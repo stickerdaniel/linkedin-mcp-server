@@ -109,7 +109,6 @@ from differential.session import (
     write_synthetic_cookie_file,
 )
 from differential.signals import INCOMPLETE as O2_INCOMPLETE
-from differential.signals import UNKNOWN as O2_UNKNOWN
 from differential.signals import UNOBSERVED as O2_UNOBSERVED
 from differential.signals import VIOLATED as O2_VIOLATED
 from differential.signals import (
@@ -1657,9 +1656,11 @@ def row_expectations(
         failures.append("cleanup had to intervene or could not finish")
     if vector.o2 == O2_VIOLATED:
         failures.append("O2: a signal was aimed at a wrong target, or a canary died")
-    if vector.o2_traced == O2_UNKNOWN:
-        failures.append("O2: a traced signal's sender or target could not be placed")
-    elif vector.o2_traced == O2_INCOMPLETE and vector.o2_required:
+    # ``unknown`` is the oracle's stated limit (``signals``): a recipient a
+    # SIGKILL reached is gone by the next sample. It is recorded, not failed.
+    if vector.o2_traced == O2_VIOLATED:
+        failures.append("O2: a traced signal reached a process outside its set")
+    if vector.o2_traced == O2_INCOMPLETE and vector.o2_required:
         failures.append("O2: the required signal oracle's evidence is incomplete")
     if expect_owner:
         if not vector.owner_published:
@@ -1753,16 +1754,28 @@ def r6_reading(result: RowResult) -> str | None:
     return "="
 
 
-def r6_verdict(result: RowResult, *, experiment: str, windows: bool) -> list[str]:
+def r6_verdict(
+    result: RowResult,
+    *,
+    experiment: str,
+    windows: bool,
+    linux: bool | None = None,
+) -> list[str]:
     """What H-R6 requires of an experiment beyond the row's own expectations.
 
     K2 (baseline daemon) must read ``!``: before Path A its owner's guardian
     kills the owner's group, which no Direct guardian does. Reading ``=`` there
-    is the harness missing a known difference. K3 (candidate daemon) must read
-    ``=`` and have recovered on the second call. K1 (Direct killed) reads ``=``
-    as the non-leader server a host starts. On Windows there is no guardian, so
-    the reading is not applicable; the kill and K3's recovery still are.
+    is the harness missing a known difference. On Linux the oracle is part of
+    that witness: K2 needs a complete required trace that shows the class
+    ``guardian:principal-group``, while the rest of K2's outcome stays the
+    baseline's to record. On macOS the guardian's argv is the witness. K3
+    (candidate daemon) must read ``=`` and have recovered on the second call.
+    K1 (Direct killed) reads ``=`` as the non-leader server a host starts. On
+    Windows there is no guardian, so the reading is not applicable; the kill
+    and K3's recovery still are.
     """
+    if linux is None:
+        linux = sys.platform.startswith("linux")
     problems = list(result.runtime_failures)
     killed = result.killed or {}
     vector = result.vector
@@ -1777,16 +1790,22 @@ def r6_verdict(result: RowResult, *, experiment: str, windows: bool) -> list[str
         return [*problems, "the killed actor's guardian was never seen"]
     assert vector is not None
     group_kill_seen = GUARDIAN_OWNER_GROUP_KILL in vector.signal_classes
+    traced = vector.o2_required and vector.o2_traced not in (
+        O2_UNOBSERVED,
+        O2_INCOMPLETE,
+    )
+    if linux and not traced:
+        problems.append(
+            f"the required signal oracle did not deliver a complete trace "
+            f"(required={vector.o2_required}, traced O2 {vector.o2_traced!r})"
+        )
     if experiment == "K2":
         if reading != "!":
             problems.append(
                 "K2 read '=' on H-R6, where the baseline's '!' is known (its "
                 "owner's guardian gets the owner's group): a harness defect"
             )
-        elif (
-            vector.o2_traced not in (O2_UNOBSERVED, O2_INCOMPLETE)
-            and not group_kill_seen
-        ):
+        elif linux and traced and not group_kill_seen:
             problems.append(
                 "K2's guardian had a group to kill, but the signal oracle saw no "
                 "kill of the owner's group: a harness defect"
@@ -1813,17 +1832,25 @@ def compare_repeat(first: RowVector, second: RowVector) -> list[str]:
 def compare_to_direct(direct: RowVector, daemon: RowVector) -> list[str]:
     """K3 against a Direct reference: O1, O2 and O4 must be ``=``.
 
-    O2 is ``=`` when the row's and the traced scope's states are the same and
-    the daemon row sent no class of signal that neither Direct's construction
-    nor the reference's run sends. Two unobserved states compare equal as
-    labels, which says nothing of what either row's unobserved actors sent.
+    O2 is ``=`` when the row's states are the same, the daemon row sent no
+    class of signal that neither Direct's construction nor the reference's
+    run sends, and neither traced O2 is violated or incomplete where the other
+    is not. ``held`` against ``unknown`` is no difference: which of the two a
+    row reads depends on whether a recipient outlived the next sample, not on
+    what was sent. Two unobserved states compare equal as labels, which says
+    nothing of what either row's unobserved actors sent.
     """
     differences = []
-    for name in ("o1_single_browser", "o2", "o2_traced", "o4_session"):
+    for name in ("o1_single_browser", "o2", "o4_session"):
         if getattr(direct, name) != getattr(daemon, name):
             differences.append(
                 f"{name}: Direct {getattr(direct, name)!r}, daemon "
                 f"{getattr(daemon, name)!r}"
+            )
+    for state in (O2_VIOLATED, O2_INCOMPLETE):
+        if (direct.o2_traced == state) != (daemon.o2_traced == state):
+            differences.append(
+                f"o2_traced: Direct {direct.o2_traced!r}, daemon {daemon.o2_traced!r}"
             )
     extra = classes_direct_would_not_send(daemon.signal_classes, direct.signal_classes)
     if extra:
@@ -1945,7 +1972,6 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
     if o2 is not None:
         failures += [f"O2 violation: {line}" for line in o2.violations]
         failures += [f"O2 violation: {line}" for line in o2.canary_deaths]
-        failures += [f"O2 unknown: {line}" for line in o2.unknowns]
         if o2.required:
             failures += [f"O2 incomplete: {line}" for line in o2.incomplete]
 

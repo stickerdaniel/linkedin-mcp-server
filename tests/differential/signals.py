@@ -1,13 +1,13 @@
-"""O2: the signals a row's traced actors send, whom they reached, and the canaries.
+"""O2: the signals a row's traced actors send, what they named, and the canaries.
 
 **The oracle is strace, on Linux only, and it sees only what it traces.**
-``strace -f -ttt -yy -e trace=<TRACED_SYSCALLS> -p <server|owner> -p
-<guardian>`` records every signal those two processes send, and those their
-children started after the attach send, from the moment each is attached
-until it exits. That is its scope and nothing else: the frontend, the driver,
+``strace -f -ttt -yy -e trace=<TRACED_SYSCALLS>,<FOLLOWED_SYSCALLS> -p
+<server|owner> -p <guardian>`` records every signal those two processes send,
+and those their threads and children send, from the moment each is attached
+until it ends. That is its scope and nothing else: the frontend, the driver,
 the browser, a replacement owner and every moment before the attach are
-outside it. So a row has two O2 readings. ``traced`` is the oracle's, for
-that scope only. ``row`` is what the row can say about every actor, which is
+outside it. So a row has two O2 readings. ``traced`` is the oracle's, for that
+scope only. ``row`` is what the row can say about every actor, which is
 ``violated`` on evidence (a traced violation, a dead canary) and otherwise
 ``unobserved``: nothing here watches the other senders, so their silence is
 never promoted to ``held``.
@@ -20,42 +20,57 @@ Linux the oracle is *required*: an oracle that cannot run there fails the row.
 Anywhere else it is *unavailable* and says why; nothing stands in for it.
 
 **Missing evidence is never an empty trace.** The oracle's outcome is
-``complete`` only when strace attached to every pid asked for, followed each
-until it ended (an exit line, or the harness's own confirmed kill of it with
-no detach reported), exited on its own with status 0 or was detached on
-request, and left a trace file whose every line parsed. Anything less is
-``incomplete``, whatever it did record.
+``complete`` only when strace attached to every pid asked for, exited on its
+own with status 0 or was detached on request, left a trace file whose every
+line parsed, and accounted for every tracee it covered: the roots, their
+threads, and every thread or child their ``clone``, ``fork`` and ``vfork``
+calls started. Each needs its own end (an exit line, or the harness's own
+confirmed kill of a root), or for a thread its process's end, or the
+deliberate stop's detach, which is then that tracee's boundary. A tracee strace
+let go on its own, or one with no end, leaves it ``incomplete``.
 
-**A recipient is the lifetime the samples pin down.** The watcher publishes
-when each sample began and ended, and on Linux the last pid the kernel had
-allocated when it began. A pid target at a send time is the lifetime seen at
-that pid in the samples on both sides of it, or seen in the one before when
-the kernel allocated that pid to nobody in between. A group target is the set
-of processes in that group in those two samples, and it is complete only when
-the group did not exist at the watcher's baseline, no read failed around the
-send, and every member is pinned down the same way; a member that changed
-group, or appeared, between the two samples leaves it unknown. What cannot be
-resolved makes the traced O2 *unknown*, never *held*.
+**What a signal was aimed at is what the call names.** Its class is the
+sender's role and the kind of target the call names, read against the
+watcher's records: the principal's own group, a group or pid the watcher
+recorded for one of the row's browsers (or for a process carrying such a
+browser's marker), the sender itself, or anything else. That is the Path A
+witness, and it rests on the call alone: which processes a signal then reached
+is a separate question.
+
+**Who received a signal is known only when the samples show it.** The watcher
+samples the process table; between two samples it sees nothing. A pid target is
+pinned to a lifetime only when the same lifetime (pid and create time) is seen
+in the samples on both sides of the send. A group target is pinned only when
+every process in that group in either sample is seen in both, in that group
+both times, the group did not exist at the watcher's first sample, and no
+process could not be identified, and no member's group could not be read,
+around the send. That is endpoint membership, not a continuous record: a
+process that joined and left the group between the two samples is not seen.
+A process a SIGKILL reached is gone by the next sample, so it can almost never
+be pinned, and the traced O2 of a row whose guardian drained its browser groups
+usually reads ``unknown``. That is the oracle's stated limit, not a pass: the
+kernel's last allocated pid, which the watcher logs, is a cursor and no proof
+that a pid was not reused, so nothing else stands in for the second sample.
 
 **A browser's marker is its launch.** On Linux, Chromium's crashpad handler
 double-forks out of the browser's tree, carrying the browser's environment and
 with it the random marker the product sets per launch, which is what the
 guardian drains by. A process carrying the marker of one of the row's browsers
 is in that browser's launched set, from the moment the watcher knew the marker.
-The marker says nothing about whether a group is complete.
 
-**The traced O2** holds when every call reached only the sender's launched set
-(its principal, the server or owner it belongs to, and that principal's
-descendants). A call that returned an error other than ``ESRCH`` is an
-attempt, not a delivery; one aimed outside the set is still a violation, as an
-attempt. ``ESRCH`` reached nobody, and signal 0 is a liveness probe. A signal is
-evidence of a signal, not of a death: deaths are only what was observed.
+**The traced O2** is ``violated`` when a pinned recipient is outside the
+sender's launched set (its principal, the server or owner it belongs to, and
+that principal's descendants), ``unknown`` when a recipient could not be
+pinned, and ``held`` only when every recipient was pinned inside it. A call
+that returned an error other than ``ESRCH`` is an attempt, not a delivery; one
+aimed outside the set is still a violation, as an attempt. ``ESRCH`` reached
+nobody, and signal 0 is a liveness probe. A signal is evidence of a signal,
+not of a death: deaths are only what was observed.
 
-**Across experiments**, each call has a class, sender role and target kind, and
-a row's classes are compared with those Direct's actors send by construction
-(``DIRECT_CLASSES``) and those the Direct reference actually sent: the
-pre-Path-A guardian's ``killpg`` of the owner's group reaches processes the
-owner launched, yet no Direct guardian sends it.
+**Across experiments** a row's classes are compared with those Direct's actors
+send by construction (``DIRECT_CLASSES``) and those the Direct reference
+actually sent: the pre-Path-A guardian's ``killpg`` of the owner's group names
+the principal's group, which no Direct guardian does.
 
 **Canaries** are processes the harness starts before the row in a session of
 their own (POSIX) or outside every Job it can leave (Windows). One that dies
@@ -87,6 +102,8 @@ TRACED_SYSCALLS = (
     "rt_sigqueueinfo",
     "rt_tgsigqueueinfo",
 )
+#: The syscalls that start a tracee strace then follows: what the cohort is.
+FOLLOWED_SYSCALLS = ("clone", "clone3", "fork", "vfork")
 
 HELD = "held"
 VIOLATED = "violated"
@@ -132,7 +149,7 @@ DIRECT_CLASSES = frozenset(
 )
 
 _LINE = re.compile(r"^(?P<tid>\d+)\s+(?P<t>\d+\.\d+)\s+(?P<rest>.*)$")
-_NAMES = "|".join(TRACED_SYSCALLS)
+_NAMES = "|".join(TRACED_SYSCALLS + FOLLOWED_SYSCALLS)
 _COMPLETE = re.compile(r"^(?P<name>" + _NAMES + r")\((?P<args>.*)\)\s+=\s+(?P<ret>.*)$")
 _UNFINISHED = re.compile(
     r"^(?P<name>" + _NAMES + r")\((?P<args>.*)\s<unfinished \.\.\.>$"
@@ -144,6 +161,7 @@ _PIDFD = re.compile(r"<pid:(?P<pid>\d+)>")
 _ENDED = re.compile(
     r"^\+\+\+ (exited with -?\d+|killed by \S+( \(core dumped\))?) \+\+\+$"
 )
+_RETURNED = re.compile(r"^(?P<value>\d+)\b")
 
 
 @dataclass(frozen=True)
@@ -302,18 +320,40 @@ def _call(tid: int, t: float, name: str, args: str, ret: str, raw: str) -> Signa
     )
 
 
+@dataclass(frozen=True)
+class Birth:
+    """A tracee a traced thread started, which strace then follows."""
+
+    parent: int
+    child: int
+    #: ``CLONE_THREAD``: a thread of the parent's process, not a process.
+    thread: bool
+
+
 @dataclass
 class Trace:
-    """What strace wrote: the calls, which tracees ended, and what did not parse."""
+    """What strace wrote: calls, births, ends, and what did not parse."""
 
     calls: list[SignalCall] = field(default_factory=list)
+    births: list[Birth] = field(default_factory=list)
     #: Tids strace reported ending (``+++ exited ...`` or ``+++ killed by ...``).
     ended: set[int] = field(default_factory=set)
+    #: Every tid a line was written for.
+    tids: set[int] = field(default_factory=set)
     problems: list[str] = field(default_factory=list)
 
 
+def _record(trace: Trace, tid: int, t: float, name: str, args: str, ret: str, raw: str):
+    if name in FOLLOWED_SYSCALLS:
+        found = _RETURNED.match(ret.strip())
+        if found is not None and int(found["value"]) > 0:
+            trace.births.append(Birth(tid, int(found["value"]), "CLONE_THREAD" in args))
+        return
+    trace.calls.append(_call(tid, t, name, args, ret, raw))
+
+
 def read_trace(text: str) -> Trace:
-    """Every signal syscall in strace's ``-f -ttt`` output, and its integrity.
+    """Every signal syscall and tracee birth in strace's ``-f -ttt`` output.
 
     A call split by another thread (``<unfinished ...>`` then ``<... resumed>``)
     is joined. Signal lines (``---``) are skipped. A line that is not strace's,
@@ -330,6 +370,7 @@ def read_trace(text: str) -> Trace:
             trace.problems.append(f"not a trace line: {raw[:200]!r}")
             continue
         tid, t, rest = int(line["tid"]), float(line["t"]), line["rest"]
+        trace.tids.add(tid)
         try:
             if rest.startswith("---"):
                 continue
@@ -338,24 +379,21 @@ def read_trace(text: str) -> Trace:
                     raise ValueError("an unreadable exit line")
                 trace.ended.add(tid)
             elif (found := _COMPLETE.match(rest)) is not None:
-                trace.calls.append(
-                    _call(tid, t, found["name"], found["args"], found["ret"], raw)
-                )
+                _record(trace, tid, t, found["name"], found["args"], found["ret"], raw)
             elif (found := _UNFINISHED.match(rest)) is not None:
                 pending[(tid, found["name"])] = (t, found["args"])
             elif (found := _RESUMED.match(rest)) is not None:
                 began = pending.pop((tid, found["name"]), None)
                 if began is None:
                     raise ValueError("resumed without its start")
-                trace.calls.append(
-                    _call(
-                        tid,
-                        began[0],
-                        found["name"],
-                        began[1] + found["args"],
-                        found["ret"],
-                        raw,
-                    )
+                _record(
+                    trace,
+                    tid,
+                    began[0],
+                    found["name"],
+                    began[1] + found["args"],
+                    found["ret"],
+                    raw,
                 )
             else:
                 raise ValueError("not a traced call")
@@ -376,11 +414,15 @@ def parse_strace(text: str) -> list[SignalCall]:
 
 @dataclass(frozen=True)
 class Sample:
-    """One watcher sample: when it began and ended, and the kernel's last pid."""
+    """One watcher sample: when it began and ended, and the kernel's last pid.
+
+    The last pid is a diagnostic only: it is the allocator's cursor, which can
+    wrap past occupied pids and come back higher, so it proves nothing about
+    which pids were reused in between.
+    """
 
     began: float
     ended: float
-    #: ``/proc/sys/kernel/ns_last_pid`` as the sample began; None off Linux.
     last_pid: int | None
 
 
@@ -392,7 +434,8 @@ class Lifetime:
     change: an exec turns the driver's fork into the browser, and a process
     the watcher catches between its exit and its reaping shows no command line
     at all, so it reads as ``other``. ``first_t`` and ``exit_t`` are the ends
-    of samples: the first that saw it and the first that no longer did.
+    of samples: the first that saw it and the first that no longer did. A
+    group of None is one the watcher could not read.
     """
 
     pid: int
@@ -431,23 +474,22 @@ class Lifetime:
         return self._reading(t)[1]
 
     def pgid_at(self, t: float) -> int | None:
-        """The group the watcher read for it by *t*."""
+        """The group the watcher read for it by *t*; None if unread."""
         return self._reading(t)[2]
 
     def was(self, actor: str) -> bool:
         """Whether any reading of it showed *actor*."""
         return any(reading[1] == actor for reading in self.readings)
 
+    def groups_by(self, t: float) -> set[int]:
+        """Every group the watcher read for it by *t*."""
+        return {g for when, _, g in self.readings if when <= t and g is not None}
+
     def marker_by(self, t: float) -> str | None:
         """Its marker, if the watcher had read it by *t*."""
         if self.marker is None or self.marker_t is None or self.marker_t > t:
             return None
         return self.marker
-
-
-#: How a recipient was pinned down.
-BOTH_SAMPLES = "seen on both sides"
-PID_NOT_REUSED = "seen before, pid not reallocated since"
 
 
 class ProcessHistory:
@@ -519,12 +561,13 @@ class ProcessHistory:
                 known.in_row = known.in_row or entry.get("in_row") is True
             if known.marker is None and entry.get("browser_marker"):
                 known.marker, known.marker_t = entry["browser_marker"], t
-            # A start or an update: exec, a new group, a marker, an exit image.
+            # A start or an update: exec, a new or unreadable group, a
+            # marker, an exiting image.
             known.readings.append(
                 (t, str(entry.get("actor", "other")), entry.get("pgid"))
             )
 
-    # --- by life span, for senders and parents
+    # --- by life span, for senders, parents and what a call names
 
     def at(self, pid: int, t: float) -> Lifetime | None:
         """The one lifetime reported alive at *pid* at *t*, or None."""
@@ -537,6 +580,24 @@ class ProcessHistory:
         seen = [life for life in self.lifetimes if life.pid == pid]
         return seen[0] if seen else None
 
+    def is_browser(self, life: Lifetime, t: float) -> bool:
+        """One of the row's browsers, or a process carrying one's marker."""
+        return (life.in_row and life.was("browser")) or self.marked(life, t)
+
+    def names_a_browser(self, pid: int, t: float) -> bool:
+        """Whether the watcher recorded *pid*, by *t*, for a row browser."""
+        return any(
+            life.pid == pid and life.first_t <= t and self.is_browser(life, t)
+            for life in self.lifetimes
+        )
+
+    def names_a_browser_group(self, pgid: int, t: float) -> bool:
+        """Whether the watcher recorded *pgid*, by *t*, as a row browser's group."""
+        return any(
+            pgid in life.groups_by(t) and self.is_browser(life, t)
+            for life in self.lifetimes
+        )
+
     # --- by samples, for recipients
 
     def brackets(self, t: float) -> tuple[Sample, Sample] | None:
@@ -547,21 +608,11 @@ class ProcessHistory:
             return None
         return before[-1], after[0]
 
-    @staticmethod
-    def pid_not_reallocated(pid: int, before: Sample, after: Sample) -> bool:
-        """The kernel gave *pid* to no process between the two samples.
+    def holder(self, pid: int, t: float) -> Lifetime | str:
+        """The lifetime that held *pid* at *t*, or why that is unknown.
 
-        Pids are allocated upwards from the last one until they wrap; a window
-        whose last pid did not go down allocated exactly the pids above the
-        first reading, up to and including the second.
+        Only the same lifetime seen in the samples on both sides of *t*.
         """
-        first, second = before.last_pid, after.last_pid
-        if first is None or second is None or second < first:
-            return False
-        return not first < pid <= second
-
-    def holder(self, pid: int, t: float) -> tuple[Lifetime, str] | str:
-        """The lifetime that held *pid* at *t*, and how; or why that is unknown."""
         bracket = self.brackets(t)
         if bracket is None:
             return "no samples on both sides of the send"
@@ -573,17 +624,19 @@ class ProcessHistory:
             and seen_after
             and seen_before[0].identity == seen_after[0].identity
         ):
-            return seen_before[0], BOTH_SAMPLES
+            return seen_before[0]
         if seen_before and not seen_after:
-            if self.pid_not_reallocated(pid, before, after):
-                return seen_before[0], PID_NOT_REUSED
-            return f"pid {pid} may have been reallocated between the samples"
+            return f"pid {pid} was gone by the sample after the send"
         if seen_after:
             return f"pid {pid} was not seen in the sample before the send"
         return f"pid {pid} was in neither sample around the send"
 
-    def group_members(self, pgid: int, t: float) -> list[tuple[Lifetime, str]] | str:
-        """Every process in group *pgid* at *t*, and how; or why that is unknown."""
+    def group_members(self, pgid: int, t: float) -> list[Lifetime] | str:
+        """Every process in group *pgid* at *t*, or why that is unknown.
+
+        Endpoint membership: those in the group in both samples around *t*.
+        A member in only one of them leaves the group unknown.
+        """
         if self.baseline_pgids is None:
             return "the watcher's baseline groups are unknown"
         if pgid in self.baseline_pgids:
@@ -595,7 +648,7 @@ class ProcessHistory:
         for first, last in self.failures:
             if first <= after.ended and last >= before.began:
                 return "a process could not be identified around the send"
-        members: list[tuple[Lifetime, str]] = []
+        members: list[Lifetime] = []
         for life in self.lifetimes:
             for sample in (before, after):
                 if life.seen_in(sample) and life.pgid_at(sample.ended) is None:
@@ -604,16 +657,9 @@ class ProcessHistory:
             is_in = life.seen_in(after) and life.pgid_at(after.ended) == pgid
             if not (was_in or is_in):
                 continue
-            if life.seen_in(before) and life.seen_in(after):
-                if was_in != is_in:
-                    return f"{life.identity} changed group between the samples"
-                members.append((life, BOTH_SAMPLES))
-            elif was_in:
-                if not self.pid_not_reallocated(life.pid, before, after):
-                    return f"pid {life.pid} may have been reallocated"
-                members.append((life, PID_NOT_REUSED))
-            else:
-                return f"{life.identity} joined between the samples"
+            if not (was_in and is_in):
+                return f"{life.identity} was in group {pgid} in one sample only"
+            members.append(life)
         if not members:
             return f"no member of group {pgid} was seen around the send"
         return members
@@ -624,13 +670,11 @@ class ProcessHistory:
         if bracket is None:
             return "no samples on both sides of the send"
         before, after = bracket
-        if not life.seen_in(before):
-            return f"{life.identity} was not seen before the send"
+        if not (life.seen_in(before) and life.seen_in(after)):
+            return f"{life.identity} was not seen on both sides of the send"
         group = life.pgid_at(before.ended)
-        if group is None:
-            return f"{life.identity}'s group was never read"
-        if life.seen_in(after) and life.pgid_at(after.ended) != group:
-            return f"{life.identity} changed group around the send"
+        if group is None or life.pgid_at(after.ended) != group:
+            return f"{life.identity}'s group around the send is not known"
         return group
 
     # --- launches
@@ -647,13 +691,6 @@ class ProcessHistory:
         """Whether *life* carries, by *t*, the marker of one of the row's browsers."""
         marker = life.marker_by(t)
         return marker is not None and bool(self.browsers(marker, t))
-
-    def leader(self, pgid: int, t: float) -> Lifetime | None:
-        """The last lifetime at pid *pgid* the watcher saw start by *t*."""
-        leaders = [
-            life for life in self.lifetimes if life.pid == pgid and life.first_t <= t
-        ]
-        return leaders[-1] if leaders else None
 
     def descends(self, life: Lifetime, ancestor: Lifetime, t: float) -> bool | None:
         """Whether *life* is *ancestor* or descends from it; None if unknown."""
@@ -698,10 +735,13 @@ class OracleOutcome:
     required: bool = False
     reasons: list[str] = field(default_factory=list)
     calls: list[SignalCall] = field(default_factory=list)
-    #: Thread id -> process id, read from ``/proc`` while the tracees ran.
+    #: Thread id -> process id, from ``/proc`` at the attach and from the
+    #: threads the tracees started.
     threads: dict[int, int] = field(default_factory=dict)
-    #: The pids strace was attached to: the senders it covers.
+    #: The pids strace was attached to.
     traced: list[int] = field(default_factory=list)
+    #: Every tracee strace covered: tid -> kind, process, and how it ended.
+    cohort: dict[int, dict[str, Any]] = field(default_factory=dict)
     attached_at: float | None = None
     stopped_at: float | None = None
     returncode: int | None = None
@@ -710,6 +750,7 @@ class OracleOutcome:
         fields = asdict(self)
         fields.pop("calls")
         fields.pop("threads")
+        fields["cohort"] = {str(tid): entry for tid, entry in self.cohort.items()}
         fields["calls"] = len(self.calls)
         return fields
 
@@ -724,13 +765,14 @@ class O2Result:
     #: The whole row's: violated on evidence, otherwise unobserved.
     row: str = UNOBSERVED
     required: bool = False
+    #: ``sender role:target kind`` of every call, from what the call named.
     classes: tuple[str, ...] = ()
     violations: list[str] = field(default_factory=list)
     unknowns: list[str] = field(default_factory=list)
     #: Why the oracle's evidence is incomplete, when it is.
     incomplete: list[str] = field(default_factory=list)
     canary_deaths: list[str] = field(default_factory=list)
-    #: Each resolved call with the identities it could have reached.
+    #: Each call, its class, and the recipients pinned for it, if any.
     resolved: list[dict[str, Any]] = field(default_factory=list)
     #: What the traced state covers: senders, interval, syscalls.
     scope: dict[str, Any] = field(default_factory=dict)
@@ -743,41 +785,41 @@ def _principal(sender: Lifetime, history: ProcessHistory, t: float) -> Lifetime 
     return sender
 
 
-def _target_kind(
-    targets: Sequence[Lifetime],
-    sender: Lifetime,
-    principal: Lifetime,
-    pgid: int | None,
-    history: ProcessHistory,
-    t: float,
+def _named(
+    call: SignalCall, sender: Lifetime, principal: Lifetime, history: ProcessHistory
 ) -> str:
-    """What a signal was aimed at, in the terms Direct's construction uses.
+    """The kind of target the call names, from the call and the records alone.
 
-    *pgid* is the group signalled, or None for a single process. A group the
-    principal leads is its own group whatever is left in it: that is the
-    pre-Path-A guardian's ``killpg(owner_group)``. A group a browser leads is a
-    browser group, whatever helpers such as crashpad it also holds: the driver
-    starts Chromium in a group of its own. So is a leaderless group of
-    processes carrying a row browser's marker: crashpad's own.
+    No recipient is resolved here: this is what the sender aimed at.
     """
-
-    def browser(life: Lifetime) -> bool:
-        return life.actor_at(t) == "browser" or history.marked(life, t)
-
-    if pgid is not None:
-        if pgid == principal.pid:
+    t = call.t
+    if call.everyone:
+        return "everyone"
+    if call.unresolvable is not None:
+        return "unresolved"
+    if call.target_group is not None or call.group_of_pid is not None:
+        if call.target_group:
+            group: int | None = call.target_group
+        elif call.group_of_pid is not None:
+            named = history.at(call.group_of_pid, t)
+            group = named.pgid_at(t) if named is not None else None
+        else:
+            group = sender.pgid_at(t)
+        if group is None:
+            return "unnamed-group"
+        if group in principal.groups_by(t):
             return "principal-group"
-        leader = history.leader(pgid, t)
-        if leader is not None and leader.actor_at(t) == "browser":
+        if history.names_a_browser_group(group, t):
             return "browser-group"
-        if leader is None and targets and all(browser(life) for life in targets):
-            return "browser-group"
-        return "descendant-group"
-    if len(targets) == 1 and targets[0].identity == sender.identity:
+        return "other-group"
+    pid = call.target_pid
+    if pid == sender.pid:
         return "self"
-    if targets and all(browser(life) for life in targets):
+    if pid == principal.pid:
+        return "principal"
+    if pid is not None and history.names_a_browser(pid, t):
         return "browser"
-    return "descendant"
+    return "other"
 
 
 def _sender(
@@ -823,11 +865,12 @@ def derive_o2(
             list(life.identity) if life is not None else [pid, None]
             for pid, life in traced.items()
         ],
-        "followed": "children the traced processes start after the attach",
+        "followed": "threads and children the traced processes start",
         "from": outcome.attached_at,
         "to": outcome.stopped_at,
         "syscalls": list(TRACED_SYSCALLS),
         "unobserved": "every other process, and every moment before the attach",
+        "recipients": "pinned only when seen on both sides of the send",
     }
     classes: set[str] = set()
     for call in outcome.calls:
@@ -841,82 +884,64 @@ def derive_o2(
         )
         sender = _sender(call, history, outcome, traced)
         if isinstance(sender, str):
+            classes.add("unplaced-sender")
             result.unknowns.append(f"{sender}: {where}")
             continue
         principal = _principal(sender, history, call.t)
         if principal is None:
+            classes.add(f"{sender.actor_at(call.t)}:unplaced-principal")
             result.unknowns.append(f"whom {sender.pid} acts for is unknown: {where}")
             continue
+        kind = f"{sender.actor_at(call.t)}:{_named(call, sender, principal, history)}"
+        classes.add(kind)
+        entry: dict[str, Any] = {
+            "sent_at": call.t,
+            "outcome": call.outcome,
+            "sender": [sender.pid, sender.start],
+            "principal": [principal.pid, principal.start],
+            "class": kind,
+            "targets": None,
+        }
+        result.resolved.append(entry)
         if call.everyone:
             result.violations.append(f"{verb} to every process: {where}")
             continue
         if call.unresolvable is not None:
             result.unknowns.append(f"target unresolved ({call.unresolvable}): {where}")
             continue
-        pgid: int | None = None
-        found: list[tuple[Lifetime, str]] | str
+        found: list[Lifetime] | str
         if call.target_group is not None or call.group_of_pid is not None:
             if call.target_group:
-                pgid = call.target_group
+                pgid: int | str = call.target_group
             else:
                 # ``kill(0, ...)``: the sender's own group. A process-group
                 # pidfd: the group of the process it names.
-                of: Lifetime = sender
+                of: Lifetime | str = sender
                 if call.group_of_pid is not None:
-                    held = history.holder(call.group_of_pid, call.t)
-                    if isinstance(held, str):
-                        result.unknowns.append(f"target unresolved ({held}): {where}")
-                        continue
-                    of = held[0]
-                group = history.group_of(of, call.t)
-                if isinstance(group, str):
-                    result.unknowns.append(f"target unresolved ({group}): {where}")
-                    continue
-                pgid = group
-            found = history.group_members(pgid, call.t)
+                    of = history.holder(call.group_of_pid, call.t)
+                pgid = history.group_of(of, call.t) if not isinstance(of, str) else of
+            found = (
+                history.group_members(pgid, call.t) if isinstance(pgid, int) else pgid
+            )
         elif call.target_pid is not None:
             held = history.holder(call.target_pid, call.t)
-            found = [held] if isinstance(held, tuple) else held
+            found = [held] if isinstance(held, Lifetime) else held
         else:
             found = "no target"
         if isinstance(found, str):
-            result.unknowns.append(f"target unresolved ({found}): {where}")
+            result.unknowns.append(f"recipients not pinned ({found}): {where}")
             continue
-        targets = [life for life, _ in found]
-        kind = (
-            f"{sender.actor_at(call.t)}:"
-            f"{_target_kind(targets, sender, principal, pgid, history, call.t)}"
-        )
-        classes.add(kind)
-        result.resolved.append(
-            {
-                "sent_at": call.t,
-                "outcome": call.outcome,
-                "sender": [sender.pid, sender.start],
-                "principal": [principal.pid, principal.start],
-                "class": kind,
-                "targets": [[life.pid, life.start] for life in targets],
-                "pinned": [how for _, how in found],
-            }
-        )
-        outside, maybe, undecided = [], [], []
-        for life, how in found:
+        entry["targets"] = [[life.pid, life.start] for life in found]
+        outside, undecided = [], []
+        for life in found:
             inside = history.descends(life, principal, call.t)
             if inside is None:
                 undecided.append(life.identity)
             elif inside is False:
-                # A group member seen only before the send may have exited
-                # before it: then it was never a recipient.
-                certain = pgid is None or how == BOTH_SAMPLES
-                (outside if certain else maybe).append(life.identity)
+                outside.append(life.identity)
         if outside:
             result.violations.append(
                 f"{verb} to {outside}, outside the launched set of "
-                f"{principal.identity}: {where}"
-            )
-        if maybe:
-            result.unknowns.append(
-                f"may have {verb} to {maybe}, outside the launched set of "
                 f"{principal.identity}: {where}"
             )
         if undecided:
@@ -1001,6 +1026,41 @@ def oracle_required(
 #: variable before each test runs.
 ORACLE_REQUIRED = oracle_required()
 
+_ATTACHED = re.compile(r"Process (\d+) attached")
+_DETACHED = re.compile(r"Process (\d+) detached")
+
+
+def cohort(
+    roots: Sequence[int],
+    threads: Mapping[int, int],
+    trace: Trace,
+    attached: Iterable[int] = (),
+) -> dict[int, dict[str, Any]]:
+    """Every tracee strace covered: tid -> kind and the process it belongs to.
+
+    The roots strace was attached to, their threads at the attach, every tid
+    a traced ``clone``, ``fork`` or ``vfork`` returned (a thread of its
+    parent's process with ``CLONE_THREAD``, a process of its own without),
+    every pid strace reported attaching, and every tid a line was written for.
+    A tid that none of these accounts for belongs to no known process.
+    """
+    members: dict[int, dict[str, Any]] = {}
+    for pid in roots:
+        members[pid] = {"kind": "root", "process": pid}
+    for tid, pid in threads.items():
+        members.setdefault(tid, {"kind": "thread", "process": pid})
+    for birth in trace.births:
+        parent = members.get(birth.parent, {}).get("process")
+        if birth.thread:
+            members.setdefault(birth.child, {"kind": "thread", "process": parent})
+        else:
+            members.setdefault(birth.child, {"kind": "child", "process": birth.child})
+    for pid in attached:
+        members.setdefault(pid, {"kind": "attached", "process": pid})
+    for tid in trace.tids:
+        members.setdefault(tid, {"kind": "unaccounted", "process": None})
+    return members
+
 
 class SignalOracle:
     """``sudo strace`` on the row's server or owner and its guardian."""
@@ -1031,7 +1091,8 @@ class SignalOracle:
 
     def command(self, pids: Sequence[int]) -> list[str]:
         # No ``-e signal=``: strace then also writes ``+++ killed by ... +++``
-        # for a tracee a signal ended, which is its end in the trace.
+        # for a tracee a signal ended, which is its end in the trace. The
+        # followed syscalls name every tracee strace takes on after the attach.
         command = [
             "sudo",
             "-n",
@@ -1040,7 +1101,7 @@ class SignalOracle:
             "-ttt",
             "-yy",
             "-e",
-            "trace=" + ",".join(TRACED_SYSCALLS),
+            "trace=" + ",".join(TRACED_SYSCALLS + FOLLOWED_SYSCALLS),
             "-o",
             str(self.out),
         ]
@@ -1060,9 +1121,7 @@ class SignalOracle:
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             text = self.err.read_text(errors="replace")
-            attached = {
-                int(found) for found in re.findall(r"Process (\d+) attached", text)
-            }
+            attached = {int(found) for found in _ATTACHED.findall(text)}
             if set(pids) <= attached:
                 self.attached_at = time.time()
                 self.read_threads()
@@ -1084,6 +1143,12 @@ class SignalOracle:
                     if task.name.isdigit():
                         self.threads[int(task.name)] = pid
 
+    def _stderr(self) -> str:
+        try:
+            return self.err.read_text(errors="replace")
+        except OSError:
+            return ""
+
     def _signal_helper(self, pid: int, name: str) -> str | None:
         """Send *name* to the oracle's own helper; why that failed, or None."""
         try:
@@ -1104,8 +1169,9 @@ class SignalOracle:
 
         It ends by itself once every tracee has exited. If one is still running
         at the deadline, strace (the harness's own helper) is interrupted,
-        which detaches it without touching the tracee; that ends the interval
-        there. *confirmed_dead* are tracees the harness killed and saw gone.
+        which detaches it without touching the tracee; that is then each
+        remaining tracee's boundary. A tracee strace let go before that is lost
+        evidence. *confirmed_dead* are roots the harness killed and saw gone.
         """
         outcome = OracleOutcome(
             status=COMPLETE,
@@ -1129,16 +1195,19 @@ class SignalOracle:
                 self._end(process, outcome)
             outcome.stopped_at = time.time()
             return outcome
-        detached = False
+        # Detaches strace reported before any stop of ours were its own doing.
+        before_stop: str | None = None
+        stopped = False
         try:
             outcome.returncode = process.wait(timeout=seconds)
         except subprocess.TimeoutExpired:
+            before_stop = self._stderr()
             failure = self._signal_helper(process.pid, "INT")
             if failure is not None:
                 outcome.reasons.append(f"strace could not be interrupted: {failure}")
             try:
                 outcome.returncode = process.wait(timeout=15)
-                detached = failure is None
+                stopped = failure is None
             except subprocess.TimeoutExpired:
                 outcome.reasons.append("strace was still running after the interrupt")
                 self._end(process, outcome)
@@ -1154,24 +1223,60 @@ class SignalOracle:
             trace = read_trace(text)
             outcome.calls = trace.calls
             outcome.reasons += trace.problems
-            stderr = self.err.read_text(errors="replace") if self.err.exists() else ""
-            lost = {
-                int(found) for found in re.findall(r"Process (\d+) detached", stderr)
-            }
-            dead = set(confirmed_dead)
-            for pid in self.pids:
-                if pid in trace.ended:
-                    continue
-                if pid in dead and pid not in lost:
-                    continue
-                if detached:
-                    continue
-                outcome.reasons.append(
-                    f"strace stopped following {pid} before it ended"
+            stderr = self._stderr()
+            let_go = {
+                int(pid)
+                for pid in _DETACHED.findall(
+                    before_stop if before_stop is not None else stderr
                 )
+            }
+            members = cohort(
+                self.pids,
+                self.threads,
+                trace,
+                {int(pid) for pid in _ATTACHED.findall(stderr)},
+            )
+            self._account(outcome, members, trace, let_go, set(confirmed_dead), stopped)
         if outcome.reasons:
             outcome.status = INCOMPLETE
         return outcome
+
+    def _account(
+        self,
+        outcome: OracleOutcome,
+        members: dict[int, dict[str, Any]],
+        trace: Trace,
+        let_go: set[int],
+        dead: set[int],
+        stopped: bool,
+    ) -> None:
+        """How each tracee's coverage ended; a reason for each that did not."""
+
+        def process_ended(pid: int | None) -> bool:
+            if pid is None or pid in let_go:
+                return False
+            return pid in trace.ended or (pid in dead and pid in self.pids)
+
+        for tid, entry in members.items():
+            if entry["kind"] == "thread" and entry["process"] is not None:
+                outcome.threads[tid] = entry["process"]
+            if tid in let_go:
+                entry["end"] = None
+                outcome.reasons.append(f"strace let {tid} go before it ended")
+            elif tid in trace.ended:
+                entry["end"] = "its exit line"
+            elif tid in dead and tid in self.pids:
+                entry["end"] = "killed by the harness"
+            elif entry["kind"] == "thread" and process_ended(entry["process"]):
+                entry["end"] = "its process ended"
+            elif stopped:
+                entry["end"] = f"detached at the stop, {outcome.stopped_at}"
+            else:
+                entry["end"] = None
+                outcome.reasons.append(
+                    f"strace stopped following {tid} ({entry['kind']}) before it ended"
+                )
+        outcome.cohort = members
 
     def _end(self, process: subprocess.Popen[Any], outcome: OracleOutcome) -> None:
         """Bounded cleanup of the oracle's own helper, whatever state it is in."""

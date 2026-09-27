@@ -46,8 +46,12 @@ least ``SLOW_SAMPLE_SECONDS`` with the read it waited on longest.
 carry) and, on Linux, the last pid the kernel had allocated as it began; the
 ready line lists the process groups of the first sample. A process settled as
 unrelated still has its group read on every sample, and a change is reported.
-That is what lets O2 say which process held a pid, or was in a group, at a
-signal's send time, and when it cannot.
+A group that could not be read is published as unread (``pgid`` None, with
+``pgid_error``) and listed in the summary; the last group read never stands in
+for it. A process whose group read finds it gone is an exit. Group membership
+is what the samples saw at their ends, not a continuous record: a process that
+joined and left a group between two samples is not seen. The kernel's last
+pid is a diagnostic only.
 
 **Relevant means descended from the harness.** A process is a row actor when it
 descends from the harness (``--root-pid``), whether it was already running at
@@ -143,6 +147,8 @@ NO_EXEC = os.name == "nt"
 SLOW_SAMPLE_SECONDS = 0.25
 #: At most this many slow samples are kept, the first ones.
 _SLOW_SAMPLES_KEPT = 100
+#: At most this many failed group reads are kept, the first ones.
+_GROUP_FAILURES_KEPT = 200
 
 #: What the product sets in the environment of every browser it launches, a
 #: random value per launch, and what its guardian drains browser groups by.
@@ -196,13 +202,16 @@ class ProcessRecord:
     #: a cached initial-image observation for this PID, create time and command
     #: line; same-command re-exec is outside this identity oracle.
     launcher: str | None = None
-    #: POSIX process group, read on every full read; None on Windows or when
-    #: it could not be read. What a group signal's members are resolved from.
+    #: POSIX process group, read on every sample; None on Windows, or when it
+    #: could not be read, which ``pgid_error`` then says. Never the last
+    #: group read in place of one that failed.
     pgid: int | None = None
     #: A digest of the process's browser marker (``BROWSER_MARKER_ENV``), read
     #: once per lifetime for a process that could be the row's browser. What
     #: ties a crashpad handler, which leaves the row's tree, to its browser.
     browser_marker: str | None = None
+    #: Why this sample could not read the group, when it could not.
+    pgid_error: str | None = None
 
     @property
     def identity(self) -> tuple[int, float]:
@@ -222,6 +231,8 @@ class ProcessRecord:
             fields["launcher"] = self.launcher
         if self.browser_marker is not None:
             fields["browser_marker"] = self.browser_marker
+        if self.pgid_error is not None:
+            fields["pgid_error"] = self.pgid_error
         if not self.in_row:
             # These events are published as CI evidence, and a process that is
             # not the row's own may carry anything in its arguments, credentials
@@ -244,6 +255,7 @@ def record(
     launcher: str | None = None,
     pgid: int | None = None,
     browser_marker: str | None = None,
+    pgid_error: str | None = None,
 ) -> ProcessRecord:
     cmdline = tuple(cmdline)
     return ProcessRecord(
@@ -257,10 +269,13 @@ def record(
         launcher,
         pgid,
         browser_marker,
+        pgid_error,
     )
 
 
-#: The last pid the kernel allocated in this pid namespace (Linux).
+#: The last pid the kernel allocated in this pid namespace (Linux). Logged as
+#: a diagnostic only: the allocator's cursor can wrap past occupied pids and
+#: come back higher, so two readings prove nothing about reuse in between.
 NS_LAST_PID = Path("/proc/sys/kernel/ns_last_pid")
 
 
@@ -272,14 +287,19 @@ def read_last_pid() -> int | None:
         return None
 
 
+#: What ``Sampler`` records for a group read that found the process gone.
+GONE = "gone"
+
+
 def posix_pgid(pid: int) -> int | None:
-    """A process's group on POSIX, or None on Windows or if it cannot be read."""
+    """A process's group on POSIX, or None on Windows, which has none.
+
+    Raises ``ProcessLookupError`` for a process that is gone, and any other
+    ``OSError`` for one whose group could not be read: neither is a group.
+    """
     if os.name == "nt":
         return None
-    try:
-        return os.getpgid(pid)
-    except OSError:
-        return None
+    return os.getpgid(pid)
 
 
 #: Set by a macOS framework build's ``bin/python`` stub to the path it was
@@ -453,11 +473,13 @@ class Tracker:
                         previous.exe,
                         previous.cmdline,
                         previous.pgid,
+                        previous.pgid_error,
                         previous.browser_marker,
                     ) != (
                         process.exe,
                         process.cmdline,
                         process.pgid,
+                        process.pgid_error,
                         process.browser_marker,
                     ):
                         events.append(
@@ -648,6 +670,9 @@ class Sampler:
         #: Every sample of at least ``SLOW_SAMPLE_SECONDS``, up to a bound.
         self.slow_samples: list[dict[str, Any]] = []
         self.slow_sample_count = 0
+        #: Every group read that failed for a process still there.
+        self.group_read_failures: list[dict[str, Any]] = []
+        self.group_read_failure_count = 0
         self._episodes: dict[tuple[int, float | None], dict[str, Any]] = {}
         self._closed: list[dict[str, Any]] = []
 
@@ -671,10 +696,35 @@ class Sampler:
             "slowest_read": self.slowest_read,
             "slow_sample_count": self.slow_sample_count,
             "slow_samples": self.slow_samples,
+            "group_read_failure_count": self.group_read_failure_count,
+            "group_read_failures": self.group_read_failures,
         }
 
     def possible_browser(self, exe: str | None) -> bool:
         return possible_browser(exe, self.browser_exe, self.browser_dir)
+
+    def _group(self, pid: int, start: float) -> tuple[int | None, str | None]:
+        """The process's group now, or None and why not: ``GONE``, or unread.
+
+        An unread group is recorded, and is never the last one read.
+        """
+        try:
+            return self._timed("pgid", pid, lambda: self._pgid_of(pid)), None
+        except ProcessLookupError:
+            return None, GONE
+        except OSError as exc:
+            error = f"unread: {type(exc).__name__}"
+            if len(self.group_read_failures) < _GROUP_FAILURES_KEPT:
+                self.group_read_failures.append(
+                    {
+                        "pid": pid,
+                        "start_identity": start,
+                        "t": self._clock(),
+                        "error": error,
+                    }
+                )
+            self.group_read_failure_count += 1
+            return None, error
 
     def _timed(self, kind: str, pid: int, call: Callable[[], Any]) -> Any:
         """Run one read, keeping the sample's slowest with its kind and pid."""
@@ -804,11 +854,12 @@ class Sampler:
             if known is not None and known.identity in self._unrelated:
                 # Settled as unrelated, but a group can still be joined, and a
                 # group signal's members must include it if it did.
-                group = self._pgid_of(pid)
-                # None is a process gone since it was opened: it is reported
-                # as an exit on the next sample, not as a change of group.
-                if group is not None and group != known.pgid:
-                    known = replace(known, pgid=group)
+                group, error = self._group(pid, start)
+                if error == GONE:
+                    # Gone since it was opened: an exit, not a change of group.
+                    continue
+                if (group, error) != (known.pgid, known.pgid_error):
+                    known = replace(known, pgid=group, pgid_error=error)
                 sample[pid] = known
                 continue
             if (pid, start) in self._vanished:
@@ -832,6 +883,9 @@ class Sampler:
                     continue
                 if not failed:
                     self._complete.add((pid, start))
+            group, error = self._group(pid, start)
+            if error == GONE:
+                continue
             # Carried while the command line holds; read, if at all, only once
             # the process is classified (``_read_launchers``).
             launcher = (
@@ -847,7 +901,8 @@ class Sampler:
                 cmdline,
                 in_row=known is not None and known.in_row,
                 launcher=launcher,
-                pgid=self._pgid_of(pid),
+                pgid=group,
+                pgid_error=error,
                 browser_marker=known.browser_marker if known is not None else None,
             )
             if failed:

@@ -433,7 +433,9 @@ def _sampler(
         # every host the suite runs on.
         no_exec=no_exec,
         # The modelled group, never the real one of a real pid.
-        pgid_of=lambda pid: (table.get(pid) or {}).get("pgid"),
+        pgid_of=lambda pid: _field(
+            {"pgid": (table.get(pid) or {}).get("pgid")}, "pgid"
+        ),
         # Markers are read wherever a guardian drains by them: POSIX.
         read_markers=not no_exec,
     )
