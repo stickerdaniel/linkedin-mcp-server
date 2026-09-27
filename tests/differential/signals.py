@@ -47,6 +47,16 @@ could be either. Observations that cannot be placed leave the collection
 Whether the collection is complete is kept apart from what it showed:
 ``OracleOutcome.status`` is the collection, ``O2Result.state`` the verdict.
 
+**What complete does not claim.** Collection completeness is evaluated from
+the records strace emitted, not from an identity-complete kernel lifecycle log.
+Exit-report timestamps need not be the instants when the corresponding
+lifetimes ended or released their ids. An older lifetime reported late can
+remain indistinguishable from a returned child when no separate new-lifetime
+end or duplicate attachment is present; such histories are outside this
+reconstruction's guarantee. H-R6 traces with no recorded creation calls do not
+exercise birth reconciliation, and a row relying on a followed child's identity
+needs separate validation before it counts as stronger evidence.
+
 **What a signal was aimed at is what the call names.** Its class is the
 sender's role and the kind of target the call names, read against the
 watcher's records up to the send and never after it: a group number the
@@ -1232,8 +1242,9 @@ def _confirms(
         or (known.ended_at is not None and known.ended_at <= birth.returned)
     ):
         return (
-            f"child id {birth.child} ended before its creation call returned; "
-            f"confirmation and reuse are indistinguishable"
+            f"child id {birth.child}'s end report cannot be ordered "
+            f"unambiguously against its creation call's completion; "
+            f"confirmation and reuse remain indistinguishable"
         )
     if known.census:
         if not birth.thread:
@@ -1248,9 +1259,9 @@ def _confirms(
             return "its creation call's return time is unknown, so its order is too"
         if read_from <= birth.returned:
             return (
-                f"the census read it between {read_from} and {read_to}, while "
-                f"its creation call ran; confirmation and reuse are "
-                f"indistinguishable"
+                f"the census read it between {read_from} and {read_to}, before "
+                f"the available return bound; the trace cannot establish that "
+                f"it followed the creation call"
             )
         return None
     if known.kind not in ("unaccounted", "attached"):

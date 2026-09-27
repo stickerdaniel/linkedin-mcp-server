@@ -1725,7 +1725,7 @@ def test_a_later_observation_does_not_change_an_earlier_class(
 
 # --- E1EE-01: only what the trace can place confirms a birth -----------------------
 
-_AMBIGUOUS_END = "ended before its creation call returned"
+_AMBIGUOUS_END = "cannot be ordered unambiguously against its creation call"
 
 
 @pytest.mark.parametrize(
@@ -1855,7 +1855,7 @@ _THREAD_24_CALL = (
             {24: 20},
             {24: (6.1, 6.1)},
             INCOMPLETE,
-            "while its creation call ran",
+            "before the available return bound",
             id="read-within-the-call",
         ),
         pytest.param(
@@ -1956,7 +1956,7 @@ _CLONE_24 = "20  6.0 clone(child_stack=0x1, flags=CLONE_VM|CLONE_SIGHAND|CLONE_T
             _CLONE_24 + ") = 24\n24  8.0 +++ exited with 0 +++\n",
             {24: (6.10, 6.15)},
             INCOMPLETE,
-            "while its creation call ran",
+            "before the available return bound",
             id="unsplit-census-possibly-mid-call",
         ),
         pytest.param(
@@ -1966,7 +1966,7 @@ _CLONE_24 = "20  6.0 clone(child_stack=0x1, flags=CLONE_VM|CLONE_SIGHAND|CLONE_T
             "24  8.0 +++ exited with 0 +++\n",
             {24: (6.10, 6.15)},
             INCOMPLETE,
-            "while its creation call ran",
+            "before the available return bound",
             id="resumed-return-after-the-census",
         ),
         pytest.param(
@@ -2001,7 +2001,7 @@ _CLONE_24 = "20  6.0 clone(child_stack=0x1, flags=CLONE_VM|CLONE_SIGHAND|CLONE_T
             "24  8.0 +++ exited with 0 +++\n",
             {24: (6.2, 6.3)},
             INCOMPLETE,
-            "while its creation call ran",
+            "before the available return bound",
             id="census-after-entry-plus-duration-before-the-next-line",
         ),
         pytest.param(
