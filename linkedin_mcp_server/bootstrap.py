@@ -374,6 +374,10 @@ class BootstrapState:
     #: and stubbed in as many tests, and threading an argument through all of
     #: them would change far more than the one thing that matters.
     login_supersedes: str | None | object = UNGUARDED
+    #: A login or import in this process ended on LinkedIn's restriction page.
+    #: No login can lift that, so none is started until a session reappears on
+    #: disk or a stale one is retired for a fresh login.
+    account_restricted: bool = False
 
 
 _state = BootstrapState()
@@ -3786,8 +3790,11 @@ async def _refresh_background_task_state() -> None:
             _state.last_error = "LinkedIn login bootstrap task was cancelled"
             logger.warning("LinkedIn login bootstrap task cancelled")
         except Exception as exc:
+            from linkedin_mcp_server.core.exceptions import AccountRestrictedError
+
             _state.auth_state = AuthState.FAILED
             _state.last_error = str(exc)
+            _state.account_restricted = isinstance(exc, AccountRestrictedError)
             logger.warning("LinkedIn login bootstrap failed: %s", exc)
         else:
             _state.auth_state = AuthState.READY
@@ -4121,6 +4128,13 @@ async def _start_login_if_needed(
             nothing_ran_yet=True,
         )
 
+    # Imported here, like the other core exceptions in this module, to keep
+    # bootstrap out of the config -> core import cycle.
+    from linkedin_mcp_server.core.exceptions import (
+        AccountRestrictedError,
+        ProxyConnectionError,
+    )
+
     # Cheap check-and-claim under the lock; the slow work (auto-import browser
     # launch, then the bounded inline wait) runs AFTER the lock is released so
     # concurrent pollers never serialize on it.
@@ -4130,6 +4144,12 @@ async def _start_login_if_needed(
         if _auth_ready():
             _state.auth_state = AuthState.READY
             return
+
+        # Ahead of every branch below, each of which ends in an import or a login
+        # window: LinkedIn has refused this account, and signing in again only
+        # lands on the same page.
+        if _state.account_restricted:
+            raise AccountRestrictedError()
 
         login_task: asyncio.Task[None] | None = None
         import_task: asyncio.Task[bool] | None = None
@@ -4161,10 +4181,6 @@ async def _start_login_if_needed(
     # Await an import (ours or a peer's). On success the caller falls through to
     # the scrape; on failure we re-enter to take the manual-login path.
     if import_task is not None:
-        # Imported here, like the other core exceptions in this module, to keep
-        # bootstrap out of the config -> core import cycle.
-        from linkedin_mcp_server.core.exceptions import ProxyConnectionError
-
         try:
             await import_task
         except asyncio.CancelledError:
@@ -4173,6 +4189,12 @@ async def _start_login_if_needed(
             # The import itself re-raises this rather than reporting "no
             # session"; swallowing it here would undo that and send the user
             # into a manual login that has to fail through the same proxy.
+            raise
+        except AccountRestrictedError:
+            # For the same reason: the manual login would land on the page the
+            # imported session already did. Remembered so the next call does not
+            # take that path either.
+            _state.account_restricted = True
             raise
         except Exception:  # noqa: BLE001 - any import failure -> manual login
             logger.debug("Auto-import task failed", exc_info=True)
@@ -4224,6 +4246,8 @@ async def _start_login_if_needed(
             # Resume one-shot: the caller falls through to
             # get_or_create_browser()/ensure_authenticated()/scrape.
             return
+        if _state.account_restricted:
+            raise AccountRestrictedError()
 
     # Budget elapsed (still running), budget == 0, or the task finished but did
     # not persist a valid session. Emit the poll-friendly pending signal.
@@ -4260,13 +4284,21 @@ async def wait_for_login_to_finish(timeout: float) -> bool:
 
     Returns False when the wait runs out, which leaves the login running: it owns
     the profile and cancelling it would strand a half-finished sign-in.
+
+    Raises:
+        AccountRestrictedError: The login ended on LinkedIn's restriction page,
+            which is an answer rather than a login still to wait for.
     """
+    from linkedin_mcp_server.core.exceptions import AccountRestrictedError
+
     task = _state.login_task
     if task is not None and not task.done():
         # `wait`, never `wait_for`: the latter cancels on timeout, and this task
         # is a browser window somebody may be typing into.
         await asyncio.wait({task}, timeout=timeout)
     await _refresh_background_task_state()
+    if _state.account_restricted and not _auth_ready():
+        raise AccountRestrictedError()
     return _auth_ready()
 
 
@@ -4456,6 +4488,9 @@ async def invalidate_auth_and_trigger_relogin(
         _state.auth_state = AuthState.STARTING
         _state.auth_started_at = utcnow_iso()
         _state.last_error = None
+        # Reached only after a session on disk was tried and failed, so this is
+        # a new attempt, and its own outcome decides the flag again.
+        _state.account_restricted = False
         _state.auth_completed_at = None
         _state.login_supersedes = stale_generation
         _state.login_task = asyncio.create_task(

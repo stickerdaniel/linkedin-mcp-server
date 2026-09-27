@@ -30,6 +30,7 @@ from linkedin_mcp_server.daemon_auth import (
 from linkedin_mcp_server.core.exceptions import AccountRestrictedError
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.exceptions import (
+    AuthenticationStartedError,
     AuthMissingOnOwnerError,
     AuthStaleOnOwnerError,
 )
@@ -243,6 +244,40 @@ class TestTheFrontendActsOnTheMarker:
         assert len(calls) == 1
         assert result.is_error is True
         assert MARKER_KEY not in (result.meta or {})
+        assert result.content[0].text == str(AccountRestrictedError())
+
+    @pytest.mark.parametrize("found_by", ["repair", "wait"])
+    async def test_a_restriction_found_while_signing_in_is_the_answer(
+        self, found_by: str
+    ):
+        # Either the login refused to start because an earlier one ended on the
+        # restriction, or the one started here just did. The owner's own wording
+        # asks for a retry, which would only be refused again.
+        owner, calls = _owner_that_fails_with(
+            AuthMissingOnOwnerError("no session", nothing_ran_yet=True)
+        )
+        repair_error = (
+            AccountRestrictedError()
+            if found_by == "repair"
+            else AuthenticationStartedError("A login browser window has been opened.")
+        )
+
+        with (
+            self._profile_is_free(),
+            patch(
+                "linkedin_mcp_server.daemon_auth._repair_auth_locally",
+                AsyncMock(side_effect=repair_error),
+            ),
+            patch(
+                "linkedin_mcp_server.daemon_auth._wait_for_the_sign_in",
+                AsyncMock(side_effect=AccountRestrictedError()),
+            ),
+        ):
+            async with Client(_proxy_to(owner)) as client:
+                result = await client.call_tool("scrape", raise_on_error=False)
+
+        assert len(calls) == 1
+        assert result.is_error is True
         assert result.content[0].text == str(AccountRestrictedError())
 
     async def test_a_call_that_had_already_started_is_never_run_again(self):
