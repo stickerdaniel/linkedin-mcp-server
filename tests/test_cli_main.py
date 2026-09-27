@@ -10,7 +10,11 @@ import pytest
 
 import linkedin_mcp_server.cli_main as cli_main
 from linkedin_mcp_server.config.schema import AppConfig, ConfigurationError
-from linkedin_mcp_server.exceptions import ProfileRootRefusedError
+from linkedin_mcp_server.core.exceptions import AccountRestrictedError
+from linkedin_mcp_server.exceptions import (
+    BrowserDowngradeError,
+    ProfileRootRefusedError,
+)
 
 
 def _make_config(
@@ -343,22 +347,41 @@ def test_main_non_interactive_no_auth_still_starts_server(
     assert captured.out == ""
 
 
-def test_profile_info_reports_a_downgrade_plainly(
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            BrowserDowngradeError(
+                profile_version="151.0.7922.34",
+                browser_version="148.0.7778.96",
+                browser_product="Google Chrome for Testing",
+            ),
+            ("151.0.7922.34", "148.0.7778.96"),
+        ),
+        (
+            AccountRestrictedError(),
+            ("restricted access to this account", "will not open a login window"),
+        ),
+    ],
+    ids=["downgrade", "restricted account"],
+)
+def test_profile_info_reports_a_refusal_plainly(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     caplog: pytest.LogCaptureFixture,
     tmp_path,
+    error: Exception,
+    expected: tuple[str, ...],
 ) -> None:
     """`--status` is the first thing a puzzled user runs, so a refused browser
-    must not arrive there as an unexpected internal error.
+    or a restricted account must not arrive there as an unexpected internal
+    error.
 
     Without its own branch it goes through `logger.exception` ("Unexpected
     error checking session") and then prints "Could not validate session ...
     Check logs and browser configuration" over a message that already names
-    both versions and the exact fix.
+    the exact fix.
     """
-    from linkedin_mcp_server.exceptions import BrowserDowngradeError
-
     profile_dir = tmp_path / "profile"
     profile_dir.mkdir(parents=True)
     (profile_dir / "Default").mkdir(parents=True)
@@ -378,11 +401,7 @@ def test_profile_info_reports_a_downgrade_plainly(
     )
 
     async def refuse() -> bool:
-        raise BrowserDowngradeError(
-            profile_version="151.0.7922.34",
-            browser_version="148.0.7778.96",
-            browser_product="Google Chrome for Testing",
-        )
+        raise error
 
     monkeypatch.setattr(
         "linkedin_mcp_server.cli_main.get_profile_dir", lambda: profile_dir
@@ -408,8 +427,8 @@ def test_profile_info_reports_a_downgrade_plainly(
 
     assert exit_info.value.code == 1
     captured = capsys.readouterr()
-    assert "151.0.7922.34" in captured.out
-    assert "148.0.7778.96" in captured.out
+    for fragment in expected:
+        assert fragment in captured.out
     assert "check logs and browser configuration" not in captured.out.lower()
     # And no traceback logged as an unexpected failure either. The two halves
     # of "internal error" are the printed advice and the ERROR-level trace, and
@@ -626,6 +645,47 @@ def test_import_from_browser_app_bound_message(monkeypatch, capsys, tmp_path):
 
     assert exit_info.value.code == 1
     assert "could not import session" in capsys.readouterr().out.lower()
+
+
+def test_import_from_browser_reports_a_restricted_account(
+    monkeypatch, capsys, tmp_path
+):
+    _patch_import_handler(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.browser_import.orchestrate.import_session_from_browser",
+        AsyncMock(side_effect=AccountRestrictedError()),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_main.import_from_browser_and_exit()
+
+    assert exit_info.value.code == 1
+    assert str(AccountRestrictedError()) in capsys.readouterr().out
+
+
+def test_login_reports_a_restricted_account_and_exits_nonzero(
+    monkeypatch, capsys, tmp_path
+):
+    """What `--login` prints once the login browser lands on the restriction."""
+    config = AppConfig()
+    config.browser.user_data_dir = str(tmp_path / "profile")
+    monkeypatch.setattr(cli_main, "get_config", lambda: config)
+    monkeypatch.setattr(cli_main, "configure_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(cli_main, "get_version", lambda: "4.0.0")
+    monkeypatch.setattr(cli_main, "_retire_a_shared_browser", lambda *_args: False)
+
+    async def restricted(*_args, **_kwargs):
+        raise AccountRestrictedError()
+
+    monkeypatch.setattr("linkedin_mcp_server.setup.interactive_login", restricted)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_main.get_profile_and_exit()
+
+    assert exit_info.value.code == 1
+    captured = capsys.readouterr()
+    assert str(AccountRestrictedError()) in captured.out
+    assert "Traceback" not in captured.out + captured.err
 
 
 def test_main_dispatches_import_before_login(monkeypatch, tmp_path):

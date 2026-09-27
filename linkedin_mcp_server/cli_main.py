@@ -15,7 +15,7 @@ from linkedin_mcp_server.bootstrap import (
     configure_browser_environment,
     ensure_browser_installed,
 )
-from linkedin_mcp_server.core import AuthenticationError
+from linkedin_mcp_server.core import AccountRestrictedError, AuthenticationError
 from linkedin_mcp_server.exceptions import (
     BrowserBusyError,
     BrowserDowngradeError,
@@ -459,7 +459,11 @@ def import_from_browser_and_exit() -> None:
             print(f"❌ {e}")
             print("   Log into LinkedIn in your browser first, or run with --login.")
             sys.exit(1)
-        except (CookieDecryptionError, AuthenticationError) as e:
+        except (
+            CookieDecryptionError,
+            AuthenticationError,
+            AccountRestrictedError,
+        ) as e:
             print(f"❌ Could not import session: {e}")
             sys.exit(1)
 
@@ -542,11 +546,11 @@ def profile_info_and_exit() -> None:
             return browser.is_authenticated
         except AuthenticationError:
             return False
-        except BrowserDowngradeError:
+        except (BrowserDowngradeError, AccountRestrictedError):
             # Not "unexpected", and no traceback. This is the guard doing its
-            # job, the message already says which two versions and what to do,
-            # and `--status` is the first thing a puzzled user runs. The tool
-            # path treats it the same way, in `error_handler`.
+            # job, the message already says what happened and what to do, and
+            # `--status` is the first thing a puzzled user runs. The tool path
+            # treats both the same way, in `error_handler`.
             raise
         except Exception as e:
             logger.exception(f"Unexpected error checking session: {e}")
@@ -570,7 +574,7 @@ def profile_info_and_exit() -> None:
 
     try:
         valid = asyncio.run(check_session())
-    except BrowserDowngradeError as e:
+    except (BrowserDowngradeError, AccountRestrictedError) as e:
         # Ahead of the generic handler, which would add "Check logs and browser
         # configuration" to a message that already names the fix exactly.
         print(f"\n❌ {e}")

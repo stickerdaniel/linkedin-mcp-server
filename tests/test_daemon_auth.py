@@ -27,6 +27,7 @@ from linkedin_mcp_server.daemon_auth import (
     FrontendAuthRepairMiddleware,
     OwnerAuthSignalMiddleware,
 )
+from linkedin_mcp_server.core.exceptions import AccountRestrictedError
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.exceptions import (
     AuthMissingOnOwnerError,
@@ -227,6 +228,22 @@ class TestTheFrontendActsOnTheMarker:
         assert len(calls) == 2
         assert result.is_error is False
         assert result.content[0].text == "scraped ok"
+
+    async def test_a_restricted_account_reaches_the_client_without_a_repair(self):
+        # LinkedIn's restriction is not bad auth: a login cannot lift it, so the
+        # frontend must neither open one nor replay the call. The owner's words
+        # still have to arrive, the way any other tool error's do.
+        owner, calls = _owner_that_fails_with(AccountRestrictedError())
+
+        with self._profile_is_free(), self._repair() as repair:
+            async with Client(_proxy_to(owner)) as client:
+                result = await client.call_tool("scrape", raise_on_error=False)
+
+        repair.assert_not_awaited()
+        assert len(calls) == 1
+        assert result.is_error is True
+        assert MARKER_KEY not in (result.meta or {})
+        assert result.content[0].text == str(AccountRestrictedError())
 
     async def test_a_call_that_had_already_started_is_never_run_again(self):
         # The one that protects LinkedIn state. Some of these tools send messages

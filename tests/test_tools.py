@@ -771,6 +771,66 @@ class TestPersonTool:
                 {"linkedin_username": "test"},
             )
 
+    @pytest.mark.parametrize("found_by", ["startup", "scrape"])
+    async def test_a_restricted_account_is_reported_not_relogged(
+        self, monkeypatch, serve_extractor, found_by: str
+    ):
+        """The session stays in place and no login window opens.
+
+        Found either by the startup feed check or by a navigation mid-scrape;
+        both reach the tool body, which routes only auth failures to re-login.
+        """
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.core.exceptions import AccountRestrictedError
+        from linkedin_mcp_server.exceptions import AuthenticationStartedError
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
+            AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.get_or_create_browser",
+            AsyncMock(side_effect=AccountRestrictedError()),
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.get_runtime_policy",
+            lambda: "managed",
+        )
+        close_browser = AsyncMock(return_value=None)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.close_browser", close_browser
+        )
+        relogin = AsyncMock(
+            side_effect=AuthenticationStartedError(
+                "Session expired. A login browser window has been opened."
+            )
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+            relogin,
+        )
+        if found_by == "scrape":
+            extractor = MagicMock()
+            extractor.scrape_person = AsyncMock(side_effect=AccountRestrictedError())
+            serve_extractor(extractor)
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        with pytest.raises(ToolError) as exc_info:
+            await mcp.call_tool(
+                "get_person_profile",
+                {"linkedin_username": "test-user"},
+            )
+
+        # Whole, and nothing appended: no issue template for LinkedIn's decision.
+        assert str(exc_info.value) == str(AccountRestrictedError())
+        relogin.assert_not_awaited()
+        close_browser.assert_not_awaited()
+
 
 class TestCompanyTools:
     async def test_get_company_profile(self, mock_context, serve_extractor):

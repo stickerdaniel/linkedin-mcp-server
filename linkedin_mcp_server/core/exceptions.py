@@ -24,6 +24,26 @@ class AuthenticationError(LinkedInScraperException):
     pass
 
 
+class AccountRestrictedError(LinkedInScraperException):
+    """LinkedIn restricted the account and wants identity verification.
+
+    Deliberately not an ``AuthenticationError``: every tool routes that class
+    into ``handle_auth_error``, which retires the session state and opens a
+    login window. No login can lift a restriction, so that recovery would
+    discard the session and then wait for a sign-in that cannot complete.
+    """
+
+    def __init__(self, message: str | None = None):
+        super().__init__(
+            message
+            or (
+                "LinkedIn has restricted access to this account and asks for "
+                "identity verification. Resolve it on linkedin.com in your own "
+                "browser. The server will not open a login window or retry."
+            )
+        )
+
+
 class RateLimitError(LinkedInScraperException):
     """Raised when rate limiting is detected."""
 
