@@ -725,15 +725,21 @@ async def test_wait_for_manual_login_does_not_log_waiting_after_cookie(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("restricted_tab", [0, 1], ids=["tracked tab", "other tab"])
+@pytest.mark.parametrize("with_cookie", [False, True], ids=["no cookie", "cookie"])
 async def test_wait_for_manual_login_stops_on_a_restricted_account(
-    monkeypatch, restricted_tab: int
+    monkeypatch, restricted_tab: int, with_cookie: bool
 ):
     """A restricted account gets no li_at, so without this the wait never ends.
 
     Unlimited budget and the real sleep: a loop that keeps waiting spends its
-    one-second polls until the outer bound fails the test.
+    one-second polls until the outer bound fails the test. With a cookie as
+    well, the restriction page still wins rather than reading as a login.
     """
     page = _manual_login_page()
+    if with_cookie:
+        page.context.cookies = AsyncMock(
+            return_value=[{"name": "li_at", "value": "token"}]
+        )
     restriction = "https://www.linkedin.com/flagship-web/login/login-restriction/"
     tabs = [page, _tab("https://www.linkedin.com/feed/")]
     tabs[restricted_tab].url = restriction

@@ -15,12 +15,11 @@ from .exceptions import AccountRestrictedError, AuthenticationError
 
 logger = logging.getLogger(__name__)
 
-# The only restriction route measured so far, on 2026-09-27: a restricted
-# account landed on /flagship-web/login/login-restriction/ right after its
-# credentials were accepted. The page is localized, so the path is all that is
-# read. Matched as the final path segments so the same route without the
-# flagship-web prefix counts too; no other restriction URL has been observed,
-# and none is guessed at here.
+# LinkedIn's account-restriction route, /flagship-web/login/login-restriction/,
+# which a restricted account reaches right after its credentials are accepted.
+# The page is localized, so only the path is read, as its final segments so the
+# route without the flagship-web prefix counts too. Add another route only once
+# it has been seen, never by guessing.
 _ACCOUNT_RESTRICTION_PATH_TAIL = ("login", "login-restriction")
 _AUTH_BLOCKER_URL_PATTERNS = (
     "/login",
@@ -405,16 +404,17 @@ async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
                 "Manual login cancelled because the browser was closed."
             ) from exc
 
+        # Every tab, because sign-in may happen in any of them. Without this a
+        # restricted account keeps the loop waiting for a cookie LinkedIn will
+        # not issue, which with LOGIN_TIMEOUT=0 is forever. Ahead of the cookie,
+        # so a restriction page wins even if LinkedIn did set one.
+        for tab in page.context.pages:
+            _raise_if_account_restricted(tab.url)
+
         if has_auth_cookie:
             _check_wait_budget(log_status=False)
             logger.info("Manual login completed successfully")
             return
-
-        # Every tab, because sign-in may happen in any of them. Without this a
-        # restricted account keeps the loop waiting for a cookie LinkedIn will
-        # not issue, which with LOGIN_TIMEOUT=0 is forever.
-        for tab in page.context.pages:
-            _raise_if_account_restricted(tab.url)
 
         _check_wait_budget()
 
