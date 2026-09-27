@@ -113,7 +113,6 @@ from differential.synthetic_origin import (
     EgressProxy,
     SyntheticOrigin,
 )
-from differential import HARNESS_CLOCK_OFFSET
 from differential.watcher import (
     LAUNCHER_ENV,
     OWNER_MODULE,
@@ -546,8 +545,6 @@ class Watcher:
             self._log.platform,
             "--root-pid",
             str(os.getpid()),
-            "--clock-offset",
-            repr(HARNESS_CLOCK_OFFSET),
         ]
         if self.browser_exe:
             command += ["--browser-exe", self.browser_exe]

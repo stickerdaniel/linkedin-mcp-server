@@ -29,9 +29,7 @@ import psutil
 from differential import harness
 from differential.events import EventLog, read_jsonl
 from differential.harness import watcher_failures
-from differential import HARNESS_CLOCK_OFFSET
 from differential.watcher import (
-    CREATE_TIME_MARGIN_SECONDS,
     ProcessRecord,
     Sampler,
     Tracker,
@@ -189,8 +187,6 @@ def _start_watcher(tmp_path: Path, *, deadline: float = 60) -> subprocess.Popen:
             # process, such as a parallel test's held /bin/ps, could be one.
             "--browser-dir",
             str(tmp_path / "ms-playwright"),
-            "--clock-offset",
-            repr(HARNESS_CLOCK_OFFSET),
         ]
     )
     limit = time.monotonic() + 15
@@ -347,9 +343,6 @@ def test_a_watcher_stopped_on_request_after_the_actors_is_healthy(tmp_path):
     assert summary["sample_seconds_p95"] >= summary["sample_seconds_mean"] * 0.5
     assert summary["first_sample_cached"] > 0
     assert summary["reads_per_sample_max"] >= 1
-    # The harness's clock reached the watcher, and it held still.
-    assert summary["clock_offset_at_start"] == HARNESS_CLOCK_OFFSET
-    assert summary["clock_step_detected"] is False
 
 
 BROWSER_DIR = "/opt/ms-playwright"
@@ -401,17 +394,7 @@ def _user_of(process) -> object:
     return process._entry.get("user", HARNESS)
 
 
-class _Clock:
-    """The modelled calendar-minus-monotonic offset; 0.0 until a test moves it."""
-
-    def __init__(self) -> None:
-        self.offset = 0.0
-
-    def __call__(self) -> float:
-        return self.offset
-
-
-def _sampler(table, *, root=1, browser_exe=BROWSER_EXE, clock=None):
+def _sampler(table, *, root=1, browser_exe=BROWSER_EXE, no_exec=False):
     return Sampler(
         root,
         own_pid=999,
@@ -421,9 +404,9 @@ def _sampler(table, *, root=1, browser_exe=BROWSER_EXE, clock=None):
         user=HARNESS,
         browser_exe=browser_exe,
         browser_dir=BROWSER_DIR,
-        # The harness's offset at its start, and a clock that has held still.
-        clock_offset=0.0,
-        offset_now=clock or _Clock(),
+        # A POSIX process table unless a test models Windows: the same on
+        # every host the suite runs on.
+        no_exec=no_exec,
     )
 
 
@@ -803,22 +786,23 @@ def test_a_baseline_process_with_an_open_ancestry_is_watched(ancestry):
 @pytest.mark.parametrize(
     "ancestry",
     [
-        pytest.param({60: {"start": 4.0, "ppid": 1, "cmdline": ["d"]}}, id="init"),
+        pytest.param({60: {"start": 5.5, "ppid": 0, "cmdline": ["d"]}}, id="pid-0"),
         pytest.param(
             {
-                59: {"start": 3.0, "ppid": 1, "cmdline": ["launcher"]},
+                59: {"start": 3.0, "ppid": 0, "cmdline": ["launcher"]},
                 60: {"start": 5.5, "ppid": 59, "cmdline": ["d"]},
             },
-            id="through-an-older-parent",
+            id="through-a-parent-of-pid-0",
         ),
-        pytest.param({60: {"start": 5.5, "ppid": 0, "cmdline": ["d"]}}, id="pid-0"),
     ],
 )
 def test_a_baseline_process_with_a_complete_ancestry_is_read_once(ancestry):
     assert _reads_over_five_samples({**_baseline_table(), **ancestry}) == 1
 
 
-def _reads_over_five_samples(table: dict[int, dict[str, Any]]) -> int:
+def _reads_over_five_samples(
+    table: dict[int, dict[str, Any]], *, no_exec: bool = False
+) -> int:
     """How often pid 60's command line is read over five samples."""
     reads = {"n": 0}
 
@@ -829,165 +813,120 @@ def _reads_over_five_samples(table: dict[int, dict[str, Any]]) -> int:
             return super().__getitem__(key)
 
     table[60] = Counting(table[60])
-    sampler = _sampler(table, root=10)
+    sampler = _sampler(table, root=10, no_exec=no_exec)
     for _ in range(5):
         sampler.sample()
     return reads["n"]
 
 
-# The harness (pid 10) started at 5.0; the margin is CREATE_TIME_MARGIN_SECONDS.
-_OLDER = 5.0 - CREATE_TIME_MARGIN_SECONDS - 0.01
-_WITHIN = 5.0 - CREATE_TIME_MARGIN_SECONDS + 0.01
-
-
 @pytest.mark.parametrize(
-    "parent",
+    "start",
     [
-        pytest.param({}, id="parent-gone"),
-        pytest.param(
-            {59: {"start": 0.5, "ppid": 1, "open": psutil.AccessDenied(59)}},
-            id="parent-unopenable",
-        ),
-        pytest.param(
-            {59: {"start": 4.99, "ppid": 1, "cmdline": ["younger"]}},
-            id="younger-process-at-the-parent-pid",
-        ),
+        pytest.param(4.0, id="reads-older-than-the-harness"),
+        pytest.param(5.5, id="reads-younger-than-the-harness"),
     ],
 )
-def test_a_process_older_than_the_harness_is_settled_whatever_its_parent(parent):
-    # Windows keeps a dead parent's pid in its orphans; the age settles it.
+def test_a_child_of_pid_1_is_watched_whatever_its_create_time_says(start):
+    # pid 1 adopts the harness's orphans too, and a wall-clock create time
+    # cannot show which of its children were born before the harness.
     table = {
         **_baseline_table(),
-        **parent,
-        60: {"start": _OLDER, "ppid": 59, "cmdline": ["service"]},
-    }
-    assert _reads_over_five_samples(table) == 1
-
-
-def test_a_process_within_the_margin_of_the_harness_is_watched():
-    table = {
-        **_baseline_table(),
-        60: {"start": _WITHIN, "ppid": 59, "cmdline": ["service"]},
+        60: {"start": start, "ppid": 1, "cmdline": ["service"]},
     }
     assert _reads_over_five_samples(table) == 5
 
 
-def _reversed_order_table() -> dict[int, dict[str, Any]]:
-    """The e1dc model: its create time reads older than the harness (5.0), its
-    parent is gone. Only a clock step makes a younger process read like this."""
+def _dead_parent_service() -> dict[int, dict[str, Any]]:
+    """A service whose parent pid names a process that is gone, as Windows
+    keeps it for every orphan. Fully readable, and no browser."""
     return {
         **_baseline_table(),
-        60: {"start": 4.9, "ppid": 59, "cmdline": ["python", "pre-exec"]},
+        60: {
+            "start": 5.5,
+            "ppid": 59,
+            "exe": "C:/Windows/System32/svchost.exe",
+            "cmdline": ["svchost.exe", "-k", "netsvcs"],
+        },
     }
 
 
-def _reads_with(clock: Any, table: dict[int, dict[str, Any]], steps=()) -> int:
-    reads = {"n": 0}
-
-    class Counting(dict):
-        def __getitem__(self, key):
-            if key == "cmdline":
-                reads["n"] += 1
-            return super().__getitem__(key)
-
-    table[60] = Counting(table[60])
-    sampler = _sampler(table, root=10, clock=clock)
-    for index in range(5):
-        if index in steps:
-            clock.offset = steps[index]
-        sampler.sample()
-    return reads["n"]
+def test_on_windows_a_fully_read_non_browser_is_read_once():
+    # Windows has no exec: this image is the process's for its lifetime.
+    assert _reads_over_five_samples(_dead_parent_service(), no_exec=True) == 1
 
 
-def test_while_the_clock_holds_an_older_create_time_is_trusted():
-    # Pass-through: with the clock unmoved, a process that reads older than the
-    # harness was born before it, and is read once.
-    assert _reads_with(_Clock(), _reversed_order_table()) == 1
-
-
-def test_a_clock_step_before_the_first_sample_leaves_age_unused():
-    clock = _Clock()
-    clock.offset = -0.1
-    assert _reads_with(clock, _reversed_order_table()) == 5
-
-
-def test_a_clock_step_during_the_row_voids_what_age_alone_settled():
-    # Cached at the first sample, then the clock steps: read again from the
-    # sample that measured the step on.
-    clock = _Clock()
-    # Read at the first sample, cached through the second, and read again in
-    # the third, fourth and fifth.
-    assert _reads_with(clock, _reversed_order_table(), steps={2: 0.1}) == 4
+def test_on_posix_the_same_process_stays_watched():
+    # It could exec into the browser later, and its ancestry is open.
+    assert _reads_over_five_samples(_dead_parent_service(), no_exec=False) == 5
 
 
 @pytest.mark.parametrize(
-    ("change", "detected"),
+    "change",
     [
-        # Literal values, so the test does not move with the constant: the
-        # margin is 0.05 s and a step is anything beyond half of it.
-        (0.02, False),
-        (-0.02, False),
-        (0.03, True),
-        (-0.03, True),
-        # Between half the margin and the margin: a shift the margin could
-        # hide, so already a step.
-        (0.045, True),
+        pytest.param({"cmdline": psutil.AccessDenied(60)}, id="arguments-unread"),
+        pytest.param({"exe": psutil.AccessDenied(60)}, id="executable-unread"),
+        pytest.param({"exe": ""}, id="executable-empty"),
+        pytest.param({"exe": BROWSER_EXE}, id="the-browser"),
+        pytest.param(
+            {"exe": f"{BROWSER_DIR}/chromium-1/chrome-linux/chrome_crashpad"},
+            id="under-the-browsers-dir",
+        ),
+        pytest.param(
+            {"cmdline": ["svchost.exe", "--user-data-dir=/tmp/any-profile"]},
+            id="names-a-profile",
+        ),
     ],
 )
-def test_a_step_is_a_change_beyond_half_the_margin(change, detected):
-    assert CREATE_TIME_MARGIN_SECONDS == 0.05
-    clock = _Clock()
-    table = _reversed_order_table()
-    sampler = _sampler(table, root=10, clock=clock)
-    sampler.sample()
-    clock.offset = change
-    sampler.sample()
-    stats = sampler.stats()
-    assert stats["clock_step_detected"] is detected
-    assert stats["clock_offset_change"] == round(abs(change), 4)
-    assert stats["clock_offset_at_start"] == 0.0
+def test_on_windows_an_image_not_read_in_full_or_a_browser_stays_watched(change):
+    table = _dead_parent_service()
+    table[60] = {**table[60], **change}
+    assert _reads_over_five_samples(table, no_exec=True) == 5
 
 
-def test_a_process_settled_by_its_ancestry_survives_a_clock_step():
-    # Only age is voided: a complete ancestry to pid 0 still settles.
-    clock = _Clock()
-    table = {
-        **_baseline_table(),
-        60: {"start": 5.5, "ppid": 0, "cmdline": ["d"]},
+def test_on_windows_a_browser_started_later_is_a_new_process_and_is_counted():
+    # The first-sample service is cached; the browser that joins the row is a
+    # new process, read in full as new, beside the row's own.
+    profile = "/tmp/e1dd-profile"
+    table = _dead_parent_service()
+    sampler, tracker = _sampler(table, root=10, no_exec=True), Tracker()
+    _observe(sampler, tracker, 0.0)
+    assert sampler.first_sample_cached >= 1
+    table[61] = {
+        "start": 6.0,
+        "ppid": 59,
+        "exe": BROWSER_EXE,
+        "cmdline": _chrome(profile),
     }
-    assert _reads_with(clock, table, steps={2: 0.1}) == 1
+    table[70] = {
+        "start": 6.0,
+        "ppid": 10,
+        "exe": BROWSER_EXE,
+        "cmdline": _chrome(profile),
+    }
+    _observe(sampler, tracker, 1.0)
+    assert tracker.max_roots[canonical_user_data_dir(profile)] == 2
 
 
-def test_without_the_harnesss_clock_no_process_is_settled_by_age():
-    table = _reversed_order_table()
-    sampler = Sampler(
-        10,
-        own_pid=999,
-        pids=lambda: list(table),
-        open_process=lambda pid: _FakeProcess(table, pid),
-        user_of=_user_of,
-        user=HARNESS,
-        browser_exe=BROWSER_EXE,
-        browser_dir=BROWSER_DIR,
-    )
-    sampler.sample()
-    assert sampler.first_sample_watched == 1
-    assert sampler.stats()["clock_offset_at_start"] is None
-
-
-def test_a_younger_first_sample_process_with_an_open_ancestry_is_still_caught():
-    # E1CE-01 C with the age rule in place: born after the harness, its parent
-    # gone, it becomes a second browser root and must be counted.
-    profile = "/tmp/e1db-profile"
+@pytest.mark.parametrize(
+    "start",
+    [
+        pytest.param(5.5, id="e1ce-c-ordinary-order"),
+        # The e1dc and e1dd models: born after the harness, but its wall-clock
+        # create time reads older, as after a backward clock step.
+        pytest.param(4.9, id="e1dc-e1dd-calendar-reads-older"),
+    ],
+)
+def test_on_posix_a_first_sample_process_with_an_open_ancestry_is_still_caught(start):
+    profile = "/tmp/e1dd-profile"
     table = {
         **_baseline_table(),
-        60: {"start": 5.5, "ppid": 59, "cmdline": ["python", "pre-exec"]},
+        60: {"start": start, "ppid": 59, "cmdline": ["python", "pre-exec"]},
     }
     sampler, tracker = _sampler(table, root=10), Tracker()
     _observe(sampler, tracker, 0.0)
     assert sampler.first_sample_watched == 1
     table[60] = {
-        "start": 5.5,
+        "start": start,
         "ppid": 1,
         "exe": BROWSER_EXE,
         "cmdline": _chrome(profile),
@@ -1002,22 +941,27 @@ def test_a_younger_first_sample_process_with_an_open_ancestry_is_still_caught():
     assert tracker.max_roots[canonical_user_data_dir(profile)] == 2
 
 
-def test_the_summary_states_what_sampling_cost():
+@pytest.mark.parametrize("no_exec", [False, True])
+def test_the_summary_states_what_sampling_cost(no_exec):
     table = {
         **_baseline_table(),
-        60: {"start": _OLDER, "ppid": 59, "cmdline": ["old"]},
-        61: {"start": 5.5, "ppid": 59, "cmdline": ["young"]},
+        60: {"start": 5.5, "ppid": 0, "cmdline": ["settled"]},
+        61: {"start": 5.5, "ppid": 59, "cmdline": ["python", "open"]},
     }
-    sampler = _sampler(table, root=10)
+    sampler = _sampler(table, root=10, no_exec=no_exec)
     for _ in range(3):
         sampler.sample()
     stats = sampler.stats()
-    assert stats["create_time_margin_seconds"] == CREATE_TIME_MARGIN_SECONDS
-    # init and 60 by age, and the harness is the row's; 61 is watched.
-    assert stats["first_sample_cached"] == 2
-    assert stats["first_sample_watched"] == 1
-    # Every process in the first sample, then only the harness and 61.
-    assert sampler.reads_per_sample == [4, 2, 2]
+    assert stats["no_exec"] is no_exec
+    if no_exec:
+        # init and 60 by ancestry, 61 by its image; the harness is the row's.
+        assert (stats["first_sample_cached"], stats["first_sample_watched"]) == (3, 0)
+        assert sampler.reads_per_sample == [4, 1, 1]
+    else:
+        # init and 60 by ancestry; 61 is watched.
+        assert (stats["first_sample_cached"], stats["first_sample_watched"]) == (2, 1)
+        # Every process in the first sample, then only the harness and 61.
+        assert sampler.reads_per_sample == [4, 2, 2]
     assert duration_stats([0.01, 0.02, 0.03]) == {
         "sample_seconds_mean": 0.02,
         "sample_seconds_p95": 0.03,
@@ -1488,9 +1432,9 @@ def test_a_watcher_that_never_takes_its_baseline_is_stopped(tmp_path, monkeypatc
     assert watcher._process.poll() is not None
 
 
-def test_the_harness_watcher_carries_the_harnesss_clock(tmp_path):
-    # The real watcher, started the way a row starts it: its summary names
-    # the offset the harness took at its start, so age can be checked at all.
+def test_the_harness_watcher_trusts_images_only_where_there_is_no_exec(tmp_path):
+    # The real watcher, started the way a row starts it: the image rule is on
+    # exactly on Windows, and its summary says which it applied.
     watcher = harness.Watcher(
         tmp_path / "w",
         EventLog(tmp_path / "log", run="r"),
@@ -1501,5 +1445,5 @@ def test_the_harness_watcher_carries_the_harnesss_clock(tmp_path):
     watcher.start()
     summary = watcher.stop()
     assert summary is not None
-    assert summary["clock_offset_at_start"] == HARNESS_CLOCK_OFFSET
-    assert summary["clock_step_detected"] is False
+    assert summary["no_exec"] is (sys.platform == "win32")
+    assert "clock_offset_at_start" not in summary

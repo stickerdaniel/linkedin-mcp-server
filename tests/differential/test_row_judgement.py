@@ -42,7 +42,7 @@ from differential.session import (
     write_synthetic_cookie_file,
 )
 from differential.synthetic_origin import OriginRequest
-from differential.test_watcher import BROWSER_EXE, _Clock, _sampler
+from differential.test_watcher import BROWSER_EXE, _sampler
 from differential.watcher import Tracker, canonical_user_data_dir
 from linkedin_mcp_server.session_state import portable_cookie_path, write_source_state
 
@@ -872,18 +872,15 @@ def _lifetime_census(case: str) -> dict:
         # A staging leftover whose parent vanished before the first sample.
         table[9] = {"start": 5.1, "ppid": 10, "open": psutil.NoSuchProcess(9)}
         table[2] = {"start": 5.3, "ppid": 9, "cmdline": ["python", "pre-exec"]}
-    clock = _Clock()
-    if case.startswith("clock-stepped"):
-        # The e1dc model: a staging leftover born after the harness whose
-        # calendar create time reads older, because the clock stepped back,
-        # and whose parent is already gone at the first sample.
-        table[2] = {"start": 4.9, "ppid": 9, "cmdline": ["python", "pre-exec"]}
-    if case == "clock-stepped-before-the-first-sample":
-        clock.offset = -0.1
-    sampler, tracker = _sampler(table, root=10, clock=clock), Tracker()
+    if case.startswith("calendar-reads-older"):
+        # The e1dc and e1dd models: a staging leftover born after the harness
+        # whose wall-clock create time reads older, as after a backward clock
+        # step anywhere before the first sample, with its parent already gone
+        # or itself already adopted by init.
+        ppid = 1 if case.endswith("adopted-by-init") else 9
+        table[2] = {"start": 4.9, "ppid": ppid, "cmdline": ["python", "pre-exec"]}
+    sampler, tracker = _sampler(table, root=10), Tracker()
     tracker.observe(sampler.sample(), 0.0)
-    if case == "clock-stepped-during-the-row":
-        clock.offset = -0.1
     table[3] = browser(6.0)
     if case == "two-readable-roots":
         table[2] = browser(6.0)
@@ -896,7 +893,7 @@ def _lifetime_census(case: str) -> dict:
     elif case == "incomplete-baseline-ancestry":
         table.pop(9)
         table[2] = browser(5.3, ppid=1)
-    elif case.startswith("clock-stepped"):
+    elif case.startswith("calendar-reads-older"):
         # Adopted by init and exec'd into the row's browser: same pid, same
         # create time, new command line.
         table[2] = browser(4.9, ppid=1)
@@ -940,8 +937,8 @@ def _judged_lifetime(profile, case: str, *, daemon: bool):
         "cached-unrelated-pid-reused-open-denied",
         "cached-unrelated-pid-reused-create-time-denied",
         "incomplete-baseline-ancestry",
-        "clock-stepped-before-the-first-sample",
-        "clock-stepped-during-the-row",
+        "calendar-reads-older-parent-gone",
+        "calendar-reads-older-adopted-by-init",
     ],
 )
 def test_an_exclusion_about_another_lifetime_fails_o1_and_the_comparison(profile, case):

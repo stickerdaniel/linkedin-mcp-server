@@ -32,27 +32,31 @@ process is established as unrelated to the row when
 
 * its owning user can be read and is not the harness's user (the real uid on
   POSIX, the user name on Windows), since no actor runs as anyone else; or
-* it was running at the first sample and was created before the harness, by
-  more than ``CREATE_TIME_MARGIN_SECONDS``, since nothing older than the
-  harness can descend from it; or
 * it was running at the first sample and its whole ancestry, read then, ends
-  without passing the harness: every parent present and no younger than its
-  child, up to one created before the harness or a child of pid 0. A younger
-  child of pid 1 is not enough, since an orphan of the harness is adopted
-  there; or
+  at a child of pid 0 without passing the harness, every parent present and
+  no younger than its child. A child of pid 1 is not enough, since an orphan
+  of the harness is adopted there, and nothing but a wall-clock create time
+  would say it is older than the harness; or
+* on Windows, it was running at the first sample, its executable and command
+  line were both read then, it names no profile and cannot be the browser.
+  Windows has no exec, so that image is the process's for its whole lifetime
+  (``Sampler.no_exec``); or
 * its executable, read in the same sample, is neither the row's browser
   (``--browser-exe``) nor anything under the managed browsers
   (``--browser-dir``). That is the setuid ``/bin/ps`` the product runs on
   macOS: psutil cannot read its arguments, and it cannot be a browser.
 
-**An exclusion belongs to one lifetime.** The first two last: they are kept by
-pid *and* create time, and apply only in a sample that read that same create
+Wall-clock create times are never a birth-order key: the calendar clock can be
+stepped, and a process born after the harness can then read as older.
+
+**An exclusion belongs to one lifetime.** The first three last: they are kept
+by pid *and* create time, and apply only in a sample that read that same create
 time, so a pid that cannot be identified now is not covered by what was
-established about an earlier process there. The third holds for its sample
-only, since the process can exec later. Evidence that ties a kept exclusion to
-the harness withdraws it. A process already running at the first sample whose
-ancestry could not be completed is not excluded but read again on every
-sample, and counts as a possible actor once it shows the browser.
+established about an earlier process there. The last holds for its sample
+only, since a POSIX process can exec later. Evidence that ties a kept exclusion
+to the harness withdraws it. A process already running at the first sample that
+none of these settles is not excluded but read again on every sample, and
+counts as a possible actor once it shows the browser.
 
 Losing a process (``NoSuchProcess``, or a pid whose create time changed) is an
 exit. Any other process whose identity, parent or arguments cannot be read, or
@@ -95,30 +99,13 @@ CHILD_TYPE_FLAG = "--type="
 #: Target interval between samples.
 SAMPLE_SECONDS = 0.05
 
-#: How much older than the harness a process has to be to count as created
-#: before it. Two create times are compared, both read through psutil on one
-#: machine; the margin absorbs their clock's resolution, which on Windows is
-#: the system timer's (about 15.6 ms by default), with room to spare.
-CREATE_TIME_MARGIN_SECONDS = 0.05
-
-#: How far the calendar clock may have moved against the monotonic clock since
-#: the harness started before age stops being evidence. Half the margin, so a
-#: shift the margin could hide is caught first.
-CLOCK_STEP_TOLERANCE_SECONDS = CREATE_TIME_MARGIN_SECONDS / 2
-
-
-def clock_offset_now() -> float:
-    """The calendar clock's offset from the monotonic clock, in seconds.
-
-    Create times are calendar times. A process born after the harness has a
-    calendar create time no earlier than the harness's unless the calendar
-    clock stepped or slewed backwards since the harness started, and this
-    offset, compared with the one the harness took at its start, measures
-    exactly that movement. On Linux psutil reports boot time plus start ticks,
-    boot-relative rather than read at birth; the same rule is kept for every
-    platform.
-    """
-    return time.time() - time.monotonic()
+#: Whether this platform can replace a process's program in place. Windows
+#: cannot: ``CreateProcess`` fixes a process's image and command line for its
+#: whole lifetime, and becoming another program means a new process, which is a
+#: new (pid, create time) the watcher reads in full as new. A process rewriting
+#: its own PEB command line is adversarial and is not a browser launch; it is
+#: outside this oracle.
+NO_EXEC = os.name == "nt"
 
 
 def canonical_user_data_dir(value: str) -> str:
@@ -471,7 +458,9 @@ class Sampler:
     *pids*, *open_process*, *clock* and *user_of* are psutil's, the wall clock
     and ``process_user`` by default, and are replaced in tests to model a
     process table. *browser_exe* and *browser_dir* name what the row's browser
-    runs. *user* is the harness's user, as *user_of* reports it.
+    runs. *user* is the harness's user, as *user_of* reports it. *no_exec*
+    says whether a process's program is fixed for its lifetime, which is
+    Windows's by default and set in tests to model either platform.
     """
 
     def __init__(
@@ -486,19 +475,10 @@ class Sampler:
         user: object | None = None,
         browser_exe: str | None = None,
         browser_dir: str | None = None,
-        clock_offset: float | None = None,
-        offset_now: Callable[[], float] = clock_offset_now,
+        no_exec: bool = NO_EXEC,
     ) -> None:
         self.root_pid = root_pid
-        #: The harness's calendar-minus-monotonic offset at its start, or None,
-        #: which leaves age unused: nothing then says the clock held still.
-        self.clock_offset = clock_offset
-        self._offset_now = offset_now
-        #: The largest change of that offset seen, and whether it voided age.
-        self.clock_offset_change = 0.0
-        self.clock_step_detected = False
-        #: Identities cached as unrelated on age alone, void after a step.
-        self._age_only: set[tuple[int, float]] = set()
+        self.no_exec = no_exec
         self.own_pid = os.getpid() if own_pid is None else own_pid
         self._pids = pids
         self._open = open_process
@@ -528,10 +508,7 @@ class Sampler:
         """What sampling cost, for the summary."""
         reads = self.reads_per_sample
         return {
-            "create_time_margin_seconds": CREATE_TIME_MARGIN_SECONDS,
-            "clock_offset_at_start": self.clock_offset,
-            "clock_offset_change": round(self.clock_offset_change, 4),
-            "clock_step_detected": self.clock_step_detected,
+            "no_exec": self.no_exec,
             "first_sample_cached": self.first_sample_cached,
             "first_sample_watched": self.first_sample_watched,
             "reads_per_sample_mean": (
@@ -590,8 +567,6 @@ class Sampler:
         return ppid, exe, cmdline, failures, exe_read
 
     def sample(self) -> dict[int, ProcessRecord]:
-        # Before anything is read: a step voids age for this sample already.
-        self._check_the_clock()
         first = self._baseline is None
         sample: dict[int, ProcessRecord] = {}
         # pid -> (episode key, failed fields, exe, exe read now, process or None,
@@ -689,10 +664,11 @@ class Sampler:
         row = {process.identity for process in sample.values() if process.in_row}
         self._unrelated -= row
         self._watched -= row
-        self._age_only -= row
         settled: set[tuple[int, float]] = set()
         if first:
             settled = self._settled_ancestry(sample)
+            if self.no_exec:
+                settled |= self._settled_image(sample, failures)
             for pid in identified:
                 process = sample.get(pid)
                 if process is None or process.in_row or pid == self.own_pid:
@@ -700,12 +676,16 @@ class Sampler:
                 if process.identity not in settled:
                     self._watched.add(process.identity)
         verdicts = self._judge(sample, failures, settled)
-        # Running before any actor, its whole ancestry read now and not
-        # leading to the harness: established unrelated.
+        # Running before any actor, and its whole ancestry read now not leading
+        # to the harness, or on Windows its whole image read now and no
+        # browser: established unrelated.
         self._unrelated |= settled
         if first:
-            self.first_sample_cached = len(settled)
-            self.first_sample_watched = len(self._watched)
+            # Everything cached so far was established in this first sample,
+            # by ancestry, image or user.
+            self.first_sample_cached = len(self._unrelated)
+            # Not those another rule established unrelated in the same sample.
+            self.first_sample_watched = len(self._watched - self._unrelated)
         self.reads_per_sample.append(self._reads)
         self._reads = 0
         self._track(sample, verdicts)
@@ -742,92 +722,74 @@ class Sampler:
     ) -> set[tuple[int, float]]:
         """The identities whose ancestry, read in this sample, ends away from the harness.
 
-        A process created before the harness cannot descend from it, whatever
-        its ancestry, so one older than the harness by more than
-        ``CREATE_TIME_MARGIN_SECONDS`` ends the walk, itself or as an ancestor.
-        That is what settles most of a Windows process table, where an
-        orphan's parent pid keeps naming a process that is gone. Age is read
-        off calendar create times, so it counts only while the clock is shown
-        not to have moved since the harness began (``_check_the_clock``), and
-        what it alone settled is kept apart so a later step can void it. Otherwise
-        every parent has to be in the sample and no younger than its child: a
+        Every parent has to be in the sample and no younger than its child: a
         parent that could not be read, or a younger process at the parent's
-        pid, leaves the ancestry open. It also ends at a child of pid 0 (or a
-        pid that is its own parent); a younger child of pid 1 stays open,
-        because pid 1 adopts every orphan, the harness's included.
+        pid, leaves the ancestry open. It ends at a child of pid 0 (or a pid
+        that is its own parent). A child of pid 1 stays open whatever its create
+        time says: pid 1 adopts every orphan, the harness's included, and a
+        wall-clock create time cannot show that it was born before the harness.
         """
-        root = sample.get(self.root_pid)
-        born = root.start if root is not None else None
-        by_age_allowed = born is not None and self._age_admissible()
-        # pid -> (settled, settled only because some process was old enough)
-        memo: dict[int, tuple[bool, bool]] = {}
+        memo: dict[int, bool] = {}
         for pid in sample:
             chain: list[int] = []
             current = pid
             while True:
                 if current in memo:
-                    settled, by_age = memo[current]
+                    settled = memo[current]
                     break
                 process = sample[current]
                 if process.in_row or current == self.own_pid or current in chain:
-                    settled, by_age = False, False
+                    settled = False
                     break
                 chain.append(current)
-                if (
-                    by_age_allowed
-                    and born is not None
-                    and process.start < born - CREATE_TIME_MARGIN_SECONDS
-                ):
-                    settled, by_age = True, True
-                    break
                 if process.ppid in (0, current):
-                    settled, by_age = True, False
+                    settled = True
                     break
                 if process.ppid == 1:
-                    settled, by_age = False, False
+                    settled = False
                     break
                 parent = sample.get(process.ppid)
                 if parent is None or parent.start > process.start:
-                    settled, by_age = False, False
+                    settled = False
                     break
                 current = process.ppid
             for member in chain:
-                memo[member] = (settled, by_age)
-        settled_now = {
+                memo[member] = settled
+        return {
             process.identity
             for pid, process in sample.items()
-            if memo.get(pid, (False, False))[0] and pid != self.own_pid
+            if memo.get(pid) and pid != self.own_pid
         }
-        self._age_only |= {
-            process.identity
-            for pid, process in sample.items()
-            if memo.get(pid, (False, False)) == (True, True) and pid != self.own_pid
-        }
-        return settled_now
 
-    def _age_admissible(self) -> bool:
-        """Whether age is still evidence: the clock has not moved since the harness began."""
-        return self.clock_offset is not None and not self.clock_step_detected
+    def _settled_image(
+        self,
+        sample: dict[int, ProcessRecord],
+        failures: dict[int, tuple[Any, list[str], str | None, bool, Any, bool]],
+    ) -> set[tuple[int, float]]:
+        """First-sample processes whose whole image is read now and is no browser.
 
-    def _check_the_clock(self) -> None:
-        """Measure the clock against the harness's start, and void age on a step.
-
-        Once the calendar clock has moved by more than
-        ``CLOCK_STEP_TOLERANCE_SECONDS`` against the monotonic clock, birth
-        order can no longer be read off create times, for the rest of the
-        observation: every lifetime cached on age alone goes back to being
-        watched, and read again from this sample on.
+        Only where a process cannot exec (``no_exec``, Windows): its executable
+        and command line, both read in this sample, are then its own for the
+        rest of its lifetime, so one that names no profile and cannot be the
+        browser never will, whatever its ancestry says. A process whose
+        executable or arguments could not be read is not judged here.
         """
-        if self.clock_offset is None:
-            return
-        change = abs(self._offset_now() - self.clock_offset)
-        self.clock_offset_change = max(self.clock_offset_change, change)
-        if self.clock_step_detected or change <= CLOCK_STEP_TOLERANCE_SECONDS:
-            return
-        self.clock_step_detected = True
-        self._unrelated -= self._age_only
-        self._watched |= self._age_only
-        self._age_only.clear()
+        settled = set()
+        for pid, process in sample.items():
+            if process.in_row or pid == self.own_pid:
+                continue
+            if pid in failures:
+                fields = {failure.split(":", 1)[0] for failure in failures[pid][1]}
+                if fields & {"open", "identity", "exe", "cmdline"}:
+                    continue
+            if not process.exe or self.possible_browser(process.exe):
+                continue
+            if process.profile is not None or any(
+                argument.startswith(USER_DATA_DIR_FLAG) for argument in process.cmdline
+            ):
+                continue
+            settled.add(process.identity)
+        return settled
 
     def _resolve_by_user(
         self, sample: dict[int, ProcessRecord], identified: dict[int, Any]
@@ -989,9 +951,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     # a browser root, and one running neither cannot.
     parser.add_argument("--browser-exe")
     parser.add_argument("--browser-dir")
-    # The harness's calendar-minus-monotonic offset, taken when it started.
-    # Without it no process is settled by age.
-    parser.add_argument("--clock-offset", type=float)
     args = parser.parse_args(argv)
 
     base = {
@@ -1005,7 +964,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.root_pid,
         browser_exe=args.browser_exe,
         browser_dir=args.browser_dir,
-        clock_offset=args.clock_offset,
     )
     began = time.monotonic()
     observation_start: float | None = None
