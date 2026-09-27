@@ -31,12 +31,19 @@ let go on its own, or one with no end, leaves it ``incomplete``. A tracee is a
 lifetime, not a number: an end satisfies only the lifetime it follows, and a
 thread id that turns up again (born anew, or writing after its end) is a
 reused id the trace cannot place, so it too leaves the collection
-``incomplete`` and its old association is dropped. A child seen while its
-parent's creation call ran, before it returned, is that call's child, even
-one that already exited (``vfork`` returns only then); and the thread census,
-read just after the attach, is the same thread as a traced birth whose call
-began before the census was read, in the same process. Observations that
-contradict each other leave it ``incomplete`` with the reason.
+``incomplete`` and its old association is dropped. The trace carries no
+event that links a creation call to the child it made, only the id the call
+returns, and a call's entry is not the child's allocation: an earlier
+lifetime of the same id can still end while the call runs. So a child seen
+writing while its parent's creation call ran is that call's child, since a
+lifetime still writing has not released its id, but an end of the id before
+the call returned could be either and leaves the collection ``incomplete``;
+so does the id announced as attached more than once. A thread census entry,
+timed by when its task directory was read, is the traced thread only when it
+was read after the creation call returned, in the same process; read before
+the call began it was an earlier lifetime, and read while the call ran it
+could be either. Observations that cannot be placed leave the collection
+``incomplete`` with the reason.
 Whether the collection is complete is kept apart from what it showed:
 ``OracleOutcome.status`` is the collection, ``O2Result.state`` the verdict.
 
@@ -103,6 +110,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -1120,8 +1128,10 @@ class Tracee:
     #: When it was first on record: its birth, or its first line; None when
     #: it was there at the attach and has written nothing since.
     first: float | None = None
-    #: Known only from the thread census, read at ``Cohort.census_at``.
+    #: Known only from the thread census, read in ``Cohort.census_times``.
     census: bool = False
+    #: When the trace showed it end.
+    ended_at: float | None = None
     #: A thread started in the trace: the lifetime that started it.
     parent: Tracee | None = None
     #: The process it belongs to, when that is its own or known at the attach.
@@ -1148,8 +1158,9 @@ class Cohort:
     #: Tids that turned up again, as a new birth or after their end, or whose
     #: observations contradict each other.
     reused: dict[int, str] = field(default_factory=dict)
-    #: When the thread census was read, if known.
-    census_at: float | None = None
+    #: Tid -> when the census read the task directory it was in, from the
+    #: start to the end of that listing.
+    census_times: Mapping[int, tuple[float, float]] = field(default_factory=dict)
 
     def add(self, tracee: Tracee) -> Tracee:
         self.lifetimes.append(tracee)
@@ -1157,32 +1168,45 @@ class Cohort:
         return tracee
 
 
-def _confirms(known: Tracee, birth: Birth, census_at: float | None) -> str | None:
-    """Why *birth* is not the lifetime already on record, or None when it is.
+def _confirms(
+    known: Tracee, birth: Birth, census_times: Mapping[int, tuple[float, float]]
+) -> str | None:
+    """Why *birth* cannot be the lifetime already on record, or None when it is.
 
-    What was seen of the id while the parent's call ran, from its start to its
-    return, was this child, even if it had already exited: ``vfork`` returns
-    only once the child execs or exits. A census entry is the same thread when
-    the call that started it began before the census was read. Anything seen of
-    the id before the call began, or ended by then, was an earlier lifetime.
+    Nothing in the trace links a creation call to the child it made but the
+    id it returns, and the id is allocated after the call's entry. What was
+    seen of the id while the call ran is this child only if it cannot have been
+    an earlier lifetime's: a line it wrote can be (a lifetime still writing
+    has not released its id), an end cannot (an earlier lifetime may have ended
+    between the entry and the allocation). A census entry is this thread only
+    when its task directory was read after the call returned.
     """
+    if known.first is not None and known.first < birth.began:
+        return f"it was seen at {known.first}, before its creation call began"
+    if known.ended and known.ended_at is not None and known.ended_at <= birth.returned:
+        return (
+            f"child id {birth.child} ended before its creation call returned; "
+            f"confirmation and reuse are indistinguishable"
+        )
     if known.census:
-        if census_at is None:
-            return "the census's time is unknown, so its order against the birth is too"
         if not birth.thread:
             return "the census had it as a thread, the trace saw a process born"
-        if birth.began > census_at:
-            return f"the census at {census_at} predates its birth at {birth.began}"
-        if known.first is not None and known.first < birth.began:
-            return f"it was seen at {known.first}, before its birth at {birth.began}"
+        times = census_times.get(known.tid)
+        if times is None:
+            return "the census entry's time is unknown, so its order is too"
+        read_from, read_to = times
+        if read_to < birth.began:
+            return f"the census read it at {read_to}, before its creation call began"
+        if read_from <= birth.returned:
+            return (
+                f"the census read it between {read_from} and {read_to}, while "
+                f"its creation call ran; confirmation and reuse are "
+                f"indistinguishable"
+            )
         return None
     if known.kind not in ("unaccounted", "attached"):
         return f"an earlier lifetime of it ({known.kind}) is on record"
-    if known.first is None:
-        return None if not known.ended else "it ended before its birth"
-    if birth.began <= known.first <= birth.returned:
-        return None
-    return f"it was seen at {known.first}, before its birth at {birth.began}"
+    return None
 
 
 def cohort(
@@ -1191,28 +1215,35 @@ def cohort(
     trace: Trace,
     attached: Iterable[int] = (),
     *,
-    census_at: float | None = None,
+    census_times: Mapping[int, tuple[float, float]] | None = None,
 ) -> Cohort:
     """Every tracee strace covered, as lifetimes, from the trace in order.
 
     The roots strace was attached to, their threads from the census read
-    after the attach (at *census_at*), every tid a traced ``clone``, ``fork``
-    or ``vfork`` returned (a thread of its parent's process with
-    ``CLONE_THREAD``, a process of its own without), every pid strace reported
-    attaching, and every tid a line was written for. A birth confirms the
-    lifetime seen of its id while the call ran (``_confirms``); which process
-    a thread belongs to is resolved once the whole trace is read, whatever
-    order the returns came in. A tid that turns up again, born anew or writing
-    after its end, or whose census entry contradicts its birth, is recorded,
-    and no lifetime of it is trusted.
+    after the attach (each timed by *census_times*), every tid a traced
+    ``clone``, ``fork`` or ``vfork`` returned (a thread of its parent's
+    process with ``CLONE_THREAD``, a process of its own without), every pid
+    strace reported attaching (*attached*, once per announcement), and every
+    tid a line was written for. A birth confirms a lifetime already on record
+    only as ``_confirms`` allows; which process a thread belongs to is
+    resolved once the whole trace is read, whatever order the returns came
+    in. A tid that turns up again, born anew or writing after its end, one
+    announced twice, and one whose observations cannot be placed, is
+    recorded, and no lifetime of it is trusted.
     """
-    members = Cohort(census_at=census_at)
+    members = Cohort(census_times=dict(census_times or {}))
     for pid in roots:
         members.add(Tracee(pid, "root", process_pid=pid))
     for tid, pid in threads.items():
         if tid not in members.current:
             members.add(Tracee(tid, "thread", process_pid=pid, census=True))
-    for pid in attached:
+    announced = Counter(attached)
+    for pid, count in announced.items():
+        if count > 1:
+            members.reused[pid] = (
+                f"tid {pid} was announced attached {count} times; confirmation "
+                f"and reuse are indistinguishable"
+            )
         if pid not in members.current:
             members.add(Tracee(pid, "attached", process_pid=pid))
     #: Census threads a birth confirmed, and the process the census gave them.
@@ -1233,7 +1264,7 @@ def cohort(
                     )
                 )
                 continue
-            problem = _confirms(known, birth, census_at)
+            problem = _confirms(known, birth, members.census_times)
             if problem is not None:
                 members.reused[birth.child] = (
                     f"tid {birth.child} was born at {birth.began}, but {problem}"
@@ -1257,6 +1288,7 @@ def cohort(
             tracee.first = t
         if event[0] == "end":
             tracee.ended = True
+            tracee.ended_at = t
     for tracee, pid in confirmed:
         process = tracee.process()
         if process != pid:
@@ -1286,9 +1318,9 @@ class SignalOracle:
         #: Thread id -> process id, read from ``/proc`` while the tracees ran.
         self.threads: dict[int, int] = {}
         self.attached_at: float | None = None
-        #: When the thread census was read: after the attach, so a thread
-        #: born in between is both in it and in the trace.
-        self.census_at: float | None = None
+        #: Tid -> when the census read its task directory, start to end: after
+        #: the attach, so a thread born in between is in it and in the trace.
+        self.census_times: dict[int, tuple[float, float]] = {}
         self.attach_failure: str | None = None
         self._process: subprocess.Popen[Any] | None = None
         self._run = run
@@ -1346,15 +1378,28 @@ class SignalOracle:
     def read_threads(self) -> None:
         """Remember which threads belong to which traced process, while they run.
 
-        Read after the attach; the time it finished is kept, since a thread
-        born after the attach can be in it as well as in the trace.
+        Read after the attach, so a thread born after it can be in the census
+        as well as in the trace: each entry keeps when its task directory was
+        read, from the start of that listing to its end.
         """
         for pid in self.pids:
             with contextlib.suppress(OSError):
-                for task in Path(f"/proc/{pid}/task").iterdir():
-                    if task.name.isdigit():
-                        self.threads[int(task.name)] = pid
-        self.census_at = time.time()
+                began = self._now()
+                tasks = self._tasks(pid)
+                read = self._now()
+                for name in tasks:
+                    if name.isdigit():
+                        self.threads[int(name)] = pid
+                        self.census_times[int(name)] = (began, read)
+
+    @staticmethod
+    def _now() -> float:
+        return time.time()
+
+    @staticmethod
+    def _tasks(pid: int) -> list[str]:
+        """The names in ``/proc/<pid>/task``: one per thread of *pid*."""
+        return [task.name for task in Path(f"/proc/{pid}/task").iterdir()]
 
     def _stderr(self) -> str:
         try:
@@ -1447,8 +1492,8 @@ class SignalOracle:
                 self.pids,
                 self.threads,
                 trace,
-                {int(pid) for pid in _ATTACHED.findall(stderr)},
-                census_at=self.census_at,
+                [int(pid) for pid in _ATTACHED.findall(stderr)],
+                census_times=self.census_times,
             )
             self._account(outcome, members, let_go, set(confirmed_dead), stopped)
         if outcome.reasons:

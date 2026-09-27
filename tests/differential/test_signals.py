@@ -1722,89 +1722,154 @@ def test_a_later_observation_does_not_change_an_earlier_class(
     assert late.classes == (f"guardian:{after_exec}",)
 
 
-# --- E1ED-01: a birth confirms what was seen of its id, the census by its time ------
+# --- E1EE-01: only what the trace can place confirms a birth -----------------------
 
-_CHILD_EXITED = "23  6.1 +++ exited with 0 +++\n"
+_AMBIGUOUS_END = "ended before its creation call returned"
 
 
 @pytest.mark.parametrize(
-    ("trace", "stderr"),
+    ("trace", "stderr", "reason"),
     [
         pytest.param(
             "21  6.0 vfork( <unfinished ...>\n"
-            + _CHILD_EXITED
-            + "21  6.2 <... vfork resumed>) = 23\n",
+            "23  6.1 +++ exited with 0 +++\n"
+            "21  6.2 <... vfork resumed>) = 23\n",
             "",
+            _AMBIGUOUS_END,
             id="vfork-child-ends-before-the-return",
-        ),
-        pytest.param(
-            "21  6.0 vfork( <unfinished ...>\n"
-            + _CHILD_EXITED
-            + "21  6.2 <... vfork resumed>) = 23\n",
-            "strace: Process 23 attached\n",
-            id="vfork-announced",
         ),
         pytest.param(
             "21  6.0 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD"
             " <unfinished ...>\n"
-            + _CHILD_EXITED
-            + "21  6.2 <... clone resumed>) = 23\n",
-            "",
-            id="clone-vfork",
+            "23  6.1 +++ exited with 0 +++\n"
+            "21  6.2 <... clone resumed>) = 23\n",
+            "strace: Process 23 attached\n",
+            _AMBIGUOUS_END,
+            id="clone-vfork-announced-once",
+        ),
+        # e1ee's model: an earlier 23 ends inside the call and the new child's
+        # end is missing; strace announced 23 twice.
+        pytest.param(
+            "21  6.0 clone(child_stack=NULL, flags=SIGCHLD <unfinished ...>\n"
+            "23  6.1 +++ exited with 0 +++\n"
+            "21  6.2 <... clone resumed>) = 23\n",
+            "strace: Process 23 attached\nstrace: Process 23 attached\n",
+            _AMBIGUOUS_END,
+            id="old-exit-inside-the-call-new-end-missing",
         ),
         pytest.param(
-            "21  6.0 vfork() = 23\n" + _CHILD_EXITED, "", id="return-before-end"
+            "21  6.0 vfork() = 23\n23  6.1 +++ exited with 0 +++\n",
+            "strace: Process 23 attached\nstrace: Process 23 attached\n",
+            "announced attached 2 times",
+            id="announced-twice",
+        ),
+        pytest.param(
+            "23  5.0 +++ exited with 0 +++\n"
+            "21  6.0 vfork( <unfinished ...>\n"
+            "21  6.2 <... vfork resumed>) = 23\n",
+            "",
+            "before its creation call began",
+            id="ended-before-the-call-began",
         ),
     ],
 )
-def test_a_child_that_ended_during_its_parents_call_is_that_child(
-    tmp_path, trace, stderr
+def test_what_the_trace_cannot_place_leaves_the_collection_incomplete(
+    tmp_path, trace, stderr, reason
 ):
     outcome = _attached(tmp_path, trace + _ENDS, stderr=stderr).stop()
+    assert outcome.status == INCOMPLETE
+    assert any(reason in line for line in outcome.reasons), outcome.reasons
+    assert outcome.cohort[23]["reused"]
+
+
+@pytest.mark.parametrize(
+    "trace",
+    [
+        pytest.param(
+            "21  6.0 clone(child_stack=NULL, flags=SIGCHLD <unfinished ...>\n"
+            "23  6.1 kill(23, 0) = 0\n"
+            "21  6.2 <... clone resumed>) = 23\n"
+            "23  6.5 +++ exited with 0 +++\n",
+            id="writes-in-the-call-ends-after-the-return",
+        ),
+        pytest.param(
+            "21  6.0 vfork() = 23\n23  6.1 +++ exited with 0 +++\n",
+            id="return-before-end",
+        ),
+    ],
+)
+def test_a_child_the_trace_places_is_one_lifetime(tmp_path, trace):
+    outcome = _attached(
+        tmp_path, trace + _ENDS, stderr="strace: Process 23 attached\n"
+    ).stop()
     assert outcome.status == COMPLETE, outcome.reasons
     assert outcome.cohort[23]["kind"] == "child"
     assert outcome.cohort[23]["lifetimes"] == 1
     assert outcome.cohort[23]["end"] == "its exit line"
 
 
-def test_an_id_that_ended_before_the_call_began_is_an_earlier_lifetime(tmp_path):
-    trace = (
-        "23  5.0 +++ exited with 0 +++\n"
-        "21  6.0 vfork( <unfinished ...>\n"
-        "21  6.2 <... vfork resumed>) = 23\n"
-    )
-    outcome = _attached(tmp_path, trace + _ENDS).stop()
-    assert outcome.status == INCOMPLETE
-    assert any("before its birth" in reason for reason in outcome.reasons)
-
-
 _THREAD_24 = (
     "20  5.1 clone(child_stack=0x1, flags=CLONE_VM|CLONE_SIGHAND|CLONE_THREAD) = 24\n"
+    "24  8.0 +++ exited with 0 +++\n"
+)
+#: A thread-creation call that runs from 6.0 to 6.2, returning 24.
+_THREAD_24_CALL = (
+    "20  6.0 clone(child_stack=0x1, flags=CLONE_VM|CLONE_SIGHAND|CLONE_THREAD"
+    " <unfinished ...>\n"
+    "20  6.2 <... clone resumed>) = 24\n"
     "24  8.0 +++ exited with 0 +++\n"
 )
 
 
 @pytest.mark.parametrize(
-    ("trace", "census", "census_at", "status", "reason"),
+    ("trace", "census", "times", "status", "reason"),
     [
-        pytest.param(_THREAD_24, {}, None, COMPLETE, None, id="trace-only"),
+        pytest.param(_THREAD_24, {}, {}, COMPLETE, None, id="trace-only"),
         pytest.param(
             "24  8.0 +++ exited with 0 +++\n",
             {24: 20},
-            5.2,
+            {24: (5.2, 5.2)},
             COMPLETE,
             None,
             id="census-only",
         ),
-        # Born after the attach, before the census read it: one thread.
-        pytest.param(_THREAD_24, {24: 20}, 5.2, COMPLETE, None, id="overlapping"),
+        # Born after the attach, read after its creation call returned.
         pytest.param(
-            _THREAD_24, {24: 20}, 5.0, INCOMPLETE, "predates", id="census-before-birth"
+            _THREAD_24, {24: 20}, {24: (5.2, 5.3)}, COMPLETE, None, id="read-after"
+        ),
+        pytest.param(
+            _THREAD_24_CALL,
+            {24: 20},
+            {24: (6.1, 6.1)},
+            INCOMPLETE,
+            "while its creation call ran",
+            id="read-within-the-call",
+        ),
+        pytest.param(
+            _THREAD_24_CALL,
+            {24: 20},
+            {24: (5.8, 5.9)},
+            INCOMPLETE,
+            "before its creation call began",
+            id="read-before-the-call",
+        ),
+        # e1ee's model: the listing began before the call and finished after
+        # it; the old 24 ended inside the call; the new end is missing.
+        pytest.param(
+            "20  6.0 clone(child_stack=0x1, flags=CLONE_VM|CLONE_SIGHAND|CLONE_THREAD"
+            " <unfinished ...>\n"
+            "24  6.1 +++ exited with 0 +++\n"
+            "20  6.2 <... clone resumed>) = 24\n",
+            {24: 20},
+            {24: (5.9, 6.3)},
+            INCOMPLETE,
+            _AMBIGUOUS_END,
+            id="listing-spans-the-call",
         ),
         pytest.param(
             _THREAD_24,
             {24: 21},
-            5.2,
+            {24: (5.2, 5.3)},
             INCOMPLETE,
             "the census had it in 21",
             id="census-names-another-process",
@@ -1813,37 +1878,32 @@ _THREAD_24 = (
             "20  5.1 clone(child_stack=NULL, flags=SIGCHLD) = 24\n"
             "24  8.0 +++ exited with 0 +++\n",
             {24: 20},
-            5.2,
+            {24: (5.2, 5.3)},
             INCOMPLETE,
             "a process born",
             id="census-thread-born-a-process",
         ),
         pytest.param(
-            _THREAD_24,
-            {24: 20},
-            None,
-            INCOMPLETE,
-            "time is unknown",
-            id="census-untimed",
+            _THREAD_24, {24: 20}, {}, INCOMPLETE, "time is unknown", id="untimed"
         ),
         pytest.param(
             "24  5.1 +++ exited with 0 +++\n"
             "21  5.5 clone(child_stack=NULL, flags=SIGCHLD) = 24\n"
             "24  6.5 +++ exited with 0 +++\n",
             {24: 20},
-            5.0,
+            {24: (5.0, 5.0)},
             INCOMPLETE,
             "reused id",
             id="actual-reuse",
         ),
     ],
 )
-def test_the_thread_census_is_reconciled_with_traced_births(
-    tmp_path, trace, census, census_at, status, reason
+def test_the_thread_census_is_placed_by_when_each_entry_was_read(
+    tmp_path, trace, census, times, status, reason
 ):
     oracle = _attached(tmp_path, trace + _ENDS)
     oracle.threads = dict(census)
-    oracle.census_at = census_at
+    oracle.census_times = dict(times)
     outcome = oracle.stop()
     assert outcome.status == status, outcome.reasons
     if reason is None:
@@ -1852,3 +1912,18 @@ def test_the_thread_census_is_reconciled_with_traced_births(
     else:
         assert any(reason in line for line in outcome.reasons), outcome.reasons
         assert 24 not in outcome.threads
+
+
+def test_each_census_entry_keeps_when_its_task_directory_was_read(
+    tmp_path, monkeypatch
+):
+    oracle = SignalOracle(tmp_path)
+    oracle.pids = [20, 21]
+    clock = iter([1.0, 2.0, 3.0, 4.0])
+    monkeypatch.setattr(oracle, "_now", lambda: next(clock))
+    monkeypatch.setattr(
+        oracle, "_tasks", lambda pid: {20: ["20", "24"], 21: ["21"]}[pid]
+    )
+    oracle.read_threads()
+    assert oracle.threads == {20: 20, 24: 20, 21: 21}
+    assert oracle.census_times == {20: (1.0, 2.0), 24: (1.0, 2.0), 21: (3.0, 4.0)}
