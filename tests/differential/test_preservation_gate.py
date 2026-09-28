@@ -561,10 +561,21 @@ async def test_k2_requires_a_successful_host_quit(
         assert preservation_calls == 0
 
 
-def _owner_stream(path: Path, *, outcome: bool | None, owner: int = 42) -> None:
+#: No termination of the owner's gate in the stream at all.
+_NO_GATE = "none"
+
+
+def _owner_stream(
+    path: Path,
+    *,
+    outcome: bool | None,
+    gate: bool | None | str = _NO_GATE,
+    owner: int = 42,
+) -> None:
     """The closing owner's records as its shim writes them: ready, the planted
     query on installer 700, and the routine drain's termination of it, begun
-    and ended with *outcome* (None: no end was recorded)."""
+    and ended with *outcome* (None: no end was recorded). With *gate*, the
+    same for the owner's gate (3572), a row process that is no installer."""
     lines: list[dict[str, Any]] = [
         {"kind": "ready", "created": 1.0, "fault": True, "observer": True, "t": 3.0},
         {"kind": "query", "t": 4.0, "member": 700, "created": 9.0, "job": 55},
@@ -588,6 +599,29 @@ def _owner_stream(path: Path, *, outcome: bool | None, owner: int = 42) -> None:
                 "t": 5.1,
             }
         )
+    if gate != _NO_GATE:
+        lines += [
+            {"kind": "query", "t": 4.5, "member": 3572, "created": 0.5, "job": 55},
+            {
+                "kind": "terminate",
+                "phase": "begin",
+                "call": 2,
+                "caller": job_query.ROUTINE_DRAIN,
+                "member": 3572,
+                "created": 0.5,
+                "t": 5.2,
+            },
+        ]
+        if gate is not None:
+            lines.append(
+                {
+                    "kind": "terminate",
+                    "phase": "end",
+                    "call": 2,
+                    "succeeded": gate,
+                    "t": 5.3,
+                }
+            )
     with path.open("a") as stream:
         for number, line in enumerate(lines, start=1):
             stream.write(
@@ -596,16 +630,20 @@ def _owner_stream(path: Path, *, outcome: bool | None, owner: int = 42) -> None:
 
 
 @pytest.mark.parametrize(
-    ("experiment", "outcome", "calibrated"),
+    ("experiment", "outcome", "gate", "calibrated"),
     [
-        pytest.param("K2", True, True, id="k2-confirmed"),
-        pytest.param("K2", False, False, id="k2-failed-call"),
-        pytest.param("K2", None, False, id="k2-no-recorded-end"),
-        pytest.param("K3", False, False, id="k3-failed-call"),
+        pytest.param("K2", True, _NO_GATE, True, id="k2-confirmed"),
+        pytest.param("K2", False, _NO_GATE, False, id="k2-failed-call"),
+        pytest.param("K2", None, _NO_GATE, False, id="k2-no-recorded-end"),
+        pytest.param("K3", False, _NO_GATE, False, id="k3-failed-call"),
+        # Beside a confirmed termination: the gate's completed termination is
+        # the baseline's own behaviour, its unfinished one missing evidence.
+        pytest.param("K2", True, True, True, id="k2-confirmed-and-gate"),
+        pytest.param("K2", True, None, False, id="k2-confirmed-gate-unfinished"),
     ],
 )
 async def test_only_a_confirmed_termination_calibrates_k2(
-    row, monkeypatch, tmp_path, experiment, outcome, calibrated
+    row, monkeypatch, tmp_path, experiment, outcome, gate, calibrated
 ):
     # E1EU-02, from the owner's records through the row to the verdict: the
     # baseline's positive control is a termination that succeeded on the
@@ -616,12 +654,21 @@ async def test_only_a_confirmed_termination_calibrates_k2(
     real = harness.job_query_reading
 
     def reading(shim, **kwargs):
-        _owner_stream(shim.reached_file, outcome=outcome)
+        _owner_stream(shim.reached_file, outcome=outcome, gate=gate)
         return real(shim, **kwargs)
 
     monkeypatch.setattr(harness, "job_query_reading", reading)
+    # The gate's whole chain, up to the frontend the harness started.
+    chain = [
+        _started(4242, os.getpid(), 0.2, "frontend"),
+        dict(_started(3572, 4242, 0.5, "owner"), start_identity=0.5),
+    ]
     result, _ = await row(
-        processes=[], summary=_SETTLED, job_query_shim=shim, experiment=experiment
+        processes=[],
+        summary=_SETTLED,
+        observed=chain,
+        job_query_shim=shim,
+        experiment=experiment,
     )
     assert result.vector is not None
     assert result.vector.job_query_reached is True
@@ -635,7 +682,7 @@ async def test_only_a_confirmed_termination_calibrates_k2(
         assert defect, problems
     if outcome is False:
         assert any("attempted 700" in p for p in defect)
-    if outcome is None:
+    if outcome is None or gate is None:
         assert any("no end was recorded" in p for p in problems)
 
 

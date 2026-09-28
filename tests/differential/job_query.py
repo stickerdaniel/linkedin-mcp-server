@@ -1175,16 +1175,18 @@ def drain_reading(
                 f"planted query before it"
             )
             continue
-        if kind == "other":
-            reading.others.append(line)
-            continue
-        relevant.add(key)
+        if kind == "installer":
+            relevant.add(key)
         if line.get("succeeded") is None:
-            # It began and no end was recorded: it may not have run at all.
+            # It began and no end was recorded: it may not have run at all,
+            # and the records are incomplete whichever member it named.
             reading.unknown.append(
-                f"the routine drain's termination of installer {found.pid} began "
+                f"the routine drain's termination of {line.get('member')} began "
                 f"and no end was recorded"
             )
+            continue
+        if kind == "other":
+            reading.others.append(line)
             continue
         if line.get("succeeded") is not True:
             reading.attempted.append(line)

@@ -739,6 +739,34 @@ def test_a_confirmed_termination_beside_an_attempt_is_the_witness():
     assert [f.pid for f in reading.terminated] == [700]
 
 
+@pytest.mark.parametrize(
+    ("gate_outcome", "value"),
+    [
+        pytest.param(True, True, id="completed"),
+        pytest.param(False, True, id="failed"),
+        pytest.param(None, None, id="no-recorded-end"),
+    ],
+)
+def test_a_missing_end_leaves_no_reading_whatever_member_it_named(gate_outcome, value):
+    # A confirmed installer termination beside a termination of the owner's
+    # gate: complete records calibrate, whether the gate's call succeeded or
+    # failed; a gate call with no recorded end leaves the records incomplete.
+    reading = drain_reading(
+        [_ended()],
+        [_query(), _query(member=3572, created=1.0)],
+        [_terminate(), _terminate(member=3572, created=1.0, succeeded=gate_outcome)],
+        known_other=lambda member, created: (member, created) == (3572, 1.0),
+    )
+    assert reading.value is value
+    assert [f.pid for f in reading.terminated] == [700]
+    if value is None:
+        assert any("3572 began and no end was recorded" in u for u in reading.unknown)
+        assert reading.others == []
+    else:
+        assert reading.unknown == []
+        assert [line["member"] for line in reading.others] == [3572]
+
+
 def test_a_known_row_process_the_drain_terminated_is_an_act_not_a_witness():
     # Run 36410976409, K2: the drain also asked about, and terminated, the
     # owner's gate and console host, row processes that are no installer.
