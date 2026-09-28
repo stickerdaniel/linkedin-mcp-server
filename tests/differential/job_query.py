@@ -562,6 +562,11 @@ class PrivateCache:
             _link(source, held)
         self.held = None
 
+    def restore_installed(self, python: str, env: dict[str, str]) -> None:
+        """Restore the dependency and its matching install record before reuse."""
+        self.restore()
+        record_install(python, env)
+
     def dismantle(self) -> None:
         """Remove every link first, then what patchright wrote here itself
         (``.links``, ``__dirlock``), then the directory; never a link's target.

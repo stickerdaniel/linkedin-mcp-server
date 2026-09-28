@@ -3004,10 +3004,6 @@ async def measure_host_quit_row(
         job_window.update(began=closed["began"], ended=closed["ended"])
         emit("harness", "job_query.window", phase="close", **job_window)
         watch_late_installers()
-        # Back before the next call, so a successor's setup finds everything
-        # and it can serve and later leave through its idle exit; an installer
-        # already waiting on the stall host waits on regardless.
-        cache.restore()
         # An owner whose close stayed unconfirmed stands down, and a call that
         # reaches it meanwhile is told to call again for its replacement
         # (measured on Windows, run 36384952466: the probe came 33 ms after the
@@ -3024,6 +3020,10 @@ async def measure_host_quit_row(
             if leaving and identified is not None
             else None
         )
+        # Both the held-back link and its install record must be ready before
+        # the next owner can serve a browser-backed read.
+        await asyncio.to_thread(cache.restore_installed, runtime.python, env)
+        emit("harness", "job_query.window", phase="cache restored")
         probe = await call(READ_TOOL, READ_TOOL_ARGUMENTS)
         job_window["probe_ended"] = probe["ended"]
         job_window["probe"] = {

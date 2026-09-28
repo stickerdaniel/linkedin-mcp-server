@@ -966,6 +966,9 @@ def test_the_private_cache_reads_as_installed_before_the_first_read(
     browser = real / f"{bootstrap._FULL_DIR_PREFIX}{revision}"
     browser.mkdir(parents=True)
     (browser / "INSTALLATION_COMPLETE").write_text("")
+    ffmpeg = real / "ffmpeg-1"
+    ffmpeg.mkdir()
+    (ffmpeg / "INSTALLATION_COMPLETE").write_text("")
     directory = isolate_profile_dir
     base = {
         key: value
@@ -980,8 +983,17 @@ def test_the_private_cache_reads_as_installed_before_the_first_read(
     host = StallHost().start()
     try:
         env = dict(base)
-        cache = private_install(sys.executable, [browser], env, host, parent=tmp_path)
+        cache = private_install(
+            sys.executable, [browser, ffmpeg], env, host, parent=tmp_path
+        )
         assert env["PLAYWRIGHT_BROWSERS_PATH"] == str(cache.directory)
+        assert _ready(env)
+        cache.hold_back()
+        (directory.parent / "browser-install.json").unlink(missing_ok=True)
+        cache.restore()
+        assert not _ready(env)
+        cache.hold_back()
+        cache.restore_installed(sys.executable, env)
         assert _ready(env)
         cache.dismantle()
     finally:
