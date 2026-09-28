@@ -561,9 +561,19 @@ def test_the_shim_venv_runs_the_source_code_and_the_shim(tmp_path):
     assert venv.shim_sha256 == SHIM_SHA256
     installed = Path(venv.site_packages, "sitecustomize.py").read_text(encoding="utf-8")
     assert installed == SHIM_SOURCE
-    # Nothing but the shim and the path line: every other import is the source's.
+    # Windows startup also writes the declared observer-ready record.
     added = {p.name for p in Path(venv.site_packages).iterdir()} - {"__pycache__"}
-    assert added == {"sitecustomize.py", "_h_r11_code.pth"}
+    expected = {"sitecustomize.py", "_h_r11_code.pth"}
+    if sys.platform == "win32":
+        expected.add("h-r11-reached.jsonl")
+        ready = [
+            json.loads(line) for line in venv.reached_file.read_text().splitlines()
+        ]
+        assert ready and all(
+            line["kind"] == "ready" and line["fault"] and line["observer"]
+            for line in ready
+        )
+    assert added == expected
 
 
 # --- The row-private cache ------------------------------------------------------
