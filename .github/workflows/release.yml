@@ -408,9 +408,25 @@ jobs:
           PY
           echo "✅ Every versioned file reads $VERSION"
 
+      # Capture before deleting: an unreadable policy must leave protection in place.
+      - name: Read branch protection
+        id: protection
+        env:
+          GH_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          STRICT=$(gh api "repos/$GITHUB_REPOSITORY/branches/main/protection" \
+            --jq '.required_status_checks.strict | if type == "boolean" then . else error("strict must be a JSON boolean") end')
+          case "$STRICT" in
+            true|false) ;;
+            *) echo "::error::No boolean strict setting; leaving protection in place."; exit 1 ;;
+          esac
+          printf 'strict=%s\n' "$STRICT" >> "$GITHUB_OUTPUT"
+          printf 'Captured required_status_checks.strict=%s\n' "$STRICT"
+
       - name: Remove branch protection (temporary)
         run: |
-          gh api repos/${{ github.repository }}/branches/main/protection \
+          gh api "repos/$GITHUB_REPOSITORY/branches/main/protection" \
             --method DELETE
         env:
           GH_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
@@ -431,14 +447,15 @@ jobs:
             echo "✅ Committed version updates"
           fi
 
+      # The separate successful capture survives a failed DELETE or version sync.
       - name: Restore branch protection
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
+          STRICT: ${{ steps.protection.outputs.strict }}
           PAYLOAD: >-
             {
               "required_status_checks": {
-                "strict": true,
                 "checks": [
                   {"context": "lint-and-check", "app_id": 15368},
                   {"context": "test", "app_id": 15368},
@@ -454,7 +471,25 @@ jobs:
               "restrictions": null
             }
         run: |
-          echo "$PAYLOAD" | gh api repos/${{ github.repository }}/branches/main/protection \
+          set -euo pipefail
+          if [[ -z "$STRICT" ]]; then
+            echo "No captured strict setting; leaving protection unchanged."
+            exit 0
+          fi
+          case "$STRICT" in
+            true|false) ;;
+            *) echo "::error::Captured strict setting is not boolean; refusing to restore."; exit 1 ;;
+          esac
+          RESTORE_PAYLOAD=$(python3 - <<'PY'
+          import json
+          import os
+
+          payload = json.loads(os.environ["PAYLOAD"])
+          payload["required_status_checks"]["strict"] = os.environ["STRICT"] == "true"
+          print(json.dumps(payload))
+          PY
+          )
+          printf '%s\n' "$RESTORE_PAYLOAD" | gh api "repos/$GITHUB_REPOSITORY/branches/main/protection" \
             --method PUT \
             --input -
 
