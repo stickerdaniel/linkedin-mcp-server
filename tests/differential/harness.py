@@ -115,7 +115,7 @@ from differential.job_query import (
     private_install,
     reached,
     record_install,
-    terminated_in,
+    terminated_by_drain,
 )
 from differential.session import (
     RETAINED,
@@ -1995,10 +1995,10 @@ def job_query_observations(
     Reached: the shim recorded a planted failure in the process whose drain
     it was, the owner serving at the close (none expected in Direct, which has
     no adopted Job, so any line at all counts there). Terminated: an installer
-    process ended with exit code 1 inside the ``close_session`` call, which is
-    the routine drain's ``TerminateProcess(handle, 1)`` while the owner lived.
-    Successor: an owner started other than the one that closed, before the
-    call after the close had returned.
+    process the drain ended after failing to place it (``terminated_by_drain``).
+    Successor: an owner process started between the close's start and the
+    return of the call after it; the gate and venv launcher Windows records
+    beside the first owner started long before.
     """
     if shim is None:
         return {}
@@ -2012,13 +2012,15 @@ def job_query_observations(
         if entry.get("kind") == "process.start"
         and entry.get("in_row") is True
         and entry.get("actor") == "owner"
+        and began is not None
         and probe_ended is not None
-        and float(entry.get("t", 0.0)) <= probe_ended
+        and began <= float(entry.get("t", 0.0)) <= probe_ended
     }
+    terminated = terminated_by_drain(fates.fates.values(), lines, span)
     return {
         "failed_job_query": True,
         "job_query_reached": bool(lines),
-        "job_member_terminated": bool(terminated_in(fates.fates.values(), span)),
+        "job_member_terminated": bool(terminated),
         "successor_before_quit": (
             bool(owners - {owner_pid}) if daemon and owner_pid is not None else None
         ),

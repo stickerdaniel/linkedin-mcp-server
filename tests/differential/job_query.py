@@ -532,19 +532,71 @@ def stall_environment(host: StallHost) -> dict[str, str]:
 
 # --- Installer fate --------------------------------------------------------------
 
+#: FILETIME counts 100 ns ticks from 1601-01-01; this many of them to 1970.
+_FILETIME_UNIX_EPOCH = 116_444_736_000_000_000
+
+
+def filetime_to_unix(ticks: int) -> float:
+    """A Windows FILETIME as seconds since the Unix epoch, ``time.time()``'s clock."""
+    return (ticks - _FILETIME_UNIX_EPOCH) / 10_000_000
+
+
+def _open_for_exit_time(pid: int) -> Any | None:
+    """A handle that keeps *pid*'s exit time readable once it has ended."""
+    if sys.platform != "win32":
+        return None
+    import _winapi
+
+    query_limited, synchronize = 0x1000, 0x00100000
+    try:
+        return _winapi.OpenProcess(query_limited | synchronize, False, pid)
+    except OSError:
+        return None
+
+
+def _kernel_exit_time(handle: Any) -> float | None:
+    """The kernel's own record of when the process behind *handle* ended."""
+    if handle is None or sys.platform != "win32":
+        return None
+    import ctypes
+    import _winapi
+    from ctypes import wintypes
+
+    times = [wintypes.FILETIME() for _ in range(4)]
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        answered = kernel32.GetProcessTimes(
+            wintypes.HANDLE(int(handle)), *(ctypes.byref(t) for t in times)
+        )
+    finally:
+        _winapi.CloseHandle(handle)
+    if not answered:
+        return None
+    exit_time = times[1]
+    return filetime_to_unix((exit_time.dwHighDateTime << 32) | exit_time.dwLowDateTime)
+
 
 @dataclass
 class Fate:
     pid: int
     start: float
+    #: When the harness's waiter saw the exit: late by however long it took.
     exited_at: float | None = None
     exit_code: int | None = None
+    #: When the kernel recorded the exit (Windows), on the same clock as
+    #: ``time.time()``; what the drain's ordering is judged by where it exists.
+    kernel_exit: float | None = None
+
+    @property
+    def ended(self) -> float | None:
+        return self.kernel_exit if self.kernel_exit is not None else self.exited_at
 
     def as_event_fields(self) -> dict[str, Any]:
         return {
             "pid": self.pid,
             "start_identity": self.start,
             "exited_at": self.exited_at,
+            "kernel_exit": self.kernel_exit,
             "exit_code": self.exit_code,
         }
 
@@ -552,8 +604,10 @@ class Fate:
 class Fates:
     """Each installer process the row saw, watched from a handle held early.
 
-    On Windows a handle keeps the exit code readable after the process ends,
-    which is what tells ``TerminateProcess(handle, 1)`` from any other end.
+    On Windows a handle keeps the exit code and the kernel's exit time
+    readable after the process ends: the code tells ``TerminateProcess(h, 1)``
+    from a clean end, and the time orders the end against the drain's queries
+    and the close's return without the waiter's wake-up in between.
     """
 
     def __init__(self) -> None:
@@ -565,6 +619,7 @@ class Fates:
         if key in self.fates:
             return
         fate = self.fates[key] = Fate(process.pid, start)
+        handle = _open_for_exit_time(process.pid)
 
         def wait() -> None:
             try:
@@ -573,6 +628,8 @@ class Fates:
                 code = None
             fate.exit_code = code
             fate.exited_at = time.time()
+            with contextlib.suppress(Exception):
+                fate.kernel_exit = _kernel_exit_time(handle)
 
         thread = threading.Thread(target=wait, daemon=True)
         thread.start()
@@ -587,21 +644,42 @@ class Fates:
             thread.join(timeout=max(deadline - time.monotonic(), 0.0))
 
 
-def terminated_in(
-    fates: Iterable[Fate], window: tuple[float, float] | None, *, slack: float = 1.0
+def terminated_by_drain(
+    fates: Iterable[Fate],
+    queried: Iterable[dict[str, Any]],
+    window: tuple[float, float] | None,
 ) -> list[Fate]:
-    """The members ended with exit code 1 inside the close's window.
+    """The members the routine drain ended after failing to place them.
 
-    That is ``TerminateProcess(handle, 1)`` during the routine drain, which is
-    inside ``close_session``; *slack* covers the waiter noticing the exit.
+    A member counts when it ended with exit code 1 after the owner's first
+    planted failure asked about *that* member, and before ``close_session``
+    returned. Both bounds are needed, and neither has slack:
+
+    * Something else ends the installer with the same code: the server's or
+      owner's shutdown stops the background setup
+      (``server.py`` lifespan -> ``stop_background_browser_setup`` ->
+      ``TerminateJobObject(1)``), in Direct at host quit and in the candidate
+      when the owner stands down. That runs only once the close has returned
+      (measured, run 36381621588: K1 18 ms after, K3 210 ms after), so the
+      close's return is the bound, not the close plus a grace.
+    * The drain only terminates a member it has just asked about, so a member
+      that ended before its first query was ended by something else.
+
+    *queried* are the shim's records for the owner (``job_query.reached``).
     """
     if window is None:
         return []
-    began, ended = window
+    _began, ended = window
+    first: dict[int, float] = {}
+    for line in queried:
+        member, t = line.get("member"), line.get("t")
+        if isinstance(member, int) and isinstance(t, (int, float)):
+            first[member] = min(first.get(member, t), float(t))
     return [
         fate
         for fate in fates
         if fate.exit_code == 1
-        and fate.exited_at is not None
-        and began <= fate.exited_at <= ended + slack
+        and fate.ended is not None
+        and fate.pid in first
+        and first[fate.pid] <= fate.ended <= ended
     ]

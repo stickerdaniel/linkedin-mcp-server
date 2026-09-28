@@ -53,7 +53,8 @@ from differential.job_query import (
     reached,
     record_install,
     shim_namespace,
-    terminated_in,
+    filetime_to_unix,
+    terminated_by_drain,
 )
 from differential.session import LAST_VERSION_FILE, write_synthetic_cookie_file
 from differential.test_row_judgement import _healthy
@@ -334,16 +335,79 @@ def test_a_terminated_member_inside_the_close_reads_bang(tmp_path):
     assert observed["successor_before_quit"] is False
 
 
+# The three shapes run 36381621588 measured on Windows, seconds past 1790573600.
+#: K2: the baseline drain asked about 7596 and ended it 6 ms later, mid-close.
+_K2 = dict(window=(72.848, 73.805), queried=[73.749], exited=73.755)
+#: K3: the candidate drain asked about the member for its whole 10 s deadline;
+#: the owner's shutdown ended it 211 ms after the close had returned.
+_K3 = dict(window=(130.632, 140.910), queried=[130.901, 140.904], exited=141.121)
+
+
+def _drained(shape: dict, member: int = 700, **fate: Any) -> list[Fate]:
+    queried = [{"member": member, "t": t} for t in shape["queried"]]
+    ended = Fate(700, 1.0, exit_code=1, kernel_exit=shape["exited"])
+    return terminated_by_drain(
+        [dataclasses.replace(ended, **fate)], queried, shape["window"]
+    )
+
+
+def test_the_drain_ending_a_member_it_just_failed_to_place_reads_bang():
+    assert [fate.pid for fate in _drained(_K2)] == [700]
+
+
+def test_the_shared_shutdown_after_the_close_is_not_the_drains():
+    # The K3 reading the 1 s grace turned into '!' on Windows.
+    assert _drained(_K3) == []
+
+
 @pytest.mark.parametrize(
-    "fate",
+    ("shape", "fate", "member"),
     [
-        pytest.param(Fate(700, 9.0, exited_at=30.0, exit_code=1), id="after-the-close"),
-        pytest.param(Fate(700, 9.0, exited_at=11.0, exit_code=0), id="another-code"),
-        pytest.param(Fate(700, 9.0), id="still-running"),
+        # K1: no adopted Job, so nothing ever asked about the member.
+        pytest.param(_K2, {}, 701, id="never-asked"),
+        pytest.param(
+            dict(_K2, queried=[73.760]), {}, 700, id="ended-before-it-was-asked"
+        ),
+        pytest.param(_K2, {"exit_code": 0}, 700, id="another-code"),
+        pytest.param(_K2, {"kernel_exit": None}, 700, id="still-running"),
     ],
 )
-def test_any_other_end_of_the_member_is_not_the_drains(fate):
-    assert terminated_in([fate], (10.0, 12.0)) == []
+def test_any_other_end_of_the_member_is_not_the_drains(shape, fate, member):
+    assert _drained(shape, member=member, **fate) == []
+
+
+def test_the_kernels_exit_time_is_judged_not_the_waiters():
+    # The waiter woke after the close returned; the kernel ended it inside.
+    late = _drained(_K2, exited_at=73.9, kernel_exit=73.804)
+    assert [fate.pid for fate in late] == [700]
+
+
+def test_a_filetime_reads_on_the_unix_clock():
+    assert filetime_to_unix(116_444_736_000_000_000) == 0.0
+    assert filetime_to_unix(116_444_736_000_000_000 + 15_000_000) == 1.5
+
+
+def test_the_first_owners_gate_and_launcher_are_no_successor(tmp_path):
+    # Windows records the owner's gate and venv launcher as owner processes,
+    # started with it, long before the close.
+    observed = job_query_observations(
+        _shim(tmp_path),
+        fates=_fates(),
+        window=_WINDOW,
+        owner_pid=42,
+        observed=[
+            {
+                "kind": "process.start",
+                "t": 1.0,
+                "pid": p,
+                "in_row": True,
+                "actor": "owner",
+            }
+            for p in (40, 41, 42)
+        ],
+        daemon=True,
+    )
+    assert observed["successor_before_quit"] is False
 
 
 def test_a_planted_failure_in_another_process_is_not_the_owners(tmp_path):
