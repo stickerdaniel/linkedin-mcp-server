@@ -897,6 +897,8 @@ if args[:2] != ["api", "repos/" + os.environ["GITHUB_REPOSITORY"] + "/branches/m
     sys.exit("unexpected API endpoint")
 state_path = Path(os.environ["API_STATE"])
 policy = json.loads(state_path.read_text())
+if os.environ.get("FAIL_BEFORE") == "1" and os.environ.get("FAIL_METHOD") == method:
+    sys.exit("gh: HTTP 403: Forbidden")
 if method == "GET":
     if policy is None or os.environ.get("FAIL_METHOD") == method:
         sys.exit("gh: HTTP 404: Not Found")
@@ -924,6 +926,7 @@ def _run_protection_steps(
     policy: dict[str, Any] | None,
     *,
     fail_method: str = "",
+    fail_before: bool = False,
     reject_push: bool = False,
     unwritable_output: bool = False,
     restore_overrides: dict[str, str] | None = None,
@@ -965,6 +968,7 @@ def _run_protection_steps(
         "API_LOG": str(api_log),
         "API_STATE": str(state),
         "FAIL_METHOD": fail_method,
+        "FAIL_BEFORE": "1" if fail_before else "0",
         "VERSION": "4.26.1",
         "LC_ALL": "C",
     }
@@ -1156,6 +1160,18 @@ def test_release_protection_failures_stop_tagging(tmp_path: Path, failure: str) 
         assert results["Restore branch protection"].returncode == 0
     if failure == "PUT":
         assert results["Restore branch protection"].returncode != 0
+
+
+def test_failed_restore_can_leave_protection_missing(tmp_path: Path) -> None:
+    results, calls, restored, repo = _run_protection_steps(
+        tmp_path, _PROTECTION_POLICY, fail_method="PUT", fail_before=True
+    )
+
+    assert results["Restore branch protection"].returncode != 0
+    assert "HTTP 403" in results["Restore branch protection"].stderr
+    assert [call["method"] for call in calls] == ["GET", "DELETE", "PUT"]
+    assert restored is None
+    assert not _published_test_tag(repo)
 
 
 @pytest.mark.parametrize("override", [{"STRICT": "maybe"}, {"PAYLOAD": "not json"}])
