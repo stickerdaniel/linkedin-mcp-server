@@ -34,6 +34,7 @@ from differential.baseline import baseline_file
 from differential.harness import (
     RowResult,
     RowVector,
+    close_left_unconfirmed,
     is_installer,
     job_query_observations,
     judge_row,
@@ -575,3 +576,18 @@ def test_recording_an_install_that_is_not_there_is_refused(
     )
     with pytest.raises(RuntimeError, match="does not read as ready"):
         record_install(sys.executable, env)
+
+
+def test_an_owner_log_says_whether_its_close_stayed_unconfirmed(tmp_path):
+    # The line the owner logs when its drain could not prove the browser gone,
+    # as in run 36384952466, K3.
+    log = tmp_path / "daemon.log"
+    log.write_text(
+        '{"level": "ERROR", "message": "Browser processes from this launch are '
+        'still running after close, so the shutdown stays unconfirmed."}\n'
+    )
+    assert close_left_unconfirmed(str(log), seconds=0.1)
+    # K2: the baseline drain terminated what it could not place and confirmed.
+    log.write_text('{"level": "INFO", "message": "Browser closed"}\n')
+    assert not close_left_unconfirmed(str(log), seconds=0.1)
+    assert not close_left_unconfirmed(None, seconds=0.1)

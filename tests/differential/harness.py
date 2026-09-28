@@ -1925,6 +1925,32 @@ def r6_verdict(
 
 
 _INSTALLER_SECONDS = 60.0
+#: How long an owner that stood down after an unconfirmed close may take to go.
+_OWNER_STAND_DOWN_SECONDS = 30.0
+#: What the product logs when a close could not prove the browser gone
+#: (``core/browser.py``, the same at the baseline).
+_UNCONFIRMED_CLOSE_LINE = "stays unconfirmed"
+
+
+def close_left_unconfirmed(log_path: str | None, seconds: float = 2.0) -> bool:
+    """Whether the owner's log says its close stayed unconfirmed.
+
+    Read until the line is there or *seconds* pass: ``close_session`` has
+    returned, so the drain that decides has logged. False for a log that is
+    not there, which leaves the probe where it was.
+    """
+    if not log_path:
+        return False
+    path = Path(log_path)
+    deadline = time.monotonic() + seconds
+    while True:
+        if path.is_file() and _UNCONFIRMED_CLOSE_LINE in path.read_text(
+            errors="replace"
+        ):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
 
 
 def is_installer(record: Mapping[str, Any]) -> bool:
@@ -2805,8 +2831,32 @@ async def measure_host_quit_row(
         # and it can serve and later leave through its idle exit; an installer
         # already waiting on the stall host waits on regardless.
         cache.restore()
+        # An owner whose close stayed unconfirmed stands down, and a call that
+        # reaches it meanwhile is told to call again for its replacement
+        # (measured on Windows, run 36384952466: the probe came 33 ms after the
+        # verdict, the owner answered "restarting", the host quit, and no
+        # successor was ever asked for). So the probe waits for that owner to
+        # be gone, observed through the handle the row identified it by.
+        leaving = identified is not None and close_left_unconfirmed(
+            owner.get("log_path")
+        )
+        job_window["owner_left_before_probe"] = (
+            await asyncio.to_thread(
+                wait_until_dead, identified.process, _OWNER_STAND_DOWN_SECONDS
+            )
+            if leaving and identified is not None
+            else None
+        )
         probe = await call(READ_TOOL, READ_TOOL_ARGUMENTS)
         job_window["probe_ended"] = probe["ended"]
+        emit(
+            "harness",
+            "job_query.window",
+            phase="probe",
+            owner_left_before_probe=job_window["owner_left_before_probe"],
+            probe_ended=probe["ended"],
+            probe_error=probe.get("is_error"),
+        )
 
     async def after_call() -> None:
         await find_the_owner()

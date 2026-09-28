@@ -304,6 +304,52 @@ async def test_the_failed_job_query_row_writes_through_the_real_event_log(
     assert all(source.is_dir() for source in sources)
 
 
+async def test_the_probe_waits_for_an_owner_that_stood_down(row, monkeypatch, tmp_path):
+    # K3 on Windows: the probe reached the owner 33 ms after its unconfirmed
+    # close, was told the owner was restarting, and no successor was asked for.
+    store = tmp_path / "store"
+    sources = [store / "chromium-1", store / "ffmpeg-2"]
+    for source in sources:
+        source.mkdir(parents=True)
+    monkeypatch.setattr(harness, "install_locations", lambda *a: sources)
+    monkeypatch.setattr(job_query, "record_install", lambda *a: None)
+    monkeypatch.setattr(harness, "record_install", lambda *a: None)
+    monkeypatch.setattr(
+        harness,
+        "wait_for_installers",
+        lambda *a, **k: [(SimpleNamespace(pid=700, wait=lambda: 1), 9.0)],
+    )
+    monkeypatch.setattr(harness, "close_left_unconfirmed", lambda *a, **k: True)
+    gone: list[float] = []
+
+    def owner_gone(process, seconds, **kwargs):
+        gone.append(time.time())
+        return True
+
+    monkeypatch.setattr(harness, "wait_until_dead", owner_gone)
+    shim = ShimVenv(
+        directory=tmp_path / "shim",
+        python=sys.executable,
+        source_python=sys.executable,
+        site_packages=str(tmp_path),
+        shim_sha256=SHIM_SHA256,
+        pth_sha256="",
+        source_code={},
+        code={},
+    )
+    await row(
+        processes=[],
+        summary={"read_failures": [], "relevant_read_failures": []},
+        job_query_shim=shim,
+    )
+    windows = [r for r in row.log.records() if r["kind"] == "job_query.window"]
+    close = next(w for w in windows if w["phase"] == "close")
+    probe = next(w for w in windows if w["phase"] == "probe")
+    assert probe["owner_left_before_probe"] is True
+    # Waited for after the close returned and before the probe was made.
+    assert gone and close["ended"] <= gone[0] <= probe["probe_ended"]
+
+
 async def test_a_settled_complete_census_starts_the_post_quit_session_once(row):
     result, calls = await row(
         processes=[
