@@ -146,7 +146,8 @@ def install(win32job, error, identity, record=_RECORD, created=None):
                 handle = int(job)
             except Exception:
                 handle = None
-            _write(record, {"kind": "query", "t": time.time(), "pid": os.getpid(),
+            _write(record, {"kind": "query", "t": time.time(),
+                            "monotonic_ns": time.monotonic_ns(), "pid": os.getpid(),
                             "pid_created": created, "member": member,
                             "created": member_created, "job": handle})
             raise error(5, "IsProcessInJob", "planted by the H-R11 shim")

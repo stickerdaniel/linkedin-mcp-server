@@ -167,6 +167,7 @@ def row(tmp_path, monkeypatch, profile):
             # A row's scripted phase: every call answers at once.
             async def call(name, arguments):
                 began = time.time()
+                began_monotonic_ns = time.monotonic_ns()
                 if name == harness.READ_TOOL:
                     # The origin sees the read's feed request while it runs.
                     origin.requests.extend(
@@ -180,6 +181,8 @@ def row(tmp_path, monkeypatch, profile):
                     "tool": name,
                     "began": began,
                     "ended": time.time(),
+                    "began_monotonic_ns": began_monotonic_ns,
+                    "ended_monotonic_ns": time.monotonic_ns(),
                     "is_error": False,
                     "read_the_post": name == harness.READ_TOOL,
                 }
@@ -372,6 +375,7 @@ def _witness(shim: ShimVenv, **fields: Any) -> None:
     record = {
         "kind": "query",
         "t": time.time(),
+        "monotonic_ns": time.monotonic_ns(),
         "pid": 42,
         "pid_created": 1.0,
         "member": 700,
@@ -455,6 +459,7 @@ _K3_FAULTS = {
     "no-stand-down": "the owner logged no stand-down",
     "unsettled-family": "no post-settlement recovery",
     "restoration-race": "restoration: the auth root's",
+    "unreadable-directory": "restoration: the auth root's profile/blocked could not be compared",
     "protected-change": "by the recovery boundary: the login generation",
     "impossible-successor": "no successor is shown to have served",
     "host-killed": "the harness had to kill the server",
@@ -507,7 +512,7 @@ async def _k3(row, monkeypatch, tmp_path, *, fault=None, stood=None):
         "another-actor": {"pid": 99},
         "reused-pid": {"pid_created": 0.5},
         "the-successors": {"pid": 43, "pid_created": created},
-        "before-the-close": {"t": time.time() - 3600},
+        "before-the-close": {"monotonic_ns": time.monotonic_ns() - 3_600_000_000_000},
         "about-the-gate": {"member": 3572, "created": 0.5},
     }.get(fault or "", {})
 
@@ -522,11 +527,24 @@ async def _k3(row, monkeypatch, tmp_path, *, fault=None, stood=None):
 
     row.hooks.clear()
     row.hooks["close_session"] = close
-    if fault == "restoration-race":
+    if fault in ("restoration-race", "unreadable-directory"):
+        late = Path(row.owner.auth_root) / "profile" / "late.txt"
+        if fault == "unreadable-directory":
+            blocked = late.parent / "blocked"
+            blocked.mkdir()
+            late = blocked / "Preferences"
+            late.write_text("before")
+            scandir = os.scandir
+
+            def refused(path):
+                if Path(path) == blocked:
+                    raise PermissionError(13, "test subtree is unreadable", str(path))
+                return scandir(path)
+
+            monkeypatch.setattr(os, "scandir", refused)
 
         def racing(*args):
             # Something besides the harness writes whenever it records.
-            late = Path(row.owner.auth_root) / "profile" / "late.txt"
             late.write_text(str(time.monotonic_ns()))
 
         monkeypatch.setattr(job_query, "record_install", racing)
@@ -972,6 +990,17 @@ def _ledger(*continuations, run="gate") -> harness.R11Ledger:
 
 def test_the_composition_holds_for_a_calibrated_whole_run(cells, model):
     assert harness.r11_composition(model, _ledger(*cells), revisions=_REVISIONS) == []
+
+
+async def test_unreadable_restoration_cannot_pass_a_calibrated_composition(
+    cells, model, row, monkeypatch, tmp_path
+):
+    k1, k2, _ = cells
+    result = await _k3(row, monkeypatch, tmp_path, fault="unreadable-directory")
+    problems = harness.r11_composition(
+        model, _ledger(k1, k2, result.continuation), revisions=_REVISIONS
+    )
+    assert any("profile/blocked could not be compared" in p for p in problems)
 
 
 def test_the_composition_needs_a_calibration_from_this_invocation(cells, model):

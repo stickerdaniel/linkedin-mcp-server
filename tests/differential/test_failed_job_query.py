@@ -746,13 +746,14 @@ def test_every_lifetime_the_drain_asked_about_must_be_accounted_for():
 
 #: The owner that closed, (pid, its own creation time), and its close call.
 _OWNER = (42, 1.0)
-_CLOSE = (100.0, 110.0)
+_CLOSE_NS = (100_000_000_000, 110_000_000_000)
 
 
 def _record(**fields: Any) -> dict[str, Any]:
     return {
         "kind": "query",
         "t": 105.0,
+        "monotonic_ns": 105_000_000_000,
         "pid": 42,
         "pid_created": 1.0,
         "member": 880,
@@ -771,8 +772,10 @@ def _record(**fields: Any) -> dict[str, Any]:
         pytest.param({"pid_created": None}, False, id="its-lifetime-unread"),
         pytest.param({"job": None}, False, id="no-held-job-named"),
         pytest.param({"pid": 43, "pid_created": 120.0}, False, id="the-successor"),
-        pytest.param({"t": 99.9}, False, id="before-the-close"),
-        pytest.param({"t": 110.1}, False, id="after-the-close"),
+        pytest.param({"monotonic_ns": 99_900_000_000}, False, id="before-the-close"),
+        pytest.param({"monotonic_ns": 110_100_000_000}, False, id="after-the-close"),
+        pytest.param({"monotonic_ns": None}, False, id="no-monotonic-reading"),
+        pytest.param({"t": -1000.0}, True, id="wall-time-does-not-order-fault"),
         pytest.param({"member": 3572, "created": 678.378}, False, id="the-gate"),
         pytest.param({"member": 9999, "created": 1.0}, False, id="an-unrecorded-one"),
     ],
@@ -782,18 +785,77 @@ def test_a_witness_is_the_owner_that_closed_asking_about_the_family_then(
 ):
     family = installer_family(_K2_ROW, _fates())
     found = fault_witnesses(
-        [_record(**changes)], owner=_OWNER, family=family, interval=_CLOSE
+        [_record(**changes)], owner=_OWNER, family=family, interval_ns=_CLOSE_NS
     )
     assert bool(found) is witness
+
+
+@pytest.mark.parametrize(
+    ("mono", "wall", "expected"),
+    [
+        (10_100_000_000, 100.1, False),
+        (10_600_000_000, 100.2, False),
+        (10_350_000_000, 100.15, True),
+    ],
+    ids=["before-close-backstep", "after-close-clock-shift", "inside-close"],
+)
+def test_fault_order_does_not_follow_an_accepted_wall_clock_shift(
+    monkeypatch, mono, wall, expected
+):
+    from differential import harness
+
+    marker = WallClockMarker()
+    marker.began = (99.0, 9.0)
+    monkeypatch.setattr(
+        harness, "time", SimpleNamespace(time=lambda: 100.3, monotonic=lambda: 10.5)
+    )
+    assert marker.held()  # 0.2 seconds is inside the wall-clock guard's allowance.
+    found = fault_witnesses(
+        [_record(t=wall, monotonic_ns=mono)],
+        owner=_OWNER,
+        family=installer_family(_K2_ROW, _fates()),
+        interval_ns=(10_200_000_000, 10_500_000_000),
+    )
+    assert bool(found) is expected
+
+
+def test_shim_and_host_monotonic_readings_share_the_machine_clock(tmp_path):
+    record = tmp_path / "reached.jsonl"
+    program = f"""
+from types import SimpleNamespace
+ns = {{'__name__': 'h_r11_model', '__file__': {str(record.parent / "shim")!r}}}
+exec({SHIM_SOURCE!r}, ns)
+job = SimpleNamespace(IsProcessInJob=lambda *args: True)
+ns['install'](job, RuntimeError, lambda pid: (pid, 9.0), {str(record)!r}, created=5.0)
+caller = {{'__name__': 'linkedin_mcp_server.process_tree'}}
+exec('def _in_another_owned_job(job): return job.IsProcessInJob(700, 55)', caller)
+try:
+    caller['_in_another_owned_job'](job)
+except RuntimeError:
+    pass
+"""
+    began = time.monotonic_ns()
+    subprocess.run(
+        [sys.executable, "-I", "-S", "-c", program],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    ended = time.monotonic_ns()
+    (written,) = reached(record)
+    assert began <= written["monotonic_ns"] <= ended
 
 
 def test_no_owner_or_no_close_leaves_no_witness():
     family = installer_family(_K2_ROW, _fates())
     assert (
-        fault_witnesses([_record()], owner=None, family=family, interval=_CLOSE) == []
+        fault_witnesses([_record()], owner=None, family=family, interval_ns=_CLOSE_NS)
+        == []
     )
     assert (
-        fault_witnesses([_record()], owner=_OWNER, family=family, interval=None) == []
+        fault_witnesses([_record()], owner=_OWNER, family=family, interval_ns=None)
+        == []
     )
 
 
@@ -899,6 +961,50 @@ def test_the_restoration_may_write_only_its_own_install_record(auth):
     (profile / "Default" / "Preferences").unlink()
     changed = restoration_changes(before, auth_files(root))
     assert len(changed) == 2 and all("changed while" in p for p in changed)
+
+
+def test_an_unreadable_auth_root_is_not_an_empty_snapshot(auth, monkeypatch):
+    profile, _ = auth
+    root = profile.parent
+    scandir = os.scandir
+
+    def refused(path):
+        if Path(path) == root:
+            raise PermissionError(13, "test root is unreadable", str(path))
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", refused)
+    before, after = auth_files(root), auth_files(root)
+    assert before == after
+    assert restoration_changes(before, after)
+
+
+def test_a_linked_directory_is_refused_without_scanning_its_target(auth, tmp_path):
+    from differential.job_query import _link, _unlink
+
+    profile, _ = auth
+    target = tmp_path / "other-data"
+    target.mkdir()
+    (target / "unrelated.txt").write_text("not part of this profile")
+    link = profile / "linked-directory"
+    _link(target, link)
+    try:
+        files = auth_files(profile.parent)
+        assert files["profile/linked-directory"] == "link"
+        assert "profile/linked-directory/unrelated.txt" not in files
+        assert restoration_changes(files, files)
+    finally:
+        _unlink(link)
+
+
+def test_empty_directory_changes_are_part_of_restoration_evidence(auth):
+    profile, _ = auth
+    before = auth_files(profile.parent)
+    (profile / "new-empty-directory").mkdir()
+    assert any(
+        "new-empty-directory" in problem
+        for problem in restoration_changes(before, auth_files(profile.parent))
+    )
 
 
 def test_matching_unreadable_snapshots_do_not_prove_restoration_safe(auth, monkeypatch):

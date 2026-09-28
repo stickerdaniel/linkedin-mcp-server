@@ -65,6 +65,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -1001,6 +1002,7 @@ async def run_host_session(
 
                 async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
                     began = time.time()
+                    began_monotonic_ns = time.monotonic_ns()
                     called = await client.call_tool_mcp(
                         name, arguments, timeout=_CALL_SECONDS
                     )
@@ -1008,6 +1010,8 @@ async def run_host_session(
                         "tool": name,
                         "began": began,
                         "ended": time.time(),
+                        "began_monotonic_ns": began_monotonic_ns,
+                        "ended_monotonic_ns": time.monotonic_ns(),
                         **tool_summary(called),
                     }
                     session.scripted.append(summary)
@@ -2558,24 +2562,55 @@ _RESTORATION_WRITES = frozenset({"browser-install.json"})
 
 
 def auth_files(root: Path) -> dict[str, str]:
-    """Every file under the auth root, by relative path, with its SHA-256.
+    """Snapshot files and directories without traversing links or reparse points.
 
-    ``unreadable`` for a file that could not be read, ``link`` for a link,
-    which is never followed.
+    File content is hashed; directories are recorded even when empty. Failed
+    enumeration, metadata or content reads stay ``unreadable``, never absence.
     """
     files: dict[str, str] = {}
-    for directory, names, entries in os.walk(root):
+
+    def relative(path: Path) -> str:
+        try:
+            return path.relative_to(root).as_posix()
+        except ValueError:
+            return "."
+
+    def kind(path: Path) -> str:
+        try:
+            metadata = path.lstat()
+        except OSError:
+            return "unreadable"
+        if stat.S_ISLNK(metadata.st_mode) or (
+            getattr(metadata, "st_file_attributes", 0)
+            & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            return "link"
+        if stat.S_ISDIR(metadata.st_mode):
+            return "directory"
+        return "file" if stat.S_ISREG(metadata.st_mode) else "unreadable"
+
+    def failed(error: OSError) -> None:
+        path = Path(error.filename) if error.filename else root
+        files[relative(path)] = "unreadable"
+
+    files["."] = kind(root)
+    if files["."] != "directory":
+        return files
+    for directory, names, entries in os.walk(root, onerror=failed, followlinks=False):
         base = Path(directory)
         for name in [*names, *entries]:
             path = base / name
-            relative = path.relative_to(root).as_posix()
-            if path.is_symlink():
-                files[relative] = "link"
-            elif name in entries:
+            entry_kind = kind(path)
+            key = relative(path)
+            if entry_kind != "file":
+                files[key] = entry_kind
+                if name in names and entry_kind != "directory":
+                    names.remove(name)
+            else:
                 try:
-                    files[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+                    files[key] = hashlib.sha256(path.read_bytes()).hexdigest()
                 except OSError:
-                    files[relative] = "unreadable"
+                    files[key] = "unreadable"
     return files
 
 
@@ -2638,7 +2673,7 @@ def fault_witnesses(
     *,
     owner: tuple[int, float] | None,
     family: Callable[[Any, Any], bool],
-    interval: tuple[float, float] | None,
+    interval_ns: tuple[int, int] | None,
 ) -> list[dict[str, Any]]:
     """The planted failures that witness the intended entry, and only those.
 
@@ -2646,24 +2681,26 @@ def fault_witnesses(
     pid and its own creation time, so neither an earlier process at a reused
     pid nor the successor), about a lifetime of the installer family
     (*family*), asking a Job that owner held (its handle), at a time inside
-    the close call (*interval*, the host's send and receipt on the same wall
-    clock). Each certifies that one invocation reached the fault, and nothing
-    about any call after it.
+    the close call (*interval_ns*, host and shim monotonic nanoseconds on this
+    machine). Wall time is diagnostic only and cannot move a pre-close query
+    inside the interval. Each record certifies one invocation, not later calls.
     """
-    if owner is None or interval is None:
+    if owner is None or interval_ns is None:
         return []
     pid, created = owner
-    began, ended = interval
+    began, ended = interval_ns
+    if type(began) is not int or type(ended) is not int or began > ended:
+        return []
     found = []
     for record in records:
-        made, t = record.get("pid_created"), record.get("t")
+        made, t = record.get("pid_created"), record.get("monotonic_ns")
         if record.get("pid") != pid or not isinstance(made, (int, float)):
             continue
         if not isinstance(record.get("job"), int):
             continue
         if abs(float(made) - created) > _START_TOLERANCE_SECONDS:
             continue
-        if not isinstance(t, (int, float)) or not began <= t <= ended:
+        if type(t) is not int or not began <= t <= ended:
             continue
         if family(record.get("member"), record.get("created")):
             found.append(dict(record))
@@ -2803,6 +2840,7 @@ class NativeContinuation:
     validity: tuple[str, ...]
     termination_cause: str = UNOBSERVED_CAUSE
     evidence: str = NATIVE
+    close_monotonic_ns: tuple[int, int] | None = None
 
 
 def native_continuation(
@@ -2836,11 +2874,20 @@ def native_continuation(
         if isinstance(began, (int, float)) and isinstance(ended, (int, float))
         else None
     )
+    mono_began, mono_ended = (
+        window.get("began_monotonic_ns"),
+        window.get("ended_monotonic_ns"),
+    )
+    close_monotonic_ns = (
+        (mono_began, mono_ended)
+        if type(mono_began) is int and type(mono_ended) is int
+        else None
+    )
     witnesses = fault_witnesses(
         records,
         owner=owner,
         family=installer_family(observed, fates),
-        interval=close,
+        interval_ns=close_monotonic_ns,
     )
     tool = host.tool or {}
     return NativeContinuation(
@@ -2856,6 +2903,7 @@ def native_continuation(
         and bool(tool.get("read_the_post")),
         owner=owner,
         close=close,
+        close_monotonic_ns=close_monotonic_ns,
         installers=len(fates.fates),
         reached=len(records),
         witnesses=tuple(witnesses),
@@ -3756,7 +3804,12 @@ async def measure_host_quit_row(
         # owner that closed wrote is what follows this offset.
         job_window["log_before_close"] = log_size(log_path)
         closed = await call("close_session", {})
-        job_window.update(began=closed["began"], ended=closed["ended"])
+        job_window.update(
+            began=closed["began"],
+            ended=closed["ended"],
+            began_monotonic_ns=closed.get("began_monotonic_ns"),
+            ended_monotonic_ns=closed.get("ended_monotonic_ns"),
+        )
         job_window["clock_held"] = close_clock.held()
         consumed = (
             await asyncio.to_thread(
