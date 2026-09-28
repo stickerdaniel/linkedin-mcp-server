@@ -16,8 +16,14 @@ before and after, and asks for the same kernel lock the product takes
 ``flock`` belongs to open file descriptions, so the fresh open is what makes
 this an independent contender: a descriptor inherited from the holder would
 be the holder. The helper runs as its own process with no site processing
-(:func:`run_probe`), so no overlay reaches it, and it is always reaped. It is
-a checkpoint, not continuous telemetry of the lock.
+(:func:`run_probe`), so no overlay reaches it. It is a checkpoint, not
+continuous telemetry of the lock.
+
+The helper is owned from before it exists until it is reaped, through its own
+``Popen`` and never by its number. Whatever ends :func:`run_probe` (an answer,
+the timeout, a failed collection, an interrupt) kills and reaps it within a
+bound; one that outlives the bound stays owned, and :func:`settle` refuses
+every later probe with :class:`UnsettledHelper` until it is gone.
 
 POSIX only; elsewhere every answer is ``unknown``.
 """
@@ -88,13 +94,88 @@ def probe(path: str) -> dict:
         os.close(descriptor)
 
 
+class UnsettledHelper(RuntimeError):
+    """A helper this process started outlived its kill: nothing more is asked."""
+
+
+# Every helper started and not yet reaped, each with its pipes. Only a reaped
+# helper leaves; a helper that will not die stays here, not forgotten.
+_OWNED: list[subprocess.Popen] = []
+
+
+class _Helper(subprocess.Popen):
+    """A ``Popen`` owned before its child exists.
+
+    Registering first leaves no moment in which a started child has no owner:
+    not a failure inside ``Popen`` after the fork, and not an interrupt between
+    its return and the caller's assignment.
+    """
+
+    def __init__(self, *args, **kwargs):
+        _OWNED.append(self)
+        super().__init__(*args, **kwargs)
+
+
+def _finish(process: subprocess.Popen, grace: float) -> bool:
+    """Kill *process* if it still runs and reap it; False if *grace* ran out."""
+    if getattr(process, "pid", None) is not None:
+        # Popen polls before it signals: a child it has reaped is never
+        # signalled, and one nobody has reaped still holds its number.
+        process.kill()
+        try:
+            process.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            return False
+    for pipe in (getattr(process, "stdout", None), getattr(process, "stderr", None)):
+        if pipe is not None:
+            pipe.close()
+    return True
+
+
+def settle(grace: float = 5.0) -> None:
+    """Reap every owned helper, or raise :class:`UnsettledHelper`.
+
+    Nothing may be probed or measured while one is left: its lock question may
+    still be in flight. :func:`run_probe` asks this first.
+    """
+    for process in list(_OWNED):
+        if _finish(process, grace):
+            _OWNED.remove(process)
+    if _OWNED:
+        raise UnsettledHelper(
+            f"helper(s) {[process.pid for process in _OWNED]} outlived their "
+            f"kill by {grace}s; they stay owned, and nothing more is asked until "
+            f"settle() reaps them"
+        )
+
+
+def _settle_after(failure: BaseException, grace: float) -> bool:
+    """Settle after *failure* without replacing it; note on it what is left."""
+    try:
+        settle(grace)
+    except BaseException as problem:
+        failure.add_note(f"and the helper was not settled: {problem!r}")
+        return False
+    return True
+
+
 def run_probe(
-    path: str, *, python: str = sys.executable, timeout: float = 10.0
+    path: str,
+    *,
+    python: str = sys.executable,
+    timeout: float = 10.0,
+    grace: float = 5.0,
 ) -> dict:
-    """Ask from a fresh process with no site processing, and always reap it."""
+    """Ask from a fresh process with no site processing; see the module docstring.
+
+    Returns only once the helper is reaped. A failure while starting or
+    collecting it propagates unchanged after the cleanup, which only adds a
+    note if the helper is left owned.
+    """
+    settle(grace)
     command = [python, "-I", "-S", os.path.abspath(__file__), path]
     try:
-        process = subprocess.Popen(
+        process = _Helper(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -102,14 +183,21 @@ def run_probe(
             text=True,
             close_fds=True,
         )
-    except OSError as exc:
-        return _answer(UNKNOWN, f"the helper could not start: {exc!r}")
+    except BaseException as failure:
+        if _settle_after(failure, grace) and isinstance(failure, OSError):
+            return _answer(UNKNOWN, f"the helper could not start: {failure!r}")
+        raise
     try:
         out, err = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        process.kill()
-        process.communicate()
-        return _answer(UNKNOWN, f"the helper did not answer within {timeout}s")
+        settle(grace)
+        return _answer(
+            UNKNOWN, f"the helper did not answer within {timeout}s and was reaped"
+        )
+    except BaseException as failure:
+        _settle_after(failure, grace)
+        raise
+    settle(grace)
     if process.returncode != 0:
         return _answer(
             UNKNOWN, f"the helper failed ({process.returncode}): {err[-500:]}"

@@ -468,9 +468,16 @@ def selection_problems(
                 f"calibration"
             )
         returned = outcome.get("returned_ns")
+        began = outcome.get("entered_ns")
         if type(returned) is not int:
             problems.append("the outcome has no return time")
             returned = None
+        elif type(began) is not int or returned < began:
+            # One clock and one call: the return can share the entry's tick,
+            # never precede it.
+            problems.append(
+                f"the outcome returned at {returned}, before its entry at {began}"
+            )
     published = activation.get("published_ns")
     mine = [
         event

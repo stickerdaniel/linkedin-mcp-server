@@ -435,6 +435,31 @@ def test_a_consumption_before_the_drain_returned_is_another(tree, row):
 
 
 @pytest.mark.parametrize(
+    ("shift", "fits"),
+    [
+        pytest.param(-1, False, id="returned-before-entry"),
+        pytest.param(0, True, id="returned-on-the-entry-tick"),
+    ],
+)
+def test_an_outcome_that_returned_before_its_entry_is_refused(tree, row, shift, fits):
+    activation, sent = _selected(tree, row)
+    _event(row, r7_fault.CONSUMED)
+    _event(row, r7_fault.HELD)
+    # A complete, matching record whose only fault is its order.
+    path = row / r7_fault.OUTCOME
+    outcome = json.loads(path.read_text())
+    outcome["returned_ns"] = outcome["entered_ns"] + shift
+    path.write_text(json.dumps(outcome))
+    problems = selection_problems(row, activation=activation, sent_ns=sent)
+    assert (problems == []) is fits, problems
+    if not fits:
+        assert problems == [
+            f"the outcome returned at {outcome['returned_ns']}, before its entry at "
+            f"{outcome['entered_ns']}"
+        ]
+
+
+@pytest.mark.parametrize(
     ("logger", "message", "args", "observed"),
     [
         pytest.param(
