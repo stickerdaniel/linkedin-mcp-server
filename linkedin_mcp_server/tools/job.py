@@ -266,3 +266,60 @@ def register_job_tools(
                 raise_tool_error(relogin_exc, "get_saved_jobs")
         except Exception as e:
             raise_tool_error(e, "get_saved_jobs")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Dismiss Job",
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
+        tags={"job"},
+    )
+    async def dismiss_job(
+        job_id: str,
+        keywords: str,
+        ctx: Context,
+    ) -> dict[str, Any]:
+        """
+        Dismiss a job from LinkedIn job search so later searches never show it.
+
+        For jobs already applied to or rejected. Clicks the dismiss button on
+        the job's card in a search for keywords, then reloads that search to
+        confirm the job is gone. Irreversible: LinkedIn offers no undo after a
+        reload. A job the search does not list is an error, since an already
+        dismissed job and a search that missed it look the same.
+
+        Args:
+            job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
+            keywords: A narrow search whose first page lists the job, such as
+                its title and company (e.g., "Applied AI Engineer Action1")
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url (the search), job_id, dismissed (true) and
+            already_dismissed, true when the card was already dismissed.
+        """
+        try:
+            extractor = await get_ready_extractor(ctx, tool_name="dismiss_job")
+            logger.info("Dismissing job %s via search %r", job_id, keywords)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Opening job search"
+            )
+
+            result = await extractor.dismiss_job(job_id, keywords)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "dismiss_job")
+        except Exception as e:
+            raise_tool_error(e, "dismiss_job")  # NoReturn

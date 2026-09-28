@@ -35,6 +35,7 @@ def _make_mock_extractor(result: dict) -> MagicMock:
     mock.search_jobs = AsyncMock(return_value=result)
     mock.get_saved_jobs = AsyncMock(return_value=result)
     mock.get_job_apply_url = AsyncMock(return_value=result)
+    mock.dismiss_job = AsyncMock(return_value=result)
     mock.search_people = AsyncMock(return_value=result)
     mock.get_sidebar_profiles = AsyncMock(return_value=result)
     mock.get_inbox = AsyncMock(return_value=result)
@@ -1327,6 +1328,37 @@ class TestJobTools:
         mock_extractor.get_saved_jobs.assert_awaited_once_with(
             max_pages=2, stage="saved"
         )
+
+    async def test_dismiss_job(self, mock_context, serve_extractor):
+        expected = {
+            "url": "https://www.linkedin.com/jobs/search/?keywords=Engineer+Acme",
+            "job_id": "12345",
+            "dismissed": True,
+            "already_dismissed": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "dismiss_job")
+        result = await tool_fn("12345", "Engineer Acme", mock_context)
+        assert result == expected
+        mock_extractor.dismiss_job.assert_awaited_once_with("12345", "Engineer Acme")
+
+    async def test_dismiss_job_is_marked_destructive(self):
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        tool = await mcp.get_tool("dismiss_job")
+        assert tool is not None and tool.annotations is not None
+        assert tool.annotations.read_only_hint is False
+        assert tool.annotations.destructive_hint is True
 
 
 class TestGetSidebarProfilesTool:
