@@ -155,6 +155,27 @@ def verify_checkout(checkout: Path, pinned: str = BASELINE_SHA) -> dict[str, Any
     return state
 
 
+def baseline_file(
+    relative: str, *, pinned: str = BASELINE_SHA, repo: Path = REPO_ROOT
+) -> str:
+    """One file of the pinned revision, fetched first when a shallow clone lacks it.
+
+    For a model control that runs the baseline's own function against doubles,
+    in a job that never prepares the whole baseline.
+    """
+    if git(repo, "cat-file", "-e", f"{pinned}^{{commit}}") is None:
+        fetched = _run(
+            ["git", "fetch", "--no-tags", "--depth=1", "origin", pinned],
+            cwd=repo,
+            timeout=300,
+        )
+        _checked(fetched, f"fetching {pinned}")
+    shown = git(repo, "show", f"{pinned}:{relative}")
+    if shown is None:
+        raise BaselineRefused(f"{relative} is not in {pinned}")
+    return shown
+
+
 def venv_python(checkout: Path) -> Path:
     if sys.platform == "win32":
         return checkout / ".venv" / "Scripts" / "python.exe"

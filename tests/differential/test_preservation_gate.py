@@ -14,10 +14,15 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import functools
+import json
 import os
+import socket
 import subprocess
 import sys
+import tempfile
+import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -25,9 +30,14 @@ from unittest.mock import AsyncMock
 import psutil
 import pytest
 
+import linkedin_mcp_server
 from differential import harness
+from differential.baseline import baseline_file
 from differential.events import EventLog
 from differential.harness import DaemonCleanup, PostQuit, measure_host_quit_row
+from differential import job_query
+from differential.job_query import SHIM_SHA256, ShimVenv, StallHost
+from differential.job_query_model import BASELINE, CANDIDATE, calibrate
 from differential.session import LAST_VERSION_FILE, write_synthetic_cookie_file
 from differential.signals import (
     COMPLETE,
@@ -35,10 +45,13 @@ from differential.signals import (
     OracleOutcome,
     parse_strace,
 )
+from differential.test_failed_job_query import _Native
 from differential.test_row_judgement import _healthy
+from linkedin_mcp_server import process_tree
 from linkedin_mcp_server.session_state import portable_cookie_path, write_source_state
 
 ME = "harness-user"
+_PROCESS_TREE = "linkedin_mcp_server/process_tree.py"
 
 
 class _Watcher:
@@ -107,13 +120,23 @@ class _Oracle:
 
 
 class _Row:
-    """The row entry, and what the modelled row handed to its owner cleanup."""
+    """The row entry, and what the modelled row handed to its owner cleanup.
 
-    def __init__(self, run, owner, cleaned: list, log: EventLog):
+    ``hooks`` maps a tool name to what the modelled actors do while that call
+    runs in a row's scripted phase: an owner's log line, a shim record.
+    ``operations`` is every scripted tool call, in order, with whatever else a
+    test instruments (``_job_query_row``) interleaved.
+    """
+
+    def __init__(
+        self, run, owner, cleaned: list, log: EventLog, hooks: dict, operations: list
+    ):
         self._run = run
         self.owner = owner
         self.cleaned = cleaned
         self.log = log
+        self.hooks = hooks
+        self.operations = operations
 
     async def __call__(self, **row):
         return await self._run(**row)
@@ -138,6 +161,8 @@ def row(tmp_path, monkeypatch, profile):
         42, 1.0, "synthetic", str(account.auth_root), _Actor(42)
     )
     cleaned: list = []
+    hooks: dict = {}
+    operations: list = []
 
     async def host(*args, **kwargs):
         origin.requests.extend(healthy.row_requests)
@@ -145,6 +170,33 @@ def row(tmp_path, monkeypatch, profile):
         if started is not None:
             started(4242)
         await kwargs["after_call"]()
+        script = kwargs.get("script")
+        if script is not None:
+            # A row's scripted phase: every call answers at once.
+            async def call(name, arguments):
+                operations.append(("call", name))
+                began = time.time()
+                began_monotonic_ns = time.monotonic_ns()
+                if name == harness.READ_TOOL:
+                    # The origin sees the read's feed request while it runs.
+                    origin.requests.extend(
+                        dataclasses.replace(request, t=time.time())
+                        for request in harness.feed_requests(healthy.row_requests)
+                    )
+                hook = hooks.get(name)
+                if hook is not None:
+                    hook()
+                return {
+                    "tool": name,
+                    "began": began,
+                    "ended": time.time(),
+                    "began_monotonic_ns": began_monotonic_ns,
+                    "ended_monotonic_ns": time.monotonic_ns(),
+                    "is_error": False,
+                    "read_the_post": name == harness.READ_TOOL,
+                }
+
+            await script(call)
         return healthy.host
 
     def identify(*args, **kwargs):
@@ -216,7 +268,14 @@ def row(tmp_path, monkeypatch, profile):
         )
         return result, preservation.await_count
 
-    return _Row(run, owner, cleaned, EventLog(tmp_path / "evidence", run="gate"))
+    return _Row(
+        run,
+        owner,
+        cleaned,
+        EventLog(tmp_path / "evidence", run="gate"),
+        hooks,
+        operations,
+    )
 
 
 @pytest.fixture
@@ -242,6 +301,1101 @@ _FINISHED_PS = {
     "resolution": "exited",
     "failures": ["cmdline: AccessDenied"],
 }
+
+
+#: The checkout the modelled rows run, as ``row_identity`` names it.
+_HEAD = "c" * 40
+
+
+def _job_query_row(
+    monkeypatch, tmp_path, native=None, *, module=None, operations=None
+) -> ShimVenv:
+    """The row's own script, cache, stall host and fate tracking, with one
+    installer, 700, found as it starts; *native* answers for its handle.
+
+    The actors import *module*'s process_tree, this checkout's by default,
+    and the checkout is at ``_HEAD``. The row-private cache is made under
+    *tmp_path*. Each real ``PrivateCache.restore``, ``dismantle`` and
+    ``restore_installed`` call, each install-record write (``private`` through
+    the cache, ``real`` from the teardown) and each stall-host stop is
+    appended to *operations*, in order.
+    """
+    operations = [] if operations is None else operations
+    store = tmp_path / "store"
+    sources = [store / "chromium-1", store / "ffmpeg-2"]
+    for source in sources:
+        source.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(harness, "install_locations", lambda *a: sources)
+    monkeypatch.setattr(
+        harness,
+        "private_install",
+        lambda python, locations, env, stall: job_query.private_install(
+            python,
+            locations,
+            env,
+            stall,
+            parent=Path(tempfile.mkdtemp(prefix="private-", dir=tmp_path)),
+        ),
+    )
+    # No browser here to read as installed; test_failed_job_query covers that.
+    monkeypatch.setattr(
+        job_query,
+        "record_install",
+        lambda *a: operations.append(("record_install", "private")),
+    )
+    monkeypatch.setattr(
+        harness,
+        "record_install",
+        lambda *a: operations.append(("record_install", "real")),
+    )
+    for name in ("restore", "dismantle", "restore_installed"):
+        original = getattr(job_query.PrivateCache, name)
+
+        def recorded(self, *args, _name=name, _original=original, **kwargs):
+            operations.append(("cache", _name))
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(job_query.PrivateCache, name, recorded)
+    stop = job_query.StallHost.stop
+
+    def stopped(self):
+        operations.append(("stall", "stop"))
+        return stop(self)
+
+    monkeypatch.setattr(job_query.StallHost, "stop", stopped)
+    monkeypatch.setattr(harness, "row_identity", lambda: {"head": _HEAD})
+    monkeypatch.setattr(harness, "_FAMILY_SETTLE_SECONDS", 0.3)
+
+    def installers(observed, *, watch, **kwargs):
+        watch(700, 9.0)
+        return [(700, 9.0)]
+
+    monkeypatch.setattr(harness, "wait_for_installers", installers)
+    if native is not None:
+        monkeypatch.setattr(harness, "Fates", lambda: job_query.Fates(native))
+    return ShimVenv(
+        directory=tmp_path / "shim",
+        python=sys.executable,
+        source_python=sys.executable,
+        site_packages=str(tmp_path),
+        shim_sha256=SHIM_SHA256,
+        pth_sha256="",
+        source_code={},
+        code={"module": str(module or Path(linkedin_mcp_server.__file__))},
+    )
+
+
+def _baseline_module(tmp_path: Path) -> Path:
+    """Where a baseline runtime's actors would import the pinned process_tree."""
+    package = tmp_path / "baseline-code" / "linkedin_mcp_server"
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "process_tree.py").write_text(baseline_file(_PROCESS_TREE))
+    (package / "__init__.py").write_text("")
+    return package / "__init__.py"
+
+
+#: A watcher that observed the whole row: nothing it could not see.
+_SETTLED = {
+    "read_failures": [],
+    "relevant_read_failures": [],
+    "stopped_by": "stop file",
+    "observation_start": 0.0,
+    "observation_end": time.time() + 3600,
+    "max_gap_seconds": 0.1,
+}
+
+
+def _owner_log(monkeypatch, tmp_path) -> Path:
+    """The daemon log the descriptor names, shared by every owner of the root."""
+    log = tmp_path / "daemon.log"
+    if not log.exists():
+        log.write_text("")
+    monkeypatch.setattr(
+        harness.daemon_descriptor,
+        "read",
+        lambda _: SimpleNamespace(
+            pid=42, instance_id="synthetic", protocol_version=2, log_path=str(log)
+        ),
+    )
+    return log
+
+
+def _log_line(log: Path, message: str) -> None:
+    """A line in the shared daemon log: diagnostic, and no writer is named."""
+    with log.open("a") as stream:
+        stream.write(json.dumps({"level": "WARNING", "message": message}) + "\n")
+
+
+#: What the two observed events log, as the daemon log would show them.
+_CONSUMED_LINE = (
+    "Browser processes from this launch are still running after close, so the "
+    "shutdown stays unconfirmed."
+)
+_STAND_DOWN_LINE = f"Standing down: {harness.HELD_PROFILE_REASON}"
+
+
+def _event(shim: ShimVenv, event: str, **fields: Any) -> None:
+    """The shim's record of one observed logger event: by default reached by
+    the owner that closes (42, created 1.0), now."""
+    record = {
+        "kind": "log",
+        "event": event,
+        "t": time.time(),
+        "monotonic_ns": time.monotonic_ns(),
+        "pid": 42,
+        "pid_created": 1.0,
+        "reason": harness.HELD_PROFILE_REASON if event == harness.STAND_DOWN else None,
+        **fields,
+    }
+    with shim.reached_file.open("a") as stream:
+        stream.write(json.dumps(record) + "\n")
+
+
+def _witness(shim: ShimVenv, **fields: Any) -> None:
+    """The shim's record of one planted failure: by default by the owner that
+    closes (42, created 1.0), about installer 700 (created 9.0), now."""
+    record = {
+        "kind": "query",
+        "t": time.time(),
+        "monotonic_ns": time.monotonic_ns(),
+        "pid": 42,
+        "pid_created": 1.0,
+        "member": 700,
+        "created": 9.0,
+        "job": 55,
+        **fields,
+    }
+    with shim.reached_file.open("a") as stream:
+        stream.write(json.dumps(record) + "\n")
+
+
+class _Marker:
+    """The close marker: created at 2, and a clock that held."""
+
+    def mark(self):
+        pass
+
+    def held(self):
+        return True
+
+    def after(self, pid, start):
+        return start > 2.0
+
+
+def _chain(*, gate: bool = True) -> list[dict]:
+    """The frontend the harness started, the owner's gate and the owner (42)."""
+    records = [_started(4242, os.getpid(), 0.2, "frontend")]
+    if gate:
+        records.append(dict(_started(3572, 4242, 0.5, "owner"), start_identity=0.5))
+    records.append(_started(42, 4242, 1.0, "owner"))
+    return records
+
+
+async def _k1(row, monkeypatch, tmp_path, *, module=None, witness=False, native=None):
+    """K1 through the real entry: Direct, the installer running at the close,
+    no adopted Job, so nothing plants a failure unless *witness*."""
+    shim = _job_query_row(
+        monkeypatch,
+        tmp_path,
+        native or _Native(),
+        module=module,
+        operations=row.operations,
+    )
+    row.hooks.clear()
+    if witness:
+        row.hooks["close_session"] = lambda: _witness(shim)
+    result, _ = await row(
+        processes=[],
+        summary=_SETTLED,
+        daemon=False,
+        job_query_shim=shim,
+        experiment="K1",
+    )
+    return result
+
+
+async def _k2(row, monkeypatch, tmp_path, *, module=None, witness=True, summary=None):
+    """K2 through the real entry: the owner that closes (42) reaches the
+    planted failure about installer 700 inside its close, confirms its close
+    and stays; the family settles, then the recovery."""
+    shim = _job_query_row(
+        monkeypatch, tmp_path, _Native(), module=module, operations=row.operations
+    )
+    _owner_log(monkeypatch, tmp_path)
+    row.hooks.clear()
+    if witness:
+        row.hooks["close_session"] = lambda: _witness(shim)
+    result, _ = await row(
+        processes=[],
+        summary=summary or _SETTLED,
+        observed=_chain(),
+        job_query_shim=shim,
+        experiment="K2",
+    )
+    return result
+
+
+_NO_CONSUMPTION = "not seen to reach core.close's consumption"
+_NO_STAND_DOWN = "not seen to reach its held-profile stand-down"
+
+#: One piece of K3's continuation, taken away or moved, and the problem the
+#: common gate then names.
+_K3_FAULTS = {
+    "no-witness": "no planted failure witnesses the entry",
+    "another-actor": "no planted failure witnesses the entry",
+    "reused-pid": "no planted failure witnesses the entry",
+    "the-successors": "no planted failure witnesses the entry",
+    "before-the-close": "no planted failure witnesses the entry",
+    "about-the-gate": "no planted failure witnesses the entry",
+    "no-consumption": _NO_CONSUMPTION,
+    # E1EY-02: another owner generation reaching it, inside the close, while
+    # the daemon log shows the same line.
+    "a-foreign-generations-consumption": _NO_CONSUMPTION,
+    "consumption-before-the-close": _NO_CONSUMPTION,
+    # The lines in the shared daemon log, and no lifetime-bound event at all.
+    "daemon-log-lines-only": _NO_CONSUMPTION,
+    "no-stand-down": _NO_STAND_DOWN,
+    "a-foreign-stand-down": _NO_STAND_DOWN,
+    "a-setup-deadline-stand-down": _NO_STAND_DOWN,
+    # E1EY-03: the shim proves 799 existed; nothing shows it ended.
+    "an-unaccounted-queried-member": "pid 799",
+    "unsettled-family": "no post-settlement recovery",
+    "restoration-race": "restoration: the auth root's",
+    "unreadable-directory": "restoration: the auth root's profile/blocked could not be compared",
+    "protected-change": "by the recovery boundary: the login generation",
+    "impossible-successor": "no successor is shown to have served",
+    "host-killed": "the harness had to kill the server",
+    "no-first-post": "the first call did not read the synthetic post",
+    "watcher-gap": "watcher: ",
+    "cleanup-swept": "cleanup had to kill browsers",
+}
+
+
+async def _k3(
+    row, monkeypatch, tmp_path, *, fault=None, stood=None, native=None, extra=()
+):
+    """K3 through the real entry, whole unless *fault* names one piece.
+
+    The owner that closes (42) reaches the planted failure about installer 700
+    inside its close and reaches core.close's consumption of the drain's
+    False, then its held-profile stand-down, and is seen to exit; the family
+    settles; after the harness's restoration a successor (43), begun after
+    the close, serves the probe. The daemon log gets the matching lines too,
+    as the real one would: diagnostic, and never read as a witness.
+    """
+    if native is None:
+        native = (
+            _Native(wait=PermissionError())
+            if fault == "unsettled-family"
+            else _Native()
+        )
+    shim = _job_query_row(monkeypatch, tmp_path, native, operations=row.operations)
+    log = _owner_log(monkeypatch, tmp_path)
+    monkeypatch.setattr(harness, "WallClockMarker", _Marker)
+    monkeypatch.setattr(harness, "_SUCCESSOR_SECONDS", 0.3)
+    # Seen before the probe returned: the run starts after these were taken.
+    seen = time.time() - 1
+    created = 1.5 if fault == "impossible-successor" else seen - 0.5
+    successor = harness.OwnerIdentity(
+        43, created, "successor", row.owner.auth_root, _Actor(43)
+    )
+    foreign = {"pid": 43, "pid_created": created}
+
+    def gone(process, seconds, **kwargs):
+        if stood is not None:
+            stood.append(time.time())
+        _log_line(log, _STAND_DOWN_LINE)
+        if fault == "replaced-daemon-log":
+            # Another file at the same path: nothing it holds is read.
+            log.unlink()
+            log.write_text("a replacement log\n")
+        if fault in ("no-stand-down", "daemon-log-lines-only"):
+            return True
+        if fault == "a-foreign-stand-down":
+            _event(shim, harness.STAND_DOWN, **foreign)
+        elif fault == "a-setup-deadline-stand-down":
+            _event(
+                shim,
+                harness.STAND_DOWN,
+                reason="managed browser setup exceeded its background deadline",
+            )
+        else:
+            _event(shim, harness.STAND_DOWN)
+        return True
+
+    monkeypatch.setattr(harness, "wait_until_dead", gone)
+    looked = {"n": 0}
+
+    def identify(*args, **kwargs):
+        looked["n"] += 1
+        return (successor if looked["n"] > 1 else row.owner), None
+
+    monkeypatch.setattr(harness, "identify_owner", identify)
+    witness: dict[str, Any] = {
+        "another-actor": {"pid": 99},
+        "reused-pid": {"pid_created": 0.5},
+        "the-successors": foreign,
+        "before-the-close": {"monotonic_ns": time.monotonic_ns() - 3_600_000_000_000},
+        "about-the-gate": {"member": 3572, "created": 0.5},
+    }.get(fault or "", {})
+
+    def close():
+        if fault != "no-witness":
+            _witness(shim, **witness)
+        if fault == "an-unaccounted-queried-member":
+            _witness(shim, member=799, created=9.5)
+        _log_line(log, _CONSUMED_LINE)
+        if fault == "a-foreign-generations-consumption":
+            _event(shim, harness.CONSUMED_FALSE, **foreign)
+            # The foreign owner's stand-down would then be its own, too.
+        elif fault == "consumption-before-the-close":
+            _event(
+                shim,
+                harness.CONSUMED_FALSE,
+                monotonic_ns=time.monotonic_ns() - 3_600_000_000_000,
+            )
+        elif fault not in ("no-consumption", "daemon-log-lines-only"):
+            _event(shim, harness.CONSUMED_FALSE)
+        if fault == "replaced-daemon-log":
+            log.write_text("")
+        if fault == "protected-change":
+            # A fresh login generation: a relogin nobody asked for.
+            write_source_state(Path(row.owner.auth_root) / "profile")
+
+    row.hooks.clear()
+    row.hooks["close_session"] = close
+    if fault in ("restoration-race", "unreadable-directory"):
+        late = Path(row.owner.auth_root) / "profile" / "late.txt"
+        if fault == "unreadable-directory":
+            blocked = late.parent / "blocked"
+            blocked.mkdir()
+            late = blocked / "Preferences"
+            late.write_text("before")
+            scandir = os.scandir
+
+            def refused(path):
+                if Path(path) == blocked:
+                    raise PermissionError(13, "test subtree is unreadable", str(path))
+                return scandir(path)
+
+            monkeypatch.setattr(os, "scandir", refused)
+
+        def racing(*args):
+            # Something besides the harness writes whenever it records.
+            late.write_text(str(time.monotonic_ns()))
+
+        monkeypatch.setattr(job_query, "record_install", racing)
+    if fault in ("host-killed", "no-first-post"):
+        original = harness.run_host_session
+        changes: dict[str, Any] = (
+            {"killed_by_harness": True}
+            if fault == "host-killed"
+            else {"tool": {"is_error": True, "read_the_post": False, "text": ""}}
+        )
+
+        async def host(*args, **kwargs):
+            return dataclasses.replace(await original(*args, **kwargs), **changes)
+
+        monkeypatch.setattr(harness, "run_host_session", host)
+    if fault == "cleanup-swept":
+        monkeypatch.setattr(harness, "sweep_browsers", lambda account: [4711])
+    summary = dict(_SETTLED)
+    if fault == "watcher-gap":
+        summary["max_gap_seconds"] = 5.0
+    records = [
+        *_chain(),
+        dict(_started(43, 4242, seen - 0.5, "owner"), start_identity=created),
+        _started(50, 43, seen, "driver"),
+        _started(51, 50, seen + 0.1, "browser"),
+        *extra,
+    ]
+    result, _ = await row(
+        processes=[],
+        summary=summary,
+        observed=records,
+        job_query_shim=shim,
+        experiment="K3",
+    )
+    return result
+
+
+def _gate(result, experiment: str) -> list[str]:
+    return harness.continuation_problems(
+        result.continuation, experiment=experiment, revision=_HEAD, run="gate"
+    )
+
+
+async def test_the_failed_job_query_row_writes_through_the_real_event_log(
+    row, monkeypatch, tmp_path
+):
+    # The real EventLog: an event kind the schema does not know fails here.
+    result = await _k3(row, monkeypatch, tmp_path)
+    assert result.host is not None and result.host.error is None
+    records = row.log.records()
+    kinds = {record["kind"] for record in records}
+    assert {
+        "shim.planted",
+        "job_query.window",
+        "installer.fate",
+        "shim.reached",
+        "job_query.continuation",
+    } <= kinds
+    (planted,) = [r for r in records if r["kind"] == "shim.planted"]
+    assert planted["shim_sha256"] == SHIM_SHA256
+    (continuation,) = [r for r in records if r["kind"] == "job_query.continuation"]
+    assert continuation["termination_cause"] == "unobserved"
+    assert continuation["evidence"] == "native"
+    # The row-private cache is gone and the linked directories are not.
+    assert not Path(planted["private_cache"]).exists()
+    assert all(source.is_dir() for source in (tmp_path / "store").iterdir()), (
+        "a linked directory was removed"
+    )
+
+
+async def test_a_whole_k3_continuation_passes_the_common_gate(
+    row, monkeypatch, tmp_path
+):
+    result = await _k3(row, monkeypatch, tmp_path)
+    continuation = result.continuation
+    assert continuation is not None
+    assert _gate(result, "K3") == []
+    assert continuation.termination_cause == harness.UNOBSERVED_CAUSE
+    assert [(w["pid"], w["member"]) for w in continuation.witnesses] == [(42, 700)]
+    assert continuation.recovery == harness.POST_SETTLEMENT
+    # A packet that claims to have seen the caller, or to be more than native
+    # evidence, claims what nothing here observed.
+    for claim in (
+        {"termination_cause": "the routine drain"},
+        {"evidence": harness.SOURCE_MODEL},
+    ):
+        overclaimed = dataclasses.replace(continuation, **claim)
+        assert any(
+            "nothing native observed the caller" in problem
+            for problem in harness.continuation_problems(
+                overclaimed, experiment="K3", revision=_HEAD
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("fault", "why"), list(_K3_FAULTS.items()), ids=list(_K3_FAULTS)
+)
+async def test_each_missing_piece_of_k3_fails_the_common_gate(
+    row, monkeypatch, tmp_path, fault, why
+):
+    result = await _k3(row, monkeypatch, tmp_path, fault=fault)
+    problems = _gate(result, "K3")
+    assert any(why in problem for problem in problems), problems
+
+
+async def test_k3_probes_only_after_its_owner_left_and_the_family_settled(
+    row, monkeypatch, tmp_path
+):
+    # K3 on Windows: the probe reached the owner 33 ms after its unconfirmed
+    # close, was told the owner was restarting, and no successor was asked
+    # for (run 36384952466). Now the owner's exit, then the family's
+    # settlement, then the harness's restoration, then the probe.
+    stood: list[float] = []
+    await _k3(row, monkeypatch, tmp_path, stood=stood)
+    windows = [r for r in row.log.records() if r["kind"] == "job_query.window"]
+    phases = [w["phase"] for w in windows]
+    assert phases.index("close") < phases.index("family settled")
+    assert phases.index("family settled") < phases.index("cache restored")
+    assert phases.index("cache restored") < phases.index("probe")
+    close = next(w for w in windows if w["phase"] == "close")
+    settled = next(w for w in windows if w["phase"] == "family settled")
+    assert close["ended"] <= stood[0] <= settled["t"]
+
+
+async def test_the_shared_daemon_log_is_read_for_nothing(row, monkeypatch, tmp_path):
+    # Positive control for E1EY-02: truncated during the close and replaced
+    # at the same path before the owner's exit, the daemon log changes
+    # nothing the continuation says; the lifetime-bound events carry it.
+    result = await _k3(row, monkeypatch, tmp_path, fault="replaced-daemon-log")
+    assert _gate(result, "K3") == []
+    assert result.continuation is not None
+    assert result.continuation.consumed_false and result.continuation.stood_down
+
+
+#: What restores or rewrites the row-private download or an install record.
+_CACHE_WRITES = {
+    ("cache", "restore"),
+    ("cache", "dismantle"),
+    ("cache", "restore_installed"),
+    ("record_install", "private"),
+    ("record_install", "real"),
+}
+
+
+def _after_close(operations: list) -> list:
+    return operations[operations.index(("call", "close_session")) + 1 :]
+
+
+async def test_a_row_that_fails_before_its_verdict_touches_no_cache(
+    row, monkeypatch, tmp_path
+):
+    # The host session itself raises: no settlement verdict was ever taken,
+    # which is not a settled family.
+    shim = _job_query_row(monkeypatch, tmp_path, _Native(), operations=row.operations)
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("the host session broke")
+
+    monkeypatch.setattr(harness, "run_host_session", broken)
+    with pytest.raises(RuntimeError, match="the host session broke"):
+        await row(processes=[], summary=_SETTLED, job_query_shim=shim)
+    setup = row.operations.index(("record_install", "private"))
+    teardown = row.operations[setup + 1 :]
+    assert not _CACHE_WRITES & set(teardown), teardown
+    assert teardown == [("stall", "stop")]
+    (cache,) = _private_caches(tmp_path)
+    assert cache.is_dir()
+
+
+async def test_a_settled_row_restores_for_reuse_and_only_then_stops_its_stall_host(
+    row, monkeypatch, tmp_path
+):
+    await _k3(row, monkeypatch, tmp_path)
+    after = _after_close(row.operations)
+    # Restored for the probe, then the probe; the teardown's restoration for
+    # reuse, then the stall host.
+    assert after.index(("cache", "restore_installed")) < after.index(
+        ("call", harness.READ_TOOL)
+    )
+    teardown = after[after.index(("call", harness.READ_TOOL)) + 1 :]
+    assert teardown.index(("cache", "dismantle")) < teardown.index(("stall", "stop"))
+    assert teardown.index(("record_install", "real")) < teardown.index(
+        ("stall", "stop")
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "settles"),
+    [
+        # The shim proves 799 existed, and nothing records it: it blocks.
+        ("unrecorded", False),
+        # Recorded with an unknown parent: it blocks until it is seen to leave.
+        ("unresolved-running", False),
+        ("seen-to-exit", True),
+        # Recorded below the frontend the harness started: no installer's.
+        ("grounded", True),
+    ],
+)
+async def test_a_positively_queried_member_is_reconciled_before_restoration(
+    row, monkeypatch, tmp_path, case, settles
+):
+    # E1EY-03: before the harness restores or probes, not only at the end.
+    unresolved = _started(799, 9999, 9.5, "other")
+    extra = {
+        "unrecorded": (),
+        "unresolved-running": (unresolved,),
+        "seen-to-exit": (
+            unresolved,
+            {"kind": "process.exit", "pid": 799, "start_identity": 9.5, "t": 9.9},
+        ),
+        "grounded": (_started(799, 4242, 9.5, "other"),),
+    }[case]
+    result = await _k3(
+        row, monkeypatch, tmp_path, fault="an-unaccounted-queried-member", extra=extra
+    )
+    after = _after_close(row.operations)
+    problems = _gate(result, "K3")
+    if settles:
+        assert ("cache", "restore_installed") in after
+        assert ("call", harness.READ_TOOL) in after
+        assert problems == []
+    else:
+        # No restoration, no probe, and no teardown write to the cache or to
+        # an install record: 799 was never shown ended.
+        assert not _CACHE_WRITES & set(after), after
+        assert ("call", harness.READ_TOOL) not in after
+        assert ("stall", "stop") in after
+        assert any("before recovery:" in p and "pid 799" in p for p in problems)
+        assert any("before cleanup:" in p and "pid 799" in p for p in problems)
+
+
+class _Pending(_Native):
+    """An installer handle whose wait returns only once the harness stops its
+    stall host: an exit that the harness itself caused."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = threading.Event()
+
+    def wait(self, handle):
+        self.release.wait(30)
+
+
+def _private_caches(tmp_path: Path) -> list[Path]:
+    return sorted(tmp_path.glob("private-*/browsers"))
+
+
+@pytest.mark.parametrize(
+    "case", ["failed-wait", "pending-wait", "unresolved-descendant", "direct"]
+)
+async def test_an_unresolved_family_is_left_as_it_was(row, monkeypatch, tmp_path, case):
+    # E1EY-04: the teardown restores for reuse only a settled family; a
+    # failed row's cleanup stops the harness's own stall host and keeps the
+    # download, the install records and the unresolved verdict.
+    monkeypatch.setattr(harness, "_BROWSER_GONE_SECONDS", 0.3)
+    if case == "pending-wait":
+        native = _Pending()
+        stop = job_query.StallHost.stop
+
+        def releasing(self):
+            stop(self)
+            native.release.set()
+
+        monkeypatch.setattr(job_query.StallHost, "stop", releasing)
+        result = await _k3(row, monkeypatch, tmp_path, native=native)
+    elif case == "failed-wait":
+        result = await _k3(row, monkeypatch, tmp_path, fault="unsettled-family")
+    elif case == "unresolved-descendant":
+        family = (
+            _started(700, 4242, 9.0, "installer"),
+            _started(701, 700, 9.2, "other"),
+        )
+        result = await _k3(row, monkeypatch, tmp_path, extra=family)
+    else:
+        result = await _k1(
+            row, monkeypatch, tmp_path, native=_Native(wait=PermissionError())
+        )
+    after = _after_close(row.operations)
+    assert not _CACHE_WRITES & set(after), after
+    assert after[-1] == ("stall", "stop")
+    # The download's place is still there, as the row left it.
+    (cache,) = _private_caches(tmp_path)
+    assert cache.is_dir()
+    (cleanup,) = [
+        r
+        for r in row.log.records()
+        if r["kind"] == "job_query.window" and r["phase"] == "failed-row cleanup"
+    ]
+    assert cleanup["private_cache"] == str(cache) and cleanup["unresolved"]
+    assert result.continuation is not None
+    validity = result.continuation.validity
+    assert any(p.startswith("before cleanup: ") for p in validity), validity
+    assert any("cannot establish product settlement before" in p for p in validity)
+    assert any("its cause remains unobserved" in p for p in validity)
+    assert _gate(result, "K1" if case == "direct" else "K3")
+    if case == "pending-wait":
+        # The installer did end, once the harness stopped the stall host; that
+        # settles nothing the row's verdict had already left unresolved.
+        assert native.release.is_set()
+
+
+async def test_a_whole_k2_continuation_passes_without_any_consumer(
+    row, monkeypatch, tmp_path
+):
+    # The baseline confirms its close and keeps serving: no consumption, no
+    # stand-down, no successor, and none is asked of it.
+    result = await _k2(row, monkeypatch, tmp_path)
+    assert _gate(result, "K2") == []
+    missing = await _k2(row, monkeypatch, tmp_path, witness=False)
+    assert any("no planted failure" in p for p in _gate(missing, "K2"))
+
+
+async def test_k1_needs_no_fault_and_refuses_one(row, monkeypatch, tmp_path):
+    result = await _k1(row, monkeypatch, tmp_path)
+    assert _gate(result, "K1") == []
+    assert result.continuation is not None
+    assert result.continuation.recovery == harness.NO_RECOVERY
+    reached = await _k1(row, monkeypatch, tmp_path, witness=True)
+    assert any("no adopted Job" in p for p in _gate(reached, "K1"))
+
+
+async def test_a_cell_is_judged_against_its_own_experiment_revision_and_run(
+    row, monkeypatch, tmp_path
+):
+    result = await _k2(row, monkeypatch, tmp_path)
+    assert "the continuation is K2's, not K3's" in harness.continuation_problems(
+        result.continuation, experiment="K3", revision=_HEAD
+    )
+    other = harness.continuation_problems(
+        result.continuation, experiment="K2", revision="d" * 40
+    )
+    assert any(f"not {'d' * 40}" in p for p in other)
+    elsewhere = harness.continuation_problems(
+        result.continuation, experiment="K2", revision=_HEAD, run="another"
+    )
+    assert any("from run gate, not another" in p for p in elsewhere)
+    assert harness.continuation_problems(None, experiment="K2", revision=_HEAD) == [
+        "K2 left no native continuation"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("native", "starts"),
+    [
+        pytest.param(_Native(), 1, id="an-observed-exit"),
+        pytest.param(_Native(wait=PermissionError()), 0, id="a-failed-wait"),
+        pytest.param(_Native(exited=None), 0, id="no-kernel-exit"),
+        pytest.param(_Native(created=5.0), 0, id="another-lifetime"),
+    ],
+)
+async def test_the_post_quit_session_waits_for_every_installer_fate(
+    row, monkeypatch, tmp_path, native, starts
+):
+    # An installer whose end was not observed may still be running on the
+    # profile's setup: no session starts after the row until it is.
+    shim = _job_query_row(monkeypatch, tmp_path, native)
+    result, calls = await row(
+        processes=[],
+        summary=_SETTLED,
+        daemon=False,
+        job_query_shim=shim,
+        experiment="K1",
+    )
+    assert calls == starts, result.failures
+    problems = _gate(result, "K1")
+    if not starts:
+        assert result.post_quit is not None and result.post_quit.valid is None
+        assert any("H-R11 evidence incomplete" in f for f in result.failures)
+        assert any("installer inventory" in p for p in problems)
+    else:
+        assert problems == []
+
+
+@pytest.mark.parametrize("case", ["reused-parent", "delayed-installer"])
+@pytest.mark.parametrize("helper_exited", [False, True])
+async def test_uncertain_installer_lineage_blocks_preservation_until_exit(
+    row, monkeypatch, tmp_path, case, helper_exited
+):
+    shim = _job_query_row(monkeypatch, tmp_path, _Native())
+    helper = dict(_started(702, 700, 9.08, "other"), start_identity=9.02)
+    if case == "reused-parent":
+        observed = [
+            _started(700, os.getpid(), 9.0, "installer"),
+            {"kind": "process.exit", "pid": 700, "start_identity": 9.0, "t": 9.03},
+            dict(_started(700, os.getpid(), 9.08, "other"), start_identity=9.06),
+            helper,
+        ]
+    else:
+        observed = [
+            {**helper, "ppid": -1, "t": 9.1, "in_row": False},
+            dict(_started(700, os.getpid(), 9.2, "installer"), start_identity=9.0),
+            {**helper, "kind": "process.update", "t": 9.2},
+            {"kind": "process.exit", "pid": 700, "start_identity": 9.0, "t": 9.3},
+        ]
+    if helper_exited:
+        observed.append(
+            {"kind": "process.exit", "pid": 702, "start_identity": 9.02, "t": 9.4}
+        )
+    lineage = harness.Lineage(observed)
+    life = lineage.lifetime(702, 9.02)
+    assert life is None or lineage.of(life) != harness.FROM_HARNESS
+    result, calls = await row(
+        processes=[],
+        summary=_SETTLED,
+        observed=observed,
+        daemon=False,
+        job_query_shim=shim,
+        experiment="K1",
+    )
+    problems = _gate(result, "K1")
+    if helper_exited:
+        assert calls == 1 and problems == [], result.failures
+    else:
+        assert calls == 0
+        assert any("702 (unresolved)" in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    ("recorded", "starts"),
+    [
+        # The watcher recorded it after the first look: the late look watches it.
+        pytest.param(True, 1, id="started-late-and-recorded"),
+        pytest.param("owner-gate", 1, id="a-known-row-process"),
+        # Nothing recorded it: its fate is unknown, and it could be setup's.
+        pytest.param(False, 0, id="never-recorded"),
+    ],
+)
+async def test_every_queried_lifetime_must_be_accounted_for(
+    row, monkeypatch, tmp_path, recorded, starts
+):
+    shim = _job_query_row(monkeypatch, tmp_path, _Native())
+    # Some actor's drain asked about 702: positive evidence that it existed.
+    row.hooks.clear()
+    row.hooks["close_session"] = lambda: _witness(shim, pid=1, member=702)
+    # Recorded as a late installer the late look watches, or as the owner's
+    # own gate (run 36410976409), a row process that is no installer.
+    role = "installer" if recorded != "owner-gate" else "owner"
+    late = dict(_started(702, 4242, 2.0, role), start_identity=9.0)
+    # The frontend, started by the harness: the gate's chain is complete.
+    frontend = _started(4242, os.getpid(), 1.0, "frontend")
+    result, calls = await row(
+        processes=[],
+        summary=_SETTLED,
+        observed=[frontend, late] if recorded else [],
+        job_query_shim=shim,
+        experiment="K2",
+    )
+    assert calls == starts, result.failures
+    assert result.continuation is not None
+    unaccounted = [p for p in result.continuation.validity if "pid 702" in p]
+    assert bool(unaccounted) is (not starts), result.continuation.validity
+
+
+@pytest.mark.parametrize(
+    "fault", ["cleanup", "watcher"], ids=["daemon-dir-survived", "watcher-gap"]
+)
+async def test_k2_never_accepts_a_cleanup_or_watcher_failure(
+    row, monkeypatch, tmp_path, fault
+):
+    # E1EP-04, through the row: the baseline's own behaviour is K2's to keep,
+    # a cleanup that did not finish or a watcher that could not see is not.
+    summary = dict(_SETTLED)
+    if fault == "cleanup":
+
+        def retire(_account, identified):
+            return DaemonCleanup(
+                "dir",
+                True,
+                False,
+                True,
+                False,
+                ("the row's daemon directory survived removal",),
+            )
+
+        monkeypatch.setattr(harness, "retire_daemon_state", retire)
+    else:
+        summary["max_gap_seconds"] = 5.0
+    result = await _k2(row, monkeypatch, tmp_path, summary=summary)
+    problems = _gate(result, "K2")
+    expected = "cleanup: the row's daemon" if fault == "cleanup" else "watcher: "
+    assert any(p.startswith(expected) for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        ({}, None),
+        ({"killed_by_harness": True}, "the harness had to kill the server"),
+        ({"exited_on_quit": False}, "the server did not exit within"),
+        ({"exit_code": 1}, "the server exited abnormally"),
+        ({"stdin_closed": False}, "closing the server's stdin failed"),
+        ({"alive_before_quit": False}, "the server was already gone"),
+    ],
+    ids=["clean", "killed", "timeout", "nonzero", "stdin", "already-dead"],
+)
+async def test_k2_requires_a_successful_host_quit(
+    row, monkeypatch, tmp_path, changes, expected
+):
+    original = harness.run_host_session
+
+    async def host(*args, **kwargs):
+        return dataclasses.replace(await original(*args, **kwargs), **changes)
+
+    monkeypatch.setattr(harness, "run_host_session", host)
+    result = await _k2(row, monkeypatch, tmp_path)
+    assert result.host is not None and result.host.error is None
+    problems = _gate(result, "K2")
+    host_problems = harness.host_failures(result.host)
+    if expected is None:
+        assert host_problems == [] and problems == []
+    else:
+        assert any(expected in problem for problem in host_problems)
+        assert all(problem in problems for problem in host_problems)
+
+
+async def test_failed_private_setup_closes_the_listener_and_removes_its_links(
+    row, monkeypatch, tmp_path
+):
+    store = tmp_path / "store"
+    sources = [store / "chromium-1", store / "ffmpeg-2"]
+    for source in sources:
+        source.mkdir(parents=True)
+        (source / "INSTALLATION_COMPLETE").write_text("")
+    monkeypatch.setattr(harness, "install_locations", lambda *a: sources)
+    monkeypatch.setattr(
+        harness,
+        "private_install",
+        lambda python, locations, env, stall: job_query.private_install(
+            python, locations, env, stall, parent=tmp_path
+        ),
+    )
+
+    def refuse_record(*args):
+        raise RuntimeError("private install is not ready")
+
+    monkeypatch.setattr(job_query, "record_install", refuse_record)
+    started: list[str] = []
+
+    class TrackedStall(StallHost):
+        def start(self):
+            super().start()
+            started.append(self.url)
+            return self
+
+    monkeypatch.setattr(harness, "StallHost", TrackedStall)
+    shim = ShimVenv(
+        directory=tmp_path / "shim",
+        python=sys.executable,
+        source_python=sys.executable,
+        site_packages=str(tmp_path),
+        shim_sha256=SHIM_SHA256,
+        pth_sha256="",
+        source_code={},
+        code={},
+    )
+    with pytest.raises(RuntimeError, match="private install is not ready"):
+        await row(
+            processes=[],
+            summary={"read_failures": [], "relevant_read_failures": []},
+            job_query_shim=shim,
+        )
+    assert not (tmp_path / "browsers").exists()
+    assert all((source / "INSTALLATION_COMPLETE").exists() for source in sources)
+    assert len(started) == 1
+    port = int(started[0].rsplit(":", 1)[1])
+    with pytest.raises(OSError):
+        socket.create_connection(("127.0.0.1", port), timeout=0.2)
+
+
+# --- The composition: the source model and every native cell of this run ---------
+
+
+@pytest.fixture
+def cells(row, monkeypatch, tmp_path):
+    """K1, K2 and K3 as three real rows of one run, K1 and K2 importing the
+    pinned baseline's process_tree and K3 this checkout's."""
+    import asyncio
+
+    baseline = _baseline_module(tmp_path)
+
+    async def run():
+        k1 = await _k1(row, monkeypatch, tmp_path, module=baseline)
+        k2 = await _k2(row, monkeypatch, tmp_path, module=baseline)
+        k3 = await _k3(row, monkeypatch, tmp_path)
+        return k1.continuation, k2.continuation, k3.continuation
+
+    return asyncio.run(run())
+
+
+@pytest.fixture(scope="module")
+def model():
+    return calibrate(
+        {
+            BASELINE: baseline_file(_PROCESS_TREE),
+            CANDIDATE: Path(process_tree.__file__).read_text(encoding="utf-8"),
+        }
+    )
+
+
+_REVISIONS = {"K1": _HEAD, "K2": _HEAD, "K3": _HEAD}
+
+
+def _ledger(*continuations, run="gate") -> harness.R11Ledger:
+    ledger = harness.R11Ledger(run)
+    for continuation in continuations:
+        ledger.record(continuation)
+    return ledger
+
+
+def test_the_composition_holds_for_a_calibrated_whole_run(cells, model):
+    assert harness.r11_composition(model, _ledger(*cells), revisions=_REVISIONS) == []
+
+
+async def test_unreadable_restoration_cannot_pass_a_calibrated_composition(
+    cells, model, row, monkeypatch, tmp_path
+):
+    k1, k2, _ = cells
+    result = await _k3(row, monkeypatch, tmp_path, fault="unreadable-directory")
+    problems = harness.r11_composition(
+        model, _ledger(k1, k2, result.continuation), revisions=_REVISIONS
+    )
+    assert any("profile/blocked could not be compared" in p for p in problems)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "a-foreign-generations-consumption",
+        "daemon-log-lines-only",
+        "no-consumption",
+        "a-foreign-stand-down",
+        "an-unaccounted-queried-member",
+        "unsettled-family",
+    ],
+)
+async def test_a_k3_cell_missing_its_own_continuation_cannot_be_composed(
+    cells, model, row, monkeypatch, tmp_path, fault
+):
+    # From the producer, through the row and the cell's gate, to the
+    # composition with a fresh calibration and valid K1 and K2 cells.
+    k1, k2, _ = cells
+    result = await _k3(row, monkeypatch, tmp_path, fault=fault)
+    problems = harness.r11_composition(
+        model, _ledger(k1, k2, result.continuation), revisions=_REVISIONS
+    )
+    assert any(
+        problem.startswith("K3: ") and _K3_FAULTS[fault] in problem
+        for problem in problems
+    ), problems
+
+
+def test_the_composition_needs_a_calibration_from_this_invocation(cells, model):
+    problems = harness.r11_composition(None, _ledger(*cells), revisions=_REVISIONS)
+    assert problems == ["no source-model calibration ran in this invocation"]
+    failing = dataclasses.replace(model, problems=("unknown, candidate: ended 700",))
+    problems = harness.r11_composition(failing, _ledger(*cells), revisions=_REVISIONS)
+    assert problems == ["source model: unknown, candidate: ended 700"]
+
+
+@pytest.mark.parametrize("missing", ["K1", "K2", "K3"])
+def test_the_composition_needs_every_native_cell(cells, model, missing):
+    # K1 and K3 selected without K2 compose nothing, nor does any other pair.
+    present = [c for c in cells if c.experiment != missing]
+    problems = harness.r11_composition(model, _ledger(*present), revisions=_REVISIONS)
+    assert f"{missing}: {missing} left no native continuation" in problems
+
+
+def test_a_valid_looking_cell_from_another_revision_or_run_fails(cells, model):
+    k1, k2, k3 = cells
+    moved = dataclasses.replace(k3, revision="d" * 40)
+    problems = harness.r11_composition(
+        model, _ledger(k1, k2, moved), revisions=_REVISIONS
+    )
+    assert any(p.startswith("K3: the actors ran dddd") for p in problems), problems
+    problems = harness.r11_composition(
+        model, _ledger(*cells, run="another"), revisions=_REVISIONS
+    )
+    assert sum("from run gate, not another" in p for p in problems) == 3
+
+
+def test_a_cell_that_ran_other_code_than_the_model_fails(cells, model):
+    k1, k2, k3 = cells
+    swapped = dataclasses.replace(k3, process_tree_sha256=k1.process_tree_sha256)
+    problems = harness.r11_composition(
+        model, _ledger(k1, k2, swapped), revisions=_REVISIONS
+    )
+    assert any(p.startswith("K3: the actors imported process_tree") for p in problems)
+
+
+def test_an_invocation_takes_each_cell_once(cells, model):
+    ledger = _ledger(*cells)
+    assert harness.r11_composition(model, ledger, revisions=_REVISIONS) == []
+    # Emptied by the composition: nothing is left over for a later one.
+    again = harness.r11_composition(model, ledger, revisions=_REVISIONS)
+    assert {p for p in again if "left no native continuation" in p} == {
+        f"{k}: {k} left no native continuation" for k in ("K1", "K2", "K3")
+    }
+    doubled = harness.r11_composition(
+        model, _ledger(*cells, cells[2]), revisions=_REVISIONS
+    )
+    assert "a second K3 continuation in one invocation" in doubled
+
+
+def test_k3_worse_than_k1_fails_the_composition(cells, model):
+    k1, k2, k3 = cells
+    assert k3.vector is not None
+    worse = dataclasses.replace(
+        k3, vector=dataclasses.replace(k3.vector, o4_session="lost")
+    )
+    problems = harness.r11_composition(
+        model, _ledger(k1, k2, worse), revisions=_REVISIONS
+    )
+    assert any(p.startswith("K3 differs from K1 frozen: o4_session") for p in problems)
 
 
 async def test_a_settled_complete_census_starts_the_post_quit_session_once(row):

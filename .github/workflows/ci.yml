@@ -435,8 +435,10 @@ jobs:
     # (bound 15) and five more native rows, three of them with an owner that
     # leaves through its idle exit (bound 25), and from 75 for H-R6 after
     # them: three more rows, two of them waiting out a recovered owner's idle
-    # exit (bound 25). Windows is the slowest leg.
-    timeout-minutes: 100
+    # exit (bound 25), and from 100 for H-R11 on Windows: two shim venvs and
+    # three rows, one waiting out a successor's idle exit (bound 25). Windows is
+    # the slowest leg.
+    timeout-minutes: 125
     strategy:
       fail-fast: false
       matrix:
@@ -484,6 +486,7 @@ jobs:
           tests/differential/test_preservation_gate.py
           tests/differential/test_baseline.py
           tests/differential/test_signals.py
+          tests/differential/test_failed_job_query.py
 
       # The identity gate runs on every leg, because every leg's browser is a
       # different one from the Ubuntu job's. macOS is the only platform with a
@@ -704,6 +707,23 @@ jobs:
           LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
         timeout-minutes: 25
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_killed_rows.py
+
+      # Row H-R11, a failed Job-membership query at a routine close, Windows
+      # only: K1 frozen, K2 (the baseline owner reaches the failed query in
+      # its close) and K3 (the candidate reaches it, stands down, and a
+      # successor serves), then their composition with the source model of
+      # the branch each routine takes. Each runs from a venv with one declared
+      # shim (tests/differential/job_query.py), whose hash the evidence
+      # records; no native evidence names the caller that ended an installer.
+      - name: Fail the drain's Job query
+        if: runner.os == 'Windows'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 25
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_failed_job_query_row.py
 
       # The row's evidence packet: events, counts, watcher output, failures
       # and the runtime identity, and nothing else (``events.PUBLISHED_FILES``).

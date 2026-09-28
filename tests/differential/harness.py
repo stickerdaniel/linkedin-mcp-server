@@ -65,11 +65,19 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
-from dataclasses import asdict, dataclass, field
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -99,6 +107,25 @@ from differential.baseline import (
     stage_frozen_session,
 )
 from differential.events import EventLog, read_jsonl
+from differential.job_query import (
+    SHIM_SHA256,
+    Fates,
+    PrivateCache,
+    ShimVenv,
+    StallHost,
+    install_locations,
+    logged,
+    private_install,
+    reached,
+    record_install,
+)
+from differential.job_query_model import (
+    BASELINE,
+    CANDIDATE,
+    SOURCE_MODEL,
+    RoutineModel,
+    source_sha256,
+)
 from differential.session import (
     RETAINED,
     UNCERTAIN,
@@ -116,6 +143,7 @@ from differential.signals import VIOLATED as O2_VIOLATED
 from differential.signals import (
     ORACLE_REQUIRED,
     Canaries,
+    Lifetime,
     O2Result,
     OracleOutcome,
     ProcessHistory,
@@ -902,6 +930,14 @@ class HostSession:
     #: H-R6: the call made after the owner was killed, and how it failed.
     second_tool: dict[str, Any] | None = None
     second_error: str | None = None
+    #: What a row's scripted phase called, in order, and how it failed.
+    scripted: list[dict[str, Any]] = field(default_factory=list)
+    script_error: str | None = None
+
+
+#: A row's scripted phase: it is handed a function that calls one tool through
+#: the host's own client and returns the call's summary.
+ToolCall = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 async def run_host_session(
@@ -915,13 +951,17 @@ async def run_host_session(
     arguments: dict[str, Any] | None = None,
     started: Callable[[int], None] | None = None,
     second_call: bool = False,
+    script: Callable[[ToolCall], Awaitable[None]] | None = None,
 ) -> HostSession:
     """Initialize, call the read tool once, then quit the way a host does.
 
     *started* is told the server's pid as soon as it runs. With *second_call*
     the tool is called once more after *after_call*, which is how H-R6 sees the
     frontend recover from a killed owner; its failure is recorded apart and
-    does not stop the host from quitting.
+    does not stop the host from quitting. *script*, when given, runs last
+    before the quit with a function that calls tools through this client
+    (H-R11); what it called is in ``scripted``, and its failure, recorded as
+    ``script_error``, does not stop the quit either.
     """
     session = HostSession()
 
@@ -959,6 +999,30 @@ async def run_host_session(
                     session.user_lines += session.second_tool["text"].splitlines()
                 except Exception as exc:  # noqa: BLE001 - the recovery's evidence
                     session.second_error = f"{type(exc).__name__}: {exc}"
+            if script is not None:
+
+                async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+                    began = time.time()
+                    began_monotonic_ns = time.monotonic_ns()
+                    called = await client.call_tool_mcp(
+                        name, arguments, timeout=_CALL_SECONDS
+                    )
+                    summary: dict[str, Any] = {
+                        "tool": name,
+                        "began": began,
+                        "ended": time.time(),
+                        "began_monotonic_ns": began_monotonic_ns,
+                        "ended_monotonic_ns": time.monotonic_ns(),
+                        **tool_summary(called),
+                    }
+                    session.scripted.append(summary)
+                    session.user_lines += summary["text"].splitlines()
+                    return summary
+
+                try:
+                    await script(call)
+                except Exception as exc:  # noqa: BLE001 - the script's own evidence
+                    session.script_error = f"{type(exc).__name__}: {exc}"
             await transport.host_quit()
     except Exception as exc:  # noqa: BLE001 - reported as the row's evidence
         detail = f"{type(exc).__name__}: {exc}"
@@ -1259,6 +1323,193 @@ def identify_owner(
         ),
         None,
     )
+
+
+#: How long, after the probe, the row waits for the descriptor to name the
+#: successor and for the watcher to have seen the browser it launched.
+_SUCCESSOR_SECONDS = 10.0
+
+
+def kernel_start_ticks(
+    pid: int, start: float, *, open_process: Callable[[int], Any] = psutil.Process
+) -> int | None:
+    """When the lifetime (*pid*, *start*) began, in the kernel's clock ticks.
+
+    ``/proc/<pid>/stat``'s start time counts ticks since boot, so two of them
+    compare whatever the wall clock did meanwhile, which a create time read
+    against ``time.time()`` does not. None off Linux, for a process gone, or
+    when the pid was not that lifetime both before and after the read.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+
+    def same() -> bool:
+        try:
+            created = open_process(pid).create_time()
+        except psutil.Error:
+            return False
+        return abs(created - start) <= _START_TOLERANCE_SECONDS
+
+    if not same():
+        return None
+    ticks = _stat_start_ticks(pid)
+    return ticks if ticks is not None and same() else None
+
+
+def _stat_start_ticks(pid: int) -> int | None:
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    # The command name is in parentheses and may hold anything; the fields
+    # after its last ')' start with the state, field 3, so start time (22)
+    # is the 20th of them.
+    fields = text[text.rfind(")") + 2 :].split()
+    try:
+        return int(fields[19])
+    except (IndexError, ValueError):
+        return None
+
+
+def close_marker() -> int | None:
+    """The start, in kernel ticks, of a process started as the close begins.
+
+    A lifetime whose start is later in ticks began after this marker, which
+    no reading of the wall clock can say across a clock step. None where the
+    ticks cannot be read.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        marker = subprocess.Popen(
+            [sys.executable, "-I", "-c", "import sys; sys.stdin.read()"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+    try:
+        return _stat_start_ticks(marker.pid)
+    finally:
+        with contextlib.suppress(OSError, ValueError):
+            assert marker.stdin is not None
+            marker.stdin.close()
+        try:
+            marker.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            marker.kill()
+            marker.wait(timeout=10)
+
+
+def created_after(pid: int, start: float, marker: int | None) -> bool | None:
+    """Whether (*pid*, *start*) began after the close marker; None if unknown.
+
+    The same tick is unknown: either could have come first.
+    """
+    if marker is None:
+        return None
+    ticks = kernel_start_ticks(pid, start)
+    if ticks is None or ticks == marker:
+        return None
+    return ticks > marker
+
+
+def successor_problems(
+    observed: Iterable[Mapping[str, Any]],
+    closing: OwnerIdentity | None,
+    successor: OwnerIdentity | None,
+    *,
+    probe: tuple[float, float] | None,
+    probe_requests: int,
+    after_close: Callable[[int, float], bool | None],
+) -> list[str]:
+    """Why *successor* is not shown to have replaced *closing* and served the
+    probe; empty when it is.
+
+    A served probe says that some owner answered, not which. The successor
+    counts only as a lifetime of its own: another pid and create time and
+    another instance than the owner that closed, not yet gone, and begun
+    after the close (*after_close*, from kernel start times: when the watcher
+    first saw a process says only when it looked).
+
+    And it served *this* probe. The origin saw the feed request while the
+    probe ran (*probe* is its call's start and return, *probe_requests* the
+    feed requests between them), so a row browser alive then made it. Every
+    row browser the watcher could have seen in that interval must descend
+    from the successor, one of them begun after the close and seen before the
+    probe returned. One from the owner that closed, or one whose ancestry is
+    unknown, leaves the served request unattributed; a browser launched only
+    after the response is no evidence for it.
+    """
+    if closing is None:
+        return ["the owner that closed was never identified"]
+    if successor is None:
+        return ["the descriptor names no owner this row started"]
+    if (successor.pid, successor.create_time) == (closing.pid, closing.create_time):
+        return [f"the descriptor still names the owner that closed, pid {closing.pid}"]
+    problems = []
+    if successor.instance_id == closing.instance_id:
+        problems.append(f"the successor reuses instance {closing.instance_id!r}")
+    history = ProcessHistory(observed, outside=[os.getpid()])
+
+    def lifetime(owner: OwnerIdentity) -> Lifetime | None:
+        for life in history.lifetimes:
+            if (
+                life.pid == owner.pid
+                and abs(life.start - owner.create_time) <= _START_TOLERANCE_SECONDS
+                and life.was("owner")
+            ):
+                return life
+        return None
+
+    old, new = lifetime(closing), lifetime(successor)
+    if new is None:
+        return [*problems, f"the watcher never saw pid {successor.pid} start"]
+    if old is None:
+        return [*problems, f"the watcher has no lifetime for pid {closing.pid}"]
+    if new.exit_t is not None:
+        problems.append(f"pid {successor.pid} had exited before the host quit")
+    began_after = after_close(successor.pid, successor.create_time)
+    if began_after is False:
+        problems.append(f"pid {successor.pid} began before the close")
+    elif began_after is None:
+        problems.append(
+            f"pid {successor.pid}'s start could not be ordered against the close"
+        )
+    if probe is None:
+        return [*problems, "the probe's interval was not recorded"]
+    began, ended = probe
+    if probe_requests < 1:
+        problems.append("the origin saw no feed request while the probe ran")
+    now = time.time()
+    served = False
+    for life in history.lifetimes:
+        if not (life.in_row and life.was("browser")):
+            continue
+        # Any row browser the watcher could have seen while the probe ran.
+        if life.first_t > ended + MAX_WATCHER_GAP_SECONDS:
+            continue
+        if life.exit_t is not None and life.exit_t < began:
+            continue
+        if history.descends(life, old, now) is True:
+            problems.append(
+                f"browser {life.pid} of pid {closing.pid}, the owner that closed, "
+                f"ran while the probe was served"
+            )
+        elif history.descends(life, new, now) is not True:
+            problems.append(
+                f"browser {life.pid} ran while the probe was served, and nothing "
+                f"ties it to pid {successor.pid}"
+            )
+        elif life.first_t <= ended and after_close(life.pid, life.start) is True:
+            served = True
+    if not served:
+        problems.append(
+            f"no browser of pid {successor.pid}, begun after the close, was seen "
+            f"before the probe returned"
+        )
+    return problems
 
 
 def settle_owner(
@@ -1863,6 +2114,1031 @@ def r6_verdict(
     return problems
 
 
+_INSTALLER_SECONDS = 60.0
+#: How long an owner that stood down after an unconfirmed close may take to go.
+_OWNER_STAND_DOWN_SECONDS = 30.0
+#: How long the installer family may take to settle once the close is over.
+_FAMILY_SETTLE_SECONDS = 30.0
+#: The two logger events the shim observes (``job_query``): ``core.close``
+#: consuming the drain's False, logged only when the drain did not prove the
+#: launch gone and never for an exception on the way (e1ex, P2), and the
+#: owner's stand-down.
+CONSUMED_FALSE = "consumed-false"
+STAND_DOWN = "stand-down"
+#: The stand-down of an OWNER whose close left the profile held
+#: (``server_role.a_held_profile_means_this_owner_must_go``). An owner also
+#: stands down for a setup deadline, which is not this continuation.
+HELD_PROFILE_REASON = "the browser did not shut down cleanly, so the profile is held"
+
+
+def owner_events(
+    events: Iterable[Mapping[str, Any]],
+    *,
+    owner: tuple[int, float] | None,
+    event: str,
+    after_ns: int | None,
+    before_ns: int | None = None,
+    reason: str | None = None,
+) -> list[dict[str, Any]]:
+    """The observed logger events of kind *event* the owner that closed reached.
+
+    That very lifetime (its pid and its own creation time, read once at its
+    startup), at a monotonic reading no earlier than *after_ns* and, when
+    given, no later than *before_ns*, and with *reason* when given. The
+    daemon log is one file per auth root that every owner generation appends
+    to, so a line in it names no writer; another generation's event, the
+    successor's, or an earlier process's at a reused pid witnesses nothing
+    for this owner (review e1ey, E1EY-02).
+    """
+    if owner is None or type(after_ns) is not int:
+        return []
+    pid, created = owner
+    found = []
+    for record in events:
+        made, t = record.get("pid_created"), record.get("monotonic_ns")
+        if record.get("event") != event or record.get("pid") != pid:
+            continue
+        if not isinstance(made, (int, float)):
+            continue
+        if abs(float(made) - created) > _START_TOLERANCE_SECONDS:
+            continue
+        if type(t) is not int or t < after_ns:
+            continue
+        if before_ns is not None and t > before_ns:
+            continue
+        if reason is not None and record.get("reason") != reason:
+            continue
+        found.append(dict(record))
+    return found
+
+
+def is_installer(record: Mapping[str, Any]) -> bool:
+    """A process of the product's installer: supervisor, its gate, the
+    ``patchright install`` worker and the Node processes it starts."""
+    joined = " ".join(str(part) for part in record.get("cmdline") or [])
+    return (
+        record.get("actor") == "installer"
+        or ("patchright" in joined and " install " in f" {joined} ")
+        or "oopBrowserDownload" in joined
+    )
+
+
+def installer_starts(observed: Iterable[Mapping[str, Any]]) -> list[tuple[int, float]]:
+    """Every installer lifetime (pid, create time) the watcher recorded in the row."""
+    starts: list[tuple[int, float]] = []
+    for entry in observed:
+        if entry.get("kind") not in ("process.start", "process.update"):
+            continue
+        if entry.get("in_row") is not True or not is_installer(entry):
+            continue
+        start = entry.get("start_identity")
+        if not isinstance(start, (int, float)):
+            continue
+        key = (int(entry["pid"]), float(start))
+        if key not in starts:
+            starts.append(key)
+    return starts
+
+
+def wait_for_installers(
+    observed: Callable[[], Iterable[Mapping[str, Any]]],
+    *,
+    watch: Callable[[int, float], None],
+    open_process: Callable[[int], Any] = psutil.Process,
+    seconds: float = _INSTALLER_SECONDS,
+) -> list[tuple[int, float]]:
+    """The row's installer processes, each handed to *watch* as it is found.
+
+    Only when the process at the pid is still the lifetime the watcher
+    recorded (its create time), and at once, so the handle *watch* takes names
+    that lifetime and keeps its exit readable however it ends. After the
+    first is seen, a second look a moment later picks up the worker and the
+    download the supervisor starts.
+    """
+    deadline = time.monotonic() + seconds
+    found: list[tuple[int, float]] = []
+    settle_until: float | None = None
+    while True:
+        for key in installer_starts(observed()):
+            if key in found:
+                continue
+            try:
+                process = open_process(key[0])
+                if abs(process.create_time() - key[1]) > _START_TOLERANCE_SECONDS:
+                    continue
+            except psutil.Error:
+                continue
+            found.append(key)
+            watch(*key)
+            if settle_until is None:
+                settle_until = time.monotonic() + 3.0
+        now = time.monotonic()
+        if (settle_until is not None and now >= settle_until) or now >= deadline:
+            return found
+        time.sleep(0.1)
+
+
+#: Where a row lifetime's recorded ancestry leads (``Lineage.of``).
+INSTALLER = "installer"
+BELOW_INSTALLER = "below an installer"
+FROM_HARNESS = "from the harness"
+UNRESOLVED = "unresolved"
+
+
+class Lineage:
+    """Where each row lifetime's recorded ancestry leads, parent by parent.
+
+    ``installer`` for an installer by its own record (``is_installer``);
+    ``below an installer`` when a recorded ancestor is one, whatever the
+    lifetime's own command; ``from the harness`` only when every link up to a
+    process the harness itself started (*outside*, the harness's own pid) is
+    a recorded row lifetime and none of them is an installer; ``unresolved``
+    otherwise: a parent the watcher never recorded, a link outside the row,
+    or a loop. Measured on Windows (run 36410976409, K2): the owner's release
+    gate, its Python child and that child's console host trace, through the
+    frontend and its launcher, to the harness pid that also started the
+    row's canaries.
+    """
+
+    def __init__(
+        self, observed: Iterable[Mapping[str, Any]], *, outside: Iterable[int] = ()
+    ) -> None:
+        records = list(observed)
+        self.outside = frozenset(outside) or frozenset({os.getpid()})
+        self.history = ProcessHistory(records, outside=self.outside)
+        self.installers = installer_starts(records)
+        self._memo: dict[tuple[int, float], str] = {}
+
+    def _is_installer(self, life: Lifetime) -> bool:
+        return any(
+            life.pid == pid and abs(life.start - start) <= _START_TOLERANCE_SECONDS
+            for pid, start in self.installers
+        )
+
+    def of(self, life: Lifetime) -> str:
+        if life.identity in self._memo:
+            return self._memo[life.identity]
+        answer = UNRESOLVED
+        current: Lifetime | None = life
+        seen: set[tuple[int, float]] = set()
+        while current is not None and current.identity not in seen:
+            seen.add(current.identity)
+            if self._is_installer(current):
+                answer = INSTALLER if current is life else BELOW_INSTALLER
+                break
+            if not current.in_row:
+                break
+            if current.ppid in self.outside:
+                answer = FROM_HARNESS
+                break
+            parent = self.history.at(current.ppid, current.first_t)
+            if parent is None or parent.start > current.start:
+                break
+            current = parent
+        self._memo[life.identity] = answer
+        return answer
+
+    def lifetime(self, pid: Any, created: Any) -> Lifetime | None:
+        """The one row lifetime recorded at *pid* with creation time *created*."""
+        if not isinstance(pid, int) or not isinstance(created, (int, float)):
+            return None
+        lives = [
+            life
+            for life in self.history.lifetimes
+            if life.pid == pid
+            and life.in_row
+            and abs(life.start - float(created)) <= _START_TOLERANCE_SECONDS
+        ]
+        return lives[0] if len(lives) == 1 else None
+
+
+def installer_family(
+    observed: Iterable[Mapping[str, Any]], fates: Fates, *, outside: Iterable[int] = ()
+) -> Callable[[Any, Any], bool]:
+    """Whether a lifetime is one of the installer family the row tracked.
+
+    A lifetime the row watched as an installer, or one the watcher recorded
+    in the row whose own record or recorded ancestry is an installer
+    (``Lineage``). An unresolved ancestry is not the family: it may be, which
+    keeps it in the inventory, but it witnesses nothing.
+    """
+    lineage = Lineage(observed, outside=outside)
+
+    def member(pid: Any, created: Any) -> bool:
+        if any(fate.is_lifetime(pid, created) for fate in fates.fates.values()):
+            return True
+        life = lineage.lifetime(pid, created)
+        return life is not None and lineage.of(life) in (INSTALLER, BELOW_INSTALLER)
+
+    return member
+
+
+def unaccounted_members(
+    records: Iterable[Mapping[str, Any]],
+    observed: Iterable[Mapping[str, Any]],
+    fates: Fates,
+    *,
+    outside: Iterable[int] = (),
+) -> list[str]:
+    """Every lifetime the shim saw asked about that the row cannot account for.
+
+    A record names a member of some actor's adopted Job, which is positive
+    evidence that the lifetime existed. It is accounted for when the row
+    watched it or the watcher recorded it in the row: then either the
+    inventory has to see it end (an installer, below one, or of unresolved
+    ancestry) or its ancestry leads to the harness with no installer on the
+    way. Measured on Windows (run 36410976409, K2): the drain also asked
+    about the owner's release gate, its Python child and that child's console
+    host. A lifetime nobody recorded could be an installer still running.
+    """
+    lineage = Lineage(observed, outside=outside)
+    problems = []
+    seen: set[tuple[Any, Any]] = set()
+    for record in records:
+        key = (record.get("member"), record.get("created"))
+        if key in seen:
+            continue
+        seen.add(key)
+        pid, created = key
+        if any(fate.is_lifetime(pid, created) for fate in fates.fates.values()):
+            continue
+        if lineage.lifetime(pid, created) is not None:
+            continue
+        problems.append(
+            f"the drain asked about pid {pid} created {created}, a lifetime the "
+            f"watcher never recorded in the row, so its end is unknown"
+        )
+    return problems
+
+
+def family_problems(
+    observed: Iterable[Mapping[str, Any]],
+    fates: Fates,
+    records: Iterable[Mapping[str, Any]],
+) -> list[str]:
+    """Why the installer family is not shown ended, from everything known now.
+
+    The watcher's history and the row's own handles (``installer_inventory``),
+    and every lifetime the shim has positively seen asked about
+    (``unaccounted_members``): a lifetime that evidence proves existed and
+    nothing shows ended may still be setup's, however it escaped the
+    watcher. The same rules at every boundary: before the harness restores
+    or probes, and before its teardown touches the cache.
+    """
+    observed = list(observed)
+    return [
+        *installer_inventory(observed, fates),
+        *unaccounted_members(records, observed, fates),
+    ]
+
+
+def settle_family(
+    observed: Callable[[], Iterable[Mapping[str, Any]]],
+    fates: Fates,
+    records: Callable[[], Iterable[Mapping[str, Any]]],
+    seconds: float = _FAMILY_SETTLE_SECONDS,
+) -> list[str]:
+    """Wait for the installer family to be shown ended; what is not, if not.
+
+    The labelled boundary before the harness restores the row-private cache
+    and makes the recovery probe: restoring a dependency under a download
+    still running would race it, and a probe made then would be a different
+    measurement. The same reconciliation as the barrier after the row
+    (``family_problems``), with the shim's records read afresh each time.
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        problems = family_problems(observed(), fates, records())
+        if not problems or time.monotonic() >= deadline:
+            return problems
+        time.sleep(0.2)
+
+
+def installer_inventory(
+    observed: Iterable[Mapping[str, Any]],
+    fates: Fates,
+    *,
+    outside: Iterable[int] = (),
+) -> list[str]:
+    """Every lifetime setup could have left running that is not shown ended.
+
+    That is every installer, every row lifetime recorded below one whatever
+    its own command (a console host, a helper), every lifetime the row
+    watched, and every row lifetime whose ancestry is unresolved: its first
+    observation cannot prove that it predates setup. Ended is
+    an exit observed through the row's own handle, or the watcher seeing
+    that lifetime leave the process table; a handle that could not be opened
+    or read, or a lifetime nobody saw leave, is neither.
+    """
+    records = list(observed)
+    lineage = Lineage(records, outside=outside)
+    gone = [
+        (record.get("pid"), record.get("start_identity"))
+        for record in records
+        if record.get("kind") == "process.exit"
+    ]
+    inventory: dict[tuple[int, float], str] = {}
+    for life in lineage.history.lifetimes:
+        if not life.in_row:
+            continue
+        kind = lineage.of(life)
+        if kind in (INSTALLER, BELOW_INSTALLER, UNRESOLVED):
+            inventory[(life.pid, life.start)] = kind
+    for key in fates.fates:
+        if not any(
+            key[0] == pid and abs(key[1] - start) <= _START_TOLERANCE_SECONDS
+            for pid, start in inventory
+        ):
+            inventory[key] = "watched"
+    problems = []
+    for (pid, start), kind in inventory.items():
+        fate = next(
+            (
+                fate
+                for fate in fates.fates.values()
+                if fate.pid == pid
+                and abs(fate.start - start) <= _START_TOLERANCE_SECONDS
+            ),
+            None,
+        )
+        if fate is not None and fate.settled:
+            continue
+        if any(
+            gone_pid == pid
+            and isinstance(gone_start, (int, float))
+            and abs(gone_start - start) <= _START_TOLERANCE_SECONDS
+            for gone_pid, gone_start in gone
+        ):
+            continue
+        why = f": {fate.problem}" if fate is not None and fate.problem else ""
+        problems.append(
+            f"pid {pid} ({kind}), created {start}, was neither seen to exit nor "
+            f"settled through its handle{why}"
+        )
+    return problems
+
+
+#: How far the wall clock may move apart from the monotonic one, and how far
+#: apart two creation times must be to be ordered at all.
+_CLOCK_SECONDS = 0.25
+
+
+class WallClockMarker:
+    """The creation time of a process started as the close begins.
+
+    Windows keeps a process's creation time on the wall clock only, so it
+    orders two processes only while that clock ran with the monotonic one:
+    this records both as the row began and checks them when asked. Creation
+    times within ``_CLOCK_SECONDS`` of the marker are not ordered at all.
+    """
+
+    def __init__(self) -> None:
+        self.began = (time.time(), time.monotonic())
+        self.created: float | None = None
+
+    def mark(self) -> None:
+        try:
+            marker = subprocess.Popen(
+                [sys.executable, "-I", "-c", "import sys; sys.stdin.read()"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            return
+        try:
+            with contextlib.suppress(psutil.Error):
+                self.created = psutil.Process(marker.pid).create_time()
+        finally:
+            with contextlib.suppress(OSError, ValueError):
+                assert marker.stdin is not None
+                marker.stdin.close()
+            try:
+                marker.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                marker.kill()
+                marker.wait(timeout=10)
+
+    def held(self) -> bool:
+        """Whether the wall clock has kept pace with the monotonic one so far."""
+        wall, mono = self.began
+        return abs((time.time() - wall) - (time.monotonic() - mono)) <= _CLOCK_SECONDS
+
+    def after(self, pid: int, start: float) -> bool | None:
+        """Whether *start* is after the marker; None when that is not known."""
+        if self.created is None or not self.held():
+            return None
+        if start > self.created + _CLOCK_SECONDS:
+            return True
+        if start < self.created - _CLOCK_SECONDS:
+            return False
+        return None
+
+
+def successor_verdict(
+    *,
+    probe: Mapping[str, Any] | None,
+    left: bool | None,
+    problems: Iterable[str] | None,
+) -> list[str]:
+    """Why H-R11's recovery is not a successor that served, before host quit.
+
+    All three are needed: the probe read the synthetic post, the owner that
+    closed was confirmed gone before it, and the owner the descriptor then
+    named is a new lifetime and instance that served it (``successor_problems``
+    and a creation time after the close began). A gate, an owner-labelled
+    start or a later Direct session stands in for none of them.
+    """
+    found = []
+    if probe is None:
+        found.append("no probe was made after the close")
+    elif probe.get("is_error") or not probe.get("read_the_post"):
+        found.append(
+            f"the probe after the close did not read the synthetic post "
+            f"(is_error={probe.get('is_error')!r})"
+        )
+    if left is not True:
+        found.append(
+            f"the owner that closed was not confirmed gone before the probe "
+            f"(left={left!r})"
+        )
+    if problems is None:
+        # Nobody looked for a new owner, so nothing shows there was one.
+        return [*found, "the successor was never looked for"]
+    return [*found, *problems]
+
+
+#: The one file the harness's own restoration writes in the auth root: the
+#: install record ``record_install`` puts back for the restored cache.
+_RESTORATION_WRITES = frozenset({"browser-install.json"})
+
+
+def auth_files(root: Path) -> dict[str, str]:
+    """Snapshot files and directories without traversing links or reparse points.
+
+    File content is hashed; directories are recorded even when empty. Failed
+    enumeration, metadata or content reads stay ``unreadable``, never absence.
+    """
+    files: dict[str, str] = {}
+
+    def relative(path: Path) -> str:
+        try:
+            return path.relative_to(root).as_posix()
+        except ValueError:
+            return "."
+
+    def kind(path: Path) -> str:
+        try:
+            metadata = path.lstat()
+        except OSError:
+            return "unreadable"
+        if stat.S_ISLNK(metadata.st_mode) or (
+            getattr(metadata, "st_file_attributes", 0)
+            & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            return "link"
+        if stat.S_ISDIR(metadata.st_mode):
+            return "directory"
+        return "file" if stat.S_ISREG(metadata.st_mode) else "unreadable"
+
+    def failed(error: OSError) -> None:
+        path = Path(error.filename) if error.filename else root
+        files[relative(path)] = "unreadable"
+
+    files["."] = kind(root)
+    if files["."] != "directory":
+        return files
+    for directory, names, entries in os.walk(root, onerror=failed, followlinks=False):
+        base = Path(directory)
+        for name in [*names, *entries]:
+            path = base / name
+            entry_kind = kind(path)
+            key = relative(path)
+            if entry_kind != "file":
+                files[key] = entry_kind
+                if name in names and entry_kind != "directory":
+                    names.remove(name)
+            else:
+                try:
+                    files[key] = hashlib.sha256(path.read_bytes()).hexdigest()
+                except OSError:
+                    files[key] = "unreadable"
+    return files
+
+
+def restoration_changes(
+    before: Mapping[str, str], after: Mapping[str, str]
+) -> list[str]:
+    """What changed in the auth root across the harness's restoration, beyond
+    the install record it writes itself.
+
+    The restoration relinks a row-private cache outside the auth root and
+    writes that record. Anything else that changed meanwhile was changed by
+    something else, and a final snapshot would count it as the product's.
+    """
+    problems = []
+    for name in sorted(before.keys() | after.keys()):
+        if name in _RESTORATION_WRITES:
+            continue
+        if {before.get(name), after.get(name)} & {"unreadable", "link"}:
+            problems.append(
+                f"the auth root's {name} could not be compared across restoration"
+            )
+        elif before.get(name) != after.get(name):
+            problems.append(
+                f"the auth root's {name} changed while the harness restored the cache"
+            )
+    return problems
+
+
+def protected_changes(before: ProfileSnapshot, at: ProfileSnapshot) -> list[str]:
+    """What the product changed of the protected session by the recovery boundary.
+
+    Read at that checkpoint, before the harness restores anything, so no
+    restoration can repair it; a checkpoint, not a watch over the interval.
+    Allowed: the cookie file's bytes and names, which the close's export and
+    a session refresh rewrite, and the browser's own profile files. Not
+    allowed: another login generation, a staged session no longer usable, a
+    new quarantine, a missing profile, an artefact that no longer reads.
+    """
+    problems = []
+    if at.generation != before.generation:
+        problems.append(
+            f"the login generation changed from {before.generation!r} to "
+            f"{at.generation!r}"
+        )
+    if before.li_at_usable and not at.li_at_usable:
+        problems.append("the staged session's li_at is no longer usable")
+    quarantined = sorted(set(at.quarantine) - set(before.quarantine))
+    if quarantined:
+        problems.append(f"quarantined: {quarantined}")
+    if before.profile_present and not at.profile_present:
+        problems.append("the browser profile is gone")
+    unreadable = sorted(set(at.unreadable) - set(before.unreadable))
+    if unreadable:
+        problems.append(f"no longer readable: {unreadable}")
+    return problems
+
+
+def fault_witnesses(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    owner: tuple[int, float] | None,
+    family: Callable[[Any, Any], bool],
+    interval_ns: tuple[int, int] | None,
+) -> list[dict[str, Any]]:
+    """The planted failures that witness the intended entry, and only those.
+
+    A witness was written by the owner that closed, that very lifetime (its
+    pid and its own creation time, so neither an earlier process at a reused
+    pid nor the successor), about a lifetime of the installer family
+    (*family*), asking a Job that owner held (its handle), at a time inside
+    the close call (*interval_ns*, host and shim monotonic nanoseconds on this
+    machine). Wall time is diagnostic only and cannot move a pre-close query
+    inside the interval. Each record certifies one invocation, not later calls.
+    """
+    if owner is None or interval_ns is None:
+        return []
+    pid, created = owner
+    began, ended = interval_ns
+    if type(began) is not int or type(ended) is not int or began > ended:
+        return []
+    found = []
+    for record in records:
+        made, t = record.get("pid_created"), record.get("monotonic_ns")
+        if record.get("pid") != pid or not isinstance(made, (int, float)):
+            continue
+        if not isinstance(record.get("job"), int):
+            continue
+        if abs(float(made) - created) > _START_TOLERANCE_SECONDS:
+            continue
+        if type(t) is not int or not began <= t <= ended:
+            continue
+        if family(record.get("member"), record.get("created")):
+            found.append(dict(record))
+    return found
+
+
+def imported_process_tree(shim: ShimVenv) -> str | None:
+    """The process_tree the shim venv's actors import, by content."""
+    module = shim.code.get("module")
+    if not module:
+        return None
+    try:
+        text = (Path(module).parent / "process_tree.py").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return source_sha256(text)
+
+
+def job_query_problems(
+    shim: ShimVenv | None,
+    *,
+    fates: Fates,
+    window: Mapping[str, Any],
+    script_error: str | None,
+    observed: Iterable[Mapping[str, Any]] = (),
+    records: Iterable[Mapping[str, Any]] = (),
+    host: Sequence[str] = (),
+    watcher: Sequence[str] = (),
+    cleanup: Sequence[str] = (),
+    before_cleanup: Sequence[str] | None = (),
+) -> list[str]:
+    """What stops H-R11 from observing the row, in any experiment.
+
+    Not the behaviour under test, so K2 is held to all of it too: the row's
+    own script; every installer lifetime not shown ended
+    (``installer_inventory``), at the recovery boundary, before the teardown
+    touched anything (*before_cleanup*, None when that was never
+    established) and after the row; every lifetime the shim saw asked about
+    that the row cannot account for (``unaccounted_members``); a harness
+    restoration that changed more than its own record; the whole of
+    ``host_failures``; what the watcher could not observe (*watcher*,
+    ``watcher_failures``); what cleanup could not do (*cleanup*,
+    ``DaemonCleanup.failures``); and a wall clock that moved.
+
+    What was unresolved before the teardown stays unresolved. An exit observed
+    after the harness stops its stall host cannot establish product settlement
+    before that intervention; its cause remains unobserved.
+    """
+    if shim is None:
+        return []
+    observed = list(observed)
+    problems = list(host)
+    if script_error is not None:
+        problems.append(f"the H-R11 script failed: {script_error}")
+    if before_cleanup is None:
+        problems.append(
+            "the installer family was never shown ended before the teardown began"
+        )
+    else:
+        problems += [f"before cleanup: {p}" for p in before_cleanup]
+    problems += [
+        f"installer inventory: {p}" for p in installer_inventory(observed, fates)
+    ]
+    problems += [
+        f"installer evidence: {p}"
+        for p in unaccounted_members(records, observed, fates)
+    ]
+    problems += [
+        f"before recovery: {p}" for p in window.get("family_before_recovery") or ()
+    ]
+    problems += [f"restoration: {p}" for p in window.get("restoration_changes") or ()]
+    problems += [f"watcher: {problem}" for problem in watcher]
+    problems += [f"cleanup: {problem}" for problem in cleanup]
+    if not fates.fates:
+        problems.append(
+            "no installer ran when the row closed, so the Job query had no "
+            "member to be asked about"
+        )
+    if window.get("clock_held") is False:
+        problems.append(
+            "the wall clock moved apart from the monotonic one by the end of the "
+            "close, so no record's time can be placed inside it"
+        )
+    if window.get("script_ended") is not True:
+        problems.append("the H-R11 script did not run to its end")
+    return problems
+
+
+#: No native evidence here says which caller ended an installer lifetime:
+#: exit code 1 comes from the routine drain and from a Job's rundown alike.
+UNOBSERVED_CAUSE = "unobserved"
+NATIVE = "native"
+#: The recovery probe was made only once the installer family had settled.
+POST_SETTLEMENT = "post-settlement"
+#: Direct keeps its installer in its own setup until host quit, so no
+#: settlement can come before a probe, and none is made.
+NO_RECOVERY = "none: Direct keeps its installer until host quit"
+
+
+@dataclass(frozen=True)
+class NativeContinuation:
+    """What one native H-R11 experiment established, as native evidence only.
+
+    Claim map. That the experiment reached the planted situation: the owner
+    that closed, the installer family it held, and positive fault witnesses
+    (``fault_witnesses``), each certifying one invocation. What followed:
+    that same owner lifetime reaching core.close's consumption of the drain's
+    False inside the close, then its own held-profile stand-down, and its
+    observed exit (K3, ``owner_events``); the family settled at a labelled
+    boundary, then a post-settlement recovery whose successor served the probe
+    (K3); the protected session at that boundary; and every validity problem.
+    The shared daemon log is diagnostic only: its lines name no writer.
+
+    ``termination_cause`` is ``unobserved`` in every cell, and no field says
+    whether any caller selected ``TerminateProcess``: that is the source
+    model's (``job_query_model``), a different kind of evidence. Nothing
+    here is merged with it into a native reading of the drain.
+    """
+
+    experiment: str
+    run: str
+    mode: str
+    #: The revision the actors ran (the pin, or the checkout's HEAD), and the
+    #: process_tree they import, by content (``source_sha256``).
+    revision: str | None
+    process_tree_sha256: str | None
+    shim_sha256: str
+    vector: RowVector | None
+    first_read: bool
+    #: The owner that closed, (pid, creation time); None in Direct.
+    owner: tuple[int, float] | None
+    #: The close call, as the host sent it and read its answer.
+    close: tuple[float, float] | None
+    #: Installer lifetimes the row watched.
+    installers: int
+    #: Every planted failure recorded in the row, and those that witness the
+    #: intended entry.
+    reached: int
+    witnesses: tuple[Mapping[str, Any], ...]
+    #: Daemon rows: the owner that closed reached core.close's consumption of
+    #: the drain's False inside its close and its held-profile stand-down
+    #: after it began (observed logger events of that lifetime), and was seen
+    #: to exit. None in Direct.
+    consumed_false: bool | None
+    stood_down: bool | None
+    owner_left: bool | None
+    #: Observed logger events recorded in the row, whoever reached them.
+    events: int
+    recovery: str
+    protected_at_boundary: tuple[str, ...]
+    successor_verified: bool | None
+    successor_problems: tuple[str, ...]
+    #: What kept this experiment from being observed, whatever it is.
+    validity: tuple[str, ...]
+    termination_cause: str = UNOBSERVED_CAUSE
+    evidence: str = NATIVE
+    close_monotonic_ns: tuple[int, int] | None = None
+
+
+def native_continuation(
+    *,
+    experiment: str,
+    run: str,
+    daemon: bool,
+    identity: Mapping[str, Any],
+    shim: ShimVenv,
+    vector: RowVector | None,
+    host: HostSession,
+    window: Mapping[str, Any],
+    fates: Fates,
+    observed: Sequence[Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+    events: Sequence[Mapping[str, Any]],
+    successor: Mapping[str, Any],
+    validity: Sequence[str],
+) -> NativeContinuation:
+    """The row's continuation, from what it recorded; judged elsewhere."""
+    owner_pid, owner_created = window.get("owner_pid"), window.get("owner_created")
+    owner = (
+        (int(owner_pid), float(owner_created))
+        if daemon
+        and isinstance(owner_pid, int)
+        and isinstance(owner_created, (int, float))
+        else None
+    )
+    began, ended = window.get("began"), window.get("ended")
+    close = (
+        (float(began), float(ended))
+        if isinstance(began, (int, float)) and isinstance(ended, (int, float))
+        else None
+    )
+    mono_began, mono_ended = (
+        window.get("began_monotonic_ns"),
+        window.get("ended_monotonic_ns"),
+    )
+    close_monotonic_ns = (
+        (mono_began, mono_ended)
+        if type(mono_began) is int and type(mono_ended) is int
+        else None
+    )
+    witnesses = fault_witnesses(
+        records,
+        owner=owner,
+        family=installer_family(observed, fates),
+        interval_ns=close_monotonic_ns,
+    )
+    began_ns, ended_ns = close_monotonic_ns or (None, None)
+    consumed = owner_events(
+        events,
+        owner=owner,
+        event=CONSUMED_FALSE,
+        after_ns=began_ns,
+        before_ns=ended_ns,
+    )
+    stood = owner_events(
+        events,
+        owner=owner,
+        event=STAND_DOWN,
+        after_ns=began_ns,
+        reason=HELD_PROFILE_REASON,
+    )
+    tool = host.tool or {}
+    return NativeContinuation(
+        experiment=experiment,
+        run=run,
+        mode="daemon" if daemon else "direct",
+        revision=identity.get("head"),
+        process_tree_sha256=imported_process_tree(shim),
+        shim_sha256=shim.shim_sha256,
+        vector=vector,
+        first_read=bool(tool)
+        and not tool.get("is_error")
+        and bool(tool.get("read_the_post")),
+        owner=owner,
+        close=close,
+        close_monotonic_ns=close_monotonic_ns,
+        installers=len(fates.fates),
+        reached=len(records),
+        witnesses=tuple(witnesses),
+        consumed_false=bool(consumed) if daemon else None,
+        stood_down=bool(stood) if daemon else None,
+        owner_left=window.get("owner_left_before_probe") if daemon else None,
+        events=len(events),
+        recovery=str(window.get("recovery") or "not reached"),
+        protected_at_boundary=tuple(window.get("protected_at_boundary") or ()),
+        successor_verified=successor.get("verified") if daemon else None,
+        successor_problems=tuple(successor.get("problems") or ()),
+        validity=tuple(validity),
+    )
+
+
+def continuation_problems(
+    continuation: NativeContinuation | None,
+    *,
+    experiment: str,
+    revision: str | None,
+    run: str | None = None,
+) -> list[str]:
+    """The common validity gate of an H-R11 cell, and what its experiment adds.
+
+    Every cell: the expected experiment, mode, revision and shim, a named
+    process_tree, a first read of the synthetic post, labels that claim no
+    more than native evidence, and not one validity problem (host, watcher,
+    cleanup, census, installer family, script, runtime, restoration, clock).
+    K1 is the reference: Direct has no adopted Job, so no planted failure is
+    required, and one reached there is the wrong topology. K2 and K3: the
+    owner that closed and a positive fault witness inside its close. K3 also:
+    core.close's negative consumption, the stand-down, the owner's exit, a
+    post-settlement recovery with nothing protected changed by its boundary,
+    and a successor that served it. No cell says which caller ended an
+    installer.
+    """
+    if continuation is None:
+        return [f"{experiment} left no native continuation"]
+    c = continuation
+    problems = list(c.validity)
+    if c.experiment != experiment:
+        problems.append(f"the continuation is {c.experiment}'s, not {experiment}'s")
+    if run is not None and c.run != run:
+        problems.append(f"the continuation is from run {c.run}, not {run}")
+    if revision is None or c.revision != revision:
+        problems.append(f"the actors ran {c.revision}, not {revision}")
+    if c.shim_sha256 != SHIM_SHA256:
+        problems.append(f"the shim was {c.shim_sha256}, not the declared {SHIM_SHA256}")
+    if c.process_tree_sha256 is None:
+        problems.append("the process_tree the actors import could not be read")
+    if c.evidence != NATIVE or c.termination_cause != UNOBSERVED_CAUSE:
+        problems.append(
+            f"the continuation claims {c.evidence!r} evidence and a termination "
+            f"cause {c.termination_cause!r}; nothing native observed the caller"
+        )
+    expected_mode = "direct" if experiment == "K1" else "daemon"
+    if c.mode != expected_mode:
+        problems.append(f"{experiment} ran in {c.mode} mode, not {expected_mode}")
+    if not c.first_read:
+        problems.append("the first call did not read the synthetic post")
+    if experiment == "K1":
+        if c.reached:
+            problems.append(
+                f"the Direct reference reached the Job-membership query "
+                f"{c.reached} time(s), but it has no adopted Job to reach it "
+                f"through"
+            )
+        return problems
+    if c.owner is None:
+        problems.append("the owner that closed was never identified")
+    if c.close is None:
+        problems.append("the close's interval was not recorded")
+    if not c.witnesses:
+        problems.append(
+            f"no planted failure witnesses the entry: {c.reached} recorded, none "
+            f"by the owner that closed, about the installer family, inside its "
+            f"close"
+        )
+    if experiment == "K2":
+        return problems
+    if c.consumed_false is not True:
+        problems.append(
+            f"the owner that closed was not seen to reach core.close's consumption "
+            f"of the drain's False inside its close ({c.events} logger event(s) "
+            f"recorded in the row)"
+        )
+    if c.stood_down is not True:
+        problems.append(
+            f"the owner that closed was not seen to reach its held-profile "
+            f"stand-down ({c.events} logger event(s) recorded in the row)"
+        )
+    if c.owner_left is not True:
+        problems.append(
+            f"the owner that closed was not seen to exit (owner_left={c.owner_left!r})"
+        )
+    if c.recovery != POST_SETTLEMENT:
+        problems.append(f"no post-settlement recovery: {c.recovery}")
+    problems += [f"by the recovery boundary: {p}" for p in c.protected_at_boundary]
+    if c.successor_verified is not True:
+        problems.append(
+            "no successor is shown to have served the recovery"
+            + (f": {'; '.join(c.successor_problems)}" if c.successor_problems else "")
+        )
+    return problems
+
+
+class R11Ledger:
+    """The native continuations of one invocation of the row module.
+
+    Made by that module for itself and emptied by the composition, so a cell
+    of another invocation or an earlier repetition never stands in. A second
+    continuation for one experiment is refused, not chosen between.
+    """
+
+    def __init__(self, run: str) -> None:
+        self.run = run
+        self._cells: dict[str, NativeContinuation] = {}
+        self._problems: list[str] = []
+
+    def record(self, continuation: NativeContinuation | None) -> None:
+        if continuation is None:
+            return
+        if continuation.experiment in self._cells:
+            self._problems.append(
+                f"a second {continuation.experiment} continuation in one invocation"
+            )
+            return
+        self._cells[continuation.experiment] = continuation
+
+    def take(self) -> tuple[dict[str, NativeContinuation], list[str]]:
+        cells, problems = self._cells, self._problems
+        self._cells, self._problems = {}, []
+        return cells, problems
+
+
+def r11_composition(
+    model: RoutineModel | None,
+    ledger: R11Ledger,
+    *,
+    revisions: Mapping[str, str | None],
+) -> list[str]:
+    """What stops H-R11's claim from being composed in this invocation.
+
+    A composition of separate results, never a sum of them: the source
+    model's conditional branch, calibrated in this process against the exact
+    sources the native runtimes imported (the baseline's prohibited
+    selection, the candidate's abstention and every positive control); each
+    native continuation of this run through the common gate; and K3 no worse
+    than K1 on O1, O2 and O4. A missing calibration or cell fails it: K1 and
+    K3 selected alone compose nothing. Whole-system O2 stays what the vectors
+    say, unobserved where nothing traced it.
+    """
+    cells, problems = ledger.take()
+    if model is None:
+        problems.append("no source-model calibration ran in this invocation")
+    else:
+        if model.evidence != SOURCE_MODEL:
+            problems.append(f"the calibration is {model.evidence!r}, not source-model")
+        problems += [f"source model: {problem}" for problem in model.problems]
+    for experiment in ("K1", "K2", "K3"):
+        cell = cells.get(experiment)
+        problems += [
+            f"{experiment}: {problem}"
+            for problem in continuation_problems(
+                cell,
+                experiment=experiment,
+                revision=revisions.get(experiment),
+                run=ledger.run,
+            )
+        ]
+        if cell is None or model is None:
+            continue
+        modelled = model.sha256.get(CANDIDATE if experiment == "K3" else BASELINE)
+        if cell.process_tree_sha256 != modelled:
+            problems.append(
+                f"{experiment}: the actors imported process_tree "
+                f"{cell.process_tree_sha256}, the source model ran {modelled}"
+            )
+    reference, candidate = cells.get("K1"), cells.get("K3")
+    if reference is not None and candidate is not None:
+        if reference.vector is None or candidate.vector is None:
+            problems.append("K1 or K3 left no vector to compare")
+        else:
+            problems += [
+                f"K3 differs from K1 frozen: {difference}"
+                for difference in compare_to_direct(reference.vector, candidate.vector)
+            ]
+    return problems
+
+
 def compare_repeat(first: RowVector, second: RowVector) -> list[str]:
     """K0: every field of two runs of the same experiment must agree."""
     one, two = asdict(first), asdict(second)
@@ -1975,6 +3251,9 @@ class RowResult:
     failures: list[str] = field(default_factory=list)
     #: A frozen row whose actors could not be shown to run the baseline.
     runtime_failures: list[str] = field(default_factory=list)
+    #: H-R11: what the native experiment established, and every problem that
+    #: kept it from being observed (``continuation_problems`` judges it).
+    continuation: NativeContinuation | None = None
     #: H-R6: what the harness killed, its guardian and the oracle's state.
     killed: dict[str, Any] | None = None
     o2: O2Result | None = None
@@ -2295,6 +3574,7 @@ async def measure_host_quit_row(
     expect_owner: bool | None = None,
     reference: str | None = None,
     kill_actor: bool = False,
+    job_query_shim: ShimVenv | None = None,
 ) -> RowResult:
     """Run a host-quit row once and return its outcome vector and evidence.
 
@@ -2306,6 +3586,14 @@ async def measure_host_quit_row(
     that process to the watcher's record of it, with the signal oracle
     attached to it and its guardian first; in daemon mode the host then calls
     again, which is where the frontend recovers.
+    *job_query_shim* makes it H-R11 (``job_query``): the actors start from that
+    venv, whose declared shim fails the routine drain's Job-membership query;
+    the browser cache is a row-private one of links; after the read the row
+    holds a dependency back so the next call starts an installer that waits on
+    a host that never answers, then calls ``close_session`` with it running.
+    In daemon mode, once the installer family has settled, the row restores
+    the cache and calls once more, where a successor would serve. What the
+    row established is ``RowResult.continuation`` (``NativeContinuation``).
     """
     # First, before anything reads, launches or spawns.
     account = claim_account(profile)
@@ -2316,7 +3604,11 @@ async def measure_host_quit_row(
         expect_owner = daemon
     result = RowResult(experiment=experiment, mode=mode, reference=reference)
     runtime = runtime or candidate_runtime()
-    command = list(command or runtime.command())
+    shim = job_query_shim
+    command = list(
+        command
+        or ([shim.python, "-m", "linkedin_mcp_server"] if shim else runtime.command())
+    )
 
     def emit(actor: str, kind: str, **fields: Any) -> None:
         log.emit(experiment=experiment, row=row, actor=actor, kind=kind, **fields)
@@ -2379,6 +3671,42 @@ async def measure_host_quit_row(
     env = actor_environment(
         account, proxy.url, daemon=daemon, browsers=browsers, chrome_path=chrome_path
     )
+    cache: PrivateCache | None = None
+    stall: StallHost | None = None
+    fates = Fates()
+    job_window: dict[str, Any] = {}
+    #: H-R11 daemon: the owner the descriptor named after the probe, and why it
+    #: is not shown to be a successor that served it (``successor_verdict``).
+    successor: dict[str, Any] = {}
+    #: H-R11 daemon: orders the successor's creation after the close.
+    close_clock = WallClockMarker()
+    #: H-R11: why the installer family is not shown ended, taken after host
+    #: quit and before the teardown; None until that verdict has been taken.
+    family_at_teardown: list[str] | None = None
+    if shim is not None:
+        # Every planted failure of an earlier row in the same venv is not ours.
+        shim.reached_file.unlink(missing_ok=True)
+        locations = await asyncio.to_thread(install_locations, runtime.python, browsers)
+        stall = StallHost().start()
+        try:
+            cache = await asyncio.to_thread(
+                private_install, runtime.python, locations, env, stall
+            )
+            emit(
+                "harness",
+                "shim.planted",
+                **shim.as_event_fields(),
+                private_cache=str(cache.directory),
+                linked=[str(location) for location in locations],
+                stall_host=stall.url,
+            )
+        except BaseException:
+            try:
+                if cache is not None:
+                    cache.dismantle()
+            finally:
+                stall.stop()
+            raise
     emit(
         "harness",
         "row.identity",
@@ -2497,6 +3825,203 @@ async def measure_host_quit_row(
             owner["start_identity"] = identified.create_time
         emit("harness", "owner.found", **owner)
 
+    async def job_query_script(call: ToolCall) -> None:
+        """Start an installer and close with it running; in daemon mode, once
+        the installer family has settled, recover and call once more."""
+        assert cache is not None and shim is not None
+        # The owner whose drain the shim should be reached in: the one serving now.
+        job_window["owner_pid"] = identified.pid if identified is not None else None
+        job_window["owner_created"] = (
+            identified.create_time if identified is not None else None
+        )
+        log_path = owner.get("log_path")
+        job_window["owner_log"] = log_path
+        held = cache.hold_back()
+        # The row's own install record, so setup looks again on the next call.
+        (account.auth_root / "browser-install.json").unlink(missing_ok=True)
+        emit("harness", "job_query.window", phase="held back", held=str(held))
+        await call(READ_TOOL, READ_TOOL_ARGUMENTS)
+        members = await asyncio.to_thread(
+            wait_for_installers, watcher.observed, watch=fates.watch
+        )
+        emit(
+            "harness",
+            "job_query.window",
+            phase="installer",
+            installers=[list(member) for member in members],
+        )
+        # Whatever was created after this marker was created after the close
+        # began, while the wall clock kept pace (``WallClockMarker``).
+        await asyncio.to_thread(close_clock.mark)
+        closed = await call("close_session", {})
+        job_window.update(
+            began=closed["began"],
+            ended=closed["ended"],
+            began_monotonic_ns=closed.get("began_monotonic_ns"),
+            ended_monotonic_ns=closed.get("ended_monotonic_ns"),
+        )
+        job_window["clock_held"] = close_clock.held()
+        # Whether the owner that closed reached core.close's consumption of the
+        # drain's False inside the close: the shim records it synchronously in
+        # that owner before the call answers. Only a lifetime-bound event
+        # counts; the daemon log is shared by every owner generation.
+        consumed = daemon and bool(
+            owner_events(
+                logged(shim.reached_file),
+                owner=(
+                    (identified.pid, identified.create_time)
+                    if identified is not None
+                    else None
+                ),
+                event=CONSUMED_FALSE,
+                after_ns=closed.get("began_monotonic_ns"),
+                before_ns=closed.get("ended_monotonic_ns"),
+            )
+        )
+        job_window["consumed_false"] = consumed
+        emit("harness", "job_query.window", phase="close", **job_window)
+        watch_late_installers()
+        if not daemon:
+            # Direct's own setup holds the installer until host quit, so its
+            # family settles only then (``fates.settle`` below) and no probe
+            # could come after that settlement.
+            job_window["recovery"] = NO_RECOVERY
+            job_window["script_ended"] = True
+            return
+        # An owner whose close stayed unconfirmed stands down, and a call that
+        # reaches it meanwhile is told to call again for its replacement
+        # (measured on Windows, run 36384952466: the probe came 33 ms after the
+        # verdict, the owner answered "restarting", the host quit, and no
+        # successor was ever asked for). So the probe waits for that owner to
+        # be gone, observed through the handle the row identified it by.
+        leaving = identified is not None and consumed is True
+        job_window["owner_left_before_probe"] = (
+            await asyncio.to_thread(
+                wait_until_dead, identified.process, _OWNER_STAND_DOWN_SECONDS
+            )
+            if leaving and identified is not None
+            else None
+        )
+        # The labelled boundary: the installer family settled first, then the
+        # harness's restoration, then the probe, so the probe is a
+        # post-settlement recovery and the restoration races no download.
+        # Settled means every lifetime known so far, the shim's positively
+        # queried ones included, not only what the watcher recorded.
+        watch_late_installers()
+        unsettled = await asyncio.to_thread(
+            settle_family,
+            watcher.observed,
+            fates,
+            lambda: reached(shim.reached_file),
+            _FAMILY_SETTLE_SECONDS,
+        )
+        job_window["family_before_recovery"] = unsettled
+        emit("harness", "job_query.window", phase="family settled", unsettled=unsettled)
+        if unsettled:
+            job_window["recovery"] = "not made: the installer family had not settled"
+            job_window["script_ended"] = True
+            return
+        # What the product left at the boundary, read before the harness
+        # restores anything, and the auth root on both sides of that
+        # restoration, so neither can stand for the other.
+        at_boundary = snapshot(account.profile, expected_digest=staged.li_at_digest)
+        job_window["protected_at_boundary"] = protected_changes(before, at_boundary)
+        unrestored = await asyncio.to_thread(auth_files, account.auth_root)
+        # Both the held-back link and its install record must be ready before
+        # the next owner can serve a browser-backed read.
+        await asyncio.to_thread(cache.restore_installed, runtime.python, env)
+        restored = await asyncio.to_thread(auth_files, account.auth_root)
+        job_window["restoration_changes"] = restoration_changes(unrestored, restored)
+        job_window["recovery"] = POST_SETTLEMENT
+        emit(
+            "harness",
+            "job_query.window",
+            phase="cache restored",
+            at_boundary=at_boundary.as_event_fields(),
+            protected_at_boundary=job_window["protected_at_boundary"],
+            restoration_changes=job_window["restoration_changes"],
+        )
+        probe = await call(READ_TOOL, READ_TOOL_ARGUMENTS)
+        job_window["probe_ended"] = probe["ended"]
+        job_window["probe"] = {
+            name: probe.get(name)
+            for name in ("began", "ended", "is_error", "read_the_post")
+        }
+        emit(
+            "harness",
+            "job_query.window",
+            phase="probe",
+            owner_left_before_probe=job_window["owner_left_before_probe"],
+            probe_ended=probe["ended"],
+            probe_error=probe.get("is_error"),
+            probe_read_the_post=probe.get("read_the_post"),
+        )
+        watch_late_installers()
+        await verify_the_successor(job_window["probe"])
+        job_window["script_ended"] = True
+
+    def watch_late_installers() -> None:
+        """Watch installer lifetimes the first look missed; one that cannot be
+        watched stays an unknown fate for the inventory to account for."""
+        for pid, start in installer_starts(watcher.observed()):
+            fates.watch(pid, start)
+
+    def find_the_successor(
+        closing: OwnerIdentity | None, probe: Mapping[str, Any]
+    ) -> None:
+        """Which owner the descriptor names now, and whether it replaced *closing*
+        and served *probe*."""
+        found: OwnerIdentity | None = None
+        successor.pop("identify_error", None)
+        try:
+            published = daemon_descriptor.read(account.auth_root)
+        except Exception as exc:  # noqa: BLE001 - the row reports it
+            successor["identify_error"] = f"{type(exc).__name__}: {exc}"
+            published = None
+        if published is not None:
+            found, problem = identify_owner(published, account, watcher.observed())
+            if problem is not None:
+                successor["identify_error"] = problem
+            successor.update(pid=published.pid, instance_id=published.instance_id)
+        began, ended = probe.get("began"), probe.get("ended")
+        interval = (began, ended) if began is not None and ended is not None else None
+        successor["problems"] = successor_problems(
+            watcher.observed(),
+            closing,
+            found,
+            probe=interval,
+            probe_requests=sum(
+                1
+                for request in feed_requests(origin.requests[request_mark:])
+                if interval is not None
+                and interval[0] <= (request.t or 0.0) <= interval[1]
+            ),
+            after_close=close_clock.after,
+        )
+
+    async def verify_the_successor(probe: Mapping[str, Any]) -> None:
+        """Before the host quits: a new owner, and only it, served the probe."""
+        left = job_window.get("owner_left_before_probe")
+        close_began = job_window.get("began")
+        served = not probe.get("is_error") and bool(probe.get("read_the_post"))
+        if served and left is True and close_began is not None:
+            deadline = time.monotonic() + _SUCCESSOR_SECONDS
+            while True:
+                await asyncio.to_thread(find_the_successor, identified, probe)
+                if not successor["problems"] or time.monotonic() >= deadline:
+                    break
+                await asyncio.sleep(0.2)
+        successor["problems"] = successor_verdict(
+            probe=probe, left=left, problems=successor.get("problems")
+        )
+        successor["verified"] = not successor["problems"]
+        job_window["successor_verified"] = successor["verified"]
+        emit(
+            "harness",
+            "owner.successor",
+            **{name: value for name, value in successor.items()},
+        )
+
     async def after_call() -> None:
         await find_the_owner()
         if kill_actor:
@@ -2533,9 +4058,10 @@ async def measure_host_quit_row(
             after_call=after_call,
             started=lambda pid: server.update(pid=pid),
             second_call=kill_actor and daemon,
+            script=job_query_script if shim is not None else None,
         )
         result.host = host
-        if kill_actor and daemon:
+        if (kill_actor or shim is not None) and daemon:
             # The owner the frontend recovered to is the one that now has to
             # leave through its idle exit and be cleaned up. If nothing else
             # was published since, the killed owner's own handle stays, so
@@ -2562,6 +4088,8 @@ async def measure_host_quit_row(
                 owner.clear()
                 owner.update(killed_record)
             owner["replaced_after_kill"] = replaced
+            if shim is not None:
+                owner["successor"] = dict(successor)
         if host.tool is not None:
             emit("host_stub", "tool.result", tool=READ_TOOL, **host.tool)
         emit(
@@ -2606,6 +4134,20 @@ async def measure_host_quit_row(
             )
             emit("harness", "owner.exit", **exit_record)
 
+        if shim is not None:
+            # Ended with their Jobs when the server or owner went (Direct's
+            # only boundary). The wait is bounded and settles nothing by
+            # itself: what counts is the verdict taken here, before the
+            # teardown touches the cache or stops the stall host, and nothing
+            # after it can improve that verdict.
+            watch_late_installers()
+            await asyncio.to_thread(fates.settle, _BROWSER_GONE_SECONDS)
+            family_at_teardown = await asyncio.to_thread(
+                family_problems,
+                watcher.observed(),
+                fates,
+                reached(shim.reached_file),
+            )
         residual = await asyncio.to_thread(
             wait_for_no_browser, account, _BROWSER_GONE_SECONDS
         )
@@ -2616,6 +4158,54 @@ async def measure_host_quit_row(
     finally:
         if actors_ended is None:
             actors_ended = time.time()
+        # A failed row's cleanup differs from restoration for reuse: while the
+        # family is not shown ended, a download may still be running, and it
+        # is evidence, not litter.
+        unresolved_family = cache is not None and family_at_teardown != []
+        if cache is not None and not unresolved_family:
+            # Restoration for reuse: the row-private cache goes, and the real
+            # cache is recorded again for the post-quit session.
+            try:
+                cache.dismantle()
+            except Exception as exc:  # noqa: BLE001 - reported, the teardown goes on
+                teardown.append(f"the private browser cache stayed: {exc!r}")
+            try:
+                await asyncio.to_thread(
+                    record_install,
+                    runtime.python,
+                    {**env, "PLAYWRIGHT_BROWSERS_PATH": str(browsers)},
+                )
+            except Exception as exc:  # noqa: BLE001 - reported, the teardown goes on
+                teardown.append(f"the real cache's install was not recorded: {exc!r}")
+        elif cache is not None:
+            # The private cache, its held-back place and the install records
+            # stay exactly as the row left them, and so does what is known of
+            # each installer, read before the harness intervenes below.
+            emit(
+                "harness",
+                "job_query.window",
+                phase="failed-row cleanup",
+                unresolved=family_at_teardown,
+                private_cache=str(cache.directory),
+                held=str(cache.held) if cache.held is not None else None,
+                fates=[fate.as_event_fields() for fate in fates.fates.values()],
+            )
+            teardown.append(
+                f"the installer family was not shown ended, so the private cache "
+                f"{cache.directory} (held back: {cache.held}) and the install "
+                f"records were left as they were"
+            )
+        if stall is not None:
+            stall_url = stall.url
+            stall.stop()
+            if unresolved_family:
+                # Do not credit later exits as pre-intervention settlement.
+                teardown.append(
+                    f"the harness stopped its stall host {stall_url} with the "
+                    f"installer family unresolved; a later exit cannot establish "
+                    f"product settlement before this intervention; its cause "
+                    f"remains unobserved"
+                )
         # Each helper is ended whatever the one before it did; a failure is
         # the row's to report.
         confirmed = [killed["pid"]] if killed.get("exit") == "killed" else []
@@ -2666,7 +4256,9 @@ async def measure_host_quit_row(
         if runtime.frozen:
             result.runtime_failures = interpreter_failures(
                 observed_events,
-                runtime,
+                # The declared shim venv is where the actors start from; that
+                # it imports the runtime's code was checked when it was made.
+                replace(runtime, python=shim.python) if shim else runtime,
                 candidate_prefix=sys.prefix,
                 owner_expected=bool(owner.get("pid")),
             )
@@ -2714,6 +4306,35 @@ async def measure_host_quit_row(
     )
     if expect_owner and identified is None:
         refusals.append("the row's owner was never identified")
+    # Every actor that could plant a failure has exited by now; a record
+    # still missing is simply not a witness.
+    records = reached(shim.reached_file) if shim is not None else []
+    observation = job_query_problems(
+        shim,
+        fates=fates,
+        window=job_window,
+        script_error=host.script_error,
+        observed=observed_events,
+        records=records,
+        host=host_failures(host),
+        watcher=watcher_failures(
+            result.watcher,
+            actors_began=actors_began,
+            actors_ended=actors_ended,
+            browser_key=account.browser_key,
+        ),
+        cleanup=list(result.cleanup.failures) if result.cleanup else [],
+        before_cleanup=family_at_teardown,
+    )
+    # The census, cleanup and owner checks, before H-R11 adds its own: the
+    # continuation's validity carries these, and them once.
+    settled_refusals = list(refusals)
+    if shim is not None:
+        # An installer whose end was not observed may still be running on the
+        # profile's setup, so no session starts after the row until every one
+        # of them is an observed exit, and every lifetime the drain asked
+        # about is one of them.
+        refusals += [f"H-R11 evidence incomplete: {p}" for p in observation]
     post_quit: PostQuit | None
     if refusals:
         # Nothing is launched. The session's fate after the row is unknown, and
@@ -2769,6 +4390,57 @@ async def measure_host_quit_row(
             killed=killed or None,
         )
     )
+    if shim is not None:
+        for fate in fates.fates.values():
+            emit("harness", "installer.fate", **fate.as_event_fields())
+        if fates.alive():
+            observation.append(
+                f"installers outlived the row: {[f.pid for f in fates.alive()]}"
+            )
+        result.failures += observation
+        # A known-bad control keeps its behaviour, never a failure to observe,
+        # to settle or to clean up after it: every experiment is held to these.
+        result.continuation = native_continuation(
+            experiment=experiment,
+            run=log.run,
+            daemon=daemon,
+            identity=identity,
+            shim=shim,
+            vector=result.vector,
+            host=host,
+            window=job_window,
+            fates=fates,
+            observed=observed_events,
+            records=records,
+            events=logged(shim.reached_file),
+            successor=successor,
+            validity=[
+                *observation,
+                *settled_refusals,
+                *result.runtime_failures,
+                *(f"canary placement: {problem}" for problem in canary_problems),
+                *(f"teardown: {problem}" for problem in teardown),
+            ],
+        )
+        emit(
+            "harness",
+            "shim.reached",
+            lines=records,
+            events=logged(shim.reached_file),
+            witnesses=list(result.continuation.witnesses),
+            shim_sha256=shim.shim_sha256,
+        )
+        emit(
+            "harness",
+            "job_query.continuation",
+            # The event's own experiment and run are the row's; the vector is
+            # in row.outcome and the witnesses in shim.reached.
+            **{
+                name: value
+                for name, value in asdict(result.continuation).items()
+                if name not in ("experiment", "run", "vector", "witnesses")
+            },
+        )
     result.killed = killed or None
     result.o2 = o2
     result.failures += result.runtime_failures
@@ -2784,6 +4456,11 @@ async def measure_host_quit_row(
                 "coordination": coordination_reading(result.vector),
                 "killed": result.killed,
                 "o2": asdict(o2),
+                "continuation": (
+                    asdict(result.continuation)
+                    if result.continuation is not None
+                    else None
+                ),
             },
             indent=2,
         )
