@@ -616,6 +616,39 @@ class Watcher:
         return summaries[-1] if summaries else None
 
 
+def _gap_cause(summary: dict[str, Any]) -> str:
+    """Where the largest gap went, so the failure names its cause.
+
+    A gap spent mostly waiting to run between two samples leads with that wait
+    and the sample's own share: the slowest sample of the run can be the
+    baseline, which no gap is measured across.
+    """
+    widest: tuple[float, float] | None = None
+    log = summary.get("sample_log") or []
+    for previous, current in zip(log, log[1:]):
+        ended, began, now = previous[1], current[0], current[1]
+        if not all(isinstance(t, (int, float)) for t in (ended, began, now)):
+            continue
+        if widest is None or now - ended > widest[0]:
+            widest = (now - ended, began - ended)
+    if widest is not None and widest[1] > widest[0] - widest[1]:
+        return (
+            f"{widest[1]:.4f}s of it passed between two samples, while the "
+            f"watcher waited to run (priority {summary.get('priority')!r}), "
+            f"and {widest[0] - widest[1]:.4f}s in the sample that closed it"
+        )
+    slow = sorted(
+        summary.get("slow_samples") or [],
+        key=lambda entry: entry.get("seconds") or 0,
+        reverse=True,
+    )
+    waited_on = [
+        {"sample_seconds": entry.get("seconds"), **(entry.get("slowest") or {})}
+        for entry in slow[:3]
+    ]
+    return f"its slowest samples waited on {waited_on or 'nothing it recorded'}"
+
+
 def watcher_failures(
     summary: dict[str, Any] | None,
     *,
@@ -641,20 +674,9 @@ def watcher_failures(
         failures.append("the watcher's observation ended before the actors were gone")
     gap = summary.get("max_gap_seconds")
     if not isinstance(gap, (int, float)) or gap > max_gap:
-        # What the slowest samples waited on, so the failure names its cause.
-        slow = sorted(
-            summary.get("slow_samples") or [],
-            key=lambda entry: entry.get("seconds") or 0,
-            reverse=True,
-        )
-        waited_on = [
-            {"sample_seconds": entry.get("seconds"), **(entry.get("slowest") or {})}
-            for entry in slow[:3]
-        ]
         failures.append(
             f"the watcher's largest gap between samples was {gap}s, over the "
-            f"{max_gap}s this row accepts; its slowest samples waited on "
-            f"{waited_on or 'nothing it recorded'}"
+            f"{max_gap}s this row accepts; {_gap_cause(summary)}"
         )
     # Only an actor that could have been a browser root: one whose executable
     # could not be read, or is the row's browser. Every failed read stays in

@@ -126,7 +126,10 @@ as a driver, helper or renderer: an exec since could have made it a root.
 What sampling cannot see: a process that lives and dies between two samples.
 The summary records when observation began and ended and the largest wall-clock
 gap between two samples, so a claim built on it can state the window it had; an
-overlap wholly between samples remains outside this oracle's resolution.
+overlap wholly between samples remains outside this oracle's resolution. On
+Windows the watcher runs ahead of the row (``SCHEDULING_CLASS``), so a burst of
+process starts does not widen that window by keeping it waiting to run; the
+summary's ``priority`` says what it ran at.
 
 Imports nothing from the repository, so it runs as a plain script:
 ``python watcher.py --out FILE --stop FILE ...``.
@@ -160,6 +163,18 @@ SAMPLE_SECONDS = 0.05
 #: its own PEB command line is adversarial and is not a browser launch; it is
 #: outside this oracle.
 NO_EXEC = os.name == "nt"
+
+#: The scheduling class the watcher asks for, on Windows only: POSIX lets an
+#: unprivileged process lower its priority but not raise it. A burst of process
+#: starts on a Windows runner, such as the Node driver's launch, has kept a
+#: normal-class watcher waiting to run for 1.17s between two samples of 4ms
+#: each, while the owner in the same seconds logged that it had not been
+#: scheduled for 1.1s. A browser can live wholly inside such a gap. A sample
+#: costs a few milliseconds per interval, so running ahead of the row costs the
+#: row almost nothing. Asked for by the watcher itself, because a venv's
+#: ``python.exe`` is a launcher and a class given to it at creation is not
+#: passed on to the interpreter it starts.
+SCHEDULING_CLASS: int | None = getattr(psutil, "HIGH_PRIORITY_CLASS", None)
 
 #: A sample at least this long is recorded with its slowest single read, so a
 #: stall names the call and the process it waited on. A quarter of the gap
@@ -1418,6 +1433,28 @@ def duration_stats(durations: Sequence[float]) -> dict[str, float | None]:
     }
 
 
+def run_ahead() -> dict[str, Any]:
+    """Ask for ``SCHEDULING_CLASS`` where there is one; say what this runs at.
+
+    A refusal is recorded, never raised: the gaps the summary reports are
+    judged either way.
+    """
+    process = psutil.Process()
+    fields: dict[str, Any] = {}
+    if SCHEDULING_CLASS is not None:
+        try:
+            process.nice(SCHEDULING_CLASS)
+        except (psutil.Error, OSError) as exc:
+            fields["priority_error"] = type(exc).__name__
+    try:
+        now = process.nice()
+    except (psutil.Error, OSError):
+        now = None
+    # Windows answers with a class, POSIX with a nice value.
+    fields["priority"] = getattr(now, "name", now)
+    return fields
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True, type=Path)
@@ -1445,6 +1482,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "row": args.row,
         "platform": args.platform,
     }
+    # Before the baseline, so every sample the rows are judged by runs at it.
+    scheduling = run_ahead()
     tracker = Tracker()
     sampler = Sampler(
         args.root_pid,
@@ -1523,6 +1562,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "observation_start": observation_start,
                 "observation_end": last_sample,
                 "max_gap_seconds": round(max_gap, 4),
+                **scheduling,
                 **duration_stats(durations),
                 **sampler.stats(),
                 "sample_log": sample_log,

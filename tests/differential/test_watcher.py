@@ -267,6 +267,29 @@ def test_the_watcher_process_sees_one_browser_and_its_exit(tmp_path):
     assert os.getpid() not in parents
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="POSIX lets no unprivileged process run ahead"
+)
+def test_on_windows_the_watcher_runs_ahead_of_the_row(tmp_path):
+    watcher = _start_watcher(tmp_path)
+    try:
+        (ready,) = [
+            r
+            for r in read_jsonl(tmp_path / "watcher.jsonl")
+            if r["kind"] == "watcher.ready"
+        ]
+        # Read from outside, as the scheduler has it: the pid launched here is
+        # a venv launcher, and the watcher is the interpreter it started.
+        running = psutil.Process(ready["pid"]).nice()
+    finally:
+        records = _stop_watcher(tmp_path, watcher)
+    # Windows-only in psutil, so absent from the stubs ty reads on POSIX.
+    assert running == psutil.HIGH_PRIORITY_CLASS  # ty: ignore[unresolved-attribute]
+    (summary,) = [r for r in records if r["kind"] == "watcher.summary"]
+    assert summary["priority"] == "HIGH_PRIORITY_CLASS"
+    assert "priority_error" not in summary
+
+
 _DELAYED_EXEC = """
 import os
 import sys
@@ -1602,12 +1625,53 @@ def test_a_gap_over_budget_names_what_the_slowest_samples_waited_on():
             "observation_end": 10.0,
             "max_gap_seconds": 1.38,
             "slow_samples": [slow],
+            # The gap is the sample itself: 0.08s waiting, 1.3s reading.
+            "sample_log": [[4.0, 4.004, None], [4.084, 5.384, None]],
         },
         actors_began=1.0,
         actors_ended=9.0,
     )
     (failure,) = failures
     assert "1.38s" in failure and "'cmdline'" in failure and "x.exe" in failure
+
+
+def test_a_gap_spent_waiting_to_run_names_no_read():
+    # Run 36327966208, K0 on windows-latest: the only slow sample was the
+    # baseline, which no gap is measured across, and the widest gap was the
+    # watcher not running between two samples of 4ms.
+    baseline = {
+        "seconds": 0.2928,
+        "reads": 138,
+        "slowest": {
+            "kind": "ppid",
+            "pid": 1608,
+            "seconds": 0.0027,
+            "exe": "C:\\Windows\\System32\\svchost.exe",
+        },
+    }
+    failures = watcher_failures(
+        {
+            "stopped_by": "stop file",
+            "observation_start": 0.2928,
+            "observation_end": 10.0,
+            "max_gap_seconds": 1.1702,
+            "slow_samples": [baseline],
+            "priority": "NORMAL_PRIORITY_CLASS",
+            "sample_log": [
+                [0.0, 0.2928, None],
+                [0.3430, 0.3468, None],
+                [1.5128, 1.5170, None],
+                [1.5674, 1.5712, None],
+            ],
+        },
+        actors_began=1.0,
+        actors_ended=9.0,
+    )
+    (failure,) = failures
+    assert "1.1660s of it passed between two samples" in failure
+    assert "0.0042s in the sample that closed it" in failure
+    assert "NORMAL_PRIORITY_CLASS" in failure
+    assert "svchost" not in failure
 
 
 # --- What O2 reads from the samples ----------------------------------------------
