@@ -107,18 +107,22 @@ from differential.baseline import (
 )
 from differential.events import EventLog, read_jsonl
 from differential.job_query import (
+    SHIM_SHA256,
     Fates,
     PrivateCache,
     ShimVenv,
     StallHost,
     install_locations,
     private_install,
-    DrainReading,
-    drain_reading,
     reached,
     record_install,
-    shim_log,
-    terminations,
+)
+from differential.job_query_model import (
+    BASELINE,
+    CANDIDATE,
+    SOURCE_MODEL,
+    RoutineModel,
+    source_sha256,
 )
 from differential.session import (
     RETAINED,
@@ -1694,16 +1698,6 @@ class RowVector:
     #: H-R6, daemon mode: the frontend's second call after the owner was
     #: killed read the post again.
     recovered: bool | None = None
-    #: H-R11: the row-scoped shim's ``IsProcessInJob`` was reached during the
-    #: routine drain (K2/K3 daemon reach it; K1 has no adopted Job). None off
-    #: the row.
-    job_query_reached: bool | None = None
-    #: H-R11: a member of another Job the owner holds (the installer) was
-    #: terminated with exit code 1 during the routine drain while the owner was
-    #: alive. K2 True (``!``); K3 False (``=``). None off the row.
-    job_member_terminated: bool | None = None
-    #: H-R11 availability: a successor was elected while the host still ran.
-    successor_before_quit: bool | None = None
 
 
 _ASSOCIATE_SECONDS = 5.0
@@ -2118,28 +2112,68 @@ def r6_verdict(
 _INSTALLER_SECONDS = 60.0
 #: How long an owner that stood down after an unconfirmed close may take to go.
 _OWNER_STAND_DOWN_SECONDS = 30.0
-#: What the product logs when a close could not prove the browser gone
-#: (``core/browser.py``, the same at the baseline).
-_UNCONFIRMED_CLOSE_LINE = "stays unconfirmed"
+#: How long the installer family may take to settle once the close is over.
+_FAMILY_SETTLE_SECONDS = 30.0
+#: How long, after ``close_session`` returned, the owner's log may take to
+#: show the line its close wrote before answering.
+_LOG_SECONDS = 2.0
+#: ``core.close`` consuming the drain's False: logged only when the drain did
+#: not prove the launch gone, never for an exception on the way (e1ex, P2).
+#: The same line at the baseline.
+NEGATIVE_CONSUMPTION_LINE = (
+    "Browser processes from this launch are still running after close, so the "
+    "shutdown stays unconfirmed."
+)
+#: The OWNER role's continuation of a held profile: its stand-down.
+STAND_DOWN_LINE = (
+    "Standing down: the browser did not shut down cleanly, so the profile is held"
+)
 
 
-def close_left_unconfirmed(log_path: str | None, seconds: float = 2.0) -> bool:
-    """Whether the owner's log says its close stayed unconfirmed.
-
-    Read until the line is there or *seconds* pass: ``close_session`` has
-    returned, so the drain that decides has logged. False for a log that is
-    not there, which leaves the probe where it was.
-    """
+def log_size(log_path: str | None) -> int | None:
+    """Where the owner's log ends now, in bytes; None when it cannot be read."""
     if not log_path:
-        return False
-    path = Path(log_path)
+        return None
+    try:
+        return Path(log_path).stat().st_size
+    except OSError:
+        return None
+
+
+def logged_since(
+    log_path: str | None,
+    offset: int | None,
+    line: str,
+    *,
+    until: int | None = None,
+    seconds: float = 2.0,
+) -> bool | None:
+    """Whether *line* was written to the owner's log after *offset*.
+
+    The daemon log is one file per auth root and carries no pid, so a line is
+    tied to an owner by where it sits: after the offset read before that
+    owner's close and, with *until*, before an offset read later. Waits up to
+    *seconds* for it; None when the log or the offset cannot be read, which
+    is no witness either way.
+    """
+    if not log_path or offset is None:
+        return None
+    needle = line.encode("utf-8")
     deadline = time.monotonic() + seconds
     while True:
-        if path.is_file() and _UNCONFIRMED_CLOSE_LINE in path.read_text(
-            errors="replace"
-        ):
+        try:
+            with open(log_path, "rb") as stream:
+                stream.seek(offset)
+                written = (
+                    stream.read()
+                    if until is None
+                    else stream.read(max(until - offset, 0))
+                )
+        except (OSError, ValueError):
+            return None
+        if needle in written:
             return True
-        if time.monotonic() >= deadline:
+        if until is not None or time.monotonic() >= deadline:
             return False
         time.sleep(0.1)
 
@@ -2284,58 +2318,84 @@ class Lineage:
         return lives[0] if len(lives) == 1 else None
 
 
-def known_non_installer(
-    observed: Iterable[Mapping[str, Any]], *, outside: Iterable[int] = ()
+def installer_family(
+    observed: Iterable[Mapping[str, Any]], fates: Fates, *, outside: Iterable[int] = ()
 ) -> Callable[[Any, Any], bool]:
-    """Whether a lifetime is a row process shown to be no installer.
+    """Whether a lifetime is one of the installer family the row tracked.
 
-    The adopted Job holds more than the installer: measured on Windows (run
-    36410976409, K2) the drain also asked about the owner's release gate, its
-    Python child and that child's console host, all started with the owner
-    eight seconds before any installer. Such a member is placed only when the
-    watcher recorded exactly that lifetime (pid and creation time) in the row
-    and its whole recorded ancestry leads to the harness with no installer on
-    the way (``Lineage``). A parent nobody recorded places nothing: it could
-    have been an installer.
+    A lifetime the row watched as an installer, or one the watcher recorded
+    in the row whose own record or recorded ancestry is an installer
+    (``Lineage``). An unresolved ancestry is not the family: it may be, which
+    keeps it in the inventory, but it witnesses nothing.
     """
     lineage = Lineage(observed, outside=outside)
 
-    def placed(member: Any, created: Any) -> bool:
-        life = lineage.lifetime(member, created)
-        return life is not None and lineage.of(life) == FROM_HARNESS
+    def member(pid: Any, created: Any) -> bool:
+        if any(fate.is_lifetime(pid, created) for fate in fates.fates.values()):
+            return True
+        life = lineage.lifetime(pid, created)
+        return life is not None and lineage.of(life) in (INSTALLER, BELOW_INSTALLER)
 
-    return placed
+    return member
 
 
-def job_query_reading(
-    shim: ShimVenv,
-    *,
-    fates: Fates,
-    owner_pid: int | None,
-    owner_created: float | None,
-    daemon: bool,
+def unaccounted_members(
+    records: Iterable[Mapping[str, Any]],
     observed: Iterable[Mapping[str, Any]],
-    lost: Iterable[str],
-) -> DrainReading:
-    """The routine drain's reading from the shim's records of the closing owner.
+    fates: Fates,
+    *,
+    outside: Iterable[int] = (),
+) -> list[str]:
+    """Every lifetime the shim saw asked about that the row cannot account for.
 
-    Only from records shown complete for that owner's lifetime (``shim_log``,
-    with *lost* the lines where the shim announces a record it could not
-    write). In Direct no process has an adopted Job, so every record counts.
+    A record names a member of some actor's adopted Job, which is positive
+    evidence that the lifetime existed. It is accounted for when the row
+    watched it or the watcher recorded it in the row: then either the
+    inventory has to see it end (an installer, below one, or of unresolved
+    ancestry) or its ancestry leads to the harness with no installer on the
+    way. Measured on Windows (run 36410976409, K2): the drain also asked
+    about the owner's release gate, its Python child and that child's console
+    host. A lifetime nobody recorded could be an installer still running.
     """
-    log = shim_log(
-        shim.reached_file,
-        pid=owner_pid if daemon else None,
-        created=owner_created,
-        lost=lost,
-    )
-    return drain_reading(
-        fates.fates.values(),
-        log.queries,
-        log.terminations,
-        known_other=known_non_installer(observed),
-        health=[f"the shim's record: {problem}" for problem in log.problems],
-    )
+    lineage = Lineage(observed, outside=outside)
+    problems = []
+    seen: set[tuple[Any, Any]] = set()
+    for record in records:
+        key = (record.get("member"), record.get("created"))
+        if key in seen:
+            continue
+        seen.add(key)
+        pid, created = key
+        if any(fate.is_lifetime(pid, created) for fate in fates.fates.values()):
+            continue
+        if lineage.lifetime(pid, created) is not None:
+            continue
+        problems.append(
+            f"the drain asked about pid {pid} created {created}, a lifetime the "
+            f"watcher never recorded in the row, so its end is unknown"
+        )
+    return problems
+
+
+def settle_family(
+    observed: Callable[[], Iterable[Mapping[str, Any]]],
+    fates: Fates,
+    seconds: float = _FAMILY_SETTLE_SECONDS,
+) -> list[str]:
+    """Wait for the installer family to be shown ended; what is not, if not.
+
+    The labelled boundary before the harness restores the row-private cache
+    and makes the recovery probe: restoring a dependency under a download
+    still running would race it, and a probe made then would be a different
+    measurement. The same inventory as the barrier after the row
+    (``installer_inventory``).
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        problems = installer_inventory(observed(), fates)
+        if not problems or time.monotonic() >= deadline:
+            return problems
+        time.sleep(0.2)
 
 
 def installer_inventory(
@@ -2443,12 +2503,14 @@ class WallClockMarker:
                 marker.kill()
                 marker.wait(timeout=10)
 
+    def held(self) -> bool:
+        """Whether the wall clock has kept pace with the monotonic one so far."""
+        wall, mono = self.began
+        return abs((time.time() - wall) - (time.monotonic() - mono)) <= _CLOCK_SECONDS
+
     def after(self, pid: int, start: float) -> bool | None:
         """Whether *start* is after the marker; None when that is not known."""
-        if self.created is None:
-            return None
-        wall, mono = self.began
-        if abs((time.time() - wall) - (time.monotonic() - mono)) > _CLOCK_SECONDS:
+        if self.created is None or not self.held():
             return None
         if start > self.created + _CLOCK_SECONDS:
             return True
@@ -2490,67 +2552,169 @@ def successor_verdict(
     return [*found, *problems]
 
 
-def job_query_observations(
-    shim: ShimVenv | None,
-    *,
-    reading: DrainReading | None,
-    window: Mapping[str, Any],
-    owner_pid: int | None,
-    daemon: bool,
-) -> dict[str, Any]:
-    """What H-R11 feeds ``judge_row``; nothing off the row.
+#: The one file the harness's own restoration writes in the auth root: the
+#: install record ``record_install`` puts back for the restored cache.
+_RESTORATION_WRITES = frozenset({"browser-install.json"})
 
-    Reached: the shim recorded a planted failure in the process whose drain
-    it was, the owner serving at the close (none expected in Direct, which has
-    no adopted Job, so any line at all counts there). Terminated: the routine
-    drain's reading (``drain_reading``), None while any of its evidence is
-    unknown. Successor: verified before host quit (``successor_verdict``).
+
+def auth_files(root: Path) -> dict[str, str]:
+    """Every file under the auth root, by relative path, with its SHA-256.
+
+    ``unreadable`` for a file that could not be read, ``link`` for a link,
+    which is never followed.
     """
-    if shim is None:
-        return {}
-    lines = reached(shim.reached_file, pid=owner_pid if daemon else None)
-    return {
-        "failed_job_query": True,
-        "job_query_reached": bool(lines),
-        "job_member_terminated": reading.value if reading is not None else None,
-        "successor_before_quit": (
-            window.get("successor_verified") is True if daemon else None
-        ),
-    }
+    files: dict[str, str] = {}
+    for directory, names, entries in os.walk(root):
+        base = Path(directory)
+        for name in [*names, *entries]:
+            path = base / name
+            relative = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                files[relative] = "link"
+            elif name in entries:
+                try:
+                    files[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+                except OSError:
+                    files[relative] = "unreadable"
+    return files
+
+
+def restoration_changes(
+    before: Mapping[str, str], after: Mapping[str, str]
+) -> list[str]:
+    """What changed in the auth root across the harness's restoration, beyond
+    the install record it writes itself.
+
+    The restoration relinks a row-private cache outside the auth root and
+    writes that record. Anything else that changed meanwhile was changed by
+    something else, and a final snapshot would count it as the product's.
+    """
+    return [
+        f"the auth root's {name} changed while the harness restored the cache"
+        for name in sorted(before.keys() | after.keys())
+        if before.get(name) != after.get(name) and name not in _RESTORATION_WRITES
+    ]
+
+
+def protected_changes(before: ProfileSnapshot, at: ProfileSnapshot) -> list[str]:
+    """What the product changed of the protected session by the recovery boundary.
+
+    Read at that checkpoint, before the harness restores anything, so no
+    restoration can repair it; a checkpoint, not a watch over the interval.
+    Allowed: the cookie file's bytes and names, which the close's export and
+    a session refresh rewrite, and the browser's own profile files. Not
+    allowed: another login generation, a staged session no longer usable, a
+    new quarantine, a missing profile, an artefact that no longer reads.
+    """
+    problems = []
+    if at.generation != before.generation:
+        problems.append(
+            f"the login generation changed from {before.generation!r} to "
+            f"{at.generation!r}"
+        )
+    if before.li_at_usable and not at.li_at_usable:
+        problems.append("the staged session's li_at is no longer usable")
+    quarantined = sorted(set(at.quarantine) - set(before.quarantine))
+    if quarantined:
+        problems.append(f"quarantined: {quarantined}")
+    if before.profile_present and not at.profile_present:
+        problems.append("the browser profile is gone")
+    unreadable = sorted(set(at.unreadable) - set(before.unreadable))
+    if unreadable:
+        problems.append(f"no longer readable: {unreadable}")
+    return problems
+
+
+def fault_witnesses(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    owner: tuple[int, float] | None,
+    family: Callable[[Any, Any], bool],
+    interval: tuple[float, float] | None,
+) -> list[dict[str, Any]]:
+    """The planted failures that witness the intended entry, and only those.
+
+    A witness was written by the owner that closed, that very lifetime (its
+    pid and its own creation time, so neither an earlier process at a reused
+    pid nor the successor), about a lifetime of the installer family
+    (*family*), asking a Job that owner held (its handle), at a time inside
+    the close call (*interval*, the host's send and receipt on the same wall
+    clock). Each certifies that one invocation reached the fault, and nothing
+    about any call after it.
+    """
+    if owner is None or interval is None:
+        return []
+    pid, created = owner
+    began, ended = interval
+    found = []
+    for record in records:
+        made, t = record.get("pid_created"), record.get("t")
+        if record.get("pid") != pid or not isinstance(made, (int, float)):
+            continue
+        if not isinstance(record.get("job"), int):
+            continue
+        if abs(float(made) - created) > _START_TOLERANCE_SECONDS:
+            continue
+        if not isinstance(t, (int, float)) or not began <= t <= ended:
+            continue
+        if family(record.get("member"), record.get("created")):
+            found.append(dict(record))
+    return found
+
+
+def imported_process_tree(shim: ShimVenv) -> str | None:
+    """The process_tree the shim venv's actors import, by content."""
+    module = shim.code.get("module")
+    if not module:
+        return None
+    try:
+        text = (Path(module).parent / "process_tree.py").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return source_sha256(text)
 
 
 def job_query_problems(
     shim: ShimVenv | None,
     *,
     fates: Fates,
-    reading: DrainReading | None,
     window: Mapping[str, Any],
     script_error: str | None,
     observed: Iterable[Mapping[str, Any]] = (),
+    records: Iterable[Mapping[str, Any]] = (),
     host: Sequence[str] = (),
     watcher: Sequence[str] = (),
     cleanup: Sequence[str] = (),
 ) -> list[str]:
     """What stops H-R11 from observing the row, in any experiment.
 
-    Not the behaviour under test: a K2 that reads its known '!' still fails on
-    one of these, since the '!' is then not established by complete evidence.
-    Besides the row's own script and installer evidence that is every
-    installer lifetime the watcher recorded that is not shown ended
-    (``installer_inventory``), a host session that failed, what the watcher
-    could not observe (*watcher*, ``watcher_failures``) and what cleanup
-    could not do (*cleanup*, ``DaemonCleanup.failures``). The baseline's own
-    behaviour (a browser left behind, an owner that did not leave) stays out:
-    that is what K2 is there to record.
+    Not the behaviour under test, so K2 is held to all of it too: the row's
+    own script; every installer lifetime not shown ended
+    (``installer_inventory``), at the recovery boundary as well as after the
+    row; every lifetime the shim saw asked about that the row cannot account
+    for (``unaccounted_members``); a harness restoration that changed more
+    than its own record; the whole of ``host_failures``; what the watcher
+    could not observe (*watcher*, ``watcher_failures``); what cleanup could
+    not do (*cleanup*, ``DaemonCleanup.failures``); and a wall clock that
+    moved, which leaves no record placeable inside the close.
     """
     if shim is None:
         return []
+    observed = list(observed)
     problems = list(host)
     if script_error is not None:
         problems.append(f"the H-R11 script failed: {script_error}")
     problems += [
         f"installer inventory: {p}" for p in installer_inventory(observed, fates)
     ]
+    problems += [
+        f"installer evidence: {p}"
+        for p in unaccounted_members(records, observed, fates)
+    ]
+    problems += [
+        f"before recovery: {p}" for p in window.get("family_before_recovery") or ()
+    ]
+    problems += [f"restoration: {p}" for p in window.get("restoration_changes") or ()]
     problems += [f"watcher: {problem}" for problem in watcher]
     problems += [f"cleanup: {problem}" for problem in cleanup]
     if not fates.fates:
@@ -2558,97 +2722,314 @@ def job_query_problems(
             "no installer ran when the row closed, so the Job query had no "
             "member to be asked about"
         )
-    if reading is None:
-        problems.append("the drain's reading was never taken")
-    else:
-        problems += [f"installer evidence: {unknown}" for unknown in reading.unknown]
+    if window.get("clock_held") is False:
+        problems.append(
+            "the wall clock moved apart from the monotonic one by the end of the "
+            "close, so no record's time can be placed inside it"
+        )
     if window.get("script_ended") is not True:
         problems.append("the H-R11 script did not run to its end")
     return problems
 
 
-def r11_reading(result: RowResult) -> str | None:
-    """H-R11's reading for the routine drain after the Job query fails.
+#: No native evidence here says which caller ended an installer lifetime:
+#: exit code 1 comes from the routine drain and from a Job's rundown alike.
+UNOBSERVED_CAUSE = "unobserved"
+NATIVE = "native"
+#: The recovery probe was made only once the installer family had settled.
+POST_SETTLEMENT = "post-settlement"
+#: Direct keeps its installer in its own setup until host quit, so no
+#: settlement can come before a probe, and none is made.
+NO_RECOVERY = "none: Direct keeps its installer until host quit"
 
-    ``!`` when the routine drain terminated a member of another Job the owner
-    holds (the installer) after its planted query failed, ``=`` when complete
-    evidence shows it terminated none, and None where the evidence is
-    incomplete or the row is off this path.
+
+@dataclass(frozen=True)
+class NativeContinuation:
+    """What one native H-R11 experiment established, as native evidence only.
+
+    Claim map. That the experiment reached the planted situation: the owner
+    that closed, the installer family it held, and positive fault witnesses
+    (``fault_witnesses``), each certifying one invocation. What followed:
+    core.close's own log of consuming the drain's False, the stand-down and
+    the owner's exit (K3); the family settled at a labelled boundary, then a
+    post-settlement recovery whose successor served the probe (K3); the
+    protected session at that boundary; and every validity problem.
+
+    ``termination_cause`` is ``unobserved`` in every cell, and no field says
+    whether any caller selected ``TerminateProcess``: that is the source
+    model's (``job_query_model``), a different kind of evidence. Nothing
+    here is merged with it into a native reading of the drain.
     """
-    vector = result.vector
-    if vector is None or vector.job_member_terminated is None:
-        return None
-    return "!" if vector.job_member_terminated else "="
+
+    experiment: str
+    run: str
+    mode: str
+    #: The revision the actors ran (the pin, or the checkout's HEAD), and the
+    #: process_tree they import, by content (``source_sha256``).
+    revision: str | None
+    process_tree_sha256: str | None
+    shim_sha256: str
+    vector: RowVector | None
+    first_read: bool
+    #: The owner that closed, (pid, creation time); None in Direct.
+    owner: tuple[int, float] | None
+    #: The close call, as the host sent it and read its answer.
+    close: tuple[float, float] | None
+    #: Installer lifetimes the row watched.
+    installers: int
+    #: Every planted failure recorded in the row, and those that witness the
+    #: intended entry.
+    reached: int
+    witnesses: tuple[Mapping[str, Any], ...]
+    #: Daemon rows: core.close logged consuming the drain's False during the
+    #: close, the owner logged its stand-down and was seen to exit. None where
+    #: the log could not be read, or in Direct.
+    consumed_false: bool | None
+    stood_down: bool | None
+    owner_left: bool | None
+    recovery: str
+    protected_at_boundary: tuple[str, ...]
+    successor_verified: bool | None
+    successor_problems: tuple[str, ...]
+    #: What kept this experiment from being observed, whatever it is.
+    validity: tuple[str, ...]
+    termination_cause: str = UNOBSERVED_CAUSE
+    evidence: str = NATIVE
 
 
-def r11_verdict(
-    result: RowResult,
+def native_continuation(
     *,
     experiment: str,
-    non_windows: bool,
+    run: str,
+    daemon: bool,
+    identity: Mapping[str, Any],
+    shim: ShimVenv,
+    vector: RowVector | None,
+    host: HostSession,
+    window: Mapping[str, Any],
+    fates: Fates,
+    observed: Sequence[Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+    successor: Mapping[str, Any],
+    validity: Sequence[str],
+) -> NativeContinuation:
+    """The row's continuation, from what it recorded; judged elsewhere."""
+    owner_pid, owner_created = window.get("owner_pid"), window.get("owner_created")
+    owner = (
+        (int(owner_pid), float(owner_created))
+        if daemon
+        and isinstance(owner_pid, int)
+        and isinstance(owner_created, (int, float))
+        else None
+    )
+    began, ended = window.get("began"), window.get("ended")
+    close = (
+        (float(began), float(ended))
+        if isinstance(began, (int, float)) and isinstance(ended, (int, float))
+        else None
+    )
+    witnesses = fault_witnesses(
+        records,
+        owner=owner,
+        family=installer_family(observed, fates),
+        interval=close,
+    )
+    tool = host.tool or {}
+    return NativeContinuation(
+        experiment=experiment,
+        run=run,
+        mode="daemon" if daemon else "direct",
+        revision=identity.get("head"),
+        process_tree_sha256=imported_process_tree(shim),
+        shim_sha256=shim.shim_sha256,
+        vector=vector,
+        first_read=bool(tool)
+        and not tool.get("is_error")
+        and bool(tool.get("read_the_post")),
+        owner=owner,
+        close=close,
+        installers=len(fates.fates),
+        reached=len(records),
+        witnesses=tuple(witnesses),
+        consumed_false=window.get("consumed_false") if daemon else None,
+        stood_down=window.get("stood_down") if daemon else None,
+        owner_left=window.get("owner_left_before_probe") if daemon else None,
+        recovery=str(window.get("recovery") or "not reached"),
+        protected_at_boundary=tuple(window.get("protected_at_boundary") or ()),
+        successor_verified=successor.get("verified") if daemon else None,
+        successor_problems=tuple(successor.get("problems") or ()),
+        validity=tuple(validity),
+    )
+
+
+def continuation_problems(
+    continuation: NativeContinuation | None,
+    *,
+    experiment: str,
+    revision: str | None,
+    run: str | None = None,
 ) -> list[str]:
-    """What H-R11 requires of an experiment beyond the row's own expectations.
+    """The common validity gate of an H-R11 cell, and what its experiment adds.
 
-    Windows only. K1 frozen is the reference: it has no adopted Job, so the
-    shimmed query is never reached, and it ends with host quit. K2 (baseline
-    daemon) swallows the failed ``IsProcessInJob`` and so terminates a member
-    of another owned Job (the installer) with exit code 1 while it is alive, so
-    K2 must read ``!`` and must have reached the query. K3 (candidate daemon)
-    counts that member and terminates nothing, so it must read ``=``, have
-    reached the query, and elected a successor while the host still ran.
-
-    Every experiment also carries the row's observation failures
-    (``job_query_problems``): K2 keeps its known behavioural '!', but not with
-    evidence the harness could not complete or clean up after.
+    Every cell: the expected experiment, mode, revision and shim, a named
+    process_tree, a first read of the synthetic post, labels that claim no
+    more than native evidence, and not one validity problem (host, watcher,
+    cleanup, census, installer family, script, runtime, restoration, clock).
+    K1 is the reference: Direct has no adopted Job, so no planted failure is
+    required, and one reached there is the wrong topology. K2 and K3: the
+    owner that closed and a positive fault witness inside its close. K3 also:
+    core.close's negative consumption, the stand-down, the owner's exit, a
+    post-settlement recovery with nothing protected changed by its boundary,
+    and a successor that served it. No cell says which caller ended an
+    installer.
     """
-    problems = [*result.runtime_failures, *result.observation_failures]
-    if non_windows:
-        return [*problems, "H-R11 runs on Windows only; it should be skipped"]
-    vector = result.vector
-    if vector is None or not vector.tool_succeeded:
+    if continuation is None:
+        return [f"{experiment} left no native continuation"]
+    c = continuation
+    problems = list(c.validity)
+    if c.experiment != experiment:
+        problems.append(f"the continuation is {c.experiment}'s, not {experiment}'s")
+    if run is not None and c.run != run:
+        problems.append(f"the continuation is from run {c.run}, not {run}")
+    if revision is None or c.revision != revision:
+        problems.append(f"the actors ran {c.revision}, not {revision}")
+    if c.shim_sha256 != SHIM_SHA256:
+        problems.append(f"the shim was {c.shim_sha256}, not the declared {SHIM_SHA256}")
+    if c.process_tree_sha256 is None:
+        problems.append("the process_tree the actors import could not be read")
+    if c.evidence != NATIVE or c.termination_cause != UNOBSERVED_CAUSE:
+        problems.append(
+            f"the continuation claims {c.evidence!r} evidence and a termination "
+            f"cause {c.termination_cause!r}; nothing native observed the caller"
+        )
+    expected_mode = "direct" if experiment == "K1" else "daemon"
+    if c.mode != expected_mode:
+        problems.append(f"{experiment} ran in {c.mode} mode, not {expected_mode}")
+    if not c.first_read:
         problems.append("the first call did not read the synthetic post")
-    reading = r11_reading(result)
     if experiment == "K1":
-        if vector is not None and vector.job_query_reached:
+        if c.reached:
             problems.append(
-                "the Direct reference reached the Job-membership query, but it has "
-                "no adopted Job to reach it through"
+                f"the Direct reference reached the Job-membership query "
+                f"{c.reached} time(s), but it has no adopted Job to reach it "
+                f"through"
             )
         return problems
-    if vector is not None and not vector.job_query_reached:
-        problems.append("the failing Job-membership query was never reached")
-    acts = result.drain.acts() if result.drain is not None else []
+    if c.owner is None:
+        problems.append("the owner that closed was never identified")
+    if c.close is None:
+        problems.append("the close's interval was not recorded")
+    if not c.witnesses:
+        problems.append(
+            f"no planted failure witnesses the entry: {c.reached} recorded, none "
+            f"by the owner that closed, about the installer family, inside its "
+            f"close"
+        )
     if experiment == "K2":
-        if reading != "!":
-            problems.append(
-                f"K2 read {reading!r} on H-R11, where the baseline's '!' is known "
-                f"(it swallows the failed query and terminates the member): a "
-                f"harness defect"
-                + (
-                    f"; only acts short of a confirmed termination: {acts}"
-                    if acts
-                    else ""
-                )
-            )
         return problems
-    # K3
-    if reading == "!":
+    if c.consumed_false is not True:
         problems.append(
-            "K3 read '!' on H-R11: the candidate terminated a member of another "
-            "owned Job on a failed query"
+            f"core.close logged no consumption of the drain's False during the "
+            f"close (consumed_false={c.consumed_false!r})"
         )
-    elif acts:
+    if c.stood_down is not True:
+        problems.append(f"the owner logged no stand-down (stood_down={c.stood_down!r})")
+    if c.owner_left is not True:
         problems.append(
-            f"K3's routine drain acted on members it could not place: {acts}"
+            f"the owner that closed was not seen to exit (owner_left={c.owner_left!r})"
         )
-    elif reading is None:
-        problems.append("K3 has no complete reading of the routine drain")
-    if vector is not None and vector.successor_before_quit is not True:
-        why = ((result.owner or {}).get("successor") or {}).get("problems")
+    if c.recovery != POST_SETTLEMENT:
+        problems.append(f"no post-settlement recovery: {c.recovery}")
+    problems += [f"by the recovery boundary: {p}" for p in c.protected_at_boundary]
+    if c.successor_verified is not True:
         problems.append(
-            "the candidate elected no successor while the host still ran"
-            + (f": {'; '.join(why)}" if why else "")
+            "no successor is shown to have served the recovery"
+            + (f": {'; '.join(c.successor_problems)}" if c.successor_problems else "")
         )
+    return problems
+
+
+class R11Ledger:
+    """The native continuations of one invocation of the row module.
+
+    Made by that module for itself and emptied by the composition, so a cell
+    of another invocation or an earlier repetition never stands in. A second
+    continuation for one experiment is refused, not chosen between.
+    """
+
+    def __init__(self, run: str) -> None:
+        self.run = run
+        self._cells: dict[str, NativeContinuation] = {}
+        self._problems: list[str] = []
+
+    def record(self, continuation: NativeContinuation | None) -> None:
+        if continuation is None:
+            return
+        if continuation.experiment in self._cells:
+            self._problems.append(
+                f"a second {continuation.experiment} continuation in one invocation"
+            )
+            return
+        self._cells[continuation.experiment] = continuation
+
+    def take(self) -> tuple[dict[str, NativeContinuation], list[str]]:
+        cells, problems = self._cells, self._problems
+        self._cells, self._problems = {}, []
+        return cells, problems
+
+
+def r11_composition(
+    model: RoutineModel | None,
+    ledger: R11Ledger,
+    *,
+    revisions: Mapping[str, str | None],
+) -> list[str]:
+    """What stops H-R11's claim from being composed in this invocation.
+
+    A composition of separate results, never a sum of them: the source
+    model's conditional branch, calibrated in this process against the exact
+    sources the native runtimes imported (the baseline's prohibited
+    selection, the candidate's abstention and every positive control); each
+    native continuation of this run through the common gate; and K3 no worse
+    than K1 on O1, O2 and O4. A missing calibration or cell fails it: K1 and
+    K3 selected alone compose nothing. Whole-system O2 stays what the vectors
+    say, unobserved where nothing traced it.
+    """
+    cells, problems = ledger.take()
+    if model is None:
+        problems.append("no source-model calibration ran in this invocation")
+    else:
+        if model.evidence != SOURCE_MODEL:
+            problems.append(f"the calibration is {model.evidence!r}, not source-model")
+        problems += [f"source model: {problem}" for problem in model.problems]
+    for experiment in ("K1", "K2", "K3"):
+        cell = cells.get(experiment)
+        problems += [
+            f"{experiment}: {problem}"
+            for problem in continuation_problems(
+                cell,
+                experiment=experiment,
+                revision=revisions.get(experiment),
+                run=ledger.run,
+            )
+        ]
+        if cell is None or model is None:
+            continue
+        modelled = model.sha256.get(CANDIDATE if experiment == "K3" else BASELINE)
+        if cell.process_tree_sha256 != modelled:
+            problems.append(
+                f"{experiment}: the actors imported process_tree "
+                f"{cell.process_tree_sha256}, the source model ran {modelled}"
+            )
+    reference, candidate = cells.get("K1"), cells.get("K3")
+    if reference is not None and candidate is not None:
+        if reference.vector is None or candidate.vector is None:
+            problems.append("K1 or K3 left no vector to compare")
+        else:
+            problems += [
+                f"K3 differs from K1 frozen: {difference}"
+                for difference in compare_to_direct(reference.vector, candidate.vector)
+            ]
     return problems
 
 
@@ -2745,13 +3126,6 @@ class Observations:
     o2: O2Result | None = None
     #: H-R6: what the harness killed, and the guardian it had.
     killed: dict[str, Any] | None = None
-    #: H-R11: this row planted a failing ``IsProcessInJob`` shim.
-    failed_job_query: bool = False
-    #: H-R11: whether the shim's query was reached, whether a member of another
-    #: owned Job was terminated during the routine drain, and the availability.
-    job_query_reached: bool | None = None
-    job_member_terminated: bool | None = None
-    successor_before_quit: bool | None = None
 
 
 @dataclass
@@ -2771,13 +3145,9 @@ class RowResult:
     failures: list[str] = field(default_factory=list)
     #: A frozen row whose actors could not be shown to run the baseline.
     runtime_failures: list[str] = field(default_factory=list)
-    #: What kept the row from observing or cleaning up (H-R11's installer
-    #: evidence, its script): also in ``failures``, and checked in every
-    #: experiment, a known-bad control included.
-    observation_failures: list[str] = field(default_factory=list)
-    #: H-R11: the routine drain's reading, with its acts short of a confirmed
-    #: termination.
-    drain: DrainReading | None = None
+    #: H-R11: what the native experiment established, and every problem that
+    #: kept it from being observed (``continuation_problems`` judges it).
+    continuation: NativeContinuation | None = None
     #: H-R6: what the harness killed, its guardian and the oracle's state.
     killed: dict[str, Any] | None = None
     o2: O2Result | None = None
@@ -2928,22 +3298,7 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
         signal_classes=o2.classes if o2 is not None else (),
         guardian_owner_group=killed.get("guardian_owner_group"),
         recovered=_recovered(host) if killed and observed.daemon else None,
-        job_query_reached=(
-            observed.job_query_reached if observed.failed_job_query else None
-        ),
-        job_member_terminated=(
-            observed.job_member_terminated if observed.failed_job_query else None
-        ),
-        successor_before_quit=(
-            observed.successor_before_quit if observed.failed_job_query else None
-        ),
     )
-    if observed.failed_job_query and observed.daemon and not observed.job_query_reached:
-        # The row exists to fail exactly the query ``_in_another_owned_job``
-        # makes; a daemon row that never reached it measured nothing.
-        failures.append(
-            "the failing Job-membership query was never reached during the drain"
-        )
     return vector, row_expectations(vector, expect_owner=expect_owner) + failures
 
 
@@ -3129,8 +3484,10 @@ async def measure_host_quit_row(
     venv, whose declared shim fails the routine drain's Job-membership query;
     the browser cache is a row-private one of links; after the read the row
     holds a dependency back so the next call starts an installer that waits on
-    a host that never answers, then calls ``close_session`` with it running,
-    and once more after, where a successor would serve.
+    a host that never answers, then calls ``close_session`` with it running.
+    In daemon mode, once the installer family has settled, the row restores
+    the cache and calls once more, where a successor would serve. What the
+    row established is ``RowResult.continuation`` (``NativeContinuation``).
     """
     # First, before anything reads, launches or spawns.
     account = claim_account(profile)
@@ -3217,8 +3574,6 @@ async def measure_host_quit_row(
     successor: dict[str, Any] = {}
     #: H-R11 daemon: orders the successor's creation after the close.
     close_clock = WallClockMarker()
-    #: The routine drain's reading, taken once the installers have settled.
-    drain: DrainReading | None = None
     if shim is not None:
         # Every planted failure of an earlier row in the same venv is not ours.
         shim.reached_file.unlink(missing_ok=True)
@@ -3362,14 +3717,16 @@ async def measure_host_quit_row(
         emit("harness", "owner.found", **owner)
 
     async def job_query_script(call: ToolCall) -> None:
-        """Start an installer, close with it running, then call once more."""
+        """Start an installer and close with it running; in daemon mode, once
+        the installer family has settled, recover and call once more."""
         assert cache is not None
         # The owner whose drain the shim should be reached in: the one serving now.
         job_window["owner_pid"] = identified.pid if identified is not None else None
         job_window["owner_created"] = (
             identified.create_time if identified is not None else None
         )
-        job_window["owner_log"] = owner.get("log_path")
+        log_path = owner.get("log_path")
+        job_window["owner_log"] = log_path
         held = cache.hold_back()
         # The row's own install record, so setup looks again on the next call.
         (account.auth_root / "browser-install.json").unlink(missing_ok=True)
@@ -3387,19 +3744,40 @@ async def measure_host_quit_row(
         # Whatever was created after this marker was created after the close
         # began, while the wall clock kept pace (``WallClockMarker``).
         await asyncio.to_thread(close_clock.mark)
+        # The daemon log is shared by every owner of the auth root: what the
+        # owner that closed wrote is what follows this offset.
+        job_window["log_before_close"] = log_size(log_path)
         closed = await call("close_session", {})
         job_window.update(began=closed["began"], ended=closed["ended"])
+        job_window["clock_held"] = close_clock.held()
+        consumed = (
+            await asyncio.to_thread(
+                logged_since,
+                log_path,
+                job_window["log_before_close"],
+                NEGATIVE_CONSUMPTION_LINE,
+                seconds=_LOG_SECONDS,
+            )
+            if daemon
+            else None
+        )
+        job_window["consumed_false"] = consumed
         emit("harness", "job_query.window", phase="close", **job_window)
         watch_late_installers()
+        if not daemon:
+            # Direct's own setup holds the installer until host quit, so its
+            # family settles only then (``fates.settle`` below) and no probe
+            # could come after that settlement.
+            job_window["recovery"] = NO_RECOVERY
+            job_window["script_ended"] = True
+            return
         # An owner whose close stayed unconfirmed stands down, and a call that
         # reaches it meanwhile is told to call again for its replacement
         # (measured on Windows, run 36384952466: the probe came 33 ms after the
         # verdict, the owner answered "restarting", the host quit, and no
         # successor was ever asked for). So the probe waits for that owner to
         # be gone, observed through the handle the row identified it by.
-        leaving = identified is not None and close_left_unconfirmed(
-            owner.get("log_path")
-        )
+        leaving = identified is not None and consumed is True
         job_window["owner_left_before_probe"] = (
             await asyncio.to_thread(
                 wait_until_dead, identified.process, _OWNER_STAND_DOWN_SECONDS
@@ -3407,10 +3785,48 @@ async def measure_host_quit_row(
             if leaving and identified is not None
             else None
         )
+        if job_window["owner_left_before_probe"] is True:
+            # Written before the owner exited, which has been seen: no wait.
+            job_window["stood_down"] = await asyncio.to_thread(
+                logged_since,
+                log_path,
+                job_window["log_before_close"],
+                STAND_DOWN_LINE,
+                until=log_size(log_path),
+            )
+        # The labelled boundary: the installer family settled first, then the
+        # harness's restoration, then the probe, so the probe is a
+        # post-settlement recovery and the restoration races no download.
+        watch_late_installers()
+        unsettled = await asyncio.to_thread(
+            settle_family, watcher.observed, fates, _FAMILY_SETTLE_SECONDS
+        )
+        job_window["family_before_recovery"] = unsettled
+        emit("harness", "job_query.window", phase="family settled", unsettled=unsettled)
+        if unsettled:
+            job_window["recovery"] = "not made: the installer family had not settled"
+            job_window["script_ended"] = True
+            return
+        # What the product left at the boundary, read before the harness
+        # restores anything, and the auth root on both sides of that
+        # restoration, so neither can stand for the other.
+        at_boundary = snapshot(account.profile, expected_digest=staged.li_at_digest)
+        job_window["protected_at_boundary"] = protected_changes(before, at_boundary)
+        unrestored = await asyncio.to_thread(auth_files, account.auth_root)
         # Both the held-back link and its install record must be ready before
         # the next owner can serve a browser-backed read.
         await asyncio.to_thread(cache.restore_installed, runtime.python, env)
-        emit("harness", "job_query.window", phase="cache restored")
+        restored = await asyncio.to_thread(auth_files, account.auth_root)
+        job_window["restoration_changes"] = restoration_changes(unrestored, restored)
+        job_window["recovery"] = POST_SETTLEMENT
+        emit(
+            "harness",
+            "job_query.window",
+            phase="cache restored",
+            at_boundary=at_boundary.as_event_fields(),
+            protected_at_boundary=job_window["protected_at_boundary"],
+            restoration_changes=job_window["restoration_changes"],
+        )
         probe = await call(READ_TOOL, READ_TOOL_ARGUMENTS)
         job_window["probe_ended"] = probe["ended"]
         job_window["probe"] = {
@@ -3427,8 +3843,7 @@ async def measure_host_quit_row(
             probe_read_the_post=probe.get("read_the_post"),
         )
         watch_late_installers()
-        if daemon:
-            await verify_the_successor(job_window["probe"])
+        await verify_the_successor(job_window["probe"])
         job_window["script_ended"] = True
 
     def watch_late_installers() -> None:
@@ -3606,30 +4021,9 @@ async def measure_host_quit_row(
             emit("harness", "owner.exit", **exit_record)
 
         if shim is not None:
-            # Ended with their Jobs when the server or owner went; then the
-            # held-back dependency is put back before anything else runs.
+            # Ended with their Jobs when the server or owner went (Direct's
+            # boundary); the teardown below restores the cache only after.
             await asyncio.to_thread(fates.settle, _BROWSER_GONE_SECONDS)
-            # Every owner that could drain has exited, so the shim's records
-            # are final: the reading, and whether its evidence is complete.
-            owner_log = Path(job_window.get("owner_log") or "")
-            drain = job_query_reading(
-                shim,
-                fates=fates,
-                owner_pid=job_window.get("owner_pid"),
-                owner_created=job_window.get("owner_created"),
-                daemon=daemon,
-                observed=watcher.observed(),
-                # Where the shim announces a record it could not write: the
-                # owner's log in daemon mode, the server's stderr in Direct.
-                lost=[
-                    *(
-                        owner_log.read_text(errors="replace").splitlines()
-                        if daemon and owner_log.is_file()
-                        else []
-                    ),
-                    *host.stderr,
-                ],
-            )
         residual = await asyncio.to_thread(
             wait_for_no_browser, account, _BROWSER_GONE_SECONDS
         )
@@ -3756,13 +4150,16 @@ async def measure_host_quit_row(
     )
     if expect_owner and identified is None:
         refusals.append("the row's owner was never identified")
+    # Every actor that could plant a failure has exited by now; a record
+    # still missing is simply not a witness.
+    records = reached(shim.reached_file) if shim is not None else []
     observation = job_query_problems(
         shim,
         fates=fates,
-        reading=drain,
         window=job_window,
         script_error=host.script_error,
         observed=observed_events,
+        records=records,
         host=host_failures(host),
         watcher=watcher_failures(
             result.watcher,
@@ -3772,6 +4169,9 @@ async def measure_host_quit_row(
         ),
         cleanup=list(result.cleanup.failures) if result.cleanup else [],
     )
+    # The census, cleanup and owner checks, before H-R11 adds its own: the
+    # continuation's validity carries these, and them once.
+    settled_refusals = list(refusals)
     if shim is not None:
         # An installer whose end was not observed may still be running on the
         # profile's setup, so no session starts after the row until every one
@@ -3831,35 +4231,57 @@ async def measure_host_quit_row(
             owner_gates=gated,
             o2=o2,
             killed=killed or None,
-            **job_query_observations(
-                shim,
-                reading=drain,
-                window=job_window,
-                owner_pid=job_window.get("owner_pid"),
-                daemon=daemon,
-            ),
         )
     )
     if shim is not None:
         for fate in fates.fates.values():
             emit("harness", "installer.fate", **fate.as_event_fields())
-        emit(
-            "harness",
-            "shim.reached",
-            lines=reached(shim.reached_file),
-            terminations=terminations(shim.reached_file),
-            shim_sha256=shim.shim_sha256,
-        )
         if fates.alive():
             observation.append(
                 f"installers outlived the row: {[f.pid for f in fates.alive()]}"
             )
-        # A known-bad control keeps its behaviour, never a failure to observe
-        # or to clean up after it.
-        observation += [f"teardown: {problem}" for problem in teardown]
-        result.observation_failures = observation
-        result.drain = drain
-        result.failures += [p for p in observation if not p.startswith("teardown: ")]
+        result.failures += observation
+        # A known-bad control keeps its behaviour, never a failure to observe,
+        # to settle or to clean up after it: every experiment is held to these.
+        result.continuation = native_continuation(
+            experiment=experiment,
+            run=log.run,
+            daemon=daemon,
+            identity=identity,
+            shim=shim,
+            vector=result.vector,
+            host=host,
+            window=job_window,
+            fates=fates,
+            observed=observed_events,
+            records=records,
+            successor=successor,
+            validity=[
+                *observation,
+                *settled_refusals,
+                *result.runtime_failures,
+                *(f"canary placement: {problem}" for problem in canary_problems),
+                *(f"teardown: {problem}" for problem in teardown),
+            ],
+        )
+        emit(
+            "harness",
+            "shim.reached",
+            lines=records,
+            witnesses=list(result.continuation.witnesses),
+            shim_sha256=shim.shim_sha256,
+        )
+        emit(
+            "harness",
+            "job_query.continuation",
+            # The event's own experiment and run are the row's; the vector is
+            # in row.outcome and the witnesses in shim.reached.
+            **{
+                name: value
+                for name, value in asdict(result.continuation).items()
+                if name not in ("experiment", "run", "vector", "witnesses")
+            },
+        )
     result.killed = killed or None
     result.o2 = o2
     result.failures += result.runtime_failures
@@ -3875,6 +4297,11 @@ async def measure_host_quit_row(
                 "coordination": coordination_reading(result.vector),
                 "killed": result.killed,
                 "o2": asdict(o2),
+                "continuation": (
+                    asdict(result.continuation)
+                    if result.continuation is not None
+                    else None
+                ),
             },
             indent=2,
         )

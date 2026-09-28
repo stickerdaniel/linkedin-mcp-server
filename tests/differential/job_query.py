@@ -10,33 +10,40 @@ check (``WindowsJob._assign_handle``) asks the same Job about the same
 process, and failing that one would stop the installer from starting at all.
 The failure raised is the one the real API raises, ``pywintypes.error``. Every
 time the planted failure fires it appends a line to ``h-r11-reached.jsonl``
-beside the shim (the calling pid, the member asked about and its creation
-time, the Job handle), so
-a row can say whether its query was reached. Nothing else in any process is
-changed. Planting it inside an actor is Daniel's amendment to the plan
-(FABLE_PLAN_V7, 2026-09-27): the baseline cannot gain a production seam, and
-closing the owner's handle from outside would alter its handle table and keep
-the installer's Job alive.
+beside the shim: the calling pid and that process's own creation time, the
+member asked about and its creation time, the Job handle and the wall-clock
+time. Nothing else in any process is changed. Planting it inside an actor is
+Daniel's amendment to the plan (FABLE_PLAN_V7, 2026-09-27): the baseline
+cannot gain a production seam, and closing the owner's handle from outside
+would alter its handle table and keep the installer's Job alive.
 
-**The observer.** The same shim wraps ``win32api.TerminateProcess`` and changes
-nothing about it: the real call runs exactly once with the arguments it was
-given, and its result or error is the caller's. A call from either drain in
-``process_tree`` (``_drain_adopted_windows_job_members``, the routine one, or
-``_drain_adopted_windows_job``, the baseline's hard exit) is recorded with the
-caller's name, the pid and creation time of the process the handle names, and
-whether the call succeeded. That record is what tells the routine drain's
-termination from shared setup shutdown's ``TerminateJobObject``: both end the
-installer with code 1, and no time the harness can read separates them (review
-e1en, E1EN-02; declared as an amendment to FABLE_PLAN_V7, 2026-09-28).
+**Positive evidence only.** A record says that one planted failure was
+reached, by that lifetime, about that member, then. It certifies that
+invocation and nothing else: not that no other call was made, not what the
+caller did next. A record that could not be written is simply absent, and
+nothing reads an absence as evidence. So the shim observes no
+``TerminateProcess`` call, and nothing here says which native caller ended an
+installer: exit code 1 comes from the routine drain and from a Job's rundown
+alike (review e1ex, E1EX-02, which retired the observer that tried).
 
-**A missing record is not no record.** Every process the shim starts in
-writes a ``ready`` record first, with its creation time and whether the fault
-and the observer are both in place, and numbers every record it writes; one
-it could not write keeps its number, so the gap shows, and is also announced
-on stderr. A termination is recorded when it begins and again when it ends.
-The harness reads the closing owner's records only once they are shown
-complete (``shim_log``); otherwise the drain's reading is unknown (review
-e1ep, E1EP-02).
+**Claim map.** What the row establishes, and from which evidence, never added
+together:
+
+* The routine drain's branch on an unanswered held-Job query: the exact
+  baseline and candidate functions run against Win32 doubles
+  (``job_query_model``). Source-model evidence of a conditional branch.
+* That each native experiment reached that situation and what followed it:
+  the owner that closed, a positive fault record about an installer lifetime
+  inside the close, the candidate's own log of consuming the drain's False
+  and standing down, the installer family's settlement, and a successor
+  serving afterwards (``harness.NativeContinuation``). Native evidence of the
+  continuation, with the termination cause recorded as unobserved.
+* How the installer family ends after an unconfirmed close: the candidate's
+  owner exits without a signal and its kill-on-close Jobs run down, the same
+  primitive that ends the Direct reference's family at host quit. A shared
+  path, disposed of by that source reduction and the settlement observed
+  here, not by a native census of recipients. Whole-system O2 stays
+  unobserved where nothing traced it.
 
 **Where it lives.** The owner is started from ``sys.executable`` with ``-P``,
 so the only thing that reaches it is the interpreter's own startup. The shim
@@ -74,7 +81,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -90,11 +97,11 @@ SHIM_SOURCE = '''\
 
 See tests/differential/job_query.py. Fails the call only when it is made from
 linkedin_mcp_server.process_tree._in_another_owned_job; every other call goes
-to the real API unchanged. It also observes, and changes nothing about, the
-TerminateProcess calls the two process_tree drains make.
+to the real API unchanged. Each failure it plants is recorded with the
+lifetime that made the call. A record that could not be written is absent,
+and nothing reads an absence as evidence.
 """
 
-import itertools
 import json
 import os
 import sys
@@ -102,29 +109,14 @@ import time
 
 _RECORD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "h-r11-reached.jsonl")
 _MODULE = "linkedin_mcp_server.process_tree"
-_DRAINS = ("_drain_adopted_windows_job_members", "_drain_adopted_windows_job")
-_LOST = "h-r11 shim: record lost"
-#: This process's records: a token of its own, and numbers with no gap unless
-#: a record was lost.
-_TOKEN = os.urandom(8).hex()
-_NUMBERS = itertools.count(1)
-_CALLS = itertools.count(1)
 
 
 def _write(record, line):
-    """Append *line*, numbered; a record that could not be written keeps its
-    number, so the gap shows, and is announced on stderr as well."""
-    number = next(_NUMBERS)
     try:
-        text = json.dumps(dict(line, pid=os.getpid(), token=_TOKEN, seq=number))
         with open(record, "a", encoding="utf-8") as stream:
-            stream.write(text + "\\n")
-    except Exception as exc:
-        try:
-            sys.stderr.write(f"{_LOST} {os.getpid()} {number}: {exc!r}\\n")
-            sys.stderr.flush()
-        except Exception:
-            pass
+            stream.write(json.dumps(line) + "\\n")
+    except Exception:
+        pass
 
 
 def _member(identity, handle):
@@ -135,8 +127,12 @@ def _member(identity, handle):
     return member, created
 
 
-def install(win32job, error, identity, record=_RECORD):
-    """Wrap win32job.IsProcessInJob; the doubles in the tests call this too."""
+def install(win32job, error, identity, record=_RECORD, created=None):
+    """Wrap win32job.IsProcessInJob; the doubles in the tests call this too.
+
+    *created* is this process's own creation time: with its pid, the lifetime
+    every record it writes comes from.
+    """
     real = win32job.IsProcessInJob
 
     def IsProcessInJob(process, job):
@@ -145,58 +141,18 @@ def install(win32job, error, identity, record=_RECORD):
             caller.f_code.co_name == "_in_another_owned_job"
             and caller.f_globals.get("__name__") == _MODULE
         ):
-            member, created = _member(identity, process)
+            member, member_created = _member(identity, process)
             try:
                 handle = int(job)
             except Exception:
                 handle = None
-            _write(record, {"kind": "query", "t": time.time(), "member": member,
-                            "created": created, "job": handle})
+            _write(record, {"kind": "query", "t": time.time(), "pid": os.getpid(),
+                            "pid_created": created, "member": member,
+                            "created": member_created, "job": handle})
             raise error(5, "IsProcessInJob", "planted by the H-R11 shim")
         return real(process, job)
 
     win32job.IsProcessInJob = IsProcessInJob
-
-
-def observe(win32api, identity, record=_RECORD):
-    """Wrap win32api.TerminateProcess to record the drains' calls, and no more.
-
-    The real API is called exactly once, with the arguments it was given, and
-    its result or its error goes back to the caller unchanged; nothing the
-    recording does can raise into the caller. A call from one of the two
-    drains in process_tree is recorded when it begins, with that caller's
-    name and the member the handle names, and again when it ends, with
-    whether it succeeded.
-    """
-    real = win32api.TerminateProcess
-
-    def TerminateProcess(*args, **kwargs):
-        caller = sys._getframe(1)
-        name = caller.f_code.co_name
-        if caller.f_globals.get("__name__") != _MODULE or name not in _DRAINS:
-            return real(*args, **kwargs)
-        member, created = _member(identity, args[0] if args else None)
-        call = next(_CALLS)
-        _write(record, {"kind": "terminate", "phase": "begin", "call": call,
-                        "caller": name, "member": member, "created": created,
-                        "t": time.time()})
-        try:
-            result = real(*args, **kwargs)
-        except BaseException as exc:
-            _write(record, {"kind": "terminate", "phase": "end", "call": call,
-                            "succeeded": False, "error": repr(exc), "t": time.time()})
-            raise
-        _write(record, {"kind": "terminate", "phase": "end", "call": call,
-                        "succeeded": True, "t": time.time()})
-        return result
-
-    win32api.TerminateProcess = TerminateProcess
-
-
-def ready(record=_RECORD, *, created=None, fault=False, observer=False):
-    """This process's first record: which parts are in place, and its lifetime."""
-    _write(record, {"kind": "ready", "created": created, "fault": fault,
-                    "observer": observer, "t": time.time()})
 
 
 def _times(handle):
@@ -221,29 +177,19 @@ def _identity(handle):
 
 
 if sys.platform == "win32" and __name__ == "sitecustomize":
-    _parts = {"fault": False, "observer": False}
+    try:
+        import win32api
+
+        _created = _times(win32api.GetCurrentProcess())
+    except Exception:
+        _created = None
     try:
         import pywintypes
         import win32job
 
-        install(win32job, pywintypes.error, _identity)
-        _parts["fault"] = True
+        install(win32job, pywintypes.error, _identity, created=_created)
     except Exception:
         pass
-    try:
-        import win32api
-
-        observe(win32api, _identity)
-        _parts["observer"] = True
-    except Exception:
-        pass
-    try:
-        import win32api
-
-        _self = _times(win32api.GetCurrentProcess())
-    except Exception:
-        _self = None
-    ready(created=_self, **_parts)
 '''
 
 
@@ -396,159 +342,23 @@ def make_shim_venv(source_python: str, directory: Path) -> ShimVenv:
     )
 
 
-#: What the shim writes to stderr, the owner's log in daemon mode, when a
-#: record could not be written.
-LOST_MARKER = "h-r11 shim: record lost"
+def reached(path: Path) -> list[dict[str, Any]]:
+    """Every planted failure recorded at *path*, whoever made the call.
 
-#: How far apart two readings of one creation time may be (``Fate.is_lifetime``).
-_READY_TOLERANCE_SECONDS = 0.01
-
-
-def _parsed(path: Path) -> tuple[list[dict[str, Any]], int]:
-    """Every record at *path*, and how many lines could not be read as one."""
+    A line that does not read as a record is skipped: it witnesses nothing,
+    and its absence from the result is not read as anything either.
+    """
     if not path.is_file():
-        return [], 0
-    lines, unreadable = [], 0
+        return []
+    found = []
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        if not line.strip():
-            continue
         try:
             entry = json.loads(line)
         except ValueError:
-            unreadable += 1
             continue
-        if isinstance(entry, dict):
-            lines.append(entry)
-        else:
-            unreadable += 1
-    return lines, unreadable
-
-
-def _joined(lines: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
-    """Each observed ``TerminateProcess`` call, its begin and end joined."""
-    begun: dict[tuple[Any, Any], dict[str, Any]] = {}
-    ends: dict[tuple[Any, Any], dict[str, Any]] = {}
-    problems = []
-    for line in lines:
-        if line.get("kind") != "terminate":
-            continue
-        key = (line.get("token"), line.get("call"))
-        if line.get("phase") == "begin":
-            begun[key] = line
-        elif line.get("phase") == "end":
-            ends[key] = line
-    calls = []
-    for key, begin in begun.items():
-        end = ends.get(key)
-        calls.append(
-            {
-                "pid": begin.get("pid"),
-                "caller": begin.get("caller"),
-                "member": begin.get("member"),
-                "created": begin.get("created"),
-                "began": begin.get("t"),
-                "ended": end.get("t") if end else None,
-                # None: it began and no end was recorded, so it may have run.
-                "succeeded": end.get("succeeded") if end else None,
-                "error": end.get("error") if end else None,
-            }
-        )
-    for key in ends.keys() - begun.keys():
-        problems.append(f"a termination ended with no record of its start: {key}")
-    return calls, problems
-
-
-def reached(path: Path, pid: int | None = None) -> list[dict[str, Any]]:
-    """The planted failures recorded at *path*, for *pid* when it is given."""
-    lines, _ = _parsed(path)
-    return [
-        line
-        for line in lines
-        if line.get("kind") == "query" and (pid is None or line.get("pid") == pid)
-    ]
-
-
-def terminations(path: Path, pid: int | None = None) -> list[dict[str, Any]]:
-    """The drains' ``TerminateProcess`` calls the shim observed, for *pid*."""
-    lines, _ = _parsed(path)
-    calls, _ = _joined(line for line in lines if pid is None or line.get("pid") == pid)
-    return calls
-
-
-@dataclass
-class ShimLog:
-    """One actor's records, and why they might not be all it made."""
-
-    queries: list[dict[str, Any]] = field(default_factory=list)
-    terminations: list[dict[str, Any]] = field(default_factory=list)
-    problems: list[str] = field(default_factory=list)
-
-
-def shim_log(
-    path: Path,
-    *,
-    pid: int | None,
-    created: float | None,
-    lost: Iterable[str] = (),
-) -> ShimLog:
-    """The records of the process (*pid*, *created*), checked for completeness.
-
-    Complete means: that lifetime wrote its ``ready`` record with the fault
-    and the observer both in place; its records are numbered without a gap
-    (a record that could not be written keeps its number); every line of the
-    file reads as a record; no termination ended without a recorded start;
-    and no line in *lost* (the actor's stderr, the owner's log) says one of
-    its records was lost. Anything short of that is a problem, and a problem
-    leaves the drain's reading unknown: an empty set of terminations is only
-    evidence of none when nothing could have gone missing.
-
-    With no *pid* (Direct, which has no adopted Job to drain) every record
-    counts and only the file's own readability and lost lines are checked.
-    """
-    lines, unreadable = _parsed(path)
-    log = ShimLog()
-    if unreadable:
-        log.problems.append(f"{unreadable} line(s) of the shim's record are unreadable")
-    for line in lost:
-        if LOST_MARKER in line and (pid is None or f"{LOST_MARKER} {pid} " in line):
-            log.problems.append(f"the shim lost a record: {line.strip()[:200]}")
-    if pid is None:
-        mine = lines
-    else:
-        readies = [
-            line
-            for line in lines
-            if line.get("kind") == "ready"
-            and line.get("pid") == pid
-            and isinstance(line.get("created"), (int, float))
-            and created is not None
-            and abs(float(line["created"]) - created) <= _READY_TOLERANCE_SECONDS
-        ]
-        if len(readies) != 1:
-            log.problems.append(
-                f"pid {pid} created {created} left {len(readies)} ready records, "
-                f"so its shim is not shown in place"
-            )
-            return log
-        (ready,) = readies
-        if not (ready.get("fault") and ready.get("observer")):
-            log.problems.append(
-                f"pid {pid}'s shim was not all in place: fault={ready.get('fault')}, "
-                f"observer={ready.get('observer')}"
-            )
-        mine = [line for line in lines if line.get("token") == ready.get("token")]
-        numbers = sorted(
-            line["seq"] for line in mine if isinstance(line.get("seq"), int)
-        )
-        if numbers != list(range(1, len(numbers) + 1)) or len(numbers) != len(mine):
-            log.problems.append(
-                f"pid {pid}'s records are not numbered 1 to {len(mine)} without "
-                f"a gap: a record was lost"
-            )
-    log.queries = [line for line in mine if line.get("kind") == "query"]
-    log.terminations, problems = _joined(mine)
-    log.problems += problems
-    return log
+        if isinstance(entry, dict) and entry.get("kind") == "query":
+            found.append(entry)
+    return found
 
 
 # --- The member: a row-private browser cache and a download that never ends ----
@@ -1040,176 +850,3 @@ class Fates:
         deadline = time.monotonic() + seconds
         for thread in self._threads:
             thread.join(timeout=max(deadline - time.monotonic(), 0.0))
-
-
-#: The routine drain, whose termination of a member it could not place is
-#: H-R11's '!'. The baseline's hard-exit drain ``_drain_adopted_windows_job``
-#: terminates members too, after the close, and is another act.
-ROUTINE_DRAIN = "_drain_adopted_windows_job_members"
-
-
-@dataclass
-class DrainReading:
-    """What the routine drain did to the members it asked about, or why that
-    is unknown."""
-
-    #: Confirmed: installer lifetimes it terminated successfully, each after
-    #: its planted query on that lifetime, each then seen to end with code 1.
-    terminated: list[Fate] = field(default_factory=list)
-    #: Terminations of an installer it attempted and that failed: a forbidden
-    #: act, never a confirmed one.
-    attempted: list[dict[str, Any]] = field(default_factory=list)
-    #: Terminations, of any outcome, of a known row process that is no
-    #: installer (the owner's gate, its launcher, a console host).
-    others: list[dict[str, Any]] = field(default_factory=list)
-    unknown: list[str] = field(default_factory=list)
-
-    @property
-    def value(self) -> bool | None:
-        """True for '!', False for '=', None for anything else.
-
-        '!' is only a confirmed termination: the positive control K2 is
-        calibrated by. '=' is only no act at all, on complete evidence. An
-        attempt or a known row process's termination without a confirmed one
-        is a forbidden act that proves no termination, and incomplete
-        evidence proves nothing: both are None, which neither calibrates K2
-        nor passes K3.
-        """
-        if self.unknown:
-            return None
-        if self.terminated:
-            return True
-        if self.attempted or self.others:
-            return None
-        return False
-
-    def acts(self) -> list[str]:
-        """What the drain did short of a confirmed termination, for a report."""
-        return [
-            *(f"attempted {line.get('member')}" for line in self.attempted),
-            *(f"terminated row process {line.get('member')}" for line in self.others),
-        ]
-
-
-def drain_reading(
-    fates: Iterable[Fate],
-    queried: Iterable[dict[str, Any]],
-    terminated: Iterable[dict[str, Any]],
-    *,
-    known_other: Callable[[Any, Any], bool] = lambda member, created: False,
-    health: Iterable[str] = (),
-) -> DrainReading:
-    """Whether the routine drain terminated, or tried to, a member it failed
-    to place.
-
-    From the shim's records of the closing owner alone, never from timing: a
-    ``TerminateProcess`` call the routine drain made (``ROUTINE_DRAIN``)
-    after the planted query on that same lifetime. Shared setup shutdown ends
-    the installer through ``TerminateJobObject`` with the same code 1, and no
-    receipt time or exit time tells the two apart; only the caller does.
-    Three outcomes stay apart (``DrainReading.value``): a confirmed
-    termination (the call succeeded, and that same lifetime then ended with
-    code 1); a failed call, which is an attempt, a forbidden act but no
-    termination; and a call whose end was never recorded, which may not have
-    run at all and is unknown.
-
-    Each member the drain asked about is placed by its lifetime (pid and
-    creation time): a watched installer, a row process *known_other* shows is
-    no installer nor any installer's descendant, or else unknown. Unknown,
-    and so no reading at all, whenever the evidence is not complete: the
-    records' own *health* problems (``shim_log``), a relevant fate that is
-    not an observed exit, an unplaced queried or terminated lifetime, a
-    termination with no planted query before it or no recorded end, or a
-    successful one whose installer did not then end with code 1.
-    """
-    fates = list(fates)
-    reading = DrainReading(unknown=list(health))
-
-    def watched(line: dict[str, Any]) -> Fate | None:
-        for fate in fates:
-            if fate.is_lifetime(line.get("member"), line.get("created")):
-                return fate
-        return None
-
-    def placed(line: dict[str, Any]) -> tuple[str, Any] | None:
-        fate = watched(line)
-        if fate is not None:
-            return ("installer", fate)
-        if known_other(line.get("member"), line.get("created")):
-            return ("other", (line.get("member"), line.get("created")))
-        return None
-
-    relevant: set[tuple[int, float]] = set()
-    queries: dict[Any, float] = {}
-    for line in queried:
-        where = placed(line)
-        if where is None:
-            reading.unknown.append(
-                f"the drain asked about {line.get('member')} created "
-                f"{line.get('created')}, a lifetime the row neither watched nor "
-                f"knows as a process that is no installer"
-            )
-            continue
-        key = (where[1].pid, where[1].start) if where[0] == "installer" else where[1]
-        if where[0] == "installer":
-            relevant.add(key)
-        t = float(line.get("t", 0.0))
-        queries[key] = min(queries.get(key, t), t)
-    for line in terminated:
-        if line.get("caller") != ROUTINE_DRAIN:
-            continue
-        where = placed(line)
-        if where is None:
-            reading.unknown.append(
-                f"the routine drain terminated {line.get('member')} created "
-                f"{line.get('created')}, a lifetime the row cannot place"
-            )
-            continue
-        kind, found = where
-        key = (found.pid, found.start) if kind == "installer" else found
-        asked = queries.get(key)
-        began = float(line.get("began") or 0.0)
-        if asked is None or asked > began:
-            reading.unknown.append(
-                f"the routine drain terminated {line.get('member')} without the "
-                f"planted query before it"
-            )
-            continue
-        if kind == "installer":
-            relevant.add(key)
-        if line.get("succeeded") is None:
-            # It began and no end was recorded: it may not have run at all,
-            # and the records are incomplete whichever member it named.
-            reading.unknown.append(
-                f"the routine drain's termination of {line.get('member')} began "
-                f"and no end was recorded"
-            )
-            continue
-        if kind == "other":
-            reading.others.append(line)
-            continue
-        if line.get("succeeded") is not True:
-            reading.attempted.append(line)
-            continue
-        if not found.settled:
-            continue  # unknown below, as a relevant fate that did not settle
-        if (
-            found.exit_code != 1
-            or found.kernel_exit is None
-            or found.kernel_exit < began
-        ):
-            reading.unknown.append(
-                f"the routine drain terminated installer {found.pid} at {began}, "
-                f"but it ended with {found.exit_code} at {found.kernel_exit}"
-            )
-            continue
-        reading.terminated.append(found)
-    for fate in fates:
-        # A fate matters here only for a member the drain touched; every
-        # installer's end is the inventory's to account for.
-        if (fate.pid, fate.start) in relevant and not fate.settled:
-            reading.unknown.append(
-                f"installer {fate.pid}'s fate is unknown: "
-                f"{fate.problem or 'no exit was observed'}"
-            )
-    return reading

@@ -3,27 +3,35 @@
 Windows only. Each experiment's actors start from a venv of their own that
 adds one declared shim to the runtime's code (``job_query``): it fails
 ``win32job.IsProcessInJob`` when ``_in_another_owned_job`` asks it, and
-records every time it does. The same shim text, and so the same SHA-256, goes
-into all three venvs. After the read the row holds one browser dependency
-back in its row-private cache, so the next call starts the product's
-installer, which waits on a download host that never answers; then the host
-calls ``close_session`` with that installer running, and once more after.
+records each failure it plants with the lifetime that made the call. The same
+shim text, and so the same SHA-256, goes into all three venvs. After the read
+the row holds one browser dependency back in its row-private cache, so the
+next call starts the product's installer, which waits on a download host that
+never answers; then the host calls ``close_session`` with that installer
+running.
 
-* **K1 frozen** (baseline, Direct): no adopted Job, so the routine drain has
-  no member to ask about and the shim is not reached. The installer ends with
-  the server at host quit. The reference column.
-* **K2** (baseline, daemon): the owner's drain asks whether the installer,
-  a member of its adopted Job, is also in the installer's own Job; the failed
-  answer is swallowed as "no" and the installer is terminated with exit code
-  1 while the owner lives. K2 must read ``!``.
-* **K3** (candidate, daemon): the failed answer counts the member as not
-  ended; the drain runs out, the close stays unconfirmed, the owner stands
-  down and a successor serves. K3 must read ``=`` and elect that successor.
+Claim map. Each cell here is a native continuation
+(``harness.NativeContinuation``) and says nothing about which caller ended an
+installer: its termination cause is ``unobserved``. Which branch the routine
+drain selects on an unanswered held-Job query is the source model's
+(``job_query_model``), calibrated in this invocation against the exact sources
+these runtimes import. The installer family's end after an unconfirmed close
+is a shared path: the owner exits without a signal and its kill-on-close Jobs
+run down, the primitive that ends K1's family at host quit. The final test
+composes these, never adds them up.
 
-The escalation is recorded in the packet: the drain's verdict in the owner's
-log, the installer's end and exit code, the owner's exit, the lease's cleanup
-and the successor. Native like the other rows: only where CI opted in after
-trusting the CA, never under xdist, in file order.
+* **K1 frozen** (baseline, Direct): the reference. No adopted Job, so no fault
+  is required and none may be reached; the installer ends with the server at
+  host quit, which is its family's settlement, and no recovery probe follows.
+* **K2** (baseline, daemon): the owner that closed reached the planted fault
+  about an installer lifetime inside its close; the family settled before
+  the harness restored anything. The branch it then selects is the model's.
+* **K3** (candidate, daemon): the same entry; then core.close logs consuming
+  the drain's False, the owner stands down and exits, the family settles, and
+  after the harness's restoration a successor serves the probe.
+
+Native like the other rows: only where CI opted in after trusting the CA,
+never under xdist, in file order.
 """
 
 from __future__ import annotations
@@ -35,34 +43,40 @@ from pathlib import Path
 
 import pytest
 
+from differential.accounting import current
 from differential.baseline import (
     BASELINE_DIR_ENV,
+    BASELINE_SHA,
     Runtime,
+    baseline_file,
     prepare_baseline,
     remove_baseline,
 )
 from differential.events import EventLog
 from differential.harness import (
+    R11Ledger,
     RowResult,
-    RowVector,
     candidate_runtime,
-    compare_to_direct,
+    continuation_problems,
     default_browsers_path,
     measure_host_quit_row,
-    r11_reading,
-    r11_verdict,
+    r11_composition,
+    row_identity,
 )
 from differential.job_query import ShimVenv, make_shim_venv
+from differential.job_query_model import BASELINE, CANDIDATE, calibrate
 from differential.synthetic_origin import (
     OPT_IN_ENV,
     EgressProxy,
     SyntheticOrigin,
     fence_breaches,
 )
+from linkedin_mcp_server import process_tree
 from linkedin_mcp_server.config import reset_config
 
 ROW_H_R11 = "H-R11"
 WINDOWS = sys.platform == "win32"
+_PROCESS_TREE = "linkedin_mcp_server/process_tree.py"
 
 pytestmark = [
     pytest.mark.differential_browser,
@@ -85,7 +99,11 @@ pytestmark = [
     ),
 ]
 
-_VECTORS: dict[str, RowVector] = {}
+
+@pytest.fixture(scope="module")
+def ledger(request) -> R11Ledger:
+    """This invocation's continuations, and only this invocation's."""
+    return R11Ledger(current(request.config).run)
 
 
 @pytest.fixture(scope="module")
@@ -111,6 +129,10 @@ def candidate_shim(tmp_path_factory) -> ShimVenv:
     )
 
 
+def _candidate_revision() -> str | None:
+    return row_identity().get("head")
+
+
 async def _run(
     key: str,
     *,
@@ -119,6 +141,7 @@ async def _run(
     profile: Path,
     egress: tuple[SyntheticOrigin, EgressProxy],
     log: EventLog,
+    ledger: R11Ledger,
     monkeypatch: pytest.MonkeyPatch,
     runtime: Runtime | None = None,
     reference: str | None = None,
@@ -147,20 +170,28 @@ async def _run(
         reference=reference,
         job_query_shim=shim,
     )
+    # Recorded before any assertion, so the composition sees a failed cell as
+    # failed rather than as missing.
+    ledger.record(result.continuation)
+    continuation = result.continuation
     print(
-        f"{ROW_H_R11} {result.label}: {result.vector} r11={r11_reading(result)} "
+        f"{ROW_H_R11} {result.label}: {result.vector} "
+        f"witnesses={len(continuation.witnesses) if continuation else None} "
+        f"termination cause="
+        f"{continuation.termination_cause if continuation else None} "
         f"shim={shim.shim_sha256}"
     )
     return result
 
 
 @pytest.mark.differential_row(row=ROW_H_R11, experiment="K1", column="integrated")
-async def test_frozen_direct_server_is_never_asked(
+async def test_the_frozen_direct_reference_continues_without_an_adopted_job(
     baseline_runtime,
     baseline_shim,
     isolate_profile_dir,
     synthetic_egress,
     differential_run,
+    ledger,
     monkeypatch,
 ):
     result = await _run(
@@ -172,23 +203,23 @@ async def test_frozen_direct_server_is_never_asked(
         profile=isolate_profile_dir,
         egress=synthetic_egress,
         log=differential_run,
+        ledger=ledger,
         monkeypatch=monkeypatch,
     )
-    problems = result.failures + r11_verdict(
-        result, experiment="K1", non_windows=not WINDOWS
+    problems = result.failures + continuation_problems(
+        result.continuation, experiment="K1", revision=BASELINE_SHA, run=ledger.run
     )
     assert not problems, f"{problems}\n{result.report()}"
-    assert result.vector is not None
-    _VECTORS["K1"] = result.vector
 
 
 @pytest.mark.differential_row(row=ROW_H_R11, experiment="K2", column="integrated")
-async def test_the_baseline_owner_terminates_the_installer(
+async def test_the_baseline_owner_reaches_the_failed_query_in_its_close(
     baseline_runtime,
     baseline_shim,
     isolate_profile_dir,
     synthetic_egress,
     differential_run,
+    ledger,
     monkeypatch,
 ):
     result = await _run(
@@ -200,16 +231,25 @@ async def test_the_baseline_owner_terminates_the_installer(
         profile=isolate_profile_dir,
         egress=synthetic_egress,
         log=differential_run,
+        ledger=ledger,
         monkeypatch=monkeypatch,
     )
-    # The rest of K2's outcome is the baseline's, recorded in the packet.
-    problems = r11_verdict(result, experiment="K2", non_windows=not WINDOWS)
+    # The rest of K2's outcome is the baseline's, recorded in the packet; its
+    # validity is not.
+    problems = continuation_problems(
+        result.continuation, experiment="K2", revision=BASELINE_SHA, run=ledger.run
+    )
     assert not problems, f"K2: {problems}\n{result.report()}"
 
 
 @pytest.mark.differential_row(row=ROW_H_R11, experiment="K3", column="integrated")
-async def test_the_candidate_owner_leaves_the_installer_and_is_replaced(
-    candidate_shim, isolate_profile_dir, synthetic_egress, differential_run, monkeypatch
+async def test_the_candidate_owner_stands_down_and_a_successor_serves(
+    candidate_shim,
+    isolate_profile_dir,
+    synthetic_egress,
+    differential_run,
+    ledger,
+    monkeypatch,
 ):
     result = await _run(
         "K3",
@@ -219,22 +259,35 @@ async def test_the_candidate_owner_leaves_the_installer_and_is_replaced(
         profile=isolate_profile_dir,
         egress=synthetic_egress,
         log=differential_run,
+        ledger=ledger,
         monkeypatch=monkeypatch,
     )
-    problems = result.failures + r11_verdict(
-        result, experiment="K3", non_windows=not WINDOWS
+    problems = result.failures + continuation_problems(
+        result.continuation,
+        experiment="K3",
+        revision=_candidate_revision(),
+        run=ledger.run,
     )
     assert not problems, f"{problems}\n{result.report()}"
-    assert result.vector is not None
-    _VECTORS["K3"] = result.vector
 
 
-def test_the_candidate_is_no_worse_than_the_frozen_direct_failed_job_query():
-    reference, candidate = _VECTORS.get("K1"), _VECTORS.get("K3")
-    if reference is None or candidate is None:
-        pytest.fail(
-            f"K1 frozen and K3 must both have passed in this process first; "
-            f"have {sorted(_VECTORS)}"
-        )
-    differences = compare_to_direct(reference, candidate)
-    assert not differences, f"K3 differs from K1 frozen on H-R11: {differences}"
+def test_the_failed_job_query_composes_from_this_invocation_only(ledger):
+    # The source model runs here, in this process, on the pinned baseline's
+    # and this checkout's process_tree; the composition then binds it to what
+    # the native cells' runtimes imported.
+    model = calibrate(
+        {
+            BASELINE: baseline_file(_PROCESS_TREE),
+            CANDIDATE: Path(process_tree.__file__).read_text(encoding="utf-8"),
+        }
+    )
+    problems = r11_composition(
+        model,
+        ledger,
+        revisions={
+            "K1": BASELINE_SHA,
+            "K2": BASELINE_SHA,
+            "K3": _candidate_revision(),
+        },
+    )
+    assert not problems, problems
