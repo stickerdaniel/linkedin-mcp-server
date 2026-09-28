@@ -868,6 +868,56 @@ class TestWindowsAcl:
             target.rmdir()
 
     @windows_only
+    @pytest.mark.parametrize("home_is_shared", [False, True])
+    def test_installer_recovers_from_appcontainer_temp_ancestry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, home_is_shared: bool
+    ):
+        """Reproduce #908 with real Windows ACLs, without changing the host's AppData."""
+        from linkedin_mcp_server import bootstrap, windows_acl
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        home = tmp_path / "profile"
+        appdata = home / "AppData"
+        temporary = appdata / "Local" / "Temp"
+        temporary.mkdir(parents=True)
+        # ALL APPLICATION PACKAGES is a real AppContainer group. The report
+        # provides no SID or mask; Modify plus delete-child reproduces the
+        # reported ancestry refusal without claiming its exact desktop token.
+        granted = home if home_is_shared else appdata
+        subprocess.run(
+            ["icacls", str(granted), "/grant", "*S-1-15-2-1:(OI)(CI)(M,DC)"],
+            check=True,
+            capture_output=True,
+        )
+        before = {
+            path: windows_acl.describe_dacl(path) for path in (home, appdata, temporary)
+        }
+        with pytest.raises(PrivateStateError, match="S-1-15-2-1"):
+            windows_acl.create_owner_only_directory(temporary, prefix="installer-")
+
+        monkeypatch.setattr(bootstrap, "get_config", lambda: AppConfig())
+        monkeypatch.setattr(bootstrap.tempfile, "gettempdir", lambda: str(temporary))
+        monkeypatch.setattr(bootstrap.Path, "home", lambda: home)
+        if home_is_shared:
+            with pytest.raises(PrivateStateError, match="INSTALLER_TEMP_DIR"):
+                bootstrap._create_installer_temporary_root()
+        else:
+            root = bootstrap._create_installer_temporary_root()
+            try:
+                assert root.path.parent == home
+                windows_acl.verify_owner_only(root.path, directory=True)
+                payload = root.path / "download.zip"
+                payload.write_bytes(b"installer payload")
+                assert payload.read_bytes() == b"installer payload"
+            finally:
+                bootstrap._remove_installer_temporary_root(root)
+            assert not root.path.exists()
+
+        assert {path: windows_acl.describe_dacl(path) for path in before} == before
+        assert list(temporary.iterdir()) == []
+        assert list(home.iterdir()) == [appdata]
+
+    @windows_only
     def test_owner_rights_in_the_chain_is_still_accepted(self, tmp_path: Path):
         """The entry CPython puts on every directory it creates for us.
 
