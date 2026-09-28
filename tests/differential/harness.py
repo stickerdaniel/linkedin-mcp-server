@@ -2263,7 +2263,10 @@ class Lineage:
             if current.ppid in self.outside:
                 answer = FROM_HARNESS
                 break
-            current = self.history.at(current.ppid, current.first_t)
+            parent = self.history.at(current.ppid, current.first_t)
+            if parent is None or parent.start > current.start:
+                break
+            current = parent
         self._memo[life.identity] = answer
         return answer
 
@@ -2345,8 +2348,8 @@ def installer_inventory(
 
     That is every installer, every row lifetime recorded below one whatever
     its own command (a console host, a helper), every lifetime the row
-    watched, and every row lifetime whose ancestry is unresolved and that
-    appeared once setup had begun: it could be below an installer. Ended is
+    watched, and every row lifetime whose ancestry is unresolved: its first
+    observation cannot prove that it predates setup. Ended is
     an exit observed through the row's own handle, or the watcher seeing
     that lifetime leave the process table; a handle that could not be opened
     or read, or a lifetime nobody saw leave, is neither.
@@ -2358,24 +2361,12 @@ def installer_inventory(
         for record in records
         if record.get("kind") == "process.exit"
     ]
-    setup_began = min(
-        (
-            life.first_t
-            for life in lineage.history.lifetimes
-            if lineage.of(life) == INSTALLER
-        ),
-        default=None,
-    )
     inventory: dict[tuple[int, float], str] = {}
     for life in lineage.history.lifetimes:
         if not life.in_row:
             continue
         kind = lineage.of(life)
-        if kind in (INSTALLER, BELOW_INSTALLER) or (
-            kind == UNRESOLVED
-            and setup_began is not None
-            and life.first_t >= setup_began
-        ):
+        if kind in (INSTALLER, BELOW_INSTALLER, UNRESOLVED):
             inventory[(life.pid, life.start)] = kind
     for key in fates.fates:
         if not any(

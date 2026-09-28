@@ -1308,15 +1308,15 @@ def test_every_installer_lifetime_must_be_shown_ended():
         _seen(5000, 880, 688.0, "installer"),
         # Started once setup had, below a parent nobody recorded.
         _seen(5100, 5099, 689.0, "other"),
-        # Started before setup, with a parent nobody recorded: not setup's.
+        # Earlier observation without ancestry still cannot prove non-setup.
         _seen(5200, 5199, 600.0, "other"),
     ]
     problems = installer_inventory(records, fates)
     # 880 settled through its handle. 4040's handle failed; 4100 is a console
-    # host below the installer, 5000 an installer nobody watched, 5100 of
-    # unresolved lineage since setup began: none was seen to leave. The
-    # owner's gate, its child and its console host trace to the harness.
-    assert _unended(problems) == [4040, 4100, 5000, 5100]
+    # host below the installer, 5000 an installer nobody watched, and 5100
+    # and 5200 have unresolved lineage: none was seen to leave. The owner's
+    # gate, its child and its console host trace to the harness.
+    assert _unended(problems) == [4040, 4100, 5000, 5100, 5200]
     assert any("PermissionError" in p for p in problems)
     assert any("4100 (below an installer)" in p for p in problems)
     # The watcher seeing a lifetime leave the table is an observed end.
@@ -1326,6 +1326,7 @@ def test_every_installer_lifetime_must_be_shown_ended():
         _gone(4100, 687.300, 690.95),
         _gone(5000, 688.0, 690.96),
         _gone(5100, 689.0, 690.97),
+        _gone(5200, 600.0, 690.97),
     ]
     assert installer_inventory(gone, fates) == []
 

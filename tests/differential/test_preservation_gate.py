@@ -365,6 +365,47 @@ async def test_the_post_quit_session_waits_for_every_installer_fate(
         assert result.observation_failures == []
 
 
+@pytest.mark.parametrize("case", ["reused-parent", "delayed-installer"])
+@pytest.mark.parametrize("helper_exited", [False, True])
+async def test_uncertain_installer_lineage_blocks_preservation_until_exit(
+    row, monkeypatch, tmp_path, case, helper_exited
+):
+    shim = _job_query_row(monkeypatch, tmp_path, _Native())
+    helper = dict(_started(702, 700, 9.08, "other"), start_identity=9.02)
+    if case == "reused-parent":
+        observed = [
+            _started(700, os.getpid(), 9.0, "installer"),
+            {"kind": "process.exit", "pid": 700, "start_identity": 9.0, "t": 9.03},
+            dict(_started(700, os.getpid(), 9.08, "other"), start_identity=9.06),
+            helper,
+        ]
+    else:
+        observed = [
+            {**helper, "ppid": -1, "t": 9.1, "in_row": False},
+            dict(_started(700, os.getpid(), 9.2, "installer"), start_identity=9.0),
+            {**helper, "kind": "process.update", "t": 9.2},
+            {"kind": "process.exit", "pid": 700, "start_identity": 9.0, "t": 9.3},
+        ]
+    if helper_exited:
+        observed.append(
+            {"kind": "process.exit", "pid": 702, "start_identity": 9.02, "t": 9.4}
+        )
+    assert not harness.known_non_installer(observed)(702, 9.02)
+    result, calls = await row(
+        processes=[],
+        summary=_SETTLED,
+        observed=observed,
+        daemon=False,
+        job_query_shim=shim,
+    )
+    problems = harness.r11_verdict(result, experiment="K1", non_windows=False)
+    if helper_exited:
+        assert calls == 1 and problems == [], result.failures
+    else:
+        assert calls == 0
+        assert any("702 (unresolved)" in p for p in problems), problems
+
+
 @pytest.mark.parametrize(
     ("recorded", "starts"),
     [
