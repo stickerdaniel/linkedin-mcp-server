@@ -2003,6 +2003,15 @@ class _InstallerTemporaryRoot:
     pin: Any | None
 
 
+def _configured_installer_temp_dir() -> str | None:
+    configured_parent: str | None = None
+    with contextlib.suppress(Exception):
+        configured_parent = get_config().browser.installer_temp_dir
+    if configured_parent is None:
+        configured_parent = os.environ.get("INSTALLER_TEMP_DIR")
+    return configured_parent
+
+
 def _installer_temporary_parent() -> Path:
     """Return a temp parent whose pathname other local accounts cannot replace.
 
@@ -2012,11 +2021,7 @@ def _installer_temporary_parent() -> Path:
     is pinned, and the pins have to be held across the creation that happens
     after this function has already returned.
     """
-    configured_parent: str | None = None
-    with contextlib.suppress(Exception):
-        configured_parent = get_config().browser.installer_temp_dir
-    if configured_parent is None:
-        configured_parent = os.environ.get("INSTALLER_TEMP_DIR")
+    configured_parent = _configured_installer_temp_dir()
 
     if configured_parent:
         parent = Path(configured_parent).resolve(strict=True)
@@ -2069,7 +2074,6 @@ def _installer_temporary_parent() -> Path:
 
 
 def _create_installer_temporary_root() -> _InstallerTemporaryRoot:
-    parent = _installer_temporary_parent()
     pin: Any | None = None
     if os.name == "nt":
         # Not ``tempfile.mkdtemp``, which is why no Python version floor applies
@@ -2079,10 +2083,40 @@ def _create_installer_temporary_root() -> _InstallerTemporaryRoot:
         # 3.12.4 change to ``mkdtemp`` decides nothing on this path.
         from linkedin_mcp_server.windows_acl import create_owner_only_directory
 
-        path, pin = create_owner_only_directory(
-            parent, prefix="linkedin-mcp-installer-"
-        )
+        try:
+            parent = _installer_temporary_parent()
+            path, pin = create_owner_only_directory(
+                parent, prefix="linkedin-mcp-installer-"
+            )
+        except (OSError, PrivateStateError) as default_error:
+            remedy = (
+                "Set INSTALLER_TEMP_DIR or --installer-temp-dir to an existing "
+                "directory whose ancestry is controlled only by your account "
+                "or Windows system accounts. Keep existing AppContainer and "
+                "shared-folder permissions intact."
+            )
+            if _configured_installer_temp_dir():
+                raise PrivateStateError(f"{default_error}. {remedy}") from default_error
+            # AppData can carry sandbox grants even when the home itself is
+            # private. The fallback must pass the same pinned ancestry checks.
+            try:
+                fallback = Path.home().resolve(strict=True)
+                path, pin = create_owner_only_directory(
+                    fallback, prefix="linkedin-mcp-installer-"
+                )
+            except (OSError, RuntimeError) as fallback_error:
+                raise PrivateStateError(
+                    f"Browser installer temporary directory was refused: "
+                    f"{default_error}. Home fallback failed: {fallback_error}. {remedy}"
+                ) from fallback_error
+            logger.info(
+                "Using a private browser installer directory under %s because "
+                "the system temporary directory was refused: %s",
+                fallback,
+                default_error,
+            )
     else:
+        parent = _installer_temporary_parent()
         path = Path(tempfile.mkdtemp(prefix="linkedin-mcp-installer-", dir=parent))
     try:
         if os.name == "nt":

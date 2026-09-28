@@ -5366,6 +5366,176 @@ class TestPatchrightInstallStreaming:
         assert managed.assigned
 
 
+class TestWindowsInstallerTempFallback:
+    @pytest.fixture
+    def windows_temp(self, tmp_path, monkeypatch):
+        from linkedin_mcp_server import bootstrap, windows_acl
+
+        home = tmp_path / "home"
+        temporary = home / "AppData" / "Local" / "Temp"
+        temporary.mkdir(parents=True)
+        monkeypatch.setattr(bootstrap, "os", SimpleNamespace(name="nt", environ={}))
+        monkeypatch.setattr(bootstrap, "get_config", lambda: AppConfig())
+        monkeypatch.setattr(bootstrap.tempfile, "gettempdir", lambda: str(temporary))
+        monkeypatch.setattr(bootstrap.Path, "home", lambda: home)
+        real_lstat = Path.lstat
+
+        def windows_lstat(path):
+            details = real_lstat(path)
+            return SimpleNamespace(
+                st_mode=details.st_mode,
+                st_dev=details.st_dev,
+                st_ino=details.st_ino,
+                st_file_attributes=0,
+            )
+
+        monkeypatch.setattr(Path, "lstat", windows_lstat)
+        monkeypatch.setattr(windows_acl, "close_directory_pin", lambda _pin: None)
+        return home, temporary
+
+    @pytest.mark.parametrize("os_error", [False, True])
+    def test_rejected_default_temp_falls_back_to_home(
+        self, windows_temp, monkeypatch, caplog, os_error
+    ):
+        from linkedin_mcp_server import bootstrap, windows_acl
+        from linkedin_mcp_server.private_state import PrivateStateError
+
+        home, temporary = windows_temp
+        refusal = f"{home / 'AppData'} grants S-1-15-2-1 permission to remove or re-permission the installer path below it"
+
+        def create(parent, *, prefix):
+            if parent == temporary:
+                raise (
+                    PermissionError(refusal) if os_error else PrivateStateError(refusal)
+                )
+            target = parent / f"{prefix}example"
+            target.mkdir()
+            return target, object()
+
+        monkeypatch.setattr(windows_acl, "create_owner_only_directory", create)
+        with caplog.at_level(logging.INFO):
+            root = bootstrap._create_installer_temporary_root()
+
+        assert root.path.parent == home
+        assert root.path.is_dir()
+        assert root.pin is not None
+        assert list(temporary.iterdir()) == []
+        assert refusal in caplog.text
+
+    @pytest.mark.parametrize(
+        "error", [PermissionError("temp denied"), FileNotFoundError("temp removed")]
+    )
+    def test_default_parent_resolution_failure_falls_back(
+        self, windows_temp, monkeypatch, error
+    ):
+        from linkedin_mcp_server import bootstrap, windows_acl
+
+        home, _temporary = windows_temp
+
+        def unavailable_parent():
+            raise error
+
+        def create(parent, *, prefix):
+            target = parent / f"{prefix}example"
+            target.mkdir()
+            return target, object()
+
+        monkeypatch.setattr(
+            bootstrap, "_installer_temporary_parent", unavailable_parent
+        )
+        monkeypatch.setattr(windows_acl, "create_owner_only_directory", create)
+
+        root = bootstrap._create_installer_temporary_root()
+        assert root.path.parent == home
+        assert root.path.is_dir()
+
+    def test_safe_default_keeps_system_temp(self, windows_temp, monkeypatch):
+        from linkedin_mcp_server import bootstrap, windows_acl
+
+        _home, temporary = windows_temp
+
+        def create(parent, *, prefix):
+            target = parent / f"{prefix}example"
+            target.mkdir()
+            return target, object()
+
+        monkeypatch.setattr(windows_acl, "create_owner_only_directory", create)
+        root = bootstrap._create_installer_temporary_root()
+
+        assert root.path.parent == temporary
+        assert root.path.is_dir()
+
+    @pytest.mark.parametrize("configured", ["config", "environment"])
+    @pytest.mark.parametrize("resolution_fails", [False, True])
+    def test_explicit_temp_never_falls_back(
+        self, windows_temp, monkeypatch, configured, resolution_fails
+    ):
+        from linkedin_mcp_server import bootstrap, windows_acl
+        from linkedin_mcp_server.private_state import PrivateStateError
+
+        home, temporary = windows_temp
+        if configured == "config":
+            config = AppConfig()
+            config.browser.installer_temp_dir = str(temporary)
+            monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+        else:
+            bootstrap.os.environ["INSTALLER_TEMP_DIR"] = str(temporary)
+        attempted = []
+
+        def refuse(parent, *, prefix):
+            attempted.append(parent)
+            raise PrivateStateError("sandbox grant")
+
+        monkeypatch.setattr(windows_acl, "create_owner_only_directory", refuse)
+        if resolution_fails:
+            temporary.rmdir()
+        with pytest.raises(PrivateStateError, match="INSTALLER_TEMP_DIR"):
+            bootstrap._create_installer_temporary_root()
+
+        assert attempted == ([] if resolution_fails else [temporary])
+        assert list(home.iterdir()) == [home / "AppData"]
+
+    def test_unsafe_home_reports_both_failures(self, windows_temp, monkeypatch):
+        from linkedin_mcp_server import bootstrap, windows_acl
+        from linkedin_mcp_server.private_state import PrivateStateError
+
+        home, temporary = windows_temp
+
+        def refuse(parent, *, prefix):
+            raise PrivateStateError(f"unsafe {parent}")
+
+        monkeypatch.setattr(windows_acl, "create_owner_only_directory", refuse)
+        with pytest.raises(PrivateStateError, match="INSTALLER_TEMP_DIR") as caught:
+            bootstrap._create_installer_temporary_root()
+
+        assert f"unsafe {temporary}" in str(caught.value)
+        assert f"unsafe {home}" in str(caught.value)
+        assert list(home.iterdir()) == [home / "AppData"]
+
+    @pytest.mark.parametrize(
+        "error", [PermissionError("home denied"), RuntimeError("no home")]
+    )
+    def test_unavailable_home_keeps_recovery_guidance(
+        self, windows_temp, monkeypatch, error
+    ):
+        from linkedin_mcp_server import bootstrap, windows_acl
+        from linkedin_mcp_server.private_state import PrivateStateError
+
+        def refuse(parent, *, prefix):
+            raise PrivateStateError("sandbox grant")
+
+        def unavailable_home():
+            raise error
+
+        monkeypatch.setattr(windows_acl, "create_owner_only_directory", refuse)
+        monkeypatch.setattr(bootstrap.Path, "home", unavailable_home)
+        with pytest.raises(PrivateStateError, match="INSTALLER_TEMP_DIR") as caught:
+            bootstrap._create_installer_temporary_root()
+
+        assert "sandbox grant" in str(caught.value)
+        assert str(error) in str(caught.value)
+
+
 class TestCredentialRedaction:
     """Every userinfo shape a mirror URL can carry, not only user:password."""
 
