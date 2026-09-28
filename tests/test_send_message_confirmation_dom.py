@@ -1395,6 +1395,20 @@ class TestSendConfirmationDom:
         assert await dom_page.evaluate("document.body.dataset.clicked") is None
         assert await dom_page.locator("#composer").inner_text() == ""
 
+    async def test_unknown_send_toggle_does_not_claim_enter_preference(self, dom_page):
+        html = compose_page(NOOP_SEND_JS).replace(
+            '<button id="send" type="submit">Send</button>',
+            '<button id="toggle" type="button" class="unknown-toggle">'
+            "Open send options</button>",
+        )
+
+        result = await send(dom_page, html)
+
+        assert result["status"] == "send_unavailable"
+        assert result["sent"] is False
+        assert result["retry_safe"] is True
+        assert await dom_page.locator("#composer").inner_text() == ""
+
     async def test_editor_replacement_after_submit_is_not_confirmed(self, dom_page):
         result = await send(dom_page, compose_page(REPLACED_EDITOR_SEND_JS))
 

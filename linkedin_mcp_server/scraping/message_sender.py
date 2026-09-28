@@ -133,6 +133,9 @@ _PROFILE_MESSAGE_TARGET_TIMEOUT_MS = 1_000
 _MESSAGE_SUBMIT_READY_TIMEOUT_MS = 1_000
 _MESSAGE_CLEANUP_TIMEOUT_SECONDS = 1.0
 
+# Narrow exception to the generic-selector rule for #1107: enterToSend uses
+# the send-toggle class only when the verified composer has no Send button.
+# If the class changes, confirmed sends remain unavailable.
 _MESSAGE_COMPOSER_INSPECT_JS = r"""
     const visible = element => {
         const visibility = element && getComputedStyle(element).visibility;
