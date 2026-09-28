@@ -9,6 +9,7 @@ diagnostics that decide what a page *means* stay with the workflow.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import asyncio
 import logging
@@ -230,6 +231,66 @@ class JobApplyRead:
 
     type: ApplyType
     url: str | None = None
+
+
+# A search result card and its dismiss control, measured on 2026-09-28 on a
+# signed-in en-US account. Each result is an `li[data-occludable-job-id]`
+# holding the job id; the job named only by `currentJobId` sits in the detail
+# pane, which has no such card and no dismiss control. The dismiss control is
+# the card's `button` around an icon with `data-test-icon="close-small"` (some
+# cards also carry a "More options" button around `overflow-web-ios-small`).
+# Clicking it keeps the card and swaps the button for one around `undo-small`,
+# which is the only undo there is: a reload drops the job from that search
+# and every later one. Applied jobs carry the same control. The button's
+# `aria-label` names the job in the account's language and is never read.
+# More than one card for the id, or more than one dismiss button in it, is
+# refused rather than guessed at.
+SEARCH_CARD_JS = r"""(opts) => {
+    const {jobId, mark} = opts;
+    for (const old of document.querySelectorAll('[' + mark + ']')) {
+        old.removeAttribute(mark);
+    }
+    const cards = [...document.querySelectorAll('li[data-occludable-job-id]')];
+    const own = cards.filter(
+        (card) => card.getAttribute('data-occludable-job-id') === jobId
+    );
+    const result = {cards: cards.length, matches: own.length, dismiss: 0, undo: 0};
+    if (own.length !== 1) return result;
+    const card = own[0];
+    // Occluded cards render their content only near the viewport.
+    card.scrollIntoView({block: 'center'});
+    const around = (icon) => [...card.querySelectorAll('button')].filter(
+        (button) => button.querySelector('[data-test-icon="' + icon + '"]')
+    );
+    const dismiss = around('close-small');
+    result.dismiss = dismiss.length;
+    result.undo = around('undo-small').length;
+    if (dismiss.length === 1) dismiss[0].setAttribute(mark, '');
+    return result;
+}"""
+
+_SEARCH_CARD_SELECTOR = "li[data-occludable-job-id]"
+_DISMISS_MARK = "data-mcp-dismiss"
+
+# How long a search gets to render its cards, a found card its buttons, and a
+# clicked card its undo state.
+_SEARCH_READY_TIMEOUT = 10.0
+_SEARCH_CARD_RENDER_TIMEOUT = 5.0
+_DISMISS_TIMEOUT = 5.0
+_SEARCH_POLL = 0.25
+
+SearchCardOutcome = Literal[
+    # The dismiss button was clicked and the card turned to its undo state.
+    "dismissed",
+    # The card is already in its undo state.
+    "already_dismissed",
+    # No card for the job in the search's results, scrolled to the end.
+    "absent",
+    # The card is there but no single dismiss button could be told to be its.
+    "no_button",
+    # The button was clicked and the card did not change.
+    "not_dismissed",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -810,3 +871,87 @@ class JobPageReader:
             }"""
         )
         return int(value) if value is not None else None
+
+    async def _open_job_search(self, url: str) -> None:
+        """Navigate to a job search and wait for its result cards to render.
+
+        Raises when the navigation ends anywhere but a job search, after
+        offering the page to the auth-barrier check. A search with no results
+        renders no card, so that wait ends in silence.
+        """
+        await self._navigator._navigate_to_page(url)
+        await self._session.check_rate_limit()
+        page = self._session.page
+        if not same_job_search(route(url), route(page.url)):
+            await self._navigator._raise_if_auth_barrier(page.url)
+            raise LinkedInOperationError(
+                f"The job search navigation ended on {page.url}"
+            )
+        await self._session.dismiss_modal()
+        try:
+            await page.wait_for_selector(
+                _SEARCH_CARD_SELECTOR,
+                state="attached",
+                timeout=int(_SEARCH_READY_TIMEOUT * 1000),
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("No result card rendered on %s", url)
+
+    async def _find_search_card(self, job_id: str) -> dict[str, int]:
+        """Count ``job_id``'s cards and buttons, and mark its dismiss button."""
+        found = await self._session.page.evaluate(
+            SEARCH_CARD_JS, {"jobId": job_id, "mark": _DISMISS_MARK}
+        )
+        if not isinstance(found, dict):
+            raise LinkedInOperationError("The job search page could not be read")
+        return found
+
+    async def _locate_search_card(self, job_id: str) -> dict[str, int]:
+        """Find ``job_id``'s card, scrolling the rail once when it is not there.
+
+        A found card is polled until its buttons render, since an occluded
+        card is an empty `li` until it nears the viewport.
+        """
+        found = await self._find_search_card(job_id)
+        if not found["matches"]:
+            await self._session.scroll_job_sidebar(deadline=SCROLL_DEADLINE_MAX)
+            found = await self._find_search_card(job_id)
+        deadline = self._session.monotonic() + _SEARCH_CARD_RENDER_TIMEOUT
+        while (
+            found["matches"] == 1
+            and not (found["dismiss"] or found["undo"])
+            and self._session.monotonic() < deadline
+        ):
+            await self._session.delay(_SEARCH_POLL)
+            found = await self._find_search_card(job_id)
+        return found
+
+    async def search_lists_job(self, url: str, job_id: str) -> bool:
+        """Whether the job search at ``url`` shows a card for ``job_id``."""
+        await self._open_job_search(url)
+        return bool((await self._locate_search_card(job_id))["matches"])
+
+    async def dismiss_search_card(self, url: str, job_id: str) -> SearchCardOutcome:
+        """Click the dismiss button on ``job_id``'s card in the search at ``url``.
+
+        Success is the card turning to its undo state; the caller confirms it
+        against a fresh load of the search.
+        """
+        await self._open_job_search(url)
+        found = await self._locate_search_card(job_id)
+        if not found["matches"]:
+            return "absent"
+        if found["dismiss"] != 1:
+            if found["matches"] == 1 and found["undo"] and not found["dismiss"]:
+                return "already_dismissed"
+            return "no_button"
+
+        page = self._session.page
+        await page.locator(f"button[{_DISMISS_MARK}]").click(timeout=5000)
+        deadline = self._session.monotonic() + _DISMISS_TIMEOUT
+        while self._session.monotonic() < deadline:
+            await self._session.delay(_SEARCH_POLL)
+            found = await self._find_search_card(job_id)
+            if found["undo"] and not found["dismiss"]:
+                return "dismissed"
+        return "not_dismissed"

@@ -20,6 +20,10 @@
         "coroutine": true,
         "signature": "(self, username: 'str', *, note: 'str | None' = None) -> 'dict[str, Any]'"
       },
+      "dismiss_job": {
+        "coroutine": true,
+        "signature": "(self, job_id: 'str', keywords: 'str') -> 'dict[str, Any]'"
+      },
       "extract_feed": {
         "coroutine": true,
         "signature": "(self, num_posts: 'int' = 10) -> 'ExtractedSection'"
@@ -99,6 +103,7 @@
     },
     "tool_methods": [
       "connect_with_person",
+      "dismiss_job",
       "extract_feed",
       "extract_page",
       "get_company_employees",
@@ -153,6 +158,30 @@
           },
           "required": [
             "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "dismiss_job": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "job_id": {
+              "description": "LinkedIn job ID (e.g., \"4252026496\", \"3856789012\")",
+              "type": "string"
+            },
+            "keywords": {
+              "description": "A narrow search whose first page lists the job, such as\nits title and company (e.g., \"Applied AI Engineer Action1\")",
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id",
+            "keywords"
           ],
           "type": "object"
         },
