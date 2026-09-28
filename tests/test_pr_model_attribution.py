@@ -253,7 +253,7 @@ def test_workflow_checks_attribution_in_required_job() -> None:
     assert checkout["with"]["ref"] == "${{ github.workflow_sha }}"
     assert checkout["with"]["ref"] != "${{ github.event.pull_request.base.sha }}"
     assert checkout["with"]["persist-credentials"] is False
-    assert checkout["with"]["fetch-depth"] == 1
+    assert checkout["with"]["fetch-depth"] == 0
 
     validator = steps["Check PR model attribution"]
     fetch = steps["Fetch PR commits"]
