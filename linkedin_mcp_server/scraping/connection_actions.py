@@ -43,7 +43,12 @@ from linkedin_mcp_server.scraping.session import ScrapingSession
 
 logger = logging.getLogger(__name__)
 
-_DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
+# A messaging overlay (a minimised chat bubble LinkedIn keeps open across
+# pages) is also a dialog. Its composer never belongs to an invite, and its
+# buttons would otherwise join the positional picks below: measured live in
+# September 2026, the last one was the chat's "Open send options" toggle.
+_NOT_MESSAGING = ':not(:has([contenteditable="true"]))'
+_DIALOG_SELECTOR = f'dialog[open]{_NOT_MESSAGING}, [role="dialog"]{_NOT_MESSAGING}'
 _DIALOG_PREMIUM_LINK_SELECTOR = (
     'dialog[open] a[href*="/premium/"], [role="dialog"] a[href*="/premium/"]'
 )
