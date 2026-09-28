@@ -93,6 +93,9 @@ jobs:
           while read -r LOGIN <&3; do
             case "$LOGIN" in *'[bot]') continue ;; esac
             if printf '%s\n' "$LOGIN" | grep -qixF "$OWNER"; then continue; fi
+            # Search allows 30 requests a minute; stay under it however many
+            # authors a release credits.
+            sleep 2
             MERGED=$(gh api -X GET search/issues \
               -f q="repo:$GITHUB_REPOSITORY is:pr is:merged author:$LOGIN" \
               -f per_page=100 \
