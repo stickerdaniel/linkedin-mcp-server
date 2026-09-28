@@ -523,6 +523,42 @@ async def test_k2_never_accepts_a_cleanup_or_watcher_failure(
     assert any(p.startswith(expected) for p in problems), problems
 
 
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        ({}, None),
+        ({"killed_by_harness": True}, "the harness had to kill the server"),
+        ({"exited_on_quit": False}, "the server did not exit within"),
+        ({"exit_code": 1}, "the server exited abnormally"),
+        ({"stdin_closed": False}, "closing the server's stdin failed"),
+        ({"alive_before_quit": False}, "the server was already gone"),
+    ],
+    ids=["clean", "killed", "timeout", "nonzero", "stdin", "already-dead"],
+)
+async def test_k2_requires_a_successful_host_quit(
+    row, monkeypatch, tmp_path, changes, expected
+):
+    shim = _job_query_row(monkeypatch, tmp_path, _Native())
+    original = harness.run_host_session
+
+    async def host(*args, **kwargs):
+        return dataclasses.replace(await original(*args, **kwargs), **changes)
+
+    monkeypatch.setattr(harness, "run_host_session", host)
+    result, preservation_calls = await row(
+        processes=[], summary=_SETTLED, job_query_shim=shim, experiment="K2"
+    )
+    assert result.host is not None and result.host.error is None
+    problems = harness.r11_verdict(result, experiment="K2", non_windows=False)
+    host_problems = harness.host_failures(result.host)
+    if expected is None:
+        assert host_problems == []
+    else:
+        assert any(expected in problem for problem in host_problems)
+        assert all(problem in problems for problem in host_problems)
+        assert preservation_calls == 0
+
+
 async def test_failed_private_setup_closes_the_listener_and_removes_its_links(
     row, monkeypatch, tmp_path
 ):

@@ -1265,7 +1265,7 @@ def test_what_the_watcher_and_cleanup_could_not_do_is_an_observation_failure(
         window={"script_ended": True},
         script_error=None,
         observed=[_seen(880, 3860, 686.896, "installer")],
-        host_error="RuntimeError: boom",
+        host=["the host session failed: RuntimeError: boom"],
         watcher=["the watcher wrote no summary"],
         cleanup=["the row's daemon directory survived removal"],
     )

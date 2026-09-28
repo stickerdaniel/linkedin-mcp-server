@@ -2452,7 +2452,7 @@ def job_query_problems(
     window: Mapping[str, Any],
     script_error: str | None,
     observed: Iterable[Mapping[str, Any]] = (),
-    host_error: str | None = None,
+    host: Sequence[str] = (),
     watcher: Sequence[str] = (),
     cleanup: Sequence[str] = (),
 ) -> list[str]:
@@ -2470,9 +2470,7 @@ def job_query_problems(
     """
     if shim is None:
         return []
-    problems = []
-    if host_error is not None:
-        problems.append(f"the host session failed: {host_error}")
+    problems = list(host)
     if script_error is not None:
         problems.append(f"the H-R11 script failed: {script_error}")
     problems += [
@@ -3677,7 +3675,7 @@ async def measure_host_quit_row(
         window=job_window,
         script_error=host.script_error,
         observed=observed_events,
-        host_error=host.error,
+        host=host_failures(host),
         watcher=watcher_failures(
             result.watcher,
             actors_began=actors_began,
