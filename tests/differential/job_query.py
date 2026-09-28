@@ -17,8 +17,20 @@ Daniel's amendment to the plan (FABLE_PLAN_V7, 2026-09-27): the baseline
 cannot gain a production seam, and closing the owner's handle from outside
 would alter its handle table and keep the installer's Job alive.
 
-**Positive evidence only.** A record says that one planted failure was
-reached, by that lifetime, about that member, then. It certifies that
+**Two logger events.** The same shim is also a declared, test-only observer
+of exactly two logger events: ``core.close`` logging that the drain did not
+prove the launch gone (its consumption of the drain's False, logged for no
+exception), and the owner's ``Standing down: %s``. A filter on each of the
+two loggers matches the logger's name and the record's exact message
+template, and returns True whatever happens, so no record, handler or call
+changes; a record of it carries the process's pid, its own creation time and
+a monotonic reading. The daemon log is one file per auth root, shared by
+every owner generation, so only this tells which lifetime reached that call
+(review e1ey, E1EY-02). It says the call was reached, not that anything was
+written to the log.
+
+**Positive evidence only.** A record says that one planted failure, or one of
+the two events, was reached by that lifetime, then. It certifies that
 invocation and nothing else: not that no other call was made, not what the
 caller did next. A record that could not be written is simply absent, and
 nothing reads an absence as evidence. So the shim observes no
@@ -34,10 +46,11 @@ together:
   (``job_query_model``). Source-model evidence of a conditional branch.
 * That each native experiment reached that situation and what followed it:
   the owner that closed, a positive fault record about an installer lifetime
-  inside the close, the candidate's own log of consuming the drain's False
-  and standing down, the installer family's settlement, and a successor
-  serving afterwards (``harness.NativeContinuation``). Native evidence of the
-  continuation, with the termination cause recorded as unobserved.
+  inside the close, that same lifetime reaching core.close's consumption of
+  the drain's False and its stand-down, the installer family's settlement,
+  and a successor serving afterwards (``harness.NativeContinuation``). Native
+  evidence of the continuation, with the termination cause recorded as
+  unobserved.
 * How the installer family ends after an unconfirmed close: the candidate's
   owner exits without a signal and its kill-on-close Jobs run down, the same
   primitive that ends the Direct reference's family at host quit. A shared
@@ -98,8 +111,9 @@ SHIM_SOURCE = '''\
 See tests/differential/job_query.py. Fails the call only when it is made from
 linkedin_mcp_server.process_tree._in_another_owned_job; every other call goes
 to the real API unchanged. Each failure it plants is recorded with the
-lifetime that made the call. A record that could not be written is absent,
-and nothing reads an absence as evidence.
+lifetime that made the call. It also observes two logger events, and changes
+nothing about them. A record that could not be written is absent, and nothing
+reads an absence as evidence.
 """
 
 import json
@@ -109,6 +123,14 @@ import time
 
 _RECORD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "h-r11-reached.jsonl")
 _MODULE = "linkedin_mcp_server.process_tree"
+#: The two logger events observed, by logger name and exact message template:
+#: core.close consuming the drain's False, and the owner's stand-down.
+_EVENTS = {
+    ("linkedin_mcp_server.core.browser",
+     "Browser processes from this launch are still running after close, so the "
+     "shutdown stays unconfirmed."): "consumed-false",
+    ("linkedin_mcp_server.daemon_owner", "Standing down: %s"): "stand-down",
+}
 
 
 def _write(record, line):
@@ -156,6 +178,35 @@ def install(win32job, error, identity, record=_RECORD, created=None):
     win32job.IsProcessInJob = IsProcessInJob
 
 
+def witness(logging, record=_RECORD, created=None):
+    """Observe the two logger events in _EVENTS; the doubles call this too.
+
+    A filter on each of the two loggers, matching the record's logger name and
+    its exact message template, never the formatted text. It returns True
+    whatever happens, so the record, its handlers and the call go on exactly
+    as without it; a failure while recording only loses the evidence. A record
+    written here says the code reached that logging call in this lifetime,
+    not that any handler wrote it anywhere.
+    """
+
+    def observed(entry):
+        try:
+            event = _EVENTS.get((entry.name, entry.msg))
+            if event is not None:
+                args = entry.args if isinstance(entry.args, tuple) else ()
+                reason = args[0] if args and isinstance(args[0], str) else None
+                _write(record, {"kind": "log", "event": event, "t": time.time(),
+                                "monotonic_ns": time.monotonic_ns(),
+                                "pid": os.getpid(), "pid_created": created,
+                                "reason": reason})
+        except Exception:
+            pass
+        return True
+
+    for name in sorted({logger for logger, _ in _EVENTS}):
+        logging.getLogger(name).addFilter(observed)
+
+
 def _times(handle):
     import ctypes
     from ctypes import wintypes
@@ -189,6 +240,12 @@ if sys.platform == "win32" and __name__ == "sitecustomize":
         import win32job
 
         install(win32job, pywintypes.error, _identity, created=_created)
+    except Exception:
+        pass
+    try:
+        import logging
+
+        witness(logging, created=_created)
     except Exception:
         pass
 '''
@@ -343,8 +400,8 @@ def make_shim_venv(source_python: str, directory: Path) -> ShimVenv:
     )
 
 
-def reached(path: Path) -> list[dict[str, Any]]:
-    """Every planted failure recorded at *path*, whoever made the call.
+def _records(path: Path, kind: str) -> list[dict[str, Any]]:
+    """Every record of *kind* at *path*, whoever wrote it.
 
     A line that does not read as a record is skipped: it witnesses nothing,
     and its absence from the result is not read as anything either.
@@ -357,9 +414,19 @@ def reached(path: Path) -> list[dict[str, Any]]:
             entry = json.loads(line)
         except ValueError:
             continue
-        if isinstance(entry, dict) and entry.get("kind") == "query":
+        if isinstance(entry, dict) and entry.get("kind") == kind:
             found.append(entry)
     return found
+
+
+def reached(path: Path) -> list[dict[str, Any]]:
+    """Every planted failure recorded at *path*: query records, and only those."""
+    return _records(path, "query")
+
+
+def logged(path: Path) -> list[dict[str, Any]]:
+    """Every observed logger event recorded at *path*, and never a query."""
+    return _records(path, "log")
 
 
 # --- The member: a row-private browser cache and a download that never ends ----

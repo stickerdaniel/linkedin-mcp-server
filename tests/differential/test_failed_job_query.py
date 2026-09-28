@@ -14,7 +14,8 @@ Here, on every platform:
   that must fail the calibration;
 * which records witness the intended entry, and which lifetimes the row must
   account for; the installer fates and inventory behind settlement; the
-  successor behind recovery; the owner's log behind the consumer;
+  successor behind recovery; the shim's two observed logger events, bound to
+  the owner's lifetime, behind the consumer and the stand-down;
 * the shim venv, built for real: same product code, the shim ran, the hash;
 * the row-private cache: a held-back link is only ever a link;
 * the stall host: it holds a request without answering.
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -38,20 +40,22 @@ import pytest
 from differential.baseline import baseline_file
 from differential.harness import (
     BELOW_INSTALLER,
+    CONSUMED_FALSE,
     FROM_HARNESS,
+    HELD_PROFILE_REASON,
     INSTALLER,
-    NEGATIVE_CONSUMPTION_LINE,
+    STAND_DOWN,
     UNRESOLVED,
     Lineage,
     WallClockMarker,
     auth_files,
+    family_problems,
     fault_witnesses,
     installer_family,
     installer_inventory,
     is_installer,
     job_query_problems,
-    log_size,
-    logged_since,
+    owner_events,
     protected_changes,
     restoration_changes,
     successor_problems,
@@ -68,6 +72,7 @@ from differential.job_query import (
     StallHost,
     code_difference,
     filetime_to_unix,
+    logged,
     make_shim_venv,
     private_install,
     reached,
@@ -334,15 +339,25 @@ def test_model_shim_does_not_patch_a_windows_job_api(monkeypatch):
 def test_an_actors_startup_plants_the_fault_even_without_its_own_lifetime(
     monkeypatch, tmp_path
 ):
-    # Run as an actor's ``sitecustomize`` over Windows doubles. Its creation
-    # time is unreadable here, so its records carry none and witness nothing,
-    # but the fault is still planted.
+    # Run as an actor's ``sitecustomize`` over Windows doubles, and over a
+    # logging double, so this process's own loggers stay untouched. Its
+    # creation time is unreadable here, so its records carry none and witness
+    # nothing, but the fault is still planted and the two events observed.
     job = SimpleNamespace(IsProcessInJob=lambda process, handle: True)
+    loggers: dict[str, logging.Logger] = {}
+
+    def get_logger(name: str) -> logging.Logger:
+        if name not in loggers:
+            loggers[name] = logging.Logger(name, logging.DEBUG)
+            loggers[name].addHandler(logging.NullHandler())
+        return loggers[name]
+
     with monkeypatch.context() as patch:
         patch.setattr(sys, "platform", "win32")
         patch.setitem(sys.modules, "win32job", job)
         patch.setitem(sys.modules, "win32api", None)
         patch.setitem(sys.modules, "pywintypes", SimpleNamespace(error=_Error))
+        patch.setitem(sys.modules, "logging", SimpleNamespace(getLogger=get_logger))
         namespace: dict[str, Any] = {
             "__name__": "sitecustomize",
             "__file__": str(tmp_path / "sitecustomize.py"),
@@ -357,6 +372,11 @@ def test_an_actors_startup_plants_the_fault_even_without_its_own_lifetime(
         )
     (line,) = reached(record)
     assert line["pid_created"] is None and line["pid"] == os.getpid()
+    loggers["linkedin_mcp_server.daemon_owner"].warning(
+        "Standing down: %s", HELD_PROFILE_REASON
+    )
+    (event,) = logged(record)
+    assert event["event"] == STAND_DOWN and event["pid_created"] is None
 
 
 def test_an_unrelated_sitecustomize_does_not_prove_the_shim_ran(tmp_path):
@@ -772,6 +792,7 @@ def _record(**fields: Any) -> dict[str, Any]:
         pytest.param({"pid_created": None}, False, id="its-lifetime-unread"),
         pytest.param({"job": None}, False, id="no-held-job-named"),
         pytest.param({"pid": 43, "pid_created": 120.0}, False, id="the-successor"),
+        pytest.param({"pid": 43}, False, id="another-pid-same-start"),
         pytest.param({"monotonic_ns": 99_900_000_000}, False, id="before-the-close"),
         pytest.param({"monotonic_ns": 110_100_000_000}, False, id="after-the-close"),
         pytest.param({"monotonic_ns": None}, False, id="no-monotonic-reading"),
@@ -935,6 +956,55 @@ def test_what_the_watcher_and_cleanup_could_not_do_is_an_observation_failure(
     assert "the host session failed: RuntimeError: boom" in problems
 
 
+def test_a_positively_queried_lifetime_is_part_of_the_family_until_accounted():
+    # E1EY-03: the shim proves 799 existed; nothing the watcher or a handle
+    # recorded shows it ended, so the family is not shown ended.
+    fates = _fates(_ended(880, 686.896))
+    # The rest of the measured family, seen to leave.
+    row = [*_K2_ROW, _gone(4040, 687.182, 690.95), _gone(4100, 687.3, 690.95)]
+    asked = [{"member": 799, "created": 690.5}]
+    assert family_problems(row, fates, []) == []
+    (problem,) = family_problems(row, fates, asked)
+    assert "pid 799" in problem
+    # Recorded below the installer and then seen to leave: accounted and ended.
+    below = _seen(799, 880, 690.5, "other")
+    seen = [*row, below, _gone(799, 690.5, 691.0)]
+    assert family_problems(seen, fates, asked) == []
+    # Recorded, but not seen to end: an installer's descendant is still running.
+    running = family_problems([*row, below], fates, asked)
+    assert any("799 (below an installer)" in p for p in running)
+    # A process whose recorded ancestry reaches the harness is no installer's.
+    grounded = [*row, _seen(799, 6928, 690.5, "other")]
+    assert family_problems(grounded, fates, asked) == []
+
+
+def test_a_family_never_shown_ended_before_the_teardown_is_a_failure(tmp_path):
+    fates = _fates(_ended())
+    window = {"script_ended": True}
+    assert (
+        job_query_problems(
+            _shim(tmp_path), fates=fates, window=window, script_error=None
+        )
+        == []
+    )
+    never = job_query_problems(
+        _shim(tmp_path),
+        fates=fates,
+        window=window,
+        script_error=None,
+        before_cleanup=None,
+    )
+    assert any("never shown ended before the teardown" in p for p in never)
+    kept = job_query_problems(
+        _shim(tmp_path),
+        fates=fates,
+        window=window,
+        script_error=None,
+        before_cleanup=["pid 700 (watched), created 9.0, was neither seen"],
+    )
+    assert "before cleanup: pid 700 (watched), created 9.0, was neither seen" in kept
+
+
 # --- The harness's restoration, and the session at the recovery boundary ----------
 
 
@@ -1056,34 +1126,209 @@ def test_a_lost_session_by_the_boundary_is_a_protected_change(auth):
     assert any("no longer usable" in p for p in protected_changes(before, at))
 
 
-# --- The owner's own log: the consumer and the stand-down -------------------------
+# --- The two observed logger events: the consumer and the stand-down -------------
+
+#: The product's own templates, as its loggers are called with them.
+_CONSUMED = (
+    "Browser processes from this launch are still running after close, so the "
+    "shutdown stays unconfirmed."
+)
+_BROWSER_LOGGER = "linkedin_mcp_server.core.browser"
+_OWNER_LOGGER = "linkedin_mcp_server.daemon_owner"
 
 
-def test_only_what_the_owner_wrote_after_the_offset_counts(tmp_path):
-    log = tmp_path / "daemon.log"
-    # An earlier owner of the same auth root logged the same line.
-    log.write_text(json.dumps({"message": NEGATIVE_CONSUMPTION_LINE}) + "\n")
-    offset = log_size(str(log))
-    assert (
-        logged_since(str(log), offset, NEGATIVE_CONSUMPTION_LINE, seconds=0.1) is False
+class _Kept(logging.Handler):
+    """A handler that keeps every record it is handed, as it was handed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+def _witnessed(record: Path) -> tuple[dict[str, logging.Logger], _Kept]:
+    """The two loggers, apart from this process's own, with the shim's filter."""
+    loggers: dict[str, logging.Logger] = {}
+
+    def get_logger(name: str) -> logging.Logger:
+        if name not in loggers:
+            logger = logging.Logger(name, logging.DEBUG)
+            logger.propagate = False
+            loggers[name] = logger
+        return loggers[name]
+
+    shim_namespace()["witness"](
+        SimpleNamespace(getLogger=get_logger), str(record), created=5.0
     )
-    with log.open("a") as stream:
-        stream.write(json.dumps({"message": NEGATIVE_CONSUMPTION_LINE}) + "\n")
-    end = log_size(str(log))
-    assert logged_since(str(log), offset, NEGATIVE_CONSUMPTION_LINE, seconds=0.1)
-    # And only before a later offset, when one is given.
-    with log.open("a") as stream:
-        stream.write(json.dumps({"message": "Standing down: later"}) + "\n")
-    assert logged_since(str(log), offset, "Standing down", until=end) is False
-    assert logged_since(str(log), offset, "Standing down") is True
+    kept = _Kept()
+    for name in (_BROWSER_LOGGER, _OWNER_LOGGER, "elsewhere"):
+        get_logger(name).addHandler(kept)
+    return loggers, kept
 
 
-def test_an_unreadable_log_is_no_witness_either_way(tmp_path):
-    assert log_size(None) is None
-    assert log_size(str(tmp_path / "missing.log")) is None
-    assert logged_since(None, 0, NEGATIVE_CONSUMPTION_LINE) is None
-    assert logged_since(str(tmp_path / "missing.log"), 0, "x", seconds=0.1) is None
-    assert logged_since(str(tmp_path / "missing.log"), None, "x") is None
+def test_the_shim_observes_exactly_its_two_logger_events(tmp_path):
+    record = tmp_path / "reached.jsonl"
+    loggers, kept = _witnessed(record)
+    assert sorted(name for name, logger in loggers.items() if logger.filters) == [
+        _BROWSER_LOGGER,
+        _OWNER_LOGGER,
+    ]
+    before = time.monotonic_ns()
+    loggers[_BROWSER_LOGGER].error(_CONSUMED)
+    loggers[_OWNER_LOGGER].warning("Standing down: %s", HELD_PROFILE_REASON)
+    first, second = logged(record)
+    assert (first["event"], first["pid"], first["pid_created"]) == (
+        CONSUMED_FALSE,
+        os.getpid(),
+        5.0,
+    )
+    assert (second["event"], second["reason"]) == (STAND_DOWN, HELD_PROFILE_REASON)
+    assert before <= first["monotonic_ns"] <= second["monotonic_ns"]
+    # Every record reached its handler, as it was logged.
+    assert [r.getMessage() for r in kept.records] == [
+        _CONSUMED,
+        f"Standing down: {HELD_PROFILE_REASON}",
+    ]
+    # Kept apart: an observed event is never a planted failure, nor the reverse.
+    assert reached(record) == []
+    job = _planted(record)
+    with pytest.raises(_Error):
+        _caller("_in_another_owned_job", "linkedin_mcp_server.process_tree")(
+            job, 700, 55
+        )
+    assert len(reached(record)) == 1 and len(logged(record)) == 2
+
+
+@pytest.mark.parametrize(
+    ("logger", "message", "args"),
+    [
+        # The same text, formatted in by an argument: not the template.
+        pytest.param(_BROWSER_LOGGER, "%s", (_CONSUMED,), id="as-an-argument"),
+        # The same text, already formatted: not the template either.
+        pytest.param(
+            _OWNER_LOGGER,
+            f"Standing down: {HELD_PROFILE_REASON}",
+            (),
+            id="pre-formatted",
+        ),
+        pytest.param(_OWNER_LOGGER, _CONSUMED, (), id="another-logger"),
+        pytest.param(_BROWSER_LOGGER, _CONSUMED + " (again)", (), id="another-text"),
+    ],
+)
+def test_nothing_else_is_observed(tmp_path, logger, message, args):
+    record = tmp_path / "reached.jsonl"
+    loggers, kept = _witnessed(record)
+    loggers[logger].error(message, *args)
+    assert logged(record) == []
+    assert len(kept.records) == 1
+
+
+def test_a_record_that_cannot_be_written_changes_no_logging(tmp_path):
+    unwritable = tmp_path / "a-directory"
+    unwritable.mkdir()
+    loggers, kept = _witnessed(unwritable)
+    loggers[_BROWSER_LOGGER].error(_CONSUMED)
+    # A non-string argument where the reason would be: recorded without one.
+    loggers[_OWNER_LOGGER].warning("Standing down: %s", 7)
+    # A message that cannot even be looked up: logged all the same.
+    loggers[_BROWSER_LOGGER].error({"not": "hashable"})
+    assert logged(unwritable) == []
+    assert [r.getMessage() for r in kept.records] == [
+        _CONSUMED,
+        "Standing down: 7",
+        "{'not': 'hashable'}",
+    ]
+
+
+#: The owner that closed, its close as monotonic nanoseconds.
+_CLOSING = (42, 1.0)
+_INSIDE = (100_000_000_000, 110_000_000_000)
+
+
+def _event(**fields: Any) -> dict[str, Any]:
+    return {
+        "kind": "log",
+        "event": CONSUMED_FALSE,
+        "t": 105.0,
+        "monotonic_ns": 105_000_000_000,
+        "pid": 42,
+        "pid_created": 1.0,
+        "reason": None,
+        **fields,
+    }
+
+
+@pytest.mark.parametrize(
+    ("changes", "found"),
+    [
+        pytest.param({}, True, id="the-owner-that-closed-inside-its-close"),
+        # The next generation appending the same event to the same daemon log.
+        pytest.param({"pid": 43, "pid_created": 12.0}, False, id="another-generation"),
+        # Started within the same 10 ms, as a gate and its child can be.
+        pytest.param({"pid": 43}, False, id="another-pid-same-start"),
+        pytest.param({"pid_created": 0.5}, False, id="another-lifetime-at-the-pid"),
+        pytest.param({"pid_created": None}, False, id="its-lifetime-unread"),
+        pytest.param({"monotonic_ns": 99_900_000_000}, False, id="before-the-close"),
+        pytest.param({"monotonic_ns": 110_100_000_000}, False, id="after-the-close"),
+        pytest.param({"monotonic_ns": None}, False, id="no-monotonic-reading"),
+        pytest.param({"event": STAND_DOWN}, False, id="another-event"),
+    ],
+)
+def test_only_the_closing_owners_own_consumption_counts(changes, found):
+    events = [_event(**changes)]
+    begun, ended = _INSIDE
+    assert (
+        bool(
+            owner_events(
+                events,
+                owner=_CLOSING,
+                event=CONSUMED_FALSE,
+                after_ns=begun,
+                before_ns=ended,
+            )
+        )
+        is found
+    )
+
+
+@pytest.mark.parametrize(
+    ("changes", "found"),
+    [
+        pytest.param({}, True, id="held-profile"),
+        pytest.param({"monotonic_ns": 200_000_000_000}, True, id="after-the-close"),
+        pytest.param({"monotonic_ns": 99_000_000_000}, False, id="before-the-close"),
+        pytest.param(
+            {"reason": "managed browser setup exceeded its background deadline"},
+            False,
+            id="a-setup-deadline",
+        ),
+        pytest.param({"pid": 43, "pid_created": 12.0}, False, id="another-generation"),
+    ],
+)
+def test_only_the_closing_owners_held_profile_stand_down_counts(changes, found):
+    events = [_event(**{"event": STAND_DOWN, "reason": HELD_PROFILE_REASON, **changes})]
+    assert (
+        bool(
+            owner_events(
+                events,
+                owner=_CLOSING,
+                event=STAND_DOWN,
+                after_ns=_INSIDE[0],
+                reason=HELD_PROFILE_REASON,
+            )
+        )
+        is found
+    )
+
+
+def test_no_owner_or_close_leaves_no_event():
+    assert owner_events([_event()], owner=None, event=CONSUMED_FALSE, after_ns=1) == []
+    assert (
+        owner_events([_event()], owner=_CLOSING, event=CONSUMED_FALSE, after_ns=None)
+        == []
+    )
 
 
 # --- The successor, on Windows' clock --------------------------------------------

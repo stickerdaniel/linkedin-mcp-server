@@ -114,6 +114,7 @@ from differential.job_query import (
     ShimVenv,
     StallHost,
     install_locations,
+    logged,
     private_install,
     reached,
     record_install,
@@ -2118,68 +2119,57 @@ _INSTALLER_SECONDS = 60.0
 _OWNER_STAND_DOWN_SECONDS = 30.0
 #: How long the installer family may take to settle once the close is over.
 _FAMILY_SETTLE_SECONDS = 30.0
-#: How long, after ``close_session`` returned, the owner's log may take to
-#: show the line its close wrote before answering.
-_LOG_SECONDS = 2.0
-#: ``core.close`` consuming the drain's False: logged only when the drain did
-#: not prove the launch gone, never for an exception on the way (e1ex, P2).
-#: The same line at the baseline.
-NEGATIVE_CONSUMPTION_LINE = (
-    "Browser processes from this launch are still running after close, so the "
-    "shutdown stays unconfirmed."
-)
-#: The OWNER role's continuation of a held profile: its stand-down.
-STAND_DOWN_LINE = (
-    "Standing down: the browser did not shut down cleanly, so the profile is held"
-)
+#: The two logger events the shim observes (``job_query``): ``core.close``
+#: consuming the drain's False, logged only when the drain did not prove the
+#: launch gone and never for an exception on the way (e1ex, P2), and the
+#: owner's stand-down.
+CONSUMED_FALSE = "consumed-false"
+STAND_DOWN = "stand-down"
+#: The stand-down of an OWNER whose close left the profile held
+#: (``server_role.a_held_profile_means_this_owner_must_go``). An owner also
+#: stands down for a setup deadline, which is not this continuation.
+HELD_PROFILE_REASON = "the browser did not shut down cleanly, so the profile is held"
 
 
-def log_size(log_path: str | None) -> int | None:
-    """Where the owner's log ends now, in bytes; None when it cannot be read."""
-    if not log_path:
-        return None
-    try:
-        return Path(log_path).stat().st_size
-    except OSError:
-        return None
-
-
-def logged_since(
-    log_path: str | None,
-    offset: int | None,
-    line: str,
+def owner_events(
+    events: Iterable[Mapping[str, Any]],
     *,
-    until: int | None = None,
-    seconds: float = 2.0,
-) -> bool | None:
-    """Whether *line* was written to the owner's log after *offset*.
+    owner: tuple[int, float] | None,
+    event: str,
+    after_ns: int | None,
+    before_ns: int | None = None,
+    reason: str | None = None,
+) -> list[dict[str, Any]]:
+    """The observed logger events of kind *event* the owner that closed reached.
 
-    The daemon log is one file per auth root and carries no pid, so a line is
-    tied to an owner by where it sits: after the offset read before that
-    owner's close and, with *until*, before an offset read later. Waits up to
-    *seconds* for it; None when the log or the offset cannot be read, which
-    is no witness either way.
+    That very lifetime (its pid and its own creation time, read once at its
+    startup), at a monotonic reading no earlier than *after_ns* and, when
+    given, no later than *before_ns*, and with *reason* when given. The
+    daemon log is one file per auth root that every owner generation appends
+    to, so a line in it names no writer; another generation's event, the
+    successor's, or an earlier process's at a reused pid witnesses nothing
+    for this owner (review e1ey, E1EY-02).
     """
-    if not log_path or offset is None:
-        return None
-    needle = line.encode("utf-8")
-    deadline = time.monotonic() + seconds
-    while True:
-        try:
-            with open(log_path, "rb") as stream:
-                stream.seek(offset)
-                written = (
-                    stream.read()
-                    if until is None
-                    else stream.read(max(until - offset, 0))
-                )
-        except (OSError, ValueError):
-            return None
-        if needle in written:
-            return True
-        if until is not None or time.monotonic() >= deadline:
-            return False
-        time.sleep(0.1)
+    if owner is None or type(after_ns) is not int:
+        return []
+    pid, created = owner
+    found = []
+    for record in events:
+        made, t = record.get("pid_created"), record.get("monotonic_ns")
+        if record.get("event") != event or record.get("pid") != pid:
+            continue
+        if not isinstance(made, (int, float)):
+            continue
+        if abs(float(made) - created) > _START_TOLERANCE_SECONDS:
+            continue
+        if type(t) is not int or t < after_ns:
+            continue
+        if before_ns is not None and t > before_ns:
+            continue
+        if reason is not None and record.get("reason") != reason:
+            continue
+        found.append(dict(record))
+    return found
 
 
 def is_installer(record: Mapping[str, Any]) -> bool:
@@ -2381,9 +2371,31 @@ def unaccounted_members(
     return problems
 
 
+def family_problems(
+    observed: Iterable[Mapping[str, Any]],
+    fates: Fates,
+    records: Iterable[Mapping[str, Any]],
+) -> list[str]:
+    """Why the installer family is not shown ended, from everything known now.
+
+    The watcher's history and the row's own handles (``installer_inventory``),
+    and every lifetime the shim has positively seen asked about
+    (``unaccounted_members``): a lifetime that evidence proves existed and
+    nothing shows ended may still be setup's, however it escaped the
+    watcher. The same rules at every boundary: before the harness restores
+    or probes, and before its teardown touches the cache.
+    """
+    observed = list(observed)
+    return [
+        *installer_inventory(observed, fates),
+        *unaccounted_members(records, observed, fates),
+    ]
+
+
 def settle_family(
     observed: Callable[[], Iterable[Mapping[str, Any]]],
     fates: Fates,
+    records: Callable[[], Iterable[Mapping[str, Any]]],
     seconds: float = _FAMILY_SETTLE_SECONDS,
 ) -> list[str]:
     """Wait for the installer family to be shown ended; what is not, if not.
@@ -2391,12 +2403,12 @@ def settle_family(
     The labelled boundary before the harness restores the row-private cache
     and makes the recovery probe: restoring a dependency under a download
     still running would race it, and a probe made then would be a different
-    measurement. The same inventory as the barrier after the row
-    (``installer_inventory``).
+    measurement. The same reconciliation as the barrier after the row
+    (``family_problems``), with the shim's records read afresh each time.
     """
     deadline = time.monotonic() + seconds
     while True:
-        problems = installer_inventory(observed(), fates)
+        problems = family_problems(observed(), fates, records())
         if not problems or time.monotonic() >= deadline:
             return problems
         time.sleep(0.2)
@@ -2730,18 +2742,24 @@ def job_query_problems(
     host: Sequence[str] = (),
     watcher: Sequence[str] = (),
     cleanup: Sequence[str] = (),
+    before_cleanup: Sequence[str] | None = (),
 ) -> list[str]:
     """What stops H-R11 from observing the row, in any experiment.
 
     Not the behaviour under test, so K2 is held to all of it too: the row's
     own script; every installer lifetime not shown ended
-    (``installer_inventory``), at the recovery boundary as well as after the
-    row; every lifetime the shim saw asked about that the row cannot account
-    for (``unaccounted_members``); a harness restoration that changed more
-    than its own record; the whole of ``host_failures``; what the watcher
-    could not observe (*watcher*, ``watcher_failures``); what cleanup could
-    not do (*cleanup*, ``DaemonCleanup.failures``); and a wall clock that
-    moved, which leaves no record placeable inside the close.
+    (``installer_inventory``), at the recovery boundary, before the teardown
+    touched anything (*before_cleanup*, None when that was never
+    established) and after the row; every lifetime the shim saw asked about
+    that the row cannot account for (``unaccounted_members``); a harness
+    restoration that changed more than its own record; the whole of
+    ``host_failures``; what the watcher could not observe (*watcher*,
+    ``watcher_failures``); what cleanup could not do (*cleanup*,
+    ``DaemonCleanup.failures``); and a wall clock that moved.
+
+    What was unresolved before the teardown stays unresolved: an installer
+    that ended only once the harness stopped its stall host, say, is the
+    harness's doing and settles nothing the product did.
     """
     if shim is None:
         return []
@@ -2749,6 +2767,12 @@ def job_query_problems(
     problems = list(host)
     if script_error is not None:
         problems.append(f"the H-R11 script failed: {script_error}")
+    if before_cleanup is None:
+        problems.append(
+            "the installer family was never shown ended before the teardown began"
+        )
+    else:
+        problems += [f"before cleanup: {p}" for p in before_cleanup]
     problems += [
         f"installer inventory: {p}" for p in installer_inventory(observed, fates)
     ]
@@ -2795,10 +2819,12 @@ class NativeContinuation:
     Claim map. That the experiment reached the planted situation: the owner
     that closed, the installer family it held, and positive fault witnesses
     (``fault_witnesses``), each certifying one invocation. What followed:
-    core.close's own log of consuming the drain's False, the stand-down and
-    the owner's exit (K3); the family settled at a labelled boundary, then a
-    post-settlement recovery whose successor served the probe (K3); the
-    protected session at that boundary; and every validity problem.
+    that same owner lifetime reaching core.close's consumption of the drain's
+    False inside the close, then its own held-profile stand-down, and its
+    observed exit (K3, ``owner_events``); the family settled at a labelled
+    boundary, then a post-settlement recovery whose successor served the probe
+    (K3); the protected session at that boundary; and every validity problem.
+    The shared daemon log is diagnostic only: its lines name no writer.
 
     ``termination_cause`` is ``unobserved`` in every cell, and no field says
     whether any caller selected ``TerminateProcess``: that is the source
@@ -2826,12 +2852,15 @@ class NativeContinuation:
     #: intended entry.
     reached: int
     witnesses: tuple[Mapping[str, Any], ...]
-    #: Daemon rows: core.close logged consuming the drain's False during the
-    #: close, the owner logged its stand-down and was seen to exit. None where
-    #: the log could not be read, or in Direct.
+    #: Daemon rows: the owner that closed reached core.close's consumption of
+    #: the drain's False inside its close and its held-profile stand-down
+    #: after it began (observed logger events of that lifetime), and was seen
+    #: to exit. None in Direct.
     consumed_false: bool | None
     stood_down: bool | None
     owner_left: bool | None
+    #: Observed logger events recorded in the row, whoever reached them.
+    events: int
     recovery: str
     protected_at_boundary: tuple[str, ...]
     successor_verified: bool | None
@@ -2856,6 +2885,7 @@ def native_continuation(
     fates: Fates,
     observed: Sequence[Mapping[str, Any]],
     records: Sequence[Mapping[str, Any]],
+    events: Sequence[Mapping[str, Any]],
     successor: Mapping[str, Any],
     validity: Sequence[str],
 ) -> NativeContinuation:
@@ -2889,6 +2919,21 @@ def native_continuation(
         family=installer_family(observed, fates),
         interval_ns=close_monotonic_ns,
     )
+    began_ns, ended_ns = close_monotonic_ns or (None, None)
+    consumed = owner_events(
+        events,
+        owner=owner,
+        event=CONSUMED_FALSE,
+        after_ns=began_ns,
+        before_ns=ended_ns,
+    )
+    stood = owner_events(
+        events,
+        owner=owner,
+        event=STAND_DOWN,
+        after_ns=began_ns,
+        reason=HELD_PROFILE_REASON,
+    )
     tool = host.tool or {}
     return NativeContinuation(
         experiment=experiment,
@@ -2907,9 +2952,10 @@ def native_continuation(
         installers=len(fates.fates),
         reached=len(records),
         witnesses=tuple(witnesses),
-        consumed_false=window.get("consumed_false") if daemon else None,
-        stood_down=window.get("stood_down") if daemon else None,
+        consumed_false=bool(consumed) if daemon else None,
+        stood_down=bool(stood) if daemon else None,
         owner_left=window.get("owner_left_before_probe") if daemon else None,
+        events=len(events),
         recovery=str(window.get("recovery") or "not reached"),
         protected_at_boundary=tuple(window.get("protected_at_boundary") or ()),
         successor_verified=successor.get("verified") if daemon else None,
@@ -2985,11 +3031,15 @@ def continuation_problems(
         return problems
     if c.consumed_false is not True:
         problems.append(
-            f"core.close logged no consumption of the drain's False during the "
-            f"close (consumed_false={c.consumed_false!r})"
+            f"the owner that closed was not seen to reach core.close's consumption "
+            f"of the drain's False inside its close ({c.events} logger event(s) "
+            f"recorded in the row)"
         )
     if c.stood_down is not True:
-        problems.append(f"the owner logged no stand-down (stood_down={c.stood_down!r})")
+        problems.append(
+            f"the owner that closed was not seen to reach its held-profile "
+            f"stand-down ({c.events} logger event(s) recorded in the row)"
+        )
     if c.owner_left is not True:
         problems.append(
             f"the owner that closed was not seen to exit (owner_left={c.owner_left!r})"
@@ -3630,6 +3680,9 @@ async def measure_host_quit_row(
     successor: dict[str, Any] = {}
     #: H-R11 daemon: orders the successor's creation after the close.
     close_clock = WallClockMarker()
+    #: H-R11: why the installer family is not shown ended, taken after host
+    #: quit and before the teardown; None until that verdict has been taken.
+    family_at_teardown: list[str] | None = None
     if shim is not None:
         # Every planted failure of an earlier row in the same venv is not ours.
         shim.reached_file.unlink(missing_ok=True)
@@ -3775,7 +3828,7 @@ async def measure_host_quit_row(
     async def job_query_script(call: ToolCall) -> None:
         """Start an installer and close with it running; in daemon mode, once
         the installer family has settled, recover and call once more."""
-        assert cache is not None
+        assert cache is not None and shim is not None
         # The owner whose drain the shim should be reached in: the one serving now.
         job_window["owner_pid"] = identified.pid if identified is not None else None
         job_window["owner_created"] = (
@@ -3800,9 +3853,6 @@ async def measure_host_quit_row(
         # Whatever was created after this marker was created after the close
         # began, while the wall clock kept pace (``WallClockMarker``).
         await asyncio.to_thread(close_clock.mark)
-        # The daemon log is shared by every owner of the auth root: what the
-        # owner that closed wrote is what follows this offset.
-        job_window["log_before_close"] = log_size(log_path)
         closed = await call("close_session", {})
         job_window.update(
             began=closed["began"],
@@ -3811,16 +3861,22 @@ async def measure_host_quit_row(
             ended_monotonic_ns=closed.get("ended_monotonic_ns"),
         )
         job_window["clock_held"] = close_clock.held()
-        consumed = (
-            await asyncio.to_thread(
-                logged_since,
-                log_path,
-                job_window["log_before_close"],
-                NEGATIVE_CONSUMPTION_LINE,
-                seconds=_LOG_SECONDS,
+        # Whether the owner that closed reached core.close's consumption of the
+        # drain's False inside the close: the shim records it synchronously in
+        # that owner before the call answers. Only a lifetime-bound event
+        # counts; the daemon log is shared by every owner generation.
+        consumed = daemon and bool(
+            owner_events(
+                logged(shim.reached_file),
+                owner=(
+                    (identified.pid, identified.create_time)
+                    if identified is not None
+                    else None
+                ),
+                event=CONSUMED_FALSE,
+                after_ns=closed.get("began_monotonic_ns"),
+                before_ns=closed.get("ended_monotonic_ns"),
             )
-            if daemon
-            else None
         )
         job_window["consumed_false"] = consumed
         emit("harness", "job_query.window", phase="close", **job_window)
@@ -3846,21 +3902,18 @@ async def measure_host_quit_row(
             if leaving and identified is not None
             else None
         )
-        if job_window["owner_left_before_probe"] is True:
-            # Written before the owner exited, which has been seen: no wait.
-            job_window["stood_down"] = await asyncio.to_thread(
-                logged_since,
-                log_path,
-                job_window["log_before_close"],
-                STAND_DOWN_LINE,
-                until=log_size(log_path),
-            )
         # The labelled boundary: the installer family settled first, then the
         # harness's restoration, then the probe, so the probe is a
         # post-settlement recovery and the restoration races no download.
+        # Settled means every lifetime known so far, the shim's positively
+        # queried ones included, not only what the watcher recorded.
         watch_late_installers()
         unsettled = await asyncio.to_thread(
-            settle_family, watcher.observed, fates, _FAMILY_SETTLE_SECONDS
+            settle_family,
+            watcher.observed,
+            fates,
+            lambda: reached(shim.reached_file),
+            _FAMILY_SETTLE_SECONDS,
         )
         job_window["family_before_recovery"] = unsettled
         emit("harness", "job_query.window", phase="family settled", unsettled=unsettled)
@@ -4083,8 +4136,18 @@ async def measure_host_quit_row(
 
         if shim is not None:
             # Ended with their Jobs when the server or owner went (Direct's
-            # boundary); the teardown below restores the cache only after.
+            # only boundary). The wait is bounded and settles nothing by
+            # itself: what counts is the verdict taken here, before the
+            # teardown touches the cache or stops the stall host, and nothing
+            # after it can improve that verdict.
+            watch_late_installers()
             await asyncio.to_thread(fates.settle, _BROWSER_GONE_SECONDS)
+            family_at_teardown = await asyncio.to_thread(
+                family_problems,
+                watcher.observed(),
+                fates,
+                reached(shim.reached_file),
+            )
         residual = await asyncio.to_thread(
             wait_for_no_browser, account, _BROWSER_GONE_SECONDS
         )
@@ -4095,13 +4158,18 @@ async def measure_host_quit_row(
     finally:
         if actors_ended is None:
             actors_ended = time.time()
-        if cache is not None:
+        # A failed row's cleanup differs from restoration for reuse: while the
+        # family is not shown ended, a download may still be running, and it
+        # is evidence, not litter.
+        unresolved_family = cache is not None and family_at_teardown != []
+        if cache is not None and not unresolved_family:
+            # Restoration for reuse: the row-private cache goes, and the real
+            # cache is recorded again for the post-quit session.
             try:
                 cache.dismantle()
             except Exception as exc:  # noqa: BLE001 - reported, the teardown goes on
                 teardown.append(f"the private browser cache stayed: {exc!r}")
             try:
-                # The post-quit session runs on the real cache again.
                 await asyncio.to_thread(
                     record_install,
                     runtime.python,
@@ -4109,8 +4177,35 @@ async def measure_host_quit_row(
                 )
             except Exception as exc:  # noqa: BLE001 - reported, the teardown goes on
                 teardown.append(f"the real cache's install was not recorded: {exc!r}")
+        elif cache is not None:
+            # The private cache, its held-back place and the install records
+            # stay exactly as the row left them, and so does what is known of
+            # each installer, read before the harness intervenes below.
+            emit(
+                "harness",
+                "job_query.window",
+                phase="failed-row cleanup",
+                unresolved=family_at_teardown,
+                private_cache=str(cache.directory),
+                held=str(cache.held) if cache.held is not None else None,
+                fates=[fate.as_event_fields() for fate in fates.fates.values()],
+            )
+            teardown.append(
+                f"the installer family was not shown ended, so the private cache "
+                f"{cache.directory} (held back: {cache.held}) and the install "
+                f"records were left as they were"
+            )
         if stall is not None:
+            stall_url = stall.url
             stall.stop()
+            if unresolved_family:
+                # The harness's own helper, stopped by the harness: whatever
+                # installer ends after this ends because of it.
+                teardown.append(
+                    f"the harness stopped its stall host {stall_url} with the "
+                    f"installer family unresolved; an installer exit after this "
+                    f"is the harness's doing, not the product's rundown"
+                )
         # Each helper is ended whatever the one before it did; a failure is
         # the row's to report.
         confirmed = [killed["pid"]] if killed.get("exit") == "killed" else []
@@ -4229,6 +4324,7 @@ async def measure_host_quit_row(
             browser_key=account.browser_key,
         ),
         cleanup=list(result.cleanup.failures) if result.cleanup else [],
+        before_cleanup=family_at_teardown,
     )
     # The census, cleanup and owner checks, before H-R11 adds its own: the
     # continuation's validity carries these, and them once.
@@ -4316,6 +4412,7 @@ async def measure_host_quit_row(
             fates=fates,
             observed=observed_events,
             records=records,
+            events=logged(shim.reached_file),
             successor=successor,
             validity=[
                 *observation,
@@ -4329,6 +4426,7 @@ async def measure_host_quit_row(
             "harness",
             "shim.reached",
             lines=records,
+            events=logged(shim.reached_file),
             witnesses=list(result.continuation.witnesses),
             shim_sha256=shim.shim_sha256,
         )
