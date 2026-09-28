@@ -17,16 +17,16 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
 <details open>
 <summary><strong>LinkedIn MCP Sponsor</strong></summary>
 <br/>
-<a href="https://cadenza.page" target="_blank">
+<a href="https://cadenza.page/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=oss_sponsor&amp;utm_content=banner" target="_blank">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/e7dc04a7-4b2c-4f8f-bffa-77895f02a9b4">
     <img src="https://github.com/user-attachments/assets/8b8ffaf4-ac80-4943-bb14-88562d636a35" alt="Cadenza, hosted LinkedIn MCP for your AI assistant" width="100%">
   </picture>
 </a>
 
-> Prefer not to run a server? [**Cadenza**](https://cadenza.page) is the hosted LinkedIn MCP server for your agents, on web, desktop, and mobile. Set your own limits on LinkedIn actions and use your Sales Navigator, Recruiter, and InMail.
+> Prefer not to run a server? [**Cadenza**](https://cadenza.page/?utm_source=github&utm_medium=readme&utm_campaign=oss_sponsor&utm_content=name) is the hosted LinkedIn MCP server for your agents, on web, desktop, and mobile. Set your own limits on LinkedIn actions and use your Sales Navigator, Recruiter, and InMail.
 
-Use code <strong>FOUNDING20</strong> for 20% off your first year <a href="https://cadenza.page">Try Cadenza →</a>
+Use code <strong>FOUNDING20</strong> for 20% off your first year <a href="https://cadenza.page/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=oss_sponsor&amp;utm_content=cta">Try Cadenza →</a>
 
 <br/>
 
