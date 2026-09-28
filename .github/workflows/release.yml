@@ -61,7 +61,9 @@ jobs:
       # that would have to be withdrawn. The previous version is read on its
       # own and an unreadable parent manifest fails the step. The author of
       # every pull request the section links is looked up for the credit
-      # line, and a failed lookup fails the step too.
+      # line, and a failed lookup fails the step too. An author other than the
+      # owner or a bot whose merged pull requests all sit in this section is
+      # searched for and named as a first contribution.
       - name: Compose release notes
         if: steps.check.outputs.should-release == 'true'
         env:
@@ -84,6 +86,25 @@ jobs:
           done
           python3 -c 'import json, sys; print(json.dumps(dict(line.split() for line in sys.stdin)))' \
             < "$RUNNER_TEMP/pr-authors.txt" > "$RUNNER_TEMP/pr-authors.json"
+          OWNER=${GITHUB_REPOSITORY%%/*}
+          cut -d' ' -f2 "$RUNNER_TEMP/pr-authors.txt" | sort -u > "$RUNNER_TEMP/authors.txt"
+          : > "$RUNNER_TEMP/first-contributors.txt"
+          # Read on fd 3, so nothing inside the loop can consume the list.
+          while read -r LOGIN <&3; do
+            case "$LOGIN" in *'[bot]') continue ;; esac
+            if printf '%s\n' "$LOGIN" | grep -qixF "$OWNER"; then continue; fi
+            MERGED=$(gh api -X GET search/issues \
+              -f q="repo:$GITHUB_REPOSITORY is:pr is:merged author:$LOGIN" \
+              -f per_page=100 \
+              --jq '[.total_count, .items[].number] | map(tostring) | join(" ")')
+            FIRST=$(python3 -c 'import sys; total, *merged = sys.argv[1].split(); print(int(total) <= 100 and set(merged) <= set(sys.argv[2].split()))' \
+              "$MERGED" "$PULLS")
+            if [ "$FIRST" = True ]; then
+              echo "$LOGIN" >> "$RUNNER_TEMP/first-contributors.txt"
+            fi
+          done 3< "$RUNNER_TEMP/authors.txt"
+          python3 -c 'import json, sys; print(json.dumps(sys.stdin.read().split()))' \
+            < "$RUNNER_TEMP/first-contributors.txt" > "$RUNNER_TEMP/first-contributors.json"
           python3 scripts/compose_release_notes.py \
             --changelog CHANGELOG.md \
             --template RELEASE_NOTES_TEMPLATE.md \
@@ -92,6 +113,7 @@ jobs:
             --previous-version "$PREVIOUS" \
             --repository "$GITHUB_REPOSITORY" \
             --pr-authors "$RUNNER_TEMP/pr-authors.json" \
+            --first-contributors "$RUNNER_TEMP/first-contributors.json" \
             --pyproject pyproject.toml \
             --output RELEASE_NOTES.md
 

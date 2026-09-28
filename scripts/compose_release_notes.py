@@ -4,9 +4,10 @@ The body is the version's CHANGELOG section without its heading, with its
 categories promoted to H2 and its bug fixes folded when other categories sit
 beside them, then the install instructions, then the contributors, then the
 compare link. Every pull request link gets its author's login, so GitHub
-shows its Contributors block. Runs in the release workflow before anything
-is built or published, so a missing section stops the release while nothing
-exists yet that would have to be withdrawn.
+shows its Contributors block, and an author whose first merged pull request
+is in this release is named as such. Runs in the release workflow before
+anything is built or published, so a missing section stops the release while
+nothing exists yet that would have to be withdrawn.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ _FIX_TYPE = "fix"
 _LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(\[bot\])?")
 _PR_NUMBER = re.compile(r"[0-9]+")
 _BOT_SUFFIX = "[bot]"
+_FIRST_CONTRIBUTION = " (first contribution 🎉)"
 
 
 class ReleaseNotesError(Exception):
@@ -110,6 +112,40 @@ def _authors(text: str) -> dict[str, str]:
     return authors
 
 
+def _first_contributors(text: str) -> list[str]:
+    try:
+        logins = json.loads(text)
+    except json.JSONDecodeError:
+        logins = None
+    if not isinstance(logins, list):
+        raise ReleaseNotesError(
+            "The first contributors are not a JSON array of logins."
+        )
+    # The login is not echoed: it could carry a workflow command.
+    if not all(isinstance(login, str) and _LOGIN.fullmatch(login) for login in logins):
+        raise ReleaseNotesError("A first contributor is not a valid GitHub login.")
+    return logins
+
+
+def _owner(repository: str) -> str:
+    # GitHub logins are case-insensitive.
+    return repository.split("/", 1)[0].casefold()
+
+
+def _marked(first: list[str], contributors: list[str], owner: str) -> set[str]:
+    """The first contributors, checked against this section's own authors."""
+    marked = {login.casefold() for login in first}
+    if owner in marked:
+        raise ReleaseNotesError(
+            "The repository owner is listed as a first contributor."
+        )
+    if not marked <= {login.casefold() for login in contributors}:
+        raise ReleaseNotesError(
+            "A first contributor is not among this release's contributors."
+        )
+    return marked
+
+
 def _credit(
     section: str, repository: str, authors: dict[str, str]
 ) -> tuple[str, list[str]]:
@@ -124,8 +160,7 @@ def _credit(
             "The pull request authors have no entry for "
             f"{', '.join(f'#{number}' for number in missing)}."
         )
-    # GitHub logins are case-insensitive.
-    owner = repository.split("/", 1)[0].casefold()
+    owner = _owner(repository)
     contributors: list[str] = []
 
     def credit(link: re.Match[str]) -> str:
@@ -196,6 +231,7 @@ def compose(
     previous_version: str,
     repository: str,
     authors: dict[str, str],
+    first_contributors: list[str],
     pyproject: str,
 ) -> str:
     if leftovers:
@@ -205,11 +241,20 @@ def compose(
             "fold them into the CHANGELOG section for "
             f"{version} and delete them."
         )
+    owner = _owner(repository)
     section, contributors = _credit(_section(changelog, version), repository, authors)
+    marked = _marked(first_contributors, contributors, owner)
+    # The owner comes last; a stable sort keeps everyone else in order.
+    contributors.sort(key=lambda login: login.casefold() == owner)
     parts = [_layout(section, _fix_heading(pyproject)), _install(template, version)]
     if contributors:
         parts.append(
-            "**Contributors:** " + ", ".join(f"@{login}" for login in contributors)
+            "**Contributors:** "
+            + ", ".join(
+                f"@{login}"
+                + (_FIRST_CONTRIBUTION if login.casefold() in marked else "")
+                for login in contributors
+            )
         )
     parts.append(
         f"**Full Changelog**: https://github.com/{repository}/compare/"
@@ -224,6 +269,7 @@ _COMPOSE_ARGS = (
     "previous_version",
     "output",
     "pr_authors",
+    "first_contributors",
     "pyproject",
 )
 
@@ -246,6 +292,11 @@ def _parse_args() -> argparse.Namespace:
         "--pr-authors",
         type=Path,
         help="JSON object mapping pull request numbers to GitHub logins",
+    )
+    parser.add_argument(
+        "--first-contributors",
+        type=Path,
+        help="JSON array of logins whose first merged pull request is in this release",
     )
     parser.add_argument("--pyproject", type=Path)
     args = parser.parse_args()
@@ -278,6 +329,7 @@ def main() -> int:
             args.previous_version,
             args.repository,
             _authors(args.pr_authors.read_text(encoding="utf-8")),
+            _first_contributors(args.first_contributors.read_text(encoding="utf-8")),
             args.pyproject.read_text(encoding="utf-8"),
         )
     except ReleaseNotesError as error:

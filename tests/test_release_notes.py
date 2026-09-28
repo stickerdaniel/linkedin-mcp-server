@@ -74,10 +74,14 @@ def _compose(
     fragments: tuple[str, ...] = ("README.md",),
     previous: str = "4.25.0",
     authors: dict[str, str] = _OWNER_AUTHORS,
+    first: Any = (),
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     (tmp_path / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
     (tmp_path / "TEMPLATE.md").write_text(template, encoding="utf-8")
     (tmp_path / "pr-authors.json").write_text(json.dumps(authors), encoding="utf-8")
+    (tmp_path / "first-contributors.json").write_text(
+        json.dumps(first), encoding="utf-8"
+    )
     fragments_dir = tmp_path / "changelog.d"
     fragments_dir.mkdir(exist_ok=True)
     for name in fragments:
@@ -101,6 +105,8 @@ def _compose(
             _REPOSITORY,
             "--pr-authors",
             str(tmp_path / "pr-authors.json"),
+            "--first-contributors",
+            str(tmp_path / "first-contributors.json"),
             "--pyproject",
             str(_PYPROJECT),
             "--output",
@@ -226,6 +232,8 @@ def test_highlights_features_and_folded_fixes_compose_the_exact_body(
         changelog=_HIGHLIGHTS_CHANGELOG,
         previous="4.27.0",
         authors=_HIGHLIGHTS_AUTHORS,
+        # Matched without regard to case, like the owner.
+        first=["ymx1zq"],
     )
 
     assert result.returncode == 0, result.stdout
@@ -254,10 +262,62 @@ def test_highlights_features_and_folded_fixes_compose_the_exact_body(
         "\n"
         "Get v4.28.0 from 4.28.0.\n"
         "\n"
-        "**Contributors:** @ConnorMoss02, @stickerdaniel, @Ymx1ZQ\n"
+        # The owner comes last, after everyone in order of first appearance.
+        "**Contributors:** @ConnorMoss02, @Ymx1ZQ (first contribution 🎉), "
+        "@stickerdaniel\n"
         "\n"
         f"{_COMPARE}/v4.27.0...v4.28.0\n"
     )
+
+
+def test_owner_listed_as_a_first_contributor_is_an_error(tmp_path: Path) -> None:
+    result, output = _compose(tmp_path, "4.26.0", first=["StickerDaniel"])
+
+    assert result.returncode == 1
+    assert not output.exists()
+    assert result.stdout == (
+        "::error::The repository owner is listed as a first contributor.\n"
+    )
+
+
+@pytest.mark.parametrize("login", ["octocat", "renovate[bot]"])
+def test_first_contributor_outside_the_section_is_an_error(
+    tmp_path: Path, login: str
+) -> None:
+    authors = {**_OWNER_AUTHORS, "1": "renovate[bot]"}
+
+    result, output = _compose(tmp_path, "4.26.0", authors=authors, first=[login])
+
+    assert result.returncode == 1
+    assert not output.exists()
+    assert result.stdout == (
+        "::error::A first contributor is not among this release's contributors.\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("first", "message"),
+    [
+        (["-dash"], "A first contributor is not a valid GitHub login."),
+        (
+            ["evil\n::warning::forged"],
+            "A first contributor is not a valid GitHub login.",
+        ),
+        ([7], "A first contributor is not a valid GitHub login."),
+        (
+            {"stickerdaniel": True},
+            "The first contributors are not a JSON array of logins.",
+        ),
+    ],
+)
+def test_malformed_first_contributors_are_an_error_and_not_echoed(
+    tmp_path: Path, first: Any, message: str
+) -> None:
+    result, output = _compose(tmp_path, "4.26.0", first=first)
+
+    assert result.returncode == 1
+    assert not output.exists()
+    assert result.stdout == f"::error::{message}\n"
 
 
 def test_fixes_only_section_stays_open(tmp_path: Path) -> None:
@@ -395,10 +455,17 @@ def test_repository_template_composes(tmp_path: Path) -> None:
     body = output.read_text(encoding="utf-8")
     assert "$" not in body
     assert "linkedin-mcp-server-v4.26.0.mcpb" in body
+    assert "use `mcp-server-linkedin@4.26.0` instead." in body
     assert (
         "\n\n```bash\ndocker pull stickerdaniel/linkedin-mcp-server:latest\n```\n\n"
         in body
     )
+    # The template's own H3 headings are neither promoted nor folded.
+    install = template.replace("${VERSION}", "4.26.0").strip()
+    assert f"\n\n{install}\n\n" in body
+    for heading in ("uvx", "Docker", "Claude Desktop (MCP Bundle)"):
+        assert f"\n\n### {heading}\n\n" in body
+    assert body.count("<details>") == 1
     assert body.index("<summary><b>Bug Fixes (1)</b></summary>") < body.index(
         "## Install or update"
     )
@@ -495,10 +562,12 @@ _RELEASED_CHANGELOG = f"""\
 ### Features
 
 - Newer feature. ({_link(2)})
+- Another feature. ({_link(4)})
 
 ### Bug Fixes
 
 - Newer fix. ({_link(3)})
+- Raised a floor. ({_link(5)})
 
 
 ## 4.25.0 (2026-09-01)
@@ -509,7 +578,20 @@ _RELEASED_CHANGELOG = f"""\
 """
 
 # Only the new section's pull requests; a lookup of #1 would fail the step.
-_RELEASED_LOGINS = {2: "ConnorMoss02", 3: "stickerdaniel"}
+_RELEASED_LOGINS = {
+    2: "stickerdaniel",
+    3: "ConnorMoss02",
+    4: "Ymx1ZQ",
+    5: "renovate[bot]",
+}
+
+# Each author's merged pull requests: (total_count, numbers returned). The
+# owner and the bot are absent, so searching for either fails the step.
+_RELEASED_SEARCHES = {
+    # #1 was merged in 4.25.0, so this is not a first contribution.
+    "ConnorMoss02": (2, [3, 1]),
+    "Ymx1ZQ": (1, [4]),
+}
 
 # The repository's own towncrier configuration, which names the fix category.
 _TOWNCRIER = (
@@ -518,24 +600,64 @@ _TOWNCRIER = (
 )
 
 
-def _fake_gh(bin_dir: Path, logins: dict[int, str]) -> None:
-    """Answer `gh api repos/<repo>/pulls/<N> --jq .user.login` from a map."""
-    cases = "".join(
-        f"    repos/{_REPOSITORY}/pulls/{number}) echo {login}; exit 0 ;;\n"
+# Answers the two calls the step makes from canned API responses, running the
+# step's own --jq expression through jq. gh prints a string result raw.
+_FAKE_GH = """\
+import json, os, subprocess, sys
+
+with open(sys.argv[1], encoding="utf-8") as file:
+    responses = json.load(file)
+args = sys.argv[2:]
+if not os.environ.get("GH_TOKEN"):
+    sys.exit("gh: no GH_TOKEN")
+key = jq = None
+if len(args) == 4 and args[0] == "api" and args[2] == "--jq":
+    key, jq = args[1], args[3]
+elif (
+    len(args) == 10
+    and args[:5] == ["api", "-X", "GET", "search/issues", "-f"]
+    and args[6:9] == ["-f", "per_page=100", "--jq"]
+):
+    key, jq = args[5], args[9]
+if key not in responses:
+    sys.exit(f"gh: HTTP 404: Not Found ({' '.join(args)})")
+answer = subprocess.run(
+    ["jq", "-r", jq],
+    input=json.dumps(responses[key]),
+    capture_output=True,
+    text=True,
+    check=True,
+)
+sys.stdout.write(answer.stdout)
+"""
+
+
+def _fake_gh(
+    bin_dir: Path,
+    logins: dict[int, str],
+    searches: dict[str, tuple[int, list[int]]],
+) -> None:
+    """Put a `gh` on PATH that knows these pull requests and searches."""
+    assert shutil.which("jq"), "the fake gh evaluates the step's --jq with jq"
+    responses: dict[str, Any] = {
+        f"repos/{_REPOSITORY}/pulls/{number}": {
+            "number": number,
+            "user": {"login": login},
+        }
         for number, login in logins.items()
-    )
+    }
+    for login, (total, numbers) in searches.items():
+        responses[f"q=repo:{_REPOSITORY} is:pr is:merged author:{login}"] = {
+            "total_count": total,
+            "incomplete_results": False,
+            "items": [{"number": number} for number in numbers],
+        }
+    (bin_dir / "responses.json").write_text(json.dumps(responses), encoding="utf-8")
+    (bin_dir / "fake_gh.py").write_text(_FAKE_GH, encoding="utf-8")
     gh = bin_dir / "gh"
     gh.write_text(
-        "#!/bin/sh\n"
-        '[ -n "$GH_TOKEN" ] || { echo "gh: no GH_TOKEN" >&2; exit 4; }\n'
-        'if [ "$#" -eq 4 ] && [ "$1" = api ] && [ "$3" = --jq ] '
-        '&& [ "$4" = .user.login ]; then\n'
-        '  case "$2" in\n'
-        f"{cases}"
-        "  esac\n"
-        "fi\n"
-        'echo "gh: HTTP 404: Not Found ($*)" >&2\n'
-        "exit 1\n",
+        f'#!/bin/sh\nexec "{sys.executable}" "{bin_dir / "fake_gh.py"}" '
+        f'"{bin_dir / "responses.json"}" "$@"\n',
         encoding="utf-8",
     )
     gh.chmod(0o755)
@@ -552,7 +674,11 @@ def _git(cwd: Path, *args: str, env: dict[str, str]) -> None:
 
 
 def _run_compose_step(
-    tmp_path: Path, *, tag_on_origin: bool, logins: dict[int, str] = _RELEASED_LOGINS
+    tmp_path: Path,
+    *,
+    tag_on_origin: bool,
+    logins: dict[int, str] = _RELEASED_LOGINS,
+    searches: dict[str, tuple[int, list[int]]] = _RELEASED_SEARCHES,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     """Run the workflow's own compose step in a repo that just bumped 4.26.0."""
     step = _step(_workflow()["jobs"]["check-version-bump"], "Compose release notes")
@@ -572,7 +698,7 @@ def _run_compose_step(
     python3 = bin_dir / "python3"
     python3.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
     python3.chmod(0o755)
-    _fake_gh(bin_dir, logins)
+    _fake_gh(bin_dir, logins, searches)
     runner_temp = tmp_path / "runner-temp"
     runner_temp.mkdir()
     env = {
@@ -639,8 +765,25 @@ def _run_compose_step(
     return result, repo / "RELEASE_NOTES.md"
 
 
-def test_compose_step_writes_the_new_versions_notes(tmp_path: Path) -> None:
-    result, output = _run_compose_step(tmp_path, tag_on_origin=True)
+@pytest.mark.parametrize(
+    ("searches", "contributors"),
+    [
+        (
+            _RELEASED_SEARCHES,
+            "@Ymx1ZQ (first contribution 🎉), @ConnorMoss02, @stickerdaniel",
+        ),
+        # More merged pull requests than one page shows cannot all be here.
+        (
+            {**_RELEASED_SEARCHES, "Ymx1ZQ": (101, [4])},
+            "@Ymx1ZQ, @ConnorMoss02, @stickerdaniel",
+        ),
+    ],
+    ids=["first-contribution", "more-than-one-page"],
+)
+def test_compose_step_writes_the_new_versions_notes(
+    tmp_path: Path, searches: dict[str, tuple[int, list[int]]], contributors: str
+) -> None:
+    result, output = _run_compose_step(tmp_path, tag_on_origin=True, searches=searches)
 
     assert result.returncode == 0, result.stdout + result.stderr
     install = _TEMPLATE.read_text(encoding="utf-8").replace("${VERSION}", "4.26.0")
@@ -648,27 +791,46 @@ def test_compose_step_writes_the_new_versions_notes(tmp_path: Path) -> None:
     assert output.read_text(encoding="utf-8") == (
         "## Features\n"
         "\n"
-        f"- Newer feature. ({_link(2)} by @ConnorMoss02)\n"
+        f"- Newer feature. ({_link(2)})\n"
+        f"- Another feature. ({_link(4)} by @Ymx1ZQ)\n"
         "\n"
         "<details>\n"
-        "<summary><b>Bug Fixes (1)</b></summary>\n"
+        "<summary><b>Bug Fixes (2)</b></summary>\n"
         "\n"
-        f"- Newer fix. ({_link(3)})\n"
+        f"- Newer fix. ({_link(3)} by @ConnorMoss02)\n"
+        f"- Raised a floor. ({_link(5)})\n"
         "\n"
         "</details>\n"
         "\n"
         f"{install.strip()}\n"
         "\n"
-        "**Contributors:** @ConnorMoss02, @stickerdaniel\n"
+        f"**Contributors:** {contributors}\n"
         "\n"
         f"{_COMPARE}/v4.25.0...v4.26.0\n"
     )
 
 
-def test_compose_step_fails_when_an_author_lookup_fails(tmp_path: Path) -> None:
+def test_compose_step_fails_when_a_search_fails(tmp_path: Path) -> None:
     result, output = _run_compose_step(
-        tmp_path, tag_on_origin=True, logins={2: "ConnorMoss02"}
+        tmp_path,
+        tag_on_origin=True,
+        searches={"ConnorMoss02": _RELEASED_SEARCHES["ConnorMoss02"]},
     )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert (
+        "gh: HTTP 404: Not Found (api -X GET search/issues -f "
+        f"q=repo:{_REPOSITORY} is:pr is:merged author:Ymx1ZQ"
+    ) in result.stderr
+    assert not output.exists()
+
+
+def test_compose_step_fails_when_an_author_lookup_fails(tmp_path: Path) -> None:
+    logins = {
+        number: login for number, login in _RELEASED_LOGINS.items() if number != 3
+    }
+
+    result, output = _run_compose_step(tmp_path, tag_on_origin=True, logins=logins)
 
     assert result.returncode == 1, result.stdout + result.stderr
     assert f"gh: HTTP 404: Not Found (api repos/{_REPOSITORY}/pulls/3" in (
