@@ -15,6 +15,7 @@ import contextlib
 import dataclasses
 import functools
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -30,7 +31,7 @@ from differential import harness
 from differential.events import EventLog
 from differential.harness import DaemonCleanup, PostQuit, measure_host_quit_row
 from differential import job_query
-from differential.job_query import SHIM_SHA256, ShimVenv
+from differential.job_query import SHIM_SHA256, ShimVenv, StallHost
 from differential.session import LAST_VERSION_FILE, write_synthetic_cookie_file
 from differential.signals import (
     COMPLETE,
@@ -302,6 +303,60 @@ async def test_the_failed_job_query_row_writes_through_the_real_event_log(
     # The row-private cache is gone and the linked directories are not.
     assert not Path(planted["private_cache"]).exists()
     assert all(source.is_dir() for source in sources)
+
+
+async def test_failed_private_setup_closes_the_listener_and_removes_its_links(
+    row, monkeypatch, tmp_path
+):
+    store = tmp_path / "store"
+    sources = [store / "chromium-1", store / "ffmpeg-2"]
+    for source in sources:
+        source.mkdir(parents=True)
+        (source / "INSTALLATION_COMPLETE").write_text("")
+    monkeypatch.setattr(harness, "install_locations", lambda *a: sources)
+    monkeypatch.setattr(
+        harness,
+        "private_install",
+        lambda python, locations, env, stall: job_query.private_install(
+            python, locations, env, stall, parent=tmp_path
+        ),
+    )
+
+    def refuse_record(*args):
+        raise RuntimeError("private install is not ready")
+
+    monkeypatch.setattr(job_query, "record_install", refuse_record)
+    started: list[str] = []
+
+    class TrackedStall(StallHost):
+        def start(self):
+            super().start()
+            started.append(self.url)
+            return self
+
+    monkeypatch.setattr(harness, "StallHost", TrackedStall)
+    shim = ShimVenv(
+        directory=tmp_path / "shim",
+        python=sys.executable,
+        source_python=sys.executable,
+        site_packages=str(tmp_path),
+        shim_sha256=SHIM_SHA256,
+        pth_sha256="",
+        source_code={},
+        code={},
+    )
+    with pytest.raises(RuntimeError, match="private install is not ready"):
+        await row(
+            processes=[],
+            summary={"read_failures": [], "relevant_read_failures": []},
+            job_query_shim=shim,
+        )
+    assert not (tmp_path / "browsers").exists()
+    assert all((source / "INSTALLATION_COMPLETE").exists() for source in sources)
+    assert len(started) == 1
+    port = int(started[0].rsplit(":", 1)[1])
+    with pytest.raises(OSError):
+        socket.create_connection(("127.0.0.1", port), timeout=0.2)
 
 
 async def test_the_probe_waits_for_an_owner_that_stood_down(row, monkeypatch, tmp_path):

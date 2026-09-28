@@ -49,6 +49,7 @@ from differential.job_query import (
     PrivateCache,
     ShimVenv,
     StallHost,
+    code_difference,
     make_shim_venv,
     private_install,
     reached,
@@ -232,6 +233,52 @@ def test_without_an_adopted_job_the_query_is_never_reached(tmp_path):
 # --- The shim venv, built -------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="win32job runs only on Windows")
+def test_model_shim_does_not_patch_the_real_job_api():
+    win32job = pytest.importorskip("win32job")
+    original = win32job.IsProcessInJob
+    shim_namespace()
+    assert win32job.IsProcessInJob is original
+
+
+def test_model_shim_does_not_patch_a_windows_job_api(monkeypatch):
+    job = SimpleNamespace(IsProcessInJob=lambda process, handle: True)
+    original = job.IsProcessInJob
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "platform", "win32")
+        patch.setitem(sys.modules, "win32job", job)
+        patch.setitem(sys.modules, "pywintypes", SimpleNamespace(error=_Error))
+        patch.setitem(
+            sys.modules,
+            "win32process",
+            SimpleNamespace(GetProcessId=lambda handle: handle),
+        )
+        shim_namespace()
+    assert job.IsProcessInJob is original
+
+
+def test_an_unrelated_sitecustomize_does_not_prove_the_shim_ran(tmp_path):
+    source = {"module": "source", "direct_url": {}, "version": "1"}
+    shimmed = {**source, "sitecustomize": str(tmp_path / "other.py")}
+    assert code_difference(source, shimmed, tmp_path / "sitecustomize.py")
+
+
+def test_the_shim_venv_probes_code_without_importing_the_working_directory(
+    tmp_path, monkeypatch
+):
+    import linkedin_mcp_server
+
+    shadow = tmp_path / "shadow" / "linkedin_mcp_server"
+    shadow.mkdir(parents=True)
+    (shadow / "__init__.py").write_text("shadow = True\n")
+    monkeypatch.chdir(shadow.parent)
+    venv = make_shim_venv(sys.executable, tmp_path / "venv")
+    assert (
+        Path(venv.code["module"]).resolve()
+        == Path(linkedin_mcp_server.__file__).resolve()
+    )
+
+
 def test_the_shim_venv_runs_the_source_code_and_the_shim(tmp_path):
     venv = make_shim_venv(sys.executable, tmp_path / "venv")
     assert venv.code["module"] == venv.source_code["module"]
@@ -266,6 +313,17 @@ def test_the_private_cache_only_ever_removes_links(tmp_path):
     cache.dismantle()
     assert not cache.directory.exists()
     assert all((source / "INSTALLATION_COMPLETE").is_file() for source in sources)
+
+
+def test_a_partial_private_cache_build_leaves_its_sources_untouched(tmp_path):
+    source = tmp_path / "store" / "chromium-1"
+    source.mkdir(parents=True)
+    (source / "INSTALLATION_COMPLETE").write_text("")
+    private = tmp_path / "private"
+    with pytest.raises(RuntimeError, match="not installed"):
+        PrivateCache.build(private, [source, tmp_path / "missing"])
+    assert not private.exists()
+    assert (source / "INSTALLATION_COMPLETE").is_file()
 
 
 # --- The stall host ----------------------------------------------------------------

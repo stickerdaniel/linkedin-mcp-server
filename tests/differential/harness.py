@@ -2676,17 +2676,25 @@ async def measure_host_quit_row(
         shim.reached_file.unlink(missing_ok=True)
         locations = await asyncio.to_thread(install_locations, runtime.python, browsers)
         stall = StallHost().start()
-        cache = await asyncio.to_thread(
-            private_install, runtime.python, locations, env, stall
-        )
-        emit(
-            "harness",
-            "shim.planted",
-            **shim.as_event_fields(),
-            private_cache=str(cache.directory),
-            linked=[str(location) for location in locations],
-            stall_host=stall.url,
-        )
+        try:
+            cache = await asyncio.to_thread(
+                private_install, runtime.python, locations, env, stall
+            )
+            emit(
+                "harness",
+                "shim.planted",
+                **shim.as_event_fields(),
+                private_cache=str(cache.directory),
+                linked=[str(location) for location in locations],
+                stall_host=stall.url,
+            )
+        except BaseException:
+            try:
+                if cache is not None:
+                    cache.dismantle()
+            finally:
+                stall.stop()
+            raise
     emit(
         "harness",
         "row.identity",

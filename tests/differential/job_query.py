@@ -111,7 +111,7 @@ def install(win32job, error, process_id, record=_RECORD):
     win32job.IsProcessInJob = IsProcessInJob
 
 
-if sys.platform == "win32":
+if sys.platform == "win32" and __name__ == "sitecustomize":
     try:
         import pywintypes
         import win32job
@@ -136,9 +136,8 @@ def pth_line(site_packages: str) -> str:
 
 
 def shim_namespace() -> dict[str, Any]:
-    """The shim's module namespace, executed off Windows so ``install`` is
-    callable with doubles; on Windows it would also have installed itself."""
-    namespace: dict[str, Any] = {"__name__": "sitecustomize", "__file__": "shim"}
+    """Expose the shim's installer for doubles without patching the host process."""
+    namespace: dict[str, Any] = {"__name__": "h_r11_model", "__file__": "shim"}
     exec(compile(SHIM_SOURCE, "sitecustomize.py", "exec"), namespace)
     return namespace
 
@@ -171,7 +170,7 @@ print(json.dumps({
 
 def _ask(python: str, program: str) -> dict[str, Any]:
     result = subprocess.run(
-        [python, "-c", program],
+        [python, "-I", "-c", program],
         capture_output=True,
         text=True,
         check=False,
@@ -215,7 +214,9 @@ class ShimVenv:
         }
 
 
-def code_difference(source: dict[str, Any], shimmed: dict[str, Any]) -> list[str]:
+def code_difference(
+    source: dict[str, Any], shimmed: dict[str, Any], shim_path: Path
+) -> list[str]:
     """What the shim venv imports differently from its source, besides the shim."""
     problems = []
     for name in ("module", "direct_url", "version"):
@@ -224,8 +225,9 @@ def code_difference(source: dict[str, Any], shimmed: dict[str, Any]) -> list[str
                 f"{name}: the source venv has {source.get(name)!r}, the shim venv "
                 f"{shimmed.get(name)!r}"
             )
-    if not shimmed.get("sitecustomize"):
-        problems.append("the shim venv did not run its sitecustomize")
+    actual = shimmed.get("sitecustomize")
+    if not actual or Path(actual).resolve() != shim_path.resolve():
+        problems.append(f"the shim venv did not run {shim_path}")
     return problems
 
 
@@ -250,9 +252,12 @@ def make_shim_venv(source_python: str, directory: Path) -> ShimVenv:
     site_packages = _ask(python, _ASK_SOURCE)["purelib"]
     pth = pth_line(source["purelib"])
     Path(site_packages, PTH_FILE).write_text(pth, encoding="utf-8")
-    Path(site_packages, "sitecustomize.py").write_text(SHIM_SOURCE, encoding="utf-8")
+    shim_path = Path(site_packages, "sitecustomize.py")
+    shim_path.write_text(SHIM_SOURCE, encoding="utf-8")
     code = _ask(python, _ASK_CODE)
-    problems = code_difference(source_code, code)
+    problems = code_difference(source_code, code, shim_path)
+    if shim_path.read_text(encoding="utf-8") != SHIM_SOURCE:
+        problems.append("the shim venv did not keep the declared shim source")
     if problems:
         raise RuntimeError(f"the shim venv does not run the source's code: {problems}")
     return ShimVenv(
@@ -361,13 +366,26 @@ def private_install(
     """
     import tempfile
 
+    made_parent = parent is None
     parent = parent or Path(tempfile.mkdtemp(prefix="h-r11-cache-")).resolve()
-    cache = PrivateCache.build(parent / "browsers", locations)
-    env.update(
-        {"PLAYWRIGHT_BROWSERS_PATH": str(cache.directory), **stall_environment(stall)}
-    )
-    record_install(python, env)
-    return cache
+    cache: PrivateCache | None = None
+    try:
+        cache = PrivateCache.build(parent / "browsers", locations)
+        env.update(
+            {
+                "PLAYWRIGHT_BROWSERS_PATH": str(cache.directory),
+                **stall_environment(stall),
+            }
+        )
+        record_install(python, env)
+        return cache
+    except BaseException:
+        if cache is not None:
+            cache.dismantle()
+        if made_parent:
+            with contextlib.suppress(OSError):
+                parent.rmdir()
+        raise
 
 
 def _link(target: Path, link: Path) -> None:
@@ -415,11 +433,16 @@ class PrivateCache:
     @classmethod
     def build(cls, directory: Path, sources: Sequence[Path]) -> PrivateCache:
         directory.mkdir(parents=True, exist_ok=False)
-        for source in sources:
-            if not source.is_dir():
-                raise RuntimeError(f"{source} is not installed")
-            _link(source, directory / source.name)
-        return cls(directory, list(sources))
+        cache = cls(directory, list(sources))
+        try:
+            for source in sources:
+                if not source.is_dir():
+                    raise RuntimeError(f"{source} is not installed")
+                _link(source, directory / source.name)
+        except BaseException:
+            cache.dismantle()
+            raise
+        return cache
 
     def hold_back(self) -> Path:
         """Remove the link patchright installs last: winldd, else ffmpeg."""
