@@ -21,6 +21,7 @@ import dataclasses
 import json
 import os
 import socket
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -48,7 +49,9 @@ from differential.job_query import (
     ShimVenv,
     StallHost,
     make_shim_venv,
+    private_install,
     reached,
+    record_install,
     shim_namespace,
     terminated_in,
 )
@@ -428,3 +431,83 @@ def test_k1_must_not_reach_the_query(profile):
         "no adopted Job" in p
         for p in r11_verdict(_result(reached_it), experiment="K1", non_windows=False)
     )
+
+
+# --- The first read finds the private cache installed ---------------------------
+
+_READY = """
+from linkedin_mcp_server import bootstrap
+bootstrap.configure_browser_environment()
+print(bootstrap.browser_ready())
+"""
+
+
+def _ready(env: dict[str, str]) -> bool:
+    """What this checkout's own readiness check says, in a fresh interpreter."""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", _READY],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+        env=env,
+    )
+    return result.stdout.strip().splitlines()[-1] == "True"
+
+
+def test_the_private_cache_reads_as_installed_before_the_first_read(
+    tmp_path, isolate_profile_dir
+):
+    # The Windows CI cause, off Windows: staging recorded the real cache, and
+    # the readiness check refuses a record for any other browsers path, so
+    # with the private cache configured the first read only said "setup in
+    # progress". Symlinks stand in for the junctions.
+    from linkedin_mcp_server import bootstrap
+
+    targets = bootstrap._patchright_install_targets()
+    assert targets is not None
+    revision = targets[bootstrap._FULL_DIR_PREFIX]
+    real = tmp_path / "real"
+    browser = real / f"{bootstrap._FULL_DIR_PREFIX}{revision}"
+    browser.mkdir(parents=True)
+    (browser / "INSTALLATION_COMPLETE").write_text("")
+    directory = isolate_profile_dir
+    base = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("LINKEDIN", "PLAYWRIGHT", "USER_DATA_DIR"))
+    }
+    base["USER_DATA_DIR"] = str(directory)
+    staged = {**base, "PLAYWRIGHT_BROWSERS_PATH": str(real)}
+    record_install(sys.executable, staged)
+    private = {**base, "PLAYWRIGHT_BROWSERS_PATH": str(tmp_path / "private" / "b")}
+    assert not _ready(private)  # the cause: a record for the real cache only
+    host = StallHost().start()
+    try:
+        env = dict(base)
+        cache = private_install(sys.executable, [browser], env, host, parent=tmp_path)
+        assert env["PLAYWRIGHT_BROWSERS_PATH"] == str(cache.directory)
+        assert _ready(env)
+        cache.dismantle()
+    finally:
+        host.stop()
+    assert (browser / "INSTALLATION_COMPLETE").is_file()
+
+
+def test_recording_an_install_that_is_not_there_is_refused(
+    tmp_path, isolate_profile_dir
+):
+    # A row whose first read would only say "setup in progress" stops here,
+    # before an actor starts, with the path it could not read as ready.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("LINKEDIN", "PLAYWRIGHT", "USER_DATA_DIR"))
+    }
+    env.update(
+        USER_DATA_DIR=str(isolate_profile_dir), PLAYWRIGHT_BROWSERS_PATH=str(empty)
+    )
+    with pytest.raises(RuntimeError, match="does not read as ready"):
+        record_install(sys.executable, env)

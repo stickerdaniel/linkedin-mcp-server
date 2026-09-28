@@ -29,6 +29,7 @@ import pytest
 from differential import harness
 from differential.events import EventLog
 from differential.harness import DaemonCleanup, PostQuit, measure_host_quit_row
+from differential import job_query
 from differential.job_query import SHIM_SHA256, ShimVenv
 from differential.session import LAST_VERSION_FILE, write_synthetic_cookie_file
 from differential.signals import (
@@ -264,6 +265,9 @@ async def test_the_failed_job_query_row_writes_through_the_real_event_log(
     for source in sources:
         source.mkdir(parents=True)
     monkeypatch.setattr(harness, "install_locations", lambda *a: sources)
+    # No browser here to read as installed; test_failed_job_query covers that.
+    monkeypatch.setattr(job_query, "record_install", lambda *a: None)
+    monkeypatch.setattr(harness, "record_install", lambda *a: None)
     installer = SimpleNamespace(pid=700, wait=lambda: 1)
     monkeypatch.setattr(
         harness, "wait_for_installers", lambda *a, **k: [(installer, 9.0)]

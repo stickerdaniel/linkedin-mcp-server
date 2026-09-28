@@ -67,7 +67,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from collections.abc import (
     AsyncIterator,
@@ -113,8 +112,9 @@ from differential.job_query import (
     ShimVenv,
     StallHost,
     install_locations,
+    private_install,
     reached,
-    stall_environment,
+    record_install,
     terminated_in,
 )
 from differential.session import (
@@ -2647,15 +2647,9 @@ async def measure_host_quit_row(
         # Every planted failure of an earlier row in the same venv is not ours.
         shim.reached_file.unlink(missing_ok=True)
         locations = await asyncio.to_thread(install_locations, runtime.python, browsers)
-        cache = PrivateCache.build(
-            Path(tempfile.mkdtemp(prefix="h-r11-cache-")) / "browsers", locations
-        )
         stall = StallHost().start()
-        env.update(
-            {
-                "PLAYWRIGHT_BROWSERS_PATH": str(cache.directory),
-                **stall_environment(stall),
-            }
+        cache = await asyncio.to_thread(
+            private_install, runtime.python, locations, env, stall
         )
         emit(
             "harness",
@@ -2941,6 +2935,15 @@ async def measure_host_quit_row(
                 cache.dismantle()
             except Exception as exc:  # noqa: BLE001 - reported, the teardown goes on
                 teardown.append(f"the private browser cache stayed: {exc!r}")
+            try:
+                # The post-quit session runs on the real cache again.
+                await asyncio.to_thread(
+                    record_install,
+                    runtime.python,
+                    {**env, "PLAYWRIGHT_BROWSERS_PATH": str(browsers)},
+                )
+            except Exception as exc:  # noqa: BLE001 - reported, the teardown goes on
+                teardown.append(f"the real cache's install was not recorded: {exc!r}")
         if stall is not None:
             stall.stop()
         # Each helper is ended whatever the one before it did; a failure is

@@ -306,6 +306,70 @@ def install_locations(python: str, browsers: Path) -> list[Path]:
     ]
 
 
+_RECORD_INSTALL = """
+from linkedin_mcp_server import bootstrap
+browsers = bootstrap.configure_browser_environment()
+bootstrap._write_install_metadata(
+    browsers, {bootstrap._SHELL_DIR_PREFIX: False, bootstrap._FULL_DIR_PREFIX: True}
+)
+print(bootstrap.browser_ready())
+"""
+
+
+def record_install(python: str, env: dict[str, str]) -> None:
+    """Record the browser install for the cache *env* names, as setup would.
+
+    Staging records the runtime's real cache, and the readiness check refuses
+    a record whose ``browsers_path`` is not the configured one
+    (``bootstrap._metadata_shape_ok``), so with the row-private cache
+    configured the first call read "setup in progress" and ran no browser.
+    Written by *python*'s own bootstrap, the one the actors import, into the
+    auth root of ``USER_DATA_DIR``; refused unless that bootstrap then reads
+    the install as ready, links and all.
+    """
+    result = subprocess.run(
+        [python, "-I", "-c", _RECORD_INSTALL],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+        env=env,
+    )
+    lines = result.stdout.strip().splitlines()
+    if result.returncode != 0 or not lines or lines[-1] != "True":
+        raise RuntimeError(
+            f"the install at {env.get('PLAYWRIGHT_BROWSERS_PATH')} does not read as "
+            f"ready: {result.stdout[-500:]} {result.stderr[-1500:]}"
+        )
+
+
+def private_install(
+    python: str,
+    locations: Sequence[Path],
+    env: dict[str, str],
+    stall: StallHost,
+    *,
+    parent: Path | None = None,
+) -> PrivateCache:
+    """Point *env* at a row-private cache of *locations*, recorded as installed.
+
+    The row's first read has to find the browser ready there: staging recorded
+    the runtime's real cache, and a record for any other path reads as "setup
+    in progress" (``record_install``). *env* is updated in place with the cache
+    and the stall host; *parent* defaults to a fresh temporary directory,
+    resolved, since Windows hands out its 8.3 spelling.
+    """
+    import tempfile
+
+    parent = parent or Path(tempfile.mkdtemp(prefix="h-r11-cache-")).resolve()
+    cache = PrivateCache.build(parent / "browsers", locations)
+    env.update(
+        {"PLAYWRIGHT_BROWSERS_PATH": str(cache.directory), **stall_environment(stall)}
+    )
+    record_install(python, env)
+    return cache
+
+
 def _link(target: Path, link: Path) -> None:
     if sys.platform == "win32":
         import _winapi
