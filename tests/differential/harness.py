@@ -117,6 +117,7 @@ from differential.job_query import (
     drain_reading,
     reached,
     record_install,
+    shim_log,
     terminations,
 )
 from differential.session import (
@@ -1320,23 +1321,117 @@ def identify_owner(
 _SUCCESSOR_SECONDS = 10.0
 
 
+def kernel_start_ticks(
+    pid: int, start: float, *, open_process: Callable[[int], Any] = psutil.Process
+) -> int | None:
+    """When the lifetime (*pid*, *start*) began, in the kernel's clock ticks.
+
+    ``/proc/<pid>/stat``'s start time counts ticks since boot, so two of them
+    compare whatever the wall clock did meanwhile, which a create time read
+    against ``time.time()`` does not. None off Linux, for a process gone, or
+    when the pid was not that lifetime both before and after the read.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+
+    def same() -> bool:
+        try:
+            created = open_process(pid).create_time()
+        except psutil.Error:
+            return False
+        return abs(created - start) <= _START_TOLERANCE_SECONDS
+
+    if not same():
+        return None
+    ticks = _stat_start_ticks(pid)
+    return ticks if ticks is not None and same() else None
+
+
+def _stat_start_ticks(pid: int) -> int | None:
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    # The command name is in parentheses and may hold anything; the fields
+    # after its last ')' start with the state, field 3, so start time (22)
+    # is the 20th of them.
+    fields = text[text.rfind(")") + 2 :].split()
+    try:
+        return int(fields[19])
+    except (IndexError, ValueError):
+        return None
+
+
+def close_marker() -> int | None:
+    """The start, in kernel ticks, of a process started as the close begins.
+
+    A lifetime whose start is later in ticks began after this marker, which
+    no reading of the wall clock can say across a clock step. None where the
+    ticks cannot be read.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        marker = subprocess.Popen(
+            [sys.executable, "-I", "-c", "import sys; sys.stdin.read()"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+    try:
+        return _stat_start_ticks(marker.pid)
+    finally:
+        with contextlib.suppress(OSError, ValueError):
+            assert marker.stdin is not None
+            marker.stdin.close()
+        try:
+            marker.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            marker.kill()
+            marker.wait(timeout=10)
+
+
+def created_after(pid: int, start: float, marker: int | None) -> bool | None:
+    """Whether (*pid*, *start*) began after the close marker; None if unknown.
+
+    The same tick is unknown: either could have come first.
+    """
+    if marker is None:
+        return None
+    ticks = kernel_start_ticks(pid, start)
+    if ticks is None or ticks == marker:
+        return None
+    return ticks > marker
+
+
 def successor_problems(
     observed: Iterable[Mapping[str, Any]],
     closing: OwnerIdentity | None,
     successor: OwnerIdentity | None,
     *,
-    close_began: float,
+    probe: tuple[float, float] | None,
+    probe_requests: int,
+    after_close: Callable[[int, float], bool | None],
 ) -> list[str]:
     """Why *successor* is not shown to have replaced *closing* and served the
     probe; empty when it is.
 
     A served probe says that some owner answered, not which. The successor
     counts only as a lifetime of its own: another pid and create time and
-    another instance than the owner that closed, first seen by the watcher
-    after the close began and not yet gone. The probe is the one read after
-    the close, so the browser it needed is a launch after the close, and one
-    such launch must descend from the successor while none descends from the
-    owner that closed. A launch whose ancestry is unknown counts for neither.
+    another instance than the owner that closed, not yet gone, and begun
+    after the close (*after_close*, from kernel start times: when the watcher
+    first saw a process says only when it looked).
+
+    And it served *this* probe. The origin saw the feed request while the
+    probe ran (*probe* is its call's start and return, *probe_requests* the
+    feed requests between them), so a row browser alive then made it. Every
+    row browser the watcher could have seen in that interval must descend
+    from the successor, one of them begun after the close and seen before the
+    probe returned. One from the owner that closed, or one whose ancestry is
+    unknown, leaves the served request unattributed; a browser launched only
+    after the response is no evidence for it.
     """
     if closing is None:
         return ["the owner that closed was never identified"]
@@ -1364,24 +1459,46 @@ def successor_problems(
         return [*problems, f"the watcher never saw pid {successor.pid} start"]
     if old is None:
         return [*problems, f"the watcher has no lifetime for pid {closing.pid}"]
-    if new.first_t < close_began:
-        problems.append(f"pid {successor.pid} was running before the close began")
     if new.exit_t is not None:
         problems.append(f"pid {successor.pid} had exited before the host quit")
-    now = time.time()
-    launched = [
-        life
-        for life in history.lifetimes
-        if life.in_row and life.was("browser") and life.first_t >= close_began
-    ]
-    if not any(history.descends(life, new, now) is True for life in launched):
+    began_after = after_close(successor.pid, successor.create_time)
+    if began_after is False:
+        problems.append(f"pid {successor.pid} began before the close")
+    elif began_after is None:
         problems.append(
-            f"no browser launched after the close descends from pid {successor.pid}"
+            f"pid {successor.pid}'s start could not be ordered against the close"
         )
-    if any(history.descends(life, old, now) is True for life in launched):
+    if probe is None:
+        return [*problems, "the probe's interval was not recorded"]
+    began, ended = probe
+    if probe_requests < 1:
+        problems.append("the origin saw no feed request while the probe ran")
+    now = time.time()
+    served = False
+    for life in history.lifetimes:
+        if not (life.in_row and life.was("browser")):
+            continue
+        # Any row browser the watcher could have seen while the probe ran.
+        if life.first_t > ended + MAX_WATCHER_GAP_SECONDS:
+            continue
+        if life.exit_t is not None and life.exit_t < began:
+            continue
+        if history.descends(life, old, now) is True:
+            problems.append(
+                f"browser {life.pid} of pid {closing.pid}, the owner that closed, "
+                f"ran while the probe was served"
+            )
+        elif history.descends(life, new, now) is not True:
+            problems.append(
+                f"browser {life.pid} ran while the probe was served, and nothing "
+                f"ties it to pid {successor.pid}"
+            )
+        elif life.first_t <= ended and after_close(life.pid, life.start) is True:
+            served = True
+    if not served:
         problems.append(
-            f"pid {closing.pid}, the owner that closed, launched a browser after "
-            f"the close"
+            f"no browser of pid {successor.pid}, begun after the close, was seen "
+            f"before the probe returned"
         )
     return problems
 
@@ -2093,19 +2210,176 @@ def wait_for_installers(
         time.sleep(0.1)
 
 
+def known_non_installer(
+    observed: Iterable[Mapping[str, Any]],
+) -> Callable[[Any, Any], bool]:
+    """Whether a lifetime is a row process shown to be no installer.
+
+    The adopted Job holds more than the installer: measured on Windows (run
+    36410976409, K2) the drain also asked about the owner's release gate, its
+    Python child and that child's console host, all started with the owner
+    eight seconds before any installer. Such a member is placed only when the
+    watcher recorded exactly that lifetime (pid and creation time) in the
+    row, it is no installer, and no ancestor it can be traced to is one. An
+    installer's descendant the row did not watch, or a lifetime it never
+    recorded, is not placed.
+    """
+    records = list(observed)
+    history = ProcessHistory(records, outside=[os.getpid()])
+    installers = installer_starts(records)
+
+    def installer(life: Lifetime) -> bool:
+        return any(
+            life.pid == pid and abs(life.start - start) <= _START_TOLERANCE_SECONDS
+            for pid, start in installers
+        )
+
+    def placed(member: Any, created: Any) -> bool:
+        if not isinstance(member, int) or not isinstance(created, (int, float)):
+            return False
+        lives = [
+            life
+            for life in history.lifetimes
+            if life.pid == member
+            and life.in_row
+            and abs(life.start - float(created)) <= _START_TOLERANCE_SECONDS
+        ]
+        if len(lives) != 1:
+            return False
+        current: Lifetime | None = lives[0]
+        seen: set[tuple[int, float]] = set()
+        while current is not None and current.identity not in seen:
+            if installer(current):
+                return False
+            seen.add(current.identity)
+            current = history.at(current.ppid, current.first_t)
+        return current is None
+
+    return placed
+
+
 def job_query_reading(
-    shim: ShimVenv, *, fates: Fates, owner_pid: int | None, daemon: bool
+    shim: ShimVenv,
+    *,
+    fates: Fates,
+    owner_pid: int | None,
+    owner_created: float | None,
+    daemon: bool,
+    observed: Iterable[Mapping[str, Any]],
+    lost: Iterable[str],
 ) -> DrainReading:
     """The routine drain's reading from the shim's records of the closing owner.
 
-    In Direct no process has an adopted Job, so every record at all counts.
+    Only from records shown complete for that owner's lifetime (``shim_log``,
+    with *lost* the lines where the shim announces a record it could not
+    write). In Direct no process has an adopted Job, so every record counts.
     """
-    pid = owner_pid if daemon else None
+    log = shim_log(
+        shim.reached_file,
+        pid=owner_pid if daemon else None,
+        created=owner_created,
+        lost=lost,
+    )
     return drain_reading(
         fates.fates.values(),
-        reached(shim.reached_file, pid=pid),
-        terminations(shim.reached_file, pid=pid),
+        log.queries,
+        log.terminations,
+        known_other=known_non_installer(observed),
+        health=[f"the shim's record: {problem}" for problem in log.problems],
     )
+
+
+def installer_inventory(
+    observed: Iterable[Mapping[str, Any]], fates: Fates
+) -> list[str]:
+    """Every installer lifetime the watcher recorded that is not shown ended.
+
+    Ended is an exit observed through the row's own handle, or the watcher
+    seeing that lifetime leave the process table; a handle that could not be
+    opened or read, or a lifetime nobody saw leave, is neither.
+    """
+    records = list(observed)
+    gone = [
+        (record.get("pid"), record.get("start_identity"))
+        for record in records
+        if record.get("kind") == "process.exit"
+    ]
+    problems = []
+    # Every installer the watcher recorded, and every one the row watched.
+    inventory = installer_starts(records)
+    inventory += [key for key in fates.fates if key not in inventory]
+    for pid, start in inventory:
+        fate = fates.fates.get((pid, start))
+        if fate is not None and fate.settled:
+            continue
+        if any(
+            gone_pid == pid
+            and isinstance(gone_start, (int, float))
+            and abs(gone_start - start) <= _START_TOLERANCE_SECONDS
+            for gone_pid, gone_start in gone
+        ):
+            continue
+        why = f": {fate.problem}" if fate is not None and fate.problem else ""
+        problems.append(
+            f"installer {pid} created {start} was neither seen to exit nor "
+            f"settled through its handle{why}"
+        )
+    return problems
+
+
+#: How far the wall clock may move apart from the monotonic one, and how far
+#: apart two creation times must be to be ordered at all.
+_CLOCK_SECONDS = 0.25
+
+
+class WallClockMarker:
+    """The creation time of a process started as the close begins.
+
+    Windows keeps a process's creation time on the wall clock only, so it
+    orders two processes only while that clock ran with the monotonic one:
+    this records both as the row began and checks them when asked. Creation
+    times within ``_CLOCK_SECONDS`` of the marker are not ordered at all.
+    """
+
+    def __init__(self) -> None:
+        self.began = (time.time(), time.monotonic())
+        self.created: float | None = None
+
+    def mark(self) -> None:
+        try:
+            marker = subprocess.Popen(
+                [sys.executable, "-I", "-c", "import sys; sys.stdin.read()"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            return
+        try:
+            with contextlib.suppress(psutil.Error):
+                self.created = psutil.Process(marker.pid).create_time()
+        finally:
+            with contextlib.suppress(OSError, ValueError):
+                assert marker.stdin is not None
+                marker.stdin.close()
+            try:
+                marker.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                marker.kill()
+                marker.wait(timeout=10)
+
+    def after(self, pid: int, start: float) -> bool | None:
+        """Whether *start* is after the marker; None when that is not known."""
+        if self.created is None:
+            return None
+        wall, mono = self.began
+        if abs((time.time() - wall) - (time.monotonic() - mono)) > _CLOCK_SECONDS:
+            return None
+        if start > self.created + _CLOCK_SECONDS:
+            return True
+        if start < self.created - _CLOCK_SECONDS:
+            return False
+        return None
 
 
 def successor_verdict(
@@ -2177,17 +2451,35 @@ def job_query_problems(
     reading: DrainReading | None,
     window: Mapping[str, Any],
     script_error: str | None,
+    observed: Iterable[Mapping[str, Any]] = (),
+    host_error: str | None = None,
+    watcher: Sequence[str] = (),
+    cleanup: Sequence[str] = (),
 ) -> list[str]:
     """What stops H-R11 from observing the row, in any experiment.
 
     Not the behaviour under test: a K2 that reads its known '!' still fails on
     one of these, since the '!' is then not established by complete evidence.
+    Besides the row's own script and installer evidence that is every
+    installer lifetime the watcher recorded that is not shown ended
+    (``installer_inventory``), a host session that failed, what the watcher
+    could not observe (*watcher*, ``watcher_failures``) and what cleanup
+    could not do (*cleanup*, ``DaemonCleanup.failures``). The baseline's own
+    behaviour (a browser left behind, an owner that did not leave) stays out:
+    that is what K2 is there to record.
     """
     if shim is None:
         return []
     problems = []
+    if host_error is not None:
+        problems.append(f"the host session failed: {host_error}")
     if script_error is not None:
         problems.append(f"the H-R11 script failed: {script_error}")
+    problems += [
+        f"installer inventory: {p}" for p in installer_inventory(observed, fates)
+    ]
+    problems += [f"watcher: {problem}" for problem in watcher]
+    problems += [f"cleanup: {problem}" for problem in cleanup]
     if not fates.fates:
         problems.append(
             "no installer ran when the row closed, so the Job query had no "
@@ -2837,6 +3129,8 @@ async def measure_host_quit_row(
     #: H-R11 daemon: the owner the descriptor named after the probe, and why it
     #: is not shown to be a successor that served it (``successor_verdict``).
     successor: dict[str, Any] = {}
+    #: H-R11 daemon: orders the successor's creation after the close.
+    close_clock = WallClockMarker()
     #: The routine drain's reading, taken once the installers have settled.
     drain: DrainReading | None = None
     if shim is not None:
@@ -2986,6 +3280,10 @@ async def measure_host_quit_row(
         assert cache is not None
         # The owner whose drain the shim should be reached in: the one serving now.
         job_window["owner_pid"] = identified.pid if identified is not None else None
+        job_window["owner_created"] = (
+            identified.create_time if identified is not None else None
+        )
+        job_window["owner_log"] = owner.get("log_path")
         held = cache.hold_back()
         # The row's own install record, so setup looks again on the next call.
         (account.auth_root / "browser-install.json").unlink(missing_ok=True)
@@ -3000,6 +3298,9 @@ async def measure_host_quit_row(
             phase="installer",
             installers=[list(member) for member in members],
         )
+        # Whatever was created after this marker was created after the close
+        # began, while the wall clock kept pace (``WallClockMarker``).
+        await asyncio.to_thread(close_clock.mark)
         closed = await call("close_session", {})
         job_window.update(began=closed["began"], ended=closed["ended"])
         emit("harness", "job_query.window", phase="close", **job_window)
@@ -3045,12 +3346,16 @@ async def measure_host_quit_row(
         job_window["script_ended"] = True
 
     def watch_late_installers() -> None:
-        """Watch installer lifetimes the first look missed, while they still run."""
+        """Watch installer lifetimes the first look missed; one that cannot be
+        watched stays an unknown fate for the inventory to account for."""
         for pid, start in installer_starts(watcher.observed()):
-            fates.watch(pid, start, required=False)
+            fates.watch(pid, start)
 
-    def find_the_successor(closing: OwnerIdentity | None, close_began: float) -> None:
-        """Which owner the descriptor names now, and whether it replaced *closing*."""
+    def find_the_successor(
+        closing: OwnerIdentity | None, probe: Mapping[str, Any]
+    ) -> None:
+        """Which owner the descriptor names now, and whether it replaced *closing*
+        and served *probe*."""
         found: OwnerIdentity | None = None
         successor.pop("identify_error", None)
         try:
@@ -3063,18 +3368,21 @@ async def measure_host_quit_row(
             if problem is not None:
                 successor["identify_error"] = problem
             successor.update(pid=published.pid, instance_id=published.instance_id)
-        problems = successor_problems(
-            watcher.observed(), closing, found, close_began=close_began
+        began, ended = probe.get("began"), probe.get("ended")
+        interval = (began, ended) if began is not None and ended is not None else None
+        successor["problems"] = successor_problems(
+            watcher.observed(),
+            closing,
+            found,
+            probe=interval,
+            probe_requests=sum(
+                1
+                for request in feed_requests(origin.requests[request_mark:])
+                if interval is not None
+                and interval[0] <= (request.t or 0.0) <= interval[1]
+            ),
+            after_close=close_clock.after,
         )
-        # The watcher's first sight of a process is when it sampled it, not
-        # when it began; on Windows the creation time is the kernel's own, on
-        # the same clock as the close's start.
-        if found is not None and found.create_time < close_began:
-            problems.append(
-                f"pid {found.pid} was created at {found.create_time}, before the "
-                f"close began at {close_began}"
-            )
-        successor["problems"] = problems
 
     async def verify_the_successor(probe: Mapping[str, Any]) -> None:
         """Before the host quits: a new owner, and only it, served the probe."""
@@ -3084,7 +3392,7 @@ async def measure_host_quit_row(
         if served and left is True and close_began is not None:
             deadline = time.monotonic() + _SUCCESSOR_SECONDS
             while True:
-                await asyncio.to_thread(find_the_successor, identified, close_began)
+                await asyncio.to_thread(find_the_successor, identified, probe)
                 if not successor["problems"] or time.monotonic() >= deadline:
                     break
                 await asyncio.sleep(0.2)
@@ -3217,8 +3525,24 @@ async def measure_host_quit_row(
             await asyncio.to_thread(fates.settle, _BROWSER_GONE_SECONDS)
             # Every owner that could drain has exited, so the shim's records
             # are final: the reading, and whether its evidence is complete.
+            owner_log = Path(job_window.get("owner_log") or "")
             drain = job_query_reading(
-                shim, fates=fates, owner_pid=job_window.get("owner_pid"), daemon=daemon
+                shim,
+                fates=fates,
+                owner_pid=job_window.get("owner_pid"),
+                owner_created=job_window.get("owner_created"),
+                daemon=daemon,
+                observed=watcher.observed(),
+                # Where the shim announces a record it could not write: the
+                # owner's log in daemon mode, the server's stderr in Direct.
+                lost=[
+                    *(
+                        owner_log.read_text(errors="replace").splitlines()
+                        if daemon and owner_log.is_file()
+                        else []
+                    ),
+                    *host.stderr,
+                ],
             )
         residual = await asyncio.to_thread(
             wait_for_no_browser, account, _BROWSER_GONE_SECONDS
@@ -3352,6 +3676,15 @@ async def measure_host_quit_row(
         reading=drain,
         window=job_window,
         script_error=host.script_error,
+        observed=observed_events,
+        host_error=host.error,
+        watcher=watcher_failures(
+            result.watcher,
+            actors_began=actors_began,
+            actors_ended=actors_ended,
+            browser_key=account.browser_key,
+        ),
+        cleanup=list(result.cleanup.failures) if result.cleanup else [],
     )
     if shim is not None:
         # An installer whose end was not observed may still be running on the

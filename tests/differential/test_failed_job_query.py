@@ -27,6 +27,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,16 +39,21 @@ from differential.baseline import baseline_file
 from differential.harness import (
     RowResult,
     RowVector,
+    WallClockMarker,
     close_left_unconfirmed,
+    installer_inventory,
     is_installer,
     job_query_observations,
     job_query_problems,
+    known_non_installer,
+    successor_problems,
     judge_row,
     r11_reading,
     r11_verdict,
     successor_verdict,
 )
 from differential.job_query import (
+    LOST_MARKER,
     ROUTINE_DRAIN,
     SHIM_SHA256,
     SHIM_SOURCE,
@@ -62,6 +68,7 @@ from differential.job_query import (
     private_install,
     reached,
     record_install,
+    shim_log,
     shim_namespace,
     filetime_to_unix,
     terminations,
@@ -367,20 +374,161 @@ def test_model_shim_does_not_patch_a_windows_job_api(monkeypatch):
     assert api.TerminateProcess is terminate
 
 
-def test_the_actors_startup_installs_the_fault_and_the_observer(monkeypatch):
-    # What an actor's interpreter runs: the shim as ``sitecustomize`` on Windows.
+def _startup(monkeypatch, tmp_path: Path, *, observer: bool = True) -> Path:
+    """Run the shim as an actor's ``sitecustomize`` over Windows doubles."""
     job = SimpleNamespace(IsProcessInJob=lambda process, handle: True)
     api = SimpleNamespace(TerminateProcess=lambda handle, status: None)
-    original, terminate = job.IsProcessInJob, api.TerminateProcess
     with monkeypatch.context() as patch:
         patch.setattr(sys, "platform", "win32")
         patch.setitem(sys.modules, "win32job", job)
-        patch.setitem(sys.modules, "win32api", api)
+        patch.setitem(sys.modules, "win32api", api if observer else None)
         patch.setitem(sys.modules, "pywintypes", SimpleNamespace(error=_Error))
-        namespace: dict[str, Any] = {"__name__": "sitecustomize", "__file__": "shim"}
+        namespace: dict[str, Any] = {
+            "__name__": "sitecustomize",
+            "__file__": str(tmp_path / "sitecustomize.py"),
+        }
         exec(compile(SHIM_SOURCE, "sitecustomize.py", "exec"), namespace)
-    assert job.IsProcessInJob is not original
-    assert api.TerminateProcess is not terminate
+    return tmp_path / "h-r11-reached.jsonl"
+
+
+def test_the_actors_startup_installs_the_fault_and_the_observer(monkeypatch, tmp_path):
+    record = _startup(monkeypatch, tmp_path)
+    (ready,) = [json.loads(line) for line in record.read_text().splitlines()]
+    assert ready["kind"] == "ready" and ready["seq"] == 1
+    assert ready["fault"] is True and ready["observer"] is True
+
+
+def test_an_actor_whose_observer_is_missing_says_so(monkeypatch, tmp_path):
+    record = _startup(monkeypatch, tmp_path, observer=False)
+    (ready,) = [json.loads(line) for line in record.read_text().splitlines()]
+    assert ready["fault"] is True and ready["observer"] is False
+
+
+# --- The records: complete, or no reading ---------------------------------------
+
+
+def _actor(record: Path, **ready: Any) -> dict[str, Any]:
+    """One actor's shim, over doubles, that has written its ready record."""
+    shim = shim_namespace()
+    shim["ready"](record, **{"created": 5.0, "fault": True, "observer": True, **ready})
+    return shim
+
+
+def _drain_once(shim: dict[str, Any], record: Path, api_record: Path | None = None):
+    """The routine drain asks about 700 and terminates it, through the shim."""
+    job = SimpleNamespace(IsProcessInJob=lambda process, handle: True)
+    shim["install"](job, _Error, _identity, record)
+    api = _Terminator()
+    shim["observe"](api, _identity, api_record or record)
+    with pytest.raises(_Error):
+        _caller("_in_another_owned_job", _PROCESS_TREE)(job, 700, 55)
+    answer = _terminating("_drain_adopted_windows_job_members")(api, 700, 1)
+    return job, api, answer
+
+
+def _log(record: Path, **kwargs: Any):
+    return shim_log(record, pid=os.getpid(), created=5.0, **kwargs)
+
+
+def test_complete_records_are_read_as_they_were_written(tmp_path):
+    record = tmp_path / "reached.jsonl"
+    _drain_once(_actor(record), record)
+    log = _log(record)
+    assert log.problems == []
+    assert [line["member"] for line in log.queries] == [700]
+    (call,) = log.terminations
+    assert (call["caller"], call["member"], call["succeeded"]) == (
+        ROUTINE_DRAIN,
+        700,
+        True,
+    )
+
+
+def test_a_termination_record_that_could_not_be_written_leaves_no_reading(
+    tmp_path, capsys
+):
+    # E1EP-02: the query is written, the termination's records are not. The
+    # real API still ran once and answered; the lost records show.
+    record, unwritable = tmp_path / "reached.jsonl", tmp_path / "a-directory"
+    unwritable.mkdir()
+    shim = _actor(record)
+    _job, api, answer = _drain_once(shim, record, api_record=unwritable)
+    assert answer == "the real answer" and api.calls == [((700, 1), {})]
+    lost = capsys.readouterr().err.splitlines()
+    assert len([line for line in lost if LOST_MARKER in line]) == 2
+    # Announced on stderr, the owner's log, even with nothing written after.
+    assert _log(record, lost=lost).problems
+    # And a later record shows the numbers it skipped, without the log.
+    job = SimpleNamespace(IsProcessInJob=lambda process, handle: True)
+    shim["install"](job, _Error, _identity, record)
+    with pytest.raises(_Error):
+        _caller("_in_another_owned_job", _PROCESS_TREE)(job, 700, 55)
+    log = _log(record)
+    assert any("without a gap" in problem for problem in log.problems)
+    reading = drain_reading(
+        [Fate(700, 9.0, exit_code=1, kernel_exit=11.0)],
+        log.queries,
+        log.terminations,
+        health=log.problems,
+    )
+    assert reading.value is None
+
+
+@pytest.mark.parametrize(
+    ("ready", "why"),
+    [
+        pytest.param({"observer": False}, "not all in place", id="no-observer"),
+        pytest.param({"fault": False}, "not all in place", id="no-fault"),
+        pytest.param({"created": 4.0}, "0 ready records", id="another-lifetime"),
+    ],
+)
+def test_an_actor_not_shown_fully_shimmed_leaves_no_reading(tmp_path, ready, why):
+    record = tmp_path / "reached.jsonl"
+    _drain_once(_actor(record, **ready), record)
+    assert any(why in problem for problem in _log(record).problems)
+
+
+def test_no_ready_record_at_all_leaves_no_reading(tmp_path):
+    record = tmp_path / "reached.jsonl"
+    _drain_once(shim_namespace(), record)
+    assert any("0 ready records" in p for p in _log(record).problems)
+
+
+def test_an_unreadable_line_leaves_no_reading(tmp_path):
+    record = tmp_path / "reached.jsonl"
+    _drain_once(_actor(record), record)
+    with record.open("a") as stream:
+        stream.write('{"kind": "terminate", "phase": "beg\n')
+    assert any("unreadable" in p for p in _log(record).problems)
+
+
+def test_an_end_with_no_recorded_start_leaves_no_reading(tmp_path):
+    record = tmp_path / "reached.jsonl"
+    shim = _actor(record)
+    shim["_write"](record, {"kind": "terminate", "phase": "end", "call": 9})
+    assert any("no record of its start" in p for p in _log(record).problems)
+
+
+def test_a_start_with_no_recorded_end_is_an_attempt(tmp_path):
+    # The call began and never came back: it may have terminated the member.
+    record = tmp_path / "reached.jsonl"
+    shim = _actor(record)
+    shim["_write"](
+        record,
+        {
+            "kind": "terminate",
+            "phase": "begin",
+            "call": 1,
+            "caller": ROUTINE_DRAIN,
+            "member": 700,
+            "created": 9.0,
+            "t": 1.0,
+        },
+    )
+    log = _log(record)
+    assert log.problems == []
+    (call,) = log.terminations
+    assert call["succeeded"] is None
 
 
 def test_an_unrelated_sitecustomize_does_not_prove_the_shim_ran(tmp_path):
@@ -539,17 +687,53 @@ def test_the_same_code_at_shared_shutdown_is_not_the_drains():
     assert reading.value is False and reading.unknown == []
 
 
+def test_the_hard_exit_drain_is_not_the_routine_bang():
+    # The baseline's hard exit terminates every member after the close.
+    line = _terminate("_drain_adopted_windows_job")
+    assert drain_reading([_ended()], [_query()], [line]).value is False
+
+
 @pytest.mark.parametrize(
-    "line",
-    [
-        pytest.param(_terminate("_drain_adopted_windows_job"), id="hard-exit-drain"),
-        pytest.param(_terminate(succeeded=False), id="failed-call"),
-    ],
+    "outcome", [False, None], ids=["failed-call", "no-recorded-end"]
 )
-def test_neither_the_hard_exit_drain_nor_a_failed_call_is_the_routine_bang(line):
-    # The baseline's hard exit terminates every member after the close; a
-    # termination that failed terminated nothing. Neither is the witness.
-    reading = drain_reading([_ended()], [_query()], [line])
+def test_an_attempt_the_routine_drain_made_is_never_equal(outcome):
+    # A termination that failed, or whose end was never recorded, was still
+    # tried on a member the drain could not place: the act, not '='.
+    reading = drain_reading([_ended()], [_query()], [_terminate(succeeded=outcome)])
+    assert reading.value is True and reading.terminated == []
+    assert [line["member"] for line in reading.attempted] == [700]
+
+
+def test_a_known_row_process_the_drain_terminated_is_the_act_too():
+    # Run 36410976409, K2: the drain also asked about, and terminated, the
+    # owner's gate and console host, row processes that are no installer.
+    gate = dict(_query(member=3572, created=1.0))
+    reading = drain_reading(
+        [_ended()],
+        [_query(), gate],
+        [_terminate(member=3572, created=1.0)],
+        known_other=lambda member, created: (member, created) == (3572, 1.0),
+    )
+    assert reading.unknown == [] and reading.value is True
+    assert [line["member"] for line in reading.others] == [3572]
+    # Asked about and left alone, it changes nothing.
+    left = drain_reading(
+        [_ended()],
+        [_query(), gate],
+        [],
+        known_other=lambda member, created: (member, created) == (3572, 1.0),
+    )
+    assert left.unknown == [] and left.value is False
+
+
+def test_the_records_own_gaps_leave_no_reading():
+    reading = drain_reading([_ended()], [_query()], [], health=["a record was lost"])
+    assert reading.value is None and reading.unknown == ["a record was lost"]
+
+
+def test_an_unsettled_installer_the_drain_never_touched_is_the_inventorys():
+    # Its end matters for the barrier (installer_inventory), not the reading.
+    reading = drain_reading([_ended(kernel_exit=None, exit_code=None)], [], [])
     assert reading.value is False
 
 
@@ -601,20 +785,24 @@ def test_a_delayed_reply_moves_no_reading(tmp_path, received):
             id="no-kernel-exit",
         ),
         pytest.param(
-            _ended(), [_query(created=5.0)], [], "did not watch", id="another-lifetime"
+            _ended(),
+            [_query(created=5.0)],
+            [],
+            "neither watched nor knows",
+            id="another-lifetime",
         ),
         pytest.param(
             _ended(),
             [_query(), _query(member=701)],
             [],
-            "did not watch",
+            "neither watched nor knows",
             id="an-unwatched-member",
         ),
         pytest.param(
             _ended(),
             [_query()],
             [_terminate(member=701)],
-            "did not watch",
+            "cannot place",
             id="terminated-unwatched",
         ),
         pytest.param(
@@ -675,9 +863,9 @@ class _Native:
         self.closed += 1
 
 
-def _watched(native: _Native, *, required: bool = True) -> Fates:
+def _watched(native: _Native) -> Fates:
     fates = Fates(native)
-    fates.watch(700, 9.0, required=required)
+    fates.watch(700, 9.0)
     fates.settle(5.0)
     return fates
 
@@ -713,8 +901,11 @@ def test_an_unobserved_end_is_unknown_never_an_exit_or_a_survivor(native, why):
     [_Native(opens=False), _Native(created=5.0)],
     ids=["gone", "another-lifetime"],
 )
-def test_a_late_look_keeps_only_what_it_can_watch(native):
-    assert _watched(native, required=False).fates == {}
+def test_a_process_that_could_not_be_watched_is_kept_as_unknown(native):
+    # E1EP-03: dropped, it would leave the inventory with nothing to account
+    # for; kept, it is unknown until something shows it ended.
+    (fate,) = _watched(native).fates.values()
+    assert fate.problem is not None and not fate.settled
 
 
 def _reach(tmp_path: Path, pid: int) -> None:
@@ -926,6 +1117,228 @@ def test_k1_must_not_reach_the_query(profile):
         "no adopted Job" in p
         for p in r11_verdict(_result(reached_it), experiment="K1", non_windows=False)
     )
+
+
+# --- Placing the drain's members: installers, known row processes, or unknown ------
+
+
+def _seen(pid, ppid, start, actor, cmdline=("python",), *, t=None, in_row=True):
+    return {
+        "kind": "process.start",
+        "t": start + 0.02 if t is None else t,
+        "pid": pid,
+        "ppid": ppid,
+        "pgid": pid,
+        "start_identity": start,
+        "in_row": in_row,
+        "actor": actor,
+        "cmdline": list(cmdline),
+    }
+
+
+def _gone(pid, start, t):
+    return {"kind": "process.exit", "t": t, "pid": pid, "start_identity": start}
+
+
+#: Run 36410976409, K2, as the watcher recorded it: the owner's release gate
+#: (3572), its Python child (7708) and that child's console host (1276), eight
+#: seconds before the installer's supervisor (880) and a worker below it.
+_K2_ROW = [
+    _seen(3572, 6928, 678.378, "owner", ("venv\\python.exe", "-I", "-S", "-u")),
+    _seen(7708, 3572, 678.383, "owner", ("venv\\python.exe", "-I", "-S", "-u")),
+    _seen(1276, 7708, 678.386, "other", ("conhost.exe", "0x4")),
+    _seen(880, 3860, 686.896, "installer"),
+    _seen(4040, 880, 687.182, "other", ("python", "-m", "patchright", "install")),
+    # A child of the installer that is no installer by its own record.
+    _seen(4100, 880, 687.300, "other", ("conhost.exe", "0x4")),
+]
+
+
+@pytest.mark.parametrize(
+    ("member", "created", "known"),
+    [
+        pytest.param(3572, 678.378, True, id="owner-gate"),
+        pytest.param(7708, 678.383, True, id="owner-child"),
+        pytest.param(1276, 678.386, True, id="console-host"),
+        pytest.param(880, 686.896, False, id="the-installer"),
+        pytest.param(4040, 687.182, False, id="an-installer-by-its-command"),
+        pytest.param(4100, 687.300, False, id="an-installers-descendant"),
+        pytest.param(3572, 600.0, False, id="another-lifetime-at-the-pid"),
+        pytest.param(9999, 678.0, False, id="never-recorded"),
+    ],
+)
+def test_only_a_recorded_row_process_outside_every_installer_is_placed(
+    member, created, known
+):
+    assert known_non_installer(_K2_ROW)(member, created) is known
+
+
+def test_the_measured_k2_members_read_bang_once_placed():
+    # The three the run could not place are known row processes; the reading
+    # is then complete, and the routine drain's terminations of the installer
+    # make it '!'.
+    fates = [
+        Fate(880, 686.896, exit_code=1, kernel_exit=690.937),
+        Fate(4040, 687.182, exit_code=1, kernel_exit=690.949),
+    ]
+    queries = [
+        {"t": 690.9, "member": m, "created": c}
+        for m, c in [(3572, 678.378), (7708, 678.383), (1276, 678.386)]
+        + [(880, 686.896), (4040, 687.182)]
+    ]
+    stopped = [
+        dict(_terminate(member=3572, created=678.378, began=690.92)),
+        dict(_terminate(member=880, created=686.896, began=690.93)),
+        dict(_terminate(member=4040, created=687.182, began=690.94)),
+    ]
+    reading = drain_reading(
+        fates, queries, stopped, known_other=known_non_installer(_K2_ROW)
+    )
+    assert reading.unknown == [] and reading.value is True
+    assert sorted(f.pid for f in reading.terminated) == [880, 4040]
+    # Unplaced, the same member leaves the reading unknown, not '='.
+    stranger = [*queries, {"t": 690.9, "member": 4100, "created": 687.3}]
+    assert (
+        drain_reading(
+            fates, stranger, stopped, known_other=known_non_installer(_K2_ROW)
+        ).value
+        is None
+    )
+
+
+# --- The installer inventory, before any session after the row ---------------------
+
+
+def test_every_installer_lifetime_must_be_shown_ended():
+    fates = Fates(_Native())
+    fates.fates[(880, 686.896)] = Fate(880, 686.896, exit_code=1, kernel_exit=690.9)
+    fates.fates[(4040, 687.182)] = Fate(4040, 687.182, problem="PermissionError()")
+    records = [*_K2_ROW, _seen(5000, 880, 688.0, "installer")]
+    problems = installer_inventory(records, fates)
+    # 880 settled through its handle; 4040's handle failed and nobody saw it
+    # leave; 5000 was never watched and nobody saw it leave either.
+    assert [p.split()[1] for p in problems] == ["4040", "5000"]
+    assert "PermissionError" in problems[0]
+    # The watcher seeing a lifetime leave the table is an observed end.
+    gone = [*records, _gone(4040, 687.182, 690.95), _gone(5000, 688.0, 690.96)]
+    assert installer_inventory(gone, fates) == []
+
+
+def test_a_late_installer_whose_handle_failed_blocks_the_session(tmp_path):
+    # E1EP-03: the late look could not open it, the drain never asked about
+    # it, the other installer settled: it is still not shown ended.
+    fates = Fates(_Native(opens=False))
+    fates.watch(5000, 688.0)
+    records = [_seen(5000, 880, 688.0, "installer")]
+    problems = job_query_problems(
+        _shim(tmp_path),
+        fates=fates,
+        reading=drain_reading(fates.fates.values(), [], []),
+        window={"script_ended": True},
+        script_error=None,
+        observed=records,
+    )
+    assert any("installer inventory" in p and "5000" in p for p in problems)
+
+
+def test_what_the_watcher_and_cleanup_could_not_do_is_an_observation_failure(
+    tmp_path,
+):
+    # E1EP-04: K2 keeps its known '!', never a watcher that could not see or a
+    # cleanup that could not finish.
+    fates = Fates(_Native())
+    fates.fates[(880, 686.896)] = Fate(880, 686.896, exit_code=1, kernel_exit=690.9)
+    problems = job_query_problems(
+        _shim(tmp_path),
+        fates=fates,
+        reading=drain_reading(fates.fates.values(), [], []),
+        window={"script_ended": True},
+        script_error=None,
+        observed=[_seen(880, 3860, 686.896, "installer")],
+        host_error="RuntimeError: boom",
+        watcher=["the watcher wrote no summary"],
+        cleanup=["the row's daemon directory survived removal"],
+    )
+    assert "watcher: the watcher wrote no summary" in problems
+    assert "cleanup: the row's daemon directory survived removal" in problems
+    assert "the host session failed: RuntimeError: boom" in problems
+
+
+# --- The successor, on Windows' clock --------------------------------------------
+
+
+def test_a_wall_clock_marker_orders_only_well_apart_and_while_the_clock_held():
+    marker = WallClockMarker()
+    assert marker.after(1, 10.0) is None  # never marked
+    marker.created = 100.0
+    assert marker.after(1, 101.0) is True
+    assert marker.after(1, 99.0) is False
+    assert marker.after(1, 100.1) is None  # too close to order
+    # The wall clock jumped since the row began: nothing is ordered.
+    wall, mono = marker.began
+    marker.began = (wall - 5.0, mono)
+    assert marker.after(1, 101.0) is None
+
+
+def test_a_wall_clock_marker_reads_a_real_process():
+    marker = WallClockMarker()
+    marker.mark()
+    assert marker.created is not None
+    assert abs(marker.created - time.time()) < 30
+
+
+#: The close began at 10 (marker created then); the probe ran 12.5 to 14.
+_PROBE = (12.5, 14.0)
+
+
+def _after_close(pid, start):
+    return start > 10.25 if abs(start - 10.0) > 0.25 else None
+
+
+def _owner_identity(pid, start, instance):
+    from differential.harness import OwnerIdentity
+
+    return OwnerIdentity(pid, start, instance, "/auth", None)
+
+
+def _served(*extra, owner_start=12.0, browser_t=13.0):
+    return [
+        _seen(20, 10, 2.0, "owner"),
+        _seen(22, 20, 3.0, "driver"),
+        _seen(30, 22, 4.0, "browser"),
+        _gone(30, 4.0, 9.0),
+        _seen(40, 10, owner_start, "owner", t=owner_start + 0.05),
+        _seen(42, 40, browser_t, "driver", t=browser_t),
+        _seen(43, 42, browser_t + 0.1, "browser", t=browser_t + 0.1),
+        *extra,
+    ]
+
+
+def _successor(records, *, owner_start=12.0, probe=_PROBE, requests=1):
+    return successor_problems(
+        records,
+        _owner_identity(20, 2.0, "first"),
+        _owner_identity(40, owner_start, "second"),
+        probe=probe,
+        probe_requests=requests,
+        after_close=_after_close,
+    )
+
+
+def test_a_new_owner_whose_browser_ran_while_the_probe_was_served_succeeds():
+    assert _successor(_served()) == []
+
+
+def test_an_owner_born_after_the_probe_did_not_serve_it():
+    # E1EP-05: born at 20, browser at 22, the probe returned at 14.
+    problems = _successor(_served(owner_start=20.0, browser_t=22.0), owner_start=20.0)
+    assert any("no browser of pid 40" in p for p in problems)
+
+
+def test_an_unknown_browser_beside_the_successors_fails_closed():
+    stranger = _seen(50, 49, 13.2, "browser", t=13.2)
+    problems = _successor(_served(stranger))
+    assert any("browser 50 ran while" in p for p in problems)
 
 
 # --- The first read finds the private cache installed ---------------------------

@@ -155,11 +155,17 @@ def row(tmp_path, monkeypatch, profile):
         if script is not None:
             # A row's scripted phase: every call answers at once.
             async def call(name, arguments):
-                now = time.time()
+                began = time.time()
+                if name == harness.READ_TOOL:
+                    # The origin sees the read's feed request while it runs.
+                    origin.requests.extend(
+                        dataclasses.replace(request, t=time.time())
+                        for request in harness.feed_requests(healthy.row_requests)
+                    )
                 return {
                     "tool": name,
-                    "began": now,
-                    "ended": now,
+                    "began": began,
+                    "ended": time.time(),
                     "is_error": False,
                     "read_the_post": name == harness.READ_TOOL,
                 }
@@ -295,7 +301,15 @@ def _job_query_row(monkeypatch, tmp_path, native=None) -> ShimVenv:
     )
 
 
-_SETTLED = {"read_failures": [], "relevant_read_failures": []}
+#: A watcher that observed the whole row: nothing it could not see.
+_SETTLED = {
+    "read_failures": [],
+    "relevant_read_failures": [],
+    "stopped_by": "stop file",
+    "observation_start": 0.0,
+    "observation_end": time.time() + 3600,
+    "max_gap_seconds": 0.1,
+}
 
 
 async def test_the_failed_job_query_row_writes_through_the_real_event_log(
@@ -342,7 +356,7 @@ async def test_the_post_quit_session_waits_for_every_installer_fate(
     result, calls = await row(
         processes=[], summary=_SETTLED, daemon=False, job_query_shim=shim
     )
-    assert calls == starts
+    assert calls == starts, result.failures
     if not starts:
         assert result.post_quit is not None and result.post_quit.valid is None
         assert any("H-R11 evidence incomplete" in f for f in result.failures)
@@ -356,6 +370,7 @@ async def test_the_post_quit_session_waits_for_every_installer_fate(
     [
         # The watcher recorded it after the first look: the late look watches it.
         pytest.param(True, 1, id="started-late-and-recorded"),
+        pytest.param("owner-gate", 1, id="a-known-row-process"),
         # Nothing recorded it: its fate, and so the drain's reading, is unknown.
         pytest.param(False, 0, id="never-recorded"),
     ],
@@ -377,7 +392,10 @@ async def test_every_queried_lifetime_must_be_a_watched_one(
         return real(shim, **kwargs)
 
     monkeypatch.setattr(harness, "job_query_reading", reading)
-    late = dict(_started(702, 700, 2.0, "installer"), start_identity=9.0)
+    # Recorded as a late installer the late look watches, or as the owner's
+    # own gate (run 36410976409), a row process that is no installer.
+    role = "installer" if recorded != "owner-gate" else "owner"
+    late = dict(_started(702, 4242, 2.0, role), start_identity=9.0)
     result, calls = await row(
         processes=[],
         summary=_SETTLED,
@@ -385,9 +403,11 @@ async def test_every_queried_lifetime_must_be_a_watched_one(
         daemon=False,
         job_query_shim=shim,
     )
-    assert calls == starts
+    assert calls == starts, result.failures
     if not starts:
-        assert any("did not watch" in f for f in result.observation_failures)
+        assert any(
+            "neither watched nor knows" in f for f in result.observation_failures
+        )
     else:
         assert result.observation_failures == []
 
@@ -399,7 +419,7 @@ async def test_every_queried_lifetime_must_be_a_watched_one(
         pytest.param("same-owner", "still names the owner that closed", id="same"),
         # First sampled after the close, but created before it: the watcher's
         # time is when it looked, not when the process began.
-        pytest.param("created-before", "before the close began", id="created-before"),
+        pytest.param("created-before", "began before the close", id="created-before"),
     ],
 )
 async def test_recovery_counts_only_a_new_owner_that_served_before_quit(
@@ -413,8 +433,20 @@ async def test_recovery_counts_only_a_new_owner_that_served_before_quit(
     monkeypatch.setattr(harness, "close_left_unconfirmed", lambda *a, **k: True)
     monkeypatch.setattr(harness, "wait_until_dead", lambda *a, **k: True)
     monkeypatch.setattr(harness, "_SUCCESSOR_SECONDS", 0.3)
-    later = time.time() + 60
-    created = 1.5 if case == "created-before" else later
+
+    class Marker:
+        """The close marker: created at 2, and a clock that held."""
+
+        def mark(self):
+            pass
+
+        def after(self, pid, start):
+            return start > 2.0
+
+    monkeypatch.setattr(harness, "WallClockMarker", Marker)
+    # Seen before the probe returned: the run starts after these were taken.
+    seen = time.time() - 1
+    created = 1.5 if case == "created-before" else seen - 0.5
     successor = harness.OwnerIdentity(
         43, created, "successor", row.owner.auth_root, _Actor(43)
     )
@@ -429,10 +461,12 @@ async def test_recovery_counts_only_a_new_owner_that_served_before_quit(
     serving = 43 if replaced else 42
     records = [_started(42, 4242, 1.0, "owner")]
     if replaced:
-        records.append(dict(_started(43, 4242, later, "owner"), start_identity=created))
+        records.append(
+            dict(_started(43, 4242, seen - 0.5, "owner"), start_identity=created)
+        )
     records += [
-        _started(50, serving, later + 0.1, "driver"),
-        _started(51, 50, later + 0.2, "browser"),
+        _started(50, serving, seen, "driver"),
+        _started(51, 50, seen + 0.1, "browser"),
     ]
     result, _ = await row(
         processes=[], summary=_SETTLED, observed=records, job_query_shim=shim
@@ -451,6 +485,42 @@ async def test_recovery_counts_only_a_new_owner_that_served_before_quit(
     else:
         (problem,) = elected
         assert why in problem
+
+
+@pytest.mark.parametrize(
+    "fault", ["cleanup", "watcher"], ids=["daemon-dir-survived", "watcher-gap"]
+)
+async def test_k2_never_accepts_a_cleanup_or_watcher_failure(
+    row, monkeypatch, tmp_path, fault
+):
+    # E1EP-04, through the row: the baseline's known '!' is K2's to keep, a
+    # cleanup that did not finish or a watcher that could not see is not.
+    shim = _job_query_row(monkeypatch, tmp_path, _Native())
+    summary = dict(_SETTLED)
+    if fault == "cleanup":
+
+        def retire(_account, identified):
+            return DaemonCleanup(
+                "dir",
+                True,
+                False,
+                True,
+                False,
+                ("the row's daemon directory survived removal",),
+            )
+
+        monkeypatch.setattr(harness, "retire_daemon_state", retire)
+    else:
+        summary["max_gap_seconds"] = 5.0
+    result, _ = await row(
+        processes=[],
+        summary=summary,
+        job_query_shim=shim,
+        experiment="K2",
+    )
+    problems = harness.r11_verdict(result, experiment="K2", non_windows=False)
+    expected = "cleanup: the row's daemon" if fault == "cleanup" else "watcher: "
+    assert any(p.startswith(expected) for p in problems), problems
 
 
 async def test_failed_private_setup_closes_the_listener_and_removes_its_links(
