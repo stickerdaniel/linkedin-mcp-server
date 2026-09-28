@@ -26,7 +26,7 @@ described on [GitHub Releases](https://github.com/stickerdaniel/linkedin-mcp-ser
 
 - `send_message` reports `sent` for delivered messages instead of `send_unconfirmed`. ([#1108](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1108))
 - A shared browser owner that cannot close its browser no longer signals other processes. ([#1122](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1122))
-- The Docker image runs Chrome for Testing 153, and older images refuse its profiles. ([#1123](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1123))
+- The Docker image runs Chrome for Testing 153; older images refuse a profile it opened. ([#1123](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1123))
 - `CHROME_PATH` and `--chrome-path` keep the server on its own browser. ([#1125](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1125))
 - `connect_with_person` returns `connect_unavailable` when the note cannot be filled. ([#1136](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1136))
 - `connect_with_person` no longer reports a sent invitation as `send_failed`. ([#1137](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1137))
