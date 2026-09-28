@@ -20,7 +20,9 @@ concurrency:
 # Coding agents sign their work either with a Co-Authored-By trailer or by
 # claiming the author/committer field. Squash-merging collects the trailers of
 # every commit in the PR into the merge commit, so a single unnoticed trailer
-# reaches main permanently. Each identity below is a vendor-controlled address
+# reaches main permanently. The PR body is a second way in: this repository
+# squash-merges with the body as the commit message, so a trailer written
+# there lands on main exactly like one in a commit. Each identity below is a vendor-controlled address
 # or a known agent's GitHub App handle. Dependency bots (dependabot, renovate)
 # are deliberately allowed: they are maintenance automation, not authorship
 # claims.
@@ -38,12 +40,32 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.workflow_sha }}
-          fetch-depth: 1
+          # Full history: in a shallow clone the base commit has no parents,
+          # so BASE..HEAD below follows a merge from an older main through
+          # every commit already on main and fails on their trailers.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Check PR model attribution
         if: github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.user.login != 'renovate[bot]'
         run: python scripts/check_pr_model_attribution.py
+
+      - name: Check PR body for bot Co-Authored-By lines
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          # Same trailer pattern as the commit check below. A body edited on
+          # the web arrives with CRLF; the trailing [[:space:]]* absorbs the CR.
+          TRAILER_RE="^[[:space:]]*co-authored-by:[[:space:]]+.*<${AI_IDENTITY_RE}>[[:space:]]*$"
+          HITS=$(printf '%s\n' "$PR_BODY" | grep -Ei "$TRAILER_RE" || true)
+
+          if [ -n "$HITS" ]; then
+            echo "::error::The PR body contains a bot Co-Authored-By line. The body becomes the squash commit message, so edit the PR description and remove it."
+            printf '%s\n' "$HITS"
+            exit 1
+          fi
+
+          echo "PR body clean."
 
       - name: Fetch PR commits
         env:

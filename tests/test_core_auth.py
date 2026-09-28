@@ -9,7 +9,10 @@ from patchright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
-from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.core.exceptions import (
+    AccountRestrictedError,
+    AuthenticationError,
+)
 from linkedin_mcp_server.core.auth import (
     _REMEMBER_ME_CONTAINER_SELECTOR,
     detect_auth_barrier,
@@ -268,6 +271,56 @@ async def test_detect_auth_barrier_ignores_auth_substrings_in_slugs():
     assert result is None
 
 
+_RESTRICTION_URLS = [
+    # The route measured on 2026-09-27.
+    "https://www.linkedin.com/flagship-web/login/login-restriction/",
+    "https://www.linkedin.com/login/login-restriction/",
+    "https://www.linkedin.com/flagship-web/login/login-restriction",
+    "https://www.linkedin.com/login/login-restriction?trk=guest_homepage",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", _RESTRICTION_URLS)
+async def test_a_restricted_account_is_not_an_auth_barrier(url: str):
+    """No login clears it, so it must not be reported as one to log in past."""
+    page = _barrier_page()
+    page.url = url
+    page.title = AsyncMock(return_value="LinkedIn Login, Sign in | LinkedIn")
+    page.evaluate = AsyncMock(return_value="")
+
+    with pytest.raises(AccountRestrictedError, match="identity verification"):
+        await detect_auth_barrier_quick(page)
+    with pytest.raises(AccountRestrictedError):
+        await detect_auth_barrier(page)
+    with pytest.raises(AccountRestrictedError):
+        await is_logged_in(page)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("url", "barrier"),
+    [
+        ("https://www.linkedin.com/login/", "auth blocker URL"),
+        ("https://www.linkedin.com/login/login-restriction-help/", "auth blocker URL"),
+        ("https://www.linkedin.com/login-restriction-help/", None),
+        ("https://www.linkedin.com/in/login-restriction/", None),
+    ],
+)
+async def test_near_misses_of_the_restriction_route(url: str, barrier: str | None):
+    page = _barrier_page()
+    page.url = url
+    page.title = AsyncMock(return_value="LinkedIn")
+    page.evaluate = AsyncMock(return_value="")
+
+    result = await detect_auth_barrier_quick(page)
+
+    if barrier is None:
+        assert result is None
+    else:
+        assert result is not None and result.startswith(barrier)
+
+
 @pytest.mark.asyncio
 async def test_resolve_remember_me_prompt_clicks_saved_account():
     page = MagicMock()
@@ -327,6 +380,13 @@ def _manual_login_page() -> MagicMock:
     page.is_closed.return_value = False
     page.context.cookies = AsyncMock(return_value=[])
     return page
+
+
+def _tab(url: str = "https://www.linkedin.com/login") -> MagicMock:
+    """Another tab in the login browser; a real one always has an address."""
+    tab = MagicMock()
+    tab.url = url
+    return tab
 
 
 @pytest.mark.asyncio
@@ -445,7 +505,7 @@ async def test_wait_for_manual_login_waits_for_applicable_cookie(monkeypatch):
 async def test_wait_for_manual_login_survives_tracked_tab_closing(monkeypatch):
     page = _manual_login_page()
     page.is_closed.return_value = True
-    page.context.pages = [MagicMock()]
+    page.context.pages = [_tab()]
     page.context.cookies = AsyncMock(side_effect=[[], [_linkedin_cookie()]])
     monkeypatch.setattr(
         "linkedin_mcp_server.core.auth.resolve_remember_me_prompt",
@@ -528,7 +588,7 @@ async def test_wait_for_manual_login_checks_cookie_before_repeated_prompt(monkey
 @pytest.mark.asyncio
 async def test_wait_for_manual_login_does_not_poll_other_tabs(monkeypatch):
     page = _manual_login_page()
-    page.context.pages = [page, MagicMock(), MagicMock()]
+    page.context.pages = [page, _tab(), _tab()]
     resolve_prompt = AsyncMock(return_value=True)
 
     class _FakeLoop:
@@ -661,3 +721,36 @@ async def test_wait_for_manual_login_does_not_log_waiting_after_cookie(
         await wait_for_manual_login(page, timeout=0)
 
     assert "Still waiting for manual login" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restricted_tab", [0, 1], ids=["tracked tab", "other tab"])
+@pytest.mark.parametrize("with_cookie", [False, True], ids=["no cookie", "cookie"])
+async def test_wait_for_manual_login_stops_on_a_restricted_account(
+    monkeypatch, restricted_tab: int, with_cookie: bool
+):
+    """A restricted account gets no li_at, so without this the wait never ends.
+
+    Unlimited budget and the real sleep: a loop that keeps waiting spends its
+    one-second polls until the outer bound fails the test. With a cookie as
+    well, the restriction page still wins rather than reading as a login.
+    """
+    page = _manual_login_page()
+    if with_cookie:
+        page.context.cookies = AsyncMock(
+            return_value=[{"name": "li_at", "value": "token"}]
+        )
+    restriction = "https://www.linkedin.com/flagship-web/login/login-restriction/"
+    tabs = [page, _tab("https://www.linkedin.com/feed/")]
+    tabs[restricted_tab].url = restriction
+    page.context.pages = tabs
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.auth.resolve_remember_me_prompt",
+        AsyncMock(return_value=False),
+    )
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(AccountRestrictedError, match="will not open a login window"):
+        await asyncio.wait_for(wait_for_manual_login(page, timeout=0), timeout=3)
+
+    assert asyncio.get_running_loop().time() - started < 0.5
