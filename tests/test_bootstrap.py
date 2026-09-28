@@ -5337,8 +5337,9 @@ class TestWindowsInstallerTempFallback:
         monkeypatch.setattr(windows_acl, "close_directory_pin", lambda _pin: None)
         return home, temporary
 
+    @pytest.mark.parametrize("os_error", [False, True])
     def test_rejected_default_temp_falls_back_to_home(
-        self, windows_temp, monkeypatch, caplog
+        self, windows_temp, monkeypatch, caplog, os_error
     ):
         from linkedin_mcp_server import bootstrap, windows_acl
         from linkedin_mcp_server.private_state import PrivateStateError
@@ -5348,7 +5349,9 @@ class TestWindowsInstallerTempFallback:
 
         def create(parent, *, prefix):
             if parent == temporary:
-                raise PrivateStateError(refusal)
+                raise (
+                    PermissionError(refusal) if os_error else PrivateStateError(refusal)
+                )
             target = parent / f"{prefix}example"
             target.mkdir()
             return target, object()
@@ -5362,6 +5365,33 @@ class TestWindowsInstallerTempFallback:
         assert root.pin is not None
         assert list(temporary.iterdir()) == []
         assert refusal in caplog.text
+
+    @pytest.mark.parametrize(
+        "error", [PermissionError("temp denied"), FileNotFoundError("temp removed")]
+    )
+    def test_default_parent_resolution_failure_falls_back(
+        self, windows_temp, monkeypatch, error
+    ):
+        from linkedin_mcp_server import bootstrap, windows_acl
+
+        home, _temporary = windows_temp
+
+        def unavailable_parent():
+            raise error
+
+        def create(parent, *, prefix):
+            target = parent / f"{prefix}example"
+            target.mkdir()
+            return target, object()
+
+        monkeypatch.setattr(
+            bootstrap, "_installer_temporary_parent", unavailable_parent
+        )
+        monkeypatch.setattr(windows_acl, "create_owner_only_directory", create)
+
+        root = bootstrap._create_installer_temporary_root()
+        assert root.path.parent == home
+        assert root.path.is_dir()
 
     def test_safe_default_keeps_system_temp(self, windows_temp, monkeypatch):
         from linkedin_mcp_server import bootstrap, windows_acl
@@ -5380,8 +5410,9 @@ class TestWindowsInstallerTempFallback:
         assert root.path.is_dir()
 
     @pytest.mark.parametrize("configured", ["config", "environment"])
+    @pytest.mark.parametrize("resolution_fails", [False, True])
     def test_explicit_temp_never_falls_back(
-        self, windows_temp, monkeypatch, configured
+        self, windows_temp, monkeypatch, configured, resolution_fails
     ):
         from linkedin_mcp_server import bootstrap, windows_acl
         from linkedin_mcp_server.private_state import PrivateStateError
@@ -5400,10 +5431,12 @@ class TestWindowsInstallerTempFallback:
             raise PrivateStateError("sandbox grant")
 
         monkeypatch.setattr(windows_acl, "create_owner_only_directory", refuse)
+        if resolution_fails:
+            temporary.rmdir()
         with pytest.raises(PrivateStateError, match="INSTALLER_TEMP_DIR"):
             bootstrap._create_installer_temporary_root()
 
-        assert attempted == [temporary]
+        assert attempted == ([] if resolution_fails else [temporary])
         assert list(home.iterdir()) == [home / "AppData"]
 
     def test_unsafe_home_reports_both_failures(self, windows_temp, monkeypatch):

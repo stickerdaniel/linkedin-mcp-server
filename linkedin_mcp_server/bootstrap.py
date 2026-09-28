@@ -2073,7 +2073,6 @@ def _installer_temporary_parent() -> Path:
 
 
 def _create_installer_temporary_root() -> _InstallerTemporaryRoot:
-    parent = _installer_temporary_parent()
     pin: Any | None = None
     if os.name == "nt":
         # Not ``tempfile.mkdtemp``, which is why no Python version floor applies
@@ -2084,10 +2083,11 @@ def _create_installer_temporary_root() -> _InstallerTemporaryRoot:
         from linkedin_mcp_server.windows_acl import create_owner_only_directory
 
         try:
+            parent = _installer_temporary_parent()
             path, pin = create_owner_only_directory(
                 parent, prefix="linkedin-mcp-installer-"
             )
-        except PrivateStateError as default_error:
+        except (OSError, PrivateStateError) as default_error:
             remedy = (
                 "Set INSTALLER_TEMP_DIR or --installer-temp-dir to an existing "
                 "directory whose ancestry is controlled only by your account "
@@ -2115,6 +2115,7 @@ def _create_installer_temporary_root() -> _InstallerTemporaryRoot:
                 default_error,
             )
     else:
+        parent = _installer_temporary_parent()
         path = Path(tempfile.mkdtemp(prefix="linkedin-mcp-installer-", dir=parent))
     try:
         if os.name == "nt":
