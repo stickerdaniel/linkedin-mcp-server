@@ -67,9 +67,17 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
-from dataclasses import asdict, dataclass, field
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -99,6 +107,16 @@ from differential.baseline import (
     stage_frozen_session,
 )
 from differential.events import EventLog, read_jsonl
+from differential.job_query import (
+    Fates,
+    PrivateCache,
+    ShimVenv,
+    StallHost,
+    install_locations,
+    reached,
+    stall_environment,
+    terminated_in,
+)
 from differential.session import (
     RETAINED,
     UNCERTAIN,
@@ -902,6 +920,14 @@ class HostSession:
     #: H-R6: the call made after the owner was killed, and how it failed.
     second_tool: dict[str, Any] | None = None
     second_error: str | None = None
+    #: What a row's scripted phase called, in order, and how it failed.
+    scripted: list[dict[str, Any]] = field(default_factory=list)
+    script_error: str | None = None
+
+
+#: A row's scripted phase: it is handed a function that calls one tool through
+#: the host's own client and returns the call's summary.
+ToolCall = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 async def run_host_session(
@@ -915,13 +941,17 @@ async def run_host_session(
     arguments: dict[str, Any] | None = None,
     started: Callable[[int], None] | None = None,
     second_call: bool = False,
+    script: Callable[[ToolCall], Awaitable[None]] | None = None,
 ) -> HostSession:
     """Initialize, call the read tool once, then quit the way a host does.
 
     *started* is told the server's pid as soon as it runs. With *second_call*
     the tool is called once more after *after_call*, which is how H-R6 sees the
     frontend recover from a killed owner; its failure is recorded apart and
-    does not stop the host from quitting.
+    does not stop the host from quitting. *script*, when given, runs last
+    before the quit with a function that calls tools through this client
+    (H-R11); what it called is in ``scripted``, and its failure, recorded as
+    ``script_error``, does not stop the quit either.
     """
     session = HostSession()
 
@@ -959,6 +989,27 @@ async def run_host_session(
                     session.user_lines += session.second_tool["text"].splitlines()
                 except Exception as exc:  # noqa: BLE001 - the recovery's evidence
                     session.second_error = f"{type(exc).__name__}: {exc}"
+            if script is not None:
+
+                async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+                    began = time.time()
+                    called = await client.call_tool_mcp(
+                        name, arguments, timeout=_CALL_SECONDS
+                    )
+                    summary: dict[str, Any] = {
+                        "tool": name,
+                        "began": began,
+                        "ended": time.time(),
+                        **tool_summary(called),
+                    }
+                    session.scripted.append(summary)
+                    session.user_lines += summary["text"].splitlines()
+                    return summary
+
+                try:
+                    await script(call)
+                except Exception as exc:  # noqa: BLE001 - the script's own evidence
+                    session.script_error = f"{type(exc).__name__}: {exc}"
             await transport.host_quit()
     except Exception as exc:  # noqa: BLE001 - reported as the row's evidence
         detail = f"{type(exc).__name__}: {exc}"
@@ -1452,6 +1503,16 @@ class RowVector:
     #: H-R6, daemon mode: the frontend's second call after the owner was
     #: killed read the post again.
     recovered: bool | None = None
+    #: H-R11: the row-scoped shim's ``IsProcessInJob`` was reached during the
+    #: routine drain (K2/K3 daemon reach it; K1 has no adopted Job). None off
+    #: the row.
+    job_query_reached: bool | None = None
+    #: H-R11: a member of another Job the owner holds (the installer) was
+    #: terminated with exit code 1 during the routine drain while the owner was
+    #: alive. K2 True (``!``); K3 False (``=``). None off the row.
+    job_member_terminated: bool | None = None
+    #: H-R11 availability: a successor was elected while the host still ran.
+    successor_before_quit: bool | None = None
 
 
 _ASSOCIATE_SECONDS = 5.0
@@ -1863,6 +1924,172 @@ def r6_verdict(
     return problems
 
 
+_INSTALLER_SECONDS = 60.0
+
+
+def is_installer(record: Mapping[str, Any]) -> bool:
+    """A process of the product's installer: supervisor, its gate, the
+    ``patchright install`` worker and the Node processes it starts."""
+    joined = " ".join(str(part) for part in record.get("cmdline") or [])
+    return (
+        record.get("actor") == "installer"
+        or ("patchright" in joined and " install " in f" {joined} ")
+        or "oopBrowserDownload" in joined
+    )
+
+
+def wait_for_installers(
+    observed: Callable[[], Iterable[Mapping[str, Any]]],
+    *,
+    open_process: Callable[[int], Any] = psutil.Process,
+    seconds: float = _INSTALLER_SECONDS,
+) -> list[tuple[Any, float]]:
+    """Handles to the row's installer processes, once one has been seen.
+
+    A handle only when the process at the pid is still the lifetime the
+    watcher recorded (its create time), and taken at once, so its exit code
+    stays readable however it ends. After the first is seen, a second look a
+    moment later picks up the worker and the download the supervisor starts.
+    """
+    deadline = time.monotonic() + seconds
+    found: dict[tuple[int, float], Any] = {}
+    settle_until: float | None = None
+    while True:
+        for entry in observed():
+            if entry.get("kind") not in ("process.start", "process.update"):
+                continue
+            if entry.get("in_row") is not True or not is_installer(entry):
+                continue
+            start = entry.get("start_identity")
+            if not isinstance(start, (int, float)):
+                continue
+            key = (int(entry["pid"]), float(start))
+            if key in found:
+                continue
+            try:
+                process = open_process(key[0])
+                if abs(process.create_time() - start) > _START_TOLERANCE_SECONDS:
+                    continue
+            except psutil.Error:
+                continue
+            found[key] = process
+            if settle_until is None:
+                settle_until = time.monotonic() + 3.0
+        now = time.monotonic()
+        if (settle_until is not None and now >= settle_until) or now >= deadline:
+            return [(process, key[1]) for key, process in found.items()]
+        time.sleep(0.1)
+
+
+def job_query_observations(
+    shim: ShimVenv | None,
+    *,
+    fates: Fates,
+    window: Mapping[str, Any],
+    owner_pid: int | None,
+    observed: Iterable[Mapping[str, Any]],
+    daemon: bool,
+) -> dict[str, Any]:
+    """What H-R11 feeds ``judge_row``; nothing off the row.
+
+    Reached: the shim recorded a planted failure in the process whose drain
+    it was, the owner serving at the close (none expected in Direct, which has
+    no adopted Job, so any line at all counts there). Terminated: an installer
+    process ended with exit code 1 inside the ``close_session`` call, which is
+    the routine drain's ``TerminateProcess(handle, 1)`` while the owner lived.
+    Successor: an owner started other than the one that closed, before the
+    call after the close had returned.
+    """
+    if shim is None:
+        return {}
+    lines = reached(shim.reached_file, pid=owner_pid if daemon else None)
+    began, ended = window.get("began"), window.get("ended")
+    span = (began, ended) if began is not None and ended is not None else None
+    probe_ended = window.get("probe_ended")
+    owners = {
+        entry["pid"]
+        for entry in observed
+        if entry.get("kind") == "process.start"
+        and entry.get("in_row") is True
+        and entry.get("actor") == "owner"
+        and probe_ended is not None
+        and float(entry.get("t", 0.0)) <= probe_ended
+    }
+    return {
+        "failed_job_query": True,
+        "job_query_reached": bool(lines),
+        "job_member_terminated": bool(terminated_in(fates.fates.values(), span)),
+        "successor_before_quit": (
+            bool(owners - {owner_pid}) if daemon and owner_pid is not None else None
+        ),
+    }
+
+
+def r11_reading(result: RowResult) -> str | None:
+    """H-R11's reading for the routine drain after the Job query fails.
+
+    ``!`` when a member of another Job the owner holds (the installer) was
+    terminated with exit code 1 during the routine drain while the owner was
+    alive, ``=`` when none was, and None where the query was never reached
+    (K1: no adopted Job) or the row is off this path.
+    """
+    vector = result.vector
+    if vector is None or vector.job_member_terminated is None:
+        return None
+    return "!" if vector.job_member_terminated else "="
+
+
+def r11_verdict(
+    result: RowResult,
+    *,
+    experiment: str,
+    non_windows: bool,
+) -> list[str]:
+    """What H-R11 requires of an experiment beyond the row's own expectations.
+
+    Windows only. K1 frozen is the reference: it has no adopted Job, so the
+    shimmed query is never reached, and it ends with host quit. K2 (baseline
+    daemon) swallows the failed ``IsProcessInJob`` and so terminates a member
+    of another owned Job (the installer) with exit code 1 while it is alive, so
+    K2 must read ``!`` and must have reached the query. K3 (candidate daemon)
+    counts that member and terminates nothing, so it must read ``=``, have
+    reached the query, and elected a successor while the host still ran.
+    """
+    problems = list(result.runtime_failures)
+    if non_windows:
+        return [*problems, "H-R11 runs on Windows only; it should be skipped"]
+    vector = result.vector
+    if vector is None or not vector.tool_succeeded:
+        problems.append("the first call did not read the synthetic post")
+    reading = r11_reading(result)
+    if experiment == "K1":
+        if vector is not None and vector.job_query_reached:
+            problems.append(
+                "the Direct reference reached the Job-membership query, but it has "
+                "no adopted Job to reach it through"
+            )
+        return problems
+    if vector is not None and not vector.job_query_reached:
+        problems.append("the failing Job-membership query was never reached")
+    if experiment == "K2":
+        if reading != "!":
+            problems.append(
+                "K2 read '=' on H-R11, where the baseline's '!' is known (it "
+                "swallows the failed query and terminates the member): a harness "
+                "defect"
+            )
+        return problems
+    # K3
+    if reading == "!":
+        problems.append(
+            "K3 read '!' on H-R11: the candidate terminated a member of another "
+            "owned Job on a failed query"
+        )
+    if vector is not None and vector.successor_before_quit is not True:
+        problems.append("the candidate elected no successor while the host still ran")
+    return problems
+
+
 def compare_repeat(first: RowVector, second: RowVector) -> list[str]:
     """K0: every field of two runs of the same experiment must agree."""
     one, two = asdict(first), asdict(second)
@@ -1956,6 +2183,13 @@ class Observations:
     o2: O2Result | None = None
     #: H-R6: what the harness killed, and the guardian it had.
     killed: dict[str, Any] | None = None
+    #: H-R11: this row planted a failing ``IsProcessInJob`` shim.
+    failed_job_query: bool = False
+    #: H-R11: whether the shim's query was reached, whether a member of another
+    #: owned Job was terminated during the routine drain, and the availability.
+    job_query_reached: bool | None = None
+    job_member_terminated: bool | None = None
+    successor_before_quit: bool | None = None
 
 
 @dataclass
@@ -2125,7 +2359,22 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
         signal_classes=o2.classes if o2 is not None else (),
         guardian_owner_group=killed.get("guardian_owner_group"),
         recovered=_recovered(host) if killed and observed.daemon else None,
+        job_query_reached=(
+            observed.job_query_reached if observed.failed_job_query else None
+        ),
+        job_member_terminated=(
+            observed.job_member_terminated if observed.failed_job_query else None
+        ),
+        successor_before_quit=(
+            observed.successor_before_quit if observed.failed_job_query else None
+        ),
     )
+    if observed.failed_job_query and observed.daemon and not observed.job_query_reached:
+        # The row exists to fail exactly the query ``_in_another_owned_job``
+        # makes; a daemon row that never reached it measured nothing.
+        failures.append(
+            "the failing Job-membership query was never reached during the drain"
+        )
     return vector, row_expectations(vector, expect_owner=expect_owner) + failures
 
 
@@ -2295,6 +2544,7 @@ async def measure_host_quit_row(
     expect_owner: bool | None = None,
     reference: str | None = None,
     kill_actor: bool = False,
+    job_query_shim: ShimVenv | None = None,
 ) -> RowResult:
     """Run a host-quit row once and return its outcome vector and evidence.
 
@@ -2306,6 +2556,12 @@ async def measure_host_quit_row(
     that process to the watcher's record of it, with the signal oracle
     attached to it and its guardian first; in daemon mode the host then calls
     again, which is where the frontend recovers.
+    *job_query_shim* makes it H-R11 (``job_query``): the actors start from that
+    venv, whose declared shim fails the routine drain's Job-membership query;
+    the browser cache is a row-private one of links; after the read the row
+    holds a dependency back so the next call starts an installer that waits on
+    a host that never answers, then calls ``close_session`` with it running,
+    and once more after, where a successor would serve.
     """
     # First, before anything reads, launches or spawns.
     account = claim_account(profile)
@@ -2316,7 +2572,11 @@ async def measure_host_quit_row(
         expect_owner = daemon
     result = RowResult(experiment=experiment, mode=mode, reference=reference)
     runtime = runtime or candidate_runtime()
-    command = list(command or runtime.command())
+    shim = job_query_shim
+    command = list(
+        command
+        or ([shim.python, "-m", "linkedin_mcp_server"] if shim else runtime.command())
+    )
 
     def emit(actor: str, kind: str, **fields: Any) -> None:
         log.emit(experiment=experiment, row=row, actor=actor, kind=kind, **fields)
@@ -2379,6 +2639,32 @@ async def measure_host_quit_row(
     env = actor_environment(
         account, proxy.url, daemon=daemon, browsers=browsers, chrome_path=chrome_path
     )
+    cache: PrivateCache | None = None
+    stall: StallHost | None = None
+    fates = Fates()
+    job_window: dict[str, Any] = {}
+    if shim is not None:
+        # Every planted failure of an earlier row in the same venv is not ours.
+        shim.reached_file.unlink(missing_ok=True)
+        locations = await asyncio.to_thread(install_locations, runtime.python, browsers)
+        cache = PrivateCache.build(
+            Path(tempfile.mkdtemp(prefix="h-r11-cache-")) / "browsers", locations
+        )
+        stall = StallHost().start()
+        env.update(
+            {
+                "PLAYWRIGHT_BROWSERS_PATH": str(cache.directory),
+                **stall_environment(stall),
+            }
+        )
+        emit(
+            "harness",
+            "shim.planted",
+            **shim.as_event_fields(),
+            private_cache=str(cache.directory),
+            linked=[str(location) for location in locations],
+            stall_host=stall.url,
+        )
     emit(
         "harness",
         "row.identity",
@@ -2497,6 +2783,35 @@ async def measure_host_quit_row(
             owner["start_identity"] = identified.create_time
         emit("harness", "owner.found", **owner)
 
+    async def job_query_script(call: ToolCall) -> None:
+        """Start an installer, close with it running, then call once more."""
+        assert cache is not None
+        # The owner whose drain the shim should be reached in: the one serving now.
+        job_window["owner_pid"] = identified.pid if identified is not None else None
+        held = cache.hold_back()
+        # The row's own install record, so setup looks again on the next call.
+        (account.auth_root / "browser-install.json").unlink(missing_ok=True)
+        emit("harness", "job_query.window", phase="held back", held=str(held))
+        await call(READ_TOOL, READ_TOOL_ARGUMENTS)
+        members = await asyncio.to_thread(wait_for_installers, watcher.observed)
+        for process, start in members:
+            fates.watch(process, start)
+        emit(
+            "harness",
+            "job_query.window",
+            phase="installer",
+            installers=[[process.pid, start] for process, start in members],
+        )
+        closed = await call("close_session", {})
+        job_window.update(began=closed["began"], ended=closed["ended"])
+        emit("harness", "job_query.window", phase="close", **job_window)
+        # Back before the next call, so a successor's setup finds everything
+        # and it can serve and later leave through its idle exit; an installer
+        # already waiting on the stall host waits on regardless.
+        cache.restore()
+        probe = await call(READ_TOOL, READ_TOOL_ARGUMENTS)
+        job_window["probe_ended"] = probe["ended"]
+
     async def after_call() -> None:
         await find_the_owner()
         if kill_actor:
@@ -2533,9 +2848,10 @@ async def measure_host_quit_row(
             after_call=after_call,
             started=lambda pid: server.update(pid=pid),
             second_call=kill_actor and daemon,
+            script=job_query_script if shim is not None else None,
         )
         result.host = host
-        if kill_actor and daemon:
+        if (kill_actor or shim is not None) and daemon:
             # The owner the frontend recovered to is the one that now has to
             # leave through its idle exit and be cleaned up. If nothing else
             # was published since, the killed owner's own handle stays, so
@@ -2606,6 +2922,10 @@ async def measure_host_quit_row(
             )
             emit("harness", "owner.exit", **exit_record)
 
+        if shim is not None:
+            # Ended with their Jobs when the server or owner went; then the
+            # held-back dependency is put back before anything else runs.
+            await asyncio.to_thread(fates.settle, _BROWSER_GONE_SECONDS)
         residual = await asyncio.to_thread(
             wait_for_no_browser, account, _BROWSER_GONE_SECONDS
         )
@@ -2616,6 +2936,13 @@ async def measure_host_quit_row(
     finally:
         if actors_ended is None:
             actors_ended = time.time()
+        if cache is not None:
+            try:
+                cache.dismantle()
+            except Exception as exc:  # noqa: BLE001 - reported, the teardown goes on
+                teardown.append(f"the private browser cache stayed: {exc!r}")
+        if stall is not None:
+            stall.stop()
         # Each helper is ended whatever the one before it did; a failure is
         # the row's to report.
         confirmed = [killed["pid"]] if killed.get("exit") == "killed" else []
@@ -2666,7 +2993,9 @@ async def measure_host_quit_row(
         if runtime.frozen:
             result.runtime_failures = interpreter_failures(
                 observed_events,
-                runtime,
+                # The declared shim venv is where the actors start from; that
+                # it imports the runtime's code was checked when it was made.
+                replace(runtime, python=shim.python) if shim else runtime,
                 candidate_prefix=sys.prefix,
                 owner_expected=bool(owner.get("pid")),
             )
@@ -2767,8 +3096,34 @@ async def measure_host_quit_row(
             owner_gates=gated,
             o2=o2,
             killed=killed or None,
+            **job_query_observations(
+                shim,
+                fates=fates,
+                window=job_window,
+                owner_pid=job_window.get("owner_pid"),
+                observed=observed_events,
+                daemon=daemon,
+            ),
         )
     )
+    if shim is not None:
+        for fate in fates.fates.values():
+            emit("harness", "installer.fate", **fate.as_event_fields())
+        emit(
+            "harness",
+            "shim.reached",
+            lines=reached(shim.reached_file),
+            shim_sha256=shim.shim_sha256,
+        )
+        if not fates.fates:
+            result.failures.append(
+                "no installer ran when the row closed, so the Job query had no "
+                "member to be asked about"
+            )
+        if fates.alive():
+            result.failures.append(
+                f"installers outlived the row: {[f.pid for f in fates.alive()]}"
+            )
     result.killed = killed or None
     result.o2 = o2
     result.failures += result.runtime_failures

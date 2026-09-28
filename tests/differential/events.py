@@ -85,6 +85,13 @@ KINDS = frozenset(
         "process.death_unattributed",
         "canary.start",
         "actor.killed",
+        # H-R11: the declared shim and its hash, the close's window and the
+        # installer it ran into, how each installer ended, and where the
+        # planted failure was reached.
+        "shim.planted",
+        "job_query.window",
+        "installer.fate",
+        "shim.reached",
     }
 )
 

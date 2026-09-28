@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -28,6 +29,7 @@ import pytest
 from differential import harness
 from differential.events import EventLog
 from differential.harness import DaemonCleanup, PostQuit, measure_host_quit_row
+from differential.job_query import SHIM_SHA256, ShimVenv
 from differential.session import LAST_VERSION_FILE, write_synthetic_cookie_file
 from differential.signals import (
     COMPLETE,
@@ -145,6 +147,14 @@ def row(tmp_path, monkeypatch, profile):
         if started is not None:
             started(4242)
         await kwargs["after_call"]()
+        script = kwargs.get("script")
+        if script is not None:
+            # A row's scripted phase: every call answers at once.
+            async def call(name, arguments):
+                now = time.time()
+                return {"tool": name, "began": now, "ended": now, "is_error": False}
+
+            await script(call)
         return healthy.host
 
     def identify(*args, **kwargs):
@@ -242,6 +252,52 @@ _FINISHED_PS = {
     "resolution": "exited",
     "failures": ["cmdline: AccessDenied"],
 }
+
+
+async def test_the_failed_job_query_row_writes_through_the_real_event_log(
+    row, monkeypatch, tmp_path
+):
+    # The row's own script, cache, stall host and fate tracking, with the real
+    # EventLog: an event kind the schema does not know fails here.
+    store = tmp_path / "store"
+    sources = [store / "chromium-1", store / "ffmpeg-2"]
+    for source in sources:
+        source.mkdir(parents=True)
+    monkeypatch.setattr(harness, "install_locations", lambda *a: sources)
+    installer = SimpleNamespace(pid=700, wait=lambda: 1)
+    monkeypatch.setattr(
+        harness, "wait_for_installers", lambda *a, **k: [(installer, 9.0)]
+    )
+    shim = ShimVenv(
+        directory=tmp_path / "shim",
+        python=sys.executable,
+        source_python=sys.executable,
+        site_packages=str(tmp_path),
+        shim_sha256=SHIM_SHA256,
+        pth_sha256="",
+        source_code={},
+        code={},
+    )
+    result, _calls = await row(
+        processes=[],
+        summary={"read_failures": [], "relevant_read_failures": []},
+        daemon=False,
+        job_query_shim=shim,
+    )
+    assert result.host is not None and result.host.error is None
+    records = row.log.records()
+    kinds = {record["kind"] for record in records}
+    assert {
+        "shim.planted",
+        "job_query.window",
+        "installer.fate",
+        "shim.reached",
+    } <= kinds
+    (planted,) = [r for r in records if r["kind"] == "shim.planted"]
+    assert planted["shim_sha256"] == SHIM_SHA256
+    # The row-private cache is gone and the linked directories are not.
+    assert not Path(planted["private_cache"]).exists()
+    assert all(source.is_dir() for source in sources)
 
 
 async def test_a_settled_complete_census_starts_the_post_quit_session_once(row):
