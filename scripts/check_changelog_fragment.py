@@ -43,8 +43,10 @@ INCOMPLETE_FILES = (
     "changed_files count. Rerun the check."
 )
 
-# A fragment is one line in the release notes; details go in the PR description.
-MAX_FRAGMENT_CHARS = 140
+# A fragment is one line in the release notes: at 90 characters a bullet and its
+# PR link still fit on one line of a GitHub release page, measured at desktop
+# width. Details go in the PR description.
+MAX_FRAGMENT_CHARS = 90
 
 _NO_EOF_NEWLINE = "\\ No newline at end of file"
 _GITLINK = re.compile(r"\+Subproject commit [0-9a-f]{40}")

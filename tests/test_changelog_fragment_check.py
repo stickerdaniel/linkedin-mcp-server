@@ -251,15 +251,15 @@ def test_fragment_without_text_is_rejected(tmp_path: Path) -> None:
 
 def _too_long(length: int) -> str:
     return (
-        f"changelog.d/1234.feat.md is {length} characters long; the limit is 140. "
+        f"changelog.d/1234.feat.md is {length} characters long; the limit is 90. "
         "Keep the sentence to what changes for a user and put the details in "
         "the PR description."
     )
 
 
-def test_fragment_of_140_characters_passes(tmp_path: Path) -> None:
+def test_fragment_of_90_characters_passes(tmp_path: Path) -> None:
     # Surrounding whitespace is not part of the sentence.
-    patch = f"@@ -0,0 +1 @@\n+  {'x' * 140}  "
+    patch = f"@@ -0,0 +1 @@\n+  {'x' * 90}  "
     result = _run(
         tmp_path,
         "feat: Add company search",
@@ -270,8 +270,8 @@ def test_fragment_of_140_characters_passes(tmp_path: Path) -> None:
     assert result.stdout == ""
 
 
-def test_fragment_of_141_characters_fails(tmp_path: Path) -> None:
-    patch = f"@@ -0,0 +1 @@\n+{'x' * 141}"
+def test_fragment_of_91_characters_fails(tmp_path: Path) -> None:
+    patch = f"@@ -0,0 +1 @@\n+{'x' * 91}"
     result = _run(
         tmp_path,
         "feat: Add company search",
@@ -279,12 +279,12 @@ def test_fragment_of_141_characters_fails(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 1
-    assert _errors(result) == [_too_long(141)]
+    assert _errors(result) == [_too_long(91)]
 
 
 def test_multi_line_fragment_counts_its_joined_text(tmp_path: Path) -> None:
-    # Two lines of 70 join with one space into 141 characters.
-    patch = f"@@ -0,0 +1,2 @@\n+{'x' * 70}  \n+  {'y' * 70}"
+    # Two lines of 45 join with one space into 91 characters.
+    patch = f"@@ -0,0 +1,2 @@\n+{'x' * 45}  \n+  {'y' * 45}"
     result = _run(
         tmp_path,
         "feat: Add company search",
@@ -292,7 +292,7 @@ def test_multi_line_fragment_counts_its_joined_text(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 1
-    assert _errors(result) == [_too_long(141)]
+    assert _errors(result) == [_too_long(91)]
 
 
 _NO_NEWLINE = "\\ No newline at end of file"

@@ -463,8 +463,8 @@ def test_repository_template_composes(tmp_path: Path) -> None:
     # The template's own H3 headings are neither promoted nor folded.
     install = template.replace("${VERSION}", "4.26.0").strip()
     assert f"\n\n{install}\n\n" in body
-    for heading in ("uvx", "Docker", "Claude Desktop (MCP Bundle)"):
-        assert f"\n\n### {heading}\n\n" in body
+    for heading in ("uvx", "Docker", "the MCP Bundle"):
+        assert f"\n\n### Update with {heading}\n\n" in body
     assert body.count("<details>") == 1
     assert body.index("<summary><b>Bug Fixes (1)</b></summary>") < body.index(
         "## Install or update"
