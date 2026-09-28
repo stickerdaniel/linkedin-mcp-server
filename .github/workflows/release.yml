@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       should-release: ${{ steps.check.outputs.should-release }}
       new-version: ${{ steps.check.outputs.new-version }}
@@ -58,17 +59,31 @@ jobs:
       # Composed here, before build and publish-pypi, so a CHANGELOG without a
       # section for this version stops the release while nothing exists yet
       # that would have to be withdrawn. The previous version is read on its
-      # own and an unreadable parent manifest fails the step.
+      # own and an unreadable parent manifest fails the step. The author of
+      # every pull request the section links is looked up for the credit
+      # line, and a failed lookup fails the step too.
       - name: Compose release notes
         if: steps.check.outputs.should-release == 'true'
         env:
           VERSION: ${{ steps.check.outputs.new-version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           PREVIOUS=$(git show HEAD~1:pyproject.toml | python3 -c \
             'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["project"]["version"])')
           echo "Previous version: $PREVIOUS"
           git ls-remote --exit-code --tags origin "refs/tags/v$PREVIOUS"
+          PULLS=$(python3 scripts/compose_release_notes.py --list-pull-requests \
+            --changelog CHANGELOG.md \
+            --version "$VERSION" \
+            --repository "$GITHUB_REPOSITORY")
+          : > "$RUNNER_TEMP/pr-authors.txt"
+          for N in $PULLS; do
+            LOGIN=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$N" --jq .user.login)
+            printf '%s %s\n' "$N" "$LOGIN" >> "$RUNNER_TEMP/pr-authors.txt"
+          done
+          python3 -c 'import json, sys; print(json.dumps(dict(line.split() for line in sys.stdin)))' \
+            < "$RUNNER_TEMP/pr-authors.txt" > "$RUNNER_TEMP/pr-authors.json"
           python3 scripts/compose_release_notes.py \
             --changelog CHANGELOG.md \
             --template RELEASE_NOTES_TEMPLATE.md \
@@ -76,6 +91,8 @@ jobs:
             --version "$VERSION" \
             --previous-version "$PREVIOUS" \
             --repository "$GITHUB_REPOSITORY" \
+            --pr-authors "$RUNNER_TEMP/pr-authors.json" \
+            --pyproject pyproject.toml \
             --output RELEASE_NOTES.md
 
       - name: Upload release notes

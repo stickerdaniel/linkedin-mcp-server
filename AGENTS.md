@@ -213,6 +213,7 @@ section LinkedIn rate-limits, `send_message` takes three, and
 git checkout main && git pull
 uv version --bump minor          # or: major, patch — updates pyproject.toml AND uv.lock
 uv run towncrier build --version "$(uv version --short)" --yes
+# optional: under the new version heading in CHANGELOG.md, above the categories, add a `### Highlights` list of up to three `**Lead-in.** sentence ([#N](link))` bullets
 git add pyproject.toml uv.lock
 gt create -m "chore: Bump version to X.Y.Z"
 gt submit                        # merge PR to trigger release workflow

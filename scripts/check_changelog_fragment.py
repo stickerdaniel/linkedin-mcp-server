@@ -43,6 +43,9 @@ INCOMPLETE_FILES = (
     "changed_files count. Rerun the check."
 )
 
+# A fragment is one line in the release notes; details go in the PR description.
+MAX_FRAGMENT_CHARS = 140
+
 _NO_EOF_NEWLINE = "\\ No newline at end of file"
 _GITLINK = re.compile(r"\+Subproject commit [0-9a-f]{40}")
 
@@ -154,9 +157,12 @@ def _is_text_file(entry: dict[str, Any]) -> bool:
     return True
 
 
-def _has_added_text(entry: dict[str, Any]) -> bool:
+def _added_text(entry: dict[str, Any]) -> str:
+    """The added lines as one sentence, the way a release note shows it."""
     patch = entry.get("patch") or ""
-    return any(line.startswith("+") and line[1:].strip() for line in patch.splitlines())
+    return " ".join(
+        line[1:].strip() for line in patch.splitlines() if line.startswith("+")
+    ).strip()
 
 
 def _shown(path: str) -> str:
@@ -222,8 +228,18 @@ def check(
                 f"{_shown(path)} must be a text file ending in a newline, "
                 "as `towncrier create` writes it."
             )
-        elif entry["status"] == "added" and not _has_added_text(entry):
-            errors.append(f"{_shown(path)} is empty. Write one user-facing sentence.")
+        elif entry["status"] == "added":
+            length = len(_added_text(entry))
+            if not length:
+                errors.append(
+                    f"{_shown(path)} is empty. Write one user-facing sentence."
+                )
+            elif length > MAX_FRAGMENT_CHARS:
+                errors.append(
+                    f"{_shown(path)} is {length} characters long; the limit is "
+                    f"{MAX_FRAGMENT_CHARS}. Keep the sentence to what changes "
+                    "for a user and put the details in the PR description."
+                )
 
     required = _required_type(title)
     if required is None:

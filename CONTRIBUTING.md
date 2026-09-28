@@ -175,8 +175,9 @@ not count. The PR Title check fails until the fragment is there.
 1. Open the PR as a draft to get its number.
 2. Add `changelog.d/<number>.feat.md`, `.fix.md` or `.breaking.md` to match the
    title. A breaking title takes `.breaking.md` whatever its type.
-3. Write one user-facing sentence in it, without a PR link; the release adds
-   that.
+3. Write one sentence of at most 140 characters that says what changes for a
+   user, without a PR link; the release adds that. Details belong in the PR
+   description.
 4. Push it to the same branch. The PR Title check turns green.
 
 Adding or removing the breaking marker means renaming the fragment. Edit an

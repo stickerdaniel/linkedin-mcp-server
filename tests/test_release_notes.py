@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -11,16 +12,25 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT = _REPO_ROOT / "scripts" / "compose_release_notes.py"
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
 _TEMPLATE = _REPO_ROOT / "RELEASE_NOTES_TEMPLATE.md"
+_PYPROJECT = _REPO_ROOT / "pyproject.toml"
 _REPOSITORY = "stickerdaniel/linkedin-mcp-server"
 _SHOULD_RELEASE = "steps.check.outputs.should-release == 'true'"
+_PULL = f"https://github.com/{_REPOSITORY}/pull"
+_COMPARE = f"**Full Changelog**: https://github.com/{_REPOSITORY}/compare"
 
-_CHANGELOG = """\
+
+def _link(number: int) -> str:
+    return f"[#{number}]({_PULL}/{number})"
+
+
+_CHANGELOG = f"""\
 # Changelog
 
 Entries start with the release that adopted towncrier.
@@ -31,24 +41,26 @@ Entries start with the release that adopted towncrier.
 
 ### Features
 
-- Newer feature. ([#3](https://example.test/pull/3))
+- Newer feature. ({_link(3)})
 
 
 ## 4.26.0 (2026-09-24)
 
 ### Breaking Changes
 
-- Removed a setting. ([#2](https://example.test/pull/2))
+- Removed a setting. ({_link(2)})
 
 ### Bug Fixes
 
-- Fixed a crash. ([#1](https://example.test/pull/1))
+- Fixed a crash. ({_link(1)})
 
 
 ## 4.25.1 (2026-09-01)
 
 No significant changes.
 """
+
+_OWNER_AUTHORS = {"1": "stickerdaniel", "2": "stickerdaniel", "3": "stickerdaniel"}
 
 _INSTALL = "## Install or update\n\nGet v${VERSION} from ${VERSION}.\n"
 
@@ -61,9 +73,11 @@ def _compose(
     template: str = _INSTALL,
     fragments: tuple[str, ...] = ("README.md",),
     previous: str = "4.25.0",
+    authors: dict[str, str] = _OWNER_AUTHORS,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     (tmp_path / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
     (tmp_path / "TEMPLATE.md").write_text(template, encoding="utf-8")
+    (tmp_path / "pr-authors.json").write_text(json.dumps(authors), encoding="utf-8")
     fragments_dir = tmp_path / "changelog.d"
     fragments_dir.mkdir(exist_ok=True)
     for name in fragments:
@@ -85,6 +99,10 @@ def _compose(
             previous,
             "--repository",
             _REPOSITORY,
+            "--pr-authors",
+            str(tmp_path / "pr-authors.json"),
+            "--pyproject",
+            str(_PYPROJECT),
             "--output",
             str(output),
         ],
@@ -95,25 +113,51 @@ def _compose(
     return result, output
 
 
+def _list_pull_requests(
+    tmp_path: Path, version: str, changelog: str
+) -> subprocess.CompletedProcess[str]:
+    (tmp_path / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+    return subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "--list-pull-requests",
+            "--changelog",
+            str(tmp_path / "CHANGELOG.md"),
+            "--version",
+            version,
+            "--repository",
+            _REPOSITORY,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def test_section_between_two_others_composes_the_exact_body(tmp_path: Path) -> None:
     result, output = _compose(tmp_path, "4.26.0")
 
     assert result.returncode == 0, result.stdout
     assert output.read_text(encoding="utf-8") == (
-        "### Breaking Changes\n"
+        "## Breaking Changes\n"
         "\n"
-        "- Removed a setting. ([#2](https://example.test/pull/2))\n"
+        f"- Removed a setting. ({_link(2)})\n"
         "\n"
-        "### Bug Fixes\n"
+        "<details>\n"
+        "<summary><b>Bug Fixes (1)</b></summary>\n"
         "\n"
-        "- Fixed a crash. ([#1](https://example.test/pull/1))\n"
+        f"- Fixed a crash. ({_link(1)})\n"
+        "\n"
+        "</details>\n"
         "\n"
         "## Install or update\n"
         "\n"
         "Get v4.26.0 from 4.26.0.\n"
         "\n"
-        "**Full Changelog**: https://github.com/stickerdaniel/linkedin-mcp-server"
-        "/compare/v4.25.0...v4.26.0\n"
+        "**Contributors:** @stickerdaniel\n"
+        "\n"
+        f"{_COMPARE}/v4.25.0...v4.26.0\n"
     )
 
 
@@ -128,9 +172,156 @@ def test_section_at_end_of_file_with_no_significant_changes(tmp_path: Path) -> N
         "\n"
         "Get v4.25.1 from 4.25.1.\n"
         "\n"
-        "**Full Changelog**: https://github.com/stickerdaniel/linkedin-mcp-server"
-        "/compare/v4.25.0...v4.25.1\n"
+        f"{_COMPARE}/v4.25.0...v4.25.1\n"
     )
+
+
+_HIGHLIGHTS_CHANGELOG = f"""\
+# Changelog
+
+<!-- towncrier release notes start -->
+
+## 4.28.0 (2026-10-05)
+
+### Highlights
+
+- **Faster search.** Results arrive sooner. ({_link(12)})
+
+### Features
+
+- Added search. ({_link(12)})
+- Added export. ({_link(13)})
+
+### Bug Fixes
+
+- Fixed a crash. ({_link(14)})
+- Fixed a hang that
+  spanned two lines. ({_link(15)})
+- Raised a dependency floor. ({_link(16)})
+- Kept the order, see [#17](https://example.test/pull/17). ({_link(13)})
+
+
+## 4.27.0 (2026-10-01)
+
+### Features
+
+- Newer feature. ({_link(3)})
+"""
+
+_HIGHLIGHTS_AUTHORS = {
+    "12": "ConnorMoss02",
+    "13": "stickerdaniel",
+    "14": "Ymx1ZQ",
+    "15": "ConnorMoss02",
+    "16": "renovate[bot]",
+}
+
+
+def test_highlights_features_and_folded_fixes_compose_the_exact_body(
+    tmp_path: Path,
+) -> None:
+    result, output = _compose(
+        tmp_path,
+        "4.28.0",
+        changelog=_HIGHLIGHTS_CHANGELOG,
+        previous="4.27.0",
+        authors=_HIGHLIGHTS_AUTHORS,
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert output.read_text(encoding="utf-8") == (
+        "## Highlights\n"
+        "\n"
+        f"- **Faster search.** Results arrive sooner. ({_link(12)} by @ConnorMoss02)\n"
+        "\n"
+        "## Features\n"
+        "\n"
+        f"- Added search. ({_link(12)} by @ConnorMoss02)\n"
+        f"- Added export. ({_link(13)})\n"
+        "\n"
+        "<details>\n"
+        "<summary><b>Bug Fixes (4)</b></summary>\n"
+        "\n"
+        f"- Fixed a crash. ({_link(14)} by @Ymx1ZQ)\n"
+        "- Fixed a hang that\n"
+        f"  spanned two lines. ({_link(15)} by @ConnorMoss02)\n"
+        f"- Raised a dependency floor. ({_link(16)})\n"
+        f"- Kept the order, see [#17](https://example.test/pull/17). ({_link(13)})\n"
+        "\n"
+        "</details>\n"
+        "\n"
+        "## Install or update\n"
+        "\n"
+        "Get v4.28.0 from 4.28.0.\n"
+        "\n"
+        "**Contributors:** @ConnorMoss02, @stickerdaniel, @Ymx1ZQ\n"
+        "\n"
+        f"{_COMPARE}/v4.27.0...v4.28.0\n"
+    )
+
+
+def test_fixes_only_section_stays_open(tmp_path: Path) -> None:
+    changelog = _CHANGELOG.replace(
+        "## 4.25.1 (2026-09-01)\n\nNo significant changes.\n",
+        f"## 4.25.1 (2026-09-01)\n\n### Bug Fixes\n\n- Fixed a hang. ({_link(4)})\n",
+    )
+
+    result, output = _compose(
+        tmp_path, "4.25.1", changelog=changelog, authors={"4": "Ymx1ZQ"}
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert output.read_text(encoding="utf-8") == (
+        "## Bug Fixes\n"
+        "\n"
+        f"- Fixed a hang. ({_link(4)} by @Ymx1ZQ)\n"
+        "\n"
+        "## Install or update\n"
+        "\n"
+        "Get v4.25.1 from 4.25.1.\n"
+        "\n"
+        "**Contributors:** @Ymx1ZQ\n"
+        "\n"
+        f"{_COMPARE}/v4.25.0...v4.25.1\n"
+    )
+
+
+def test_pull_request_without_an_author_is_an_error(tmp_path: Path) -> None:
+    result, output = _compose(tmp_path, "4.26.0", authors={"3": "stickerdaniel"})
+
+    assert result.returncode == 1
+    assert not output.exists()
+    assert (
+        "::error::The pull request authors have no entry for #2, #1." in result.stdout
+    )
+
+
+@pytest.mark.parametrize(
+    "login",
+    ["two words", "-dash", "a" * 40, "renovate[bot]x", "evil\n::warning::forged"],
+)
+def test_invalid_login_is_an_error_and_not_echoed(tmp_path: Path, login: str) -> None:
+    result, output = _compose(
+        tmp_path, "4.26.0", authors={**_OWNER_AUTHORS, "1": login}
+    )
+
+    assert result.returncode == 1
+    assert not output.exists()
+    assert result.stdout == "::error::The author of #1 is not a valid GitHub login.\n"
+
+
+def test_list_pull_requests_prints_each_linked_number_once(tmp_path: Path) -> None:
+    result = _list_pull_requests(tmp_path, "4.28.0", _HIGHLIGHTS_CHANGELOG)
+
+    assert result.returncode == 0, result.stdout
+    assert result.stdout == "12\n13\n14\n15\n16\n"
+
+
+def test_list_pull_requests_needs_the_section(tmp_path: Path) -> None:
+    result = _list_pull_requests(tmp_path, "4.29.0", _HIGHLIGHTS_CHANGELOG)
+
+    assert result.returncode == 1
+    assert "::error::CHANGELOG.md has no section for 4.29.0." in result.stdout
 
 
 def test_version_is_matched_literally(tmp_path: Path) -> None:
@@ -204,7 +395,14 @@ def test_repository_template_composes(tmp_path: Path) -> None:
     body = output.read_text(encoding="utf-8")
     assert "$" not in body
     assert "linkedin-mcp-server-v4.26.0.mcpb" in body
-    assert body.index("### Bug Fixes") < body.index("## Install or update")
+    assert (
+        "\n\n```bash\ndocker pull stickerdaniel/linkedin-mcp-server:latest\n```\n\n"
+        in body
+    )
+    assert body.index("<summary><b>Bug Fixes (1)</b></summary>") < body.index(
+        "## Install or update"
+    )
+    assert body.index("## Install or update") < body.index("**Contributors:** ")
     assert body.rstrip("\n").splitlines()[-1].startswith("**Full Changelog**: ")
 
 
@@ -225,6 +423,8 @@ def test_notes_are_composed_before_anything_is_published() -> None:
     check = jobs["check-version-bump"]
     names = [step.get("name") for step in check["steps"]]
 
+    # The author lookup reads pull requests with the job's own token.
+    assert check["permissions"] == {"contents": "read", "pull-requests": "read"}
     assert names.index("Check if version was bumped") < names.index(
         "Compose release notes"
     )
@@ -283,8 +483,9 @@ def test_release_body_comes_from_the_composed_notes() -> None:
 
 
 _NEW_VERSION_OUTPUT = "${{ steps.check.outputs.new-version }}"
+_TOKEN_EXPRESSION = "${{ github.token }}"
 
-_RELEASED_CHANGELOG = """\
+_RELEASED_CHANGELOG = f"""\
 # Changelog
 
 <!-- towncrier release notes start -->
@@ -293,15 +494,51 @@ _RELEASED_CHANGELOG = """\
 
 ### Features
 
-- Newer feature. ([#2](https://example.test/pull/2))
+- Newer feature. ({_link(2)})
+
+### Bug Fixes
+
+- Newer fix. ({_link(3)})
 
 
 ## 4.25.0 (2026-09-01)
 
 ### Bug Fixes
 
-- Older fix. ([#1](https://example.test/pull/1))
+- Older fix. ({_link(1)})
 """
+
+# Only the new section's pull requests; a lookup of #1 would fail the step.
+_RELEASED_LOGINS = {2: "ConnorMoss02", 3: "stickerdaniel"}
+
+# The repository's own towncrier configuration, which names the fix category.
+_TOWNCRIER = (
+    "\n[tool.towncrier]"
+    + _PYPROJECT.read_text(encoding="utf-8").split("\n[tool.towncrier]", 1)[1]
+)
+
+
+def _fake_gh(bin_dir: Path, logins: dict[int, str]) -> None:
+    """Answer `gh api repos/<repo>/pulls/<N> --jq .user.login` from a map."""
+    cases = "".join(
+        f"    repos/{_REPOSITORY}/pulls/{number}) echo {login}; exit 0 ;;\n"
+        for number, login in logins.items()
+    )
+    gh = bin_dir / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        '[ -n "$GH_TOKEN" ] || { echo "gh: no GH_TOKEN" >&2; exit 4; }\n'
+        'if [ "$#" -eq 4 ] && [ "$1" = api ] && [ "$3" = --jq ] '
+        '&& [ "$4" = .user.login ]; then\n'
+        '  case "$2" in\n'
+        f"{cases}"
+        "  esac\n"
+        "fi\n"
+        'echo "gh: HTTP 404: Not Found ($*)" >&2\n'
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
 
 
 def _git(cwd: Path, *args: str, env: dict[str, str]) -> None:
@@ -315,13 +552,16 @@ def _git(cwd: Path, *args: str, env: dict[str, str]) -> None:
 
 
 def _run_compose_step(
-    tmp_path: Path, *, tag_on_origin: bool
+    tmp_path: Path, *, tag_on_origin: bool, logins: dict[int, str] = _RELEASED_LOGINS
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     """Run the workflow's own compose step in a repo that just bumped 4.26.0."""
     step = _step(_workflow()["jobs"]["check-version-bump"], "Compose release notes")
     assert step["env"]["VERSION"] == _NEW_VERSION_OUTPUT
+    assert step["env"]["GH_TOKEN"] == _TOKEN_EXPRESSION
     step_env = {
-        key: value.replace(_NEW_VERSION_OUTPUT, "4.26.0")
+        key: value.replace(_NEW_VERSION_OUTPUT, "4.26.0").replace(
+            _TOKEN_EXPRESSION, "test-token"
+        )
         for key, value in step["env"].items()
     }
     assert not any("${{" in value for value in step_env.values()), step_env
@@ -332,6 +572,9 @@ def _run_compose_step(
     python3 = bin_dir / "python3"
     python3.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
     python3.chmod(0o755)
+    _fake_gh(bin_dir, logins)
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
     env = {
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "HOME": str(tmp_path),
@@ -355,7 +598,8 @@ def _run_compose_step(
 
     pyproject = repo / "pyproject.toml"
     pyproject.write_text(
-        '[project]\nname = "demo"\nversion = "4.25.0"\n', encoding="utf-8"
+        f'[project]\nname = "demo"\nversion = "4.25.0"\n{_TOWNCRIER}',
+        encoding="utf-8",
     )
     _git(repo, "add", "pyproject.toml", env=env)
     _git(repo, "commit", "--quiet", "-m", "chore: Release 4.25.0", env=env)
@@ -364,7 +608,8 @@ def _run_compose_step(
         _git(repo, "push", "--quiet", "origin", "refs/tags/v4.25.0", env=env)
 
     pyproject.write_text(
-        '[project]\nname = "demo"\nversion = "4.26.0"\n', encoding="utf-8"
+        f'[project]\nname = "demo"\nversion = "4.26.0"\n{_TOWNCRIER}',
+        encoding="utf-8",
     )
     (repo / "CHANGELOG.md").write_text(_RELEASED_CHANGELOG, encoding="utf-8")
     shutil.copy(_TEMPLATE, repo / "RELEASE_NOTES_TEMPLATE.md")
@@ -381,7 +626,12 @@ def _run_compose_step(
         # What Actions runs for a step without an explicit shell.
         ["bash", "-e", str(script)],
         cwd=repo,
-        env={**env, **step_env, "GITHUB_REPOSITORY": _REPOSITORY},
+        env={
+            **env,
+            **step_env,
+            "GITHUB_REPOSITORY": _REPOSITORY,
+            "RUNNER_TEMP": str(runner_temp),
+        },
         capture_output=True,
         text=True,
         check=False,
@@ -396,15 +646,35 @@ def test_compose_step_writes_the_new_versions_notes(tmp_path: Path) -> None:
     install = _TEMPLATE.read_text(encoding="utf-8").replace("${VERSION}", "4.26.0")
     assert "$" not in install
     assert output.read_text(encoding="utf-8") == (
-        "### Features\n"
+        "## Features\n"
         "\n"
-        "- Newer feature. ([#2](https://example.test/pull/2))\n"
+        f"- Newer feature. ({_link(2)} by @ConnorMoss02)\n"
+        "\n"
+        "<details>\n"
+        "<summary><b>Bug Fixes (1)</b></summary>\n"
+        "\n"
+        f"- Newer fix. ({_link(3)})\n"
+        "\n"
+        "</details>\n"
         "\n"
         f"{install.strip()}\n"
         "\n"
-        "**Full Changelog**: https://github.com/stickerdaniel/linkedin-mcp-server"
-        "/compare/v4.25.0...v4.26.0\n"
+        "**Contributors:** @ConnorMoss02, @stickerdaniel\n"
+        "\n"
+        f"{_COMPARE}/v4.25.0...v4.26.0\n"
     )
+
+
+def test_compose_step_fails_when_an_author_lookup_fails(tmp_path: Path) -> None:
+    result, output = _run_compose_step(
+        tmp_path, tag_on_origin=True, logins={2: "ConnorMoss02"}
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"gh: HTTP 404: Not Found (api repos/{_REPOSITORY}/pulls/3" in (
+        result.stderr
+    )
+    assert not output.exists()
 
 
 def test_compose_step_needs_the_previous_tag_on_origin(tmp_path: Path) -> None:
