@@ -2757,9 +2757,9 @@ def job_query_problems(
     ``watcher_failures``); what cleanup could not do (*cleanup*,
     ``DaemonCleanup.failures``); and a wall clock that moved.
 
-    What was unresolved before the teardown stays unresolved: an installer
-    that ended only once the harness stopped its stall host, say, is the
-    harness's doing and settles nothing the product did.
+    What was unresolved before the teardown stays unresolved. An exit observed
+    after the harness stops its stall host cannot establish product settlement
+    before that intervention; its cause remains unobserved.
     """
     if shim is None:
         return []
@@ -4199,12 +4199,12 @@ async def measure_host_quit_row(
             stall_url = stall.url
             stall.stop()
             if unresolved_family:
-                # The harness's own helper, stopped by the harness: whatever
-                # installer ends after this ends because of it.
+                # Do not credit later exits as pre-intervention settlement.
                 teardown.append(
                     f"the harness stopped its stall host {stall_url} with the "
-                    f"installer family unresolved; an installer exit after this "
-                    f"is the harness's doing, not the product's rundown"
+                    f"installer family unresolved; a later exit cannot establish "
+                    f"product settlement before this intervention; its cause "
+                    f"remains unobserved"
                 )
         # Each helper is ended whatever the one before it did; a failure is
         # the row's to report.

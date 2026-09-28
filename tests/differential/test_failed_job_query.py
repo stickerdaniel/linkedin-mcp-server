@@ -1163,7 +1163,7 @@ def _witnessed(record: Path) -> tuple[dict[str, logging.Logger], _Kept]:
         SimpleNamespace(getLogger=get_logger), str(record), created=5.0
     )
     kept = _Kept()
-    for name in (_BROWSER_LOGGER, _OWNER_LOGGER, "elsewhere"):
+    for name in (_BROWSER_LOGGER, _OWNER_LOGGER, "__main__", "elsewhere"):
         get_logger(name).addHandler(kept)
     return loggers, kept
 
@@ -1171,10 +1171,6 @@ def _witnessed(record: Path) -> tuple[dict[str, logging.Logger], _Kept]:
 def test_the_shim_observes_exactly_its_two_logger_events(tmp_path):
     record = tmp_path / "reached.jsonl"
     loggers, kept = _witnessed(record)
-    assert sorted(name for name, logger in loggers.items() if logger.filters) == [
-        _BROWSER_LOGGER,
-        _OWNER_LOGGER,
-    ]
     before = time.monotonic_ns()
     loggers[_BROWSER_LOGGER].error(_CONSUMED)
     loggers[_OWNER_LOGGER].warning("Standing down: %s", HELD_PROFILE_REASON)
@@ -1223,6 +1219,41 @@ def test_nothing_else_is_observed(tmp_path, logger, message, args):
     loggers[logger].error(message, *args)
     assert logged(record) == []
     assert len(kept.records) == 1
+
+
+@pytest.mark.parametrize("module", ["daemon_owner", "unrelated_owner"])
+def test_module_entry_logger_only_witnesses_the_real_owner_name(tmp_path, module):
+    # python -m sets __name__ to __main__ while preserving the target in __spec__.
+    # A harmless stand-in uses the product's actual logging pattern; no owner runs.
+    package = tmp_path / "linkedin_mcp_server"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (tmp_path / "probe_shim.py").write_text(SHIM_SOURCE)
+    record = tmp_path / "reached.jsonl"
+    (package / f"{module}.py").write_text(
+        "import logging\n"
+        "from probe_shim import witness\n"
+        f"witness(logging, {str(record)!r}, created=5.0)\n"
+        "logger = logging.getLogger(__name__)\n"
+        f"logger.warning('Standing down: %s', {HELD_PROFILE_REASON!r})\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-S", "-m", f"linkedin_mcp_server.{module}"],
+        cwd=tmp_path,
+        env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    assert f"Standing down: {HELD_PROFILE_REASON}" in result.stderr
+    events = logged(record)
+    if module == "daemon_owner":
+        assert len(events) == 1
+        assert events[0]["event"] == STAND_DOWN
+        assert events[0]["reason"] == HELD_PROFILE_REASON
+    else:
+        assert events == []
 
 
 def test_a_record_that_cannot_be_written_changes_no_logging(tmp_path):

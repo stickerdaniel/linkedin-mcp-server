@@ -191,7 +191,12 @@ def witness(logging, record=_RECORD, created=None):
 
     def observed(entry):
         try:
-            event = _EVENTS.get((entry.name, entry.msg))
+            name = entry.name
+            if name == "__main__":
+                spec = getattr(sys.modules.get("__main__"), "__spec__", None)
+                if getattr(spec, "name", None) == "linkedin_mcp_server.daemon_owner":
+                    name = "linkedin_mcp_server.daemon_owner"
+            event = _EVENTS.get((name, entry.msg))
             if event is not None:
                 args = entry.args if isinstance(entry.args, tuple) else ()
                 reason = args[0] if args and isinstance(args[0], str) else None
@@ -203,7 +208,7 @@ def witness(logging, record=_RECORD, created=None):
             pass
         return True
 
-    for name in sorted({logger for logger, _ in _EVENTS}):
+    for name in sorted({logger for logger, _ in _EVENTS} | {"__main__"}):
         logging.getLogger(name).addFilter(observed)
 
 

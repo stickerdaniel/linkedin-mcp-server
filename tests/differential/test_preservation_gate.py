@@ -975,7 +975,8 @@ async def test_an_unresolved_family_is_left_as_it_was(row, monkeypatch, tmp_path
     assert result.continuation is not None
     validity = result.continuation.validity
     assert any(p.startswith("before cleanup: ") for p in validity), validity
-    assert any("not the product's rundown" in p for p in validity), validity
+    assert any("cannot establish product settlement before" in p for p in validity)
+    assert any("its cause remains unobserved" in p for p in validity)
     assert _gate(result, "K1" if case == "direct" else "K3")
     if case == "pending-wait":
         # The installer did end, once the harness stopped the stall host; that
