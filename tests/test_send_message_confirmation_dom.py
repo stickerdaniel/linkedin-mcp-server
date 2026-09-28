@@ -1441,8 +1441,15 @@ class TestSendConfirmationDom:
             captured["owner"] = owner
             return owner
 
+        confirmation_started = anyio.Event()
+
         async def wait_for_confirmation(*_args, **_kwargs):
+            confirmation_started.set()
             await anyio.sleep_forever()
+
+        async def expire_after_confirmation(scope: anyio.CancelScope):
+            await confirmation_started.wait()
+            scope.deadline = anyio.current_time() + 0.05
 
         with (
             patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
@@ -1462,11 +1469,17 @@ class TestSendConfirmationDom:
                 "_message_send_confirmed",
                 side_effect=wait_for_confirmation,
             ),
-            pytest.raises(TimeoutError),
         ):
-            with anyio.fail_after(0.5):
-                await sender.send_message("fadi-eliwi", MESSAGE, confirm_send=True)
+            async with anyio.create_task_group() as group:
+                with pytest.raises(TimeoutError):
+                    with anyio.fail_after(10) as scope:
+                        group.start_soon(expire_after_confirmation, scope)
+                        await sender.send_message(
+                            "fadi-eliwi", MESSAGE, confirm_send=True
+                        )
+                group.cancel_scope.cancel()
 
+        assert confirmation_started.is_set()
         cleanup_state = await dom_page.evaluate(
             """() => {
                 const owner = document.getElementById('conversation');
