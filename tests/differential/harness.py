@@ -2589,11 +2589,19 @@ def restoration_changes(
     writes that record. Anything else that changed meanwhile was changed by
     something else, and a final snapshot would count it as the product's.
     """
-    return [
-        f"the auth root's {name} changed while the harness restored the cache"
-        for name in sorted(before.keys() | after.keys())
-        if before.get(name) != after.get(name) and name not in _RESTORATION_WRITES
-    ]
+    problems = []
+    for name in sorted(before.keys() | after.keys()):
+        if name in _RESTORATION_WRITES:
+            continue
+        if {before.get(name), after.get(name)} & {"unreadable", "link"}:
+            problems.append(
+                f"the auth root's {name} could not be compared across restoration"
+            )
+        elif before.get(name) != after.get(name):
+            problems.append(
+                f"the auth root's {name} changed while the harness restored the cache"
+            )
+    return problems
 
 
 def protected_changes(before: ProfileSnapshot, at: ProfileSnapshot) -> list[str]:

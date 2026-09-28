@@ -901,6 +901,24 @@ def test_the_restoration_may_write_only_its_own_install_record(auth):
     assert len(changed) == 2 and all("changed while" in p for p in changed)
 
 
+def test_matching_unreadable_snapshots_do_not_prove_restoration_safe(auth, monkeypatch):
+    profile, _ = auth
+    cookie_path = portable_cookie_path(profile)
+    read = Path.read_bytes
+
+    def refused(path):
+        if path == cookie_path:
+            raise PermissionError("unreadable test cookie file")
+        return read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", refused)
+    before = auth_files(profile.parent)
+    after = auth_files(profile.parent)
+    assert before == after
+    problems = restoration_changes(before, after)
+    assert any("cookies.json could not be compared" in p for p in problems)
+
+
 def test_a_legitimate_export_is_no_protected_change(auth):
     profile, staged = auth
     before = snapshot(profile, expected_digest=staged.li_at_digest)
