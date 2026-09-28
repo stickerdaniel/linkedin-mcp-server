@@ -5,6 +5,16 @@ described on [GitHub Releases](https://github.com/stickerdaniel/linkedin-mcp-ser
 
 <!-- towncrier release notes start -->
 
+## 4.26.1 (2026-09-28)
+
+### Bug Fixes
+
+- send_message reports "Press Enter to Send" and explains how to switch that setting. ([#1109](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1109))
+- Keep an open chat overlay from blocking connect_with_person invitations. ([#1110](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1110))
+- Avoid needless browser setup when Patchright versions share the cache. ([#1162](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1162))
+- Recover browser setup when Windows AppContainer grants block the default temp directory. ([#1163](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1163))
+
+
 ## 4.26.0 (2026-09-27)
 
 ### Highlights
