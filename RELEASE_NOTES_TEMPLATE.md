@@ -18,3 +18,5 @@ Use the `${VERSION}` tag instead of `latest` to pin this release.
 ### Update with the MCP Bundle
 
 For Claude Desktop, download [linkedin-mcp-server-v${VERSION}.mcpb](https://github.com/stickerdaniel/linkedin-mcp-server/releases/download/v${VERSION}/linkedin-mcp-server-v${VERSION}.mcpb) and open it to install or update. Bundles do not update themselves, so repeat this for every release.
+
+---
