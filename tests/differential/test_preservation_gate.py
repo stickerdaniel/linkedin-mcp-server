@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import functools
+import json
 import os
 import socket
 import subprocess
@@ -39,6 +40,7 @@ from differential.signals import (
     OracleOutcome,
     parse_strace,
 )
+from differential.test_failed_job_query import _Native
 from differential.test_row_judgement import _healthy
 from linkedin_mcp_server.session_state import portable_cookie_path, write_source_state
 
@@ -154,7 +156,13 @@ def row(tmp_path, monkeypatch, profile):
             # A row's scripted phase: every call answers at once.
             async def call(name, arguments):
                 now = time.time()
-                return {"tool": name, "began": now, "ended": now, "is_error": False}
+                return {
+                    "tool": name,
+                    "began": now,
+                    "ended": now,
+                    "is_error": False,
+                    "read_the_post": name == harness.READ_TOOL,
+                }
 
             await script(call)
         return healthy.host
@@ -256,11 +264,9 @@ _FINISHED_PS = {
 }
 
 
-async def test_the_failed_job_query_row_writes_through_the_real_event_log(
-    row, monkeypatch, tmp_path
-):
-    # The row's own script, cache, stall host and fate tracking, with the real
-    # EventLog: an event kind the schema does not know fails here.
+def _job_query_row(monkeypatch, tmp_path, native=None) -> ShimVenv:
+    """The row's own script, cache, stall host and fate tracking, with one
+    installer, 700, found as it starts; *native* answers for its handle."""
     store = tmp_path / "store"
     sources = [store / "chromium-1", store / "ffmpeg-2"]
     for source in sources:
@@ -269,11 +275,15 @@ async def test_the_failed_job_query_row_writes_through_the_real_event_log(
     # No browser here to read as installed; test_failed_job_query covers that.
     monkeypatch.setattr(job_query, "record_install", lambda *a: None)
     monkeypatch.setattr(harness, "record_install", lambda *a: None)
-    installer = SimpleNamespace(pid=700, wait=lambda: 1)
-    monkeypatch.setattr(
-        harness, "wait_for_installers", lambda *a, **k: [(installer, 9.0)]
-    )
-    shim = ShimVenv(
+
+    def installers(observed, *, watch, **kwargs):
+        watch(700, 9.0)
+        return [(700, 9.0)]
+
+    monkeypatch.setattr(harness, "wait_for_installers", installers)
+    if native is not None:
+        monkeypatch.setattr(harness, "Fates", lambda: job_query.Fates(native))
+    return ShimVenv(
         directory=tmp_path / "shim",
         python=sys.executable,
         source_python=sys.executable,
@@ -283,11 +293,18 @@ async def test_the_failed_job_query_row_writes_through_the_real_event_log(
         source_code={},
         code={},
     )
+
+
+_SETTLED = {"read_failures": [], "relevant_read_failures": []}
+
+
+async def test_the_failed_job_query_row_writes_through_the_real_event_log(
+    row, monkeypatch, tmp_path
+):
+    # The real EventLog: an event kind the schema does not know fails here.
+    shim = _job_query_row(monkeypatch, tmp_path)
     result, _calls = await row(
-        processes=[],
-        summary={"read_failures": [], "relevant_read_failures": []},
-        daemon=False,
-        job_query_shim=shim,
+        processes=[], summary=_SETTLED, daemon=False, job_query_shim=shim
     )
     assert result.host is not None and result.host.error is None
     records = row.log.records()
@@ -302,7 +319,138 @@ async def test_the_failed_job_query_row_writes_through_the_real_event_log(
     assert planted["shim_sha256"] == SHIM_SHA256
     # The row-private cache is gone and the linked directories are not.
     assert not Path(planted["private_cache"]).exists()
-    assert all(source.is_dir() for source in sources)
+    assert all(source.is_dir() for source in (tmp_path / "store").iterdir()), (
+        "a linked directory was removed"
+    )
+
+
+@pytest.mark.parametrize(
+    ("native", "starts"),
+    [
+        pytest.param(_Native(), 1, id="an-observed-exit"),
+        pytest.param(_Native(wait=PermissionError()), 0, id="a-failed-wait"),
+        pytest.param(_Native(exited=None), 0, id="no-kernel-exit"),
+        pytest.param(_Native(created=5.0), 0, id="another-lifetime"),
+    ],
+)
+async def test_the_post_quit_session_waits_for_every_installer_fate(
+    row, monkeypatch, tmp_path, native, starts
+):
+    # An installer whose end was not observed may still be running on the
+    # profile's setup: no session starts after the row until it is.
+    shim = _job_query_row(monkeypatch, tmp_path, native)
+    result, calls = await row(
+        processes=[], summary=_SETTLED, daemon=False, job_query_shim=shim
+    )
+    assert calls == starts
+    if not starts:
+        assert result.post_quit is not None and result.post_quit.valid is None
+        assert any("H-R11 evidence incomplete" in f for f in result.failures)
+        assert harness.r11_verdict(result, experiment="K1", non_windows=False)
+    else:
+        assert result.observation_failures == []
+
+
+@pytest.mark.parametrize(
+    ("recorded", "starts"),
+    [
+        # The watcher recorded it after the first look: the late look watches it.
+        pytest.param(True, 1, id="started-late-and-recorded"),
+        # Nothing recorded it: its fate, and so the drain's reading, is unknown.
+        pytest.param(False, 0, id="never-recorded"),
+    ],
+)
+async def test_every_queried_lifetime_must_be_a_watched_one(
+    row, monkeypatch, tmp_path, recorded, starts
+):
+    shim = _job_query_row(monkeypatch, tmp_path, _Native())
+    real = harness.job_query_reading
+
+    def reading(shim, **kwargs):
+        with shim.reached_file.open("a") as stream:
+            stream.write(
+                json.dumps(
+                    {"kind": "query", "pid": 1, "t": 1.0, "member": 702, "created": 9.0}
+                )
+                + "\n"
+            )
+        return real(shim, **kwargs)
+
+    monkeypatch.setattr(harness, "job_query_reading", reading)
+    late = dict(_started(702, 700, 2.0, "installer"), start_identity=9.0)
+    result, calls = await row(
+        processes=[],
+        summary=_SETTLED,
+        observed=[late] if recorded else [],
+        daemon=False,
+        job_query_shim=shim,
+    )
+    assert calls == starts
+    if not starts:
+        assert any("did not watch" in f for f in result.observation_failures)
+    else:
+        assert result.observation_failures == []
+
+
+@pytest.mark.parametrize(
+    ("case", "why"),
+    [
+        pytest.param("new-owner", None, id="new-owner"),
+        pytest.param("same-owner", "still names the owner that closed", id="same"),
+        # First sampled after the close, but created before it: the watcher's
+        # time is when it looked, not when the process began.
+        pytest.param("created-before", "before the close began", id="created-before"),
+    ],
+)
+async def test_recovery_counts_only_a_new_owner_that_served_before_quit(
+    row, monkeypatch, tmp_path, case, why
+):
+    # K3: the close stays unconfirmed, the owner that closed is gone, the probe
+    # reads the post. A successor only when the descriptor then names a new
+    # lifetime and instance, created after the close, that launched the
+    # browser which served it.
+    shim = _job_query_row(monkeypatch, tmp_path, _Native())
+    monkeypatch.setattr(harness, "close_left_unconfirmed", lambda *a, **k: True)
+    monkeypatch.setattr(harness, "wait_until_dead", lambda *a, **k: True)
+    monkeypatch.setattr(harness, "_SUCCESSOR_SECONDS", 0.3)
+    later = time.time() + 60
+    created = 1.5 if case == "created-before" else later
+    successor = harness.OwnerIdentity(
+        43, created, "successor", row.owner.auth_root, _Actor(43)
+    )
+    looked = {"n": 0}
+    replaced = case != "same-owner"
+
+    def identify(*args, **kwargs):
+        looked["n"] += 1
+        return (successor if replaced and looked["n"] > 1 else row.owner), None
+
+    monkeypatch.setattr(harness, "identify_owner", identify)
+    serving = 43 if replaced else 42
+    records = [_started(42, 4242, 1.0, "owner")]
+    if replaced:
+        records.append(dict(_started(43, 4242, later, "owner"), start_identity=created))
+    records += [
+        _started(50, serving, later + 0.1, "driver"),
+        _started(51, 50, later + 0.2, "browser"),
+    ]
+    result, _ = await row(
+        processes=[], summary=_SETTLED, observed=records, job_query_shim=shim
+    )
+    assert result.vector is not None
+    assert result.vector.successor_before_quit is (why is None)
+    (event,) = [r for r in row.log.records() if r["kind"] == "owner.successor"]
+    assert event["verified"] is (why is None)
+    elected = [
+        p
+        for p in harness.r11_verdict(result, experiment="K3", non_windows=False)
+        if "elected no successor" in p
+    ]
+    if why is None:
+        assert elected == []
+    else:
+        (problem,) = elected
+        assert why in problem
 
 
 async def test_failed_private_setup_closes_the_listener_and_removes_its_links(

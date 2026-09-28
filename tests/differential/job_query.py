@@ -10,12 +10,24 @@ check (``WindowsJob._assign_handle``) asks the same Job about the same
 process, and failing that one would stop the installer from starting at all.
 The failure raised is the one the real API raises, ``pywintypes.error``. Every
 time the planted failure fires it appends a line to ``h-r11-reached.jsonl``
-beside the shim (the calling pid, the member asked about, the Job handle), so
+beside the shim (the calling pid, the member asked about and its creation
+time, the Job handle), so
 a row can say whether its query was reached. Nothing else in any process is
 changed. Planting it inside an actor is Daniel's amendment to the plan
 (FABLE_PLAN_V7, 2026-09-27): the baseline cannot gain a production seam, and
 closing the owner's handle from outside would alter its handle table and keep
 the installer's Job alive.
+
+**The observer.** The same shim wraps ``win32api.TerminateProcess`` and changes
+nothing about it: the real call runs exactly once with the arguments it was
+given, and its result or error is the caller's. A call from either drain in
+``process_tree`` (``_drain_adopted_windows_job_members``, the routine one, or
+``_drain_adopted_windows_job``, the baseline's hard exit) is recorded with the
+caller's name, the pid and creation time of the process the handle names, and
+whether the call succeeded. That record is what tells the routine drain's
+termination from shared setup shutdown's ``TerminateJobObject``: both end the
+installer with code 1, and no time the harness can read separates them (review
+e1en, E1EN-02; declared as an amendment to FABLE_PLAN_V7, 2026-09-28).
 
 **Where it lives.** The owner is started from ``sys.executable`` with ``-P``,
 so the only thing that reaches it is the interpreter's own startup. The shim
@@ -69,7 +81,8 @@ SHIM_SOURCE = '''\
 
 See tests/differential/job_query.py. Fails the call only when it is made from
 linkedin_mcp_server.process_tree._in_another_owned_job; every other call goes
-to the real API unchanged.
+to the real API unchanged. It also observes, and changes nothing about, the
+TerminateProcess calls the two process_tree drains make.
 """
 
 import json
@@ -78,9 +91,27 @@ import sys
 import time
 
 _RECORD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "h-r11-reached.jsonl")
+_MODULE = "linkedin_mcp_server.process_tree"
+_DRAINS = ("_drain_adopted_windows_job_members", "_drain_adopted_windows_job")
 
 
-def install(win32job, error, process_id, record=_RECORD):
+def _write(record, line):
+    try:
+        with open(record, "a", encoding="utf-8") as stream:
+            stream.write(json.dumps(line) + "\\n")
+    except OSError:
+        pass
+
+
+def _member(identity, handle):
+    try:
+        member, created = identity(handle)
+    except Exception:
+        return None, None
+    return member, created
+
+
+def install(win32job, error, identity, record=_RECORD):
     """Wrap win32job.IsProcessInJob; the doubles in the tests call this too."""
     real = win32job.IsProcessInJob
 
@@ -88,36 +119,81 @@ def install(win32job, error, process_id, record=_RECORD):
         caller = sys._getframe(1)
         if (
             caller.f_code.co_name == "_in_another_owned_job"
-            and caller.f_globals.get("__name__") == "linkedin_mcp_server.process_tree"
+            and caller.f_globals.get("__name__") == _MODULE
         ):
-            try:
-                member = process_id(process)
-            except Exception:
-                member = None
+            member, created = _member(identity, process)
             try:
                 handle = int(job)
             except Exception:
                 handle = None
-            try:
-                with open(record, "a", encoding="utf-8") as stream:
-                    line = {"pid": os.getpid(), "t": time.time(), "member": member,
-                            "job": handle}
-                    stream.write(json.dumps(line) + "\\n")
-            except OSError:
-                pass
+            _write(record, {"kind": "query", "pid": os.getpid(), "t": time.time(),
+                            "member": member, "created": created, "job": handle})
             raise error(5, "IsProcessInJob", "planted by the H-R11 shim")
         return real(process, job)
 
     win32job.IsProcessInJob = IsProcessInJob
 
 
+def observe(win32api, identity, record=_RECORD):
+    """Wrap win32api.TerminateProcess to record the drains' calls, and no more.
+
+    The real API is called exactly once, with the arguments it was given, and
+    its result or its error goes back to the caller unchanged. A call from one
+    of the two drains in process_tree is recorded with that caller's name, the
+    member the handle names, and whether the call succeeded.
+    """
+    real = win32api.TerminateProcess
+
+    def TerminateProcess(*args, **kwargs):
+        caller = sys._getframe(1)
+        name = caller.f_code.co_name
+        if caller.f_globals.get("__name__") != _MODULE or name not in _DRAINS:
+            return real(*args, **kwargs)
+        member, created = _member(identity, args[0] if args else None)
+        line = {"kind": "terminate", "pid": os.getpid(), "caller": name,
+                "member": member, "created": created, "began": time.time()}
+        try:
+            result = real(*args, **kwargs)
+        except BaseException as exc:
+            _write(record, dict(line, ended=time.time(), succeeded=False,
+                                error=repr(exc)))
+            raise
+        _write(record, dict(line, ended=time.time(), succeeded=True))
+        return result
+
+    win32api.TerminateProcess = TerminateProcess
+
+
+def _identity(handle):
+    """The pid a process handle names, and that process's creation time."""
+    import ctypes
+    from ctypes import wintypes
+
+    import win32process
+
+    times = [wintypes.FILETIME() for _ in range(4)]
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    created = None
+    if kernel32.GetProcessTimes(
+        wintypes.HANDLE(int(handle)), *(ctypes.byref(t) for t in times)
+    ):
+        ticks = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+        created = (ticks - 116444736000000000) / 10000000
+    return win32process.GetProcessId(handle), created
+
+
 if sys.platform == "win32" and __name__ == "sitecustomize":
     try:
         import pywintypes
         import win32job
-        import win32process
 
-        install(win32job, pywintypes.error, win32process.GetProcessId)
+        install(win32job, pywintypes.error, _identity)
+    except Exception:
+        pass
+    try:
+        import win32api
+
+        observe(win32api, _identity)
     except Exception:
         pass
 '''
@@ -272,17 +348,26 @@ def make_shim_venv(source_python: str, directory: Path) -> ShimVenv:
     )
 
 
-def reached(path: Path, pid: int | None = None) -> list[dict[str, Any]]:
-    """The planted failures recorded at *path*, for *pid* when it is given."""
+def _records(path: Path, kind: str, pid: int | None) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
     lines = []
     for line in path.read_text(encoding="utf-8").splitlines():
         with contextlib.suppress(ValueError):
             entry = json.loads(line)
-            if pid is None or entry.get("pid") == pid:
+            if entry.get("kind") == kind and (pid is None or entry.get("pid") == pid):
                 lines.append(entry)
     return lines
+
+
+def reached(path: Path, pid: int | None = None) -> list[dict[str, Any]]:
+    """The planted failures recorded at *path*, for *pid* when it is given."""
+    return _records(path, "query", pid)
+
+
+def terminations(path: Path, pid: int | None = None) -> list[dict[str, Any]]:
+    """The drains' ``TerminateProcess`` calls the shim observed, for *pid*."""
+    return _records(path, "terminate", pid)
 
 
 # --- The member: a row-private browser cache and a download that never ends ----
@@ -565,7 +650,7 @@ def filetime_to_unix(ticks: int) -> float:
 
 
 def _open_for_exit_time(pid: int) -> Any | None:
-    """A handle that keeps *pid*'s exit time readable once it has ended."""
+    """A handle that keeps *pid*'s exit code and times readable once it ended."""
     if sys.platform != "win32":
         return None
     import _winapi
@@ -577,26 +662,67 @@ def _open_for_exit_time(pid: int) -> Any | None:
         return None
 
 
-def _kernel_exit_time(handle: Any) -> float | None:
-    """The kernel's own record of when the process behind *handle* ended."""
-    if handle is None or sys.platform != "win32":
+def _process_time(handle: Any, index: int) -> float | None:
+    """``GetProcessTimes``' creation (0) or exit (1) time for *handle*, or None."""
+    if sys.platform != "win32":
         return None
     import ctypes
-    import _winapi
     from ctypes import wintypes
 
     times = [wintypes.FILETIME() for _ in range(4)]
-    try:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        answered = kernel32.GetProcessTimes(
-            wintypes.HANDLE(int(handle)), *(ctypes.byref(t) for t in times)
-        )
-    finally:
-        _winapi.CloseHandle(handle)
-    if not answered:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    if not kernel32.GetProcessTimes(
+        wintypes.HANDLE(int(handle)), *(ctypes.byref(t) for t in times)
+    ):
         return None
-    exit_time = times[1]
-    return filetime_to_unix((exit_time.dwHighDateTime << 32) | exit_time.dwLowDateTime)
+    chosen = times[index]
+    return filetime_to_unix((chosen.dwHighDateTime << 32) | chosen.dwLowDateTime)
+
+
+class NativeProcess:
+    """The Win32 calls a fate is read through, all on one handle.
+
+    Windows only; the tests stand doubles in for it elsewhere.
+    """
+
+    def open(self, pid: int) -> Any | None:
+        return _open_for_exit_time(pid)
+
+    def created(self, handle: Any) -> float | None:
+        return _process_time(handle, 0)
+
+    def wait(self, handle: Any) -> None:
+        if sys.platform != "win32":
+            raise OSError("no Win32 wait off Windows")
+        import _winapi
+
+        answer = _winapi.WaitForSingleObject(handle, _winapi.INFINITE)
+        if answer != _winapi.WAIT_OBJECT_0:
+            raise OSError(f"WaitForSingleObject answered {answer}")
+
+    def exit_code(self, handle: Any) -> int:
+        if sys.platform != "win32":
+            raise OSError("no Win32 exit code off Windows")
+        import _winapi
+
+        return _winapi.GetExitCodeProcess(handle)
+
+    def exited(self, handle: Any) -> float | None:
+        # Read only after the wait returned: for a process still running the
+        # exit time GetProcessTimes writes is undefined.
+        return _process_time(handle, 1)
+
+    def close(self, handle: Any) -> None:
+        if sys.platform != "win32":
+            return
+        import _winapi
+
+        _winapi.CloseHandle(handle)
+
+
+#: How far apart two readings of one creation time may be: both are the
+#: kernel's FILETIME, read through psutil and through ``GetProcessTimes``.
+_CREATED_TOLERANCE_SECONDS = 0.01
 
 
 @dataclass
@@ -606,13 +732,31 @@ class Fate:
     #: When the harness's waiter saw the exit: late by however long it took.
     exited_at: float | None = None
     exit_code: int | None = None
-    #: When the kernel recorded the exit (Windows), on the same clock as
-    #: ``time.time()``; what the drain's ordering is judged by where it exists.
+    #: When the kernel recorded the exit, on the same clock as ``time.time()``.
     kernel_exit: float | None = None
+    #: Why this fate cannot be known: no handle to this lifetime, a failed
+    #: wait, no exit time. Never read as an exit, nor as a process still alive.
+    problem: str | None = None
 
     @property
     def ended(self) -> float | None:
-        return self.kernel_exit if self.kernel_exit is not None else self.exited_at
+        return self.kernel_exit
+
+    @property
+    def settled(self) -> bool:
+        """An observed exit: a code and the kernel's exit time, from one handle."""
+        return (
+            self.problem is None
+            and self.exit_code is not None
+            and self.kernel_exit is not None
+        )
+
+    def is_lifetime(self, pid: Any, created: Any) -> bool:
+        return (
+            pid == self.pid
+            and isinstance(created, (int, float))
+            and abs(float(created) - self.start) <= _CREATED_TOLERANCE_SECONDS
+        )
 
     def as_event_fields(self) -> dict[str, Any]:
         return {
@@ -621,45 +765,93 @@ class Fate:
             "exited_at": self.exited_at,
             "kernel_exit": self.kernel_exit,
             "exit_code": self.exit_code,
+            "problem": self.problem,
         }
 
 
 class Fates:
-    """Each installer process the row saw, watched from a handle held early.
+    """Each installer process the row saw, watched through one handle.
 
-    On Windows a handle keeps the exit code and the kernel's exit time
-    readable after the process ends: the code tells ``TerminateProcess(h, 1)``
-    from a clean end, and the time orders the end against the drain's queries
-    and the close's return without the waiter's wake-up in between.
+    The handle is opened when the row identifies the process and is checked to
+    name the lifetime the watcher recorded (its creation time), then waited on,
+    and the exit code and the kernel's exit time are read from it only once
+    that wait returned. Anything short of that leaves the fate's ``problem``
+    set: unknown, never an exit and never a survivor.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, native: Any | None = None) -> None:
+        self.native = native if native is not None else NativeProcess()
         self.fates: dict[tuple[int, float], Fate] = {}
         self._threads: list[threading.Thread] = []
 
-    def watch(self, process: Any, start: float) -> None:
-        key = (process.pid, start)
+    def watch(self, pid: int, start: float, *, required: bool = True) -> None:
+        """Watch the lifetime (*pid*, *start*).
+
+        One that cannot be watched is an unknown fate, unless it is not
+        *required*: a late look for installers the first one missed keeps only
+        those it can watch. A queried member it could not watch is still
+        caught, as a query of a lifetime nobody watched (``drain_reading``).
+        """
+        key = (pid, start)
         if key in self.fates:
             return
-        fate = self.fates[key] = Fate(process.pid, start)
-        handle = _open_for_exit_time(process.pid)
+        fate = Fate(pid, start)
+        native = self.native
+        try:
+            handle = native.open(pid)
+        except Exception as exc:  # noqa: BLE001 - recorded as unknown
+            handle, fate.problem = None, f"its handle could not be opened: {exc!r}"
+        if handle is None:
+            fate.problem = fate.problem or "its handle could not be opened"
+        else:
+            try:
+                created = native.created(handle)
+            except Exception:  # noqa: BLE001 - recorded as unknown
+                created = None
+            if not fate.is_lifetime(pid, created):
+                native.close(handle)
+                fate.problem = (
+                    f"the process the handle names was created at {created}, not "
+                    f"the recorded {start}"
+                )
+        if fate.problem is not None:
+            if required:
+                self.fates[key] = fate
+            return
+        self.fates[key] = fate
 
         def wait() -> None:
             try:
-                code = process.wait()
-            except Exception:  # noqa: BLE001 - recorded as unknown
-                code = None
-            fate.exit_code = code
-            fate.exited_at = time.time()
-            with contextlib.suppress(Exception):
-                fate.kernel_exit = _kernel_exit_time(handle)
+                native.wait(handle)
+                code = native.exit_code(handle)
+                ended = native.exited(handle)
+            except Exception as exc:  # noqa: BLE001 - recorded as unknown
+                fate.problem = f"its wait failed: {exc!r}"
+            else:
+                if ended is None:
+                    fate.problem = "the kernel gave no exit time"
+                else:
+                    fate.exit_code, fate.kernel_exit = code, ended
+                    fate.exited_at = time.time()
+            finally:
+                with contextlib.suppress(Exception):
+                    native.close(handle)
 
         thread = threading.Thread(target=wait, daemon=True)
         thread.start()
         self._threads.append(thread)
 
     def alive(self) -> list[Fate]:
-        return [fate for fate in self.fates.values() if fate.exited_at is None]
+        """Watched, and no exit observed yet: still running as far as is known."""
+        return [
+            fate
+            for fate in self.fates.values()
+            if fate.problem is None and not fate.settled
+        ]
+
+    def unsettled(self) -> list[Fate]:
+        """Every fate that is not an observed exit: alive or unknown."""
+        return [fate for fate in self.fates.values() if not fate.settled]
 
     def settle(self, seconds: float) -> None:
         deadline = time.monotonic() + seconds
@@ -667,42 +859,99 @@ class Fates:
             thread.join(timeout=max(deadline - time.monotonic(), 0.0))
 
 
-def terminated_by_drain(
+#: The routine drain, whose termination of a member it could not place is
+#: H-R11's '!'. The baseline's hard-exit drain ``_drain_adopted_windows_job``
+#: terminates members too, after the close, and is another act.
+ROUTINE_DRAIN = "_drain_adopted_windows_job_members"
+
+
+@dataclass
+class DrainReading:
+    """What the routine drain did to the installer, or why that is unknown."""
+
+    #: Members it terminated, each after its planted query on that lifetime.
+    terminated: list[Fate] = field(default_factory=list)
+    unknown: list[str] = field(default_factory=list)
+
+    @property
+    def value(self) -> bool | None:
+        """True for '!', False for '=', None when the evidence is incomplete."""
+        if self.unknown:
+            return None
+        return bool(self.terminated)
+
+
+def drain_reading(
     fates: Iterable[Fate],
     queried: Iterable[dict[str, Any]],
-    window: tuple[float, float] | None,
-) -> list[Fate]:
-    """The members the routine drain ended after failing to place them.
+    terminated: Iterable[dict[str, Any]],
+) -> DrainReading:
+    """Whether the routine drain terminated a member it failed to place.
 
-    A member counts when it ended with exit code 1 after the owner's first
-    planted failure asked about *that* member, and before ``close_session``
-    returned. Both bounds are needed, and neither has slack:
+    From the shim's records of the closing owner alone, never from timing: a
+    ``TerminateProcess`` call the routine drain made (``ROUTINE_DRAIN``), that
+    succeeded, on a lifetime the row watched, after the planted query on that
+    same lifetime. Shared setup shutdown ends the installer through
+    ``TerminateJobObject`` with the same code 1, and no receipt time or exit
+    time tells the two apart; only the caller does.
 
-    * Something else ends the installer with the same code: the server's or
-      owner's shutdown stops the background setup
-      (``server.py`` lifespan -> ``stop_background_browser_setup`` ->
-      ``TerminateJobObject(1)``), in Direct at host quit and in the candidate
-      when the owner stands down. That runs only once the close has returned
-      (measured, run 36381621588: K1 18 ms after, K3 210 ms after), so the
-      close's return is the bound, not the close plus a grace.
-    * The drain only terminates a member it has just asked about, so a member
-      that ended before its first query was ended by something else.
-
-    *queried* are the shim's records for the owner (``job_query.reached``).
+    Unknown, and so no reading at all, whenever the evidence is not complete:
+    a watched fate that is not an observed exit, a queried or terminated
+    process that is no watched lifetime, or a termination whose member did not
+    then end with code 1.
     """
-    if window is None:
-        return []
-    _began, ended = window
-    first: dict[int, float] = {}
+    fates = list(fates)
+    reading = DrainReading()
+    for fate in fates:
+        if not fate.settled:
+            reading.unknown.append(
+                f"installer {fate.pid}'s fate is unknown: "
+                f"{fate.problem or 'no exit was observed'}"
+            )
+
+    def watched(line: dict[str, Any]) -> Fate | None:
+        for fate in fates:
+            if fate.is_lifetime(line.get("member"), line.get("created")):
+                return fate
+        return None
+
+    queries: dict[tuple[int, float], float] = {}
     for line in queried:
-        member, t = line.get("member"), line.get("t")
-        if isinstance(member, int) and isinstance(t, (int, float)):
-            first[member] = min(first.get(member, t), float(t))
-    return [
-        fate
-        for fate in fates
-        if fate.exit_code == 1
-        and fate.ended is not None
-        and fate.pid in first
-        and first[fate.pid] <= fate.ended <= ended
-    ]
+        fate = watched(line)
+        if fate is None:
+            reading.unknown.append(
+                f"the drain asked about {line.get('member')} created "
+                f"{line.get('created')}, a lifetime the row did not watch"
+            )
+            continue
+        t = float(line.get("t", 0.0))
+        key = (fate.pid, fate.start)
+        queries[key] = min(queries.get(key, t), t)
+    for line in terminated:
+        if line.get("caller") != ROUTINE_DRAIN or line.get("succeeded") is not True:
+            continue
+        fate = watched(line)
+        if fate is None:
+            reading.unknown.append(
+                f"the routine drain terminated {line.get('member')} created "
+                f"{line.get('created')}, a lifetime the row did not watch"
+            )
+            continue
+        asked = queries.get((fate.pid, fate.start))
+        began = float(line.get("began", 0.0))
+        if asked is None or asked > began:
+            reading.unknown.append(
+                f"the routine drain terminated installer {fate.pid} without the "
+                f"planted query before it"
+            )
+            continue
+        if fate.settled and (
+            fate.exit_code != 1 or fate.kernel_exit is None or fate.kernel_exit < began
+        ):
+            reading.unknown.append(
+                f"the routine drain terminated installer {fate.pid} at {began}, "
+                f"but it ended with {fate.exit_code} at {fate.kernel_exit}"
+            )
+            continue
+        reading.terminated.append(fate)
+    return reading

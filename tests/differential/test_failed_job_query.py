@@ -5,6 +5,10 @@ Here, on every platform:
 
 * the shim's scope: it fails ``IsProcessInJob`` for the one caller it names
   and passes every other call through, recording each failure it plants;
+* the observer: it records the two drains' ``TerminateProcess`` calls by
+  caller and outcome, and changes nothing about any call;
+* the drain's reading, from those records only, and unknown on incomplete
+  evidence; the installer fates behind it; the successor behind recovery;
 * the **model control**: the baseline's own ``process_tree`` at the pin and
   this checkout's, each loaded as that module, drained against Win32 doubles
   through the shim. The baseline terminates the member of the other Job (the
@@ -37,11 +41,14 @@ from differential.harness import (
     close_left_unconfirmed,
     is_installer,
     job_query_observations,
+    job_query_problems,
     judge_row,
     r11_reading,
     r11_verdict,
+    successor_verdict,
 )
 from differential.job_query import (
+    ROUTINE_DRAIN,
     SHIM_SHA256,
     SHIM_SOURCE,
     Fate,
@@ -50,13 +57,14 @@ from differential.job_query import (
     ShimVenv,
     StallHost,
     code_difference,
+    drain_reading,
     make_shim_venv,
     private_install,
     reached,
     record_install,
     shim_namespace,
     filetime_to_unix,
-    terminated_by_drain,
+    terminations,
 )
 from differential.session import LAST_VERSION_FILE, write_synthetic_cookie_file
 from differential.test_row_judgement import _healthy
@@ -80,10 +88,15 @@ class _Error(Exception):
     """Stands in for ``pywintypes.error``."""
 
 
+def _identity(handle: Any) -> tuple[int, float]:
+    """What the shim reads of a handle: here the handle is the pid, created at 9."""
+    return handle, 9.0
+
+
 def _planted(record: Path, answer: bool = True) -> SimpleNamespace:
     """A ``win32job`` double with the shim installed over it."""
     job = SimpleNamespace(IsProcessInJob=lambda process, handle: answer)
-    shim_namespace()["install"](job, _Error, lambda process: process, record)
+    shim_namespace()["install"](job, _Error, _identity, record)
     return job
 
 
@@ -106,6 +119,89 @@ def test_the_shim_fails_only_the_drains_membership_query(tmp_path):
         query(job, 700, 55)
     (line,) = reached(record)
     assert line["member"] == 700 and line["job"] == 55 and line["pid"] == os.getpid()
+    assert line["created"] == 9.0
+    assert terminations(record) == []
+
+
+# --- The observer: the drains' TerminateProcess, recorded and unchanged -------------
+
+_PROCESS_TREE = "linkedin_mcp_server.process_tree"
+
+
+class _Terminator:
+    """A ``win32api`` double: records every real call, answers or raises."""
+
+    def __init__(self, error: BaseException | None = None) -> None:
+        self.calls: list[tuple[tuple, dict]] = []
+        self.error = error
+
+    def TerminateProcess(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        if self.error is not None:
+            raise self.error
+        return "the real answer"
+
+
+def _observed(record: Path, error: BaseException | None = None) -> _Terminator:
+    api = _Terminator(error)
+    shim_namespace()["observe"](api, _identity, record)
+    return api
+
+
+def _terminating(name: str, module: str = _PROCESS_TREE):
+    """A function called *name* in *module* that terminates through *api*."""
+    source = (
+        f"def {name}(api, handle, status):\n"
+        f"    return api.TerminateProcess(handle, status)\n"
+    )
+    namespace: dict[str, Any] = {"__name__": module}
+    exec(source, namespace)
+    return namespace[name]
+
+
+@pytest.mark.parametrize(
+    "caller", ["_drain_adopted_windows_job_members", "_drain_adopted_windows_job"]
+)
+def test_the_observer_records_a_drains_termination_and_changes_nothing(
+    tmp_path, caller
+):
+    record = tmp_path / "reached.jsonl"
+    api = _observed(record)
+    assert _terminating(caller)(api, 700, 1) == "the real answer"
+    # The real API, once, with exactly the arguments the drain gave.
+    assert api.calls == [((700, 1), {})]
+    (line,) = terminations(record)
+    assert (line["caller"], line["member"], line["created"]) == (caller, 700, 9.0)
+    assert line["succeeded"] is True and line["pid"] == os.getpid()
+    assert line["began"] <= line["ended"]
+    assert reached(record) == []
+
+
+def test_a_failed_termination_is_raised_unchanged_and_recorded_as_failed(tmp_path):
+    record = tmp_path / "reached.jsonl"
+    refused = _Error(5, "TerminateProcess", "Access is denied.")
+    api = _observed(record, error=refused)
+    with pytest.raises(_Error) as raised:
+        _terminating("_drain_adopted_windows_job_members")(api, 700, 1)
+    assert raised.value is refused
+    assert api.calls == [((700, 1), {})]
+    (line,) = terminations(record)
+    assert line["succeeded"] is False and "Access is denied" in line["error"]
+
+
+@pytest.mark.parametrize(
+    ("name", "module"),
+    [
+        pytest.param("terminate", _PROCESS_TREE, id="another-function"),
+        pytest.param("_drain_adopted_windows_job_members", "elsewhere", id="elsewhere"),
+    ],
+)
+def test_every_other_termination_passes_through_unrecorded(tmp_path, name, module):
+    record = tmp_path / "reached.jsonl"
+    api = _observed(record)
+    assert _terminating(name, module)(api, 700, 1) == "the real answer"
+    assert api.calls == [((700, 1), {})]
+    assert terminations(record) == []
 
 
 @pytest.mark.parametrize(
@@ -178,7 +274,10 @@ def _drain(module: types.ModuleType, record: Path, *, adopted: int | None = 123)
         # Truthful: 700 is in both Jobs.
         IsProcessInJob=lambda process, handle: True,
     )
-    shim_namespace()["install"](job, _Error, lambda handle: handle.process, record)
+    shim = shim_namespace()
+    shim["install"](job, _Error, lambda handle: (handle.process, 9.0), record)
+    api = Api()
+    shim["observe"](api, lambda handle: (handle.process, 9.0), record)
 
     def sleep(seconds: float) -> None:
         clock.now += seconds
@@ -188,7 +287,7 @@ def _drain(module: types.ModuleType, record: Path, *, adopted: int | None = 123)
         _adopted_windows_job=adopted,
         _adopted_windows_gate=None,
         _live_windows_jobs=[SimpleNamespace(job_handle=55)],
-        _windows_modules=lambda: (Api(), Con(), job, object()),
+        _windows_modules=lambda: (api, Con(), job, object()),
         time=SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep),
     )
     proved = module.drain_browser_process_marker(
@@ -208,6 +307,13 @@ def test_the_baseline_terminates_the_member_it_could_not_place(tmp_path):
     assert terminated == [700]
     assert proved is True
     assert [line["member"] for line in reached(record)] == [700]
+    # And the observer names the routine drain as the one that terminated it.
+    (line,) = terminations(record)
+    assert (line["caller"], line["member"], line["succeeded"]) == (
+        ROUTINE_DRAIN,
+        700,
+        True,
+    )
 
 
 @pytest.mark.differential_row(row=ROW, experiment="K3", column="unit")
@@ -218,6 +324,7 @@ def test_the_candidate_neither_terminates_nor_proves_the_drain(tmp_path):
     assert terminated == []
     assert proved is False
     assert reached(record) and {line["member"] for line in reached(record)} == {700}
+    assert terminations(record) == []
 
 
 @pytest.mark.differential_row(row=ROW, experiment="K1", column="unit")
@@ -243,10 +350,12 @@ def test_model_shim_does_not_patch_the_real_job_api():
 
 def test_model_shim_does_not_patch_a_windows_job_api(monkeypatch):
     job = SimpleNamespace(IsProcessInJob=lambda process, handle: True)
-    original = job.IsProcessInJob
+    api = SimpleNamespace(TerminateProcess=lambda handle, status: None)
+    original, terminate = job.IsProcessInJob, api.TerminateProcess
     with monkeypatch.context() as patch:
         patch.setattr(sys, "platform", "win32")
         patch.setitem(sys.modules, "win32job", job)
+        patch.setitem(sys.modules, "win32api", api)
         patch.setitem(sys.modules, "pywintypes", SimpleNamespace(error=_Error))
         patch.setitem(
             sys.modules,
@@ -255,6 +364,23 @@ def test_model_shim_does_not_patch_a_windows_job_api(monkeypatch):
         )
         shim_namespace()
     assert job.IsProcessInJob is original
+    assert api.TerminateProcess is terminate
+
+
+def test_the_actors_startup_installs_the_fault_and_the_observer(monkeypatch):
+    # What an actor's interpreter runs: the shim as ``sitecustomize`` on Windows.
+    job = SimpleNamespace(IsProcessInJob=lambda process, handle: True)
+    api = SimpleNamespace(TerminateProcess=lambda handle, status: None)
+    original, terminate = job.IsProcessInJob, api.TerminateProcess
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "platform", "win32")
+        patch.setitem(sys.modules, "win32job", job)
+        patch.setitem(sys.modules, "win32api", api)
+        patch.setitem(sys.modules, "pywintypes", SimpleNamespace(error=_Error))
+        namespace: dict[str, Any] = {"__name__": "sitecustomize", "__file__": "shim"}
+        exec(compile(SHIM_SOURCE, "sitecustomize.py", "exec"), namespace)
+    assert job.IsProcessInJob is not original
+    assert api.TerminateProcess is not terminate
 
 
 def test_an_unrelated_sitecustomize_does_not_prove_the_shim_ran(tmp_path):
@@ -359,86 +485,269 @@ def _shim(tmp_path: Path) -> ShimVenv:
     )
 
 
-def _reach(tmp_path: Path, pid: int) -> None:
-    with (tmp_path / "h-r11-reached.jsonl").open("a") as stream:
-        stream.write(
-            json.dumps({"pid": pid, "t": 5.0, "member": 700, "job": 55}) + "\n"
-        )
-
-
-def _fates(*fates: Fate) -> Fates:
-    tracked = Fates()
-    for fate in fates:
-        tracked.fates[(fate.pid, fate.start)] = fate
-    return tracked
-
-
-_WINDOW = {"began": 10.0, "ended": 12.0, "probe_ended": 20.0}
-_OWNERS = [
-    {"kind": "process.start", "t": 1.0, "pid": 42, "in_row": True, "actor": "owner"},
-    {"kind": "process.start", "t": 15.0, "pid": 43, "in_row": True, "actor": "owner"},
-]
-
-
-def test_a_terminated_member_inside_the_close_reads_bang(tmp_path):
-    _reach(tmp_path, 42)
-    observed = job_query_observations(
-        _shim(tmp_path),
-        fates=_fates(Fate(700, 9.0, exited_at=11.0, exit_code=1)),
-        window=_WINDOW,
-        owner_pid=42,
-        observed=_OWNERS[:1],
-        daemon=True,
-    )
-    assert observed["job_query_reached"] and observed["job_member_terminated"]
-    assert observed["successor_before_quit"] is False
-
-
-# The three shapes run 36381621588 measured on Windows, seconds past 1790573600.
+# The shapes run 36381621588 measured on Windows, seconds past 1790573600.
 #: K2: the baseline drain asked about 7596 and ended it 6 ms later, mid-close.
-_K2 = dict(window=(72.848, 73.805), queried=[73.749], exited=73.755)
+_K2_QUERY, _K2_TERMINATE, _K2_EXIT = 73.749, 73.750, 73.755
 #: K3: the candidate drain asked about the member for its whole 10 s deadline;
-#: the owner's shutdown ended it 211 ms after the close had returned.
-_K3 = dict(window=(130.632, 140.910), queried=[130.901, 140.904], exited=141.121)
+#: the owner's shutdown ended it with the same code 211 ms after the close.
+_K3_QUERIES, _K3_EXIT = (130.901, 140.904), 141.121
 
 
-def _drained(shape: dict, member: int = 700, **fate: Any) -> list[Fate]:
-    queried = [{"member": member, "t": t} for t in shape["queried"]]
-    ended = Fate(700, 1.0, exit_code=1, kernel_exit=shape["exited"])
-    return terminated_by_drain(
-        [dataclasses.replace(ended, **fate)], queried, shape["window"]
+def _ended(**fields: Any) -> Fate:
+    """Installer 700, created at 9, observed to end with code 1."""
+    base: dict[str, Any] = dict(exit_code=1, kernel_exit=_K2_EXIT, exited_at=73.9)
+    base.update(fields)
+    return Fate(700, 9.0, **base)
+
+
+def _query(t: float = _K2_QUERY, member: int = 700, created: float = 9.0) -> dict:
+    return {"kind": "query", "pid": 42, "t": t, "member": member, "created": created}
+
+
+def _terminate(
+    caller: str = ROUTINE_DRAIN,
+    *,
+    succeeded: bool = True,
+    began: float = _K2_TERMINATE,
+    member: int = 700,
+    created: float = 9.0,
+) -> dict:
+    return {
+        "kind": "terminate",
+        "pid": 42,
+        "caller": caller,
+        "member": member,
+        "created": created,
+        "began": began,
+        "ended": began + 0.001,
+        "succeeded": succeeded,
+    }
+
+
+def test_the_routine_drain_terminating_a_member_it_could_not_place_reads_bang():
+    reading = drain_reading([_ended()], [_query()], [_terminate()])
+    assert reading.value is True
+    assert [fate.pid for fate in reading.terminated] == [700]
+
+
+def test_the_same_code_at_shared_shutdown_is_not_the_drains():
+    # K3: the member ends with code 1 while the candidate's owner shuts its
+    # setup down, and no routine drain terminated it: '='.
+    reading = drain_reading(
+        [_ended(kernel_exit=_K3_EXIT)], [_query(t) for t in _K3_QUERIES], []
     )
-
-
-def test_the_drain_ending_a_member_it_just_failed_to_place_reads_bang():
-    assert [fate.pid for fate in _drained(_K2)] == [700]
-
-
-def test_the_shared_shutdown_after_the_close_is_not_the_drains():
-    # The K3 reading the 1 s grace turned into '!' on Windows.
-    assert _drained(_K3) == []
+    assert reading.value is False and reading.unknown == []
 
 
 @pytest.mark.parametrize(
-    ("shape", "fate", "member"),
+    "line",
     [
-        # K1: no adopted Job, so nothing ever asked about the member.
-        pytest.param(_K2, {}, 701, id="never-asked"),
-        pytest.param(
-            dict(_K2, queried=[73.760]), {}, 700, id="ended-before-it-was-asked"
-        ),
-        pytest.param(_K2, {"exit_code": 0}, 700, id="another-code"),
-        pytest.param(_K2, {"kernel_exit": None}, 700, id="still-running"),
+        pytest.param(_terminate("_drain_adopted_windows_job"), id="hard-exit-drain"),
+        pytest.param(_terminate(succeeded=False), id="failed-call"),
     ],
 )
-def test_any_other_end_of_the_member_is_not_the_drains(shape, fate, member):
-    assert _drained(shape, member=member, **fate) == []
+def test_neither_the_hard_exit_drain_nor_a_failed_call_is_the_routine_bang(line):
+    # The baseline's hard exit terminates every member after the close; a
+    # termination that failed terminated nothing. Neither is the witness.
+    reading = drain_reading([_ended()], [_query()], [line])
+    assert reading.value is False
 
 
-def test_the_kernels_exit_time_is_judged_not_the_waiters():
-    # The waiter woke after the close returned; the kernel ended it inside.
-    late = _drained(_K2, exited_at=73.9, kernel_exit=73.804)
-    assert [fate.pid for fate in late] == [700]
+@pytest.mark.parametrize("received", [140.910, 141.200, 300.0])
+def test_a_delayed_reply_moves_no_reading(tmp_path, received):
+    # E1EN-02's control: the host's receipt of the close reply moved past the
+    # shared shutdown's termination turned '=' into '!' when it bounded the
+    # drain. Now the reading has no host time in it at all.
+    reading = drain_reading(
+        [_ended(kernel_exit=_K3_EXIT)], [_query(t) for t in _K3_QUERIES], []
+    )
+    observed = job_query_observations(
+        _shim(tmp_path),
+        reading=reading,
+        window={"began": 130.632, "ended": received},
+        owner_pid=42,
+        daemon=True,
+    )
+    assert observed["job_member_terminated"] is False
+
+
+@pytest.mark.parametrize(
+    ("fate", "queried", "terminated", "why"),
+    [
+        pytest.param(
+            _ended(exit_code=None, kernel_exit=None, exited_at=None),
+            [_query()],
+            [],
+            "no exit was observed",
+            id="still-running",
+        ),
+        pytest.param(
+            _ended(
+                exit_code=None,
+                kernel_exit=None,
+                exited_at=None,
+                problem="its wait failed: PermissionError()",
+            ),
+            [_query()],
+            [],
+            "its wait failed",
+            id="wait-failed",
+        ),
+        pytest.param(
+            _ended(kernel_exit=None),
+            [_query()],
+            [],
+            "no exit was observed",
+            id="no-kernel-exit",
+        ),
+        pytest.param(
+            _ended(), [_query(created=5.0)], [], "did not watch", id="another-lifetime"
+        ),
+        pytest.param(
+            _ended(),
+            [_query(), _query(member=701)],
+            [],
+            "did not watch",
+            id="an-unwatched-member",
+        ),
+        pytest.param(
+            _ended(),
+            [_query()],
+            [_terminate(member=701)],
+            "did not watch",
+            id="terminated-unwatched",
+        ),
+        pytest.param(
+            _ended(),
+            [_query(t=_K2_TERMINATE + 1)],
+            [_terminate()],
+            "without the planted query",
+            id="terminated-before-asked",
+        ),
+        pytest.param(
+            _ended(exit_code=0),
+            [_query()],
+            [_terminate()],
+            "ended with 0",
+            id="terminated-but-ended-otherwise",
+        ),
+    ],
+)
+def test_incomplete_evidence_is_no_reading(fate, queried, terminated, why):
+    reading = drain_reading([fate], queried, terminated)
+    assert reading.value is None
+    assert any(why in unknown for unknown in reading.unknown), reading.unknown
+
+
+class _Native:
+    """``NativeProcess`` for one pid, with the answers a test chooses."""
+
+    def __init__(
+        self,
+        *,
+        created: float | None = 9.0,
+        wait: BaseException | None = None,
+        code: int = 1,
+        exited: float | None = 11.0,
+        opens: bool = True,
+    ) -> None:
+        self._created, self._wait, self._code = created, wait, code
+        self._exited, self._opens = exited, opens
+        self.closed = 0
+
+    def open(self, pid):
+        return object() if self._opens else None
+
+    def created(self, handle):
+        return self._created
+
+    def wait(self, handle):
+        if self._wait is not None:
+            raise self._wait
+
+    def exit_code(self, handle):
+        return self._code
+
+    def exited(self, handle):
+        return self._exited
+
+    def close(self, handle):
+        self.closed += 1
+
+
+def _watched(native: _Native, *, required: bool = True) -> Fates:
+    fates = Fates(native)
+    fates.watch(700, 9.0, required=required)
+    fates.settle(5.0)
+    return fates
+
+
+def test_an_exit_is_read_from_the_handle_the_lifetime_was_bound_to():
+    fates = _watched(_Native())
+    (fate,) = fates.fates.values()
+    assert fate.settled and (fate.exit_code, fate.kernel_exit) == (1, 11.0)
+    assert fates.alive() == [] and fates.unsettled() == []
+
+
+@pytest.mark.parametrize(
+    ("native", "why"),
+    [
+        pytest.param(_Native(wait=PermissionError()), "wait failed", id="wait"),
+        pytest.param(_Native(exited=None), "no exit time", id="no-exit-time"),
+        pytest.param(_Native(created=5.0), "created at 5.0", id="another-lifetime"),
+        pytest.param(_Native(opens=False), "could not be opened", id="no-handle"),
+    ],
+)
+def test_an_unobserved_end_is_unknown_never_an_exit_or_a_survivor(native, why):
+    fates = _watched(native)
+    (fate,) = fates.fates.values()
+    assert not fate.settled and why in (fate.problem or "")
+    assert fate.exited_at is None and fate.exit_code is None
+    # Neither alive nor ended: unknown, and so no reading.
+    assert fates.alive() == [] and fates.unsettled() == [fate]
+    assert drain_reading(fates.fates.values(), [_query()], []).value is None
+
+
+@pytest.mark.parametrize(
+    "native",
+    [_Native(opens=False), _Native(created=5.0)],
+    ids=["gone", "another-lifetime"],
+)
+def test_a_late_look_keeps_only_what_it_can_watch(native):
+    assert _watched(native, required=False).fates == {}
+
+
+def _reach(tmp_path: Path, pid: int) -> None:
+    with (tmp_path / "h-r11-reached.jsonl").open("a") as stream:
+        stream.write(json.dumps(dict(_query(), pid=pid)) + "\n")
+
+
+def test_the_reading_is_what_the_row_feeds_its_judgement(tmp_path):
+    _reach(tmp_path, 42)
+    reading = drain_reading([_ended()], [_query()], [_terminate()])
+    observed = job_query_observations(
+        _shim(tmp_path),
+        reading=reading,
+        window={"successor_verified": True},
+        owner_pid=42,
+        daemon=True,
+    )
+    assert observed["job_query_reached"] and observed["job_member_terminated"]
+    assert observed["successor_before_quit"] is True
+    unknown = drain_reading([_ended(kernel_exit=None)], [_query()], [])
+    observed = job_query_observations(
+        _shim(tmp_path), reading=unknown, window={}, owner_pid=42, daemon=True
+    )
+    assert observed["job_member_terminated"] is None
+    assert observed["successor_before_quit"] is False
+
+
+def test_a_planted_failure_in_another_process_is_not_the_owners(tmp_path):
+    _reach(tmp_path, 99)
+    observed = job_query_observations(
+        _shim(tmp_path), reading=None, window={}, owner_pid=42, daemon=True
+    )
+    assert observed["job_query_reached"] is False
 
 
 def test_a_filetime_reads_on_the_unix_clock():
@@ -446,41 +755,74 @@ def test_a_filetime_reads_on_the_unix_clock():
     assert filetime_to_unix(116_444_736_000_000_000 + 15_000_000) == 1.5
 
 
-def test_the_first_owners_gate_and_launcher_are_no_successor(tmp_path):
-    # Windows records the owner's gate and venv launcher as owner processes,
-    # started with it, long before the close.
-    observed = job_query_observations(
-        _shim(tmp_path),
-        fates=_fates(),
-        window=_WINDOW,
-        owner_pid=42,
-        observed=[
-            {
-                "kind": "process.start",
-                "t": 1.0,
-                "pid": p,
-                "in_row": True,
-                "actor": "owner",
-            }
-            for p in (40, 41, 42)
-        ],
-        daemon=True,
-    )
-    assert observed["successor_before_quit"] is False
+# --- The successor: served, after the closing owner left, before host quit -------
+
+_SERVED = {"is_error": False, "read_the_post": True}
 
 
-def test_a_planted_failure_in_another_process_is_not_the_owners(tmp_path):
-    _reach(tmp_path, 99)
-    observed = job_query_observations(
+@pytest.mark.parametrize(
+    ("probe", "left", "why"),
+    [
+        pytest.param(None, True, "no probe", id="no-probe"),
+        pytest.param(
+            {"is_error": True, "read_the_post": False}, True, "did not read", id="error"
+        ),
+        pytest.param(
+            {"is_error": False, "read_the_post": False},
+            True,
+            "did not read",
+            id="no-post",
+        ),
+        pytest.param(_SERVED, False, "not confirmed gone", id="closer-stayed"),
+        pytest.param(_SERVED, None, "not confirmed gone", id="closer-unasked"),
+    ],
+)
+def test_recovery_needs_a_served_probe_after_the_closer_left(probe, left, why):
+    problems = successor_verdict(probe=probe, left=left, problems=[])
+    assert any(why in problem for problem in problems)
+
+
+def test_a_served_probe_after_the_closer_left_still_needs_the_new_owner():
+    assert successor_verdict(probe=_SERVED, left=True, problems=[]) == []
+    assert successor_verdict(probe=_SERVED, left=True, problems=None) == [
+        "the successor was never looked for"
+    ]
+    assert successor_verdict(
+        probe=_SERVED, left=True, problems=["no browser descends from 43"]
+    ) == ["no browser descends from 43"]
+
+
+def _fates(*fates: Fate) -> Fates:
+    tracked = Fates(_Native())
+    for fate in fates:
+        tracked.fates[(fate.pid, fate.start)] = fate
+    return tracked
+
+
+def test_the_problems_that_keep_the_row_from_observing(tmp_path):
+    complete = drain_reading([_ended()], [_query()], [])
+    assert (
+        job_query_problems(
+            _shim(tmp_path),
+            fates=_fates(_ended()),
+            reading=complete,
+            window={"script_ended": True},
+            script_error=None,
+        )
+        == []
+    )
+    unknown = drain_reading([_ended(kernel_exit=None)], [_query()], [])
+    problems = job_query_problems(
         _shim(tmp_path),
         fates=_fates(),
-        window=_WINDOW,
-        owner_pid=42,
-        observed=_OWNERS,
-        daemon=True,
+        reading=unknown,
+        window={},
+        script_error="TimeoutError: probe",
     )
-    assert observed["job_query_reached"] is False
-    assert observed["successor_before_quit"] is True
+    assert any("script failed" in p for p in problems)
+    assert any("no installer ran" in p for p in problems)
+    assert any("no exit was observed" in p for p in problems)
+    assert any("did not run to its end" in p for p in problems)
 
 
 def test_the_installer_is_every_process_of_it():
@@ -505,8 +847,13 @@ def _vector(profile, *, daemon: bool, **changes) -> RowVector:
     return vector
 
 
-def _result(vector: RowVector) -> RowResult:
-    return RowResult(experiment="X", mode=vector.mode, vector=vector)
+def _result(vector: RowVector, observation: tuple[str, ...] = ()) -> RowResult:
+    return RowResult(
+        experiment="X",
+        mode=vector.mode,
+        vector=vector,
+        observation_failures=list(observation),
+    )
 
 
 def test_a_daemon_row_that_never_reached_the_query_fails(profile):
@@ -527,6 +874,26 @@ def test_k2_must_read_bang(profile):
     equal = _vector(profile, daemon=True, job_member_terminated=False)
     problems = r11_verdict(_result(equal), experiment="K2", non_windows=False)
     assert any("harness defect" in problem for problem in problems)
+    unknown = _vector(profile, daemon=True, job_member_terminated=None)
+    problems = r11_verdict(_result(unknown), experiment="K2", non_windows=False)
+    assert any("harness defect" in problem for problem in problems)
+
+
+@pytest.mark.parametrize("experiment", ["K1", "K2", "K3"])
+def test_a_failure_to_observe_fails_every_experiment(profile, experiment):
+    # K2 keeps its known behavioural '!', never evidence the harness could not
+    # complete or clean up after.
+    vector = _vector(
+        profile,
+        daemon=experiment != "K1",
+        job_member_terminated=experiment == "K2",
+        job_query_reached=experiment != "K1",
+    )
+    assert r11_verdict(_result(vector), experiment=experiment, non_windows=False) == []
+    failed = _result(vector, ("teardown: the private browser cache stayed",))
+    assert "teardown: the private browser cache stayed" in r11_verdict(
+        failed, experiment=experiment, non_windows=False
+    )
 
 
 def test_k3_must_read_equal_and_elect_a_successor(profile):
@@ -536,6 +903,11 @@ def test_k3_must_read_equal_and_elect_a_successor(profile):
     assert any(
         "terminated" in p
         for p in r11_verdict(_result(bang), experiment="K3", non_windows=False)
+    )
+    unknown = _vector(profile, daemon=True, job_member_terminated=None)
+    assert any(
+        "no complete reading" in p
+        for p in r11_verdict(_result(unknown), experiment="K3", non_windows=False)
     )
     alone = _vector(profile, daemon=True, successor_before_quit=False)
     assert any(

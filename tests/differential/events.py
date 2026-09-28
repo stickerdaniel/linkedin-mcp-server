@@ -73,6 +73,7 @@ KINDS = frozenset(
         "profile.snapshot",
         "user.output",
         "owner.found",
+        "owner.successor",
         "owner.exit",
         "tool.result",
         "row.identity",

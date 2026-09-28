@@ -113,9 +113,11 @@ from differential.job_query import (
     StallHost,
     install_locations,
     private_install,
+    DrainReading,
+    drain_reading,
     reached,
     record_install,
-    terminated_by_drain,
+    terminations,
 )
 from differential.session import (
     RETAINED,
@@ -134,6 +136,7 @@ from differential.signals import VIOLATED as O2_VIOLATED
 from differential.signals import (
     ORACLE_REQUIRED,
     Canaries,
+    Lifetime,
     O2Result,
     OracleOutcome,
     ProcessHistory,
@@ -1312,6 +1315,77 @@ def identify_owner(
     )
 
 
+#: How long, after the probe, the row waits for the descriptor to name the
+#: successor and for the watcher to have seen the browser it launched.
+_SUCCESSOR_SECONDS = 10.0
+
+
+def successor_problems(
+    observed: Iterable[Mapping[str, Any]],
+    closing: OwnerIdentity | None,
+    successor: OwnerIdentity | None,
+    *,
+    close_began: float,
+) -> list[str]:
+    """Why *successor* is not shown to have replaced *closing* and served the
+    probe; empty when it is.
+
+    A served probe says that some owner answered, not which. The successor
+    counts only as a lifetime of its own: another pid and create time and
+    another instance than the owner that closed, first seen by the watcher
+    after the close began and not yet gone. The probe is the one read after
+    the close, so the browser it needed is a launch after the close, and one
+    such launch must descend from the successor while none descends from the
+    owner that closed. A launch whose ancestry is unknown counts for neither.
+    """
+    if closing is None:
+        return ["the owner that closed was never identified"]
+    if successor is None:
+        return ["the descriptor names no owner this row started"]
+    if (successor.pid, successor.create_time) == (closing.pid, closing.create_time):
+        return [f"the descriptor still names the owner that closed, pid {closing.pid}"]
+    problems = []
+    if successor.instance_id == closing.instance_id:
+        problems.append(f"the successor reuses instance {closing.instance_id!r}")
+    history = ProcessHistory(observed, outside=[os.getpid()])
+
+    def lifetime(owner: OwnerIdentity) -> Lifetime | None:
+        for life in history.lifetimes:
+            if (
+                life.pid == owner.pid
+                and abs(life.start - owner.create_time) <= _START_TOLERANCE_SECONDS
+                and life.was("owner")
+            ):
+                return life
+        return None
+
+    old, new = lifetime(closing), lifetime(successor)
+    if new is None:
+        return [*problems, f"the watcher never saw pid {successor.pid} start"]
+    if old is None:
+        return [*problems, f"the watcher has no lifetime for pid {closing.pid}"]
+    if new.first_t < close_began:
+        problems.append(f"pid {successor.pid} was running before the close began")
+    if new.exit_t is not None:
+        problems.append(f"pid {successor.pid} had exited before the host quit")
+    now = time.time()
+    launched = [
+        life
+        for life in history.lifetimes
+        if life.in_row and life.was("browser") and life.first_t >= close_began
+    ]
+    if not any(history.descends(life, new, now) is True for life in launched):
+        problems.append(
+            f"no browser launched after the close descends from pid {successor.pid}"
+        )
+    if any(history.descends(life, old, now) is True for life in launched):
+        problems.append(
+            f"pid {closing.pid}, the owner that closed, launched a browser after "
+            f"the close"
+        )
+    return problems
+
+
 def settle_owner(
     owner: OwnerIdentity | None,
     published: PublishedOwner | None,
@@ -1964,102 +2038,177 @@ def is_installer(record: Mapping[str, Any]) -> bool:
     )
 
 
+def installer_starts(observed: Iterable[Mapping[str, Any]]) -> list[tuple[int, float]]:
+    """Every installer lifetime (pid, create time) the watcher recorded in the row."""
+    starts: list[tuple[int, float]] = []
+    for entry in observed:
+        if entry.get("kind") not in ("process.start", "process.update"):
+            continue
+        if entry.get("in_row") is not True or not is_installer(entry):
+            continue
+        start = entry.get("start_identity")
+        if not isinstance(start, (int, float)):
+            continue
+        key = (int(entry["pid"]), float(start))
+        if key not in starts:
+            starts.append(key)
+    return starts
+
+
 def wait_for_installers(
     observed: Callable[[], Iterable[Mapping[str, Any]]],
     *,
+    watch: Callable[[int, float], None],
     open_process: Callable[[int], Any] = psutil.Process,
     seconds: float = _INSTALLER_SECONDS,
-) -> list[tuple[Any, float]]:
-    """Handles to the row's installer processes, once one has been seen.
+) -> list[tuple[int, float]]:
+    """The row's installer processes, each handed to *watch* as it is found.
 
-    A handle only when the process at the pid is still the lifetime the
-    watcher recorded (its create time), and taken at once, so its exit code
-    stays readable however it ends. After the first is seen, a second look a
-    moment later picks up the worker and the download the supervisor starts.
+    Only when the process at the pid is still the lifetime the watcher
+    recorded (its create time), and at once, so the handle *watch* takes names
+    that lifetime and keeps its exit readable however it ends. After the
+    first is seen, a second look a moment later picks up the worker and the
+    download the supervisor starts.
     """
     deadline = time.monotonic() + seconds
-    found: dict[tuple[int, float], Any] = {}
+    found: list[tuple[int, float]] = []
     settle_until: float | None = None
     while True:
-        for entry in observed():
-            if entry.get("kind") not in ("process.start", "process.update"):
-                continue
-            if entry.get("in_row") is not True or not is_installer(entry):
-                continue
-            start = entry.get("start_identity")
-            if not isinstance(start, (int, float)):
-                continue
-            key = (int(entry["pid"]), float(start))
+        for key in installer_starts(observed()):
             if key in found:
                 continue
             try:
                 process = open_process(key[0])
-                if abs(process.create_time() - start) > _START_TOLERANCE_SECONDS:
+                if abs(process.create_time() - key[1]) > _START_TOLERANCE_SECONDS:
                     continue
             except psutil.Error:
                 continue
-            found[key] = process
+            found.append(key)
+            watch(*key)
             if settle_until is None:
                 settle_until = time.monotonic() + 3.0
         now = time.monotonic()
         if (settle_until is not None and now >= settle_until) or now >= deadline:
-            return [(process, key[1]) for key, process in found.items()]
+            return found
         time.sleep(0.1)
+
+
+def job_query_reading(
+    shim: ShimVenv, *, fates: Fates, owner_pid: int | None, daemon: bool
+) -> DrainReading:
+    """The routine drain's reading from the shim's records of the closing owner.
+
+    In Direct no process has an adopted Job, so every record at all counts.
+    """
+    pid = owner_pid if daemon else None
+    return drain_reading(
+        fates.fates.values(),
+        reached(shim.reached_file, pid=pid),
+        terminations(shim.reached_file, pid=pid),
+    )
+
+
+def successor_verdict(
+    *,
+    probe: Mapping[str, Any] | None,
+    left: bool | None,
+    problems: Iterable[str] | None,
+) -> list[str]:
+    """Why H-R11's recovery is not a successor that served, before host quit.
+
+    All three are needed: the probe read the synthetic post, the owner that
+    closed was confirmed gone before it, and the owner the descriptor then
+    named is a new lifetime and instance that served it (``successor_problems``
+    and a creation time after the close began). A gate, an owner-labelled
+    start or a later Direct session stands in for none of them.
+    """
+    found = []
+    if probe is None:
+        found.append("no probe was made after the close")
+    elif probe.get("is_error") or not probe.get("read_the_post"):
+        found.append(
+            f"the probe after the close did not read the synthetic post "
+            f"(is_error={probe.get('is_error')!r})"
+        )
+    if left is not True:
+        found.append(
+            f"the owner that closed was not confirmed gone before the probe "
+            f"(left={left!r})"
+        )
+    if problems is None:
+        # Nobody looked for a new owner, so nothing shows there was one.
+        return [*found, "the successor was never looked for"]
+    return [*found, *problems]
 
 
 def job_query_observations(
     shim: ShimVenv | None,
     *,
-    fates: Fates,
+    reading: DrainReading | None,
     window: Mapping[str, Any],
     owner_pid: int | None,
-    observed: Iterable[Mapping[str, Any]],
     daemon: bool,
 ) -> dict[str, Any]:
     """What H-R11 feeds ``judge_row``; nothing off the row.
 
     Reached: the shim recorded a planted failure in the process whose drain
     it was, the owner serving at the close (none expected in Direct, which has
-    no adopted Job, so any line at all counts there). Terminated: an installer
-    process the drain ended after failing to place it (``terminated_by_drain``).
-    Successor: an owner process started between the close's start and the
-    return of the call after it; the gate and venv launcher Windows records
-    beside the first owner started long before.
+    no adopted Job, so any line at all counts there). Terminated: the routine
+    drain's reading (``drain_reading``), None while any of its evidence is
+    unknown. Successor: verified before host quit (``successor_verdict``).
     """
     if shim is None:
         return {}
     lines = reached(shim.reached_file, pid=owner_pid if daemon else None)
-    began, ended = window.get("began"), window.get("ended")
-    span = (began, ended) if began is not None and ended is not None else None
-    probe_ended = window.get("probe_ended")
-    owners = {
-        entry["pid"]
-        for entry in observed
-        if entry.get("kind") == "process.start"
-        and entry.get("in_row") is True
-        and entry.get("actor") == "owner"
-        and began is not None
-        and probe_ended is not None
-        and began <= float(entry.get("t", 0.0)) <= probe_ended
-    }
-    terminated = terminated_by_drain(fates.fates.values(), lines, span)
     return {
         "failed_job_query": True,
         "job_query_reached": bool(lines),
-        "job_member_terminated": bool(terminated),
+        "job_member_terminated": reading.value if reading is not None else None,
         "successor_before_quit": (
-            bool(owners - {owner_pid}) if daemon and owner_pid is not None else None
+            window.get("successor_verified") is True if daemon else None
         ),
     }
+
+
+def job_query_problems(
+    shim: ShimVenv | None,
+    *,
+    fates: Fates,
+    reading: DrainReading | None,
+    window: Mapping[str, Any],
+    script_error: str | None,
+) -> list[str]:
+    """What stops H-R11 from observing the row, in any experiment.
+
+    Not the behaviour under test: a K2 that reads its known '!' still fails on
+    one of these, since the '!' is then not established by complete evidence.
+    """
+    if shim is None:
+        return []
+    problems = []
+    if script_error is not None:
+        problems.append(f"the H-R11 script failed: {script_error}")
+    if not fates.fates:
+        problems.append(
+            "no installer ran when the row closed, so the Job query had no "
+            "member to be asked about"
+        )
+    if reading is None:
+        problems.append("the drain's reading was never taken")
+    else:
+        problems += [f"installer evidence: {unknown}" for unknown in reading.unknown]
+    if window.get("script_ended") is not True:
+        problems.append("the H-R11 script did not run to its end")
+    return problems
 
 
 def r11_reading(result: RowResult) -> str | None:
     """H-R11's reading for the routine drain after the Job query fails.
 
-    ``!`` when a member of another Job the owner holds (the installer) was
-    terminated with exit code 1 during the routine drain while the owner was
-    alive, ``=`` when none was, and None where the query was never reached
-    (K1: no adopted Job) or the row is off this path.
+    ``!`` when the routine drain terminated a member of another Job the owner
+    holds (the installer) after its planted query failed, ``=`` when complete
+    evidence shows it terminated none, and None where the evidence is
+    incomplete or the row is off this path.
     """
     vector = result.vector
     if vector is None or vector.job_member_terminated is None:
@@ -2082,8 +2231,12 @@ def r11_verdict(
     K2 must read ``!`` and must have reached the query. K3 (candidate daemon)
     counts that member and terminates nothing, so it must read ``=``, have
     reached the query, and elected a successor while the host still ran.
+
+    Every experiment also carries the row's observation failures
+    (``job_query_problems``): K2 keeps its known behavioural '!', but not with
+    evidence the harness could not complete or clean up after.
     """
-    problems = list(result.runtime_failures)
+    problems = [*result.runtime_failures, *result.observation_failures]
     if non_windows:
         return [*problems, "H-R11 runs on Windows only; it should be skipped"]
     vector = result.vector
@@ -2102,9 +2255,9 @@ def r11_verdict(
     if experiment == "K2":
         if reading != "!":
             problems.append(
-                "K2 read '=' on H-R11, where the baseline's '!' is known (it "
-                "swallows the failed query and terminates the member): a harness "
-                "defect"
+                f"K2 read {reading!r} on H-R11, where the baseline's '!' is known "
+                f"(it swallows the failed query and terminates the member): a "
+                f"harness defect"
             )
         return problems
     # K3
@@ -2113,8 +2266,14 @@ def r11_verdict(
             "K3 read '!' on H-R11: the candidate terminated a member of another "
             "owned Job on a failed query"
         )
+    elif reading is None:
+        problems.append("K3 has no complete reading of the routine drain")
     if vector is not None and vector.successor_before_quit is not True:
-        problems.append("the candidate elected no successor while the host still ran")
+        why = ((result.owner or {}).get("successor") or {}).get("problems")
+        problems.append(
+            "the candidate elected no successor while the host still ran"
+            + (f": {'; '.join(why)}" if why else "")
+        )
     return problems
 
 
@@ -2237,6 +2396,10 @@ class RowResult:
     failures: list[str] = field(default_factory=list)
     #: A frozen row whose actors could not be shown to run the baseline.
     runtime_failures: list[str] = field(default_factory=list)
+    #: What kept the row from observing or cleaning up (H-R11's installer
+    #: evidence, its script): also in ``failures``, and checked in every
+    #: experiment, a known-bad control included.
+    observation_failures: list[str] = field(default_factory=list)
     #: H-R6: what the harness killed, its guardian and the oracle's state.
     killed: dict[str, Any] | None = None
     o2: O2Result | None = None
@@ -2671,6 +2834,11 @@ async def measure_host_quit_row(
     stall: StallHost | None = None
     fates = Fates()
     job_window: dict[str, Any] = {}
+    #: H-R11 daemon: the owner the descriptor named after the probe, and why it
+    #: is not shown to be a successor that served it (``successor_verdict``).
+    successor: dict[str, Any] = {}
+    #: The routine drain's reading, taken once the installers have settled.
+    drain: DrainReading | None = None
     if shim is not None:
         # Every planted failure of an earlier row in the same venv is not ours.
         shim.reached_file.unlink(missing_ok=True)
@@ -2823,18 +2991,19 @@ async def measure_host_quit_row(
         (account.auth_root / "browser-install.json").unlink(missing_ok=True)
         emit("harness", "job_query.window", phase="held back", held=str(held))
         await call(READ_TOOL, READ_TOOL_ARGUMENTS)
-        members = await asyncio.to_thread(wait_for_installers, watcher.observed)
-        for process, start in members:
-            fates.watch(process, start)
+        members = await asyncio.to_thread(
+            wait_for_installers, watcher.observed, watch=fates.watch
+        )
         emit(
             "harness",
             "job_query.window",
             phase="installer",
-            installers=[[process.pid, start] for process, start in members],
+            installers=[list(member) for member in members],
         )
         closed = await call("close_session", {})
         job_window.update(began=closed["began"], ended=closed["ended"])
         emit("harness", "job_query.window", phase="close", **job_window)
+        watch_late_installers()
         # Back before the next call, so a successor's setup finds everything
         # and it can serve and later leave through its idle exit; an installer
         # already waiting on the stall host waits on regardless.
@@ -2857,6 +3026,10 @@ async def measure_host_quit_row(
         )
         probe = await call(READ_TOOL, READ_TOOL_ARGUMENTS)
         job_window["probe_ended"] = probe["ended"]
+        job_window["probe"] = {
+            name: probe.get(name)
+            for name in ("began", "ended", "is_error", "read_the_post")
+        }
         emit(
             "harness",
             "job_query.window",
@@ -2864,6 +3037,66 @@ async def measure_host_quit_row(
             owner_left_before_probe=job_window["owner_left_before_probe"],
             probe_ended=probe["ended"],
             probe_error=probe.get("is_error"),
+            probe_read_the_post=probe.get("read_the_post"),
+        )
+        watch_late_installers()
+        if daemon:
+            await verify_the_successor(job_window["probe"])
+        job_window["script_ended"] = True
+
+    def watch_late_installers() -> None:
+        """Watch installer lifetimes the first look missed, while they still run."""
+        for pid, start in installer_starts(watcher.observed()):
+            fates.watch(pid, start, required=False)
+
+    def find_the_successor(closing: OwnerIdentity | None, close_began: float) -> None:
+        """Which owner the descriptor names now, and whether it replaced *closing*."""
+        found: OwnerIdentity | None = None
+        successor.pop("identify_error", None)
+        try:
+            published = daemon_descriptor.read(account.auth_root)
+        except Exception as exc:  # noqa: BLE001 - the row reports it
+            successor["identify_error"] = f"{type(exc).__name__}: {exc}"
+            published = None
+        if published is not None:
+            found, problem = identify_owner(published, account, watcher.observed())
+            if problem is not None:
+                successor["identify_error"] = problem
+            successor.update(pid=published.pid, instance_id=published.instance_id)
+        problems = successor_problems(
+            watcher.observed(), closing, found, close_began=close_began
+        )
+        # The watcher's first sight of a process is when it sampled it, not
+        # when it began; on Windows the creation time is the kernel's own, on
+        # the same clock as the close's start.
+        if found is not None and found.create_time < close_began:
+            problems.append(
+                f"pid {found.pid} was created at {found.create_time}, before the "
+                f"close began at {close_began}"
+            )
+        successor["problems"] = problems
+
+    async def verify_the_successor(probe: Mapping[str, Any]) -> None:
+        """Before the host quits: a new owner, and only it, served the probe."""
+        left = job_window.get("owner_left_before_probe")
+        close_began = job_window.get("began")
+        served = not probe.get("is_error") and bool(probe.get("read_the_post"))
+        if served and left is True and close_began is not None:
+            deadline = time.monotonic() + _SUCCESSOR_SECONDS
+            while True:
+                await asyncio.to_thread(find_the_successor, identified, close_began)
+                if not successor["problems"] or time.monotonic() >= deadline:
+                    break
+                await asyncio.sleep(0.2)
+        successor["problems"] = successor_verdict(
+            probe=probe, left=left, problems=successor.get("problems")
+        )
+        successor["verified"] = not successor["problems"]
+        job_window["successor_verified"] = successor["verified"]
+        emit(
+            "harness",
+            "owner.successor",
+            **{name: value for name, value in successor.items()},
         )
 
     async def after_call() -> None:
@@ -2932,6 +3165,8 @@ async def measure_host_quit_row(
                 owner.clear()
                 owner.update(killed_record)
             owner["replaced_after_kill"] = replaced
+            if shim is not None:
+                owner["successor"] = dict(successor)
         if host.tool is not None:
             emit("host_stub", "tool.result", tool=READ_TOOL, **host.tool)
         emit(
@@ -2980,6 +3215,11 @@ async def measure_host_quit_row(
             # Ended with their Jobs when the server or owner went; then the
             # held-back dependency is put back before anything else runs.
             await asyncio.to_thread(fates.settle, _BROWSER_GONE_SECONDS)
+            # Every owner that could drain has exited, so the shim's records
+            # are final: the reading, and whether its evidence is complete.
+            drain = job_query_reading(
+                shim, fates=fates, owner_pid=job_window.get("owner_pid"), daemon=daemon
+            )
         residual = await asyncio.to_thread(
             wait_for_no_browser, account, _BROWSER_GONE_SECONDS
         )
@@ -3106,6 +3346,19 @@ async def measure_host_quit_row(
     )
     if expect_owner and identified is None:
         refusals.append("the row's owner was never identified")
+    observation = job_query_problems(
+        shim,
+        fates=fates,
+        reading=drain,
+        window=job_window,
+        script_error=host.script_error,
+    )
+    if shim is not None:
+        # An installer whose end was not observed may still be running on the
+        # profile's setup, so no session starts after the row until every one
+        # of them is an observed exit, and every lifetime the drain asked
+        # about is one of them.
+        refusals += [f"H-R11 evidence incomplete: {p}" for p in observation]
     post_quit: PostQuit | None
     if refusals:
         # Nothing is launched. The session's fate after the row is unknown, and
@@ -3161,10 +3414,9 @@ async def measure_host_quit_row(
             killed=killed or None,
             **job_query_observations(
                 shim,
-                fates=fates,
+                reading=drain,
                 window=job_window,
                 owner_pid=job_window.get("owner_pid"),
-                observed=observed_events,
                 daemon=daemon,
             ),
         )
@@ -3176,17 +3428,18 @@ async def measure_host_quit_row(
             "harness",
             "shim.reached",
             lines=reached(shim.reached_file),
+            terminations=terminations(shim.reached_file),
             shim_sha256=shim.shim_sha256,
         )
-        if not fates.fates:
-            result.failures.append(
-                "no installer ran when the row closed, so the Job query had no "
-                "member to be asked about"
-            )
         if fates.alive():
-            result.failures.append(
+            observation.append(
                 f"installers outlived the row: {[f.pid for f in fates.alive()]}"
             )
+        # A known-bad control keeps its behaviour, never a failure to observe
+        # or to clean up after it.
+        observation += [f"teardown: {problem}" for problem in teardown]
+        result.observation_failures = observation
+        result.failures += [p for p in observation if not p.startswith("teardown: ")]
     result.killed = killed or None
     result.o2 = o2
     result.failures += result.runtime_failures
