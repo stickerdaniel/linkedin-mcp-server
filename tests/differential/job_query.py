@@ -1053,11 +1053,11 @@ class DrainReading:
     """What the routine drain did to the members it asked about, or why that
     is unknown."""
 
-    #: Installer lifetimes it terminated, each after its planted query, each
-    #: then seen to end with code 1.
+    #: Confirmed: installer lifetimes it terminated successfully, each after
+    #: its planted query on that lifetime, each then seen to end with code 1.
     terminated: list[Fate] = field(default_factory=list)
-    #: Terminations it attempted on an installer that did not succeed, or
-    #: whose end was never recorded: an attempt is the same act.
+    #: Terminations of an installer it attempted and that failed: a forbidden
+    #: act, never a confirmed one.
     attempted: list[dict[str, Any]] = field(default_factory=list)
     #: Terminations, of any outcome, of a known row process that is no
     #: installer (the owner's gate, its launcher, a console host).
@@ -1066,10 +1066,29 @@ class DrainReading:
 
     @property
     def value(self) -> bool | None:
-        """True for '!', False for '=', None when the evidence is incomplete."""
+        """True for '!', False for '=', None for anything else.
+
+        '!' is only a confirmed termination: the positive control K2 is
+        calibrated by. '=' is only no act at all, on complete evidence. An
+        attempt or a known row process's termination without a confirmed one
+        is a forbidden act that proves no termination, and incomplete
+        evidence proves nothing: both are None, which neither calibrates K2
+        nor passes K3.
+        """
         if self.unknown:
             return None
-        return bool(self.terminated or self.attempted or self.others)
+        if self.terminated:
+            return True
+        if self.attempted or self.others:
+            return None
+        return False
+
+    def acts(self) -> list[str]:
+        """What the drain did short of a confirmed termination, for a report."""
+        return [
+            *(f"attempted {line.get('member')}" for line in self.attempted),
+            *(f"terminated row process {line.get('member')}" for line in self.others),
+        ]
 
 
 def drain_reading(
@@ -1087,9 +1106,12 @@ def drain_reading(
     ``TerminateProcess`` call the routine drain made (``ROUTINE_DRAIN``)
     after the planted query on that same lifetime. Shared setup shutdown ends
     the installer through ``TerminateJobObject`` with the same code 1, and no
-    receipt time or exit time tells the two apart; only the caller does. A
-    call that failed, or whose end was never recorded, is an attempt, and an
-    attempt is the act too: it never reads as '='.
+    receipt time or exit time tells the two apart; only the caller does.
+    Three outcomes stay apart (``DrainReading.value``): a confirmed
+    termination (the call succeeded, and that same lifetime then ended with
+    code 1); a failed call, which is an attempt, a forbidden act but no
+    termination; and a call whose end was never recorded, which may not have
+    run at all and is unknown.
 
     Each member the drain asked about is placed by its lifetime (pid and
     creation time): a watched installer, a row process *known_other* shows is
@@ -1097,8 +1119,8 @@ def drain_reading(
     and so no reading at all, whenever the evidence is not complete: the
     records' own *health* problems (``shim_log``), a relevant fate that is
     not an observed exit, an unplaced queried or terminated lifetime, a
-    termination with no planted query before it, or a successful one whose
-    installer did not then end with code 1.
+    termination with no planted query before it or no recorded end, or a
+    successful one whose installer did not then end with code 1.
     """
     fates = list(fates)
     reading = DrainReading(unknown=list(health))
@@ -1157,10 +1179,19 @@ def drain_reading(
             reading.others.append(line)
             continue
         relevant.add(key)
+        if line.get("succeeded") is None:
+            # It began and no end was recorded: it may not have run at all.
+            reading.unknown.append(
+                f"the routine drain's termination of installer {found.pid} began "
+                f"and no end was recorded"
+            )
+            continue
         if line.get("succeeded") is not True:
             reading.attempted.append(line)
             continue
-        if found.settled and (
+        if not found.settled:
+            continue  # unknown below, as a relevant fate that did not settle
+        if (
             found.exit_code != 1
             or found.kernel_exit is None
             or found.kernel_exit < began

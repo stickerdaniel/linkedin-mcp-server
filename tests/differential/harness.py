@@ -2210,8 +2210,79 @@ def wait_for_installers(
         time.sleep(0.1)
 
 
+#: Where a row lifetime's recorded ancestry leads (``Lineage.of``).
+INSTALLER = "installer"
+BELOW_INSTALLER = "below an installer"
+FROM_HARNESS = "from the harness"
+UNRESOLVED = "unresolved"
+
+
+class Lineage:
+    """Where each row lifetime's recorded ancestry leads, parent by parent.
+
+    ``installer`` for an installer by its own record (``is_installer``);
+    ``below an installer`` when a recorded ancestor is one, whatever the
+    lifetime's own command; ``from the harness`` only when every link up to a
+    process the harness itself started (*outside*, the harness's own pid) is
+    a recorded row lifetime and none of them is an installer; ``unresolved``
+    otherwise: a parent the watcher never recorded, a link outside the row,
+    or a loop. Measured on Windows (run 36410976409, K2): the owner's release
+    gate, its Python child and that child's console host trace, through the
+    frontend and its launcher, to the harness pid that also started the
+    row's canaries.
+    """
+
+    def __init__(
+        self, observed: Iterable[Mapping[str, Any]], *, outside: Iterable[int] = ()
+    ) -> None:
+        records = list(observed)
+        self.outside = frozenset(outside) or frozenset({os.getpid()})
+        self.history = ProcessHistory(records, outside=self.outside)
+        self.installers = installer_starts(records)
+        self._memo: dict[tuple[int, float], str] = {}
+
+    def _is_installer(self, life: Lifetime) -> bool:
+        return any(
+            life.pid == pid and abs(life.start - start) <= _START_TOLERANCE_SECONDS
+            for pid, start in self.installers
+        )
+
+    def of(self, life: Lifetime) -> str:
+        if life.identity in self._memo:
+            return self._memo[life.identity]
+        answer = UNRESOLVED
+        current: Lifetime | None = life
+        seen: set[tuple[int, float]] = set()
+        while current is not None and current.identity not in seen:
+            seen.add(current.identity)
+            if self._is_installer(current):
+                answer = INSTALLER if current is life else BELOW_INSTALLER
+                break
+            if not current.in_row:
+                break
+            if current.ppid in self.outside:
+                answer = FROM_HARNESS
+                break
+            current = self.history.at(current.ppid, current.first_t)
+        self._memo[life.identity] = answer
+        return answer
+
+    def lifetime(self, pid: Any, created: Any) -> Lifetime | None:
+        """The one row lifetime recorded at *pid* with creation time *created*."""
+        if not isinstance(pid, int) or not isinstance(created, (int, float)):
+            return None
+        lives = [
+            life
+            for life in self.history.lifetimes
+            if life.pid == pid
+            and life.in_row
+            and abs(life.start - float(created)) <= _START_TOLERANCE_SECONDS
+        ]
+        return lives[0] if len(lives) == 1 else None
+
+
 def known_non_installer(
-    observed: Iterable[Mapping[str, Any]],
+    observed: Iterable[Mapping[str, Any]], *, outside: Iterable[int] = ()
 ) -> Callable[[Any, Any], bool]:
     """Whether a lifetime is a row process shown to be no installer.
 
@@ -2219,41 +2290,16 @@ def known_non_installer(
     36410976409, K2) the drain also asked about the owner's release gate, its
     Python child and that child's console host, all started with the owner
     eight seconds before any installer. Such a member is placed only when the
-    watcher recorded exactly that lifetime (pid and creation time) in the
-    row, it is no installer, and no ancestor it can be traced to is one. An
-    installer's descendant the row did not watch, or a lifetime it never
-    recorded, is not placed.
+    watcher recorded exactly that lifetime (pid and creation time) in the row
+    and its whole recorded ancestry leads to the harness with no installer on
+    the way (``Lineage``). A parent nobody recorded places nothing: it could
+    have been an installer.
     """
-    records = list(observed)
-    history = ProcessHistory(records, outside=[os.getpid()])
-    installers = installer_starts(records)
-
-    def installer(life: Lifetime) -> bool:
-        return any(
-            life.pid == pid and abs(life.start - start) <= _START_TOLERANCE_SECONDS
-            for pid, start in installers
-        )
+    lineage = Lineage(observed, outside=outside)
 
     def placed(member: Any, created: Any) -> bool:
-        if not isinstance(member, int) or not isinstance(created, (int, float)):
-            return False
-        lives = [
-            life
-            for life in history.lifetimes
-            if life.pid == member
-            and life.in_row
-            and abs(life.start - float(created)) <= _START_TOLERANCE_SECONDS
-        ]
-        if len(lives) != 1:
-            return False
-        current: Lifetime | None = lives[0]
-        seen: set[tuple[int, float]] = set()
-        while current is not None and current.identity not in seen:
-            if installer(current):
-                return False
-            seen.add(current.identity)
-            current = history.at(current.ppid, current.first_t)
-        return current is None
+        life = lineage.lifetime(member, created)
+        return life is not None and lineage.of(life) == FROM_HARNESS
 
     return placed
 
@@ -2290,26 +2336,64 @@ def job_query_reading(
 
 
 def installer_inventory(
-    observed: Iterable[Mapping[str, Any]], fates: Fates
+    observed: Iterable[Mapping[str, Any]],
+    fates: Fates,
+    *,
+    outside: Iterable[int] = (),
 ) -> list[str]:
-    """Every installer lifetime the watcher recorded that is not shown ended.
+    """Every lifetime setup could have left running that is not shown ended.
 
-    Ended is an exit observed through the row's own handle, or the watcher
-    seeing that lifetime leave the process table; a handle that could not be
-    opened or read, or a lifetime nobody saw leave, is neither.
+    That is every installer, every row lifetime recorded below one whatever
+    its own command (a console host, a helper), every lifetime the row
+    watched, and every row lifetime whose ancestry is unresolved and that
+    appeared once setup had begun: it could be below an installer. Ended is
+    an exit observed through the row's own handle, or the watcher seeing
+    that lifetime leave the process table; a handle that could not be opened
+    or read, or a lifetime nobody saw leave, is neither.
     """
     records = list(observed)
+    lineage = Lineage(records, outside=outside)
     gone = [
         (record.get("pid"), record.get("start_identity"))
         for record in records
         if record.get("kind") == "process.exit"
     ]
+    setup_began = min(
+        (
+            life.first_t
+            for life in lineage.history.lifetimes
+            if lineage.of(life) == INSTALLER
+        ),
+        default=None,
+    )
+    inventory: dict[tuple[int, float], str] = {}
+    for life in lineage.history.lifetimes:
+        if not life.in_row:
+            continue
+        kind = lineage.of(life)
+        if kind in (INSTALLER, BELOW_INSTALLER) or (
+            kind == UNRESOLVED
+            and setup_began is not None
+            and life.first_t >= setup_began
+        ):
+            inventory[(life.pid, life.start)] = kind
+    for key in fates.fates:
+        if not any(
+            key[0] == pid and abs(key[1] - start) <= _START_TOLERANCE_SECONDS
+            for pid, start in inventory
+        ):
+            inventory[key] = "watched"
     problems = []
-    # Every installer the watcher recorded, and every one the row watched.
-    inventory = installer_starts(records)
-    inventory += [key for key in fates.fates if key not in inventory]
-    for pid, start in inventory:
-        fate = fates.fates.get((pid, start))
+    for (pid, start), kind in inventory.items():
+        fate = next(
+            (
+                fate
+                for fate in fates.fates.values()
+                if fate.pid == pid
+                and abs(fate.start - start) <= _START_TOLERANCE_SECONDS
+            ),
+            None,
+        )
         if fate is not None and fate.settled:
             continue
         if any(
@@ -2321,7 +2405,7 @@ def installer_inventory(
             continue
         why = f": {fate.problem}" if fate is not None and fate.problem else ""
         problems.append(
-            f"installer {pid} created {start} was neither seen to exit nor "
+            f"pid {pid} ({kind}), created {start}, was neither seen to exit nor "
             f"settled through its handle{why}"
         )
     return problems
@@ -2542,12 +2626,18 @@ def r11_verdict(
         return problems
     if vector is not None and not vector.job_query_reached:
         problems.append("the failing Job-membership query was never reached")
+    acts = result.drain.acts() if result.drain is not None else []
     if experiment == "K2":
         if reading != "!":
             problems.append(
                 f"K2 read {reading!r} on H-R11, where the baseline's '!' is known "
                 f"(it swallows the failed query and terminates the member): a "
                 f"harness defect"
+                + (
+                    f"; only acts short of a confirmed termination: {acts}"
+                    if acts
+                    else ""
+                )
             )
         return problems
     # K3
@@ -2555,6 +2645,10 @@ def r11_verdict(
         problems.append(
             "K3 read '!' on H-R11: the candidate terminated a member of another "
             "owned Job on a failed query"
+        )
+    elif acts:
+        problems.append(
+            f"K3's routine drain acted on members it could not place: {acts}"
         )
     elif reading is None:
         problems.append("K3 has no complete reading of the routine drain")
@@ -2690,6 +2784,9 @@ class RowResult:
     #: evidence, its script): also in ``failures``, and checked in every
     #: experiment, a known-bad control included.
     observation_failures: list[str] = field(default_factory=list)
+    #: H-R11: the routine drain's reading, with its acts short of a confirmed
+    #: termination.
+    drain: DrainReading | None = None
     #: H-R6: what the harness killed, its guardian and the oracle's state.
     killed: dict[str, Any] | None = None
     o2: O2Result | None = None
@@ -3770,6 +3867,7 @@ async def measure_host_quit_row(
         # or to clean up after it.
         observation += [f"teardown: {problem}" for problem in teardown]
         result.observation_failures = observation
+        result.drain = drain
         result.failures += [p for p in observation if not p.startswith("teardown: ")]
     result.killed = killed or None
     result.o2 = o2

@@ -396,10 +396,12 @@ async def test_every_queried_lifetime_must_be_a_watched_one(
     # own gate (run 36410976409), a row process that is no installer.
     role = "installer" if recorded != "owner-gate" else "owner"
     late = dict(_started(702, 4242, 2.0, role), start_identity=9.0)
+    # The frontend, started by the harness: the gate's chain is complete.
+    frontend = _started(4242, os.getpid(), 1.0, "frontend")
     result, calls = await row(
         processes=[],
         summary=_SETTLED,
-        observed=[late] if recorded else [],
+        observed=[frontend, late] if recorded else [],
         daemon=False,
         job_query_shim=shim,
     )
@@ -557,6 +559,84 @@ async def test_k2_requires_a_successful_host_quit(
         assert any(expected in problem for problem in host_problems)
         assert all(problem in problems for problem in host_problems)
         assert preservation_calls == 0
+
+
+def _owner_stream(path: Path, *, outcome: bool | None, owner: int = 42) -> None:
+    """The closing owner's records as its shim writes them: ready, the planted
+    query on installer 700, and the routine drain's termination of it, begun
+    and ended with *outcome* (None: no end was recorded)."""
+    lines: list[dict[str, Any]] = [
+        {"kind": "ready", "created": 1.0, "fault": True, "observer": True, "t": 3.0},
+        {"kind": "query", "t": 4.0, "member": 700, "created": 9.0, "job": 55},
+        {
+            "kind": "terminate",
+            "phase": "begin",
+            "call": 1,
+            "caller": job_query.ROUTINE_DRAIN,
+            "member": 700,
+            "created": 9.0,
+            "t": 5.0,
+        },
+    ]
+    if outcome is not None:
+        lines.append(
+            {
+                "kind": "terminate",
+                "phase": "end",
+                "call": 1,
+                "succeeded": outcome,
+                "t": 5.1,
+            }
+        )
+    with path.open("a") as stream:
+        for number, line in enumerate(lines, start=1):
+            stream.write(
+                json.dumps(dict(line, pid=owner, token="owner", seq=number)) + "\n"
+            )
+
+
+@pytest.mark.parametrize(
+    ("experiment", "outcome", "calibrated"),
+    [
+        pytest.param("K2", True, True, id="k2-confirmed"),
+        pytest.param("K2", False, False, id="k2-failed-call"),
+        pytest.param("K2", None, False, id="k2-no-recorded-end"),
+        pytest.param("K3", False, False, id="k3-failed-call"),
+    ],
+)
+async def test_only_a_confirmed_termination_calibrates_k2(
+    row, monkeypatch, tmp_path, experiment, outcome, calibrated
+):
+    # E1EU-02, from the owner's records through the row to the verdict: the
+    # baseline's positive control is a termination that succeeded on the
+    # lifetime asked about, which then ended with code 1 (the watched fate
+    # here: code 1 at 11). A failed call is a forbidden act, a missing end is
+    # unknown; neither calibrates K2, and neither passes K3.
+    shim = _job_query_row(monkeypatch, tmp_path, _Native())
+    real = harness.job_query_reading
+
+    def reading(shim, **kwargs):
+        _owner_stream(shim.reached_file, outcome=outcome)
+        return real(shim, **kwargs)
+
+    monkeypatch.setattr(harness, "job_query_reading", reading)
+    result, _ = await row(
+        processes=[], summary=_SETTLED, job_query_shim=shim, experiment=experiment
+    )
+    assert result.vector is not None
+    assert result.vector.job_query_reached is True
+    problems = harness.r11_verdict(result, experiment=experiment, non_windows=False)
+    defect = [p for p in problems if "harness defect" in p or "acted on" in p]
+    if calibrated:
+        assert result.vector.job_member_terminated is True
+        assert defect == [] and harness.r11_reading(result) == "!"
+    else:
+        assert result.vector.job_member_terminated is None
+        assert defect, problems
+    if outcome is False:
+        assert any("attempted 700" in p for p in defect)
+    if outcome is None:
+        assert any("no end was recorded" in p for p in problems)
 
 
 async def test_failed_private_setup_closes_the_listener_and_removes_its_links(

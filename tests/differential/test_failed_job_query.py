@@ -665,7 +665,7 @@ def _query(t: float = _K2_QUERY, member: int = 700, created: float = 9.0) -> dic
 def _terminate(
     caller: str = ROUTINE_DRAIN,
     *,
-    succeeded: bool = True,
+    succeeded: bool | None = True,
     began: float = _K2_TERMINATE,
     member: int = 700,
     created: float = 9.0,
@@ -703,18 +703,43 @@ def test_the_hard_exit_drain_is_not_the_routine_bang():
     assert drain_reading([_ended()], [_query()], [line]).value is False
 
 
-@pytest.mark.parametrize(
-    "outcome", [False, None], ids=["failed-call", "no-recorded-end"]
-)
-def test_an_attempt_the_routine_drain_made_is_never_equal(outcome):
-    # A termination that failed, or whose end was never recorded, was still
-    # tried on a member the drain could not place: the act, not '='.
-    reading = drain_reading([_ended()], [_query()], [_terminate(succeeded=outcome)])
-    assert reading.value is True and reading.terminated == []
+def test_a_failed_termination_is_an_attempt_never_a_termination():
+    # E1EU-02: a forbidden act, so never '=', and no calibration either.
+    reading = drain_reading([_ended()], [_query()], [_terminate(succeeded=False)])
+    assert reading.value is None and reading.terminated == []
     assert [line["member"] for line in reading.attempted] == [700]
+    assert reading.unknown == []
 
 
-def test_a_known_row_process_the_drain_terminated_is_the_act_too():
+def test_a_success_on_an_installer_whose_end_was_not_observed_confirms_nothing():
+    reading = drain_reading(
+        [_ended(exit_code=None, kernel_exit=None, exited_at=None)],
+        [_query()],
+        [_terminate()],
+    )
+    assert reading.value is None and reading.terminated == []
+
+
+def test_a_termination_with_no_recorded_end_is_unknown():
+    # E1EU-02: the begin is written before the call, which may never have run.
+    reading = drain_reading([_ended()], [_query()], [_terminate(succeeded=None)])
+    assert reading.value is None and reading.attempted == []
+    assert any("no end was recorded" in unknown for unknown in reading.unknown)
+
+
+def test_a_confirmed_termination_beside_an_attempt_is_the_witness():
+    # Run 36410976409, K2: some calls failed, others terminated installers.
+    other = Fate(701, 9.5, exit_code=1, kernel_exit=_K2_EXIT)
+    reading = drain_reading(
+        [_ended(), other],
+        [_query(), _query(member=701, created=9.5)],
+        [_terminate(), _terminate(member=701, created=9.5, succeeded=False)],
+    )
+    assert reading.value is True
+    assert [f.pid for f in reading.terminated] == [700]
+
+
+def test_a_known_row_process_the_drain_terminated_is_an_act_not_a_witness():
     # Run 36410976409, K2: the drain also asked about, and terminated, the
     # owner's gate and console host, row processes that are no installer.
     gate = dict(_query(member=3572, created=1.0))
@@ -724,8 +749,9 @@ def test_a_known_row_process_the_drain_terminated_is_the_act_too():
         [_terminate(member=3572, created=1.0)],
         known_other=lambda member, created: (member, created) == (3572, 1.0),
     )
-    assert reading.unknown == [] and reading.value is True
+    assert reading.unknown == [] and reading.value is None
     assert [line["member"] for line in reading.others] == [3572]
+    assert reading.acts() == ["terminated row process 3572"]
     # Asked about and left alone, it changes nothing.
     left = drain_reading(
         [_ended()],
@@ -1150,10 +1176,15 @@ def _gone(pid, start, t):
     return {"kind": "process.exit", "t": t, "pid": pid, "start_identity": start}
 
 
-#: Run 36410976409, K2, as the watcher recorded it: the owner's release gate
-#: (3572), its Python child (7708) and that child's console host (1276), eight
-#: seconds before the installer's supervisor (880) and a worker below it.
+#: Run 36410976409, K2, as the watcher recorded it: the frontend's launcher
+#: (6076, a child of the harness, which also started the row's canaries) and
+#: the frontend (6928), the owner's release gate (3572), its Python child
+#: (7708) and that child's console host (1276), eight seconds before the
+#: installer's supervisor (880) and a worker below it. Here the harness is
+#: this process.
 _K2_ROW = [
+    _seen(6076, os.getpid(), 678.2, "frontend", ("venv\\python.exe", "-m", "x")),
+    _seen(6928, 6076, 678.25, "frontend", ("venv\\python.exe", "-m", "x")),
     _seen(3572, 6928, 678.378, "owner", ("venv\\python.exe", "-I", "-S", "-u")),
     _seen(7708, 3572, 678.383, "owner", ("venv\\python.exe", "-I", "-S", "-u")),
     _seen(1276, 7708, 678.386, "other", ("conhost.exe", "0x4")),
@@ -1181,6 +1212,23 @@ def test_only_a_recorded_row_process_outside_every_installer_is_placed(
     member, created, known
 ):
     assert known_non_installer(_K2_ROW)(member, created) is known
+
+
+@pytest.mark.parametrize(
+    "missing", [6076, 6928, 3572], ids=["launcher", "frontend", "gate"]
+)
+def test_a_parent_nobody_recorded_places_nothing(missing):
+    # E1EU-03: with any link of the chain unrecorded, the console host could
+    # sit below an installer; that is unknown, never a known row process.
+    records = [r for r in _K2_ROW if r["pid"] != missing]
+    assert known_non_installer(records)(1276, 678.386) is False
+
+
+def test_a_link_outside_the_row_places_nothing():
+    # The frontend recorded, but not as one of the row's own processes: the
+    # chain does not reach the harness through the row.
+    records = [dict(r, in_row=False) if r["pid"] == 6928 else r for r in _K2_ROW]
+    assert known_non_installer(records)(1276, 678.386) is False
 
 
 def test_the_measured_k2_members_read_bang_once_placed():
@@ -1219,18 +1267,38 @@ def test_the_measured_k2_members_read_bang_once_placed():
 # --- The installer inventory, before any session after the row ---------------------
 
 
+def _unended(problems: list[str]) -> list[int]:
+    return sorted(int(p.split()[1]) for p in problems)
+
+
 def test_every_installer_lifetime_must_be_shown_ended():
     fates = Fates(_Native())
     fates.fates[(880, 686.896)] = Fate(880, 686.896, exit_code=1, kernel_exit=690.9)
     fates.fates[(4040, 687.182)] = Fate(4040, 687.182, problem="PermissionError()")
-    records = [*_K2_ROW, _seen(5000, 880, 688.0, "installer")]
+    records = [
+        *_K2_ROW,
+        _seen(5000, 880, 688.0, "installer"),
+        # Started once setup had, below a parent nobody recorded.
+        _seen(5100, 5099, 689.0, "other"),
+        # Started before setup, with a parent nobody recorded: not setup's.
+        _seen(5200, 5199, 600.0, "other"),
+    ]
     problems = installer_inventory(records, fates)
-    # 880 settled through its handle; 4040's handle failed and nobody saw it
-    # leave; 5000 was never watched and nobody saw it leave either.
-    assert [p.split()[1] for p in problems] == ["4040", "5000"]
-    assert "PermissionError" in problems[0]
+    # 880 settled through its handle. 4040's handle failed; 4100 is a console
+    # host below the installer, 5000 an installer nobody watched, 5100 of
+    # unresolved lineage since setup began: none was seen to leave. The
+    # owner's gate, its child and its console host trace to the harness.
+    assert _unended(problems) == [4040, 4100, 5000, 5100]
+    assert any("PermissionError" in p for p in problems)
+    assert any("4100 (below an installer)" in p for p in problems)
     # The watcher seeing a lifetime leave the table is an observed end.
-    gone = [*records, _gone(4040, 687.182, 690.95), _gone(5000, 688.0, 690.96)]
+    gone = [
+        *records,
+        _gone(4040, 687.182, 690.95),
+        _gone(4100, 687.300, 690.95),
+        _gone(5000, 688.0, 690.96),
+        _gone(5100, 689.0, 690.97),
+    ]
     assert installer_inventory(gone, fates) == []
 
 
