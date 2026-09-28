@@ -585,8 +585,9 @@ _RELEASED_LOGINS = {
     5: "renovate[bot]",
 }
 
-# Each author's merged pull requests: (total_count, numbers returned). The
-# owner and the bot are absent, so searching for either fails the step.
+# Each author's merged pull requests: (total_count, numbers returned), plus
+# an optional incomplete_results flag. The owner and the bot are absent, so
+# searching for either fails the step.
 _RELEASED_SEARCHES = {
     # #1 was merged in 4.25.0, so this is not a first contribution.
     "ConnorMoss02": (2, [3, 1]),
@@ -635,7 +636,7 @@ sys.stdout.write(answer.stdout)
 def _fake_gh(
     bin_dir: Path,
     logins: dict[int, str],
-    searches: dict[str, tuple[int, list[int]]],
+    searches: dict[str, tuple[Any, ...]],
 ) -> None:
     """Put a `gh` on PATH that knows these pull requests and searches."""
     assert shutil.which("jq"), "the fake gh evaluates the step's --jq with jq"
@@ -646,10 +647,10 @@ def _fake_gh(
         }
         for number, login in logins.items()
     }
-    for login, (total, numbers) in searches.items():
+    for login, (total, numbers, *incomplete) in searches.items():
         responses[f"q=repo:{_REPOSITORY} is:pr is:merged author:{login}"] = {
             "total_count": total,
-            "incomplete_results": False,
+            "incomplete_results": bool(incomplete and incomplete[0]),
             "items": [{"number": number} for number in numbers],
         }
     (bin_dir / "responses.json").write_text(json.dumps(responses), encoding="utf-8")
@@ -678,7 +679,7 @@ def _run_compose_step(
     *,
     tag_on_origin: bool,
     logins: dict[int, str] = _RELEASED_LOGINS,
-    searches: dict[str, tuple[int, list[int]]] = _RELEASED_SEARCHES,
+    searches: dict[str, tuple[Any, ...]] = _RELEASED_SEARCHES,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     """Run the workflow's own compose step in a repo that just bumped 4.26.0."""
     step = _step(_workflow()["jobs"]["check-version-bump"], "Compose release notes")
@@ -777,11 +778,26 @@ def _run_compose_step(
             {**_RELEASED_SEARCHES, "Ymx1ZQ": (101, [4])},
             "@Ymx1ZQ, @ConnorMoss02, @stickerdaniel",
         ),
+        # A search that timed out may have missed an older pull request.
+        (
+            {**_RELEASED_SEARCHES, "Ymx1ZQ": (1, [4], True)},
+            "@Ymx1ZQ, @ConnorMoss02, @stickerdaniel",
+        ),
+        # A search that found nothing proves nothing.
+        (
+            {**_RELEASED_SEARCHES, "Ymx1ZQ": (0, [])},
+            "@Ymx1ZQ, @ConnorMoss02, @stickerdaniel",
+        ),
     ],
-    ids=["first-contribution", "more-than-one-page"],
+    ids=[
+        "first-contribution",
+        "more-than-one-page",
+        "incomplete-search",
+        "empty-search",
+    ],
 )
 def test_compose_step_writes_the_new_versions_notes(
-    tmp_path: Path, searches: dict[str, tuple[int, list[int]]], contributors: str
+    tmp_path: Path, searches: dict[str, tuple[Any, ...]], contributors: str
 ) -> None:
     result, output = _run_compose_step(tmp_path, tag_on_origin=True, searches=searches)
 

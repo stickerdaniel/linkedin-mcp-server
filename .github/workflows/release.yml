@@ -96,8 +96,11 @@ jobs:
             MERGED=$(gh api -X GET search/issues \
               -f q="repo:$GITHUB_REPOSITORY is:pr is:merged author:$LOGIN" \
               -f per_page=100 \
-              --jq '[.total_count, .items[].number] | map(tostring) | join(" ")')
-            FIRST=$(python3 -c 'import sys; total, *merged = sys.argv[1].split(); print(int(total) <= 100 and set(merged) <= set(sys.argv[2].split()))' \
+              --jq '[.incomplete_results, .total_count, .items[].number] | map(tostring) | join(" ")')
+            # Only a complete search that finds this release's pull request and
+            # nothing older names a first contribution; a search that timed out
+            # or found nothing leaves the author unmarked.
+            FIRST=$(python3 -c 'import sys; incomplete, total, *merged = sys.argv[1].split(); print(incomplete == "false" and bool(merged) and int(total) <= 100 and set(merged) <= set(sys.argv[2].split()))' \
               "$MERGED" "$PULLS")
             if [ "$FIRST" = True ]; then
               echo "$LOGIN" >> "$RUNNER_TEMP/first-contributors.txt"
