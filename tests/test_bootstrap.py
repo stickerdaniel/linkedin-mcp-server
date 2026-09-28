@@ -454,6 +454,7 @@ class TestBrowserSetupReady:
 
     def test_false_when_metadata_absent(self, isolate_profile_dir, monkeypatch):
         _patch_targets_and_version(monkeypatch)
+        _materialize_install(browsers_path(), ["chromium-1217"])
         assert browser_setup_ready() is False
 
     def test_false_when_browsers_dir_missing(self, isolate_profile_dir, monkeypatch):
@@ -469,31 +470,86 @@ class TestBrowserSetupReady:
         _write_metadata(install_metadata_path(), bdir)
         assert browser_setup_ready() is True
 
-    def test_false_when_marker_missing(self, isolate_profile_dir, monkeypatch):
+    @pytest.mark.parametrize("metadata_version", [_PATCHRIGHT_VERSION, "1.42.0"])
+    def test_false_when_marker_missing(
+        self, isolate_profile_dir, monkeypatch, metadata_version
+    ):
         _patch_targets_and_version(monkeypatch)
         bdir = browsers_path()
         bdir.mkdir(parents=True, exist_ok=True)
         (bdir / "chromium-1217").mkdir()
         (bdir / "chromium_headless_shell-1217").mkdir()
         # No INSTALLATION_COMPLETE files
-        _write_metadata(install_metadata_path(), bdir)
+        _write_metadata(
+            install_metadata_path(), bdir, patchright_version=metadata_version
+        )
         assert browser_setup_ready() is False
 
+    @pytest.mark.parametrize("metadata_version", [_PATCHRIGHT_VERSION, "1.42.0"])
     def test_false_when_required_revision_missing(
-        self, isolate_profile_dir, monkeypatch
+        self, isolate_profile_dir, monkeypatch, metadata_version
     ):
         _patch_targets_and_version(monkeypatch)
         bdir = browsers_path()
         _materialize_install(bdir, ["chromium-1208", "chromium_headless_shell-1208"])
-        _write_metadata(install_metadata_path(), bdir)
+        _write_metadata(
+            install_metadata_path(), bdir, patchright_version=metadata_version
+        )
         assert browser_setup_ready() is False
 
-    def test_false_on_pkg_version_mismatch(self, isolate_profile_dir, monkeypatch):
-        _patch_targets_and_version(monkeypatch, version="1.42.0")
+    @pytest.mark.parametrize("metadata_version", ["1.40.0", "1.42.0"])
+    def test_ready_with_peer_metadata_and_own_revision(
+        self, isolate_profile_dir, monkeypatch, metadata_version
+    ):
+        _patch_targets_and_version(monkeypatch)
         bdir = browsers_path()
-        _materialize_install(bdir, ["chromium-1217", "chromium_headless_shell-1217"])
-        _write_metadata(install_metadata_path(), bdir, patchright_version="1.41.0")
-        assert browser_setup_ready() is False
+        _materialize_install(bdir, ["chromium-1217"])
+        _write_metadata(
+            install_metadata_path(), bdir, patchright_version=metadata_version
+        )
+        assert browser_setup_ready() is True
+
+    @pytest.mark.parametrize(
+        "version,revision,peer_version",
+        [("1.62.3", "1234", "1.63.0"), ("1.63.0", "1243", "1.62.3")],
+    )
+    async def test_peer_metadata_does_not_restart_setup(
+        self, isolate_profile_dir, monkeypatch, version, revision, peer_version
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        _patch_inline_wait(monkeypatch, 0)
+        _patch_targets_and_version(
+            monkeypatch, targets={"chromium-": revision}, version=version
+        )
+        _make_auth_ready(isolate_profile_dir)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1234", "chromium-1243"])
+        installer = AsyncMock()
+        monkeypatch.setattr(bootstrap, "_run_browser_setup", installer)
+        monkeypatch.setattr(
+            bootstrap, "_schedule_retained_browser_revision_report", lambda: None
+        )
+        initialize_bootstrap("managed")
+
+        try:
+            async with asyncio.timeout(5):
+                for writer_version in (version, peer_version, version, peer_version):
+                    with monkeypatch.context() as writer:
+                        writer.setattr(
+                            bootstrap,
+                            "_patchright_pkg_version",
+                            lambda: writer_version,
+                        )
+                        bootstrap._write_install_metadata(bdir, {"chromium-": True})
+                    metadata = install_metadata_path().read_bytes()
+
+                    await ensure_tool_ready_or_raise("search_jobs")
+
+                    installer.assert_not_awaited()
+                    assert install_metadata_path().read_bytes() == metadata
+        finally:
+            await bootstrap.stop_background_browser_setup()
 
     def test_false_on_browsers_path_mismatch(
         self, isolate_profile_dir, monkeypatch, tmp_path
