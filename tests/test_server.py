@@ -1,4 +1,5 @@
 import asyncio
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -56,6 +57,9 @@ def _a_backend() -> DaemonProxyBackend:
     attachment = MagicMock(name="attachment")
     attachment.descriptor.url = "http://127.0.0.1:1/mcp"
     attachment.token = "a-token"
+    # A mock answers every attribute with something truthy, and a truthy
+    # `control_only` is the one attachment a backend must refuse.
+    attachment.control_only = False
     return DaemonProxyBackend(
         attachment=attachment,
         auth_root=Path("/nonexistent"),
@@ -89,7 +93,20 @@ class _BackendReaching(DaemonProxyBackend):
 
 
 def _proxy_to(monkeypatch: pytest.MonkeyPatch, owner: FastMCP, **kwargs) -> FastMCP:
-    """Build a PROXY whose provider reaches *owner* in memory rather than over HTTP."""
+    """Build a PROXY whose provider reaches *owner* in memory rather than over HTTP.
+
+    The heartbeat preflight is answered in memory too, the way the owner's route
+    answers a call it has not registered yet. Without an answer the proxy would
+    refuse to dispatch, which is the contract and not what these tests are about.
+    """
+    import httpx2
+
+    from linkedin_mcp_server.daemon_proxy import FrontendCallHeartbeatMiddleware
+
+    async def beat(_attachment: object, _call_id: str) -> httpx2.Response:
+        return httpx2.Response(200, json={"watched": False})
+
+    monkeypatch.setattr(FrontendCallHeartbeatMiddleware, "_beat", staticmethod(beat))
     return create_mcp_server(
         role=ServerRole.PROXY, proxy_backend=_BackendReaching(owner), **kwargs
     )
@@ -116,6 +133,143 @@ def _server_for(role: ServerRole) -> FastMCP:
 
     reset_process_role_for_testing()
     return create_mcp_server(role=role, **_extras_for(role))
+
+
+#: Every local tool as ``tools/list`` puts it on the wire. A difference is a
+#: change every client sees, so update the file only for an intended one.
+_TOOL_CONTRACT = Path(__file__).parent / "fixtures" / "tool-contract" / "tools.json"
+
+
+#: Each client mode with the era it must actually negotiate. Written out rather
+#: than read back from the client: an auto client that fell back to the
+#: handshake would otherwise pass as the modern case it is named for.
+_BOTH_ERAS = pytest.mark.parametrize(
+    ("mode", "protocol"),
+    [("legacy", "2025-11-25"), ("auto", "2026-07-28")],
+    ids=["handshake era", "2026-07-28 era"],
+)
+
+
+async def _served_tool_contract(
+    monkeypatch: pytest.MonkeyPatch, role: ServerRole, mode: str, protocol: str
+) -> list[dict[str, Any]]:
+    """The tool list a client of *role* receives, in wire form, sorted by name.
+
+    Read through a real client rather than from ``list_tools()`` on the server,
+    because the wire form is the contract: aliases such as ``inputSchema`` and
+    ``_meta``, and every field the protocol carries, including ``outputSchema``.
+    The lifespan is stood in so no browser is installed, launched or closed.
+    """
+    _stand_in_the_lifespan(monkeypatch)
+
+    return await _wire_tools(_server_for(role), mode, protocol)
+
+
+async def _wire_tools(
+    server: FastMCP, mode: str, protocol: str
+) -> list[dict[str, Any]]:
+    """*server*'s tool list as a client speaking *mode* receives it on *protocol*."""
+    async with Client(server, mode=mode) as client:
+        assert client.protocol_version == protocol
+        tools = await client.list_tools()
+    return sorted(
+        (
+            tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+            for tool in tools
+        ),
+        key=lambda tool: tool["name"],
+    )
+
+
+def _stand_in_the_lifespan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Build servers whose lifespan installs, launches and closes no browser."""
+    for name in (
+        "initialize_bootstrap",
+        "get_runtime_policy",
+        "report_retained_browser_revisions_if_ready",
+    ):
+        monkeypatch.setattr(server_module, name, MagicMock())
+    for name in (
+        "start_background_browser_setup_if_needed",
+        "watch_for_handoff_requests",
+        "stop_background_browser_setup",
+        "close_browser",
+    ):
+        monkeypatch.setattr(server_module, name, AsyncMock())
+
+
+class TestToolContract:
+    """The tools a client is offered, compared field by field with a fixture."""
+
+    @pytest.mark.parametrize(
+        "role", [role for role in ServerRole if role.drives_browser]
+    )
+    @_BOTH_ERAS
+    async def test_the_served_tools_match_the_recorded_contract(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        role: ServerRole,
+        mode: str,
+        protocol: str,
+    ):
+        # Every field, not a projection of the ones expected to matter: an
+        # argument that leaks into `inputSchema`, a lost `outputSchema` or a
+        # changed safety annotation is a change every client sees. Both eras a
+        # client may speak, because the fixture was recorded on the handshake
+        # era and a current client negotiates the other one.
+        recorded = json.loads(_TOOL_CONTRACT.read_text(encoding="utf-8"))
+
+        assert (
+            await _served_tool_contract(monkeypatch, role, mode, protocol) == recorded
+        )
+
+    @_BOTH_ERAS
+    async def test_a_proxy_serves_the_owners_tools_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch, mode: str, protocol: str
+    ):
+        """The list a client of the frontend sees is the owner's own.
+
+        Through the production client the backend builds, on the era it
+        negotiates, with only the socket replaced by the owner in memory. A
+        field the hop drops or rewrites (an annotation, an output schema, a
+        title) would leave the owner's list correct and the one clients
+        actually read wrong.
+
+        The hop's own era is checked too, because the frontend's says nothing
+        about it: an owner able to speak the 2026-07-28 era is spoken to in it
+        whichever era the client in front chose, and a hop still on the
+        handshake would pass the comparison above unchanged.
+        """
+        from contextlib import asynccontextmanager
+
+        from fastmcp.client import transports
+        from fastmcp.client.transports import FastMCPTransport
+
+        from linkedin_mcp_server.server_role import reset_process_role_for_testing
+
+        hop: list[Any] = []
+
+        class RecordsTheHop(FastMCPTransport):
+            @asynccontextmanager
+            async def connect_session(self, **kwargs: Any):
+                async with super().connect_session(**kwargs) as session:
+                    hop.append(session)
+                    yield session
+
+        _stand_in_the_lifespan(monkeypatch)
+        owner = _server_for(ServerRole.OWNER)
+        monkeypatch.setattr(
+            transports,
+            "StreamableHttpTransport",
+            lambda *_args, **_kwargs: RecordsTheHop(owner),
+        )
+        reset_process_role_for_testing()
+        proxy = create_mcp_server(role=ServerRole.PROXY, proxy_backend=_a_backend())
+        recorded = json.loads(_TOOL_CONTRACT.read_text(encoding="utf-8"))
+
+        assert await _wire_tools(proxy, mode, protocol) == recorded
+        assert hop, "the proxy never reached its owner"
+        assert {session.protocol_version for session in hop} == {"2026-07-28"}
 
 
 class TestServerRoles:
@@ -461,15 +615,27 @@ class TestProxyRole:
         bootstrap.assert_called_once()
         close.assert_awaited_once()
 
-    async def test_a_dead_owner_is_an_error_rather_than_an_empty_tool_list(self):
+    @pytest.mark.parametrize(
+        ("mode", "says"),
+        [("legacy", "connect"), ("auto", "Internal server error")],
+        ids=["handshake era", "2026-07-28 era"],
+    )
+    async def test_a_dead_owner_is_an_error_rather_than_an_empty_tool_list(
+        self, mode: str, says: str
+    ):
         # FastMCP logs a failing provider and carries on by default. For a proxy
         # the provider *is* the server, so that default turns an unreachable
         # owner into a client that sees no tools and no reason why. Measured on
         # 3.4.4: `tools/list` returned `[]`.
+        #
+        # Both eras a client may speak to this proxy. Only the handshake era
+        # carries the reason: in 2026-07-28 the SDK answers a failure that is
+        # not an `MCPError` with a generic one (`mcp/server/runner.py`,
+        # `modern_error_data`), so there it is an error and no more.
         proxy = create_mcp_server(role=ServerRole.PROXY, proxy_backend=_a_backend())
 
-        async with Client(proxy) as client:
-            with pytest.raises(Exception, match="connect"):
+        async with Client(proxy, mode=mode) as client:
+            with pytest.raises(Exception, match=says):
                 await client.list_tools()
 
     async def test_the_update_notice_still_reaches_a_forwarded_result(
@@ -928,7 +1094,7 @@ class TestWhatTheToolsPromise:
             # exists, which is worse than a wrong annotation: it would pass
             # forever while covering nothing.
             assert tool is not None, f"{name} is not registered any more"
-            if tool.annotations and tool.annotations.readOnlyHint:
+            if tool.annotations and tool.annotations.read_only_hint:
                 claiming.add(name)
 
         assert not (marks_things_read & claiming), (

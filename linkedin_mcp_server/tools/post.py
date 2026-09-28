@@ -34,14 +34,12 @@ def register_post_tools(
         title="Search Posts",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"post", "search"},
-        exclude_args=["extractor"],
     )
     async def search_posts(
         keywords: str,
         ctx: Context,
         date_posted: str | None = None,
         max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Search LinkedIn posts/content globally by keyword (the "Posts" tab).
@@ -76,9 +74,7 @@ def register_post_tools(
             counts.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="search_posts"
-            )
+            extractor = await get_ready_extractor(ctx, tool_name="search_posts")
             logger.info(
                 "Searching posts: keywords='%s', date_posted='%s', max_pages=%d",
                 keywords,

@@ -20,10 +20,11 @@ elects a replacement; an **older** one attaches, because the owner it found is
 at least as new as it is and downgrading a shared browser to satisfy one stale
 client would be the worse trade. Same version, obviously, attaches.
 
-``protocol_version`` stays a separate and stricter thing (``daemon_descriptor``
-enforces equality on it). That is for the wire contract, where disagreement means
-two processes cannot talk. This is for behaviour, where they can talk perfectly
-well and one of them is simply out of date.
+``protocol_version`` stays a separate and stricter thing (``daemon._inspect``
+requires equality on it before any tool call, and a mismatch is control only).
+That is for the wire contract, where disagreement means two processes cannot
+share tools. This is for behaviour, where they can talk perfectly well and one of
+them is simply out of date.
 """
 
 from __future__ import annotations

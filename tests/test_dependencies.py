@@ -52,6 +52,7 @@ class TestHandleAuthError:
             # The generation it observed travels with it, so the rotation
             # downstream can tell the dead session from a peer's repair.
             mock_relogin.assert_awaited_once()
+            assert mock_relogin.await_args is not None
             assert mock_relogin.await_args.args == (None,)
             # The value, not merely the keyword. Asserting only that the argument
             # exists left a mutation passing a hardcoded None green, which is the
@@ -227,16 +228,21 @@ class TestGetReadyExtractor:
         mock_ctx = MagicMock()
         mock_ctx.report_progress = AsyncMock()
 
-        with patch(
-            "linkedin_mcp_server.tools.person.handle_auth_error",
-            new_callable=AsyncMock,
-            side_effect=AuthenticationStartedError("login opened"),
-        ) as mock_handle:
+        with (
+            patch(
+                "linkedin_mcp_server.tools.person.get_ready_extractor",
+                AsyncMock(return_value=mock_extractor),
+            ),
+            patch(
+                "linkedin_mcp_server.tools.person.handle_auth_error",
+                new_callable=AsyncMock,
+                side_effect=AuthenticationStartedError("login opened"),
+            ) as mock_handle,
+        ):
             with pytest.raises(ToolError, match="login opened"):
                 await tools["get_person_profile"](
                     linkedin_username="testuser",
                     ctx=mock_ctx,
-                    extractor=mock_extractor,
                 )
 
             mock_handle.assert_awaited_once()

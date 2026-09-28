@@ -420,7 +420,7 @@ def test_compose_step_needs_the_previous_tag_on_origin(tmp_path: Path) -> None:
 # byte for byte as it was at 4b8117bb; an intended edit to that job updates
 # the digest in the same pull request.
 _PREPARE_RELEASE_SHA256 = (
-    "b61da44f9e3bac83bbd78c0432d5cc0e38f179f2d56ece62a1554bcac16a2180"
+    "d428d7cb7a0a1d63de9f2b5ad21dce095db64d9ed7a94a6927d8b29f1a07cd70"
 )
 
 

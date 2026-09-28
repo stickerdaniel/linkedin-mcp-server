@@ -96,17 +96,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   written by a fork is therefore still refused; that one is not repairable from
   `Last Version`, and the error says so by naming the number to go back to
   rather than a browser.
-- **Never trim `_COMPARABLE_PRODUCTS` to one name.** At the current lock two
-  are live at once, on the same release: Playwright downloads its own Chromium
-  build for Linux arm64 and Chrome for Testing everywhere else, so the
-  published arm64 container reports `Chromium` while the amd64 one and macOS
-  report `Google Chrome for Testing`, at the same revision. Dropping either
-  entry turns the guard off for a shipped platform. That is the split *at the
-  lock* and it does not hold across the whole supported range: at the declared
-  floor every platform reports `Chromium`, and revision 1200 moved macOS and
-  Linux x64 together, leaving only Linux arm64 behind. Which is the point:
-  both managed names occur, and which one where depends on when and where, so
-  neither is redundant. The third entry, `google chrome`, is not a managed
+- **Never trim `_COMPARABLE_PRODUCTS` to one name.** `uvx` and `pip` resolve
+  the declared patchright range fresh, and the two managed names split across
+  it: at the declared floor every platform reports `Chromium`, revision 1200
+  moved macOS and Linux x64 to `Google Chrome for Testing`, and Linux arm64
+  followed only at patchright 1.63.0. So both names are in the field on any
+  release, even when every published image reports the same one, and dropping
+  either turns the guard off for a supported install. Which name a platform
+  reports at a given revision is a measurement, never an inference from the
+  version number. The third entry, `google chrome`, is not a managed
   browser at all but what an operator's own binary reports under `CHROME_PATH`,
   and it earns its place only when *that* Chrome is the older one: the guard
   reads the running binary, never the profile's writer. `browsers.json` is not
@@ -192,6 +190,23 @@ curl -s -X POST http://127.0.0.1:8000/mcp \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_person_profile","arguments":{"linkedin_username":"williamhgates","sections":"posts"}}}'
 ```
 
+## Live Request Limits
+
+Live checks share one LinkedIn account, so every session counts toward the
+same limits. One tool call can cost several browser actions:
+`get_person_profile` loads one page per section and a second one for a
+section LinkedIn rate-limits, `send_message` takes three, and
+`connect_with_person` up to seven.
+
+- Per tool: at most 10 calls a minute and 100 a day.
+- Profiles: at most one page load a second for `get_person_profile` and
+  `get_company_profile`, counted per section.
+- Invitations: at most 30 a day, 10 seconds apart. Count every outgoing
+  invitation attempt, whatever it returns: `send_failed`, an error, or
+  `outcome_unknown` may still have sent one.
+- On a login challenge, a CAPTCHA, or a rate-limit page, stop all live checks
+  for 24 hours.
+
 ## Release Process
 
 ```bash
@@ -259,7 +274,7 @@ for that.
 Always read [`CONTRIBUTING.md`](CONTRIBUTING.md) before filing an issue or working on this repository.
 
 - Write a short synthetic prompt that would reproduce the PR diff if given to a fresh Claude Code session. Don't copy the user's first message — distill the conversation into a single instruction that captures the full scope of changes. This tells the maintainer what was intended, which is often more useful than reviewing the full diff. Use a Markdown blockquote under a `## Synthetic prompt` heading.
-- The final non-empty line of every PR body must disclose every model used. CI accepts `Generated with <model>` or `Generated with <model>.` as the minimum. The final period is optional only for this model-only form. Prefer the detailed form `Generated with <model> for <job> in <harness>.`; for example, `Generated with Claude Opus 5 for implementation in Claude Code via T3 Code.` A harness is the coding-agent runtime that invokes the model and tools, such as Claude Code or Codex CLI. Add an outer host or wrapper with optional `via <host>`. For multiple models, use `Generated with <model 1> for <job 1> and <model 2> for <job 2> in <harness>.`; `and` separates model/job pairs exclusively, and commas or `/` list multiple jobs for one model.
+- The final non-empty line of every PR body must disclose every model used. CI skips the summary block Macroscope appends, so leave the attribution where you wrote it. CI accepts `Generated with <model>` or `Generated with <model>.` as the minimum. The final period is optional only for this model-only form. Prefer the detailed form `Generated with <model> for <job> in <harness>.`; for example, `Generated with Claude Opus 5 for implementation in Claude Code via T3 Code.` A harness is the coding-agent runtime that invokes the model and tools, such as Claude Code or Codex CLI. Add an outer host or wrapper with optional `via <host>`. For multiple models, use `Generated with <model 1> for <job 1> and <model 2> for <job 2> in <harness>.`; `and` separates model/job pairs exclusively, and commas or `/` list multiple jobs for one model.
 - When implementing a new feature/fix:
   1. Packet: before filing or commenting on a GitHub issue, read [.agents/skills/issue-packet/SKILL.md](.agents/skills/issue-packet/SKILL.md).
   2. Branch from `main`: `feature/issue-number-short-description`

@@ -30,10 +30,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
 
@@ -91,6 +91,12 @@ jobs:
   windows-daemon:
     name: Windows daemon (Python ${{ matrix.python-version }})
     runs-on: windows-latest
+    # FastMCP 4's camelCase read shims off for every test run, set before
+    # Python starts so the settings fastmcp reads at import already see it.
+    # tests/conftest.py sets the same for local runs, and
+    # tests/test_fastmcp_compatibility.py fails if it did not take effect.
+    env:
+      FASTMCP_MCP_CAMELCASE_COMPAT: "false"
     strategy:
       fail-fast: false
       matrix:
@@ -104,9 +110,9 @@ jobs:
         # absent so product CI does not silently move between patch releases.
         python-version: ["3.12.4", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
@@ -144,6 +150,8 @@ jobs:
           tests/test_daemon_election.py::TestRealOwner::test_many_clients_starting_at_once_elect_exactly_one_owner
           tests/test_daemon_election.py::TestRealOwner::test_launch_barrier_timeout_exits_without_electing
           tests/test_daemon_election.py::TestRealOwner::test_launch_barrier_failure_collects_started_frontends
+          tests/test_daemon_election.py::TestAForwardedCallThroughTheRealOwner
+          tests/test_daemon_proxy.py::TestAnOwnerProcessKilledMidCall
           tests/test_bootstrap.py::TestInstallerSupervisorLaunch::test_real_cpython_wait_unregister_contract
           tests/test_daemon_descriptor.py::TestPreparedCommit
           tests/test_daemon_descriptor.py::TestStateLocation
@@ -151,8 +159,10 @@ jobs:
           tests/test_installer_supervisor.py
           tests/test_installer_worker.py
           tests/test_process_tree.py
+          tests/test_daemon_regression_witnesses.py
           tests/test_windows_guardian_probe.py
           tests/test_private_state.py
+          tests/test_storage_class.py
 
       # Only on failure, and tolerant of an empty folder: a Python exception
       # fails this job without ever reaching Windows Error Reporting, and that
@@ -179,6 +189,9 @@ jobs:
     needs: [dependency-review, windows-daemon, platform-behaviour]
     if: always()
     runs-on: ubuntu-latest
+    # The camelCase read shims off, for the reason given at `windows-daemon`.
+    env:
+      FASTMCP_MCP_CAMELCASE_COMPAT: "false"
     steps:
       # The review job is intentionally skipped for pushes to main. On pull
       # requests it joins this existing required check instead of adding a new
@@ -198,9 +211,9 @@ jobs:
       - name: Require the platform behaviour tests
         run: test '${{ needs.platform-behaviour.result }}' = success
 
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
 
@@ -259,6 +272,144 @@ jobs:
           DISPLAY: ":99"
         run: uv run pytest --cov --cov-report=term-missing -n auto --dist loadgroup -v -s
 
+      # Release gate 1 of the default-on contract
+      # (docs/decisions/2026-09-26-daemon-default-on-contract.md): does the
+      # bundled browser accept a synthetic www.linkedin.com whose CA only this
+      # runner trusts? After the suite, so nothing above runs with an extra root
+      # in the store. The CA's key never leaves the issuing process, the CA is
+      # name-constrained to the synthetic names, and it expires within a day.
+      - name: Issue the synthetic origin certificates
+        run: uv run python tests/differential/synthetic_origin.py "$RUNNER_TEMP/synthetic-origin"
+
+      # The runner account's NSS database, which is where Chromium on Linux
+      # reads locally trusted roots. `~/.pki/nssdb` rather than the newer
+      # `~/.local/share/pki/nssdb`: since M146 Chromium prefers the old path
+      # whenever that directory exists, and older builds read nothing else, so
+      # creating it settles which database both read. The same step maps the
+      # synthetic names to loopback in the hosts file, so a browser that
+      # stopped using the proxy would reach a closed local port rather than
+      # LinkedIn. The guard refuses any machine that is not a disposable
+      # GitHub-hosted runner, `act` included.
+      - name: Trust the synthetic CA and fence off the real names
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
+            echo "Refusing to change a trust store outside a disposable GitHub-hosted runner" >&2
+            exit 1
+          fi
+          if ! command -v certutil >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq libnss3-tools
+          fi
+          db="$HOME/.pki/nssdb"
+          mkdir -p "$db"
+          if [ ! -f "$db/cert9.db" ]; then
+            certutil -d "sql:$db" -N --empty-password
+          fi
+          certutil -d "sql:$db" -A -t "C,," -n "linkedin-mcp synthetic origin test CA" -i "$RUNNER_TEMP/synthetic-origin/ca.pem"
+          echo "Trust store: NSS sql:$db"
+          certutil -d "sql:$db" -L
+          hosts="$(printf '\n127.0.0.1 www.linkedin.com static.licdn.com synthetic-canary.test\n::1 www.linkedin.com static.licdn.com synthetic-canary.test\n')"
+          printf '%s\n' "$hosts" | sudo tee -a /etc/hosts >/dev/null
+          echo "Hosts file:"; cat /etc/hosts
+
+      # The only step that opts in. A pass says the synthetic names resolved to
+      # loopback for the system and for an unproxied browser, the proxy refused
+      # a name it does not route before www.linkedin.com was named, the feed
+      # loaded under this run's CA, and a CA nobody trusted was still refused.
+      - name: Load the synthetic origin through the proxy
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+        timeout-minutes: 10
+        run: uv run pytest -v -s -o faulthandler_timeout=120 tests/differential/test_synthetic_origin.py
+
+      # Row H-R1 of the differential harness: one host starts the server, calls
+      # one read tool and quits, run Direct (K1), through the shared owner (K3),
+      # and through the owner again (K0), then K3 is held to K1 on O1 and O4.
+      # After the feasibility row, whose pass is what says this runner's fence
+      # and trust hold, and opted in the same way.
+      - name: Compare Direct and daemon on one host start and quit
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+        timeout-minutes: 20
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_host_quit_row.py
+
+      # The frozen baseline (tests/differential/baseline.py): the pinned
+      # pre-default-on revision in a worktree of its own, with its own
+      # `uv sync` venv (runtime dependencies only, from its own lock) and its
+      # own `patchright install` into a browser cache of its own, so none of it
+      # is this checkout's. Refused unless HEAD is the pin and the worktree is
+      # clean. The system libraries `--with-deps` installed above serve its
+      # Chromium too.
+      - name: Prepare the frozen baseline
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+        timeout-minutes: 15
+        run: uv run python tests/differential/baseline.py "$RUNNER_TEMP/differential-baseline"
+
+      # K1 frozen on H-R1, and H-R12 (custom browser) in K1 frozen, K2 and K3.
+      # Its own pytest run, so its packet is its own run directory next to the
+      # H-R1 one in the evidence upload below.
+      - name: Compare the frozen baseline and a custom browser
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 25
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_frozen_rows.py
+
+      # The signal oracle for H-R6 (tests/differential/signals.py): strace,
+      # attached to the killed server or owner and its guardian. Ubuntu's
+      # default kernel.yama.ptrace_scope is 1, which lets a tracer attach only
+      # to its descendants, and strace is not an ancestor of the owner, so the
+      # oracle runs `sudo -n strace`. Only here, behind the trust step's guard.
+      # H-R6 requires it on Linux: an oracle that cannot attach fails the row.
+      - name: Install the signal oracle
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
+            echo "Refusing to trace processes outside a disposable GitHub-hosted runner" >&2
+            exit 1
+          fi
+          if ! command -v strace >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq strace
+          fi
+          strace -V | head -1
+          echo "kernel.yama.ptrace_scope: $(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)"
+          sudo -n true
+
+      # Row H-R6, owner killed: K1 frozen (the Direct server killed), K2 (the
+      # baseline owner killed, whose guardian must be seen killing the owner's
+      # group) and K3 (the candidate owner killed, drained and recovered).
+      - name: Kill the owner and the Direct server
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 25
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_killed_rows.py
+
+      # The row's evidence packet: events, counts, watcher output, failures
+      # and the runtime identity, and nothing else (``events.PUBLISHED_FILES``).
+      # The certificates sit in another directory and are never included.
+      # Always, so a red row keeps what made it red.
+      - name: Keep the differential evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: differential-evidence-ubuntu-latest
+          path: ${{ runner.temp }}/differential-evidence
+          if-no-files-found: warn
+          retention-days: 14
+
       - run: uv cache prune --ci
 
   # Everything here coordinates, protects or queries state through the operating
@@ -271,12 +422,21 @@ jobs:
   platform-behaviour:
     name: Platform behaviour (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # The camelCase read shims off, for the reason given at `windows-daemon`.
+    env:
+      FASTMCP_MCP_CAMELCASE_COMPAT: "false"
     # Long enough for a cold browser download and far short of the six hours
     # a job without one is allowed to sit. These tests spawn real processes
     # and wait on them, so a contract that stops holding turns into a wedged
     # job rather than a red one, and a wedged job reads as work in progress
-    # for as long as anyone is willing to wait.
-    timeout-minutes: 25
+    # for as long as anyone is willing to wait. Raised from 25 for the
+    # differential row at the end, whose own step bound is 20, and from 45
+    # for the frozen baseline after it: a second venv and browser download
+    # (bound 15) and five more native rows, three of them with an owner that
+    # leaves through its idle exit (bound 25), and from 75 for H-R6 after
+    # them: three more rows, two of them waiting out a recovered owner's idle
+    # exit (bound 25). Windows is the slowest leg.
+    timeout-minutes: 100
     strategy:
       fail-fast: false
       matrix:
@@ -285,17 +445,18 @@ jobs:
             browsers: ~/Library/Caches/ms-playwright
           - os: windows-latest
             browsers: ~\AppData\Local\ms-playwright
-          # Here for the browser rather than for the operating system.
-          # Patchright ships Chrome for Testing everywhere except Linux arm64,
-          # which gets Playwright's own Chromium build, and the release
-          # publishes an arm64 image. Without this leg an identity regression
-          # in that build reaches the container with both other jobs green.
+          # Here for the browser rather than for the operating system. The
+          # release publishes an arm64 image, and its browser is a separate
+          # build from every other leg's: Chrome for Testing for linux-arm64
+          # at the lock, Playwright's own Chromium through patchright 1.61.2.
+          # Without this leg an identity regression in that build reaches the
+          # container with both other jobs green.
           - os: ubuntu-24.04-arm
             browsers: ~/.cache/ms-playwright
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
 
@@ -315,15 +476,21 @@ jobs:
           tests/test_session_state.py::test_the_native_machine_api_answers_on_windows
           tests/test_daemon_lock.py
           tests/test_process_tree.py
+          tests/test_daemon_regression_witnesses.py
           tests/test_greenlet_runtime.py
+          tests/test_storage_class.py
+          tests/differential/test_watcher.py
+          tests/differential/test_host_stub.py
+          tests/differential/test_preservation_gate.py
+          tests/differential/test_baseline.py
+          tests/differential/test_signals.py
 
       # The identity gate runs on every leg, because every leg's browser is a
       # different one from the Ubuntu job's. macOS is the only platform with a
       # hidden target, which is the whole reason the default mode can run
-      # without announcing itself as headless. Linux arm64 is the only platform
-      # whose bundle is Playwright's own Chromium rather than Chrome for
-      # Testing. Windows has its own binary, its own window manager and its own
-      # DPI handling, and the gate measures a headed window against the screen
+      # without announcing itself as headless. Linux arm64 runs the browser
+      # build the arm64 image ships. Windows has its own binary, its own window
+      # manager and its own DPI handling, and the gate measures a headed window against the screen
       # it stands on -- which is exactly where those differ. An earlier version
       # of this file left Windows out on the grounds that it falls back to
       # headless mode like Linux does; that is true of one case in that file
@@ -394,5 +561,161 @@ jobs:
           # that does not exist is the kind of thing someone later debugs.
           DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
         run: uv run pytest tests/test_browser_identity.py
+
+      # The synthetic origin gate from the Ubuntu job, on every other browser
+      # build. Last, so the containment and identity tests above run against an
+      # unmodified trust store.
+      - name: Issue the synthetic origin certificates
+        shell: bash
+        run: uv run python tests/differential/synthetic_origin.py "$RUNNER_TEMP/synthetic-origin"
+
+      # One store per platform, the one the bundled browser reads locally
+      # trusted roots from. Linux: the runner account's NSS database, for the
+      # reason given in the Ubuntu job. macOS: the admin trust domain in the
+      # System keychain; the user domain asks for interactive authorisation,
+      # which a runner cannot give, and passwordless sudo is what lets the
+      # admin domain through. Windows: LocalMachine\Root; adding to the
+      # CurrentUser root store raises a confirmation dialog nobody is there to
+      # answer. The two machine-wide stores, and the hosts file, are acceptable
+      # only because the guard admits nothing but a disposable GitHub-hosted
+      # runner.
+      - name: Trust the synthetic CA and fence off the real names
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
+            echo "Refusing to change a trust store outside a disposable GitHub-hosted runner" >&2
+            exit 1
+          fi
+          ca="$RUNNER_TEMP/synthetic-origin/ca.pem"
+          name="linkedin-mcp synthetic origin test CA"
+          case "$RUNNER_OS" in
+            Linux)
+              if ! command -v certutil >/dev/null; then
+                sudo apt-get update -qq
+                sudo apt-get install -y -qq libnss3-tools
+              fi
+              db="$HOME/.pki/nssdb"
+              mkdir -p "$db"
+              if [ ! -f "$db/cert9.db" ]; then
+                certutil -d "sql:$db" -N --empty-password
+              fi
+              certutil -d "sql:$db" -A -t "C,," -n "$name" -i "$ca"
+              echo "Trust store: NSS sql:$db"
+              certutil -d "sql:$db" -L
+              ;;
+            macOS)
+              sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$ca"
+              echo "Trust store: admin trust settings, /Library/Keychains/System.keychain"
+              security dump-trust-settings -d | grep -F -A4 "$name"
+              ;;
+            Windows)
+              certutil.exe -addstore -f Root "$(cygpath -w "$ca")"
+              echo "Trust store: LocalMachine\\Root"
+              certutil.exe -store Root "$name"
+              ;;
+            *)
+              echo "No trust step for $RUNNER_OS" >&2
+              exit 1
+              ;;
+          esac
+          # The fence from the Ubuntu job. Each platform's resolver caches, so
+          # each is flushed after the hosts file changes.
+          hosts="$(printf '\n127.0.0.1 www.linkedin.com static.licdn.com synthetic-canary.test\n::1 www.linkedin.com static.licdn.com synthetic-canary.test\n')"
+          case "$RUNNER_OS" in
+            Linux)
+              printf '%s\n' "$hosts" | sudo tee -a /etc/hosts >/dev/null
+              cat /etc/hosts
+              ;;
+            macOS)
+              printf '%s\n' "$hosts" | sudo tee -a /etc/hosts >/dev/null
+              sudo dscacheutil -flushcache
+              sudo killall -HUP mDNSResponder
+              cat /etc/hosts
+              ;;
+            Windows)
+              hosts_file=/c/Windows/System32/drivers/etc/hosts
+              printf '%s\n' "$hosts" >> "$hosts_file"
+              MSYS_NO_PATHCONV=1 ipconfig.exe /flushdns
+              cat "$hosts_file"
+              ;;
+          esac
+
+      - name: Load the synthetic origin through the proxy
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+        timeout-minutes: 10
+        run: uv run pytest -v -s -o faulthandler_timeout=120 tests/differential/test_synthetic_origin.py
+
+      # Row H-R1, as in the Ubuntu job.
+      - name: Compare Direct and daemon on one host start and quit
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+        timeout-minutes: 20
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_host_quit_row.py
+
+      # The frozen baseline and its rows, as in the Ubuntu job.
+      - name: Prepare the frozen baseline
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+        timeout-minutes: 15
+        shell: bash
+        run: uv run python tests/differential/baseline.py "$RUNNER_TEMP/differential-baseline"
+
+      - name: Compare the frozen baseline and a custom browser
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 25
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_frozen_rows.py
+
+      # The signal oracle and row H-R6, as in the Ubuntu job. The oracle runs
+      # on Linux only, where H-R6 requires it; macOS and Windows record it as
+      # unavailable.
+      - name: Install the signal oracle
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
+            echo "Refusing to trace processes outside a disposable GitHub-hosted runner" >&2
+            exit 1
+          fi
+          if ! command -v strace >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq strace
+          fi
+          strace -V | head -1
+          echo "kernel.yama.ptrace_scope: $(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)"
+          sudo -n true
+
+      - name: Kill the owner and the Direct server
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 25
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_killed_rows.py
+
+      # The row's evidence packet: events, counts, watcher output, failures
+      # and the runtime identity, and nothing else (``events.PUBLISHED_FILES``).
+      # The certificates sit in another directory and are never included.
+      # Always, so a red row keeps what made it red.
+      - name: Keep the differential evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: differential-evidence-${{ matrix.os }}
+          path: ${{ runner.temp }}/differential-evidence
+          if-no-files-found: warn
+          retention-days: 14
 
       - run: uv cache prune --ci

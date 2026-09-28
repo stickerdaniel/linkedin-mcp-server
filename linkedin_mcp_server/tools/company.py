@@ -6,9 +6,10 @@ with configurable section selection.
 """
 
 import logging
-from typing import Any
+from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
+from pydantic import Field
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
@@ -37,13 +38,11 @@ def register_company_tools(
         title="Get Company Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_company_profile(
         company_name: str,
         ctx: Context,
         sections: str | None = None,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Get a specific company's LinkedIn profile.
@@ -73,9 +72,7 @@ def register_company_tools(
         try:
             # Validate before starting the browser; the scraper normalizes the original reference.
             normalize_company_identifier(company_name)
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_company_profile"
-            )
+            extractor = await get_ready_extractor(ctx, tool_name="get_company_profile")
             requested, unknown = parse_company_sections(sections)
 
             logger.info(
@@ -107,12 +104,11 @@ def register_company_tools(
         title="Get Company Posts",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_company_posts(
         company_name: str,
         ctx: Context,
-        extractor: Any | None = None,
+        max_scrolls: Annotated[int, Field(ge=1, le=50)] | None = None,
     ) -> dict[str, Any]:
         """
         Get recent posts from a company's LinkedIn feed.
@@ -120,6 +116,8 @@ def register_company_tools(
         Args:
             company_name: LinkedIn company name (e.g., "docker", "anthropic", "microsoft"). A full company URL is accepted too and is reduced to the slug.
             ctx: FastMCP context for progress reporting
+            max_scrolls: Maximum scroll-to-bottom iterations to load more posts.
+                Default (None) uses 10. Increase to read further back in the feed.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
@@ -127,9 +125,7 @@ def register_company_tools(
         """
         try:
             company_name = normalize_company_identifier(company_name)
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_company_posts"
-            )
+            extractor = await get_ready_extractor(ctx, tool_name="get_company_posts")
             logger.info("Scraping company posts: %s", company_name)
 
             await ctx.report_progress(
@@ -137,7 +133,9 @@ def register_company_tools(
             )
 
             url = company_page_url(company_name, "/posts/")
-            extracted = await extractor.extract_page(url, section_name="posts")
+            extracted = await extractor.extract_page(
+                url, section_name="posts", max_scrolls=max_scrolls
+            )
 
             sections: dict[str, str] = {}
             references: dict[str, list[Reference]] = {}
@@ -176,12 +174,10 @@ def register_company_tools(
         title="Search Companies",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "search"},
-        exclude_args=["extractor"],
     )
     async def search_companies(
         keywords: str,
         ctx: Context,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Search for companies on LinkedIn.
@@ -195,9 +191,7 @@ def register_company_tools(
             The LLM should parse the raw text to extract individual companies and their pages.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="search_companies"
-            )
+            extractor = await get_ready_extractor(ctx, tool_name="search_companies")
             logger.info("Searching companies: keywords='%s'", keywords)
 
             await ctx.report_progress(
@@ -223,13 +217,11 @@ def register_company_tools(
         title="Get Company Employees",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_company_employees(
         company_name: str,
         ctx: Context,
         keywords: str | None = None,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         List employees at a company from the LinkedIn /people/ page, including
@@ -262,7 +254,7 @@ def register_company_tools(
         try:
             # Preserve the reference for the scraper's single normalization pass.
             normalize_company_identifier(company_name)
-            extractor = extractor or await get_ready_extractor(
+            extractor = await get_ready_extractor(
                 ctx, tool_name="get_company_employees"
             )
             logger.info(

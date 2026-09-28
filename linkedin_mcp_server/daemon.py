@@ -45,10 +45,11 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from linkedin_mcp_server import daemon_descriptor
+from linkedin_mcp_server import daemon_descriptor, storage_class
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_descriptor import DaemonDescriptor, DescriptorError
-from linkedin_mcp_server.session_state import get_runtime_id
+from linkedin_mcp_server.session_state import auth_root_dir, canonical, get_runtime_id
+from linkedin_mcp_server.storage_class import StorageClass
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,39 @@ class OwnerState(enum.Enum):
     UNTRUSTED = "untrusted"
 
 
+class Mismatch(enum.Enum):
+    """Which check an ``INCOMPATIBLE`` descriptor failed, as a fact to act on.
+
+    Typed rather than read out of the reason, which is prose for a log line and
+    free to change. The election acts on two of these differently from the
+    rest, and an English sentence is the wrong thing to key that on.
+    """
+
+    RUNTIME = "runtime"
+    PROFILE = "profile"
+    #: Same file format, another tool protocol. The owner may be asked to stand
+    #: down and may never be given a tool call.
+    PROTOCOL = "protocol"
+    #: Same protocol, another configuration fingerprint.
+    CONFIGURATION = "configuration"
+
+
+class DirectFallback(enum.Enum):
+    """Why an election ended at once in this client's own browser.
+
+    Two values because the probe can establish two different things, and the
+    second must not be reported as the first: silence is not proof that the
+    owner is alive, only that it is not one this client can use now.
+    """
+
+    #: The owner answered its probe.
+    LIVE_RIVAL = "a live owner of this build uses a different configuration"
+    #: The owner held its port and did not answer within the probe's budget.
+    SILENT_RIVAL = (
+        "an owner of this build with a different configuration did not answer"
+    )
+
+
 @dataclass(frozen=True)
 class Attachment:
     """An owner worth talking to, and the credential for doing so."""
@@ -104,6 +138,12 @@ class Attachment:
     #: drives a logged-in LinkedIn session, and the surrounding code logs whole
     #: objects at DEBUG while users paste those logs into issue reports.
     token: str = field(repr=False)
+    #: A pair proved for control and nothing else: the endpoint, profile,
+    #: runtime and token all passed, and the owner still may not run a tool for
+    #: this client. It comes only with an ``INCOMPATIBLE`` lookup, so it can ask
+    #: for turnover or be probed for liveness, and every consumer that would
+    #: dispatch a call refuses it (``daemon_proxy``).
+    control_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -118,6 +158,13 @@ class OwnerLookup:
     #: actionable if you can see which path — so it is DEBUG-grade detail and
     #: the callers here log it accordingly.
     reason: str = ""
+    #: Which check an ``INCOMPATIBLE`` reading failed, where one did.
+    mismatch: Mismatch | None = None
+    #: Set only by the election, and only after its one bounded probe of an
+    #: owner of this same build with another configuration: this client leaves
+    #: that owner alone and drives its own browser now, rather than waiting on a
+    #: lock the owner may hold. Which value says what the probe established.
+    fallback: DirectFallback | None = None
 
     @property
     def worth_connecting(self) -> bool:
@@ -131,11 +178,18 @@ class OwnerLookup:
         return self.state is OwnerState.ATTACHABLE
 
 
-def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
+def _inspect(
+    auth_root: Path, profile: Path, config: AppConfig, *, for_retirement: bool = False
+) -> OwnerLookup:
     """Read the descriptor once and say what it means.
 
     Order matters. The cheap, local checks come first, so a descriptor that
     already disqualifies itself is rejected before the token is read.
+
+    *for_retirement* asks whether the owner may be asked to retire, not whether
+    it may run this client's calls, so the configuration is not compared. An
+    owner of this profile, runtime and protocol with other settings is still the
+    owner of the browser a profile command is about to change.
     """
     descriptor = daemon_descriptor.read(auth_root)
     if descriptor is None:
@@ -148,6 +202,7 @@ def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
         return OwnerLookup(
             state=OwnerState.INCOMPATIBLE,
             reason="the published daemon belongs to another runtime",
+            mismatch=Mismatch.RUNTIME,
         )
 
     # The lock is per auth root, but a profile is what a browser opens. Two
@@ -157,6 +212,7 @@ def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
         return OwnerLookup(
             state=OwnerState.INCOMPATIBLE,
             reason="the published daemon serves a different profile",
+            mismatch=Mismatch.PROFILE,
         )
 
     # No endpoint check here: `from_mapping` already refuses a non-local host
@@ -165,15 +221,37 @@ def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
     # copy is what rots when the first moves.
     token = daemon_descriptor.read_token(auth_root, descriptor)
 
+    # After every identity check and the token, so a control-only pair is
+    # exactly as proved as an attachable one. `read` has already refused a
+    # schema this build cannot parse and a protocol below the control floor.
+    if descriptor.protocol_version != daemon_descriptor.PROTOCOL_VERSION:
+        return OwnerLookup(
+            state=OwnerState.INCOMPATIBLE,
+            attachment=Attachment(
+                descriptor=descriptor, token=token, control_only=True
+            ),
+            reason=(
+                f"the published daemon speaks protocol {descriptor.protocol_version} "
+                f"and this build speaks {daemon_descriptor.PROTOCOL_VERSION}"
+            ),
+            mismatch=Mismatch.PROTOCOL,
+        )
+
     # Keyed with the token, so this can only run once the token is in hand.
-    if descriptor.config_fingerprint != daemon_descriptor.config_fingerprint(
-        config, key=token
+    if not for_retirement and descriptor.config_fingerprint != (
+        daemon_descriptor.config_fingerprint(config, key=token)
     ):
         return OwnerLookup(
             state=OwnerState.INCOMPATIBLE,
+            # Control only, so the election can ask whether this owner is
+            # alive before leaving it alone; a descriptor outlives its writer.
+            attachment=Attachment(
+                descriptor=descriptor, token=token, control_only=True
+            ),
             # Names no values: the shared fields include a proxy password and
             # the path to someone's profile.
             reason="the published daemon uses a different configuration",
+            mismatch=Mismatch.CONFIGURATION,
         )
 
     return OwnerLookup(
@@ -189,10 +267,18 @@ def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
 class _DescriptorInspector:
     """Reuse one native descriptor inspection until it has actually finished."""
 
-    def __init__(self, auth_root: Path, profile: Path, config: AppConfig) -> None:
+    def __init__(
+        self,
+        auth_root: Path,
+        profile: Path,
+        config: AppConfig,
+        *,
+        for_retirement: bool = False,
+    ) -> None:
         self._auth_root = auth_root
         self._profile = profile
         self._config = config
+        self._for_retirement = for_retirement
         self._generation = 0
         self._required_generation = 0
         self._pending: tuple[int, queue.Queue[OwnerLookup | BaseException]] | None = (
@@ -260,9 +346,18 @@ class _DescriptorInspector:
         def inspect() -> None:
             try:
                 try:
-                    value: OwnerLookup | BaseException = _inspect(
-                        self._auth_root, self._profile, self._config
-                    )
+                    value: OwnerLookup | BaseException
+                    # The election's reading is made exactly as it always was;
+                    # only a retirement lookup passes the flag.
+                    if self._for_retirement:
+                        value = _inspect(
+                            self._auth_root,
+                            self._profile,
+                            self._config,
+                            for_retirement=True,
+                        )
+                    else:
+                        value = _inspect(self._auth_root, self._profile, self._config)
                 except BaseException as exc:  # noqa: BLE001 - re-raised by the caller
                     value = exc
                 result.put(value)
@@ -296,6 +391,7 @@ def look_up_owner(
     *,
     wait_seconds: float = 0.0,
     ignore_instances: AbstractSet[str] = frozenset(),
+    for_retirement: bool = False,
     _inspector: _DescriptorInspector | None = None,
 ) -> OwnerLookup:
     """Read the descriptor until it is compatible or the budget runs out.
@@ -331,6 +427,10 @@ def look_up_owner(
     nothing better, the reading is returned exactly as before, so the caller's
     own downgrade is unchanged.
 
+    *for_retirement* is for a profile command deciding whether there is an owner
+    to ask to retire: the configuration is not compared (``_inspect``). It is
+    still only a reading of files, so nothing is contacted here either.
+
     Raises:
         ValueError: *wait_seconds* is not finite.
     """
@@ -344,7 +444,9 @@ def look_up_owner(
 
     wait_budget = max(wait_seconds, 0.0)
     deadline = time.monotonic() + wait_budget
-    inspector = _inspector or _DescriptorInspector(auth_root, profile, config)
+    inspector = _inspector or _DescriptorInspector(
+        auth_root, profile, config, for_retirement=for_retirement
+    )
     last_lookup: OwnerLookup | None = None
     while True:
         remaining = deadline - time.monotonic()
@@ -395,9 +497,28 @@ def look_up_owner(
 def daemon_would_be_used(config: AppConfig) -> bool:
     """Whether this process is even a candidate for sharing a browser.
 
-    Separate from finding an owner, because it depends on nothing outside the
-    configuration and rules out the two cases where the question is moot.
+    Separate from finding an owner, and it never raises: every refusal, and
+    every failure to decide, is today's Direct server. A refusal happens before
+    any daemon state is prepared, locked, read or spawned, because the caller
+    returns on it before importing the election.
+
+    Recovery does not ask again. ``DaemonProxyBackend`` is built only by
+    ``cli_main._obtain_shared_owner`` after this returned True, and it keeps
+    the configuration admitted then, so no proxy exists to recover for a
+    process refused here.
     """
+    try:
+        return _daemon_would_be_used(config)
+    except Exception:
+        logger.warning(
+            "Could not decide whether to share a browser; this server drives "
+            "its own browser"
+        )
+        logger.debug("Daemon eligibility failure", exc_info=True)
+        return False
+
+
+def _daemon_would_be_used(config: AppConfig) -> bool:
     if not config.server.daemon_enabled:
         return False
     # An explicit HTTP bind is already one server for many clients, so there is
@@ -421,4 +542,58 @@ def daemon_would_be_used(config: AppConfig) -> bool:
             "daemon cannot outlive the virtual display owned by this server"
         )
         return False
+    if config.browser.chrome_path:
+        # Only the bundled browser is shared. A custom executable keeps the
+        # Direct server this configuration had before the daemon existed.
+        logger.info(
+            "CHROME_PATH is set, so this server drives its own browser instead "
+            "of sharing one"
+        )
+        return False
+    refusal = _storage_refusal(config)
+    if refusal is not None:
+        logger.warning(
+            "%s; this server drives its own browser instead of sharing one",
+            refusal,
+        )
+        return False
     return True
+
+
+def _storage_refusal(config: AppConfig) -> str | None:
+    """Why the daemon's roots are not on local storage, or None if both are.
+
+    Two roots, because either one carries the coordination: the auth root holds
+    the profile the owner drives, and the state root the lock, descriptor and
+    token every process reads. Only paths are computed here. Nothing is created
+    under either, since creating state for a daemon that will not run is the
+    effect this refusal exists to prevent.
+    """
+    # The auth root the election would use: ``_obtain_shared_owner`` passes
+    # ``auth_root_dir(get_profile_dir())``, and ``get_profile_dir`` is this
+    # same field of the configuration ``main`` installed before asking.
+    try:
+        profile = canonical(Path(config.browser.user_data_dir))
+        # The profile too, not only the directory above it: a profile that is
+        # itself a mount point can sit on other storage than its parent.
+        roots = [
+            ("profile directory", profile),
+            ("directory holding the profile", auth_root_dir(profile)),
+        ]
+    except Exception as exc:
+        return f"The profile directory could not be resolved ({type(exc).__name__})"
+    try:
+        # Computes a path and creates nothing; ``prepare_daemon_state`` is
+        # what creates it, and only an admitted process reaches that.
+        roots.append(("daemon state directory", daemon_descriptor.daemon_state_root()))
+    except Exception as exc:
+        return f"The daemon state directory could not be located ({type(exc).__name__})"
+
+    for label, root in roots:
+        verdict = storage_class.classify(root)
+        if verdict.storage_class is not StorageClass.LOCAL:
+            return (
+                f"The {label} is on {verdict.storage_class.value} storage "
+                f"({verdict.reason})"
+            )
+    return None

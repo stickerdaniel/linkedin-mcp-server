@@ -1,9 +1,20 @@
 import os
 import sys
 
-import pytest
+# FastMCP 4 bridges camelCase reads on MCP SDK models (`result.isError`) with
+# deprecation shims that this switch turns off. The suite runs with them off,
+# so a read the SDK v2 rename left behind fails here instead of passing on a
+# shim. Set before anything imports fastmcp, which reads its settings once at
+# import, and inherited by every process a test starts. CI sets it before
+# Python starts as well; `test_fastmcp_compatibility.py` checks it took effect.
+os.environ["FASTMCP_MCP_CAMELCASE_COMPAT"] = "false"
 
-pytest_plugins = ("scraping.support.navigation",)
+import pytest  # noqa: E402
+
+# The differential accounting is a plugin rather than a directory conftest so
+# that it is loaded wherever those cases run, the xdist controller included,
+# and counts cases no fixture ever set up.
+pytest_plugins = ("scraping.support.navigation", "differential.accounting")
 
 
 @pytest.fixture(autouse=True)

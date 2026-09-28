@@ -356,6 +356,7 @@ class ConnectionActions:
             await locator.fill(value, timeout=timeout)
             return True
         except Exception:
+            logger.debug("Invite note fill failed", exc_info=True)
             return False
 
     async def _dismiss_dialog(self) -> None:
@@ -568,6 +569,26 @@ class ConnectionActions:
 
             note_filled = await self._fill_dialog_textarea(note)
             if not note_filled:
+                # Same gate as the reveal step: the Premium nudge banner sits
+                # beside a live textarea, so a failed fill is a quota block
+                # only once no visible textarea is left. A count that fails
+                # proves no absence, so it claims no block either: a false
+                # block invites the caller to resend without the note.
+                try:
+                    textarea_visible = (
+                        await self._session.page.locator(
+                            f"{_DIALOG_TEXTAREA_SELECTOR} >> visible=true"
+                        ).count()
+                        > 0
+                    )
+                except Exception:
+                    textarea_visible = True
+                if textarea_visible:
+                    logger.info(
+                        "Invite note fill failed without evidence of a quota block"
+                    )
+                    await self._dismiss_dialog()
+                    return False, False, None
                 note_limit_message = await self._get_premium_upsell_message()
                 if note_limit_message is not None:
                     logger.info("Premium upsell blocked filling invite note")
@@ -872,8 +893,22 @@ class ConnectionActions:
             )
 
         verified = await self._read_main_profile(username)
-        verified_text = verified.get("sections", {}).get("main_profile", "")
         verified_signals = await self._read_action_signals(username)
+        if verified_signals.has_invite_anchor:
+            # The same settle retry as the accept path: an immediate re-read
+            # can still render Connect for an invitation LinkedIn already
+            # recorded (observed live 2026-09-26: send_failed, then Pending).
+            # Only a pending or already accepted invitation is evidence it
+            # landed.
+            await asyncio.sleep(3.0)
+            retry = await self._read_main_profile(username)
+            retry_signals = await self._read_action_signals(username)
+            if connection.detect_connection_state(retry_signals) in (
+                "pending",
+                "already_connected",
+            ):
+                verified, verified_signals = retry, retry_signals
+        verified_text = verified.get("sections", {}).get("main_profile", "")
         verified_state = connection.detect_connection_state(verified_signals)
 
         if verified_signals.has_invite_anchor:
@@ -888,8 +923,7 @@ class ConnectionActions:
         return _connection_result(
             url,
             "connected",
-            "Connection request sent."
-            + (f" State after send: {verified_state}." if verified_state else ""),
+            f"Connection request sent. State after send: {verified_state}.",
             note_sent=note_sent,
             profile=verified_text or page_text,
         )

@@ -10,6 +10,7 @@ from .auth import (
     wait_for_manual_login,
 )
 from .exceptions import (
+    AccountRestrictedError,
     AuthenticationError,
     ElementNotFoundError,
     LinkedInScraperException,
@@ -51,6 +52,7 @@ def __getattr__(name: str) -> object:
 
 
 __all__ = [
+    "AccountRestrictedError",
     "AuthenticationError",
     "BrowserManager",
     "await_deferring_cancels",

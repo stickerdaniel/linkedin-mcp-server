@@ -9,10 +9,13 @@ from patchright.async_api import Error as PatchrightError
 import pytest
 
 from linkedin_mcp_server.core.exceptions import (
+    AccountRestrictedError,
     AuthenticationError,
     ProxyConnectionError,
 )
 from linkedin_mcp_server.scraping import session as session_module
+from linkedin_mcp_server.scraping.capture import SectionCapture
+from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
 from .support.navigation import navigate
@@ -729,3 +732,40 @@ class TestNavigationFailureCrossesTheToolBoundaryClean:
         # The raw error must not survive as a cause either: the handlers
         # downstream print the whole chain.
         assert excinfo.value.__cause__ is None
+
+
+class TestARestrictedAccountStopsTheScrape:
+    """LinkedIn's restriction page is neither content nor a login to redo."""
+
+    @pytest.mark.parametrize(
+        "navigation_fails", [False, True], ids=["redirect", "failed navigation"]
+    )
+    async def test_the_restriction_page_raises_before_extraction(
+        self, mock_page, navigation_fails: bool
+    ):
+        async def land_on_the_restriction(*_args, **_kwargs):
+            navigate(
+                mock_page,
+                "https://www.linkedin.com/flagship-web/login/login-restriction/",
+            )
+            if navigation_fails:
+                raise PatchrightError("net::ERR_ABORTED")
+
+        mock_page.goto = AsyncMock(side_effect=land_on_the_restriction)
+        session = ScrapingSession(mock_page)
+        capture = SectionCapture(
+            session, PageNavigator(session), PageContentReader(session)
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.navigation.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(AccountRestrictedError, match="identity verification"),
+        ):
+            await capture.extract_page(
+                "https://www.linkedin.com/company/testco/posts/",
+                section_name="posts",
+            )

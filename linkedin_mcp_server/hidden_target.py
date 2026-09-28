@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 #: Playwright only surfaces a target Chromium reports as ``type: "other"`` when
 #: this is set in the *driver process* environment. It is undocumented upstream,
-#: and byte-identical across patchright 1.60.0, 1.60.1, 1.61.1 and 1.61.2; a
+#: and byte-identical across patchright 1.60.0, 1.60.1, 1.61.1, 1.61.2 and 1.63.0; a
 #: question about whether it is supported is open at
 #: https://github.com/Kaliiiiiiiiii-Vinyzu/patchright/discussions/232
 ATTACH_TO_OTHER = "PW_CHROMIUM_ATTACH_TO_OTHER"

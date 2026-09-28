@@ -14,6 +14,28 @@ from typing import Any
 _PREFIX = "Generated with "
 _PLACEHOLDER_RE = re.compile(r"<[^>]*>|\[[^]]*]")
 _RESERVED_MINIMAL_RE = re.compile(r"\b(?:for|in|and|via)\b")
+# Macroscope writes its summary into the PR body after the author, between
+# these two markers, and appends the pair at the end when it finds none. The
+# block is the bot's text, not the author's, so it is dropped before the final
+# line is read; an attribution inside it does not count. An author can write
+# the markers too, which buys text after the attribution but never a missing
+# one; the two cannot be told apart, and disclosure is what the check guards.
+# Macroscope puts each marker on a line of its own. A marker quoted in the
+# author's text or in Macroscope's summary sits inside backticks or a quote, so
+# only whole-line markers count, and the match may not cross another start:
+# neither kind of quote can stretch the block over the author's own lines.
+_MACROSCOPE_START = (
+    r"^" + re.escape("<!-- Macroscope's pull request summary starts here -->") + r"$"
+)
+_MACROSCOPE_BLOCK_RE = re.compile(
+    _MACROSCOPE_START
+    + r"(?:(?!"
+    + _MACROSCOPE_START
+    + r").)*?^"
+    + re.escape("<!-- Macroscope's pull request summary ends here -->")
+    + r"$",
+    re.DOTALL | re.MULTILINE,
+)
 _ERROR = (
     "Model attribution is required as the final non-empty PR body line. "
     'Model-only is the minimum, with an optional final period: "Generated with '
@@ -65,6 +87,8 @@ def has_model_attribution(body: str | None) -> bool:
     """Check the final non-empty line of a pull request body."""
     if not body:
         return False
+    # A body edited on the web arrives with CRLF, which `$` does not match.
+    body = _MACROSCOPE_BLOCK_RE.sub("", body.replace("\r\n", "\n"))
     lines = [line.strip() for line in body.splitlines() if line.strip()]
     return bool(lines) and is_valid_attribution(lines[-1])
 

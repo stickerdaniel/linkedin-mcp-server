@@ -96,35 +96,38 @@ _VERSION = re.compile(r"(?:^|(?<=\s))\d+(?:\.\d+){2,}")
 #: An unrecognised name costs the guard, never a false refusal, which is the
 #: right direction to be wrong in.
 #:
-#: **Two of these entries are needed at the same time, on the same release, and
-#: the axis is the platform rather than the version.** Playwright downloads
-#: Chrome for Testing for most targets but its own Chromium build for Linux
-#: arm64, and the two binaries name themselves differently. From the driver's
-#: own `DOWNLOAD_PATHS` at the current lock:
+#: **Both managed names are needed, because the supported range spans both.**
+#: The two binaries name themselves differently, and which one a user runs
+#: depends on the patchright they resolved and on their platform. From the
+#: driver's own `DOWNLOAD_PATHS`:
 #:
-#: * every supported `ubuntu*-arm64` and `debian*-arm64` ->
-#:   `chromium-linux-arm64.zip`, which unpacks to `chrome-linux/` and reports
+#: * at the lock (patchright 1.63.0, revision 1243) every target, Linux arm64
+#:   included, is `cftUrl(...)`, which unpacks to `chrome-linux64/`,
+#:   `chrome-linux-arm64/` or `Google Chrome for Testing.app` and reports
+#:   `Google Chrome for Testing`
+#: * through patchright 1.61.2, every supported `ubuntu*-arm64` and
+#:   `debian*-arm64` was `chromium-linux-arm64.zip`, which unpacks to
+#:   `chrome-linux/` and reports `Chromium`
+#: * at the declared floor (patchright 1.55.0) every platform reports
 #:   `Chromium`
-#: * Linux x64, every macOS, and `win64` -> `cftUrl(...)`, which unpacks to
-#:   `chrome-linux64/` or `Google Chrome for Testing.app` and reports `Google
-#:   Chrome for Testing`
 #:
-#: (`ubuntu18.04-*` is `void 0` in that table on both branches: patchright will
-#: not install there at all, so it names nothing.)
+#: (`void 0` entries in that table name platforms patchright will not install
+#: on at all; at the lock that includes `ubuntu20.04-*`, so they name nothing.)
 #:
-#: Both container architectures are published, so both names are in the field
-#: on any given release. Dropping either entry as redundant would silently turn
-#: the guard off for a shipped platform, which is the mistake this paragraph
-#: exists to prevent.
+#: `uvx` and `pip` resolve the declared range fresh, so both names are in the
+#: field on any given release even though the published images now agree.
+#: Dropping either entry as redundant would silently turn the guard off for a
+#: supported install, which is the mistake this paragraph exists to prevent.
 #:
-#: There is a version axis underneath as well, and it is the smaller one.
+#: The version history behind those bullets.
 #: Revision 1200 (patchright 1.57.0) moved macOS *and* Linux x64 to Chrome for
 #: Testing together; only Linux arm64 stayed on Playwright's own build, and
-#: that is the split that survives to the lock. Read it off `EXECUTABLE_PATHS`
+#: that split lasted through patchright 1.61.2. Read it off `EXECUTABLE_PATHS`
 #: rather than the download table: at 1.57.0 `linux-x64` is
 #: `["chrome-linux64", "chrome"]` while `linux-arm64` is still
 #: `["chrome-linux", "chrome"]`, carrying the driver's own `// non-cft build`
-#: comment.
+#: comment. At 1.63.0 `linux-arm64` is `["chrome-linux-arm64", "chrome"]` and
+#: the comment is gone.
 #:
 #: Two separate events are easy to conflate here, and conflating them is how
 #: the first version of this paragraph got the story wrong: *what* is packaged
@@ -132,17 +135,17 @@ _VERSION = re.compile(r"(?:^|(?<=\s))\d+(?:\.\d+){2,}")
 #: patchright 1.58.0, when `cftUrl(...)` first appears. That second move is not
 #: a move to Google: `cftUrl` points at Playwright's own CDN in both eras,
 #: `cdn.playwright.dev/chrome-for-testing-public/<version>/...` at 1.58.0 and
-#: `cdn.playwright.dev/builds/cft/<version>/...` at the lock. Nothing here ever
+#: `cdn.playwright.dev/builds/cft/<version>/...` from 1.61.2 on. Nothing here ever
 #: fetches from `storage.googleapis.com`.
 #:
 #: For anyone allowlisting egress, one host is not the whole answer. Every
 #: plain `builds/...` entry goes through `PLAYWRIGHT_CDN_MIRRORS`, three hosts
 #: tried in order: `cdn.playwright.dev/dbazure/download/playwright`,
 #: `playwright.download.prss.microsoft.com/dbazure/download/playwright`, then
-#: `cdn.playwright.dev`. That covers the arm64 image's browser, and ffmpeg on
-#: *every* platform, since `patchright install chromium` resolves that too and
-#: its entries are plain templates. Where `cftUrl` entries exist they are the
-#: other shape:
+#: `cdn.playwright.dev`. At the lock that is ffmpeg on *every* platform, since
+#: `patchright install chromium` resolves that too and its entries are plain
+#: templates; through 1.61.2 it was the arm64 image's browser as well. The
+#: `cftUrl` entries, every browser at the lock, are the other shape:
 #: one host, `cdn.playwright.dev`, and no fallback at all. Allowing only
 #: `cdn.playwright.dev` therefore installs everything, because two of the three
 #: mirrors are on it; what is lost is the Microsoft-hosted fallback, so the gap
@@ -152,7 +155,7 @@ _VERSION = re.compile(r"(?:^|(?<=\s))\d+(?:\.\d+){2,}")
 #: nothing about which browser is inside. Binaries run directly: revision
 #: 1194 ->
 #: `Chromium 141.0.7390.37`, revision 1200 -> `Google Chrome for Testing
-#: 143.0.7499.4`, and revisions 1217, 1223 and 1228 -> `Google Chrome for
+#: 143.0.7499.4`, and revisions 1217, 1223, 1228 and 1243 -> `Google Chrome for
 #: Testing`, all on macOS arm64. On Linux arm64 the container reported
 #: `Chromium 148.0.7778.0` at revision 1223 -- the same revision that reports
 #: `Google Chrome for Testing 148.0.7778.96` on macOS. One revision, two names,
@@ -162,9 +165,11 @@ _VERSION = re.compile(r"(?:^|(?<=\s))\d+(?:\.\d+){2,}")
 #: reasoning is what got this paragraph wrong the first time. At the floor
 #: (revision 1187) linux-x64 and linux-arm64 both report `Chromium
 #: 140.0.7339.16`, exactly as macOS does -- so at the floor there is no
-#: platform split at all. At the lock (revision 1228) linux-x64 reports `Google
-#: Chrome for Testing 149.0.7827.55` while linux-arm64 reports `Chromium
-#: 149.0.7827.0`, note the differing final component. Windows never answers:
+#: platform split at all. At revision 1228 (patchright 1.61.2) linux-x64
+#: reports `Google Chrome for Testing 149.0.7827.55` while linux-arm64 reports
+#: `Chromium 149.0.7827.0`, note the differing final component. At the lock
+#: (revision 1243) both images report `Google Chrome for Testing
+#: 153.0.8010.12`, and so does macOS arm64. Windows never answers:
 #: :func:`a_version_can_be_asked_for` refuses before any binary is asked.
 #:
 #: The third entry is not a managed browser at all. `Google Chrome

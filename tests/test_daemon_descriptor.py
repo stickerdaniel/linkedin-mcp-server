@@ -22,6 +22,7 @@ import pytest
 import linkedin_mcp_server.daemon_descriptor as daemon_descriptor_module
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_descriptor import (
+    CONTROL_FLOOR_PROTOCOL,
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
     CommitPreflightError,
@@ -492,6 +493,26 @@ class TestPreparedCommit:
                 config=other,
             )
 
+    def test_validation_rejects_another_protocol(self, tmp_path: Path):
+        # `read` tolerates another protocol so an owner can be asked to leave.
+        # The generation this build is about to publish as its own must speak
+        # exactly its protocol, or it would advertise calls it cannot take.
+        token = new_token()
+        profile = tmp_path / "profile"
+        descriptor = replace(
+            _descriptor(tmp_path, token, profile=profile),
+            protocol_version=PROTOCOL_VERSION - 1,
+        )
+        prepare(tmp_path, descriptor, token)
+
+        with pytest.raises(DescriptorError, match="another protocol"):
+            validate_prepared(
+                tmp_path,
+                descriptor.instance_id,
+                profile=profile,
+                config=None,
+            )
+
     def test_validation_rejects_malformed_pending_json(self, tmp_path: Path):
         instance_id = new_instance_id()
         pending = pending_descriptor_path(tmp_path, instance_id)
@@ -713,14 +734,31 @@ class TestRefusals:
         with pytest.raises(DescriptorError, match="not text this daemon wrote"):
             read_token(tmp_path, loaded)
 
-    def test_a_descriptor_from_another_protocol_is_refused(self, tmp_path: Path):
-        # The field compatibility is meant to key on. Parsed but unenforced, a
-        # client would attach to an owner whose control routes, call metadata
-        # and ping contract it does not share.
+    def test_a_descriptor_from_another_protocol_is_read_for_the_caller_to_judge(
+        self, tmp_path: Path
+    ):
+        # Refusing it here made an older owner unreadable, and an owner nobody
+        # can read is one nobody can ask to stand down. The comparison moved to
+        # `daemon._inspect`, which turns it into a control-only pair; this pins
+        # that `read` still parses and returns the owner's real protocol.
         token = new_token()
         publish(tmp_path, _descriptor(tmp_path, token), token)
         raw = json.loads(descriptor_path(tmp_path).read_text())
         raw["protocol_version"] = PROTOCOL_VERSION + 1
+        descriptor_path(tmp_path).write_text(json.dumps(raw))
+
+        loaded = read(tmp_path)
+
+        assert loaded is not None
+        assert loaded.protocol_version == PROTOCOL_VERSION + 1
+
+    def test_a_descriptor_below_the_control_floor_is_refused(self, tmp_path: Path):
+        # Below the floor there is no stand-down route this build can use, so
+        # there is nothing it could safely do with the owner at all.
+        token = new_token()
+        publish(tmp_path, _descriptor(tmp_path, token), token)
+        raw = json.loads(descriptor_path(tmp_path).read_text())
+        raw["protocol_version"] = CONTROL_FLOOR_PROTOCOL - 1
         descriptor_path(tmp_path).write_text(json.dumps(raw))
 
         with pytest.raises(DescriptorError, match="protocol"):
@@ -793,13 +831,13 @@ class TestEndpointUrl:
         # An IPv6 literal that is accepted but unbracketed parses as a bad
         # port. Measured: a valid ::1 endpoint produced a URL no client could
         # use, so the daemon was unreachable through its own descriptor.
-        import httpx
+        import httpx2
 
         descriptor = _descriptor(tmp_path, new_token(), host=host)
         descriptor.check_endpoint_is_local()
 
         assert descriptor.url == expected
-        httpx.URL(descriptor.url)  # raises if a client could not use it
+        httpx2.URL(descriptor.url)  # raises if a client could not use it
 
 
 class TestStateLocation:
@@ -1558,12 +1596,12 @@ class TestEndpointSpelling:
     ):
         # The other half: tightening this must not refuse an endpoint the
         # daemon itself would write, which is easy to do by accident.
-        import httpx
+        import httpx2
 
         descriptor = _descriptor(tmp_path, new_token(), host=host)
 
         descriptor.check_endpoint_is_local()
-        httpx.URL(descriptor.url)
+        httpx2.URL(descriptor.url)
 
 
 class TestAuthRootShape:

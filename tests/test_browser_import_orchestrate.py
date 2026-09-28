@@ -456,3 +456,114 @@ async def test_import_restores_the_session_when_every_candidate_is_rejected(
     )
 
     restore.assert_called_once_with(retired, user_data_dir)
+
+
+def _hold_the_profile_elsewhere(profile_dir):
+    """Hold *profile_dir*'s lease as another process would; return a release.
+
+    A second open file description on the lease file, which the kernel treats
+    as a separate holder even inside this process.
+    """
+    from linkedin_mcp_server.profile_lease import (
+        _release_locked_fd,
+        acquire_locked_fd,
+        get_profile_lease,
+    )
+
+    fd = acquire_locked_fd(get_profile_lease(profile_dir)._lease_path, exclusive=True)
+    assert fd is not None
+    released = []
+
+    def release() -> None:
+        if not released:
+            released.append(True)
+            _release_locked_fd(fd)
+
+    return release
+
+
+def _one_accepted_candidate(monkeypatch):
+    profile = _profile("chrome", "Default")
+    monkeypatch.setattr(
+        orchestrate, "discover_profiles", lambda browser=None: [profile]
+    )
+    _patch_meta(monkeypatch, {profile: _meta(last_access=10.0)})
+    monkeypatch.setattr(
+        orchestrate, "extract_linkedin_cookies", lambda p: [_cookie("li_at")]
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.validate_imported_cookies",
+        AsyncMock(return_value=True),
+    )
+
+
+class TestWaitingForARetiringOwner:
+    """The import's first claim on the profile, after a shared browser retired.
+
+    That claim is the only one that can wait: the rotation inside it takes a
+    second reference to a lease this process already holds, so a wait placed
+    there is never reached by an import refused here first.
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_waits_for_the_holder_to_let_go(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+
+        user_data_dir = isolate_profile_dir
+        _one_accepted_candidate(monkeypatch)
+        release = _hold_the_profile_elsewhere(user_data_dir)
+        asyncio.get_running_loop().call_later(0.3, release)
+        try:
+            ok = await import_session_from_browser(
+                "chrome", user_data_dir=user_data_dir, profile_wait_seconds=10
+            )
+        finally:
+            release()
+
+        assert ok is True
+        assert portable_cookie_path(user_data_dir).exists()
+        assert not get_profile_lease(user_data_dir).held
+
+    @pytest.mark.asyncio
+    async def test_a_holder_that_keeps_it_is_refused_with_nothing_imported(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server.exceptions import BrowserBusyError
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+
+        user_data_dir = isolate_profile_dir
+        _one_accepted_candidate(monkeypatch)
+        rotate = AsyncMock()
+        monkeypatch.setattr(orchestrate, "rotate_shielded", rotate)
+        release = _hold_the_profile_elsewhere(user_data_dir)
+        try:
+            with pytest.raises(BrowserBusyError):
+                await import_session_from_browser(
+                    "chrome", user_data_dir=user_data_dir, profile_wait_seconds=0.3
+                )
+        finally:
+            release()
+
+        rotate.assert_not_awaited()
+        assert not portable_cookie_path(user_data_dir).exists()
+        assert not get_profile_lease(user_data_dir).held
+
+    @pytest.mark.asyncio
+    async def test_every_other_caller_is_refused_at_once(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server.exceptions import BrowserBusyError
+
+        user_data_dir = isolate_profile_dir
+        _one_accepted_candidate(monkeypatch)
+        release = _hold_the_profile_elsewhere(user_data_dir)
+        started = time.monotonic()
+        try:
+            with pytest.raises(BrowserBusyError):
+                await import_session_from_browser("chrome", user_data_dir=user_data_dir)
+        finally:
+            release()
+
+        assert time.monotonic() - started < 0.5

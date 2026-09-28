@@ -16,8 +16,9 @@ import re
 import shutil
 import socket
 import sys
+import time
 from collections.abc import Callable, Iterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from linkedin_mcp_server.common_utils import (
@@ -26,6 +27,9 @@ from linkedin_mcp_server.common_utils import (
     utcnow_iso,
 )
 from linkedin_mcp_server.config import get_config
+
+if TYPE_CHECKING:
+    from linkedin_mcp_server.profile_lease import ProfileLease
 
 logger = logging.getLogger(__name__)
 
@@ -832,8 +836,37 @@ def profile_in_use_by(profile_dir: Path) -> Path | None:
     return candidate
 
 
+#: How often a synchronous wait asks for the lease again: the async wait's pace.
+_LEASE_POLL_SECONDS = 0.1
+
+
+def _take_within(lease: ProfileLease, seconds: float) -> bool:
+    """Take a reference to *lease*, waiting up to *seconds* for another holder.
+
+    The synchronous counterpart of ``ProfileLease.acquire``, for the one caller
+    that must wait from synchronous code: a logout that has just asked a shared
+    browser to retire. The same nonblocking primitive and the same announcement,
+    so a holder that hands over on request hears this waiter, and nothing is
+    left blocking in a worker after the deadline. With no wait it is exactly
+    ``try_acquire``.
+    """
+    if lease.try_acquire():
+        return True
+    deadline = time.monotonic() + max(seconds, 0.0)
+    if time.monotonic() >= deadline:
+        return False
+    with lease.announce():
+        while (remaining := deadline - time.monotonic()) > 0:
+            time.sleep(min(_LEASE_POLL_SECONDS, remaining))
+            if lease.try_acquire():
+                return True
+    return False
+
+
 @contextmanager
-def _exclusive_profile(profile_dir: Path, *, action: str) -> Iterator[None]:
+def _exclusive_profile(
+    profile_dir: Path, *, action: str, wait_seconds: float = 0.0
+) -> Iterator[None]:
     """Hold the profile exclusively for the duration of an auth-state mutation.
 
     Checking and then releasing before the move would leave a window in which
@@ -858,6 +891,10 @@ def _exclusive_profile(profile_dir: Path, *, action: str) -> Iterator[None]:
     of ``runtime-profiles/<runtime>/profile`` while sharing the mounted auth
     root, so checking only the source would move a live container's profile out
     from under it.
+
+    *wait_seconds* is for a caller that has reason to expect the holder to let
+    go, such as a shared browser that has just agreed to retire. The reference
+    taken after the wait is the same single one, released on the way out.
     """
     from linkedin_mcp_server.profile_lease import get_profile_lease
 
@@ -867,7 +904,7 @@ def _exclusive_profile(profile_dir: Path, *, action: str) -> Iterator[None]:
             "This server still has a browser open on the profile. "
             f"Close it before {action}."
         )
-    if not lease.try_acquire():
+    if not _take_within(lease, wait_seconds):
         raise RuntimeError(
             "The browser profile is in use by another process. "
             f"Stop the running server or container before {action}."
@@ -1165,12 +1202,17 @@ def _retire(backup_dir: Path, targets: list[Path]) -> None:
             logger.warning("Could not re-retire %s: %s", target, exc)
 
 
-def clear_auth_state(source_profile_dir: Path | None = None) -> bool:
+def clear_auth_state(
+    source_profile_dir: Path | None = None, *, wait_seconds: float = 0.0
+) -> bool:
     """Remove source auth artifacts, derived runtime profiles and quarantines.
 
     The ownership marker is deliberately not among the targets. Logout is
     exactly when the next run needs it: erasing it would leave a custom root
     unclaimed, and the login that follows would be refused.
+
+    *wait_seconds* bounds a wait for another holder of the profile to let go,
+    and only a logout that has asked a shared browser to retire passes one.
 
     Raises:
         ProfileRootRefusedError: The root is not one this server owns.
@@ -1179,7 +1221,9 @@ def clear_auth_state(source_profile_dir: Path | None = None) -> bool:
             destroys everyone's rather than just this caller's.
     """
     profile_dir = _owned(source_profile_dir)
-    with _exclusive_profile(profile_dir, action="clearing the stored session"):
+    with _exclusive_profile(
+        profile_dir, action="clearing the stored session", wait_seconds=wait_seconds
+    ):
         # Quarantines hold previous sessions' cookies, so a logout that left them
         # behind would not be the "clear all stored auth state" the CLI
         # advertises.

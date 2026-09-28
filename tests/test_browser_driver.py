@@ -8,7 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.core.exceptions import ProxyConnectionError
+from linkedin_mcp_server.core.exceptions import (
+    AccountRestrictedError,
+    ProxyConnectionError,
+)
 from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
 from linkedin_mcp_server.drivers.browser import (
     _feed_auth_succeeds,
@@ -152,6 +155,38 @@ async def test_same_runtime_uses_source_profile(tmp_path):
     ctor.assert_called_once()
     assert ctor.call_args.kwargs["user_data_dir"] == tmp_path / "profile"
     source_browser.import_cookies.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_restricted_account_stops_the_startup_feed_check(tmp_path):
+    """Not a dead session: the caller must not retire it and log in again."""
+    profile_dir = _write_source_state(tmp_path, runtime_id="macos-arm64-host")
+    source_browser = _make_mock_browser()
+    source_browser.page.url = (
+        "https://www.linkedin.com/flagship-web/login/login-restriction/"
+    )
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="macos-arm64-host",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=source_browser,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        pytest.raises(AccountRestrictedError, match="identity verification"),
+    ):
+        await get_or_create_browser()
+
+    source_browser.close.assert_awaited()
+    assert source_state_path(profile_dir).exists()
+    assert (profile_dir / "Default" / "Cookies").exists()
 
 
 @pytest.mark.asyncio

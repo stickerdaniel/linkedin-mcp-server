@@ -56,6 +56,7 @@ from linkedin_mcp_server.config.schema import (
     AUTH_REPAIR_LOGIN_WAIT_FRACTION,
     DEFAULT_TOOL_TIMEOUT_SECONDS,
 )
+from linkedin_mcp_server.core.exceptions import AccountRestrictedError
 from linkedin_mcp_server.session_state import PeerSessionInPlaceError
 from linkedin_mcp_server.exceptions import (
     AuthenticationInProgressError,
@@ -271,6 +272,8 @@ class FrontendAuthRepairMiddleware(Middleware):
             # failed repair would refuse the replay and send the user back for a
             # retry that was not needed.
             logger.info("Another client already signed in; using its session")
+        except AccountRestrictedError as exc:
+            return _restricted(exc)
         except (AuthenticationStartedError, AuthenticationInProgressError):
             # Also not a failure, and the one that mattered most. Both functions
             # behind `_repair_auth_locally` report a *started* login by raising,
@@ -287,7 +290,11 @@ class FrontendAuthRepairMiddleware(Middleware):
             left = _how_long_to_wait_for_the_sign_in(
                 self._tool_timeout, time.monotonic() - began
             )
-            if not await _wait_for_the_sign_in(left):
+            try:
+                signed_in = await _wait_for_the_sign_in(left)
+            except AccountRestrictedError as exc:
+                return _restricted(exc)
+            if not signed_in:
                 logger.info("The sign-in did not finish in time; not replaying")
                 return result
             logger.info("The sign-in finished")
@@ -349,6 +356,20 @@ class FrontendAuthRepairMiddleware(Middleware):
             return result
 
 
+def _restricted(exc: AccountRestrictedError) -> ToolResult:
+    """The client's answer once LinkedIn has refused the account.
+
+    In place of the owner's result, whose wording asks for a retry that would
+    only be refused again, and without a marker, so nothing downstream reads it
+    as bad auth to repair.
+    """
+    logger.warning("LinkedIn restricted the account; not signing in")
+    return ToolResult(
+        content=[mt.TextContent(type="text", text=str(exc))],
+        is_error=True,
+    )
+
+
 async def a_repeat_could_change_something(
     context: MiddlewareContext[mt.CallToolRequestParams],
 ) -> bool:
@@ -365,7 +386,9 @@ async def a_repeat_could_change_something(
     silently in the unsafe direction.
 
     Unknown counts as changing something. Only ``readOnlyHint`` says otherwise,
-    and a tool that declares nothing has not promised anything.
+    and a tool that declares nothing has not promised anything. Read under its
+    Python name, ``read_only_hint``: the camelCase attribute is a deprecation
+    shim in FastMCP 4 that a setting can switch off.
     """
     name = getattr(context.message, "name", None)
     fastmcp_context = context.fastmcp_context
@@ -377,7 +400,7 @@ async def a_repeat_could_change_something(
         logger.debug("Could not read the annotations of %s", name, exc_info=True)
         return True
     annotations = getattr(tool, "annotations", None)
-    return not bool(annotations and annotations.readOnlyHint)
+    return getattr(annotations, "read_only_hint", None) is not True
 
 
 def _readable_marker(result: ToolResult) -> dict[str, Any] | None:

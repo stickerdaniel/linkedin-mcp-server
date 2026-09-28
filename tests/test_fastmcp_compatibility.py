@@ -1,4 +1,4 @@
-"""Keep published FastMCP metadata compatible with the registered tools."""
+"""Keep published FastMCP metadata compatible with the code that uses it."""
 
 from __future__ import annotations
 
@@ -52,8 +52,9 @@ def test_security_floors_are_published() -> None:
 
     expected_runtime = {
         "cryptography": Version("50.0.1"),
-        "fastmcp": Version("3.4.7"),
-        "mcp": Version("1.28.1"),
+        "fastmcp": Version("4.0.10"),
+        "httpx2": Version("2.13.1"),
+        "mcp": Version("2.2.0"),
         "pydantic-settings": Version("2.14.2"),
         "starlette": Version("1.3.1"),
     }
@@ -62,27 +63,19 @@ def test_security_floors_are_published() -> None:
     assert _minimum(development["aiohttp"]) >= Version("3.14.3")
 
 
-def test_fastmcp_v4_is_excluded_while_exclude_args_is_used() -> None:
-    """FastMCP 4 removed the ``exclude_args`` decorator argument."""
-    tool_sources = (_REPO_ROOT / "linkedin_mcp_server" / "tools").glob("*.py")
-    legacy_sources = [
-        path.name
-        for path in tool_sources
-        if "exclude_args=" in path.read_text(encoding="utf-8")
-    ]
-    assert legacy_sources, (
-        "exclude_args has been migrated; remove this compatibility test and "
-        "review the FastMCP upper bound"
-    )
+def test_the_suite_runs_without_the_camelcase_bridge() -> None:
+    """The SDK v2 names are the only ones that resolve during the run.
 
-    pyproject = tomllib.loads(
-        (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    )
-    fastmcp = next(
-        Requirement(raw)
-        for raw in pyproject["project"]["dependencies"]
-        if canonicalize_name(Requirement(raw).name) == "fastmcp"
-    )
+    ``tests/conftest.py`` and CI switch FastMCP's camelCase shims off before
+    fastmcp is imported. A switch set too late leaves the shims on, and every
+    ``result.isError`` left behind by the rename would pass on a deprecation
+    warning; the read below is what would go on working.
+    """
+    import fastmcp
+    import mcp.types as mt
 
-    assert Version("4.0.0") not in fastmcp.specifier
-    assert Version("4.99.0") not in fastmcp.specifier
+    assert fastmcp.settings.mcp_camelcase_compat is False
+    result = mt.CallToolResult(content=[], is_error=True)
+    with pytest.raises(AttributeError, match="isError"):
+        getattr(result, "isError")
+    assert result.is_error is True

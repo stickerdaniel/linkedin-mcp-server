@@ -255,7 +255,7 @@ async def scroll_job_sidebar(
     try:
         # Never zero: Patchright reads a zero timeout as no timeout at all
         # ("Pass `0` to disable timeout", `wait_for_selector` in the installed
-        # 1.61.2 API), so a spent budget would wait on a page with no job card
+        # 1.63.0 API), so a spent budget would wait on a page with no job card
         # until the tool is cancelled and every page gathered so far is thrown
         # away with it. A sub-millisecond deadline truncates to zero the same
         # way, which the guard above does not catch.

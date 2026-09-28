@@ -660,6 +660,114 @@ class TestClearAuthState:
         assert not profile_dir.exists()
 
 
+def _hold_elsewhere(profile_dir):
+    """Hold *profile_dir*'s lease as another process would, and return a release.
+
+    A second open file description on the lease file, which the kernel treats
+    as a separate holder even inside this process, so the lease's own
+    reference count cannot answer for it.
+    """
+    from linkedin_mcp_server.profile_lease import (
+        _release_locked_fd,
+        acquire_locked_fd,
+        get_profile_lease,
+    )
+
+    fd = acquire_locked_fd(get_profile_lease(profile_dir)._lease_path, exclusive=True)
+    assert fd is not None
+    released = []
+
+    def release() -> None:
+        if not released:
+            released.append(True)
+            _release_locked_fd(fd)
+
+    return release
+
+
+class TestClearingOnceTheHolderLetsGo:
+    """The bounded wait a logout takes after a shared browser agreed to retire."""
+
+    def test_it_waits_for_a_holder_that_lets_go(self, isolate_profile_dir):
+        import threading
+
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+
+        profile_dir = isolate_profile_dir
+        _seed_session(profile_dir)
+        release = _hold_elsewhere(profile_dir)
+        timer = threading.Timer(0.3, release)
+        timer.start()
+        try:
+            assert clear_auth_state(profile_dir, wait_seconds=10) is True
+        finally:
+            timer.cancel()
+            release()
+
+        assert not profile_dir.exists()
+        assert not get_profile_lease(profile_dir).held, "the wait leaked a reference"
+
+    def test_a_holder_that_keeps_it_leaves_everything_in_place(
+        self, isolate_profile_dir
+    ):
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+
+        profile_dir = isolate_profile_dir
+        _seed_session(profile_dir)
+        release = _hold_elsewhere(profile_dir)
+        try:
+            with pytest.raises(RuntimeError, match="in use by another process"):
+                clear_auth_state(profile_dir, wait_seconds=0.3)
+        finally:
+            release()
+
+        assert portable_cookie_path(profile_dir).exists()
+        assert (profile_dir / "Local State").exists()
+        assert not get_profile_lease(profile_dir).held
+
+    def test_without_a_wait_it_refuses_at_once_as_before(self, isolate_profile_dir):
+        import time
+
+        profile_dir = isolate_profile_dir
+        _seed_session(profile_dir)
+        release = _hold_elsewhere(profile_dir)
+        started = time.monotonic()
+        try:
+            with pytest.raises(RuntimeError, match="in use by another process"):
+                clear_auth_state(profile_dir)
+        finally:
+            release()
+
+        assert time.monotonic() - started < 0.5
+        assert portable_cookie_path(profile_dir).exists()
+
+    def test_the_wait_announces_itself_to_the_holder(self, isolate_profile_dir):
+        # The handoff a successor honours: without the announcement a holder
+        # that hands over on request would never hear this waiter.
+        import threading
+
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+
+        profile_dir = isolate_profile_dir
+        _seed_session(profile_dir)
+        release = _hold_elsewhere(profile_dir)
+        heard: list[bool] = []
+
+        def listen() -> None:
+            heard.append(get_profile_lease(profile_dir).handoff_requested())
+            release()
+
+        timer = threading.Timer(0.3, listen)
+        timer.start()
+        try:
+            assert clear_auth_state(profile_dir, wait_seconds=10) is True
+        finally:
+            timer.cancel()
+            release()
+
+        assert heard == [True]
+
+
 class TestRestoreSourceProfile:
     def test_puts_a_retired_session_back(self, isolate_profile_dir):
         """Rotation happens before the replacement exists, so a login that is

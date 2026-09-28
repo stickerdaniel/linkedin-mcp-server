@@ -8,21 +8,26 @@ refusing is just as wrong as attaching.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 import linkedin_mcp_server.daemon as daemon_module
 import linkedin_mcp_server.daemon_descriptor as daemon_descriptor_module
+import linkedin_mcp_server.storage_class as storage_class_module
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon import (
+    Mismatch,
     OwnerState,
     daemon_would_be_used,
     look_up_owner,
 )
 from linkedin_mcp_server.daemon_descriptor import (
+    DescriptorError,
     build,
     descriptor_path,
     new_instance_id,
@@ -32,6 +37,8 @@ from linkedin_mcp_server.daemon_descriptor import (
     token_path,
 )
 from linkedin_mcp_server.daemon_lock import DaemonLock
+from linkedin_mcp_server.session_state import canonical
+from linkedin_mcp_server.storage_class import Classification, StorageClass
 
 _RUNTIME = "macos-arm64-host"
 
@@ -146,6 +153,10 @@ class TestRefusing:
         # differently from the one it asked for — a different proxy, in this
         # case, which is the difference between traffic leaving the machine one
         # way or another.
+        #
+        # The pair still comes back, proved but control-only, so the election
+        # can ask whether that owner is alive before leaving it alone. Nothing
+        # that dispatches a call accepts it.
         profile = tmp_path / "profile"
         _publish_owner(
             tmp_path,
@@ -153,7 +164,192 @@ class TestRefusing:
             config=_config(profile, proxy_server="http://proxy.example:8080"),
         )
 
-        assert look_up_owner(tmp_path, profile, _config(profile)).attachment is None
+        lookup = look_up_owner(tmp_path, profile, _config(profile))
+
+        assert not lookup.worth_connecting
+        assert lookup.mismatch is Mismatch.CONFIGURATION
+        assert lookup.attachment is not None and lookup.attachment.control_only
+
+
+class TestLookingForAnOwnerToRetire:
+    """Which recorded owner a profile command may ask to retire.
+
+    The browser it is about to change, whatever that owner's settings: the
+    configuration decides whether this client may *use* an owner, and retiring
+    is not using it. Everything that makes the pair trustworthy still applies.
+    """
+
+    def test_an_owner_with_other_settings_is_found(self, tmp_path: Path):
+        profile = tmp_path / "profile"
+        token = _publish_owner(
+            tmp_path,
+            profile,
+            config=_config(profile, proxy_server="http://proxy.example:8080"),
+        )
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile), for_retirement=True)
+
+        assert lookup.state is OwnerState.ATTACHABLE
+        assert lookup.attachment is not None
+        assert lookup.attachment.token == token
+        assert not lookup.attachment.control_only
+
+    def test_the_same_owner_is_still_refused_for_calls(self, tmp_path: Path):
+        # The positive control for the test above: without the flag the
+        # fingerprint does refuse, so it is the flag that lets the owner through.
+        profile = tmp_path / "profile"
+        _publish_owner(
+            tmp_path,
+            profile,
+            config=_config(profile, proxy_server="http://proxy.example:8080"),
+        )
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile))
+
+        assert lookup.mismatch is Mismatch.CONFIGURATION
+
+    def test_an_owner_of_another_profile_is_not_found(self, tmp_path: Path):
+        theirs = tmp_path / "their-profile"
+        ours = tmp_path / "our-profile"
+        ours.mkdir()
+        _publish_owner(tmp_path, theirs, config=_config(ours))
+
+        lookup = look_up_owner(tmp_path, ours, _config(ours), for_retirement=True)
+
+        assert lookup.mismatch is Mismatch.PROFILE
+        assert lookup.attachment is None
+
+    def test_an_owner_of_another_runtime_is_not_found(self, tmp_path: Path):
+        profile = tmp_path / "profile"
+        _publish_owner(tmp_path, profile, runtime_id="docker-abc123")
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile), for_retirement=True)
+
+        assert lookup.mismatch is Mismatch.RUNTIME
+        assert lookup.attachment is None
+
+    def test_an_owner_of_another_protocol_stays_control_only(self, tmp_path: Path):
+        profile = tmp_path / "profile"
+        _publish_owner(tmp_path, profile)
+        _rewrite_published(
+            tmp_path,
+            protocol_version=daemon_descriptor_module.PROTOCOL_VERSION - 1,
+        )
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile), for_retirement=True)
+
+        assert lookup.mismatch is Mismatch.PROTOCOL
+        assert lookup.attachment is not None and lookup.attachment.control_only
+
+    def test_a_token_that_does_not_match_is_untrusted(self, tmp_path: Path):
+        profile = tmp_path / "profile"
+        _publish_owner(tmp_path, profile)
+        published = read(tmp_path)
+        assert published is not None
+        token_path(tmp_path, published.instance_id).write_text("another-token")
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile), for_retirement=True)
+
+        assert lookup.state is OwnerState.UNTRUSTED
+        assert lookup.attachment is None
+
+
+def _rewrite_published(auth_root: Path, **fields: object) -> None:
+    """Change fields of the published descriptor as another build would write them."""
+    import json
+
+    path = descriptor_path(auth_root)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw.update(fields)
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+
+class TestAnOwnerOfAnotherProtocol:
+    """What a frontend may still do with an owner whose tool protocol it lacks.
+
+    Ask it to stand down, and nothing else. The descriptor is parsed rather
+    than refused, because an owner nobody can read is an owner nobody can ask
+    to leave, and every check that makes a pair trustworthy still runs on it.
+    """
+
+    @pytest.mark.parametrize("offset", [-1, 1], ids=["older", "newer"])
+    def test_it_comes_back_proved_but_for_control_only(
+        self, tmp_path: Path, offset: int
+    ):
+        profile = tmp_path / "profile"
+        token = _publish_owner(tmp_path, profile)
+        _rewrite_published(
+            tmp_path,
+            protocol_version=daemon_descriptor_module.PROTOCOL_VERSION + offset,
+        )
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile))
+
+        assert lookup.state is OwnerState.INCOMPATIBLE
+        assert not lookup.worth_connecting
+        assert lookup.mismatch is Mismatch.PROTOCOL
+        assert lookup.attachment is not None
+        assert lookup.attachment.control_only
+        assert lookup.attachment.token == token
+
+    def test_the_token_still_has_to_match(self, tmp_path: Path):
+        # Control is still a bearer credential sent to an address from a file.
+        # A protocol mismatch must not become a way around the digest check.
+        profile = tmp_path / "profile"
+        _publish_owner(tmp_path, profile)
+        _rewrite_published(
+            tmp_path,
+            protocol_version=daemon_descriptor_module.PROTOCOL_VERSION - 1,
+        )
+        published = read(tmp_path)
+        assert published is not None
+        token_path(tmp_path, published.instance_id).write_text("another-token")
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile))
+
+        assert lookup.state is OwnerState.UNTRUSTED
+        assert lookup.attachment is None
+
+    def test_another_profiles_owner_gives_no_pair_at_all(self, tmp_path: Path):
+        # Identity comes before protocol, so an owner that is not this client's
+        # cannot even be asked to stand down by it.
+        theirs = tmp_path / "their-profile"
+        ours = tmp_path / "our-profile"
+        ours.mkdir()
+        _publish_owner(tmp_path, theirs, config=_config(ours))
+        _rewrite_published(
+            tmp_path,
+            protocol_version=daemon_descriptor_module.PROTOCOL_VERSION - 1,
+        )
+
+        lookup = look_up_owner(tmp_path, ours, _config(ours))
+
+        assert lookup.mismatch is Mismatch.PROFILE
+        assert lookup.attachment is None
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"schema_version": daemon_descriptor_module.SCHEMA_VERSION + 1},
+            {"protocol_version": daemon_descriptor_module.CONTROL_FLOOR_PROTOCOL - 1},
+        ],
+        ids=["another schema", "below the control floor"],
+    )
+    def test_a_file_this_build_cannot_control_stays_untrusted(
+        self, tmp_path: Path, fields: dict[str, object]
+    ):
+        # The schema is the file format and the floor is the stand-down route.
+        # Outside either there is nothing this build can safely say to the
+        # owner, so the file is kept and nothing is attached, as before.
+        profile = tmp_path / "profile"
+        _publish_owner(tmp_path, profile)
+        _rewrite_published(tmp_path, **fields)
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile))
+
+        assert lookup.state is OwnerState.UNTRUSTED
+        assert lookup.attachment is None
+        assert descriptor_path(tmp_path).exists()
 
     def test_an_off_machine_endpoint_is_refused_before_the_token_is_sent(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -566,6 +762,7 @@ class TestWhetherTheDaemonAppliesAtAll:
             "linkedin_mcp_server.daemon.get_runtime_id",
             lambda: "linux-amd64-host",
         )
+        _storage_is(monkeypatch, lambda _path: StorageClass.LOCAL)
 
         assert config.server.transport == "stdio"
         assert daemon_would_be_used(config) is True
@@ -601,3 +798,203 @@ class TestWhetherTheDaemonAppliesAtAll:
 
         assert applies is False
         assert caplog.text == ""
+
+
+def _storage_is(
+    monkeypatch: pytest.MonkeyPatch, decide: Callable[[Path], StorageClass]
+) -> list[Path]:
+    """Replace the classifier with *decide*, and record every path it is asked."""
+    asked: list[Path] = []
+
+    def classify(path: Path) -> Classification:
+        asked.append(canonical(path))
+        return Classification(decide(canonical(path)), "test storage")
+
+    monkeypatch.setattr(storage_class_module, "classify", classify)
+    return asked
+
+
+@pytest.fixture
+def coordination(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every daemon coordination effect, recorded and refused if it runs."""
+    import linkedin_mcp_server.daemon_election as daemon_election_module
+    import linkedin_mcp_server.daemon_lock as daemon_lock_module
+
+    touched: list[str] = []
+
+    def forbid(name: str):
+        def refuse(*_args, **_kwargs):
+            touched.append(name)
+            raise AssertionError(f"{name} ran for an ineligible root")
+
+        return refuse
+
+    for name in ("prepare_daemon_state", "read", "read_token"):
+        monkeypatch.setattr(daemon_descriptor_module, name, forbid(name))
+    monkeypatch.setattr(daemon_lock_module.DaemonLock, "__init__", forbid("lock"))
+    for name in ("obtain_owner", "_spawn"):
+        monkeypatch.setattr(daemon_election_module, name, forbid(name))
+    return touched
+
+
+def _eligible_config(tmp_path: Path) -> AppConfig:
+    config = _config(tmp_path / "auth" / "profile")
+    config.server.daemon_enabled = True
+    return config
+
+
+def _state_dir(tmp_path: Path) -> Path:
+    return tmp_path / daemon_descriptor_module._APPLICATION_STATE_DIR
+
+
+class TestStorageEligibility:
+    """The contract's "Storage" and "Non-local roots" decisions.
+
+    A non-local, synced or unclassifiable auth root or daemon state root runs
+    no daemon, keeps Direct with one warning, and causes no coordination
+    effect on the way there.
+    """
+
+    @pytest.mark.parametrize(
+        "refused", [StorageClass.NONLOCAL, StorageClass.SYNCED, StorageClass.UNKNOWN]
+    )
+    @pytest.mark.parametrize(
+        ("root", "label"),
+        [
+            ("profile", "profile directory"),
+            ("auth", "directory holding the profile"),
+            ("state", "daemon state directory"),
+        ],
+    )
+    def test_an_ineligible_root_keeps_direct_with_one_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        coordination: list[str],
+        refused: StorageClass,
+        root: str,
+        label: str,
+    ):
+        target = {
+            "profile": canonical(tmp_path / "auth" / "profile"),
+            "auth": canonical(tmp_path / "auth"),
+            "state": canonical(daemon_descriptor_module.daemon_state_root()),
+        }[root]
+        _storage_is(
+            monkeypatch,
+            lambda path: refused if path == target else StorageClass.LOCAL,
+        )
+
+        with caplog.at_level("DEBUG"):
+            applies = daemon_would_be_used(_eligible_config(tmp_path))
+
+        assert applies is False
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1
+        assert label in warnings[0].getMessage()
+        assert f"on {refused.value} storage" in warnings[0].getMessage()
+        assert coordination == []
+        assert not _state_dir(tmp_path).exists()
+
+    def test_local_roots_are_eligible_and_both_are_asked(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        asked = _storage_is(monkeypatch, lambda _path: StorageClass.LOCAL)
+
+        with caplog.at_level("WARNING"):
+            applies = daemon_would_be_used(_eligible_config(tmp_path))
+
+        assert applies is True
+        assert caplog.records == []
+        # The profile, which may itself be a mount point, and the auth root the
+        # election would be given above it.
+        assert asked == [
+            canonical(tmp_path / "auth" / "profile"),
+            canonical(tmp_path / "auth"),
+            canonical(daemon_descriptor_module.daemon_state_root()),
+        ]
+        assert not _state_dir(tmp_path).exists()
+
+    def test_a_classifier_that_raises_keeps_direct(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        coordination: list[str],
+    ):
+        def explode(_path: Path) -> Classification:
+            raise RuntimeError("the classifier broke")
+
+        monkeypatch.setattr(storage_class_module, "classify", explode)
+
+        with caplog.at_level("WARNING"):
+            applies = daemon_would_be_used(_eligible_config(tmp_path))
+
+        assert applies is False
+        assert len(caplog.records) == 1
+        assert coordination == []
+
+    def test_an_unlocatable_state_root_keeps_direct(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        coordination: list[str],
+    ):
+        _storage_is(monkeypatch, lambda _path: StorageClass.LOCAL)
+
+        def no_home() -> Path:
+            raise DescriptorError("no home")
+
+        monkeypatch.setattr(daemon_descriptor_module, "_account_home", no_home)
+
+        with caplog.at_level("WARNING"):
+            applies = daemon_would_be_used(_eligible_config(tmp_path))
+
+        assert applies is False
+        assert len(caplog.records) == 1
+        assert "daemon state directory" in caplog.records[0].getMessage()
+        assert coordination == []
+
+    def test_a_reader_failure_in_the_real_classifier_keeps_direct(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        coordination: list[str],
+    ):
+        # Through the real classify(), so its own boundary is what turns the
+        # failure into UNKNOWN; the gate's outer guard would hide a regression
+        # there by answering False for a different reason.
+        def statfs_failed(_existing: Path, _platform: str) -> Classification:
+            raise OSError(5, "Input/output error")
+
+        monkeypatch.setattr(storage_class_module, "_homes", lambda: [tmp_path])
+        monkeypatch.setattr(storage_class_module, "_filesystem_class", statfs_failed)
+
+        with caplog.at_level("WARNING"):
+            applies = daemon_would_be_used(_eligible_config(tmp_path))
+
+        assert applies is False
+        assert len(caplog.records) == 1
+        assert "on unknown storage" in caplog.records[0].getMessage()
+        assert "OSError" in caplog.records[0].getMessage()
+        assert coordination == []
+
+    def test_the_real_classifier_admits_local_roots(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        # The positive control through the real provider checks: a classifier
+        # that refused everything would pass every test above.
+        def local(existing: Path, _platform: str) -> Classification:
+            assert existing.exists()
+            return Classification(StorageClass.LOCAL, "local test filesystem")
+
+        monkeypatch.setattr(storage_class_module, "_homes", lambda: [tmp_path])
+        monkeypatch.setattr(storage_class_module, "_filesystem_class", local)
+
+        assert daemon_would_be_used(_eligible_config(tmp_path)) is True

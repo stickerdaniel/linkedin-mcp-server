@@ -194,6 +194,20 @@
             "company_name": {
               "description": "LinkedIn company name (e.g., \"docker\", \"anthropic\", \"microsoft\"). A full company URL is accepted too and is reduced to the slug.",
               "type": "string"
+            },
+            "max_scrolls": {
+              "anyOf": [
+                {
+                  "maximum": 50,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Maximum scroll-to-bottom iterations to load more posts.\nDefault (None) uses 10. Increase to read further back in the feed."
             }
           },
           "required": [

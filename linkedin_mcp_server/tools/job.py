@@ -30,12 +30,10 @@ def register_job_tools(
         title="Get Job Details",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_job_details(
         job_id: str,
         ctx: Context,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Get job details for a specific job posting on LinkedIn.
@@ -55,9 +53,7 @@ def register_job_tools(
         """
         try:
             job_id = normalize_job_id(job_id)
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_job_details"
-            )
+            extractor = await get_ready_extractor(ctx, tool_name="get_job_details")
             logger.info("Scraping job: %s", job_id)
 
             await ctx.report_progress(
@@ -83,7 +79,6 @@ def register_job_tools(
         title="Search Jobs",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "search"},
-        exclude_args=["extractor"],
     )
     async def search_jobs(
         keywords: str,
@@ -96,7 +91,6 @@ def register_job_tools(
         work_type: str | None = None,
         easy_apply: bool = False,
         sort_by: str | None = None,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Search for jobs on LinkedIn.
@@ -133,9 +127,7 @@ def register_job_tools(
             # against eight it no longer had, and the call was cancelled with
             # every page it had gathered.
             started = time.monotonic()
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="search_jobs"
-            )
+            extractor = await get_ready_extractor(ctx, tool_name="search_jobs")
             logger.info(
                 "Searching jobs: keywords='%s', location='%s', max_pages=%d",
                 keywords,
@@ -178,12 +170,10 @@ def register_job_tools(
         title="Get Saved Jobs",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_saved_jobs(
         ctx: Context,
         max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         List job postings saved by the authenticated LinkedIn user.
@@ -199,9 +189,7 @@ def register_job_tools(
             numeric job ID strings usable with get_job_details), and optional references.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_saved_jobs"
-            )
+            extractor = await get_ready_extractor(ctx, tool_name="get_saved_jobs")
             logger.info("Fetching saved jobs (max_pages=%d)", max_pages)
 
             await ctx.report_progress(

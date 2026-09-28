@@ -1318,7 +1318,7 @@ class TestSearchJobs:
         assert len(seen) == 10
         assert seen[0] == 12.0  # the per-page cap, whatever max_pages says
         assert seen == [12.0] * 5 + [0.0] * 5  # 60s, spent five pages in
-        assert sum(seen) <= 60.0
+        assert sum(s for s in seen if s is not None) <= 60.0
 
     async def test_a_slow_navigation_does_not_spend_the_scroll_budget(self, mock_page):
         """The budget bounds scrolling, so only scrolling may spend it.

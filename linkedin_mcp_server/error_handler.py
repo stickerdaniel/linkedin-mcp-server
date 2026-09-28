@@ -16,6 +16,7 @@ from linkedin_mcp_server.core.proxy_errors import (
     redacted_copy,
 )
 from linkedin_mcp_server.core.exceptions import (
+    AccountRestrictedError,
     InvalidReferenceError,
     AuthenticationError,
     ElementNotFoundError,
@@ -203,6 +204,13 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
     # would send users to the tracker for something working as intended.
     elif isinstance(exception, BrowserDowngradeError):
         logger.warning("Browser older than the profile%s: %s", ctx, exception)
+        raise ToolError(str(exception)) from exception
+
+    # Diagnostics-free, following BrowserDowngradeError: LinkedIn's decision
+    # about the account is not a bug, and the message already names the only
+    # way out.
+    elif isinstance(exception, AccountRestrictedError):
+        logger.warning("LinkedIn account restricted%s", ctx)
         raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, SessionExpiredError):

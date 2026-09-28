@@ -76,6 +76,72 @@ def test_rejects_leading_reserved_minimal_tokens(keyword: str) -> None:
     assert not attribution.has_model_attribution(f"Generated with {keyword} GPT-5.6")
 
 
+#: Macroscope's block as it lands in a PR body, trimmed from #1132.
+_MACROSCOPE = (
+    "<!-- Macroscope's pull request summary starts here -->\n"
+    "<!-- Macroscope will only edit the content between these invisible "
+    "markers, and the markers themselves will not be visible in the GitHub "
+    "rendered markdown. -->\n"
+    "> [!NOTE]\n"
+    "> ### Exempt Renovate PRs from the changelog fragment requirement\n"
+    "> <!-- Macroscope's review summary starts here -->\n"
+    "> <sup>Macroscope summarized de6f451.</sup>\n"
+    "> <!-- Macroscope's review summary ends here -->\n"
+    ">\n"
+    "<!-- Macroscope's pull request summary ends here -->\n"
+)
+_LINE = "Generated with Claude Opus 5.5"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"## Summary\n\nDone.\n\n{_LINE}\n\n{_MACROSCOPE}",
+        f"## Summary\n\nDone.\n\n{_MACROSCOPE}\n{_LINE}\n",
+        (
+            "Macroscope opens with `<!-- Macroscope's pull request summary "
+            f"starts here -->`.\n\n{_LINE}\n\n{_MACROSCOPE}"
+        ),
+        (
+            "The block starts with:\n\n```\n"
+            "<!-- Macroscope's pull request summary starts here -->\n```\n\n"
+            f"{_LINE}\n\n{_MACROSCOPE}"
+        ),
+        (
+            f"## Summary\n\nDone.\n\n{_LINE}\n\n"
+            + _MACROSCOPE.replace(
+                "> [!NOTE]\n",
+                "> [!NOTE]\n> It skips `<!-- Macroscope's pull request summary "
+                "starts here -->` blocks.\n",
+            )
+        ),
+    ],
+    ids=[
+        "summary-after",
+        "summary-before",
+        "marker-quoted-above",
+        "marker-line-in-code-block",
+        "marker-quoted-inside",
+    ],
+)
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_ignores_the_macroscope_summary(body: str, newline: str) -> None:
+    assert attribution.has_model_attribution(body.replace("\n", newline))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"## Summary\n\nDone.\n\n{_MACROSCOPE.replace('> [!NOTE]', _LINE)}",
+        # Without its end marker the text is not Macroscope's block.
+        f"{_LINE}\n\n<!-- Macroscope's pull request summary starts here -->\nx",
+    ],
+    ids=["only-inside-the-summary", "unterminated"],
+)
+def test_the_macroscope_summary_carries_no_attribution(body: str) -> None:
+    assert not attribution.has_model_attribution(body)
+
+
 @pytest.mark.parametrize(
     "body",
     [

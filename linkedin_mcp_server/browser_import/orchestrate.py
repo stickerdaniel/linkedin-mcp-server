@@ -199,6 +199,7 @@ async def import_session_from_browser(
     *,
     user_data_dir: Path,
     superseded_by: str | None | object = UNGUARDED,
+    profile_wait_seconds: float = 0.0,
 ) -> bool:
     """Discover, rank, decrypt, validate and persist a browser LinkedIn session.
 
@@ -215,6 +216,10 @@ async def import_session_from_browser(
 
     Returns ``True`` on a validated, persisted session, ``False`` when a live
     ``li_at`` was found but no browser's session was accepted by LinkedIn.
+
+    *profile_wait_seconds* bounds a wait for the profile at the import's first
+    lease gate, for a caller that has asked a shared browser to retire and
+    expects it to let go. Every other caller demands the profile at once.
     """
     live, skipped = await asyncio.to_thread(_discover_and_rank, browser)
     if not live:
@@ -241,7 +246,16 @@ async def import_session_from_browser(
     # for the whole rotate-validate-commit flow. Without this another process
     # could launch against the profile the moment the staged cookies land.
     lease = get_profile_lease(user_data_dir)
-    if not lease.try_acquire():
+    # Waited for here and nowhere later: this is the reference the whole import
+    # holds, and the nested exclusivity check inside rotation only counts it
+    # again. A wait placed there would never be reached by an import refused
+    # here first.
+    held = (
+        await lease.acquire(timeout=profile_wait_seconds)
+        if profile_wait_seconds > 0
+        else lease.try_acquire()
+    )
+    if not held:
         raise BrowserBusyError(
             "Another LinkedIn MCP client is using the browser, so a session "
             "cannot be imported. Close it and try again."

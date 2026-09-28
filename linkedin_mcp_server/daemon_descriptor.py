@@ -81,25 +81,32 @@ from linkedin_mcp_server.private_state import (
 #: recognise the value refuses rather than guessing at fields it cannot read.
 SCHEMA_VERSION = 2
 
-#: Bumped when the daemon's own protocol changes incompatibly: the control
-#: routes, the call metadata, or the ping contract. Compatibility keys on this
-#: rather than on the package version, because the documented install is
+#: Bumped when the daemon's tool protocol changes incompatibly: the call
+#: metadata, the heartbeat contract, or the ping contract. Compatibility keys on
+#: this rather than on the package version, because the documented install is
 #: ``@latest`` and this project releases often. Matching exact versions would
 #: mean a manual shutdown after almost every release, which is precisely the
 #: friction the daemon exists to remove.
 #:
-#: **Incompatibly is doing the work in that sentence, and it was added rather
-#: than assumed.** The heartbeat route and the call marker
-#: (:mod:`linkedin_mcp_server.daemon_liveness`) are a control route and call
-#: metadata both, and they did not bump this. A bump makes an old owner
-#: unreadable — :func:`read` refuses the file before an attachment exists — and
-#: an owner nobody can read is an owner nobody can ask to stand down, so the
-#: turnover that an upgrade depends on would break for every owner already
-#: installed. An addition that both sides can do without is therefore not a
-#: reason to bump; one that either side would misread is. The test for it is
-#: whether the two mixed pairings still work, and for the heartbeat they are
-#: tested rather than asserted.
-PROTOCOL_VERSION = 1
+#: 2 makes the call marker mandatory in both directions: a frontend never
+#: forwards a call it could not mark, and an owner refuses one that arrives
+#: without a marker (:mod:`linkedin_mcp_server.daemon_liveness`). A version-1
+#: owner runs unmarked calls to completion, so the two cannot share tools.
+#:
+#: A bump does not make an older owner unreadable, and that is what lets it be
+#: bumped at all. :func:`read` parses a descriptor from any protocol at or above
+#: :data:`CONTROL_FLOOR_PROTOCOL` and leaves the comparison to the caller, which
+#: may then use it for control and never for a tool call
+#: (``daemon.Attachment.control_only``). An owner nobody can read is an owner
+#: nobody can ask to stand down, and the turnover an upgrade depends on would
+#: otherwise break for every owner already installed.
+PROTOCOL_VERSION = 2
+
+#: The oldest tool protocol whose stand-down route and bearer check this build
+#: can still use. That route is the control floor: it is frozen across tool
+#: protocol changes and moves only with :data:`SCHEMA_VERSION`, so a descriptor
+#: below this names an owner this client could not even ask to leave.
+CONTROL_FLOOR_PROTOCOL = 1
 
 _DESCRIPTOR_FILE = "daemon.json"
 _PENDING_DESCRIPTOR_PREFIX = "pending-"
@@ -1245,7 +1252,15 @@ def _read_own_file(
 
 
 def _decode_descriptor(path: Path, raw: str) -> DaemonDescriptor:
-    """Parse and version-check one descriptor read from *path*."""
+    """Parse and version-check one descriptor read from *path*.
+
+    The schema is enforced here and the tool protocol is not. The schema is the
+    file format, so a mismatch means fields this client cannot read. A protocol
+    mismatch is a file this client reads perfectly well, naming an owner it may
+    only ask to stand down, and that distinction is the caller's to draw
+    (``daemon._inspect``). Everything else ``from_mapping`` checks still holds
+    for it: field types, the instance identifier and a local endpoint.
+    """
     try:
         parsed = json.loads(raw)
     except ValueError as exc:
@@ -1259,11 +1274,10 @@ def _decode_descriptor(path: Path, raw: str) -> DaemonDescriptor:
             f"The daemon descriptor is version {descriptor.schema_version}, and "
             f"this client understands version {SCHEMA_VERSION}"
         )
-    if descriptor.protocol_version != PROTOCOL_VERSION:
+    if descriptor.protocol_version < CONTROL_FLOOR_PROTOCOL:
         raise DescriptorError(
-            f"The running daemon speaks protocol {descriptor.protocol_version} "
-            f"and this client speaks {PROTOCOL_VERSION}. Stop the running "
-            f"daemon to let a compatible one start."
+            f"The running daemon speaks protocol {descriptor.protocol_version}, "
+            f"which this client cannot even ask to stand down"
         )
     return descriptor
 
@@ -1309,6 +1323,12 @@ def validate_prepared(
     if descriptor.instance_id != checked:
         raise DescriptorError(
             "The prepared daemon descriptor belongs to another generation"
+        )
+    # Exact here, unlike ``read``: this is the generation this build is about
+    # to publish as its own, not one it may merely ask to stand down.
+    if descriptor.protocol_version != PROTOCOL_VERSION:
+        raise DescriptorError(
+            "The prepared daemon descriptor speaks another protocol than this build"
         )
     if not descriptor.serves(profile):
         raise DescriptorError("The prepared daemon descriptor serves another profile")
