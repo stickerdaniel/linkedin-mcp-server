@@ -969,8 +969,9 @@ def _metadata_shape_ok() -> Path | None:
         return None
     if payload.get("browsers_path") != str(configured_browsers_path):
         return None
-    if payload.get("patchright_version") != _patchright_pkg_version():
-        return None
+    # A peer on another Patchright version can write this shared metadata.
+    # Readiness depends on this process's revision and completion marker,
+    # checked by browser_ready(), not on which package last ran the installer.
     return configured_browsers_path
 
 
