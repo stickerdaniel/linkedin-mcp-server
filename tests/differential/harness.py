@@ -171,9 +171,11 @@ from differential.unconfirmed_close import (
     BEFORE_QUIT,
     BEFORE_RECOVERY,
     LOCK_FILE,
+    Deferral,
     PhaseReading,
     R7Continuation,
     R7Setup,
+    SharedReduction,
     UnsettledWorker,
     checkpoint_problems,
     clock_sample,
@@ -187,8 +189,10 @@ from differential.unconfirmed_close import (
     r7_environment,
     read_phase,
     realtime_interval,
+    retain,
     run_owned,
     settlement_problems,
+    shared_reduction,
     wait_for_marker,
 )
 from differential.unconfirmed_close import NO_RECOVERY as R7_NO_RECOVERY
@@ -1408,15 +1412,16 @@ def _stat_start_ticks(pid: int) -> int | None:
         return None
 
 
-def close_marker() -> int | None:
-    """The start, in kernel ticks, of a process started as the close begins.
+def creation_marker() -> tuple[int | None, float | None]:
+    """A process started now, as H-R7 marks its close and its barrier.
 
-    A lifetime whose start is later in ticks began after this marker, which
-    no reading of the wall clock can say across a clock step. None where the
-    ticks cannot be read.
+    Its start in kernel ticks, where they can be read (Linux): a lifetime
+    whose start is later in ticks began after the marker, which no reading
+    of the wall clock can say across a clock step. And its creation time as
+    psutil reads every lifetime's (``start_identity``), so a lifetime the
+    watcher recorded can be ordered against the marker after it is gone.
+    None for either that cannot be read.
     """
-    if not sys.platform.startswith("linux"):
-        return None
     try:
         marker = subprocess.Popen(
             [sys.executable, "-I", "-c", "import sys; sys.stdin.read()"],
@@ -1425,9 +1430,16 @@ def close_marker() -> int | None:
             stderr=subprocess.DEVNULL,
         )
     except OSError:
-        return None
+        return None, None
     try:
-        return _stat_start_ticks(marker.pid)
+        ticks = (
+            _stat_start_ticks(marker.pid) if sys.platform.startswith("linux") else None
+        )
+        try:
+            created: float | None = psutil.Process(marker.pid).create_time()
+        except psutil.Error:
+            created = None
+        return ticks, created
     finally:
         with contextlib.suppress(OSError, ValueError):
             assert marker.stdin is not None
@@ -1440,7 +1452,7 @@ def close_marker() -> int | None:
 
 
 def created_after(pid: int, start: float, marker: int | None) -> bool | None:
-    """Whether (*pid*, *start*) began after the close marker; None if unknown.
+    """Whether (*pid*, *start*) began after a marker's ticks; None if unknown.
 
     The same tick is unknown: either could have come first.
     """
@@ -1460,6 +1472,7 @@ def successor_problems(
     probe: tuple[float, float] | None,
     probe_requests: int,
     after_close: Callable[[int, float], bool | None],
+    browser_after: Callable[[int, float], bool | None] | None = None,
 ) -> list[str]:
     """Why *successor* is not shown to have replaced *closing* and served the
     probe; empty when it is.
@@ -1474,11 +1487,13 @@ def successor_problems(
     probe ran (*probe* is its call's start and return, *probe_requests* the
     feed requests between them), so a row browser alive then made it. Every
     row browser the watcher could have seen in that interval must descend
-    from the successor, one of them begun after the close and seen before the
-    probe returned. One from the owner that closed, or one whose ancestry is
-    unknown, leaves the served request unattributed; a browser launched only
-    after the response is no evidence for it.
+    from the successor, one of them begun after the close (or, with
+    *browser_after*, after the boundary that asks: H-R7's recovery barrier)
+    and seen before the probe returned. One from the owner that closed, or
+    one whose ancestry is unknown, leaves the served request unattributed; a
+    browser launched only after the response is no evidence for it.
     """
+    browser_after = browser_after or after_close
     if closing is None:
         return ["the owner that closed was never identified"]
     if successor is None:
@@ -1539,12 +1554,13 @@ def successor_problems(
                 f"browser {life.pid} ran while the probe was served, and nothing "
                 f"ties it to pid {successor.pid}"
             )
-        elif life.first_t <= ended and after_close(life.pid, life.start) is True:
+        elif life.first_t <= ended and browser_after(life.pid, life.start) is True:
             served = True
     if not served:
         problems.append(
-            f"no browser of pid {successor.pid}, begun after the close, was seen "
-            f"before the probe returned"
+            f"no browser of pid {successor.pid}, begun after the "
+            f"{'close' if browser_after is after_close else 'recovery barrier'}, "
+            f"was seen before the probe returned"
         )
     return problems
 
@@ -3245,13 +3261,18 @@ def r7_continuation(
     vector: RowVector | None,
     phase: PhaseReading | None,
     validity: Sequence[str],
+    observed: Iterable[Mapping[str, Any]] = (),
+    shared: SharedReduction = SharedReduction(),
 ) -> R7Continuation:
     """The row's H-R7 continuation, from what it recorded; judged elsewhere.
 
     The selected call is judged here, once every actor has exited, from the
     fault's own records: a duplicate or an invalid entry written late counts.
     The process_tree is the one the actors import, by content, and the fault
-    text the one in the overlay now, not the one declared.
+    text the one in the overlay now, not the one declared. So is early use
+    of the profile: against the whole of *observed*, the watcher's completed
+    history, wherever the row reached its recovery barrier, so a browser the
+    watcher reported after the barrier's own look still counts.
     """
     overlay = setup.overlay
     if overlay is not None:
@@ -3288,6 +3309,14 @@ def r7_continuation(
         window.get("guardian"),
         window.get("lock"),
     )
+    early: list[str] = []
+    if "barrier_created" in window and principal:
+        early = early_browsers(
+            observed,
+            (int(principal[0]), float(principal[1])),
+            since=window.get("close_created"),
+            until=window.get("barrier_created"),
+        )
     return R7Continuation(
         experiment=experiment,
         repetition=setup.repetition,
@@ -3323,6 +3352,8 @@ def r7_continuation(
         ended_by_harness=tuple(window.get("ended_by_harness") or ()),
         phase=phase,
         validity=tuple(validity),
+        shared=shared,
+        early_use=tuple(early),
     )
 
 
@@ -3856,15 +3887,20 @@ async def measure_host_quit_row(
     ``close_session``, then takes the lease checkpoints and, in daemon mode,
     recovers once the original owner and guardian are gone and the lock is
     free. Whatever still serves is ended after measurement, since nothing
-    idles out. What it established is ``RowResult.unconfirmed``.
+    idles out, and that settling and the teardown after it run whole even
+    when the row is cancelled, the cancellation raised only once they are
+    done. What it established is ``RowResult.unconfirmed``.
+
+    No row starts while anything an earlier row left is unsettled
+    (``unconfirmed_close.settlement_problems``).
     """
     r7 = unconfirmed_close
-    if r7 is not None:
-        # Before anything else: an earlier row's worker or helper still
-        # running could still be asking about a profile.
-        left = settlement_problems()
-        if left:
-            raise UnsettledWorker(f"an earlier row left these unsettled: {left}")
+    # Before anything else, whichever row this is: an earlier row's worker or
+    # helper still running could still be asking about a profile, and a
+    # tracer, owner or guardian it retained could still act in this one.
+    left = settlement_problems()
+    if left:
+        raise UnsettledWorker(f"an earlier row left these unsettled: {left}")
     # First, before anything reads, launches or spawns.
     account = claim_account(profile)
 
@@ -4043,6 +4079,11 @@ async def measure_host_quit_row(
     activation: dict[str, Any] | None = None
     #: The owner cleanup settles: whoever the descriptor names at the end.
     cleanup_owner: OwnerIdentity | None = None
+    #: H-R7: the cancellations its teardown held back (``Deferral``), raised
+    #: once that teardown is done, and whether ``r7_after_quit`` has begun: a
+    #: row cancelled before it still settles its owners in the teardown.
+    r7_defer = Deferral()
+    r7_settling_began = False
 
     async def kill_the_actor() -> None:
         """Associate the victim, find its guardian, attach the oracle, kill."""
@@ -4389,7 +4430,10 @@ async def measure_host_quit_row(
         probe: Mapping[str, Any],
     ) -> tuple[OwnerIdentity | None, list[str]]:
         """The owner the descriptor names now, and why it is not shown to be
-        a new lifetime that replaced the original and served *probe*."""
+        a new lifetime that replaced the original and served *probe*: the
+        owner begun after the close, since an early election is allowed, and
+        the browser that served begun after the recovery barrier, since early
+        use of the profile is not."""
         found: OwnerIdentity | None = None
         problems: list[str] = []
         try:
@@ -4403,6 +4447,7 @@ async def measure_host_quit_row(
         began, ended = probe.get("began"), probe.get("ended")
         interval = (began, ended) if began is not None and ended is not None else None
         ticks = r7_window.get("close_ticks")
+        barrier = r7_window.get("barrier_ticks")
         problems += successor_problems(
             watcher.observed(),
             identified,
@@ -4415,6 +4460,7 @@ async def measure_host_quit_row(
                 and interval[0] <= (request.t or 0.0) <= interval[1]
             ),
             after_close=lambda pid, start: created_after(pid, start, ticks),
+            browser_after=lambda pid, start: created_after(pid, start, barrier),
         )
         return found, problems
 
@@ -4548,7 +4594,9 @@ async def measure_host_quit_row(
                     },
                 )
         # Whatever starts after this marker started after the close began.
-        w["close_ticks"] = await run_owned("mark the close", close_marker, seconds=30.0)
+        w["close_ticks"], w["close_created"] = await run_owned(
+            "mark the close", creation_marker, seconds=30.0
+        )
         w["close_began"] = time.time()
         closed = await call("close_session", {})
         w["close"] = {
@@ -4606,7 +4654,11 @@ async def measure_host_quit_row(
             seconds=_R7_EXIT_SECONDS + 30.0,
         )
         point = await lease_checkpoint(BEFORE_RECOVERY)
-        barrier = time.time()
+        # The recovery barrier, kept: early use is judged against it again,
+        # from the watcher's completed history, before the row is accepted.
+        w["barrier_ticks"], w["barrier_created"] = await run_owned(
+            "mark the barrier", creation_marker, seconds=30.0
+        )
         pre = []
         if w["owner_exit"] != "exited":
             pre.append(f"the original owner was {w['owner_exit']!r}")
@@ -4614,7 +4666,10 @@ async def measure_host_quit_row(
             pre.append(f"the original guardian was {w['guardian_exit']!r}")
         pre += checkpoint_problems(point, expect=lease_probe.FREE)
         pre += early_browsers(
-            watcher.observed(), principal, since=w["close_began"], until=barrier
+            watcher.observed(),
+            principal,
+            since=w["close_created"],
+            until=w["barrier_created"],
         )
         w["pre_probe"] = pre
         emit("harness", "r7.window", phase="barrier", pre_probe=pre)
@@ -4654,6 +4709,21 @@ async def measure_host_quit_row(
         gate("the host's quit")
         w["script_ended"] = True
 
+    async def r7_step(label: str, func: Callable[..., Any], *args: Any, **kw: Any):
+        """One step of H-R7's settling: owned, bounded, never gated, and with
+        every cancellation held for the whole teardown (``r7_defer``). A step
+        that fails is recorded and answers None; the next one still runs."""
+        seconds = kw.pop("seconds")
+        try:
+            return await run_owned(
+                label, func, *args, seconds=seconds, gated=False, defer=r7_defer, **kw
+            )
+        except Exception as exc:  # noqa: BLE001 - recorded, the next step runs
+            r7_window["script_problems"].append(
+                f"settling: {label} failed: {type(exc).__name__}: {exc}"
+            )
+            return None
+
     async def r7_after_quit() -> None:
         """Settle what the scenario leaves running, after every measurement.
 
@@ -4662,39 +4732,53 @@ async def measure_host_quit_row(
         idles out, so each owner still serving is ended through the handle
         the row identified it by, labelled as the harness's, and its guardian
         seen gone; none of that is read as the product settling.
+
+        Run once, after the host's quit or, when the row was cancelled or
+        failed before it, from the teardown; either way the serving owner is
+        the one the row found serving, else the one the descriptor names now
+        as ``identify_owner`` ties it to this row, so a successor elected
+        after the last look is not left running. Each step runs whatever the
+        one before it did (``r7_step``). Anything not shown gone is retained
+        (``retain``): no later measurement starts until it is.
         """
-        nonlocal cleanup_owner
+        nonlocal cleanup_owner, r7_settling_began
+        r7_settling_began = True
         w = r7_window
-        # Cleanup, so never gated: what the row could not settle must not
-        # keep it from ending what it started. Still owned and bounded.
         if not daemon:
-            w["server_exit"] = await run_owned(
-                "the server's exit",
-                exit_state,
-                r7_handles.get("original actor"),
-                30.0,
-                seconds=60.0,
-                gated=False,
+            server_handle = r7_handles.get("original actor")
+            guardian_handle = r7_handles.get("guardian")
+            w["server_exit"] = await r7_step(
+                "the server's exit", exit_state, server_handle, 30.0, seconds=60.0
             )
-            w["guardian_after_quit"] = await run_owned(
+            w["guardian_after_quit"] = await r7_step(
                 "the guardian's exit",
                 exit_state,
-                r7_handles.get("guardian"),
+                guardian_handle,
                 _R7_EXIT_SECONDS,
                 seconds=_R7_EXIT_SECONDS + 30.0,
-                gated=False,
             )
+            for label, handle, state in (
+                ("the Direct server", server_handle, w["server_exit"]),
+                ("the Direct guardian", guardian_handle, w["guardian_after_quit"]),
+            ):
+                if handle is not None and state != "exited":
+                    retain(
+                        f"{label} {handle.pid}",
+                        lambda grace, handle=handle: (
+                            exit_state(handle, grace) == "exited"
+                        ),
+                    )
             return
         serving = r7_handles.get("successor")
-        if serving is None:
-            found = await run_owned(
-                "find the serving owner",
-                find_the_successor_r7,
-                {},
-                seconds=30.0,
-                gated=False,
+        # Only looked at, never read into being (``find_the_owner``).
+        if (
+            serving is None
+            and daemon_descriptor.descriptor_path(account.auth_root).exists()
+        ):
+            found = await r7_step(
+                "find the serving owner", find_the_successor_r7, {}, seconds=30.0
             )
-            serving = found[0]
+            serving = found[0] if found else None
         cleanup_owner = serving or identified
         seen: set[tuple[int, float]] = set()
         for who, running in (
@@ -4704,27 +4788,46 @@ async def measure_host_quit_row(
             if running is None or (running.pid, running.create_time) in seen:
                 continue
             seen.add((running.pid, running.create_time))
-            ended = await run_owned(
-                f"end the {who}", end_owner, running, seconds=60.0, gated=False
+            ended = (
+                await r7_step(f"end the {who}", end_owner, running, seconds=60.0)
+                or "unknown: the end was not answered"
             )
-            guardian = guardian_launch(watcher.observed(), running.pid)
+            if ended not in ("gone", "stopped"):
+                retain(
+                    f"the {who} {running.pid}",
+                    lambda grace, running=running: (
+                        end_owner(running) in ("gone", "stopped")
+                    ),
+                )
+            observed = watcher.observed()
+            guardian = guardian_launch(observed, running.pid)
+            guardian_exit = "none was seen"
+            if guardian is not None:
+                guardian_exit = (
+                    await r7_step(
+                        f"the {who}'s guardian's exit",
+                        lifetime_exit_state,
+                        observed,
+                        guardian[0],
+                        _R7_EXIT_SECONDS,
+                        seconds=_R7_EXIT_SECONDS + 30.0,
+                    )
+                    or "unknown: the wait was not answered"
+                )
+                if guardian_exit != "exited":
+                    retain(
+                        f"the {who}'s guardian {guardian[0]}",
+                        lambda grace, pid=guardian[0], records=observed: (
+                            lifetime_exit_state(records, pid, grace) == "exited"
+                        ),
+                    )
             record = {
                 "who": who,
                 "pid": running.pid,
                 "start_identity": running.create_time,
                 "result": ended,
                 "guardian": guardian[0] if guardian else None,
-                "guardian_exit": await run_owned(
-                    f"the {who}'s guardian's exit",
-                    lifetime_exit_state,
-                    watcher.observed(),
-                    guardian[0],
-                    _R7_EXIT_SECONDS,
-                    seconds=_R7_EXIT_SECONDS + 30.0,
-                    gated=False,
-                )
-                if guardian is not None
-                else "none was seen",
+                "guardian_exit": guardian_exit,
             }
             w["ended_by_harness"].append(record)
             emit("harness", "r7.ended", **record)
@@ -4759,6 +4862,10 @@ async def measure_host_quit_row(
     residual: list[int] = []
     teardown: list[str] = []
     r7_phase: PhaseReading | None = None
+    r7_shared = SharedReduction()
+    #: What ended the row's try, if anything: the teardown raises a
+    #: cancellation it held only when that is not already one.
+    row_failure: BaseException | None = None
     try:
         watcher.start()
         # After the watcher's baseline, so it reports the canaries' starts and
@@ -4802,6 +4909,11 @@ async def measure_host_quit_row(
                 r7_window["script_problems"].append(
                     f"settling after the quit failed: {type(exc).__name__}: {exc}"
                 )
+            # Every owner settled, the cancellation held meanwhile ends the
+            # row; the teardown below still runs whole.
+            held = r7_defer.take()
+            if held is not None:
+                raise held
         if (kill_actor or shim is not None) and daemon:
             # The owner the frontend recovered to is the one that now has to
             # leave through its idle exit and be cleaned up. If nothing else
@@ -4905,9 +5017,19 @@ async def measure_host_quit_row(
         after = snapshot(account.profile, expected_digest=staged.li_at_digest)
         result.after = after
         emit("harness", "profile.snapshot", phase="after", **after.as_event_fields())
+    except BaseException as exc:
+        row_failure = exc
+        raise
     finally:
         if actors_ended is None:
             actors_ended = time.time()
+        if r7 is not None and not r7_settling_began:
+            # Cancelled or failed before the host's quit was settled: the
+            # same settling, in this teardown, with its cancellations held.
+            try:
+                await r7_after_quit()
+            except Exception as exc:  # noqa: BLE001 - reported, the teardown goes on
+                teardown.append(f"the H-R7 actors could not be settled: {exc!r}")
         # A failed row's cleanup differs from restoration for reuse: while the
         # family is not shown ended, a download may still be running, and it
         # is evidence, not litter.
@@ -4961,7 +5083,8 @@ async def measure_host_quit_row(
         confirmed = [killed["pid"]] if killed.get("exit") == "killed" else []
         try:
             # Once its tracees have exited, strace has seen every signal they
-            # sent. H-R7 owns the wait, so a cancellation lands only after it.
+            # sent. H-R7 owns the wait and holds a cancellation for the whole
+            # teardown, so the watcher and the canaries below still stop.
             if r7 is not None:
                 outcome = await run_owned(
                     "stop the trace",
@@ -4969,6 +5092,7 @@ async def measure_host_quit_row(
                     confirmed_dead=confirmed,
                     seconds=180.0,
                     gated=False,
+                    defer=r7_defer,
                 )
             else:
                 outcome = await asyncio.to_thread(oracle.stop, confirmed_dead=confirmed)
@@ -4979,6 +5103,17 @@ async def measure_host_quit_row(
                 required=oracle.required,
                 reasons=[f"the oracle could not be stopped: {exc!r}"],
             )
+        if r7 is not None:
+            # ``stop`` returning is not the tracer gone: its last wait is
+            # bounded. Asked of the tracer's own process, and kept if not.
+            try:
+                traced_out = oracle.settled()
+            except Exception as exc:  # noqa: BLE001 - an unanswered question settles nothing
+                teardown.append(f"the trace's end could not be asked about: {exc!r}")
+                traced_out = False
+            if not traced_out:
+                retain("the row's trace", lambda grace: oracle.end())
+                teardown.append("the trace is not shown ended; it stays retained")
         try:
             # The row's interval ends here: the watcher stops before anything
             # else starts on the profile.
@@ -5027,7 +5162,10 @@ async def measure_host_quit_row(
                 guardian=(r7_window.get("guardian") or [None])[0],
                 owner_group=r7_window.get("owner_group"),
                 boundary=boundary,
+                history=ProcessHistory(observed_events, outside=[os.getpid()]),
+                marker=r7_window.get("marker_digest"),
             )
+            r7_shared = shared_reduction(o2.resolved, len(o2.unknowns), r7_phase)
             emit(
                 "harness",
                 "r7.phase",
@@ -5086,6 +5224,18 @@ async def measure_host_quit_row(
                 port=decision.port,
                 forwarded=decision.forwarded,
             )
+        if r7 is not None:
+            # The teardown is done: a cancellation it held is raised now, and
+            # nothing is preserved or measured after it. A cancellation that
+            # ended the try is already on its way; a later one is not lost
+            # behind another failure.
+            held = r7_defer.take()
+            if held is not None and not isinstance(row_failure, asyncio.CancelledError):
+                if row_failure is not None:
+                    held.add_note(
+                        f"held while the row's teardown ran after {row_failure!r}"
+                    )
+                raise held
 
     host = result.host
     assert host is not None
@@ -5268,6 +5418,8 @@ async def measure_host_quit_row(
             host=host,
             vector=result.vector,
             phase=r7_phase,
+            observed=observed_events,
+            shared=r7_shared,
             validity=[
                 *host_failures(host),
                 *(

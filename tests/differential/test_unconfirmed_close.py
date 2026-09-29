@@ -8,12 +8,17 @@
 * Owned workers: a cancelled wait does not overlap the work it waited on, a
   worker past its bound stays owned and stops every later step, and every
   failure to settle the lease contender's helpers counts.
-* The launch marker, read only from a browser the original actor launched.
+* The launch marker, read only from a browser the original actor launched,
+  and early use of the profile ordered by creation, not by first sight.
+* The calibration: its child and tracer ended on every path, and what it
+  cannot show ended retained until it is.
 * The phase, on a real transcript: the baseline owner's fatal own-group kill
   (arm64 CI run 36381619115, K2, verbatim lines) is K2's witness only in the
   calibrated shape and never the guardian's; any original-actor signal after
-  the return, or an unplaceable one, fails K3.
-* The gate each cell passes, the ledger, and the composition.
+  the return, or an unplaceable one, fails K3; each call is placed by its
+  entry and its bounded return.
+* The gate each cell passes, the ledger, and the composition, in which only
+  what the source assigns to the shared drain is set aside.
 """
 
 from __future__ import annotations
@@ -26,7 +31,8 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import psutil
 import pytest
@@ -34,7 +40,14 @@ import pytest
 from differential import harness, lease_probe, r7_fault, unconfirmed_close
 from differential.baseline import BASELINE_SHA, git
 from differential.fault_overlay import FAULT_SHA256
-from differential.signals import COMPLETE, INCOMPLETE, OracleOutcome, read_trace
+from differential.signals import (
+    COMPLETE,
+    INCOMPLETE,
+    OracleOutcome,
+    ProcessHistory,
+    derive_o2,
+    read_trace,
+)
 from differential.unconfirmed_close import (
     AFTER_CONFIRMED_CLOSE,
     AFTER_CONSUMPTION,
@@ -59,6 +72,8 @@ from differential.unconfirmed_close import (
     PhaseReading,
     R7Continuation,
     R7Ledger,
+    R7Setup,
+    SharedReduction,
     UnsettledWorker,
     WorkerFailed,
     alias_model,
@@ -82,6 +97,7 @@ from differential.unconfirmed_close import (
     run_owned,
     running_workers,
     settlement_problems,
+    shared_reduction,
 )
 from linkedin_mcp_server import process_tree
 
@@ -136,9 +152,32 @@ def test_a_return_outside_the_samples_is_not_placed(returned, samples, why):
     ],
 )
 def test_a_line_is_placed_by_its_whole_microsecond(t, placement):
-    # The return known to within [.666149100, .666149900] seconds.
+    # The return known to within [.666149100, .666149900] seconds; a call
+    # entered and returned within the one printed microsecond.
     boundary = (1790573446_666149_100, 1790573446_666149_900)
-    assert place(t, boundary) == placement
+    assert place(t, t, boundary) == placement
+
+
+@pytest.mark.parametrize(
+    ("entry", "returned", "placement"),
+    [
+        pytest.param(10.0, 10.5, BEFORE, id="returned-before"),
+        pytest.param(10.0, 12.0, AMBIGUOUS, id="crosses-the-return"),
+        pytest.param(10.0, None, AMBIGUOUS, id="no-return-bound"),
+        pytest.param(11.5, None, IN_PHASE, id="entered-after-without-a-return"),
+        pytest.param(
+            10.0, 10.999999, AMBIGUOUS, id="returned-in-the-return-microsecond"
+        ),
+        pytest.param(10.0, 10.999998, BEFORE, id="returned-the-microsecond-before"),
+        pytest.param(11.000001, 12.0, IN_PHASE, id="entered-the-microsecond-after"),
+    ],
+)
+def test_an_operation_is_placed_by_its_entry_and_its_bounded_return(
+    entry, returned, placement
+):
+    # The drain returned within [10.999999100, 11.000000900] seconds.
+    boundary = (10_999_999_100, 11_000_000_900)
+    assert place(entry, returned, boundary) == placement
 
 
 def test_the_narrowest_bracket_is_kept():
@@ -309,6 +348,7 @@ def owned(monkeypatch):
     workers: list[Any] = []
     helpers: list[Any] = []
     monkeypatch.setattr(unconfirmed_close, "_OWNED", workers)
+    monkeypatch.setattr(unconfirmed_close, "_RETAINED", [])
     monkeypatch.setattr(lease_probe, "_OWNED", helpers)
     return workers
 
@@ -499,6 +539,128 @@ def test_a_browser_from_before_the_close_is_not_the_recoverys():
     assert early_browsers(records, (100, 10.0), since=35.0, until=50.0) == []
 
 
+def _elected(browser_start: float | None, *, seen: float | None = None, parent=300):
+    """The original owner 100; successor 300, elected after the close (9.0)
+    and before the barrier (10.0); and a browser begun at *browser_start*,
+    which the watcher first reported at *seen*."""
+    records = [
+        _start(100, 1.0, os.getpid(), "owner"),
+        _start(300, 9.5, os.getpid(), "owner"),
+    ]
+    if browser_start is not None:
+        browser = _start(400, browser_start, parent, "browser")
+        records.append({**browser, "t": browser_start if seen is None else seen})
+    return records
+
+
+@pytest.mark.parametrize(
+    ("records", "since", "why"),
+    [
+        pytest.param(
+            _elected(9.95, seen=10.05),
+            9.0,
+            "began at 9.95",
+            id="born-before-seen-after",
+        ),
+        pytest.param(_elected(10.2), 9.0, None, id="born-after-the-barrier"),
+        pytest.param(
+            _elected(9.95, parent=999), 9.0, "began at 9.95", id="ancestry-unknown"
+        ),
+        pytest.param(_elected(10.0), 9.0, "same clock tick", id="the-barriers-tick"),
+        pytest.param(_elected(9.0), 9.0, "same clock tick", id="the-closes-tick"),
+        pytest.param(_elected(None), 9.0, None, id="an-election-without-a-browser"),
+        pytest.param(_elected(10.2), None, "not placed", id="the-close-unplaced"),
+    ],
+)
+def test_early_use_is_ordered_by_creation_not_by_first_sight(records, since, why):
+    problems = early_browsers(records, (100, 1.0), since=since, until=10.0)
+    if why is None:
+        assert problems == []
+    else:
+        assert len(problems) == 1 and why in problems[0], problems
+
+
+def _accepted(window: dict, observed: list[dict]) -> R7Continuation:
+    """The continuation the row builds once every actor has gone."""
+    return harness.r7_continuation(
+        R7Setup(None, False, 2),
+        window=window,
+        experiment="K3",
+        run="run",
+        daemon=True,
+        identity={"head": "revision"},
+        fault_dir=None,
+        activation=None,
+        runtime=harness.candidate_runtime(),
+        env={},
+        host=cast(Any, SimpleNamespace(tool=None)),
+        vector=None,
+        phase=None,
+        validity=[],
+        observed=observed,
+    )
+
+
+@pytest.mark.parametrize(
+    ("browser_start", "early"),
+    [
+        pytest.param(9.95, True, id="born-before-the-barrier"),
+        pytest.param(10.2, False, id="born-after-the-barrier"),
+    ],
+)
+def test_a_browser_reported_after_the_barriers_look_still_decides_the_row(
+    browser_start, early
+):
+    records = _elected(browser_start, seen=10.25)
+    window = {"principal": [100, 1.0], "close_created": 9.0, "barrier_created": 10.0}
+    # What the barrier's own look saw: the browser was not yet reported.
+    assert early_browsers(records[:2], (100, 1.0), since=9.0, until=10.0) == []
+    accepted = _accepted(window, records)
+    assert bool(accepted.early_use) is early
+    ledger = _full_ledger({("K3", 2): {"early_use": accepted.early_use}})
+    problems = _compose(ledger)
+    assert (
+        any("K3 #2" in p and "before the recovery barrier" in p for p in problems)
+        is early
+    ), problems
+
+
+def test_a_row_that_never_reached_its_barrier_is_not_asked_about_early_use():
+    accepted = _accepted({"principal": [100, 1.0]}, _elected(9.95))
+    assert accepted.early_use == ()
+
+
+@pytest.mark.parametrize(
+    ("browser_start", "served"),
+    [
+        pytest.param(9.95, False, id="begun-before-the-barrier"),
+        pytest.param(10.2, True, id="begun-after-the-barrier"),
+    ],
+)
+def test_only_a_browser_begun_after_the_barrier_serves_the_recovery(
+    browser_start, served
+):
+    closing = harness.OwnerIdentity(100, 1.0, "first", "/auth", None)
+    successor = harness.OwnerIdentity(300, 9.5, "second", "/auth", None)
+
+    def after(boundary: float):
+        # Kernel ticks in the row; creation times stand in for them here.
+        return lambda pid, start: start > boundary
+
+    problems = harness.successor_problems(
+        _elected(browser_start, seen=10.25),
+        closing,
+        successor,
+        probe=(10.1, 10.3),
+        probe_requests=1,
+        after_close=after(9.0),
+        browser_after=after(10.0),
+    )
+    assert (problems == []) is served, problems
+    if not served:
+        assert any("begun after the recovery barrier" in p for p in problems)
+
+
 # --- The phase, on a real transcript --------------------------------------------------------
 
 #: Verbatim lines of arm64 CI run 36381619115's K2 trace (the baseline owner
@@ -517,6 +679,11 @@ K2_TRACE = """\
 OWNER, THREAD, GUARDIAN, GROUP = 13240, 13266, 13257, 13240
 #: Between the drain thread's probe and the owner's hard exit.
 RETURNED = (1790573440_000000_000, 1790573440_000001_000)
+#: The same lines without the owner's fatal own-group kill, which the
+#: candidate's hard exit does not make: a K3 owner's transcript.
+K3_TRACE = K2_TRACE.replace("13240 1790573446.666149 kill(-13240, SIGKILL) = ?\n", "")
+#: After every line of either transcript.
+LATE = (1790573448_000000_000, 1790573448_000001_000)
 
 
 def _outcome(text: str = K2_TRACE, status: str = COMPLETE) -> OracleOutcome:
@@ -601,6 +768,290 @@ def test_no_tracer_no_calibration_and_no_child(monkeypatch, tmp_path):
     assert found.shape is None and "no tracer" in found.problems[0]
 
 
+#: The probe child's pid in the calibration doubles, and what the tracer
+#: writes for it: a fatal own-group kill, then its end.
+PROBE = 424242
+PROBE_TRACE = (
+    f"{PROBE} 1790573446.666149 kill(-{PROBE}, SIGKILL) = ?\n"
+    f"{PROBE} 1790573446.673977 +++ killed by SIGKILL +++\n"
+)
+
+
+class _Pipe:
+    def __init__(self, child: _Child):
+        self.child = child
+
+    def write(self, data):
+        if self.child.write_error is not None:
+            raise self.child.write_error
+        self.child.log.append("released")
+
+    def close(self):
+        self.child.log.append("stdin closed")
+        # Released or not, the probe reads its end of line and kills itself.
+        if self.child.kills_itself:
+            self.child.returncode = -9
+
+
+class _Child:
+    """The probe child's ``Popen``. It kills its own group once its stdin
+    closes, unless *kills_itself* is off; a kill ends it unless *dies* is off;
+    *wait_error* is what its first wait raises."""
+
+    pid = PROBE
+
+    def __init__(
+        self,
+        log: list,
+        *,
+        write_error: BaseException | None = None,
+        wait_error: BaseException | None = None,
+        kills_itself: bool = True,
+        dies: bool = True,
+    ):
+        self.log, self.write_error, self.wait_error = log, write_error, wait_error
+        self.kills_itself, self.dies = kills_itself, dies
+        self.returncode: int | None = None
+        self.stdin = _Pipe(self)
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.log.append("child killed")
+        if self.dies:
+            self.returncode = -9
+
+    def wait(self, timeout=None):
+        if self.wait_error is not None:
+            error, self.wait_error = self.wait_error, None
+            raise error
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("probe", timeout or 0)
+        self.log.append("child reaped")
+        return self.returncode
+
+
+class _Tracer:
+    """A tracer that exists from its ``start`` until something ends it.
+    *start_error* is raised after it exists, *stop_error* by every stop, and
+    with *ends* off nothing ends it."""
+
+    available = True
+    unavailable = None
+
+    def __init__(
+        self,
+        log: list,
+        out: Path,
+        *,
+        start_error: BaseException | None = None,
+        stop_error: BaseException | None = None,
+        ends: bool = True,
+    ):
+        self.log, self.out = log, out
+        self.start_error, self.stop_error, self.ends = start_error, stop_error, ends
+        self.running = False
+        out.write_text(PROBE_TRACE)
+
+    def start(self, pids):
+        self.running = True
+        self.log.append("tracer started")
+        if self.start_error is not None:
+            raise self.start_error
+        return None
+
+    def stop(self, *, seconds=30.0, confirmed_dead=()):
+        self.log.append("tracer stopped")
+        if self.stop_error is not None:
+            raise self.stop_error
+        if self.ends:
+            self.running = False
+        return OracleOutcome(
+            status=COMPLETE, calls=read_trace(PROBE_TRACE).calls, traced=[PROBE]
+        )
+
+    def settled(self):
+        return not self.running
+
+    def end(self):
+        self.log.append("tracer ended")
+        if self.ends:
+            self.running = False
+        return not self.running
+
+
+def _calibrate(monkeypatch, tmp_path, child: _Child, tracer: Any):
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: child)
+    return calibrate_fatal_group(tmp_path, oracle=tracer, seconds=1, grace=0.1)
+
+
+def test_a_calibration_releases_the_probe_only_once_traced_and_ends_everything(
+    monkeypatch, tmp_path
+):
+    log: list = []
+    tracer = _Tracer(log, tmp_path / "strace.txt")
+    found = _calibrate(monkeypatch, tmp_path, _Child(log), tracer)
+    assert found.problems == () and found.shape is not None
+    assert log.index("tracer started") < log.index("released")
+    assert "child reaped" in log and not tracer.running
+    assert settlement_problems() == []
+
+
+@pytest.mark.parametrize(
+    ("child", "tracer", "raised"),
+    [
+        pytest.param(
+            {},
+            {"start_error": OSError("planted: the attach output was unread")},
+            OSError,
+            id="attach-read-failure-after-the-tracer-started",
+        ),
+        pytest.param(
+            {"wait_error": KeyboardInterrupt()},
+            {},
+            KeyboardInterrupt,
+            id="wait-interrupted",
+        ),
+        pytest.param(
+            {}, {"stop_error": RuntimeError("planted")}, RuntimeError, id="stop-failed"
+        ),
+    ],
+)
+def test_a_failed_calibration_ends_its_child_and_tracer_before_raising(
+    monkeypatch, tmp_path, child, tracer, raised
+):
+    log: list = []
+    probe = _Child(log, kills_itself=False, **child)
+    tracing = _Tracer(log, tmp_path / "strace.txt", **tracer)
+    with pytest.raises(raised):
+        _calibrate(monkeypatch, tmp_path, probe, tracing)
+    assert "stdin closed" in log and "child reaped" in log
+    assert probe.returncode is not None and not tracing.running
+    # Everything shown ended, so nothing is retained and the next step runs.
+    assert settlement_problems() == []
+
+
+@pytest.mark.parametrize(
+    ("child", "why"),
+    [
+        pytest.param(
+            {"write_error": BrokenPipeError("planted")},
+            "could not be released",
+            id="release-failed",
+        ),
+        pytest.param(
+            {"wait_error": subprocess.TimeoutExpired("probe", 1)},
+            "did not end within",
+            id="wait-timed-out",
+        ),
+    ],
+)
+def test_a_calibration_that_could_not_run_its_probe_has_no_shape(
+    monkeypatch, tmp_path, child, why
+):
+    log: list = []
+    tracer = _Tracer(log, tmp_path / "strace.txt")
+    probe = _Child(log, **child)
+    found = _calibrate(monkeypatch, tmp_path, probe, tracer)
+    assert found.shape is None and any(why in p for p in found.problems)
+    assert "stdin closed" in log and probe.returncode is not None
+    assert not tracer.running
+    assert settlement_problems() == []
+    if "write_error" in child:
+        # Its stdin closed at once, the probe ended by itself: no wait spent.
+        assert not any("did not end within" in p for p in found.problems)
+
+
+def test_a_retained_resource_whose_check_fails_stays_retained():
+    def unanswered(grace):
+        raise OSError("planted: the process table was unread")
+
+    unconfirmed_close.retain("a planted helper", unanswered)
+    for _ in range(2):
+        problems = settlement_problems()
+        assert any("a planted helper could not be checked" in p for p in problems)
+    with pytest.raises(UnsettledWorker, match="a planted helper"):
+        gate("the next measurement")
+
+
+@pytest.mark.parametrize("left", ["child", "tracer"])
+def test_what_a_calibration_cannot_end_refuses_every_later_step_until_it_goes(
+    monkeypatch, tmp_path, left
+):
+    log: list = []
+    child = _Child(log, kills_itself=left != "child", dies=left != "child")
+    tracer = _Tracer(log, tmp_path / "strace.txt", ends=left != "tracer")
+    with pytest.raises(UnsettledWorker, match="stays retained"):
+        _calibrate(monkeypatch, tmp_path, child, tracer)
+    named = "probe child" if left == "child" else "calibration's tracer"
+    assert any(named in p for p in settlement_problems())
+    with pytest.raises(UnsettledWorker, match=named):
+        gate("the next measurement")
+    # Settled later, the next measurement may start.
+    child.dies, tracer.ends = True, True
+    assert settlement_problems() == []
+    gate("the next measurement")
+
+
+def test_a_primary_failure_keeps_its_type_and_names_what_stays_retained(
+    monkeypatch, tmp_path
+):
+    log: list = []
+    child = _Child(log, kills_itself=False, dies=False)
+    tracer = _Tracer(log, tmp_path / "strace.txt", start_error=OSError("planted"))
+    with pytest.raises(OSError, match="planted") as raised:
+        _calibrate(monkeypatch, tmp_path, child, tracer)
+    assert any("probe child" in note for note in raised.value.__notes__)
+    assert any("probe child" in p for p in settlement_problems())
+
+
+class _StuckTracer:
+    """A tracer process no wait ever sees end until *code* is set."""
+
+    pid = 99_999_999
+
+    def __init__(self):
+        self.code: int | None = None
+
+    def poll(self):
+        return self.code
+
+    def wait(self, timeout=None):
+        if self.code is None:
+            raise subprocess.TimeoutExpired("strace", timeout or 0)
+        return self.code
+
+
+def test_a_returned_stop_is_not_the_tracer_ended(monkeypatch, tmp_path):
+    # The real stop and its _end: each bounded wait times out and is
+    # suppressed, and stop returns an outcome with strace still running.
+    stuck = _StuckTracer()
+    helpers: list = []
+
+    def run(command, **kwargs):
+        helpers.append(command)
+        return SimpleNamespace(returncode=0)
+
+    tracer = harness.SignalOracle(tmp_path, run=run)
+    monkeypatch.setattr(tracer, "unavailable", None)
+
+    def start(pids, **kwargs):
+        tracer._process = cast(Any, stuck)
+        tracer.pids = list(pids)
+        return None
+
+    monkeypatch.setattr(tracer, "start", start)
+    log: list = []
+    with pytest.raises(UnsettledWorker, match="calibration's tracer"):
+        _calibrate(monkeypatch, tmp_path, _Child(log), tracer)
+    assert ["sudo", "-n", "kill", "-KILL", str(stuck.pid)] in helpers
+    with pytest.raises(UnsettledWorker):
+        gate("the next measurement")
+    stuck.code = 0
+    gate("the next measurement")
+
+
 def test_the_owners_own_group_kill_after_the_return_is_k2s_witness():
     found, problems = own_group_operations(_reading(), _calibration())
     assert problems == []
@@ -648,6 +1099,16 @@ def test_the_owners_own_group_kill_after_the_return_is_k2s_witness():
             "was not traced killing its own group",
             id="another-shape",
         ),
+        pytest.param(
+            # Whatever shape was calibrated, a call shown returned before the
+            # drain did is not after it.
+            "13240 1790573446.666149 kill(-13240, SIGKILL) = 0 <0.000010>\n"
+            "13240 1790573446.673977 +++ killed by SIGKILL +++\n",
+            (1790573447_000000_000, 1790573447_000001_000),
+            FatalCalibration({**(_calibration().shape or {}), "result": "0"}, ()),
+            "was not traced killing its own group",
+            id="returned-before-the-return-in-the-calibrated-shape",
+        ),
     ],
 )
 def test_nothing_else_is_k2s_witness(text, boundary, calibration, why):
@@ -690,8 +1151,17 @@ def test_an_original_actor_signal_after_the_return_fails_k3():
 
 
 def test_only_signals_before_the_return_leave_k3_at_zero():
-    late = (1790573448_000000_000, 1790573448_000001_000)
-    assert continuation_signals(_reading(boundary=late)) == []
+    assert continuation_signals(_reading(K3_TRACE, boundary=LATE)) == []
+
+
+def test_a_call_that_never_returned_is_not_shown_before_the_return():
+    # The fatal kill is entered 1.3 s before this boundary and its caller
+    # died at once, but a call that never returned has no return bound: the
+    # death line is the recipient's, not the call's.
+    problems = continuation_signals(_reading(boundary=LATE))
+    assert problems == [
+        "original actor 13240 sent SIGKILL by kill (ambiguous, no return)"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -715,6 +1185,127 @@ def test_only_signals_before_the_return_leave_k3_at_zero():
 def test_nothing_unknown_reads_as_no_signal(text, boundary, why):
     problems = continuation_signals(_reading(text, boundary))
     assert any(why in p for p in problems), problems
+
+
+#: The drain returned within the printed microsecond 11.000000.
+AT_ELEVEN = (11_000_000_000, 11_000_000_999)
+
+
+@pytest.mark.parametrize(
+    ("text", "placement"),
+    [
+        pytest.param(
+            "13240 10.000000 kill(999, SIGTERM <unfinished ...>\n"
+            "13240 12.000000 <... kill resumed>) = 0 <2.000000>\n",
+            AMBIGUOUS,
+            id="split-and-crossing",
+        ),
+        pytest.param(
+            "13240 10.000000 kill(999, SIGTERM <unfinished ...>\n"
+            "13240 10.500000 <... kill resumed>) = 0 <0.500000>\n",
+            BEFORE,
+            id="split-and-returned-before",
+        ),
+        pytest.param(
+            # Its -T time says it returned at 10.00001; only the next line
+            # bounds it, and that is after the return.
+            "13240 10.000000 kill(999, SIGTERM) = 0 <0.000010>\n"
+            "13266 12.000000 kill(-13272, 0) = -1 ESRCH (No such process) <0.000008>\n",
+            AMBIGUOUS,
+            id="unsplit-and-the-next-line-after",
+        ),
+        pytest.param(
+            "13240 10.000000 kill(999, SIGTERM) = 0 <0.000010>\n"
+            "13266 10.500000 kill(-13272, 0) = -1 ESRCH (No such process) <0.000008>\n",
+            BEFORE,
+            id="unsplit-and-the-next-line-before",
+        ),
+        pytest.param(
+            "13240 10.000000 kill(999, SIGTERM) = 0 <0.000010>\n",
+            AMBIGUOUS,
+            id="unsplit-with-no-line-after",
+        ),
+        pytest.param(
+            "13240 10.000000 kill(999, SIGTERM) = 0 <0.000010>\n"
+            "13240 10.500000 +++ exited with 0 +++\n",
+            BEFORE,
+            id="bounded-by-an-end-line",
+        ),
+        pytest.param(
+            "13240 10.000000 kill(999, SIGTERM <unfinished ...>\n"
+            "13240 10.999999 <... kill resumed>) = 0 <0.999999>\n",
+            BEFORE,
+            id="returned-the-microsecond-before",
+        ),
+        pytest.param(
+            "13240 10.000000 kill(999, SIGTERM <unfinished ...>\n"
+            "13240 11.000000 <... kill resumed>) = 0 <1.000000>\n",
+            AMBIGUOUS,
+            id="returned-in-the-return-microsecond",
+        ),
+        pytest.param(
+            "13240 11.000000 kill(999, SIGTERM) = 0 <0.000010>\n"
+            "13240 11.500000 +++ exited with 0 +++\n",
+            AMBIGUOUS,
+            id="entered-in-the-return-microsecond",
+        ),
+        pytest.param(
+            "13240 11.000001 kill(999, SIGTERM) = 0 <0.000010>\n",
+            IN_PHASE,
+            id="entered-the-microsecond-after",
+        ),
+        pytest.param(
+            "13240 10.000000 kill(-13240, SIGKILL) = ?\n"
+            "13240 10.000100 +++ killed by SIGKILL +++\n",
+            AMBIGUOUS,
+            id="never-returned",
+        ),
+    ],
+)
+def test_a_traced_signal_is_placed_by_its_whole_operation(text, placement):
+    reading = _reading(text, AT_ELEVEN)
+    (call,) = [
+        c for c in reading.calls if c["sender"] == "original actor" and not c["probe"]
+    ]
+    assert call["placement"] == placement
+    problems = continuation_signals(reading)
+    if placement == BEFORE:
+        assert problems == []
+    else:
+        assert problems and f"({placement}," in problems[0], problems
+
+
+@pytest.mark.parametrize(
+    ("text", "flagged"),
+    [
+        pytest.param(
+            "7777 10.000000 kill(999, SIGTERM <unfinished ...>\n"
+            "7777 12.000000 <... kill resumed>) = 0 <2.000000>\n",
+            True,
+            id="unplaced-and-crossing",
+        ),
+        pytest.param(
+            "7777 10.000000 kill(999, SIGTERM <unfinished ...>\n"
+            "7777 10.500000 <... kill resumed>) = 0 <0.500000>\n",
+            False,
+            id="unplaced-and-before",
+        ),
+    ],
+)
+def test_a_thread_nobody_owns_is_placed_like_any_sender(text, flagged):
+    problems = continuation_signals(_reading(text, AT_ELEVEN))
+    assert any("unplaced 7777" in p for p in problems) is flagged, problems
+
+
+def test_an_own_group_kill_that_returned_is_not_the_fatal_witness():
+    # An ordinary return, and the owner's own death by another's signal: in
+    # the phase and on its own group, and still not the calibrated shape.
+    text = (
+        "13240 1790573446.666149 kill(-13240, SIGKILL) = 0 <0.000010>\n"
+        "13240 1790573446.673977 +++ killed by SIGKILL +++\n"
+    )
+    found, problems = own_group_operations(_reading(text), _calibration())
+    assert found == [] and any("was not traced killing" in p for p in problems)
 
 
 # --- The source model ------------------------------------------------------------------------
@@ -798,7 +1389,7 @@ def _cell(experiment: str, *, control: str | None = None, **changes: Any):
         points.append(_point(BEFORE_RECOVERY, "free"))
     reading = _reading(boundary=RETURNED)
     if experiment == "K3":
-        reading = _reading(boundary=(1790573448_000000_000, 1790573448_000001_000))
+        reading = _reading(K3_TRACE, boundary=LATE)
     cell = R7Continuation(
         experiment=experiment,
         repetition=0 if control else 1,
@@ -1048,17 +1639,255 @@ def test_repetitions_that_read_differently_fail_the_composition():
     assert any("repetition 2 reads unlike repetition 1" in p for p in problems)
 
 
-def test_what_the_shared_prefixs_timing_decides_is_no_difference():
-    # A Chromium helper that outlived the close on one run, and a recipient
-    # the watcher missed: the routine drain's classes and held-or-unknown.
+def test_a_vector_difference_no_traced_call_accounts_for_is_a_difference():
+    # The routine drain's class label and an unknown recipient, with no
+    # transcript that places either in that drain: not timing, a difference.
     later = _Vector(o2_traced="unknown", signal_classes=("owner:browser-group",))
     ledger = _full_ledger({("K3", 2): {"vector": later}})
-    assert _compose(ledger) == []
+    problems = _compose(ledger)
+    assert any("repetition 2 reads unlike" in p and "vector" in p for p in problems)
 
 
-def test_a_violation_in_one_repetition_is_a_difference():
-    ledger = _full_ledger({("K3", 2): {"vector": _Vector(o2_traced="violated")}})
-    assert any("reads unlike" in p and "o2_traced" in p for p in _compose(ledger))
+# --- What the shared drain's timing may decide, and nothing else --------------------------
+
+BROWSER, OTHER_LAUNCH, CHILD = 15042, 17000, 16000
+
+
+def _launch(*, marker_seen_at: float = 2.0) -> list[dict]:
+    """The watcher's records: the owner, its guardian, a browser of the
+    original launch in a group of its own, a child of the owner that is not
+    a browser, and a browser of another launch (another marker)."""
+    return [
+        {"kind": "watcher.ready", "baseline_pgids": [1]},
+        _start(OWNER, 1.0, os.getpid(), "owner"),
+        _start(GUARDIAN, 1.1, OWNER, "guardian"),
+        {
+            **_start(BROWSER, 2.0, OWNER, "browser", browser_marker=DIGEST),
+            "t": marker_seen_at,
+        },
+        _start(CHILD, 2.5, OWNER, "driver"),
+        _start(OTHER_LAUNCH, 3.0, OWNER, "browser", browser_marker="f" * 16),
+    ]
+
+
+#: The owner's routine drain after the close: a probe that reaches nobody,
+#: and, when a Chromium helper outlived the graceful close, the kill of its
+#: group before that (``process_tree._kill_marked_process_groups``).
+QUIET = (
+    "13240 1790573446.666085 kill(-15042, 0) = -1 ESRCH (No such process) <0.000014>\n"
+    "13240 1790573446.700000 +++ exited with 0 +++\n"
+)
+DRAIN = "13240 1790573446.601691 kill(-15042, SIGKILL) = 0 <0.000595>\n"
+#: The drain's return: after its kill, and bounded by the probe's line.
+DRAIN_RETURNED = (1790573446_680000_000, 1790573446_680001_000)
+
+
+def _row_vector(mode: str, **changes: Any) -> harness.RowVector:
+    return harness.RowVector(
+        mode=mode,
+        o1_single_browser=True,
+        browser_seen=True,
+        watcher_healthy=True,
+        o4_session="retained",
+        origin_saw_feed=True,
+        feed_carried_session=True,
+        tool_succeeded=True,
+        owner_published=mode == "daemon",
+        fell_back=False,
+        host_exit_clean=True,
+        cleanup_clean=True,
+        owner_launched=mode == "daemon",
+        owner_start_attempted=mode == "daemon",
+        o2_required=True,
+        oracle_collection=COMPLETE,
+        **changes,
+    )
+
+
+def _read_row(text: str, *, records: list[dict] | None = None, boundary: Any):
+    """What a row reads of one transcript, through the real parser, O2 and
+    phase reading: the phase, the row vector's O2, and what of that O2 the
+    shared drain accounts for."""
+    history = ProcessHistory(
+        _launch() if records is None else records, outside=[os.getpid()]
+    )
+    trace = read_trace(text)
+    outcome = OracleOutcome(
+        status=COMPLETE,
+        calls=trace.calls,
+        traced=[OWNER, GUARDIAN],
+        cohort={
+            OWNER: {"kind": "root", "process": OWNER},
+            GUARDIAN: {"kind": "root", "process": GUARDIAN},
+            CHILD: {"kind": "child", "process": CHILD},
+        },
+        reasons=list(trace.problems),
+    )
+    o2 = derive_o2(outcome, history)
+    phase = read_phase(
+        outcome,
+        text,
+        owner=OWNER,
+        guardian=GUARDIAN,
+        owner_group=GROUP,
+        boundary=boundary,
+        history=history,
+        marker=DIGEST,
+    )
+    return {
+        "phase": phase,
+        "vector": _row_vector("daemon", o2_traced=o2.state, signal_classes=o2.classes),
+        "shared": shared_reduction(o2.resolved, len(o2.unknowns), phase),
+    }
+
+
+#: Per experiment: the cells read from the first transcript, the one read
+#: from the second, and the problem that names a difference between them.
+_WHERE = {
+    "K0": ([("K0", UNSHIMMED)], ("K0", INERT), "inert overlay differs"),
+    "K3": (
+        [("K3", "1"), ("K3", "3")],
+        ("K3", "2"),
+        "repetition 2 reads unlike repetition 1",
+    ),
+}
+
+
+def _ledger_of(experiment: str, first: dict, second: dict) -> R7Ledger:
+    """A full ledger, every cell with a real row vector, and *experiment*'s
+    cells given the readings *first* and *second*."""
+    ledger = _full_ledger()
+    for key, cell in list(ledger._cells.items()):
+        mode = "direct" if key[0] == "K1" else "daemon"
+        ledger._cells[key] = replace(cell, vector=_row_vector(mode, o2_traced="held"))
+    ones, two, _ = _WHERE[experiment]
+    for key in ones:
+        ledger._cells[key] = replace(ledger._cells[key], **first)
+    ledger._cells[two] = replace(ledger._cells[two], **second)
+    return ledger
+
+
+def _composed(experiment: str, first: str, second: str, **reading: Any) -> list[str]:
+    """The final composition, *experiment*'s cells read from the transcripts
+    *first* and *second*, against the real whole-row comparison."""
+    # A control has no selected drain, so no boundary: nothing is placed.
+    boundary = (
+        "no real drain return was published" if experiment == "K0" else DRAIN_RETURNED
+    )
+    ledger = _ledger_of(
+        experiment,
+        _read_row(first, boundary=boundary),
+        _read_row(second, boundary=boundary, **reading),
+    )
+    return _compose(ledger, compare_to_direct=harness.compare_to_direct)
+
+
+@pytest.mark.parametrize("experiment", ["K0", "K3"])
+def test_a_helper_the_shared_drain_killed_on_one_run_is_no_difference(experiment):
+    # One run's graceful close left a Chromium helper for the drain, whose
+    # recipient the watcher could not pin: the drain's class and its unknown
+    # recipient are set aside, since the source places that call in it.
+    reading = _read_row(DRAIN + QUIET, boundary=DRAIN_RETURNED)
+    assert reading["shared"] == SharedReduction(("owner:browser-group",), True)
+    assert reading["vector"].o2_traced == "unknown"
+    assert _composed(experiment, QUIET, DRAIN + QUIET) == []
+
+
+@pytest.mark.parametrize("experiment", ["K0", "K3"])
+@pytest.mark.parametrize(
+    ("second", "reading", "why"),
+    [
+        pytest.param(
+            "13240 1790573446.601691 kill(-999, SIGTERM) = 0 <0.000010>\n" + QUIET,
+            {},
+            "original actor:kill:SIGTERM:another group",
+            id="an-inert-only-operation",
+        ),
+        pytest.param(
+            "13240 1790573446.601691 kill(-15042, SIGTERM) = 0 <0.000010>\n" + QUIET,
+            {},
+            "original actor:kill:SIGTERM:a group of the original launch",
+            id="the-drains-target-but-another-signal",
+        ),
+        pytest.param(
+            "16000 1790573446.601691 kill(-15042, SIGKILL) = 0 <0.000595>\n" + QUIET,
+            {},
+            "descendant:kill:SIGKILL",
+            id="the-drains-call-from-another-sender",
+        ),
+        pytest.param(
+            "13240 1790573446.601691 kill(-17000, SIGKILL) = 0 <0.000595>\n" + QUIET,
+            {},
+            "original actor:kill:SIGKILL:another group",
+            id="the-same-class-on-another-launchs-group",
+        ),
+        pytest.param(
+            DRAIN + QUIET,
+            {"records": _launch(marker_seen_at=1790573447.0)},
+            "original actor:kill:SIGKILL:another group",
+            id="a-marker-read-only-after-the-call",
+        ),
+        pytest.param(
+            DRAIN
+            + "13240 1790573446.601700 kill(-999, SIGTERM) = 0 <0.000010>\n"
+            + QUIET,
+            {},
+            "'o2_traced': 'unknown'",
+            id="a-shared-unknown-beside-an-unassigned-one",
+        ),
+        pytest.param(
+            DRAIN
+            + "7777 1790573446.601700 kill(-999, SIGTERM) = 0 <0.000010>\n"
+            + QUIET,
+            {},
+            "'o2_traced': 'unknown'",
+            id="a-shared-unknown-beside-one-no-call-explains",
+        ),
+        pytest.param(
+            DRAIN
+            + "13240 1790573446.601700 kill(-17000, SIGKILL) = 0 <0.000595>\n"
+            + QUIET,
+            {},
+            "'signal_classes': ['owner:browser-group']",
+            id="the-drains-class-also-sent-elsewhere",
+        ),
+    ],
+)
+def test_an_operation_the_source_does_not_assign_to_the_drain_is_a_difference(
+    experiment, second, reading, why
+):
+    problems = _composed(experiment, QUIET, second, **reading)
+    label = _WHERE[experiment][2]
+    assert any(label in p and why in p for p in problems), problems
+
+
+def test_a_class_no_call_of_the_drain_accounts_for_is_a_difference():
+    drained = _read_row(DRAIN + QUIET, boundary=DRAIN_RETURNED)
+    vector = replace(
+        drained["vector"],
+        signal_classes=(*drained["vector"].signal_classes, "guardian:browser"),
+    )
+    ledger = _ledger_of(
+        "K3",
+        _read_row(QUIET, boundary=DRAIN_RETURNED),
+        {**drained, "vector": vector},
+    )
+    problems = _compose(ledger, compare_to_direct=harness.compare_to_direct)
+    assert any("reads unlike" in p and "guardian:browser" in p for p in problems)
+
+
+@pytest.mark.parametrize(
+    "shared",
+    [
+        pytest.param(SharedReduction(), id="nothing-shared"),
+        pytest.param(SharedReduction((), True), id="every-unknown-shared"),
+    ],
+)
+def test_a_violation_in_one_repetition_is_a_difference(shared):
+    ledger = _full_ledger(
+        {("K3", 2): {"vector": _Vector(o2_traced="violated"), "shared": shared}}
+    )
+    assert any("reads unlike" in p and "'violated'" in p for p in _compose(ledger))
 
 
 def test_an_inert_overlay_that_reads_unlike_the_plain_runtime_fails():

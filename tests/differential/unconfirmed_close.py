@@ -22,15 +22,17 @@ shared prefix read separately.
 strace dates every line on the realtime one. The harness samples both,
 bracketing each read (``clock_sample``), before the trace, after the close
 and after the trace. One offset must fit every sample, or the realtime clock
-stepped and nothing is placed. A traced call is in the phase only when its
-earliest possible time is after the latest possible return, before it only
-when its latest possible time is before the earliest; anything else is
+stepped and nothing is placed. A traced call is in the phase only when it was
+entered after the latest possible return, before it only when the trace
+bounds its return before the earliest (``place``); anything else is
 ambiguous, never resolved by a tolerance.
 
-**Workers and helpers stay owned.** Every blocking step runs on a thread the
-row owns (``run_owned``), and the lease contender's helper is owned by
-``lease_probe``. ``gate`` refuses the next measurement while either is not
-shown finished, whatever the failure to settle was.
+**Workers, helpers and resources stay owned.** Every blocking step runs on a
+thread the row owns (``run_owned``), the lease contender's helper is owned by
+``lease_probe``, and a tracer, child, owner or guardian the row could not
+show ended is retained (``retain``). ``gate`` refuses the next measurement
+while any of them is not shown finished, whatever the failure to settle was.
+A cleanup holds every cancellation until it has run whole (``Deferral``).
 """
 
 from __future__ import annotations
@@ -174,10 +176,13 @@ def realtime_interval(
 ) -> tuple[int, int] | str:
     """Where *monotonic_ns* falls on the realtime clock, or why it cannot be said.
 
-    Both clocks are slewed alike, so their difference changes only when the
-    realtime clock steps. Every sample then brackets that one difference; if
-    no difference fits all of them, the clock stepped. The time placed must
-    lie between the first and the last sample, where that holds.
+    Premise, conditional and not measured here: on Linux both clocks are
+    slewed alike, so their difference changes only when the realtime clock
+    steps. Every sample then brackets that one difference; if no difference
+    fits all of them, the clock stepped. The converse does not hold: samples
+    this sparse cannot see a step and its restoring step between two of
+    them, so an agreeing set shows only that no net step was seen. The time
+    placed must lie between the first and the last sample.
     """
     if len(samples) < 2:
         return "the clocks were not sampled on both sides of the phase"
@@ -209,14 +214,27 @@ def published_return(directory: Path | None) -> int | None:
     return value if type(value) is int else None
 
 
-def place(t: float, interval: tuple[int, int]) -> str:
-    """A traced line's time (strace's microseconds) against *interval*."""
-    earliest = round(t * 1_000_000) * 1000
-    latest = earliest + 999
+def _micros(t: float) -> int:
+    """A strace prefix as the integer microseconds it printed."""
+    return round(t * 1_000_000)
+
+
+def place(entry: float, returned: float | None, interval: tuple[int, int]) -> str:
+    """A traced signal operation against the drain's return, *interval*.
+
+    Both times are strace prefixes, truncated to their microsecond, so each
+    stands for any instant of it. The signal is sent after the entry prefix
+    was read, and the call had returned by the *returned* prefix
+    (``SignalCall.returned``); nothing else bounds it, the ``-T`` time least
+    of all. In the phase only when the operation began after the latest
+    possible return; before it only when the whole operation, to its bounded
+    return, ended before the earliest. A call with no return bound, or one
+    that crosses, is ambiguous.
+    """
     low, high = interval
-    if earliest > high:
+    if _micros(entry) * 1000 > high:
         return IN_PHASE
-    if latest < low:
+    if returned is not None and _micros(returned) * 1000 + 999 < low:
         return BEFORE
     return AMBIGUOUS
 
@@ -397,16 +415,83 @@ def running_workers() -> list[str]:
     return [worker.label for worker in _OWNED]
 
 
+@dataclass(eq=False)
+class Retained:
+    """Something outside this process a row started and could not show ended:
+    a tracer, a child, an owner, a guardian. *check* makes one bounded
+    attempt to settle it, never signalling anything the row does not own,
+    and says whether it is now settled."""
+
+    label: str
+    check: Callable[[float], bool]
+
+
+#: Every retained resource, whichever row or calibration left it: nothing is
+#: measured, by any row, until each is shown settled.
+_RETAINED: list[Retained] = []
+
+
+def retain(label: str, check: Callable[[float], bool]) -> Retained:
+    resource = Retained(label, check)
+    _RETAINED.append(resource)
+    return resource
+
+
+def unsettled_resources(grace: float = 5.0) -> list[str]:
+    """Ask each retained resource once more; those still not settled.
+
+    A check that fails is no settlement, and the resource stays retained.
+    """
+    problems = []
+    for resource in list(_RETAINED):
+        try:
+            settled = resource.check(grace) is True
+        except BaseException as exc:  # noqa: BLE001 - an unanswered check is no settlement
+            problems.append(f"{resource.label} could not be checked: {exc!r}")
+            continue
+        if settled:
+            _RETAINED.remove(resource)
+        else:
+            problems.append(f"{resource.label} is not shown settled")
+    return problems
+
+
 def settlement_problems(grace: float = 5.0) -> list[str]:
-    """Why the next step may not start: a worker still running, or the lease
-    contender's helpers not settled. Every way ``settle`` can fail counts,
-    an interrupt included; none of them shows the helper gone."""
+    """Why the next step may not start: a worker still running, a retained
+    resource not settled, or the lease contender's helpers not settled.
+    Every way ``settle`` can fail counts, an interrupt included; none of them
+    shows the helper gone."""
     problems = [f"worker {label!r} is still running" for label in running_workers()]
+    problems += unsettled_resources(grace)
     try:
         lease_probe.settle(grace)
     except BaseException as exc:  # noqa: BLE001 - a failed settlement, whatever it was
         problems.append(f"the lease contender's helpers are not settled: {exc!r}")
     return problems
+
+
+class Deferral:
+    """The cancellations a cleanup transaction held back, raised once it ends.
+
+    Every awaited cleanup step hands one of these to ``run_owned``, so a
+    cancellation, a first one or a later one, never cuts the transaction
+    short: each step still runs and keeps its result, and the first
+    cancellation is what the transaction raises when it is done.
+    """
+
+    def __init__(self) -> None:
+        self.cancelled: BaseException | None = None
+        self.count = 0
+
+    def hold(self, exc: BaseException) -> None:
+        self.count += 1
+        if self.cancelled is None:
+            self.cancelled = exc
+
+    def take(self) -> BaseException | None:
+        """The first held cancellation, which the caller now raises."""
+        held, self.cancelled = self.cancelled, None
+        return held
 
 
 def gate(label: str) -> None:
@@ -422,6 +507,7 @@ async def run_owned(
     *args: Any,
     seconds: float,
     gated: bool = True,
+    defer: Deferral | None = None,
     **kwargs: Any,
 ) -> Any:
     """Run blocking *func* on a thread the row owns, and wait for it.
@@ -429,9 +515,11 @@ async def run_owned(
     Gated first, unless it is cleanup (*gated* False): ending what the row
     started must not wait on what the row could not settle. A cancellation
     that arrives while the thread runs is held until the thread has finished,
-    then raised, so nothing after it overlaps the work. A thread that outlives
-    *seconds* is not forgotten: it stays in ``_OWNED``, and this raises
-    ``UnsettledWorker`` (or the held cancellation), so every later ``gate``
+    so nothing after it overlaps the work; then it is raised, or, with
+    *defer*, handed to that transaction and the work's result returned, so
+    the cleanup it belongs to goes on. A thread that outlives *seconds* is
+    not forgotten: it stays in ``_OWNED``, and this raises ``UnsettledWorker``
+    (or, without *defer*, the held cancellation), so every later ``gate``
     refuses until it ends. Anything but an ordinary exception from the work
     comes back as ``WorkerFailed``.
     """
@@ -464,7 +552,10 @@ async def run_owned(
             await asyncio.sleep(min(remaining, 0.05))
         except asyncio.CancelledError as exc:
             # Held, not honoured yet: the work is still running.
-            cancelled = cancelled or exc
+            if defer is not None:
+                defer.hold(exc)
+            else:
+                cancelled = cancelled or exc
     running_workers()
     if cancelled is not None:
         raise cancelled
@@ -584,29 +675,50 @@ def early_browsers(
     observed: Iterable[Mapping[str, Any]],
     principal: tuple[int, float],
     *,
-    since: float,
-    until: float,
+    since: float | None,
+    until: float | None,
 ) -> list[str]:
-    """Row browsers first seen after the close began and by the recovery
-    barrier that are not the original actor's (E1EZ-02).
+    """Row browsers begun after the close and before the recovery barrier that
+    are not the original actor's (E1EZ-02, E1FE-05).
 
-    An elected successor is allowed before the barrier; a browser on the
-    profile is not. One whose ancestry cannot be traced is not shown to be
-    the original's.
+    Ordered by creation, never by when the watcher first saw a process: a
+    browser born before the barrier and first sampled after it is still
+    early. Each lifetime's ``start`` is psutil's creation time, the kernel's
+    start ticks over the boot time; *since* and *until* are the creation
+    times of processes the harness started at the close and at the barrier
+    (``creation_marker``), on the same scale. Premise, not measured here:
+    the harness's and the watcher's psutil read the same boot time. A
+    creation in the same tick as either marker cannot be ordered, and an
+    unplaced close or barrier orders nothing; neither is accepted. An
+    elected successor is allowed before the barrier, a browser on the
+    profile is not, and one whose ancestry cannot be traced is not shown to
+    be the original's. Asked again of the completed history before the row
+    is judged, so a browser the watcher reported late still counts.
     """
+    if since is None or until is None:
+        return [
+            "the close or the recovery barrier was not placed on the creation clock"
+        ]
     history = ProcessHistory(observed, outside=[os.getpid()])
     origin = _lifetime(history, *principal)
+    now = time.time()
     problems = []
     for life in history.lifetimes:
         if not (life.in_row and life.was("browser")):
             continue
-        if not since < life.first_t <= until:
+        if life.start < since or life.start > until:
             continue
-        if origin is not None and history.descends(life, origin, until) is True:
+        if origin is not None and history.descends(life, origin, now) is True:
+            continue
+        if life.start in (since, until):
+            problems.append(
+                f"browser {life.pid} began in the same clock tick as the close or "
+                f"the barrier, so it cannot be ordered against them"
+            )
             continue
         problems.append(
-            f"browser {life.pid} was first seen at {life.first_t}, after the close "
-            f"began and before the recovery barrier, and is not the original's"
+            f"browser {life.pid} began at {life.start}, after the close and before "
+            f"the recovery barrier, and is not the original's"
         )
     return problems
 
@@ -695,6 +807,52 @@ class PhaseReading:
         ]
 
 
+def _marked_group(
+    history: ProcessHistory | None, marker: str | None, group: int, t: float
+) -> bool:
+    """Whether the watcher had recorded, by *t*, a process in *group* carrying
+    the original launch's marker (*marker*, the watcher's digest)."""
+    if history is None or not marker or group <= 0:
+        return False
+    return any(
+        life.marker_by(t) == marker and group in life.groups_by(t)
+        for life in history.lifetimes
+    )
+
+
+def _target_kind(
+    call: SignalCall,
+    *,
+    owner_group: int | None,
+    history: ProcessHistory | None,
+    marker: str | None,
+) -> str:
+    """What the call aimed at, from the call and the watcher's records alone."""
+    if call.everyone:
+        return "everyone"
+    if call.unresolvable is not None:
+        return "unresolved"
+    group = call.target_group
+    if group is not None:
+        if group == 0:
+            return "the sender's own group"
+        if owner_group is not None and group == owner_group:
+            return "the original actor's group"
+        if _marked_group(history, marker, group, call.t):
+            return "a group of the original launch"
+        return "another group"
+    if call.group_of_pid is not None:
+        return "the group of a process"
+    return "a process"
+
+
+#: The one operation the shared marked drain sends, in its owner and in its
+#: guardian alike: ``os.killpg(group, SIGKILL)`` on a group carrying the
+#: launch's marker (``process_tree._kill_marked_process_groups``, the
+#: guardian's ``_drain``; its signal-0 probes are no signal).
+_SHARED_DRAIN = ("kill", "SIGKILL", "a group of the original launch")
+
+
 def read_phase(
     outcome: OracleOutcome,
     text: str,
@@ -703,27 +861,45 @@ def read_phase(
     guardian: int | None,
     owner_group: int | None,
     boundary: tuple[int, int] | str | None,
+    history: ProcessHistory | None = None,
+    marker: str | None = None,
 ) -> PhaseReading:
     """Place every call of the complete trace, after it was read whole.
 
     Nothing is dropped: calls before the phase, calls the clock cannot place,
     and calls from a sender that cannot be named stay in the reading, and the
     collection's own reasons (malformed lines, unfinished calls, reused ids)
-    stay with it.
+    stay with it. Each call is placed by its whole operation, its entry to
+    its bounded return (``place``).
+
+    A call is *shared* only when the source assigns it to the marked drain
+    both modes run: sent by the original actor or its guardian, exactly
+    ``_SHARED_DRAIN``, at a group the watcher had seen, by then, carry the
+    original launch's *marker*. Nothing else is, whatever its class is called.
     """
     ends = trace_ends(text)
     interval = boundary if isinstance(boundary, tuple) else None
     calls = []
     for call in outcome.calls:
         pid, sender = _sender(call, outcome, owner=owner, guardian=guardian)
+        kind = _target_kind(
+            call, owner_group=owner_group, history=history, marker=marker
+        )
         fields = {
             **call.as_event_fields(),
             "tid": call.tid,
             "pid": pid,
             "sender": sender,
-            "placement": place(call.t, interval) if interval is not None else AMBIGUOUS,
+            "placement": (
+                place(call.t, call.returned, interval)
+                if interval is not None
+                else AMBIGUOUS
+            ),
             "end": _end_after(ends, call.tid, call.t),
             "probe": call.probe,
+            "target_kind": kind,
+            "shared": sender in (OWNER, GUARDIAN)
+            and (call.syscall, call.signal, kind) == _SHARED_DRAIN,
         }
         fields["shape"] = call_shape(fields, owner_group)
         calls.append(fields)
@@ -734,6 +910,49 @@ def read_phase(
         clock=boundary if isinstance(boundary, str) else None,
         calls=tuple(calls),
         tracees=len(outcome.cohort),
+    )
+
+
+@dataclass(frozen=True)
+class SharedReduction:
+    """What of a row's whole-trace O2 the shared marked drain accounts for.
+
+    *classes*: each O2 class every call of which is a shared call
+    (``read_phase``); *unknowns*: whether every recipient O2 left unknown
+    was a shared call's. A class or an unknown any other call contributed
+    stays as it is.
+    """
+
+    classes: tuple[str, ...] = ()
+    unknowns: bool = False
+
+
+def shared_reduction(
+    resolved: Sequence[Mapping[str, Any]], unknowns: int, reading: PhaseReading | None
+) -> SharedReduction:
+    """``SharedReduction`` of ``derive_o2``'s *resolved* entries and its count of
+    *unknowns*, matched to *reading*'s calls by sender process and the
+    microsecond sent. An entry no call matches is no shared call, and an
+    unknown with no entry (an unplaced sender) is no shared one either."""
+    if reading is None:
+        return SharedReduction()
+    calls: dict[tuple[Any, int], list[Mapping[str, Any]]] = {}
+    for call in reading.calls:
+        calls.setdefault((call["pid"], _micros(call["sent_at"])), []).append(call)
+    by_class: dict[str, list[bool]] = {}
+    unknown_entries = 0
+    unknown_shared = True
+    for entry in resolved:
+        sender = entry.get("sender") or [None]
+        matched = calls.get((sender[0], _micros(float(entry.get("sent_at", 0.0)))))
+        shared = bool(matched) and all(call["shared"] for call in matched or [])
+        by_class.setdefault(str(entry.get("class")), []).append(shared)
+        if entry.get("unknown"):
+            unknown_entries += 1
+            unknown_shared = unknown_shared and shared
+    return SharedReduction(
+        classes=tuple(sorted(cls for cls, flags in by_class.items() if all(flags))),
+        unknowns=unknown_shared and unknowns == unknown_entries,
     )
 
 
@@ -857,52 +1076,139 @@ def calibration_from(
     )
 
 
+def _ended(child: subprocess.Popen[bytes]) -> Callable[[float], bool]:
+    """A check that ends *child* through its own ``Popen`` and reaps it."""
+
+    def check(grace: float) -> bool:
+        if child.poll() is None:
+            # Popen polls before it signals: a reaped child is never signalled.
+            child.kill()
+            try:
+                child.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                return False
+        return True
+
+    return check
+
+
+def _clean_calibration(
+    child: subprocess.Popen[bytes] | None,
+    tracer: SignalOracle,
+    *,
+    stopped: bool,
+    grace: float,
+) -> list[str]:
+    """Each cleanup step of the calibration, whatever the others did; notes."""
+    notes: list[str] = []
+    if child is not None and child.stdin is not None:
+        try:
+            child.stdin.close()
+        except BaseException as exc:  # noqa: BLE001 - noted, the next step still runs
+            notes.append(f"the probe's stdin could not be closed: {exc!r}")
+    if child is not None:
+        try:
+            if not _ended(child)(grace):
+                notes.append(f"the probe child outlived its kill by {grace}s")
+        except BaseException as exc:  # noqa: BLE001 - noted, the next step still runs
+            notes.append(f"the probe child could not be ended: {exc!r}")
+    if not stopped:
+        try:
+            # With its tracee gone, strace ends by itself.
+            tracer.stop(seconds=grace)
+        except BaseException as exc:  # noqa: BLE001 - noted, the next step still runs
+            notes.append(f"the tracer could not be stopped: {exc!r}")
+    try:
+        if not tracer.end():
+            notes.append("the tracer is still running after its end")
+    except BaseException as exc:  # noqa: BLE001 - noted, the check below decides
+        notes.append(f"the tracer could not be ended: {exc!r}")
+    return notes
+
+
 def calibrate_fatal_group(
     directory: Path,
     *,
     seconds: float = 30.0,
+    grace: float = 10.0,
     oracle: SignalOracle | None = None,
 ) -> FatalCalibration:
     """Trace a product-free child killing its own group, as the rows trace.
 
     Disposable CI only: ``SignalOracle`` refuses anywhere else, and so does
-    this. The child leads a session of its own, so its group is itself; it
-    is the harness's own child, ended and reaped through its ``Popen`` if it
-    does not end itself within *seconds*.
+    this. The child leads a session of its own, so its group is itself.
+
+    The tracer and the child are retained (``retain``) before either exists,
+    so nothing that fails between their start and their end can lose them.
+    Cleanup then runs every step whatever the one before it did: the child's
+    stdin closed, the child killed and reaped through its ``Popen``, the
+    tracer stopped and ended. Each is asked afterwards whether it is settled,
+    by its own process, not by whether a cleanup call returned. The first
+    failure is raised with the cleanup's notes. One still unsettled stays
+    retained, refusing every later measurement, and no calibration is
+    returned while it is.
     """
     directory.mkdir(parents=True, exist_ok=True)
     tracer = oracle or SignalOracle(directory, required=True)
     if not tracer.available:
         return FatalCalibration(None, (f"no tracer here: {tracer.unavailable}",))
-    child = subprocess.Popen(
-        [sys.executable, "-I", "-S", "-c", FATAL_PROBE],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    gate("the fatal-kill calibration")
     problems: list[str] = []
+    child: subprocess.Popen[bytes] | None = None
+    owners = [retain("the calibration's tracer", lambda grace: tracer.end())]
+    outcome: OracleOutcome | None = None
+    returncode: int | None = None
+    primary: BaseException | None = None
     try:
+        child = subprocess.Popen(
+            [sys.executable, "-I", "-S", "-c", FATAL_PROBE],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        owners.append(retain("the calibration's probe child", _ended(child)))
         reason = tracer.start([child.pid])
         if reason is not None:
             problems.append(f"strace did not attach to the probe: {reason}")
         assert child.stdin is not None
-        # Released only once traced, or to end at once when it could not be.
+        # Released only once traced, or to end at once when it could not be:
+        # its stdin is closed either way, and the probe reads its end.
         try:
             child.stdin.write(b"go\n")
-            child.stdin.close()
         except OSError as exc:
             problems.append(f"the probe could not be released: {exc!r}")
         try:
-            returncode: int | None = child.wait(timeout=seconds)
+            child.stdin.close()
+        except OSError as exc:
+            problems.append(f"the probe's stdin could not be closed: {exc!r}")
+        try:
+            returncode = child.wait(timeout=seconds)
         except subprocess.TimeoutExpired:
-            returncode = None
             problems.append(f"the probe did not end within {seconds}s")
         outcome = tracer.stop(seconds=seconds)
-    finally:
-        if child.poll() is None:
-            child.kill()
-            child.wait(timeout=10)
+    except BaseException as exc:  # noqa: BLE001 - raised again once cleanup ran
+        primary = exc
+    notes = _clean_calibration(child, tracer, stopped=outcome is not None, grace=grace)
+    unsettled = []
+    for owner in owners:
+        try:
+            settled = owner.check(grace) is True
+        except BaseException as exc:  # noqa: BLE001 - an unanswered check settles nothing
+            notes.append(f"{owner.label} could not be checked: {exc!r}")
+            settled = False
+        if settled:
+            _RETAINED.remove(owner)
+        else:
+            unsettled.append(f"{owner.label} is not shown settled; it stays retained")
+    if primary is not None:
+        for note in [*notes, *unsettled]:
+            primary.add_note(note)
+        raise primary
+    if unsettled:
+        raise UnsettledWorker(f"the calibration left {unsettled}; notes: {notes}")
+    problems += notes
+    assert child is not None and outcome is not None
     try:
         text = tracer.out.read_text(errors="replace")
     except OSError as exc:
@@ -1104,6 +1410,13 @@ class R7Continuation:
     ended_by_harness: tuple[Mapping[str, Any], ...]
     phase: PhaseReading | None
     validity: tuple[str, ...]
+    #: What of the whole-trace O2 the shared marked drain accounts for, and
+    #: nothing else (``shared_reduction``).
+    shared: SharedReduction = SharedReduction()
+    #: Row browsers begun after the close and before the recovery barrier that
+    #: are not the original's, read again from the completed history
+    #: (``early_browsers``); empty where no recovery was asked for.
+    early_use: tuple[str, ...] = ()
     evidence: str = NATIVE
 
 
@@ -1253,6 +1566,7 @@ def r7_problems(
         _checkpoint(c, BEFORE_RECOVERY), expect=lease_probe.FREE
     )
     problems += [f"before the recovery: {p}" for p in c.pre_probe]
+    problems += [f"before the recovery barrier: {p}" for p in c.early_use]
     if experiment == "K2":
         _, missing = own_group_operations(c.phase, calibration)
         return problems + [f"K2 witness: {p}" for p in missing]
@@ -1269,23 +1583,42 @@ def r7_problems(
     return problems
 
 
-def _vector_semantics(vector: Any) -> dict[str, Any] | None:
-    """The row vector without what the shared prefix's timing decides.
+def _vector_semantics(c: R7Continuation) -> dict[str, Any] | None:
+    """The row vector without what the shared marked drain's timing decides.
 
-    Which classes the routine drain and the guardian sent before the phase
-    depends on whether a Chromium helper outlived the graceful close, and
-    whether a recipient was pinned (``held``) or not (``unknown``) on when
-    the watcher sampled it; neither is what the experiment established.
-    Both stay recorded in the vector; a violation or an incomplete trace
-    still differs.
+    Whether that drain found a Chromium helper still to kill after the
+    graceful close, and whether a recipient it killed was pinned (``held``)
+    or not (``unknown``), is timing, not what the experiment established.
+    So only its classes are left out, and an ``unknown`` reads as ``held``
+    only when every unknown recipient was one of its calls
+    (``SharedReduction``): what is left once that drain is set aside held.
+    Every other class, every other unknown, a violation and an incomplete
+    trace still differ.
     """
-    if vector is None:
+    if c.vector is None:
         return None
-    fields = asdict(vector)
-    fields.pop("signal_classes", None)
-    if fields.get("o2_traced") in (HELD_O2, UNKNOWN_O2):
-        fields["o2_traced"] = "held or unknown"
+    fields = asdict(c.vector)
+    shared = set(c.shared.classes)
+    fields["signal_classes"] = sorted(
+        cls for cls in fields.get("signal_classes") or () if cls not in shared
+    )
+    if fields.get("o2_traced") == UNKNOWN_O2 and c.shared.unknowns:
+        fields["o2_traced"] = HELD_O2
     return fields
+
+
+def unassigned_operations(phase: PhaseReading | None) -> list[str]:
+    """Every traced signal no source reduction assigns to the shared drain,
+    over the whole trace and whoever sent it: sender, syscall, signal and
+    target. Compared as it is: a potentially nonshared operation one
+    execution has and another lacks is a difference, never timing."""
+    if phase is None:
+        return []
+    return sorted(
+        f"{call['sender']}:{call['syscall']}:{call['signal']}:{call['target_kind']}"
+        for call in phase.calls
+        if not call["probe"] and not call["shared"]
+    )
 
 
 def semantics(c: R7Continuation) -> dict[str, Any]:
@@ -1313,13 +1646,13 @@ def semantics(c: R7Continuation) -> dict[str, Any]:
         "successor_verified": c.successor_verified,
         "phase_collection": phase.collection if phase else None,
         "original_actor_in_phase": sorted(
-            {
-                f"{call['signal']}:{call['shape']['target']}"
-                for call in (phase.of(OWNER, IN_PHASE) if phase else [])
-                if not call["probe"]
-            }
+            f"{call['signal']}:{call['target_kind']}"
+            for call in (phase.of(OWNER, IN_PHASE) if phase else [])
+            if not call["probe"] and not call["shared"]
         ),
-        "vector": _vector_semantics(c.vector),
+        "unassigned_operations": unassigned_operations(phase),
+        "early_use": list(c.early_use),
+        "vector": _vector_semantics(c),
     }
 
 
