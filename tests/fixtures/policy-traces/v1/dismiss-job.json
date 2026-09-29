@@ -1,8 +1,7 @@
 {
   "call": {
     "arguments": {
-      "job_id": "123",
-      "keywords": "Applied AI Engineer Acme"
+      "job_id": "123"
     },
     "method": "dismiss_job"
   },
@@ -16,7 +15,7 @@
     {
       "call": "dismiss_job",
       "extra": {
-        "target_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme",
+        "target_url": "https://www.linkedin.com/jobs/view/123/",
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
@@ -25,21 +24,21 @@
     {
       "call": "dismiss_job",
       "kind": "navigate",
-      "landed_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme",
-      "requested_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme",
+      "landed_url": "https://www.linkedin.com/jobs/view/123/",
+      "requested_url": "https://www.linkedin.com/jobs/view/123/",
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
     {
       "call": "dismiss_job",
-      "description": "goto https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme",
+      "description": "goto https://www.linkedin.com/jobs/view/123/",
       "kind": "boundary.stabilize",
       "result": null
     },
     {
       "call": "dismiss_job",
       "extra": {
-        "target_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme",
+        "target_url": "https://www.linkedin.com/jobs/view/123/",
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
@@ -53,6 +52,79 @@
     {
       "call": "dismiss_job",
       "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "title"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.25
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "title"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 2.0
+    },
+    {
+      "call": "dismiss_job",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "dismiss_job",
+      "extra": {
+        "target_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
+      "requested_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "dismiss_job",
+      "description": "goto https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "dismiss_job",
+      "extra": {
+        "target_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "dismiss_job",
+      "callback_id": "callback-2",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
@@ -120,14 +192,14 @@
     },
     {
       "call": "dismiss_job",
-      "callback_id": "callback-2",
+      "callback_id": "callback-3",
       "event": "framenavigated",
       "kind": "listener.add"
     },
     {
       "call": "dismiss_job",
       "extra": {
-        "target_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme",
+        "target_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
@@ -136,21 +208,21 @@
     {
       "call": "dismiss_job",
       "kind": "navigate",
-      "landed_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme",
-      "requested_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme",
+      "landed_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
+      "requested_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
     {
       "call": "dismiss_job",
-      "description": "goto https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme",
+      "description": "goto https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
       "kind": "boundary.stabilize",
       "result": null
     },
     {
       "call": "dismiss_job",
       "extra": {
-        "target_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme",
+        "target_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
@@ -163,7 +235,7 @@
     },
     {
       "call": "dismiss_job",
-      "callback_id": "callback-2",
+      "callback_id": "callback-3",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
@@ -220,7 +292,8 @@
     "already_dismissed": false,
     "dismissed": true,
     "job_id": "123",
-    "url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme"
+    "keywords": "Applied AI Engineer Acme",
+    "url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000"
   },
   "scenario": "dismiss_job__dismissed",
   "schema_version": 1

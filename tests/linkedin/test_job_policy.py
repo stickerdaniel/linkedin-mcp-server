@@ -8,6 +8,7 @@ from linkedin_mcp_server.linkedin.job_policy import (
     dropped_filters_section_error,
     employer_apply_url,
     label_similar_jobs,
+    parse_posting_title,
     reconcile_search_references,
     route,
     same_job_search,
@@ -241,3 +242,38 @@ class TestEmployerApplyUrl:
         url = "https://jobs.example.com/acme%20jobs/1?source=some%20board"
 
         assert employer_apply_url(url) == url
+
+
+class TestParsePostingTitle:
+    def test_reads_the_card_title_and_company(self):
+        assert parse_posting_title(
+            "AI & Automation Engineer / Sales Focus | Malt | LinkedIn"
+        ) == ("AI & Automation Engineer / Sales Focus", "Malt")
+
+    def test_a_card_title_holding_the_separator_splits_from_the_right(self):
+        assert parse_posting_title("Engineer | Platform | Acme | LinkedIn") == (
+            "Engineer | Platform",
+            "Acme",
+        )
+
+    def test_the_unread_count_prefix_is_dropped(self):
+        assert parse_posting_title("(3) Product Manager | Acme | LinkedIn") == (
+            "Product Manager",
+            "Acme",
+        )
+        assert parse_posting_title("(99+) Engineer | Acme | LinkedIn") == (
+            "Engineer",
+            "Acme",
+        )
+
+    def test_other_titles_are_not_a_posting(self):
+        for title in [
+            "LinkedIn",
+            "(3) LinkedIn",
+            "Jobs | LinkedIn",
+            "Engineer | Acme | Indeed",
+            " | Acme | LinkedIn",
+            "Engineer |  | LinkedIn",
+            "",
+        ]:
+            assert parse_posting_title(title) is None, title
