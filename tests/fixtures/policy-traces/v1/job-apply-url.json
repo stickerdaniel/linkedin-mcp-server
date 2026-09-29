@@ -70,12 +70,13 @@
         "descriptionHeadings": [
           "About the job"
         ],
-        "externalLabel": "Apply"
+        "externalLabel": "Apply",
+        "redirectPath": "/safety/go"
       },
       "call": "get_job_apply_url",
       "kind": "wait_for_function",
       "operation": "job_apply_ready",
-      "program_digest": "8a83e3a060f7",
+      "program_digest": "ae81173d3333",
       "timeout_ms": 10000.0
     },
     {
@@ -89,12 +90,13 @@
         "descriptionHeadings": [
           "About the job"
         ],
-        "externalLabel": "Apply"
+        "externalLabel": "Apply",
+        "redirectPath": "/safety/go"
       },
       "call": "get_job_apply_url",
       "kind": "evaluate",
       "operation": "job_apply_signals",
-      "program_digest": "a2e6080ca22d"
+      "program_digest": "13a2f86aced8"
     }
   ],
   "result": {

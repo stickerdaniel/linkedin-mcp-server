@@ -341,7 +341,7 @@
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Get how a job posting takes applications, and the employer's application link.\n\nFor a posting that applies off LinkedIn this clicks Apply, which LinkedIn\ncounts as an apply click on the posting and may later ask about. Call it\nwhen preparing an application, not while browsing. It never submits an\napplication and never shares the profile with the job poster.",
+    "description": "Get how a job posting takes applications, and the employer's application link.\n\nFor a posting that applies off LinkedIn this may click Apply, which\nLinkedIn counts as an apply click on the posting and may later ask about. Call it\nwhen preparing an application, not while browsing. It never submits an\napplication and never shares the profile with the job poster.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

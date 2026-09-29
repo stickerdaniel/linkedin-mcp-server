@@ -259,7 +259,8 @@ ApplyType = Literal["easy_apply", "external", "applied", "closed", "unknown"]
 # LinkedIn's interstitial for links that leave the site, with the destination in
 # its `url` parameter. Measured on 2026-09-14: an external posting's Apply opens
 # a "Share your profile?" dialog whose Continue link is
-# `/safety/go/?url=https%3A%2F%2Fgrnh.se%2F...`.
+# `/safety/go/?url=https%3A%2F%2Fgrnh.se%2F...`. Measured on 2026-09-19: the
+# Apply itself is such a link on some postings.
 SAFETY_REDIRECT_PATH = "/safety/go"
 
 
@@ -270,19 +271,15 @@ _PRIVATE_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
 def reaches_the_public_internet(host: str) -> bool:
     """Whether an apply destination names somewhere outside this host.
 
-    The destination of an external Apply is chosen by whoever posted the job,
-    and the server loads it in the browser to follow its redirects. A loopback,
-    link-local or private-range address would turn that into a request against
-    whatever the host or its container can reach, on a stranger's word. None of
-    those is an employer's site, so they answer as no address at all.
+    The destination of an external Apply is chosen by whoever posted the job.
+    The server never loads it, but it hands it to a caller that may: a
+    loopback, link-local or private-range address would turn that into a
+    request against whatever the caller's host can reach, on a stranger's word.
+    None of those is an employer's site, so they answer as no address at all.
 
-    Judged on the address as written, which is what this module can see. A
-    public name that resolves into private space is the browser's resolution to
-    make and is not caught here, and neither is a redirect into one: a route
-    sees only the first request of a redirect (measured, `test_job_apply_dom`).
-    What bounds the rest is that a destination is only ever loaded, never read:
-    the tool answers with an address, so a page fetched this way returns
-    nothing to its caller.
+    Judged on the address as written. A public name that resolves into private
+    space, or a redirect into one, is only reached by loading the address,
+    which is the caller's decision and not this server's.
     """
     name = host.rstrip(".").lower()
     try:

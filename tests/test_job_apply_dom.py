@@ -2,14 +2,10 @@
 
 The unit suite mocks ``page.evaluate``, so the programs behind
 ``JobPageReader.read_apply_link`` never execute there. These run the whole read
-against synthetic postings in headless chromium, with the navigation stubbed.
-LinkedIn's addresses are answered by a route and the employer's short link by a
-loopback server, because a route sees only the first request of a redirect and
-would let the second one out. That server answers to a public name mapped onto
-the loopback by the browser's own resolver, because a destination written as a
-loopback address is refused before it is ever loaded. The markup carries the
-attributes measured on
-2026-09-14 and none of LinkedIn's classes, so it is a claim about which signals
+against synthetic postings in headless chromium, with the navigation stubbed and
+every request answered by a route that records it, so a test can say what was
+never asked for. The markup carries the attributes measured on 2026-09-14 and
+2026-09-19 and none of LinkedIn's classes, so it is a claim about which signals
 are read, not about LinkedIn's layout.
 
 Skipped automatically when chromium is not installed; run locally after
@@ -18,12 +14,8 @@ Skipped automatically when chromium is not installed; run locally after
 
 from __future__ import annotations
 
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import AsyncMock, patch
 from urllib.parse import quote
-
-import asyncio
-import threading
 
 import pytest
 from patchright.async_api import async_playwright
@@ -44,10 +36,9 @@ pytestmark = [
 ]
 
 JOB_URL = "https://www.linkedin.com/jobs/view/123/"
-#: The employer's site. A name rather than `127.0.0.1`, which the apply policy
-#: refuses; the browser is told to resolve it to the loopback server below.
-EMPLOYER_HOST = "employer.example"
-EMPLOYER_ORIGIN = f"http://{EMPLOYER_HOST}:"
+#: The employer's short link, which a real one would redirect onwards.
+EMPLOYER_HOST = "grnh.example"
+EMPLOYER_LINK = f"https://{EMPLOYER_HOST}/short"
 
 EASY_APPLY = (
     '<a href="https://www.linkedin.com/jobs/view/123/apply/?openSDUIApplyFlow=true"'
@@ -59,41 +50,31 @@ OTHER_EASY_APPLY = (
 EXTERNAL = '<button type="button" aria-label="Apply on company website">Apply</button>'
 
 
-class _EmployerSite(BaseHTTPRequestHandler):
-    """A short link that redirects to the job page behind it."""
-
-    def do_GET(self) -> None:
-        if self.path == "/short":
-            self.send_response(302)
-            self.send_header("Location", "/acme/jobs/1")
-            self.end_headers()
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html")
-        self.end_headers()
-        self.wfile.write(b"<p>Apply for this job</p>")
-
-    def log_message(self, format: str, *args: object) -> None:
-        pass
-
-
-@pytest.fixture
-def employer():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _EmployerSite)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        yield f"{EMPLOYER_ORIGIN}{server.server_address[1]}"
-    finally:
-        server.shutdown()
-        server.server_close()
-
-
 def safety(destination: str) -> str:
     """LinkedIn's interstitial towards ``destination``, encoded as measured."""
     return (
         "https://www.linkedin.com/safety/go/?url="
         f"{quote(destination, safe='')}&isSdui=true"
     )
+
+
+def external_link(href: str) -> str:
+    """The external Apply as a link into the interstitial, as measured."""
+    return (
+        f'<a target="_blank" aria-label="Apply on company website" href="{href}">'
+        "Apply</a>"
+    )
+
+
+#: Records a click on any link in the posting and keeps it from navigating.
+NO_CLICK = """
+    for (const anchor of document.querySelectorAll('main a')) {
+        anchor.addEventListener('click', (event) => {
+            event.preventDefault();
+            document.body.dataset.clicked = 'true';
+        });
+    }
+"""
 
 
 def click_opens_dialog(href: str) -> str:
@@ -152,17 +133,12 @@ def requested() -> list[str]:
 async def dom_page(requested):
     async def answer(route):
         requested.append(route.request.url)
-        if route.request.url.startswith(EMPLOYER_ORIGIN):
-            await route.continue_()
-        else:
-            await route.fulfill(status=200, content_type="text/html", body="<p>ok</p>")
+        await route.fulfill(status=200, content_type="text/html", body="<p>ok</p>")
 
     async with async_playwright() as playwright:
         try:
             browser = await playwright.chromium.launch(
-                channel="chromium",
-                headless=True,
-                args=[f"--host-resolver-rules=MAP {EMPLOYER_HOST} 127.0.0.1"],
+                channel="chromium", headless=True
             )
             context = await browser.new_context()
             page = await context.new_page()
@@ -195,28 +171,52 @@ async def test_easy_apply_is_the_postings_own_apply_route(dom_page):
     assert await read(dom_page, posting(EASY_APPLY)) == JobApplyRead("easy_apply")
 
 
-async def test_an_external_apply_is_read_off_its_dialog_and_followed(
-    dom_page, requested, employer
+async def test_an_external_apply_is_read_off_its_dialog_and_never_loaded(
+    dom_page, requested
 ):
-    """Continue's link is decoded and never followed, and the short link is."""
-    short = f"{employer}/short"
+    """Continue's link is decoded, and neither it nor the employer is fetched."""
     html = posting(
-        EXTERNAL, below=OTHER_EASY_APPLY, script=click_opens_dialog(safety(short))
+        EXTERNAL,
+        below=OTHER_EASY_APPLY,
+        script=click_opens_dialog(safety(EMPLOYER_LINK)),
     )
 
-    assert await read(dom_page, html) == JobApplyRead(
-        "external", f"{employer}/acme/jobs/1"
-    )
-    assert short in requested
+    assert await read(dom_page, html) == JobApplyRead("external", EMPLOYER_LINK)
+    assert await clicked(dom_page)
     assert not any("/safety/go" in url for url in requested)
+    assert not any(EMPLOYER_HOST in url for url in requested)
 
 
-async def test_a_tab_linkedin_opens_is_read_and_closed(dom_page, employer):
-    html = posting(EXTERNAL, script=click_opens_tab(safety(f"{employer}/short")))
+async def test_an_external_apply_link_is_read_off_its_href_without_a_click(
+    dom_page, requested
+):
+    """The top card's link wins over a same-text link in the description."""
+    below = external_link(safety("https://acme.example/"))
+    html = posting(external_link(safety(EMPLOYER_LINK)), below=below, script=NO_CLICK)
 
-    assert await read(dom_page, html) == JobApplyRead(
-        "external", f"{employer}/acme/jobs/1"
-    )
+    assert await read(dom_page, html) == JobApplyRead("external", EMPLOYER_LINK)
+    assert not await clicked(dom_page)
+    assert not any(EMPLOYER_HOST in url for url in requested)
+
+
+async def test_an_external_apply_link_below_the_description_is_not_this_postings(
+    dom_page,
+):
+    html = posting("", below=external_link(safety(EMPLOYER_LINK)), script=NO_CLICK)
+
+    assert await read(dom_page, html) == JobApplyRead("unknown")
+
+
+async def test_an_external_apply_link_naming_this_host_has_no_address(dom_page):
+    html = posting(external_link(safety("http://127.0.0.1:9/x")), script=NO_CLICK)
+
+    assert await read(dom_page, html) == JobApplyRead("external")
+
+
+async def test_a_tab_linkedin_opens_is_read_and_closed(dom_page):
+    html = posting(EXTERNAL, script=click_opens_tab(safety(EMPLOYER_LINK)))
+
+    assert await read(dom_page, html) == JobApplyRead("external", EMPLOYER_LINK)
     assert dom_page.context.pages == [dom_page]
 
 
@@ -284,34 +284,14 @@ async def test_a_tab_naming_this_host_is_refused_before_it_loads(dom_page, reque
     assert not any("127.0.0.1" in url for url in requested)
 
 
-async def test_a_tabs_address_is_read_without_loading_it(dom_page, requested, employer):
+async def test_a_tabs_address_is_read_without_loading_it(dom_page, requested):
     """The interstitial names its destination, so the tab need not be loaded."""
-    interstitial = safety(f"{employer}/short")
+    interstitial = safety(EMPLOYER_LINK)
     html = posting(EXTERNAL, script=click_opens_tab(interstitial))
 
-    assert await read(dom_page, html) == JobApplyRead(
-        "external", f"{employer}/acme/jobs/1"
-    )
+    assert await read(dom_page, html) == JobApplyRead("external", EMPLOYER_LINK)
     assert interstitial not in requested
-
-
-async def test_a_name_resolving_into_this_host_is_never_loaded(
-    dom_page, requested, monkeypatch
-):
-    """A public name pointing at the loopback is refused by the resolver."""
-
-    async def answers_loopback(host, port, **kwargs):
-        return [(None, None, None, "", ("127.0.0.1", 0))]
-
-    monkeypatch.setattr(
-        asyncio.get_running_loop(), "getaddrinfo", answers_loopback, raising=False
-    )
-    html = posting(
-        EXTERNAL, script=click_opens_dialog(safety("https://jobs.acme.example/x"))
-    )
-
-    assert await read(dom_page, html) == JobApplyRead("external")
-    assert not any("jobs.acme.example" in url for url in requested)
+    assert not any(EMPLOYER_HOST in url for url in requested)
 
 
 @pytest.mark.parametrize(

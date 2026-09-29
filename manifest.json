@@ -85,7 +85,7 @@
     },
     {
       "name": "get_job_apply_url",
-      "description": "Read how a job posting takes applications and its employer application link (clicks Apply, which LinkedIn counts as an apply click)"
+      "description": "Read how a job posting takes applications and its employer application link (may click Apply, which LinkedIn counts as an apply click)"
     },
     {
       "name": "search_jobs",

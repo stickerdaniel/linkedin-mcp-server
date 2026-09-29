@@ -10,12 +10,10 @@ from __future__ import annotations
 
 from contextlib import suppress
 from dataclasses import dataclass
-from urllib.parse import urlparse
 
 import asyncio
 import logging
 import re
-import socket
 import time
 
 from patchright.async_api import Page, Request, Route
@@ -42,7 +40,6 @@ from linkedin_mcp_server.linkedin.job_policy import (
     SCROLL_DEADLINE_MAX,
     ApplyType,
     employer_apply_url,
-    reaches_the_public_internet,
     route,
     same_job_search,
 )
@@ -167,8 +164,9 @@ _EXTERNAL_APPLY_JS = r"""
     const above = (el) => Boolean(
         heading && (heading.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING)
     );
+    const labeled = (el) => (el.innerText || '').trim() === externalLabel;
     const externalButton = [...main.querySelectorAll('button')].find(
-        (el) => above(el) && (el.innerText || '').trim() === externalLabel
+        (el) => above(el) && labeled(el)
     ) || null;
 """
 
@@ -193,14 +191,21 @@ MARK_EXTERNAL_APPLY_JS = (
 
 # This posting's apply control and state, once they render. Easy Apply is found
 # by its URL, an anchor into the posting's own `/apply/` route that the "More
-# jobs" cards, each linking its own posting, cannot match. The external button
-# and the state lines are text from the locale table, and both are read above
-# the description only. Measured on 2026-09-14: Easy Apply is an
-# `<a href=".../jobs/view/<id>/apply/?openSDUIApplyFlow=true">`, the external
-# control a `<button>` with no href whose text is the label.
+# jobs" cards, each linking its own posting, cannot match. The external control
+# and the state lines are text from the locale table, and all of them are read
+# above the description only. Easy Apply is an
+# `<a href=".../jobs/view/<id>/apply/?openSDUIApplyFlow=true">` (measured on
+# 2026-09-14). The external control comes in two shapes: a `<button>` with no
+# href whose click opens a dialog or a tab (2026-09-14), and an
+# `<a target="_blank">` into the off-site interstitial that names the employer's
+# page itself (2026-09-19). `external_link` is that anchor's href, so the second
+# shape is answered without a click.
 APPLY_SIGNALS_JS = (
     r"""(opts) => {
-    const {applyPath, externalLabel, descriptionHeadings, closedLines, appliedPattern} = opts;
+    const {
+        applyPath, redirectPath, externalLabel, descriptionHeadings, closedLines,
+        appliedPattern,
+    } = opts;
     const main = document.querySelector('main');
     if (!main) return null;
     const pathOf = (anchor) => {
@@ -216,10 +221,13 @@ APPLY_SIGNALS_JS = (
     const end = lines.findIndex((line) => descriptionHeadings.includes(line));
     const top = end === -1 ? [] : lines.slice(0, end);
     const applied = new RegExp(appliedPattern);
+    const anchors = [...main.querySelectorAll('a[href]')];
+    const link = anchors.find((anchor) => above(anchor) && labeled(anchor)
+        && pathOf(anchor) === redirectPath);
     return {
-        easy_apply: [...main.querySelectorAll('a[href]')]
-            .some((anchor) => pathOf(anchor) === applyPath),
+        easy_apply: anchors.some((anchor) => pathOf(anchor) === applyPath),
         external: Boolean(externalButton),
+        external_link: link ? link.href : null,
         applied: top.some((line) => applied.test(line)),
         closed: top.some((line) => closedLines.includes(line)),
     };
@@ -247,8 +255,7 @@ DIALOG_REDIRECT_JS = r"""(redirectPath) => {
 }"""
 
 # How long the apply control gets to render, and how long an external Apply gets
-# to answer with its dialog or a tab. The employer's page gets what `goto` gets
-# everywhere else.
+# to answer with its dialog or a tab.
 _APPLY_READY_TIMEOUT = 10.0
 _APPLY_ANSWER_TIMEOUT = 10.0
 #: How long a refused tab gets to arrive as a page of its own. Refusing its
@@ -256,30 +263,6 @@ _APPLY_ANSWER_TIMEOUT = 10.0
 #: call.
 _TAB_ARRIVES_TIMEOUT = 1.0
 _APPLY_POLL = 0.25
-_EMPLOYER_LOAD_TIMEOUT = 30.0
-
-
-# The browser resolves a destination's name itself, so an address
-# `reaches_the_public_internet` refuses can still be reached through a public
-# name pointing at it. This asks the resolver the same question first.
-#
-# Not resolving is not evidence, so it loads: a configured proxy resolves for
-# the browser, and this process may hold no DNS for that name at all. What
-# stays uncovered is a name that answers one thing here and another in the
-# browser, which nothing on this side can settle, and the cost of that is a
-# request the caller never sees the body of.
-async def _resolves_off_this_host(destination: str) -> bool:
-    """Whether every address ``destination``'s name answers with is public."""
-    host = urlparse(destination).hostname
-    if not host:
-        return False
-    loop = asyncio.get_running_loop()
-    try:
-        answers = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except (OSError, UnicodeError):
-        return True
-    # A sockaddr's first element is the address; the annotation widens it.
-    return all(reaches_the_public_internet(str(answer[4][0])) for answer in answers)
 
 
 # A tab's first document is issued before the tab's frame exists, so asking
@@ -381,21 +364,27 @@ class JobPageReader:
     async def read_apply_link(
         self, url: str, job_id: str, text: JobApplyTextTable
     ) -> JobApplyRead:
-        """Read how a posting takes applications, following an external Apply.
+        """Read how a posting takes applications, and an external one's address.
 
-        Applied, closed and Easy Apply postings are answered without a click.
-        An external posting's Apply is clicked, which LinkedIn counts as an
-        apply click on the posting, and answers with a "Share your profile?"
-        dialog or a tab. Continue is never clicked: the dialog says it shares
-        the full profile with the job poster, and its link already names the
-        destination. The employer's address is then loaded in this page to
-        follow its redirects, and the page is left there.
+        Applied, closed and Easy Apply postings are answered without a click,
+        and so is an external Apply that is a link, from its href. An external
+        Apply that is a button is clicked, which LinkedIn counts as an apply
+        click on the posting, and answers with a "Share your profile?" dialog
+        or a tab. Continue is never clicked: the dialog says it shares the full
+        profile with the job poster, and its link already names the
+        destination.
+
+        The employer's address is answered as LinkedIn gives it and never
+        loaded. It comes from whoever posted the job, and loading it would let
+        a stranger's link, or any redirect behind it, send a request from this
+        host to whatever the host can reach.
         """
         await self._navigator._navigate_to_page(url)
         await self._session.check_rate_limit()
         page = self._session.page
         opts = {
             "applyPath": f"/jobs/view/{job_id}/apply",
+            "redirectPath": SAFETY_REDIRECT_PATH,
             "externalLabel": text.external_apply_label,
             "descriptionHeadings": list(text.description_headings),
             "closedLines": list(text.closed_lines),
@@ -417,16 +406,17 @@ class JobPageReader:
             return JobApplyRead("closed")
         if signals and signals["easy_apply"]:
             return JobApplyRead("easy_apply")
+        if signals and signals["external_link"]:
+            return JobApplyRead(
+                "external", employer_apply_url(signals["external_link"])
+            )
         if not signals or not signals["external"]:
             # A barrier served in place of the posting renders none of the
             # above either, and it needs the relogin path rather than a type.
             await self._navigator._raise_if_auth_barrier(url)
             return JobApplyRead("unknown")
 
-        destination = await self._click_external_apply(text)
-        if destination is None:
-            return JobApplyRead("external")
-        return JobApplyRead("external", await self._follow_to_employer(destination))
+        return JobApplyRead("external", await self._click_external_apply(text))
 
     async def _click_external_apply(self, text: JobApplyTextTable) -> str | None:
         """Click this posting's external Apply and read the address it reveals.
@@ -441,8 +431,7 @@ class JobPageReader:
         Reading it off the loaded tab instead would mean the browser had
         already asked for it, and an interstitial names its destination in a
         query parameter, which `employer_apply_url` answers with: the tab
-        carries nothing that loading it would add. Whatever it names is then
-        judged and loaded by `_follow_to_employer` like any other destination.
+        carries nothing that loading it would add.
         """
         page = self._session.page
         opened: list[Page] = []
@@ -500,44 +489,6 @@ class JobPageReader:
             for tab in dict.fromkeys(opened):
                 with suppress(Exception):
                     await tab.close()
-
-    async def _follow_to_employer(self, destination: str) -> str | None:
-        """The address the employer's link settles on, loaded in this page.
-
-        Short links are common, Greenhouse's `grnh.se` among them, and name the
-        hiring system only once they redirect. A load that fails or stops short
-        answers with where it got, or with the link itself when that is not an
-        employer's address. A destination that resolves back into this host is
-        not loaded at all and answers None, which reads to the caller as a
-        posting whose link could not be read.
-
-        What the hops after it answer with is not judged, because nothing on
-        this side can judge it. A route sees a navigation's first request and
-        not the hop it redirects to, and fulfilling that hop's response does
-        not bring the next one back through the route either. The request API,
-        which can be asked for one hop at a time, resolves in the driver rather
-        than in the browser: it cannot see `--host-resolver-rules`, and under a
-        proxy that resolves for the browser it would not resolve the name at
-        all. Walking the chain there would judge one resolution and load
-        another, which is the rebinding it was meant to answer. The bound is
-        that a destination is loaded and never read: the address the tool
-        answers with passes through `employer_apply_url`, so a hop into private
-        space is never reported, only fetched.
-        """
-        if not await _resolves_off_this_host(destination):
-            logger.debug("Refused an apply destination resolving into this host")
-            return None
-        page = self._session.page
-        try:
-            await page.goto(
-                destination, wait_until="load", timeout=_EMPLOYER_LOAD_TIMEOUT * 1000
-            )
-        except Exception as e:
-            # The type alone: a driver error can quote a configured proxy URL.
-            logger.debug(
-                "%s did not finish loading (%s)", destination, type(e).__name__
-            )
-        return employer_apply_url(page.url) or destination
 
     async def _extract_job_ids(self, *, scoped: bool = False) -> list[str]:
         """Extract unique job IDs from job card links on the current page.

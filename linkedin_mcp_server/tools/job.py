@@ -92,8 +92,8 @@ def register_job_tools(
         """
         Get how a job posting takes applications, and the employer's application link.
 
-        For a posting that applies off LinkedIn this clicks Apply, which LinkedIn
-        counts as an apply click on the posting and may later ask about. Call it
+        For a posting that applies off LinkedIn this may click Apply, which
+        LinkedIn counts as an apply click on the posting and may later ask about. Call it
         when preparing an application, not while browsing. It never submits an
         application and never shares the profile with the job poster.
 
@@ -104,7 +104,8 @@ def register_job_tools(
         Returns:
             Dict with url and apply: {type, url?}. type is easy_apply,
             external, applied, closed or unknown. url is the employer's
-            application page, after its redirects, for external postings.
+            application link as LinkedIn gives it, for external postings;
+            it is not opened, so a short link is returned unexpanded.
             A posting that could not be read returns section_errors instead.
         """
         try:
