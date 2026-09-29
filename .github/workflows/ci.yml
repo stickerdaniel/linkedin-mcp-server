@@ -397,6 +397,22 @@ jobs:
         timeout-minutes: 25
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_killed_rows.py
 
+      # Row H-R7, a close the product cannot confirm: every actor starts from
+      # a fault overlay (tests/differential/fault_overlay.py) whose declared
+      # fault hands one selected drain's True back as False. K0 twice (the
+      # plain runtime and the inert overlay), then K1 frozen, K2 and K3 three
+      # times each, with the strace oracle above, then their composition with
+      # the source model. A product-free child killing its own group under
+      # this runner's strace calibrates K2's witness first.
+      - name: Leave a close unconfirmed
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 45
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_unconfirmed_close_row.py
+
       # The row's evidence packet: events, counts, watcher output, failures
       # and the runtime identity, and nothing else (``events.PUBLISHED_FILES``).
       # The certificates sit in another directory and are never included.
@@ -437,8 +453,9 @@ jobs:
     # them: three more rows, two of them waiting out a recovered owner's idle
     # exit (bound 25), and from 100 for H-R11 on Windows: two shim venvs and
     # three rows, one waiting out a successor's idle exit (bound 25). Windows is
-    # the slowest leg.
-    timeout-minutes: 125
+    # the slowest leg. Raised from 125 for H-R7 on Linux arm64: two overlays
+    # and eleven rows (bound 45).
+    timeout-minutes: 170
     strategy:
       fail-fast: false
       matrix:
@@ -724,6 +741,17 @@ jobs:
           LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
         timeout-minutes: 25
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_failed_job_query_row.py
+
+      # Row H-R7, as in the Ubuntu job; here it is the arm64 leg's. macOS and
+      # Windows run it too, and every case is counted as skipped there.
+      - name: Leave a close unconfirmed
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 45
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_unconfirmed_close_row.py
 
       # The row's evidence packet: events, counts, watcher output, failures
       # and the runtime identity, and nothing else (``events.PUBLISHED_FILES``).

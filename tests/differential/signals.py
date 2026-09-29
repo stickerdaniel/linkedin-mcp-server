@@ -122,7 +122,7 @@ import sys
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -231,6 +231,17 @@ class SignalCall:
     #: Why the target's scope cannot be read, when it cannot.
     unresolvable: str | None = None
     raw: str = ""
+    #: A time the call had certainly returned by, as ``read_trace`` bounds a
+    #: creation call's: a split call's resumed line, or for an unsplit one the
+    #: next line strace wrote. None when the trace gives no such line, and for
+    #: a call that never returned (``= ?``, the caller died in it); the ``-T``
+    #: time bounds nothing.
+    returned: float | None = None
+
+    @property
+    def returns(self) -> bool:
+        """Whether strace saw an ordinary return: not ``= ?``."""
+        return self.result.strip() != "?"
 
     @property
     def probe(self) -> bool:
@@ -250,6 +261,9 @@ class SignalCall:
     def outcome(self) -> str:
         if self.probe:
             return "probe"
+        if not self.returns:
+            # The caller died in it: no return reports what it delivered.
+            return "no return"
         if self.reached_nobody:
             return "reached nobody"
         if self.rejected:
@@ -270,6 +284,7 @@ class SignalCall:
             "group_of_pid": self.group_of_pid,
             "everyone": self.everyone,
             "unresolvable": self.unresolvable,
+            "returned": self.returned,
         }
 
 
@@ -412,8 +427,9 @@ def _record(
     ret: str,
     raw: str,
     returned: float | None = None,
-) -> Birth | None:
-    """Record one finished call; the birth it reports, if it reports one."""
+) -> Birth | int | None:
+    """Record one finished call. The birth it reports, if it reports one; for
+    a signal call whose return only the next line can bound, its index."""
     ret, duration = _split_duration(ret)
     if name in FOLLOWED_SYSCALLS:
         found = _RETURNED.match(ret.strip())
@@ -430,8 +446,12 @@ def _record(
             trace.events.append(("birth", birth))
             return birth
         return None
-    trace.calls.append(_call(tid, t, name, args, ret, raw))
-    return None
+    call = _call(tid, t, name, args, ret, raw)
+    # A call that never returned gets no return bound, whatever line follows.
+    if call.returns:
+        call = replace(call, returned=returned)
+    trace.calls.append(call)
+    return len(trace.calls) - 1 if call.returns and returned is None else None
 
 
 def read_trace(text: str) -> Trace:
@@ -453,12 +473,16 @@ def read_trace(text: str) -> Trace:
     exit for a split call, and ``printleader`` ends any unfinished line with
     ``<unfinished ...>`` before it starts another, so an unsplit call's result
     was written before the next line's prefix was read. That next prefix, or
-    the resumed line's own, is a time the call had returned by.
+    the resumed line's own, is a time the call had returned by. Signal calls
+    are bounded the same way (``SignalCall.returned``); one that never
+    returned (``= ?``) is not.
     """
     trace = Trace()
     pending: dict[tuple[int, str], tuple[float, str]] = {}
     #: Unsplit births still waiting for the next line to bound their return.
     unbounded: list[Birth] = []
+    #: Unsplit signal calls waiting for the same, by index into ``calls``.
+    open_calls: list[int] = []
     for raw in text.splitlines():
         if not raw.strip():
             continue
@@ -471,6 +495,9 @@ def read_trace(text: str) -> Trace:
         for birth in unbounded:
             birth.returned = t
         unbounded.clear()
+        for index in open_calls:
+            trace.calls[index] = replace(trace.calls[index], returned=t)
+        open_calls.clear()
         try:
             if rest.startswith("+++"):
                 if _ENDED.match(rest) is None:
@@ -482,11 +509,13 @@ def read_trace(text: str) -> Trace:
             if rest.startswith("---"):
                 continue
             elif (found := _COMPLETE.match(rest)) is not None:
-                birth = _record(
+                recorded = _record(
                     trace, tid, t, found["name"], found["args"], found["ret"], raw
                 )
-                if birth is not None:
-                    unbounded.append(birth)
+                if isinstance(recorded, Birth):
+                    unbounded.append(recorded)
+                elif recorded is not None:
+                    open_calls.append(recorded)
             elif (found := _UNFINISHED.match(rest)) is not None:
                 pending[(tid, found["name"])] = (t, found["args"])
             elif (found := _RESUMED.match(rest)) is not None:
@@ -559,6 +588,9 @@ class Lifetime:
     marker_t: float | None = None
     #: ``(sample end, actor, group)`` for each reading, in order.
     readings: list[tuple[float, str, int | None]] = field(default_factory=list)
+    #: ``(sample end, marker, group)`` for each reading whose record carried
+    #: both: the only readings that tie a group to a marker.
+    marked_readings: list[tuple[float, str, int]] = field(default_factory=list)
 
     @property
     def identity(self) -> tuple[int, float]:
@@ -610,6 +642,18 @@ class Lifetime:
         if self.marker is None or self.marker_t is None or self.marker_t > t:
             return None
         return self.marker
+
+    def groups_marked_by(self, marker: str, t: float) -> set[int]:
+        """The groups read by *t* in the same record as *marker*.
+
+        Not every group it was ever read in: a marker first read after the
+        process changed group says nothing of the group it left.
+        """
+        return {
+            group
+            for when, carried, group in self.marked_readings
+            if when <= t and carried == marker
+        }
 
 
 class ProcessHistory:
@@ -686,6 +730,10 @@ class ProcessHistory:
             known.readings.append(
                 (t, str(entry.get("actor", "other")), entry.get("pgid"))
             )
+            if entry.get("browser_marker") and isinstance(entry.get("pgid"), int):
+                known.marked_readings.append(
+                    (t, entry["browser_marker"], entry["pgid"])
+                )
 
     # --- by life span, for senders, parents and what a call names
 
@@ -1019,11 +1067,12 @@ def derive_o2(
         if call.probe or call.reached_nobody:
             continue
         where = f"{call.syscall} at {call.t} ({call.raw.strip()})"
-        verb = (
-            f"attempted (refused: {call.result.strip()})"
-            if call.rejected
-            else f"delivered {call.signal}"
-        )
+        if call.rejected:
+            verb = f"attempted (refused: {call.result.strip()})"
+        elif not call.returns:
+            verb = f"attempted {call.signal} (no return observed)"
+        else:
+            verb = f"delivered {call.signal}"
         sender = _sender(call, history, outcome, traced)
         if isinstance(sender, str):
             classes.add("unplaced-sender")
@@ -1043,12 +1092,16 @@ def derive_o2(
             "principal": [principal.pid, principal.start],
             "class": kind,
             "targets": None,
+            # Whether this call's recipients stayed unknown: each unknown
+            # below that belongs to a call is marked on that call's entry.
+            "unknown": False,
         }
         result.resolved.append(entry)
         if call.everyone:
             result.violations.append(f"{verb} to every process: {where}")
             continue
         if call.unresolvable is not None:
+            entry["unknown"] = True
             result.unknowns.append(f"target unresolved ({call.unresolvable}): {where}")
             continue
         found: list[Lifetime] | str
@@ -1071,6 +1124,7 @@ def derive_o2(
         else:
             found = "no target"
         if isinstance(found, str):
+            entry["unknown"] = True
             result.unknowns.append(f"recipients not pinned ({found}): {where}")
             continue
         entry["targets"] = [[life.pid, life.start] for life in found]
@@ -1087,6 +1141,7 @@ def derive_o2(
                 f"{principal.identity}: {where}"
             )
         if undecided:
+            entry["unknown"] = True
             result.unknowns.append(f"could not place {undecided}: {where}")
     result.classes = tuple(sorted(classes))
     if outcome.status == INCOMPLETE:
@@ -1627,6 +1682,20 @@ class SignalOracle:
             outcome.reasons.append(f"strace could not be ended: {failure}")
         with contextlib.suppress(subprocess.TimeoutExpired):
             process.wait(timeout=5)
+
+    def settled(self) -> bool:
+        """Whether the tracer this oracle started, if any, has been reaped.
+
+        Asked of its own ``Popen``: ``stop`` returning is not this answer, since
+        its last bounded wait can end with the tracer still running.
+        """
+        return self._process is None or self._process.poll() is not None
+
+    def end(self) -> bool:
+        """One more bounded attempt to end the tracer; whether it is settled."""
+        if self._process is not None and self._process.poll() is None:
+            self._end(self._process, OracleOutcome(status=INCOMPLETE))
+        return self.settled()
 
 
 # --- Canaries -------------------------------------------------------------------------

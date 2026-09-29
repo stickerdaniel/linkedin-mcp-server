@@ -2080,3 +2080,141 @@ def test_a_duration_is_not_part_of_a_calls_result():
     )
     assert call.result == "-1 EPERM (Operation not permitted)"
     assert call.rejected
+
+
+@pytest.mark.parametrize(
+    ("text", "returned"),
+    [
+        pytest.param(
+            "21  6.0 kill(95, SIGTERM) = 0 <0.000010>\n22  7.0 +++ exited with 0 +++\n",
+            7.0,
+            id="unsplit-bounded-by-the-next-line",
+        ),
+        pytest.param(
+            "21  6.0 kill(95, SIGTERM <unfinished ...>\n"
+            "22  6.5 --- SIGCHLD ---\n"
+            "21  8.0 <... kill resumed>) = 0 <2.0>\n",
+            8.0,
+            id="split-bounded-by-its-resumed-line",
+        ),
+        pytest.param(
+            "21  6.0 kill(95, SIGTERM) = 0 <0.000010>\n", None, id="nothing-after-it"
+        ),
+        pytest.param(
+            "21  6.0 kill(-21, SIGKILL) = ?\n21  6.1 +++ killed by SIGKILL +++\n",
+            None,
+            id="never-returned",
+        ),
+        pytest.param(
+            "21  6.0 kill(95, SIGTERM) = 0 <0.000010>\n22  6.0 --- SIGCHLD ---\n",
+            6.0,
+            id="bounded-by-any-line-strace-wrote",
+        ),
+    ],
+)
+def test_a_signal_call_is_bounded_like_a_creation_and_never_by_its_duration(
+    text, returned
+):
+    (call,) = read_trace(text).calls
+    assert call.returned == returned
+    assert call.as_event_fields()["returned"] == returned
+
+
+def test_a_call_that_never_returned_is_not_read_as_delivered():
+    (fatal, returned) = read_trace(
+        "21  6.0 kill(-22, SIGKILL) = 0 <0.000010>\n"
+        "21  6.1 kill(-21, SIGKILL) = ?\n"
+        "21  6.2 +++ killed by SIGKILL +++\n"
+    ).calls[::-1]
+    assert fatal.outcome == "no return" and returned.outcome == "delivered"
+
+
+@pytest.mark.parametrize(
+    ("result", "description"),
+    [
+        ("?", "attempted SIGKILL (no return observed)"),
+        ("0", "delivered SIGKILL"),
+        ("-1 EPERM (Operation not permitted)", "attempted (refused:"),
+    ],
+)
+def test_a_violation_report_distinguishes_attempts_from_delivery(result, description):
+    trace = read_trace(f"20 6.0 kill(-1, SIGKILL) = {result}\n")
+    records = [
+        {
+            "kind": "process.start",
+            "pid": 20,
+            "start_identity": 1.0,
+            "ppid": os.getpid(),
+            "in_row": True,
+            "t": 1.0,
+            "actor": "owner",
+            "pgid": 20,
+        },
+    ]
+    o2 = derive_o2(
+        OracleOutcome(status=COMPLETE, calls=trace.calls, traced=[20]),
+        ProcessHistory(records, outside=[os.getpid()]),
+    )
+    assert o2.state == VIOLATED
+    assert len(o2.violations) == 1
+    assert o2.violations[0].startswith(description)
+
+
+def test_each_unknown_recipient_is_marked_on_the_call_it_belongs_to():
+    # One call whose group no sample brackets, one reaching nobody (no entry).
+    text = (
+        "20  6.0 kill(-500, SIGTERM) = 0 <0.000010>\n"
+        "20  6.1 kill(-501, SIGTERM) = -1 ESRCH (No such process) <0.000010>\n"
+    )
+    trace = read_trace(text)
+    records = [
+        {"kind": "watcher.ready", "baseline_pgids": [1]},
+        {
+            "kind": "process.start",
+            "pid": 20,
+            "start_identity": 1.0,
+            "ppid": os.getpid(),
+            "in_row": True,
+            "t": 1.0,
+            "actor": "owner",
+            "pgid": 20,
+        },
+    ]
+    o2 = derive_o2(
+        OracleOutcome(status=COMPLETE, calls=trace.calls, traced=[20]),
+        ProcessHistory(records, outside=[os.getpid()]),
+    )
+    assert [entry["unknown"] for entry in o2.resolved] == [True]
+    assert len(o2.unknowns) == 1
+
+
+def test_a_group_is_tied_to_a_marker_only_by_a_record_carrying_both():
+    def reading(t, pgid, **fields):
+        return {
+            "kind": "process.update" if t > 2.0 else "process.start",
+            "pid": 30,
+            "start_identity": 2.0,
+            "ppid": os.getpid(),
+            "in_row": True,
+            "t": t,
+            "actor": "browser",
+            "pgid": pgid,
+            **fields,
+        }
+
+    history = ProcessHistory(
+        [
+            reading(2.0, 999),
+            reading(3.0, 30, browser_marker="a" * 16),
+            reading(4.0, 31, browser_marker="a" * 16),
+            reading(5.0, None, browser_marker="a" * 16),
+        ],
+        outside=[os.getpid()],
+    )
+    (life,) = history.lifetimes
+    # Read in 999 before its marker was: one of its groups, not a marked one.
+    assert life.groups_by(3.0) == {999, 30}
+    assert life.groups_marked_by("a" * 16, 2.5) == set()
+    assert life.groups_marked_by("a" * 16, 3.0) == {30}
+    assert life.groups_marked_by("a" * 16, 5.0) == {30, 31}
+    assert life.groups_marked_by("b" * 16, 5.0) == set()

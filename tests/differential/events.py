@@ -94,6 +94,17 @@ KINDS = frozenset(
         "installer.fate",
         "shim.reached",
         "job_query.continuation",
+        # H-R7: the activation, the close and the recovery barrier, each lease
+        # checkpoint, what the harness ended after measuring, the phase of the
+        # trace after the real drain returned, the fatal-kill calibration and
+        # the native continuation.
+        "r7.activation",
+        "r7.window",
+        "r7.lease",
+        "r7.ended",
+        "r7.phase",
+        "r7.calibration",
+        "r7.continuation",
     }
 )
 
@@ -269,6 +280,12 @@ PUBLISHED_FILES = frozenset(
         # The signal oracle's own output: syscalls and targets, no environment.
         "strace.txt",
         "strace.stderr",
+        # H-R7: what the row recorded, and the fault's own records. A launch
+        # marker appears in them only as its digest.
+        "r7.json",
+        "activation.json",
+        "claim.json",
+        "outcome.json",
     }
 )
 
