@@ -395,11 +395,16 @@ async def _job_search_scenario(route: str = "/jobs/search/") -> dict[str, Any]:
 
 
 async def _dismiss_job_scenario() -> dict[str, Any]:
-    recorder = TraceRecorder("dismiss_job__dismissed", _COMMON_ALLOWED)
+    recorder = TraceRecorder("dismiss_job__dismissed", _COMMON_ALLOWED | {"title"})
     clock = FakeClock(recorder)
     page = _page(recorder)
-    search = "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme"
-    page.goto_landings.extend([search, search])
+    posting = "https://www.linkedin.com/jobs/view/123/"
+    search = (
+        "https://www.linkedin.com/jobs/search/"
+        "?keywords=Applied+AI+Engineer+Acme&geoId=92000000"
+    )
+    page.goto_landings.extend([posting, search, search])
+    page.script("title", "LinkedIn", "(3) Applied AI Engineer | Acme | LinkedIn")
     page.declare_locator("button[data-mcp-dismiss]", "search_card_dismiss")
     page.script(
         "evaluate:job_search_card",
@@ -410,7 +415,7 @@ async def _dismiss_job_scenario() -> dict[str, Any]:
     )
     page.script("search_card_dismiss.click", None)
     extractor = _extractor(page)
-    arguments = {"job_id": "123", "keywords": "Applied AI Engineer Acme"}
+    arguments = {"job_id": "123"}
     async with boundaries(recorder, clock):
         with recorder.context("dismiss_job"):
             result = await extractor.dismiss_job(**arguments)

@@ -1331,8 +1331,12 @@ class TestJobTools:
 
     async def test_dismiss_job(self, mock_context, serve_extractor):
         expected = {
-            "url": "https://www.linkedin.com/jobs/search/?keywords=Engineer+Acme",
+            "url": (
+                "https://www.linkedin.com/jobs/search/"
+                "?keywords=Engineer+Acme&geoId=92000000"
+            ),
             "job_id": "12345",
+            "keywords": "Engineer Acme",
             "dismissed": True,
             "already_dismissed": False,
         }
@@ -1345,9 +1349,9 @@ class TestJobTools:
 
         serve_extractor(mock_extractor)
         tool_fn = await get_tool_fn(mcp, "dismiss_job")
-        result = await tool_fn("12345", "Engineer Acme", mock_context)
+        result = await tool_fn("12345", mock_context)
         assert result == expected
-        mock_extractor.dismiss_job.assert_awaited_once_with("12345", "Engineer Acme")
+        mock_extractor.dismiss_job.assert_awaited_once_with("12345")
 
     async def test_dismiss_job_is_marked_destructive(self):
         from linkedin_mcp_server.tools.job import register_job_tools

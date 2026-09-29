@@ -280,37 +280,36 @@ def register_job_tools(
     )
     async def dismiss_job(
         job_id: str,
-        keywords: str,
         ctx: Context,
     ) -> dict[str, Any]:
         """
         Dismiss a job from LinkedIn job search so later searches never show it.
 
-        For jobs already applied to or rejected. Clicks the dismiss button on
-        the job's card in a search for keywords, then reloads that search to
-        confirm the job is gone. Irreversible: LinkedIn offers no undo after a
-        reload. A job the search does not list is an error, since an already
-        dismissed job and a search that missed it look the same.
+        For jobs already applied to or rejected. Reads the job's title and
+        company from its posting, clicks the dismiss button on its card in a
+        worldwide search for them, then reloads that search to confirm the job
+        is gone. Irreversible: LinkedIn offers no undo after a reload. A job
+        that search does not list on its first page is an error, since an
+        already dismissed job and a search that missed it look the same.
 
         Args:
             job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
-            keywords: A narrow search whose first page lists the job, such as
-                its title and company (e.g., "Applied AI Engineer Action1")
             ctx: FastMCP context for progress reporting
 
         Returns:
-            Dict with url (the search), job_id, dismissed (true) and
-            already_dismissed, true when the card was already dismissed.
+            Dict with url (the search), job_id, keywords (the searched title
+            and company), dismissed (true) and already_dismissed, true when
+            the card was already dismissed.
         """
         try:
             extractor = await get_ready_extractor(ctx, tool_name="dismiss_job")
-            logger.info("Dismissing job %s via search %r", job_id, keywords)
+            logger.info("Dismissing job %s", job_id)
 
             await ctx.report_progress(
-                progress=0, total=100, message="Opening job search"
+                progress=0, total=100, message="Opening job posting"
             )
 
-            result = await extractor.dismiss_job(job_id, keywords)
+            result = await extractor.dismiss_job(job_id)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
