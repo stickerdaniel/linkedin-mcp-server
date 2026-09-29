@@ -23,7 +23,6 @@ scripts
 tests
 AGENTS.md
 CLAUDE.md
-CHANGELOG.md
 changelog.d
 docker-compose.yml
 Dockerfile

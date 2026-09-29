@@ -17,7 +17,7 @@ from typing import Any, Callable, cast
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCRIPTS = _REPO_ROOT / "scripts"
 _FRAGMENTS = _REPO_ROOT / "changelog.d"
-_CHANGELOG = _REPO_ROOT / "CHANGELOG.md"
+_CHANGELOG = _REPO_ROOT / "docs/CHANGELOG.md"
 _MARKER = "<!-- towncrier release notes start -->"
 
 # The gate imports check_pr_title from its own directory.

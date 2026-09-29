@@ -738,7 +738,8 @@ def _run_compose_step(
         f'[project]\nname = "demo"\nversion = "4.26.0"\n{_TOWNCRIER}',
         encoding="utf-8",
     )
-    (repo / "CHANGELOG.md").write_text(_RELEASED_CHANGELOG, encoding="utf-8")
+    (repo / "docs").mkdir()
+    (repo / "docs/CHANGELOG.md").write_text(_RELEASED_CHANGELOG, encoding="utf-8")
     (repo / ".github").mkdir()
     shutil.copy(_TEMPLATE, repo / ".github" / "RELEASE_NOTES_TEMPLATE.md")
     (repo / "scripts").mkdir()
