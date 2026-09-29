@@ -3,7 +3,8 @@
 The unit suite mocks ``page.evaluate``, so the program behind
 ``JobPageReader.dismiss_search_card`` never executes there. These run the whole
 action against a synthetic results list in headless chromium, with the
-navigation stubbed. The markup carries the structure measured on 2026-09-28:
+navigation stubbed, and read a synthetic posting's document title the way
+``JobPageReader.read_posting_title`` does. The markup carries the structure measured on 2026-09-28:
 each result is an `li[data-occludable-job-id]`, its dismiss control a `button`
 around `[data-test-icon="close-small"]`, some cards also carry a "More options"
 button, and a click swaps the dismiss button for one around `undo-small`. None
@@ -21,6 +22,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from patchright.async_api import async_playwright
 
+from linkedin_mcp_server.core.exceptions import LinkedInOperationError
 from linkedin_mcp_server.linkedin import job_pages
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.job_pages import JobPageReader
@@ -33,6 +35,7 @@ pytestmark = [
 ]
 
 SEARCH_URL = "https://www.linkedin.com/jobs/search/?keywords=Engineer"
+POSTING_URL = "https://www.linkedin.com/jobs/view/111/"
 
 # A dismiss click records the card in the DOM and swaps the button for the
 # undo one, unless the page says the click is ignored. An attribute rather
@@ -110,6 +113,7 @@ def _short_waits(monkeypatch):
     monkeypatch.setattr(job_pages, "_SEARCH_READY_TIMEOUT", 1.0)
     monkeypatch.setattr(job_pages, "_SEARCH_CARD_RENDER_TIMEOUT", 1.0)
     monkeypatch.setattr(job_pages, "_DISMISS_TIMEOUT", 1.0)
+    monkeypatch.setattr(job_pages, "_POSTING_TITLE_TIMEOUT", 1.0)
 
 
 def _reader(page) -> JobPageReader:
@@ -200,3 +204,48 @@ async def test_a_reloaded_search_without_the_card_does_not_list_it(dom_page):
     ):
         assert await reader.search_lists_job(SEARCH_URL, "111") is True
         assert await reader.search_lists_job(SEARCH_URL, "222") is False
+
+
+async def read_title(page, landing: str, html: str) -> tuple[str, str]:
+    """Serve ``html`` at ``landing`` and read it as job 111's posting."""
+    await page.goto(landing)
+    await page.set_content(html)
+    reader = _reader(page)
+    with patch.object(
+        reader._navigator, "_navigate_to_page", new_callable=AsyncMock
+    ) as navigate:
+        found = await reader.read_posting_title("111")
+    navigate.assert_awaited_once_with(POSTING_URL)
+    return found
+
+
+async def test_the_posting_title_names_the_card_title_and_company(dom_page):
+    html = "<title>(3) Engineer | Platform | Acme | LinkedIn</title><main></main>"
+
+    assert await read_title(dom_page, POSTING_URL, html) == (
+        "Engineer | Platform",
+        "Acme",
+    )
+
+
+async def test_a_posting_title_set_late_is_waited_for(dom_page):
+    html = (
+        "<title>LinkedIn</title><main></main><script>setTimeout(() => {"
+        "document.title = 'Engineer | Acme | LinkedIn'}, 300);</script>"
+    )
+
+    assert await read_title(dom_page, POSTING_URL, html) == ("Engineer", "Acme")
+
+
+async def test_a_posting_title_that_never_takes_shape_is_an_error(dom_page):
+    html = "<title>(3) LinkedIn</title><main></main>"
+
+    with pytest.raises(LinkedInOperationError, match=r"'\(3\) LinkedIn'"):
+        await read_title(dom_page, POSTING_URL, html)
+
+
+async def test_a_navigation_off_the_posting_is_an_error(dom_page):
+    html = "<title>Engineer | Acme | LinkedIn</title><main></main>"
+
+    with pytest.raises(LinkedInOperationError, match="/jobs/view/222/"):
+        await read_title(dom_page, "https://www.linkedin.com/jobs/view/222/", html)

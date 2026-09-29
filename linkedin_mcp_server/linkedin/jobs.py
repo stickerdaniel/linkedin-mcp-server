@@ -32,6 +32,7 @@ from linkedin_mcp_server.linkedin.job_policy import (
     SCROLL_BUDGET_TOTAL,
     SCROLL_DEADLINE_MAX,
     SEARCH_TIMEOUT_FRACTION,
+    WORLDWIDE_GEO_ID,
     JobsTrackerStage,
     apply_link_missing_section_error,
     dropped_filters_section_error,
@@ -768,12 +769,14 @@ class JobReader:
             result["section_errors"] = section_errors
         return result
 
-    async def dismiss_job(self, job_id: str, keywords: str) -> dict[str, Any]:
+    async def dismiss_job(self, job_id: str) -> dict[str, Any]:
         """Dismiss a job from job search, so later searches no longer show it.
 
-        Acts on the job's card in the first page of a search for ``keywords``,
-        which has to list it: a search by `currentJobId` shows the job only in
-        the detail pane, which has no dismiss control. The card turning to its
+        Acts on the job's card in the first page of a worldwide search for
+        the title and company its posting names, which has to list it: a
+        search by `currentJobId` shows the job only in the detail pane, which
+        has no dismiss control. Worldwide, because a search without a location
+        is scoped to the account's remembered one. The card turning to its
         undo state is not yet a change LinkedIn kept, so the search is loaded
         again and must not list the job either. Irreversible: the undo is
         offered only in place, before any reload.
@@ -783,18 +786,19 @@ class JobReader:
         naming both.
 
         Returns:
-            {url, job_id, dismissed: True, already_dismissed}
+            {url, job_id, keywords, dismissed: True, already_dismissed}
         """
         job_id = normalize_job_id(job_id)
-        if not keywords.strip():
-            raise ValueError("keywords must name a search that lists the job")
-        url = build_job_search_url(keywords)
+        card_title, company = await self._pages.read_posting_title(job_id)
+        keywords = f"{card_title} {company}"
+        url = f"{build_job_search_url(keywords)}&geoId={WORLDWIDE_GEO_ID}"
+        await asyncio.sleep(NAV_DELAY)
         outcome = await self._pages.dismiss_search_card(url, job_id)
         if outcome == "absent":
             raise LinkedInOperationError(
-                f"Job {job_id} is not in the results of the search for "
-                f"{keywords!r}. Either it is already dismissed, or the search "
-                "missed it: retry with its exact title and company."
+                f"Job {job_id} is not on the first page of a worldwide search "
+                f"for {keywords!r}. Either it is already dismissed, or that "
+                "search does not list it on its first page."
             )
         if outcome == "no_button":
             raise LinkedInOperationError(
@@ -816,6 +820,7 @@ class JobReader:
         return {
             "url": url,
             "job_id": job_id,
+            "keywords": keywords,
             "dismissed": True,
             "already_dismissed": outcome == "already_dismissed",
         }

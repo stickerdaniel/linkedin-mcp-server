@@ -34,15 +34,17 @@ from linkedin_mcp_server.linkedin.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     ExtractedSection,
 )
+from linkedin_mcp_server.linkedin.identifiers import job_view_url
 from linkedin_mcp_server.linkedin.job_policy import (
     SAFETY_REDIRECT_PATH,
     SCROLL_DEADLINE_MAX,
     ApplyType,
     employer_apply_url,
+    parse_posting_title,
     route,
     same_job_search,
 )
-from linkedin_mcp_server.linkedin.link_metadata import build_references
+from linkedin_mcp_server.linkedin.link_metadata import JOB_PATH_RE, build_references
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.linkedin.text import (
@@ -277,6 +279,8 @@ _DISMISS_MARK = "data-mcp-dismiss"
 _SEARCH_READY_TIMEOUT = 10.0
 _SEARCH_CARD_RENDER_TIMEOUT = 5.0
 _DISMISS_TIMEOUT = 5.0
+# How long a posting gets to set its "<title> | <company> | LinkedIn" title.
+_POSTING_TITLE_TIMEOUT = 10.0
 _SEARCH_POLL = 0.25
 
 SearchCardOutcome = Literal[
@@ -871,6 +875,37 @@ class JobPageReader:
             }"""
         )
         return int(value) if value is not None else None
+
+    async def read_posting_title(self, job_id: str) -> tuple[str, str]:
+        """Open ``job_id``'s posting and read its card title and company.
+
+        Both come from the document title, which LinkedIn sets once the
+        posting renders. Raises when the navigation ends anywhere but that
+        posting, after offering the page to the auth-barrier check, or when
+        the title never takes that shape.
+        """
+        url = job_view_url(job_id, "/")
+        await self._navigator._navigate_to_page(url)
+        await self._session.check_rate_limit()
+        page = self._session.page
+        landed = JOB_PATH_RE.match(route(page.url)[1])
+        if landed is None or landed.group(1) != job_id:
+            await self._navigator._raise_if_auth_barrier(page.url)
+            raise LinkedInOperationError(
+                f"The navigation to job {job_id}'s posting ended on {page.url}"
+            )
+        deadline = self._session.monotonic() + _POSTING_TITLE_TIMEOUT
+        while True:
+            title = await page.title()
+            parsed = parse_posting_title(title)
+            if parsed is not None:
+                return parsed
+            if self._session.monotonic() >= deadline:
+                raise LinkedInOperationError(
+                    f"Job {job_id}'s posting never named its title and company: "
+                    f"its page title read {title!r}"
+                )
+            await self._session.delay(_SEARCH_POLL)
 
     async def _open_job_search(self, url: str) -> None:
         """Navigate to a job search and wait for its result cards to render.
