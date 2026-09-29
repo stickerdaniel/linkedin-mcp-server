@@ -1,145 +1,28 @@
 name: Check Attribution
 
 on:
-  # Every pull request, not only those targeting main: a stacked pull request
-  # is based on the branch below it, and a trailer that slips through there
-  # reaches main when the stack merges.
+  # Stacked pull requests need the same checks before reaching main.
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
 
-# One run per branch, for the same reason as CI: restacking pushes every branch
-# in the stack, and the trailers this reads are a property of the head commit,
-# so a superseded run answers a question nobody is asking any more.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
-
-# Coding agents sign their work either with a Co-Authored-By trailer or by
-# claiming the author/committer field. Squash-merging collects the trailers of
-# every commit in the PR into the merge commit, so a single unnoticed trailer
-# reaches main permanently. The PR body is a second way in: this repository
-# squash-merges with the body as the commit message, so a trailer written
-# there lands on main exactly like one in a commit. Each identity below is a vendor-controlled address
-# or a known agent's GitHub App handle. Dependency bots (dependabot, renovate)
-# are deliberately allowed: they are maintenance automation, not authorship
-# claims.
-env:
-  # Bare identities, matched against a trailer address and against the
-  # author/committer fields. The optional digits cover GitHub's
-  # "<id>+<handle>@users.noreply.github.com" form, whose id varies per app.
-  AI_IDENTITY_RE: '(noreply@anthropic\.com|cursoragent@cursor\.com|(noreply|codex)@openai\.com|noreply@aider\.chat|openhands@all-hands\.dev|noreply@opencode\.ai|noreply@continue\.dev|clio-agent@sisyphuslabs\.ai|roomote@roocode\.com|copilot@github\.com|([0-9]+[+])?(Copilot|gemini-code-assist\[bot\]|greptile-apps\[bot\]|coderabbitai\[bot\]|ellipsis-dev\[bot\]|qodo-merge-pro\[bot\]|sweep-ai\[bot\]|bito-code-review\[bot\]|roomote\[bot\]|factory-droid\[bot\]|opencode-agent\[bot\]|google-labs-jules\[bot\])@users\.noreply\.github\.com)'
 
 jobs:
   check-bot-coauthors:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out trusted workflow revision
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check agent attribution and hidden Unicode
+        uses: stickerdaniel/agent-guardrails@a3508d7320e64370b878359b1f4ae541b507224f # v1.0.0
         with:
-          ref: ${{ github.workflow_sha }}
-          # Full history: in a shallow clone the base commit has no parents,
-          # so BASE..HEAD below follows a merge from an older main through
-          # every commit already on main and fails on their trailers.
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Check PR model attribution
-        if: github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.user.login != 'renovate[bot]'
-        run: python scripts/check_pr_model_attribution.py
-
-      - name: Check PR body for bot Co-Authored-By lines
+          require-model-attribution: true
+        # Bind live evidence to this run, not a later branch-tip lookup.
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: |
-          # Same trailer pattern as the commit check below. A body edited on
-          # the web arrives with CRLF; the trailing [[:space:]]* absorbs the CR.
-          TRAILER_RE="^[[:space:]]*co-authored-by:[[:space:]]+.*<${AI_IDENTITY_RE}>[[:space:]]*$"
-          HITS=$(printf '%s\n' "$PR_BODY" | grep -Ei "$TRAILER_RE" || true)
-
-          if [ -n "$HITS" ]; then
-            echo "::error::The PR body contains a bot Co-Authored-By line. The body becomes the squash commit message, so edit the PR description and remove it."
-            printf '%s\n' "$HITS"
-            exit 1
-          fi
-
-          echo "PR body clean."
-
-      - name: Fetch PR commits
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          case "$PR_NUMBER" in
-            ''|*[!0-9]*) echo "Invalid pull request number"; exit 1 ;;
-          esac
-          git check-ref-format "refs/heads/${BASE_REF}"
-          git fetch --no-tags origin \
-            "refs/heads/${BASE_REF}" \
-            "refs/pull/${PR_NUMBER}/head"
-
-      - name: Check for bot Co-Authored-By lines
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          COMMITS=$(git log --format='%H' "${BASE_SHA}..${HEAD_SHA}" 2>/dev/null || true)
-
-          if [ -z "$COMMITS" ]; then
-            echo "No commits to check"
-            exit 0
-          fi
-
-          # Anchored to a full trailer line so a mention in prose does not fail.
-          TRAILER_RE="^[[:space:]]*co-authored-by:[[:space:]]+.*<${AI_IDENTITY_RE}>[[:space:]]*$"
-
-          FOUND=0
-          for sha in $COMMITS; do
-            MSG=$(git log --format='%B' -1 "$sha")
-            HITS=$(printf '%s\n' "$MSG" | grep -Ei "$TRAILER_RE" || true)
-            if [ -n "$HITS" ]; then
-              echo "::error::Commit $sha contains a bot Co-Authored-By line. Remove it with: git rebase -i and edit the commit message."
-              printf '%s\n' "$HITS"
-              FOUND=1
-            fi
-          done
-
-          if [ "$FOUND" -eq 1 ]; then
-            echo ""
-            echo "To fix: run 'git rebase -i origin/main', change 'pick' to 'reword' for flagged commits, then remove the Co-Authored-By lines."
-            exit 1
-          fi
-
-          echo "All commits clean."
-
-      - name: Check for bot commit authors
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          # Some agents (Copilot's cloud agent, Jules, Devin) claim the author
-          # or committer field instead of adding a trailer, so the check above
-          # cannot see them. Written to a file rather than piped so the loop
-          # runs in this shell and its result survives.
-          git log --format='%H %ae %ce' "${BASE_SHA}..${HEAD_SHA}" > /tmp/authors.txt 2>/dev/null || true
-
-          FOUND=0
-          while read -r sha author committer; do
-            [ -z "$sha" ] && continue
-            for addr in "$author" "$committer"; do
-              if printf '%s\n' "$addr" | grep -Eqi "^${AI_IDENTITY_RE}$"; then
-                echo "::error::Commit $sha is authored or committed by a coding agent: $addr"
-                FOUND=1
-              fi
-            done
-          done < /tmp/authors.txt
-
-          if [ "$FOUND" -eq 1 ]; then
-            echo ""
-            echo "To fix: rewrite the commit with 'git rebase -i origin/main', then 'git commit --amend --author=\"Your Name <you@example.com>\"'."
-            exit 1
-          fi
-
-          echo "All commit authors clean."
+          GUARDRAILS_WORKFLOW_REF: ${{ github.workflow_ref }}
+          GUARDRAILS_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          GUARDRAILS_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GUARDRAILS_BASE_SHA: ${{ github.event.pull_request.base.sha }}
