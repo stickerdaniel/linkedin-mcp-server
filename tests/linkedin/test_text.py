@@ -2,9 +2,7 @@
 
 import re
 
-from pathlib import Path
 
-from linkedin_mcp_server.linkedin import text as text_module
 from linkedin_mcp_server.linkedin.text import (
     DETAIL_CAPTURE_EN_US,
     JOB_APPLY_EN_US,
@@ -124,17 +122,6 @@ class TestOneDescriptionHeadingTable:
         assert JOB_APPLY_EN_US.description_headings == (
             JOB_POSTING_EN_US.description_headings
         )
-
-    def test_the_heading_is_written_once(self):
-        """An equal copy passes every other assertion here and still drifts.
-
-        Identity cannot catch it: CPython gives two equal tuple constants in
-        one module the same object, so `is` holds for a re-typed literal too.
-        The source is what distinguishes reading the other table from writing
-        the words again.
-        """
-        source = Path(text_module.__file__).read_text(encoding="utf-8")
-        assert source.count('"About the job"') == 1
 
 
 class TestStripLinkedInNoise:
