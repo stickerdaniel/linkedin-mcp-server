@@ -1,1 +1,1 @@
-Unicode verification: guardrail​probe
+Unicode verification: guardrailprobe
