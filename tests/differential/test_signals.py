@@ -2129,6 +2129,37 @@ def test_a_call_that_never_returned_is_not_read_as_delivered():
     assert fatal.outcome == "no return" and returned.outcome == "delivered"
 
 
+@pytest.mark.parametrize(
+    ("result", "description"),
+    [
+        ("?", "attempted SIGKILL (no return observed)"),
+        ("0", "delivered SIGKILL"),
+        ("-1 EPERM (Operation not permitted)", "attempted (refused:"),
+    ],
+)
+def test_a_violation_report_distinguishes_attempts_from_delivery(result, description):
+    trace = read_trace(f"20 6.0 kill(-1, SIGKILL) = {result}\n")
+    records = [
+        {
+            "kind": "process.start",
+            "pid": 20,
+            "start_identity": 1.0,
+            "ppid": os.getpid(),
+            "in_row": True,
+            "t": 1.0,
+            "actor": "owner",
+            "pgid": 20,
+        },
+    ]
+    o2 = derive_o2(
+        OracleOutcome(status=COMPLETE, calls=trace.calls, traced=[20]),
+        ProcessHistory(records, outside=[os.getpid()]),
+    )
+    assert o2.state == VIOLATED
+    assert len(o2.violations) == 1
+    assert o2.violations[0].startswith(description)
+
+
 def test_each_unknown_recipient_is_marked_on_the_call_it_belongs_to():
     # One call whose group no sample brackets, one reaching nobody (no entry).
     text = (

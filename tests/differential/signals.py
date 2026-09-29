@@ -1048,11 +1048,12 @@ def derive_o2(
         if call.probe or call.reached_nobody:
             continue
         where = f"{call.syscall} at {call.t} ({call.raw.strip()})"
-        verb = (
-            f"attempted (refused: {call.result.strip()})"
-            if call.rejected
-            else f"delivered {call.signal}"
-        )
+        if call.rejected:
+            verb = f"attempted (refused: {call.result.strip()})"
+        elif not call.returns:
+            verb = f"attempted {call.signal} (no return observed)"
+        else:
+            verb = f"delivered {call.signal}"
         sender = _sender(call, history, outcome, traced)
         if isinstance(sender, str):
             classes.add("unplaced-sender")
