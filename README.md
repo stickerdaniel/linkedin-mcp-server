@@ -238,7 +238,6 @@ while a container is running.
 - Check uv version: `uv --version` (should be 0.4.0 or higher)
 - On first run, `uvx` downloads all Python dependencies. On slow connections, uv's default 30s HTTP timeout may be too short. The recommended config above already sets `UV_HTTP_TIMEOUT=300` (seconds) to avoid this.
 - *Windows, `DLL load failed while importing _greenlet`*: move to greenlet 3.5.5 or newer, whose published Windows wheels carry the C++ runtime inside the extension again. A fresh `uvx` run resolves that on its own; an environment that pins its dependencies needs `uv lock --upgrade-package greenlet`. Only greenlet 3.3.1 through 3.5.4 need `MSVCP140.dll`, which neither the python.org installer nor the `uv`-managed builds carry, and a greenlet built from source can need it at any version. Where the version cannot be moved, the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) supplies that DLL. Reported as [greenlet#525](https://github.com/python-greenlet/greenlet/issues/525), fixed in [greenlet#526](https://github.com/python-greenlet/greenlet/pull/526).
-- *Windows, browser setup reports an AppContainer or other permission grant under `AppData`*: the installer retries in a private directory under your home, with the same ownership and permission checks. If both locations are refused, create a dedicated directory outside the shared ancestry and set `INSTALLER_TEMP_DIR` or `--installer-temp-dir PATH` in the MCP server configuration. The configured directory must already exist and pass those checks; it is used without fallback. Keep existing AppContainer and shared-folder permissions intact.
 
 </details>
 
@@ -781,7 +780,7 @@ uv run -m linkedin_mcp_server
 - `--slow-mo MS` - Delay between browser actions (default: 0, useful for debugging)
 - `--viewport WxH` - Viewport size (default: 1280x720). Applies to windowless mode only; a headed launch uses the real window size.
 - `--chrome-path PATH` - Path to a Chrome/Chromium executable
-- `--installer-temp-dir PATH` - Existing parent directory for browser installer temporary files (environment: `INSTALLER_TEMP_DIR`). Defaults to the system temporary directory; on Windows, a permission refusal retries under your home. An explicit path disables fallback. Every location must pass the same ownership and permission checks.
+- `--installer-temp-dir PATH` - Existing directory for browser installation temporary files (environment: `INSTALLER_TEMP_DIR`).
 - `--proxy-server URL` - Route browser traffic through a proxy, as `scheme://host:port`. Set it up **before** `--login`; see [Using a proxy](#using-a-proxy).
 
 **Other:**
