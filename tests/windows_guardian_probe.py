@@ -361,6 +361,80 @@ def sample_lease_acquisition(
     }
 
 
+def sample_crash_lease_acquisition(
+    scenario: str,
+    *,
+    active_descendants: Callable[[], int],
+    clock_ns: Callable[[], int] = time.perf_counter_ns,
+) -> dict[str, int]:
+    # Baseline overlap is a measurement, not an every-run scheduling promise.
+    # Guardian loss still requires its controlled live-descendant witness.
+    return sample_lease_acquisition(
+        active_descendants=active_descendants,
+        require_active=scenario == "candidate-guardian-loss-before-owner",
+        clock_ns=clock_ns,
+    )
+
+
+def sample_before_owner_termination(
+    *,
+    active_descendants: Callable[[], int],
+    descendant_count: int,
+    clock_ns: Callable[[], int] = time.perf_counter_ns,
+) -> dict[str, int]:
+    active = active_descendants()
+    sampled_ns = clock_ns()
+    if not 0 < active <= descendant_count:
+        raise RuntimeError("no valid live descendant cohort before owner termination")
+    return {"sampled_ns": sampled_ns, "active_descendants": active}
+
+
+def owner_crash_measurement(
+    scenario: str,
+    *,
+    termination: Mapping[str, int] | None,
+    lease_acquired_ns: int | None,
+    active_descendants: int | None,
+    descendants_exit_ns: int | None,
+    pending_descendants: set[int],
+    descendant_count: int,
+    guardian_outside_owner_job: bool | None,
+    pre_crash_contention: Mapping[str, int | bool] | None,
+    before_owner_termination: Mapping[str, int] | None = None,
+) -> dict[str, Any]:
+    if termination is None:
+        raise RuntimeError("the owner exit was not observed")
+    if (
+        lease_acquired_ns is None
+        or active_descendants is None
+        or descendants_exit_ns is None
+        or pre_crash_contention is None
+        or pending_descendants
+    ):
+        raise RuntimeError("the owner crash observations did not complete")
+    result: dict[str, Any] = {
+        "scenario": scenario,
+        **termination,
+        "lease_acquired_ns": lease_acquired_ns,
+        "lease_acquired_with_live_descendant_ns": (
+            lease_acquired_ns if active_descendants > 0 else 0
+        ),
+        "descendants_exit_ns": descendants_exit_ns,
+        "active_descendants_at_lease_acquire": active_descendants,
+        "descendant_count": descendant_count,
+        "guardian_outside_owner_job": guardian_outside_owner_job,
+        "pre_crash_contention": dict(pre_crash_contention),
+    }
+    if scenario == "baseline":
+        if before_owner_termination is None:
+            raise RuntimeError("the baseline starting cohort was not observed")
+        result["before_owner_termination"] = dict(before_owner_termination)
+        result["descendant_overlap"] = (
+            "observed" if active_descendants > 0 else "not-observed"
+        )
+    return result
+
+
 def sample_pre_crash_contention(
     *,
     try_acquire: Callable[[], bool],
@@ -892,11 +966,11 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
                 if acquired:
                     try:
                         lease_observation.update(
-                            sample_lease_acquisition(
+                            sample_crash_lease_acquisition(
+                                scenario,
                                 active_descendants=lambda: sum(
                                     _is_active(handle) for handle in descendant_handles
                                 ),
-                                require_active=not candidate or guardian_loss,
                             )
                         )
                     except BaseException as exc:
@@ -1028,6 +1102,14 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
                 "guardian_returncode": guardian.returncode,
             }
 
+        before_owner_termination = None
+        if scenario == "baseline":
+            before_owner_termination = sample_before_owner_termination(
+                active_descendants=lambda: sum(
+                    _is_active(handle) for handle in descendant_handles
+                ),
+                descendant_count=len(descendant_handles),
+            )
         if not _is_active(owner_handle):
             raise RuntimeError("the owner exited before starter termination")
         terminated_ns = time.perf_counter_ns()
@@ -1101,21 +1183,18 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
             ):
                 break
 
-        if termination is None:
-            raise RuntimeError("the owner exit was not observed")
-        result: dict[str, Any] = {
-            "scenario": scenario,
-            **termination,
-            "lease_acquired_ns": acquired_ns,
-            "lease_acquired_with_live_descendant_ns": (
-                acquired_ns if active_at_acquire and active_at_acquire > 0 else 0
-            ),
-            "descendants_exit_ns": descendants_exit_ns,
-            "active_descendants_at_lease_acquire": active_at_acquire,
-            "descendant_count": len(descendant_handles),
-            "guardian_outside_owner_job": guardian_outside_owner_job,
-            "pre_crash_contention": pre_crash_contention,
-        }
+        result = owner_crash_measurement(
+            scenario,
+            termination=termination,
+            lease_acquired_ns=acquired_ns,
+            active_descendants=active_at_acquire,
+            descendants_exit_ns=descendants_exit_ns,
+            pending_descendants=pending_descendants,
+            descendant_count=len(descendant_handles),
+            guardian_outside_owner_job=guardian_outside_owner_job,
+            pre_crash_contention=pre_crash_contention,
+            before_owner_termination=before_owner_termination,
+        )
         if guardian is not None:
             guardian_stdout, guardian_stderr = guardian.communicate(
                 timeout=_DEADLINE_SECONDS

@@ -375,6 +375,225 @@ def test_lease_acquisition_requires_a_live_descendant() -> None:
     }
 
 
+def _baseline_record() -> dict[str, Any]:
+    return {
+        "scenario": "baseline",
+        "pre_crash_contention": {"attempted_ns": 10, "acquired": False},
+        "before_owner_termination": {"sampled_ns": 15, "active_descendants": 24},
+        "terminated_ns": 20,
+        "owner_exit_ns": 30,
+        "lease_acquired_ns": 40,
+        "lease_acquired_with_live_descendant_ns": 40,
+        "descendants_exit_ns": 50,
+        "active_descendants_at_lease_acquire": 1,
+        "descendant_count": 24,
+        "guardian_outside_owner_job": None,
+        "descendant_overlap": "observed",
+    }
+
+
+@pytest.mark.parametrize(
+    ("overlap", "active", "witness", "acquired", "drained"),
+    [
+        ("observed", 1, 40, 40, 50),
+        ("not-observed", 0, 0, 40, 50),
+        ("not-observed", 0, 0, 60, 50),
+        ("not-observed", 0, 0, 50, 50),
+    ],
+)
+def test_baseline_verdict_preserves_the_observation_boundary(
+    overlap, active, witness, acquired, drained
+):
+    record = _baseline_record()
+    record.update(
+        descendant_overlap=overlap,
+        active_descendants_at_lease_acquire=active,
+        lease_acquired_with_live_descendant_ns=witness,
+        lease_acquired_ns=acquired,
+        descendants_exit_ns=drained,
+    )
+    _assert_baseline_record(record)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("scenario",), "candidate"),
+        (("pre_crash_contention", "acquired"), True),
+        (("pre_crash_contention", "attempted_ns"), 20),
+        (("pre_crash_contention", "attempted_ns"), False),
+        (("before_owner_termination", "active_descendants"), 0),
+        (("before_owner_termination", "active_descendants"), 25),
+        (("before_owner_termination", "active_descendants"), True),
+        (("before_owner_termination", "sampled_ns"), 20),
+        (("before_owner_termination", "sampled_ns"), None),
+        (("owner_exit_ns",), 20),
+        (("lease_acquired_ns",), 20),
+        (("descendants_exit_ns",), None),
+        (("descendants_exit_ns",), False),
+        (("descendants_exit_ns",), 0),
+        (("descendants_exit_ns",), -1),
+        (("descendants_exit_ns",), 19),
+        (("descendants_exit_ns",), 50.0),
+        (("descendant_count",), 0),
+        (("descendant_count",), True),
+        (("active_descendants_at_lease_acquire",), -1),
+        (("active_descendants_at_lease_acquire",), 25),
+        (("active_descendants_at_lease_acquire",), False),
+        (("lease_acquired_with_live_descendant_ns",), True),
+        (("guardian_outside_owner_job",), False),
+        (("descendant_overlap",), "unknown"),
+    ],
+)
+def test_nonobservation_cannot_rescue_an_invalid_baseline_record(path, value):
+    record = _baseline_record()
+    record.update(
+        descendant_overlap="not-observed",
+        active_descendants_at_lease_acquire=0,
+        lease_acquired_with_live_descendant_ns=0,
+    )
+    target = record
+    for name in path[:-1]:
+        target = target[name]
+    target[path[-1]] = value
+    with pytest.raises((AssertionError, KeyError, TypeError)):
+        _assert_baseline_record(record)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"active_descendants_at_lease_acquire": 0},
+        {"lease_acquired_with_live_descendant_ns": 0},
+        {"descendants_exit_ns": 35},
+        {"descendant_overlap": "not-observed"},
+        {
+            "descendant_overlap": "not-observed",
+            "active_descendants_at_lease_acquire": 0,
+        },
+    ],
+)
+def test_a_fabricated_or_contradictory_overlap_is_rejected(changes):
+    record = {**_baseline_record(), **changes}
+    with pytest.raises((AssertionError, KeyError, TypeError)):
+        _assert_baseline_record(record)
+
+
+@pytest.mark.parametrize(
+    "field", ["before_owner_termination", "descendants_exit_ns", "descendant_overlap"]
+)
+def test_missing_baseline_observations_are_not_invented(field):
+    record = _baseline_record()
+    del record[field]
+    with pytest.raises((AssertionError, KeyError, TypeError)):
+        _assert_baseline_record(record)
+
+
+@pytest.mark.parametrize(
+    ("active", "overlap", "witness"), [(0, "not-observed", 0), (1, "observed", 40)]
+)
+def test_baseline_zero_and_positive_samples_reach_the_real_record_producer(
+    active, overlap, witness
+):
+    sample = probe.sample_crash_lease_acquisition(
+        "baseline", active_descendants=lambda: active, clock_ns=lambda: 40
+    )
+    before = probe.sample_before_owner_termination(
+        active_descendants=lambda: 1, descendant_count=24, clock_ns=lambda: 15
+    )
+    record = probe.owner_crash_measurement(
+        "baseline",
+        termination={"terminated_ns": 20, "owner_exit_ns": 30},
+        lease_acquired_ns=sample["lease_acquired_ns"],
+        active_descendants=sample["active_descendants_at_lease_acquire"],
+        descendants_exit_ns=50,
+        pending_descendants=set(),
+        descendant_count=24,
+        guardian_outside_owner_job=None,
+        pre_crash_contention={"attempted_ns": 10, "acquired": False},
+        before_owner_termination=before,
+    )
+    assert record["descendant_overlap"] == overlap
+    assert record["lease_acquired_with_live_descendant_ns"] == witness
+    _assert_baseline_record(record)
+
+
+def test_guardian_loss_still_requires_its_live_descendant_witness():
+    with pytest.raises(RuntimeError, match="all descendants exited"):
+        probe.sample_crash_lease_acquisition(
+            "candidate-guardian-loss-before-owner",
+            active_descendants=lambda: 0,
+            clock_ns=lambda: 40,
+        )
+
+
+def test_ordinary_candidate_zero_is_unchanged_and_not_classified_as_baseline():
+    sample = probe.sample_crash_lease_acquisition(
+        "candidate", active_descendants=lambda: 0, clock_ns=lambda: 40
+    )
+    record = probe.owner_crash_measurement(
+        "candidate",
+        termination={"terminated_ns": 20, "owner_exit_ns": 30},
+        lease_acquired_ns=sample["lease_acquired_ns"],
+        active_descendants=sample["active_descendants_at_lease_acquire"],
+        descendants_exit_ns=35,
+        pending_descendants=set(),
+        descendant_count=24,
+        guardian_outside_owner_job=True,
+        pre_crash_contention={"attempted_ns": 10, "acquired": False},
+    )
+    assert record["active_descendants_at_lease_acquire"] == 0
+    assert (
+        "descendant_overlap" not in record and "before_owner_termination" not in record
+    )
+
+
+@pytest.mark.parametrize("active", [0, -1, 25])
+def test_baseline_cannot_start_without_a_valid_live_cohort(active):
+    with pytest.raises(RuntimeError, match="live descendant cohort"):
+        probe.sample_before_owner_termination(
+            active_descendants=lambda: active, descendant_count=24, clock_ns=lambda: 15
+        )
+
+
+def test_an_unreadable_starting_cohort_is_not_a_nonobservation():
+    def unreadable():
+        raise OSError("unreadable retained handle")
+
+    with pytest.raises(OSError, match="unreadable"):
+        probe.sample_before_owner_termination(
+            active_descendants=unreadable, descendant_count=24
+        )
+
+
+def test_an_unreadable_acquisition_sample_is_not_nonobserved_overlap():
+    def unreadable():
+        raise OSError("unreadable retained handle")
+
+    with pytest.raises(OSError, match="unreadable"):
+        probe.sample_crash_lease_acquisition("baseline", active_descendants=unreadable)
+
+
+@pytest.mark.parametrize(
+    "incomplete", [{"pending_descendants": {0}}, {"descendants_exit_ns": None}]
+)
+def test_a_timestamp_cannot_manufacture_completed_rundown(incomplete):
+    fields = {
+        "termination": {"terminated_ns": 20, "owner_exit_ns": 30},
+        "lease_acquired_ns": 40,
+        "active_descendants": 0,
+        "descendants_exit_ns": 50,
+        "pending_descendants": set(),
+        "descendant_count": 24,
+        "guardian_outside_owner_job": None,
+        "pre_crash_contention": {"attempted_ns": 10, "acquired": False},
+        "before_owner_termination": {"sampled_ns": 15, "active_descendants": 1},
+        **incomplete,
+    }
+    with pytest.raises(RuntimeError, match="did not complete"):
+        probe.owner_crash_measurement("baseline", **fields)
+
+
 def test_starter_termination_requires_a_later_owner_exit() -> None:
     assert starter_termination_measurement(10, 11) == {
         "terminated_ns": 10,
@@ -2424,27 +2643,52 @@ def test_job_topology_scenarios_are_native_only(tmp_path: Path, scenario: str) -
         assert isinstance(guardian["creation_error"]["win32_error"], int)
 
 
+def _assert_baseline_record(measurement: dict[str, Any]) -> None:
+    assert measurement["scenario"] == "baseline"
+    for field in (
+        "terminated_ns",
+        "owner_exit_ns",
+        "lease_acquired_ns",
+        "descendants_exit_ns",
+        "descendant_count",
+    ):
+        assert type(measurement[field]) is int and measurement[field] > 0, field
+    before = measurement["before_owner_termination"]
+    contention = measurement["pre_crash_contention"]
+    assert contention["acquired"] is False
+    assert type(contention["attempted_ns"]) is int
+    assert 0 < contention["attempted_ns"] < measurement["terminated_ns"]
+    assert type(before["sampled_ns"]) is int
+    assert 0 < before["sampled_ns"] < measurement["terminated_ns"]
+    assert type(before["active_descendants"]) is int
+    assert 0 < before["active_descendants"] <= measurement["descendant_count"]
+    assert measurement["owner_exit_ns"] > measurement["terminated_ns"]
+    assert measurement["lease_acquired_ns"] > measurement["terminated_ns"]
+    assert measurement["descendants_exit_ns"] > measurement["terminated_ns"]
+    assert measurement["guardian_outside_owner_job"] is None
+
+    active = measurement["active_descendants_at_lease_acquire"]
+    witness = measurement["lease_acquired_with_live_descendant_ns"]
+    assert type(active) is int and 0 <= active <= measurement["descendant_count"]
+    assert type(witness) is int
+    if measurement["descendant_overlap"] == "observed":
+        assert active > 0
+        assert witness == measurement["lease_acquired_ns"]
+        assert measurement["lease_acquired_ns"] < measurement["descendants_exit_ns"]
+    else:
+        assert measurement["descendant_overlap"] == "not-observed"
+        assert active == 0 and witness == 0
+
+
 @_WINDOWS_ONLY
-def test_native_owner_crash_releases_lease_before_job_descendants_exit(
-    tmp_path: Path,
+def test_native_owner_crash_records_lease_and_job_rundown(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     measurement = _run_probe(tmp_path, "baseline")
     _record_measurement(measurement)
-
-    assert measurement["pre_crash_contention"]["acquired"] is False
-    assert (
-        measurement["pre_crash_contention"]["attempted_ns"]
-        < measurement["terminated_ns"]
-    )
-    assert measurement["owner_exit_ns"] > measurement["terminated_ns"]
-    assert (
-        measurement["lease_acquired_with_live_descendant_ns"]
-        == measurement["lease_acquired_ns"]
-        > measurement["terminated_ns"]
-    )
-    assert measurement["lease_acquired_ns"] < measurement["descendants_exit_ns"]
-    assert measurement["active_descendants_at_lease_acquire"] > 0
-    assert measurement["guardian_outside_owner_job"] is None
+    with capsys.disabled():
+        print(f"Baseline crash measurement: {json.dumps(measurement, sort_keys=True)}")
+    _assert_baseline_record(measurement)
 
 
 @_WINDOWS_ONLY
