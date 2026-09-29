@@ -314,6 +314,10 @@ def employer_apply_url(href: str) -> str | None:
     host = parsed.hostname
     if parsed.scheme not in ("http", "https") or not host:
         return None
+    # Chromium decodes host escapes and treats a backslash as a slash;
+    # urllib.parse does neither. Do not validate one host and load another.
+    if "%" in host or "\\" in parsed.netloc:
+        return None
     if not reaches_the_public_internet(host):
         return None
     if host != "linkedin.com" and not host.endswith(".linkedin.com"):

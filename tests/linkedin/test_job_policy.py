@@ -211,6 +211,8 @@ class TestEmployerApplyUrl:
             "0177.0.0.1",
             "0x7f.0.0.1",
             "2130706433",
+            "%31%32%37.0.0.%31",
+            "127.0.0.1\\@jobs.example.com",
         ],
     )
     def test_an_address_that_never_leaves_this_host_is_not_an_employer(self, host):
@@ -223,3 +225,8 @@ class TestEmployerApplyUrl:
         )
 
         assert employer_apply_url(href) is None
+
+    def test_escapes_in_the_path_and_query_remain_valid(self):
+        url = "https://jobs.example.com/acme%20jobs/1?source=some%20board"
+
+        assert employer_apply_url(url) == url

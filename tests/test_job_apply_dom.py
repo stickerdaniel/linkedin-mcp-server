@@ -245,6 +245,21 @@ async def test_a_destination_inside_this_host_is_never_loaded(dom_page, requeste
     assert not any("127.0.0.1" in url for url in requested)
 
 
+@pytest.mark.parametrize(
+    "host",
+    ["%31%32%37.0.0.%31", "127.0.0.1\\@jobs.example.com"],
+)
+async def test_an_ambiguous_host_is_refused_before_navigation(
+    dom_page, requested, host
+):
+    html = posting(EXTERNAL, script=click_opens_dialog(safety(f"http://{host}/x")))
+
+    result = await read(dom_page, html)
+
+    assert not any("127.0.0.1" in url for url in requested)
+    assert result == JobApplyRead("external")
+
+
 async def test_a_tab_naming_this_host_is_refused_before_it_loads(dom_page, requested):
     """A tab opened straight onto the loopback is never asked for.
 
