@@ -437,6 +437,17 @@ def retain(label: str, check: Callable[[float], bool]) -> Retained:
     return resource
 
 
+def retained(resource: Retained) -> bool:
+    """Whether *resource* is still held: not yet shown settled."""
+    return resource in _RETAINED
+
+
+def discharge(resource: Retained) -> None:
+    """Stop holding *resource*, which its owner has just shown settled."""
+    if resource in _RETAINED:
+        _RETAINED.remove(resource)
+
+
 def unsettled_resources(grace: float = 5.0) -> list[str]:
     """Ask each retained resource once more; those still not settled.
 
@@ -811,13 +822,12 @@ def _marked_group(
     history: ProcessHistory | None, marker: str | None, group: int, t: float
 ) -> bool:
     """Whether the watcher had recorded, by *t*, a process in *group* carrying
-    the original launch's marker (*marker*, the watcher's digest)."""
+    the original launch's marker (*marker*, the watcher's digest): one record
+    holding both, never a marker read at one time and a group at another
+    (``Lifetime.groups_marked_by``)."""
     if history is None or not marker or group <= 0:
         return False
-    return any(
-        life.marker_by(t) == marker and group in life.groups_by(t)
-        for life in history.lifetimes
-    )
+    return any(group in life.groups_marked_by(marker, t) for life in history.lifetimes)
 
 
 def _target_kind(

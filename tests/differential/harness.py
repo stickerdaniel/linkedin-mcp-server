@@ -175,10 +175,12 @@ from differential.unconfirmed_close import (
     PhaseReading,
     R7Continuation,
     R7Setup,
+    Retained,
     SharedReduction,
     UnsettledWorker,
     checkpoint_problems,
     clock_sample,
+    discharge,
     early_browsers,
     file_sha256,
     gate,
@@ -190,12 +192,17 @@ from differential.unconfirmed_close import (
     read_phase,
     realtime_interval,
     retain,
+    retained,
     run_owned,
     settlement_problems,
     shared_reduction,
     wait_for_marker,
 )
 from differential.unconfirmed_close import NO_RECOVERY as R7_NO_RECOVERY
+
+# The calibration child's check, reused for the creation marker: it ends a
+# child only through its own ``Popen`` and answers settled once reaped.
+from differential.unconfirmed_close import _ended as _popen_ended
 from differential.unconfirmed_close import POST_SETTLEMENT as R7_POST_SETTLEMENT
 from differential.watcher import (
     LAUNCHER_ENV,
@@ -1412,7 +1419,11 @@ def _stat_start_ticks(pid: int) -> int | None:
         return None
 
 
-def creation_marker() -> tuple[int | None, float | None]:
+def creation_marker(
+    *,
+    popen: Callable[..., Any] | None = None,
+    open_process: Callable[[int], Any] | None = None,
+) -> tuple[int | None, float | None]:
     """A process started now, as H-R7 marks its close and its barrier.
 
     Its start in kernel ticks, where they can be read (Linux): a lifetime
@@ -1421,9 +1432,16 @@ def creation_marker() -> tuple[int | None, float | None]:
     psutil reads every lifetime's (``start_identity``), so a lifetime the
     watcher recorded can be ordered against the marker after it is gone.
     None for either that cannot be read.
+
+    The marker is retained (``retain``) from the moment it exists, ended only
+    through its own ``Popen``, and released only once that shows it gone.
+    Each cleanup step runs whatever the one before it did. One not shown
+    gone stays retained, refusing every later measurement, and the call
+    raises: the first failure of the reading, or else the cleanup's last,
+    with every other cleanup failure as a note.
     """
     try:
-        marker = subprocess.Popen(
+        marker = (popen or subprocess.Popen)(
             [sys.executable, "-I", "-c", "import sys; sys.stdin.read()"],
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
@@ -1431,24 +1449,55 @@ def creation_marker() -> tuple[int | None, float | None]:
         )
     except OSError:
         return None, None
+    held = retain(f"the creation marker {marker.pid}", _popen_ended(marker))
+    primary: BaseException | None = None
+    ticks: int | None = None
+    created: float | None = None
     try:
-        ticks = (
-            _stat_start_ticks(marker.pid) if sys.platform.startswith("linux") else None
-        )
+        if sys.platform.startswith("linux"):
+            ticks = _stat_start_ticks(marker.pid)
         try:
-            created: float | None = psutil.Process(marker.pid).create_time()
+            created = (open_process or psutil.Process)(marker.pid).create_time()
         except psutil.Error:
             created = None
-        return ticks, created
-    finally:
-        with contextlib.suppress(OSError, ValueError):
-            assert marker.stdin is not None
+    except BaseException as exc:  # noqa: BLE001 - raised again once cleanup ran
+        primary = exc
+    errors: list[BaseException] = []
+    try:
+        if marker.stdin is not None:
             marker.stdin.close()
+    except BaseException as exc:  # noqa: BLE001 - kept, the next step still runs
+        errors.append(exc)
+    try:
+        marker.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            marker.kill()
+        except BaseException as exc:  # noqa: BLE001 - kept, the next step still runs
+            errors.append(exc)
         try:
             marker.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            marker.kill()
-            marker.wait(timeout=10)
+        except BaseException as exc:  # noqa: BLE001 - kept; the marker stays held
+            errors.append(exc)
+    except BaseException as exc:  # noqa: BLE001 - kept; the marker stays held
+        errors.append(exc)
+    try:
+        settled = marker.poll() is not None
+    except BaseException as exc:  # noqa: BLE001 - an unanswered poll settles nothing
+        errors.append(exc)
+        settled = False
+    if settled:
+        discharge(held)
+    elif primary is None:
+        primary = errors[-1] if errors else UnsettledWorker(held.label)
+    if primary is not None:
+        for error in errors:
+            if error is not primary:
+                primary.add_note(f"cleaning up the creation marker: {error!r}")
+        if not settled:
+            primary.add_note(f"{held.label} is not shown gone; it stays retained")
+        raise primary
+    return ticks, created
 
 
 def created_after(pid: int, start: float, marker: int | None) -> bool | None:
@@ -4149,9 +4198,10 @@ async def measure_host_quit_row(
     #: row cancelled before it still settles its owners in the teardown.
     r7_defer = Deferral()
     r7_settling_began = False
-    #: H-R7: each owner published on the row's root that it could not
-    #: identify, by the pid named and the lifetime first read there.
-    r7_publications: set[tuple[int | None, float | None]] = set()
+    #: H-R7: the hold registered for each owner published on the row's root
+    #: that it could not identify, by the pid named and the lifetime first
+    #: read there.
+    r7_publications: dict[tuple[int | None, float | None], Retained] = {}
 
     async def kill_the_actor() -> None:
         """Associate the victim, find its guardian, attach the oracle, kill."""
@@ -4497,16 +4547,18 @@ async def measure_host_quit_row(
     def hold_publication(pid: int | None, why: str) -> None:
         """Keep an owner published on the row's root that the row could not
         identify (``UnresolvedPublication``) until it is shown gone: no
-        later measurement starts meanwhile, and nothing is sent to it."""
+        later measurement starts meanwhile, and nothing is sent to it.
+
+        Held before anything reports it, and passed over only while an
+        earlier hold of the same lifetime is still held: a report that fails
+        is named on the hold and among the row's problems, and releases
+        nothing."""
         held = UnresolvedPublication(pid)
         key = (pid, held.created)
-        if key in r7_publications:
+        earlier = r7_publications.get(key)
+        if earlier is not None and retained(earlier):
             return
-        r7_publications.add(key)
-        record = {"pid": pid, "created": held.created, "gone": held.gone, "why": why}
-        r7_window.setdefault("unresolved_publications", []).append(record)
-        emit("harness", "r7.window", phase="unresolved publication", **record)
-        retain(
+        hold = r7_publications[key] = retain(
             f"the owner published on the row's root as pid {pid}, which the row "
             f"could not identify ({why})"
             if pid is not None
@@ -4514,6 +4566,16 @@ async def measure_host_quit_row(
             f"not be read ({why})",
             held.check,
         )
+        record = {"pid": pid, "created": held.created, "gone": held.gone, "why": why}
+        r7_window.setdefault("unresolved_publications", []).append(record)
+        try:
+            emit("harness", "r7.window", phase="unresolved publication", **record)
+        except Exception as exc:  # noqa: BLE001 - named below; the hold stands
+            hold.label += f"; reporting it failed: {exc!r}"
+            r7_window["script_problems"].append(
+                f"the unresolved publication of pid {pid} could not be reported: "
+                f"{exc!r}"
+            )
 
     def find_the_successor_r7(
         probe: Mapping[str, Any],

@@ -1670,6 +1670,28 @@ def _launch(*, marker_seen_at: float = 2.0) -> list[dict]:
     ]
 
 
+#: A group the browser was read in before anything read its marker.
+EARLIER_GROUP, LATER_GROUP = 999, 16500
+
+
+def _regrouped(*, marked_first: bool) -> list[dict]:
+    """``_launch``, with the browser read in two groups in turn. Marked first,
+    it carries the marker into its second group (``LATER_GROUP``), as the
+    watcher carries it; otherwise it is read in ``EARLIER_GROUP`` without
+    one, and its marker is read only once it has moved to its own group."""
+    records = _launch()
+    browser = next(r for r in records if r.get("pid") == BROWSER)
+    if marked_first:
+        update = {**browser, "kind": "process.update", "t": 3.0, "pgid": LATER_GROUP}
+    else:
+        browser.pop("browser_marker")
+        browser["pgid"] = EARLIER_GROUP
+        update = {**browser, "kind": "process.update", "t": 3.0, "pgid": BROWSER}
+        update["browser_marker"] = DIGEST
+    records.append(update)
+    return records
+
+
 #: The owner's routine drain after the close: a probe that reaches nobody,
 #: and, when a Chromium helper outlived the graceful close, the kill of its
 #: group before that (``process_tree._kill_marked_process_groups``).
@@ -1795,6 +1817,26 @@ def test_a_helper_the_shared_drain_killed_on_one_run_is_no_difference(experiment
 
 @pytest.mark.parametrize("experiment", ["K0", "K3"])
 @pytest.mark.parametrize(
+    ("group", "marked_first"),
+    [
+        pytest.param(LATER_GROUP, True, id="a-group-it-moved-to-marked"),
+        pytest.param(BROWSER, False, id="the-group-its-marker-was-read-in"),
+    ],
+)
+def test_a_group_read_together_with_the_marker_is_the_drains(
+    experiment, group, marked_first
+):
+    # Whichever group the browser moved through, one read in the same record
+    # as the launch's marker is the drain's target, unknown recipients and all.
+    drain = f"13240 1790573446.601691 kill(-{group}, SIGKILL) = 0 <0.000595>\n"
+    records = _regrouped(marked_first=marked_first)
+    reading = _read_row(drain + QUIET, records=records, boundary=DRAIN_RETURNED)
+    assert reading["shared"] == SharedReduction(("owner:browser-group",), True)
+    assert _composed(experiment, QUIET, drain + QUIET, records=records) == []
+
+
+@pytest.mark.parametrize("experiment", ["K0", "K3"])
+@pytest.mark.parametrize(
     ("second", "reading", "why"),
     [
         pytest.param(
@@ -1850,6 +1892,13 @@ def test_a_helper_the_shared_drain_killed_on_one_run_is_no_difference(experiment
             {},
             "'signal_classes': ['owner:browser-group']",
             id="the-drains-class-also-sent-elsewhere",
+        ),
+        pytest.param(
+            f"13240 1790573446.601691 kill(-{EARLIER_GROUP}, SIGKILL) = 0 <0.000010>\n"
+            + QUIET,
+            {"records": _regrouped(marked_first=False)},
+            "original actor:kill:SIGKILL:another group",
+            id="a-group-left-before-its-marker-was-read",
         ),
     ],
 )

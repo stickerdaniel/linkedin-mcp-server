@@ -2186,3 +2186,35 @@ def test_each_unknown_recipient_is_marked_on_the_call_it_belongs_to():
     )
     assert [entry["unknown"] for entry in o2.resolved] == [True]
     assert len(o2.unknowns) == 1
+
+
+def test_a_group_is_tied_to_a_marker_only_by_a_record_carrying_both():
+    def reading(t, pgid, **fields):
+        return {
+            "kind": "process.update" if t > 2.0 else "process.start",
+            "pid": 30,
+            "start_identity": 2.0,
+            "ppid": os.getpid(),
+            "in_row": True,
+            "t": t,
+            "actor": "browser",
+            "pgid": pgid,
+            **fields,
+        }
+
+    history = ProcessHistory(
+        [
+            reading(2.0, 999),
+            reading(3.0, 30, browser_marker="a" * 16),
+            reading(4.0, 31, browser_marker="a" * 16),
+            reading(5.0, None, browser_marker="a" * 16),
+        ],
+        outside=[os.getpid()],
+    )
+    (life,) = history.lifetimes
+    # Read in 999 before its marker was: one of its groups, not a marked one.
+    assert life.groups_by(3.0) == {999, 30}
+    assert life.groups_marked_by("a" * 16, 2.5) == set()
+    assert life.groups_marked_by("a" * 16, 3.0) == {30}
+    assert life.groups_marked_by("a" * 16, 5.0) == {30, 31}
+    assert life.groups_marked_by("b" * 16, 5.0) == set()

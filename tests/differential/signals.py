@@ -588,6 +588,9 @@ class Lifetime:
     marker_t: float | None = None
     #: ``(sample end, actor, group)`` for each reading, in order.
     readings: list[tuple[float, str, int | None]] = field(default_factory=list)
+    #: ``(sample end, marker, group)`` for each reading whose record carried
+    #: both: the only readings that tie a group to a marker.
+    marked_readings: list[tuple[float, str, int]] = field(default_factory=list)
 
     @property
     def identity(self) -> tuple[int, float]:
@@ -639,6 +642,18 @@ class Lifetime:
         if self.marker is None or self.marker_t is None or self.marker_t > t:
             return None
         return self.marker
+
+    def groups_marked_by(self, marker: str, t: float) -> set[int]:
+        """The groups read by *t* in the same record as *marker*.
+
+        Not every group it was ever read in: a marker first read after the
+        process changed group says nothing of the group it left.
+        """
+        return {
+            group
+            for when, carried, group in self.marked_readings
+            if when <= t and carried == marker
+        }
 
 
 class ProcessHistory:
@@ -715,6 +730,10 @@ class ProcessHistory:
             known.readings.append(
                 (t, str(entry.get("actor", "other")), entry.get("pgid"))
             )
+            if entry.get("browser_marker") and isinstance(entry.get("pgid"), int):
+                known.marked_readings.append(
+                    (t, entry["browser_marker"], entry["pgid"])
+                )
 
     # --- by life span, for senders, parents and what a call names
 
