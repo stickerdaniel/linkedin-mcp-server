@@ -147,9 +147,8 @@ PROMOTED_JOB_IDS_JS = (
 # counts as an apply on the neighbour. Easy Apply needs no boundary, being
 # found by a URL only this posting's control can carry.
 #
-# Without the heading there is no boundary and the whole `main` is read rather
-# than nothing: a posting whose description has not rendered yet still has its
-# Apply, and refusing to look would answer `unknown` for it.
+# Without the heading, no external button is proven to belong to this posting.
+# Wait for the boundary rather than risking a click on a recommended job.
 #
 # The heading is found by walking text nodes rather than asking every element
 # for its text. Both find it; the walk visits fewer nodes and copies none of
@@ -165,8 +164,8 @@ _EXTERNAL_APPLY_JS = r"""
             break;
         }
     }
-    const above = (el) => !heading || Boolean(
-        heading.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING
+    const above = (el) => Boolean(
+        heading && (heading.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING)
     );
     const externalButton = [...main.querySelectorAll('button')].find(
         (el) => above(el) && (el.innerText || '').trim() === externalLabel

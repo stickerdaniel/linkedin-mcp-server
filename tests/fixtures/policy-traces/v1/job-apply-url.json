@@ -75,7 +75,7 @@
       "call": "get_job_apply_url",
       "kind": "wait_for_function",
       "operation": "job_apply_ready",
-      "program_digest": "9bc185b7a908",
+      "program_digest": "8a83e3a060f7",
       "timeout_ms": 10000.0
     },
     {
@@ -94,7 +94,7 @@
       "call": "get_job_apply_url",
       "kind": "evaluate",
       "operation": "job_apply_signals",
-      "program_digest": "df10af2cb5cf"
+      "program_digest": "a2e6080ca22d"
     }
   ],
   "result": {

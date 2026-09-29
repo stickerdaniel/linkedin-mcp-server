@@ -237,6 +237,17 @@ async def test_an_apply_below_the_description_belongs_to_another_posting(dom_pag
     assert not await clicked(dom_page)
 
 
+async def test_an_apply_without_a_description_boundary_is_not_clicked(dom_page):
+    html = posting(
+        "", below=EXTERNAL, script=click_opens_dialog(safety("https://acme.example/"))
+    ).replace("<h2>About the job</h2>", "")
+
+    result = await read(dom_page, html)
+
+    assert not await clicked(dom_page)
+    assert result == JobApplyRead("unknown")
+
+
 async def test_a_destination_inside_this_host_is_never_loaded(dom_page, requested):
     """A posting naming the loopback answers external, and nothing is fetched."""
     html = posting(EXTERNAL, script=click_opens_dialog(safety("http://127.0.0.1:9/x")))
