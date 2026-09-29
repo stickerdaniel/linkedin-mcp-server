@@ -38,11 +38,19 @@ def test_workflow_checks_attribution_in_required_job() -> None:
     job = workflow["jobs"]["check-bot-coauthors"]
     assert "if" not in job
     assert "continue-on-error" not in job
+    assert "permissions" not in job
+    assert "name" not in job
     assert job["runs-on"] == "ubuntu-latest"
     (step,) = job["steps"]
-    assert set(step) == {"name", "uses", "with"}
+    assert set(step) == {"name", "uses", "with", "env"}
     assert re.fullmatch(rf"{re.escape(_ACTION)}@[0-9a-f]{{40}}", step["uses"])
     assert step["with"] == {"require-model-attribution": True}
+    assert step["env"] == {
+        "GUARDRAILS_WORKFLOW_REF": "${{ github.workflow_ref }}",
+        "GUARDRAILS_WORKFLOW_SHA": "${{ github.workflow_sha }}",
+        "GUARDRAILS_HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+        "GUARDRAILS_BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+    }
     # Renovate updates both the digest and version without changing this test.
     pin_line = next(
         line

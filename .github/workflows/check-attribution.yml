@@ -20,3 +20,9 @@ jobs:
         uses: stickerdaniel/agent-guardrails@a3508d7320e64370b878359b1f4ae541b507224f # v1.0.0
         with:
           require-model-attribution: true
+        # Bind live evidence to this run, not a later branch-tip lookup.
+        env:
+          GUARDRAILS_WORKFLOW_REF: ${{ github.workflow_ref }}
+          GUARDRAILS_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          GUARDRAILS_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GUARDRAILS_BASE_SHA: ${{ github.event.pull_request.base.sha }}
