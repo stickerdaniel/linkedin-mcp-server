@@ -13,6 +13,7 @@ stopped, what it retained, and whether anything was preserved after.
 from __future__ import annotations
 
 import asyncio
+import functools
 import threading
 from types import SimpleNamespace
 from typing import Any
@@ -39,6 +40,7 @@ from differential.unconfirmed_close import (
 
 REAL_END_OWNER = harness.end_owner
 REAL_RETIRE = harness.retire_daemon_state
+REAL_PUBLICATION = harness.UnresolvedPublication
 
 ORIGINAL, SUCCESSOR = 42, 84
 
@@ -55,8 +57,11 @@ class _Owner:
     """The handle an owner was identified by: every kill recorded, and gone
     once killed unless it will not die."""
 
-    def __init__(self, pid: int, done: list, *, dies: bool = True):
+    def __init__(
+        self, pid: int, done: list, *, dies: bool = True, created: float | None = None
+    ):
         self.pid, self.done, self.dies, self.alive = pid, done, dies, True
+        self.created = float(pid) if created is None else created
 
     def is_running(self):
         return self.alive
@@ -71,20 +76,30 @@ class _Owner:
         self.alive = not self.dies
 
     def create_time(self):
-        return float(self.pid)
+        if not self.alive:
+            raise psutil.NoSuchProcess(self.pid)
+        return self.created
 
 
 class _Scene:
     """Owner 42 closes; the host may replace it with successor 84 before it
-    quits or is cancelled. Each owner's guardian is its pid plus one."""
+    quits or is cancelled. Each owner's guardian is its pid plus one.
+
+    ``at_pid`` is the process table the row's unidentified publications are
+    read from, by pid: whatever holds a pid now, which need not be the
+    owner that once did; ``denied`` pids cannot be read."""
 
     def __init__(self, modelled_row, monkeypatch, tmp_path, staged_profile):
         self.row = modelled_row
         self.done: list[Any] = []
         self.owners = {pid: _Owner(pid, self.done) for pid in (ORIGINAL, SUCCESSOR)}
-        self.published = [ORIGINAL]
+        self.at_pid: dict[int, _Owner] = dict(self.owners)
+        self.denied: set[int] = set()
+        self.published: list[int | None] = [ORIGINAL]
+        self.unreadable = False
         self.guardians = {ORIGINAL + 1: "exited", SUCCESSOR + 1: "exited"}
         self.identifiable = {ORIGINAL, SUCCESSOR}
+        self.on_end: dict[int, Any] = {}
         self.traced_out = True
         self.retired: list[Any] = []
         self.held: dict[str, tuple[threading.Event, threading.Event]] = {}
@@ -95,15 +110,24 @@ class _Scene:
         state = tmp_path / "owned-daemon-state"
         state.mkdir()
         monkeypatch.setattr(harness.daemon_descriptor, "daemon_dir", lambda _: state)
-        monkeypatch.setattr(
-            harness.daemon_descriptor,
-            "read",
-            lambda _: SimpleNamespace(
+
+        def read(_root):
+            if self.unreadable:
+                raise OSError("planted: the descriptor was unreadable")
+            if self.published[0] is None:
+                return None
+            return SimpleNamespace(
                 pid=self.published[0],
                 instance_id=str(self.published[0]),
                 protocol_version=2,
                 log_path="",
-            ),
+            )
+
+        monkeypatch.setattr(harness.daemon_descriptor, "read", read)
+        monkeypatch.setattr(
+            harness,
+            "UnresolvedPublication",
+            functools.partial(REAL_PUBLICATION, open_process=self.open_process),
         )
 
         def identify(descriptor, *args):
@@ -123,7 +147,11 @@ class _Scene:
 
         def end_owner(identity):
             self.step(f"end {identity.pid}")
-            return REAL_END_OWNER(identity)
+            ended = REAL_END_OWNER(identity)
+            then = self.on_end.pop(identity.pid, None)
+            if then is not None:
+                then()
+            return ended
 
         def guardian_exit(observed, pid, seconds, **kwargs):
             self.step(f"guardian {pid}")
@@ -191,6 +219,14 @@ class _Scene:
             "run_probe",
             lambda path, **kwargs: {"state": "free", "device": 0, "inode": 0},
         )
+
+    def open_process(self, pid: int) -> _Owner:
+        if pid in self.denied:
+            raise psutil.AccessDenied(pid)
+        held = self.at_pid.get(pid)
+        if held is None or not held.alive:
+            raise psutil.NoSuchProcess(pid)
+        return held
 
     def hold(self, label: str) -> None:
         self.held[label] = (threading.Event(), threading.Event())
@@ -339,7 +375,25 @@ async def test_a_host_cancelled_before_settling_ends_whoever_serves(
     assert settlement_problems() == []
 
 
-async def test_an_owner_the_row_cannot_identify_is_never_signalled(scene, monkeypatch):
+def _kills(scene: _Scene) -> list[int]:
+    return [op[1] for op in scene.done if op[0] == "killed"]
+
+
+async def _refused_everywhere(scene: _Scene, named: str) -> None:
+    """Nothing measures while *named* is held: not the gate, not a row."""
+    assert any(named in p for p in settlement_problems()), settlement_problems()
+    with pytest.raises(UnsettledWorker, match=named):
+        unconfirmed_close.gate("a later measurement")
+    with pytest.raises(UnsettledWorker, match="an earlier row left"):
+        await scene.row(processes=[], summary=_SETTLED)
+
+
+UNIDENTIFIED = f"pid {SUCCESSOR}, which the row could not identify"
+
+
+async def test_an_owner_the_row_cannot_identify_is_never_signalled_nor_passed(
+    scene, monkeypatch
+):
     monkeypatch.setattr(
         harness,
         "run_host_session",
@@ -349,7 +403,7 @@ async def test_an_owner_the_row_cannot_identify_is_never_signalled(scene, monkey
     with pytest.raises(asyncio.CancelledError):
         await scene.run()
     assert scene.owners[SUCCESSOR].alive
-    assert ("killed", SUCCESSOR) not in scene.done
+    assert SUCCESSOR not in _kills(scene)
     # Cleanup falls back to the original, and the descriptor naming another
     # owner keeps the row's state as evidence rather than signalling it.
     pid, cleanup = scene.retired[-1]
@@ -358,6 +412,212 @@ async def test_an_owner_the_row_cannot_identify_is_never_signalled(scene, monkey
         f"names pid {SUCCESSOR}" in failure and "not signalled" in failure
         for failure in cleanup.failures
     ), cleanup.failures
+    # And nothing measures after it while it runs, asked again and again.
+    await _refused_everywhere(scene, UNIDENTIFIED)
+    await _refused_everywhere(scene, UNIDENTIFIED)
+    assert SUCCESSOR not in _kills(scene)
+
+
+@pytest.mark.parametrize(
+    ("then", "settled"),
+    [
+        pytest.param("it-exits", True, id="it-exits"),
+        pytest.param("its-pid-is-reused", True, id="its-pid-is-then-reused"),
+        pytest.param("still-running", False, id="still-running"),
+        pytest.param(
+            "still-running-descriptor-gone", False, id="descriptor-gone-it-runs"
+        ),
+        pytest.param(
+            "still-running-descriptor-replaced", False, id="descriptor-replaced"
+        ),
+        pytest.param("unreadable", False, id="its-process-unreadable"),
+    ],
+)
+async def test_only_its_own_lifetime_ending_lets_measurement_resume(
+    scene, monkeypatch, then, settled
+):
+    monkeypatch.setattr(
+        harness,
+        "run_host_session",
+        scene.host(replace=True, then=asyncio.CancelledError("planted")),
+    )
+    scene.identifiable.discard(SUCCESSOR)
+    with pytest.raises(asyncio.CancelledError):
+        await scene.run()
+    successor = scene.owners[SUCCESSOR]
+    if then in ("it-exits", "its-pid-is-reused"):
+        successor.alive = False
+    if then == "its-pid-is-reused":
+        # Another process takes the number: not the lifetime that published.
+        scene.at_pid[SUCCESSOR] = _Owner(SUCCESSOR, scene.done, created=999.0)
+    if then == "still-running-descriptor-gone":
+        scene.published[0] = None
+    if then == "still-running-descriptor-replaced":
+        scene.published[0] = ORIGINAL
+    if then == "unreadable":
+        scene.denied.add(SUCCESSOR)
+    if settled:
+        assert settlement_problems() == []
+        unconfirmed_close.gate("a later measurement")
+    else:
+        await _refused_everywhere(scene, UNIDENTIFIED)
+    assert SUCCESSOR not in _kills(scene)
+
+
+async def test_a_pid_unreadable_when_published_waits_for_its_first_read(
+    scene, monkeypatch
+):
+    monkeypatch.setattr(
+        harness,
+        "run_host_session",
+        scene.host(replace=True, then=asyncio.CancelledError("planted")),
+    )
+    scene.identifiable.discard(SUCCESSOR)
+    scene.denied.add(SUCCESSOR)
+    with pytest.raises(asyncio.CancelledError):
+        await scene.run()
+    await _refused_everywhere(scene, UNIDENTIFIED)
+    # Readable at last and still running: that lifetime is now the one held.
+    scene.denied.discard(SUCCESSOR)
+    await _refused_everywhere(scene, UNIDENTIFIED)
+    # Then it ends, and its number goes to another process.
+    scene.owners[SUCCESSOR].alive = False
+    scene.at_pid[SUCCESSOR] = _Owner(SUCCESSOR, scene.done, created=999.0)
+    assert settlement_problems() == []
+    assert SUCCESSOR not in _kills(scene)
+
+
+async def test_an_unreadable_descriptor_is_never_read_as_settled(scene, monkeypatch):
+    host = scene.host(replace=False, then=asyncio.CancelledError("planted"))
+
+    async def unreadable_after_the_call(*args, **kwargs):
+        after_call = kwargs["after_call"]
+
+        async def then_unreadable():
+            await after_call()
+            scene.unreadable = True
+
+        return await host(*args, **{**kwargs, "after_call": then_unreadable})
+
+    monkeypatch.setattr(harness, "run_host_session", unreadable_after_the_call)
+    with pytest.raises(asyncio.CancelledError):
+        await scene.run()
+    # The owner the row identified is still ended; nothing else is signalled.
+    assert _kills(scene) == [ORIGINAL]
+    named = "whose descriptor could not be read"
+    await _refused_everywhere(scene, named)
+    # Readable again and naming nothing, every owner gone: still nothing ties
+    # what was published to a lifetime, so nothing measures.
+    scene.unreadable = False
+    scene.published[0] = None
+    await _refused_everywhere(scene, named)
+
+
+async def test_an_owner_published_after_settling_is_held_not_signalled(
+    scene, monkeypatch
+):
+    monkeypatch.setattr(
+        harness, "run_host_session", scene.host(replace=True, then=None)
+    )
+    third = _Owner(126, scene.done)
+    scene.at_pid[126] = third
+
+    def publish_a_third():
+        scene.published[0] = 126
+
+    # Published between settling and cleanup, by nothing the row identified.
+    scene.on_end[SUCCESSOR] = publish_a_third
+    result, preserved = await scene.run()
+    assert preserved == 0 and third.alive and 126 not in _kills(scene)
+    assert result.unconfirmed is not None
+    named = "pid 126, which the row could not identify"
+    assert any(named in p for p in result.unconfirmed.validity)
+    await _refused_everywhere(scene, named)
+    third.alive = False
+    assert settlement_problems() == []
+
+
+@pytest.mark.parametrize(
+    ("seen", "then", "named"),
+    [
+        pytest.param("unidentified", "gone", UNIDENTIFIED, id="then-descriptor-gone"),
+        pytest.param(
+            "unidentified", "the-original", UNIDENTIFIED, id="then-names-the-original"
+        ),
+        pytest.param(
+            "unreadable",
+            "gone",
+            "whose descriptor could not be read",
+            id="unreadable-then-readable-and-empty",
+        ),
+    ],
+)
+async def test_what_settling_saw_published_stays_held_whatever_cleanup_reads(
+    scene, monkeypatch, seen, then, named
+):
+    # Settling looks the root up once. Before cleanup reads it again, the
+    # descriptor changes, and the owner it named still runs: what cleanup
+    # reads then says nothing of that owner.
+    host = scene.host(replace=True, then=asyncio.CancelledError("planted"))
+
+    async def settling_reads(*args, **kwargs):
+        after_call = kwargs["after_call"]
+
+        async def then_unreadable():
+            await after_call()
+            scene.unreadable = seen == "unreadable"
+
+        return await host(*args, **{**kwargs, "after_call": then_unreadable})
+
+    def change():
+        scene.unreadable = False
+        scene.published[0] = None if then == "gone" else ORIGINAL
+
+    if seen == "unidentified":
+        scene.identifiable.discard(SUCCESSOR)
+    # Settling ends the original after its look at the root.
+    scene.on_end[ORIGINAL] = change
+    monkeypatch.setattr(harness, "run_host_session", settling_reads)
+    with pytest.raises(asyncio.CancelledError):
+        await scene.run()
+    assert scene.owners[SUCCESSOR].alive and SUCCESSOR not in _kills(scene)
+    # Cleanup found nothing left to settle, and still nothing measures.
+    assert scene.retired[-1][1].owner_gone
+    await _refused_everywhere(scene, named)
+
+
+@pytest.mark.parametrize(
+    ("pid", "first", "then", "settled"),
+    [
+        # Nothing names a pid, whatever the table shows later.
+        pytest.param(None, None, 5.0, (False, False), id="unreadable-descriptor"),
+        pytest.param(7, None, 5.0, (True, True), id="no-process-held-it"),
+        # Held from its first read: the lifetime then is the one waited for.
+        pytest.param(7, 5.0, 5.0, (False, False), id="the-same-lifetime"),
+        pytest.param(7, 5.0, 6.0, (False, True), id="another-lifetime-at-its-pid"),
+        pytest.param(7, 5.0, None, (False, True), id="its-pid-then-free"),
+        # Unread at first, the first lifetime read is the one waited for.
+        pytest.param(7, "denied", 6.0, (False, False), id="read-only-later"),
+        pytest.param(7, "denied", None, (False, True), id="free-when-read"),
+    ],
+)
+def test_an_unresolved_publication_is_settled_only_by_its_lifetime(
+    pid, first, then, settled
+):
+    table: dict[int, Any] = {7: first}
+
+    def open_process(number):
+        found = table.get(number)
+        if found == "denied":
+            raise psutil.AccessDenied(number)
+        if found is None:
+            raise psutil.NoSuchProcess(number)
+        return _Owner(number, [], created=found)
+
+    held = REAL_PUBLICATION(pid, open_process=open_process)
+    now = held.check(0.0)
+    table[7] = then
+    assert (now, held.check(0.0)) == settled
 
 
 async def test_a_failure_then_a_cancellation_raises_the_cancellation_after_cleanup(

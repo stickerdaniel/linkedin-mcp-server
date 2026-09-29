@@ -3233,6 +3233,22 @@ def lifetime_exit_state(
     ]
     if not starts:
         return "unknown: the watcher never recorded it in the row"
+    return _lifetime_exit(pid, starts, seconds, open_process=open_process)
+
+
+def _lifetime_exit(
+    pid: int,
+    starts: Sequence[float],
+    seconds: float,
+    *,
+    open_process: Callable[[int], Any] = psutil.Process,
+) -> str:
+    """``exit_state`` of the lifetime at *pid* that began at one of *starts*.
+
+    A pid that names no process, or another lifetime than every one of
+    them, shows that lifetime gone: a pid is not reused while its process,
+    or its zombie, still exists.
+    """
     try:
         process = open_process(pid)
         created = process.create_time()
@@ -3243,6 +3259,55 @@ def lifetime_exit_state(
     if not any(abs(created - start) <= _START_TOLERANCE_SECONDS for start in starts):
         return "exited"
     return exit_state(process, seconds)
+
+
+class UnresolvedPublication:
+    """An owner published on the row's own auth root that the row could not
+    tie to a lifetime it identified: *pid* is the one the descriptor named,
+    None when the descriptor could not be read.
+
+    Nothing here is signalled: the row never showed that process to be its
+    own. ``check`` answers settled only on lifetime evidence that whatever
+    published *pid* is gone: no process holds that pid, or the lifetime
+    first read there, by pid and create time, has since ended
+    (``_lifetime_exit``, one look and no wait, since nothing was sent). The
+    first read is taken at once and again by each check until one succeeds;
+    whatever published *pid* was either that lifetime or already gone. The
+    descriptor settles nothing, missing or replaced: it says nothing of the
+    process it named. Nor does a pid whose process cannot be read, and an
+    unreadable descriptor names no pid to read, so that one is never settled.
+    """
+
+    def __init__(
+        self, pid: int | None, *, open_process: Callable[[int], Any] = psutil.Process
+    ) -> None:
+        self.pid = pid
+        self._open = open_process
+        self.created: float | None = None
+        self.gone = False
+        if pid is not None:
+            self._first_read()
+
+    def _first_read(self) -> None:
+        assert self.pid is not None
+        try:
+            self.created = self._open(self.pid).create_time()
+        except psutil.NoSuchProcess:
+            self.gone = True
+        except psutil.Error:
+            pass
+
+    def check(self, grace: float) -> bool:
+        if self.pid is None:
+            return False
+        if not self.gone and self.created is None:
+            self._first_read()
+        if not self.gone and self.created is not None:
+            state = _lifetime_exit(
+                self.pid, [self.created], 0.0, open_process=self._open
+            )
+            self.gone = state == "exited"
+        return self.gone
 
 
 def r7_continuation(
@@ -4084,6 +4149,9 @@ async def measure_host_quit_row(
     #: row cancelled before it still settles its owners in the teardown.
     r7_defer = Deferral()
     r7_settling_began = False
+    #: H-R7: each owner published on the row's root that it could not
+    #: identify, by the pid named and the lifetime first read there.
+    r7_publications: set[tuple[int | None, float | None]] = set()
 
     async def kill_the_actor() -> None:
         """Associate the victim, find its guardian, attach the oracle, kill."""
@@ -4426,6 +4494,27 @@ async def measure_host_quit_row(
         emit("harness", "r7.lease", **point)
         return point
 
+    def hold_publication(pid: int | None, why: str) -> None:
+        """Keep an owner published on the row's root that the row could not
+        identify (``UnresolvedPublication``) until it is shown gone: no
+        later measurement starts meanwhile, and nothing is sent to it."""
+        held = UnresolvedPublication(pid)
+        key = (pid, held.created)
+        if key in r7_publications:
+            return
+        r7_publications.add(key)
+        record = {"pid": pid, "created": held.created, "gone": held.gone, "why": why}
+        r7_window.setdefault("unresolved_publications", []).append(record)
+        emit("harness", "r7.window", phase="unresolved publication", **record)
+        retain(
+            f"the owner published on the row's root as pid {pid}, which the row "
+            f"could not identify ({why})"
+            if pid is not None
+            else f"the owner published on the row's root, whose descriptor could "
+            f"not be read ({why})",
+            held.check,
+        )
+
     def find_the_successor_r7(
         probe: Mapping[str, Any],
     ) -> tuple[OwnerIdentity | None, list[str]]:
@@ -4433,17 +4522,21 @@ async def measure_host_quit_row(
         a new lifetime that replaced the original and served *probe*: the
         owner begun after the close, since an early election is allowed, and
         the browser that served begun after the recovery barrier, since early
-        use of the profile is not."""
+        use of the profile is not. One the row cannot identify, or cannot
+        read, is held (``hold_publication``)."""
         found: OwnerIdentity | None = None
         problems: list[str] = []
         try:
             published = daemon_descriptor.read(account.auth_root)
         except Exception as exc:  # noqa: BLE001 - the row reports it
+            hold_publication(None, f"{type(exc).__name__}: {exc}")
             return None, [f"the descriptor could not be read: {exc!r}"]
         if published is not None:
             found, problem = identify_owner(published, account, watcher.observed())
             if problem is not None:
                 problems.append(problem)
+            if found is None:
+                hold_publication(published.pid, problem or "not identified")
         began, ended = probe.get("began"), probe.get("ended")
         interval = (began, ended) if began is not None and ended is not None else None
         ticks = r7_window.get("close_ticks")
@@ -5202,6 +5295,34 @@ async def measure_host_quit_row(
         result.cleanup = retire_daemon_state(
             account, cleanup_owner if cleanup_owner is not None else identified
         )
+        if r7 is not None and daemon:
+            # Whatever the root still publishes is an owner this row
+            # identified, and settled or retained, or it is held: cleanup
+            # left it running unsignalled.
+            known = {
+                (owner_identity.pid, owner_identity.instance_id)
+                for owner_identity in (
+                    identified,
+                    cleanup_owner,
+                    r7_handles.get("successor"),
+                )
+                if owner_identity is not None
+            }
+            try:
+                if daemon_descriptor.descriptor_path(account.auth_root).exists():
+                    left_published = daemon_descriptor.read(account.auth_root)
+                    if (
+                        left_published is not None
+                        and (left_published.pid, left_published.instance_id)
+                        not in known
+                    ):
+                        hold_publication(
+                            left_published.pid,
+                            "still published after cleanup, and not an owner this "
+                            "row identified",
+                        )
+            except Exception as exc:  # noqa: BLE001 - unread is unknown, and held
+                hold_publication(None, f"after cleanup: {type(exc).__name__}: {exc}")
         swept = sweep_browsers(account)
         for request in row_requests:
             emit(
