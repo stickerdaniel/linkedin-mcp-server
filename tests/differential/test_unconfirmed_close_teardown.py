@@ -257,7 +257,7 @@ class _Scene:
 
         return host
 
-    def scripted(self, monkeypatch):
+    def scripted(self, monkeypatch, *, close_error: bool | None = False):
         """A host that runs the row's own H-R7 script, as the real one does,
         keeping its failure as the script's. What the script would read of
         processes the row did not start is modelled: no guardian handle,
@@ -285,7 +285,7 @@ class _Scene:
                     "ended": time.time(),
                     "began_monotonic_ns": began_ns,
                     "ended_monotonic_ns": time.monotonic_ns(),
-                    "is_error": False,
+                    "is_error": close_error if name == "close_session" else False,
                     "read_the_post": False,
                 }
 
@@ -886,6 +886,22 @@ def _markers(monkeypatch, *markers: _Marker, read=None):
     )
     monkeypatch.setattr(harness, "creation_marker", marker)
     return marker
+
+
+@pytest.mark.parametrize("close_error", [False, True, None])
+async def test_the_scripted_close_requires_a_successful_tool_result(
+    scene, monkeypatch, close_error
+):
+    monkeypatch.setattr(
+        harness,
+        "run_host_session",
+        scene.scripted(monkeypatch, close_error=close_error),
+    )
+    _markers(monkeypatch, _Marker(700, []))
+    result, _ = await scene.run()
+    assert result.unconfirmed is not None
+    problems = [p for p in result.unconfirmed.validity if "close_session" in p]
+    assert bool(problems) is (close_error is not False), problems
 
 
 async def test_a_marker_that_ends_leaves_nothing_held(monkeypatch):

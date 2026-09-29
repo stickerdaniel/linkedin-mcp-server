@@ -4764,6 +4764,10 @@ async def measure_host_quit_row(
                 "is_error",
             )
         }
+        if closed.get("is_error") is not False:
+            w["script_problems"].append(
+                "close_session did not return a successful tool result"
+            )
         w["clocks"].append(clock_sample("after the close"))
         emit("harness", "r7.window", phase="closed", **w["close"])
         if not daemon:
