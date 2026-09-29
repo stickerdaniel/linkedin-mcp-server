@@ -71,6 +71,24 @@
       "description": "Ruff is pinned in pyproject.toml and .pre-commit-config.yaml; tests/test_ruff_toolchain.py requires both to match",
       "matchPackageNames": ["ruff", "astral-sh/ruff-pre-commit"],
       "groupName": "ruff"
+    },
+    {
+      "description": "Agent guardrails: minor and patch automerge",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["stickerdaniel/agent-guardrails"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "agent-guardrails",
+      "groupSlug": "agent-guardrails",
+      "automerge": true
+    },
+    {
+      "description": "Agent guardrails: major and digest updates stay manual",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["stickerdaniel/agent-guardrails"],
+      "matchUpdateTypes": ["major", "digest", "pin", "pinDigest"],
+      "groupName": "agent-guardrails manual",
+      "groupSlug": "agent-guardrails-manual",
+      "automerge": false
     }
   ]
 }
