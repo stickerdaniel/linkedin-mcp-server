@@ -158,6 +158,12 @@
     },
     {
       "type": "git",
+      "name": "agentGuardrails",
+      "url": "https://github.com/stickerdaniel/agent-guardrails",
+      "branch": "main"
+    },
+    {
+      "type": "git",
       "name": "mcpPythonSdk",
       "url": "https://github.com/modelcontextprotocol/python-sdk",
       "branch": "main",
