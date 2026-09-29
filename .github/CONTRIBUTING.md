@@ -4,7 +4,7 @@ Contributions are welcome. Search existing issues first, then use the [issue for
 
 ## Development Setup
 
-See the [README](README.md#setup-from-source-develop--contribute) for full setup instructions.
+See the [README](../README.md#setup-from-source-develop--contribute) for full setup instructions.
 
 ```bash
 git clone https://github.com/stickerdaniel/linkedin-mcp-server
@@ -41,7 +41,7 @@ PERSON_SECTIONS: dict[str, tuple[str, bool]] = {
 
 The `is_overlay` boolean distinguishes modal overlays (like contact info) from full page navigations — overlays use a different extraction method that reads from the `<dialog>` element.
 
-The canonical owner modules iterate the config dict directly, checking which sections the caller requested. `scraping/person.py` owns person sections and `scraping/company.py` owns company sections; `scraping/extractor.py` is only the stable delegating facade. See the generated [scraping architecture reference](docs/scraping-architecture.md) for the current ownership table, import graph, facade surface, and page-owning classification.
+The canonical owner modules iterate the config dict directly, checking which sections the caller requested. `scraping/person.py` owns person sections and `scraping/company.py` owns company sections; `scraping/extractor.py` is only the stable delegating facade. See the generated [scraping architecture reference](../docs/scraping-architecture.md) for the current ownership table, import graph, facade surface, and page-owning classification.
 
 ```python
 for section_name, (suffix, is_overlay) in PERSON_SECTIONS.items():
@@ -102,7 +102,7 @@ When adding an entirely new MCP tool (e.g., `search_companies`):
 ### Code
 
 - [ ] Add the workflow to its canonical owner module from `docs/scraping-architecture.md`; keep `LinkedInExtractor` in `scraping/extractor.py` as a thin delegate only if the stable facade needs a new method
-- [ ] No LinkedIn private API (Voyager). See [Read the rendered page](docs/decisions/2026-09-16-rendered-page.md)
+- [ ] No LinkedIn private API (Voyager). See [Read the rendered page](../docs/decisions/2026-09-16-rendered-page.md)
 - [ ] Add or extend tool registration function (`tools/*.py`)
 - [ ] Register tools in `create_mcp_server()` if new file (`server.py`)
 
@@ -190,7 +190,7 @@ changes what users see, whoever merges it adds the sentence in a follow-up PR.
 
 ## Scraping Philosophy: Minimize DOM Dependence
 
-Voyager and other LinkedIn private APIs are out of scope. See [Read the rendered page](docs/decisions/2026-09-16-rendered-page.md).
+Voyager and other LinkedIn private APIs are out of scope. See [Read the rendered page](../docs/decisions/2026-09-16-rendered-page.md).
 
 This project favours **innerText extraction and URL navigation** over DOM selectors. LinkedIn's markup changes frequently — class names, `data-` attributes, and component structure are unstable. Our scraping engine is deliberately built to survive those changes:
 
@@ -202,7 +202,7 @@ This project favours **innerText extraction and URL navigation** over DOM select
 
 ## Code Style
 
-- **Commits:** conventional commits — `type(scope): subject` (see [CLAUDE.md](CLAUDE.md) for details)
+- **Commits:** conventional commits — `type(scope): subject` (see [CLAUDE.md](../CLAUDE.md) for details)
 - **Lint/format:** `uv run ruff check . --fix && uv run ruff format .`
 - **Type check:** `uv run ty check`
 - **Tests:** `uv run pytest --cov`

@@ -18,7 +18,7 @@ import yaml
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT = _REPO_ROOT / "scripts" / "compose_release_notes.py"
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
-_TEMPLATE = _REPO_ROOT / "RELEASE_NOTES_TEMPLATE.md"
+_TEMPLATE = _REPO_ROOT / ".github" / "RELEASE_NOTES_TEMPLATE.md"
 _PYPROJECT = _REPO_ROOT / "pyproject.toml"
 _REPOSITORY = "stickerdaniel/linkedin-mcp-server"
 _SHOULD_RELEASE = "steps.check.outputs.should-release == 'true'"
@@ -739,7 +739,8 @@ def _run_compose_step(
         encoding="utf-8",
     )
     (repo / "CHANGELOG.md").write_text(_RELEASED_CHANGELOG, encoding="utf-8")
-    shutil.copy(_TEMPLATE, repo / "RELEASE_NOTES_TEMPLATE.md")
+    (repo / ".github").mkdir()
+    shutil.copy(_TEMPLATE, repo / ".github" / "RELEASE_NOTES_TEMPLATE.md")
     (repo / "scripts").mkdir()
     shutil.copy(_SCRIPT, repo / "scripts" / "compose_release_notes.py")
     (repo / "changelog.d").mkdir()

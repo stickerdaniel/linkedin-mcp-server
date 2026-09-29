@@ -219,7 +219,7 @@ def test_packet_skill_cli_create_preserves_form_routes() -> None:
 def test_reporting_workflow_links_do_not_contain_stale_intake_copy() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     readme_path = repo_root / "README.md"
-    contributing_path = repo_root / "CONTRIBUTING.md"
+    contributing_path = repo_root / ".github" / "CONTRIBUTING.md"
 
     readme_text = readme_path.read_text(encoding="utf-8")
     contributing_text = contributing_path.read_text(encoding="utf-8")

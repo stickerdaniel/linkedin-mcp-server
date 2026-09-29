@@ -6,7 +6,7 @@
     "enabled": true
   },
   "pip-compile": {
-    "managerFilePatterns": ["/^build-constraints\\.txt$/"]
+    "managerFilePatterns": ["/^requirements/build-constraints\\.txt$/"]
   },
   "customManagers": [
     {
