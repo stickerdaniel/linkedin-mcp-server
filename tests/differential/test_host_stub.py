@@ -5,7 +5,9 @@ is longer than the two seconds after which the MCP SDK's own stdio client
 starts signalling, so a stub that killed its server would fail here and a
 native row built on it would measure a kill while calling it a quit. Two more
 answer the call and then end badly, one with a nonzero status on EOF and one
-before the host ever quits; neither may read as a normal host quit.
+before the host ever quits; neither may read as a normal host quit. A fourth
+leaves a grandchild holding its stderr past its exit, which is where the
+post-exit hook has to run: after the exit, before that stderr closes.
 """
 
 from __future__ import annotations
@@ -14,12 +16,14 @@ import asyncio
 import os
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import psutil
 
 from differential.harness import (
     READ_TOOL,
+    ToolCall,
     actor_environment,
     claim_account,
     host_failures,
@@ -55,6 +59,21 @@ async def closing(app):
             print("stand-in server failing its close", file=sys.stderr, flush=True)
             sys.stderr.flush()
             os._exit(7)
+        elif ending == "linger":
+            # A grandchild that inherits stderr and outlives the server by two
+            # seconds, then says so on that stderr.
+            import subprocess
+
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys, time; time.sleep(2); "
+                    "print('grandchild done', file=sys.stderr, flush=True)",
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+            )
 
 
 mcp = FastMCP("stand-in", lifespan=closing)
@@ -77,9 +96,17 @@ mcp.run(transport="stdio", show_banner=False)
 """ % {"tool": READ_TOOL}
 
 
-async def _session(tmp_path: Path, ending: str, seen: list[str] | None = None):
-    script = tmp_path / "stand_in_server.py"
-    script.write_text(_STAND_IN_SERVER)
+async def _session(
+    tmp_path: Path,
+    ending: str,
+    seen: list[str] | None = None,
+    *,
+    after_call: Callable[[], Awaitable[None]] | None = None,
+    after_exit: Callable[[], Awaitable[None]] | None = None,
+    script: Callable[[ToolCall], Awaitable[None]] | None = None,
+):
+    server = tmp_path / "stand_in_server.py"
+    server.write_text(_STAND_IN_SERVER)
     die = tmp_path / "die"
 
     async def linger() -> None:
@@ -101,11 +128,13 @@ async def _session(tmp_path: Path, ending: str, seen: list[str] | None = None):
         await asyncio.sleep(1)
 
     return await run_host_session(
-        [sys.executable, str(script), POST_MARKER, ending, str(die)],
+        [sys.executable, str(server), POST_MARKER, ending, str(die)],
         env=dict(os.environ),
         cwd=tmp_path,
         on_stderr=(seen.append if seen is not None else lambda _line: None),
-        after_call=linger,
+        after_call=after_call or linger,
+        after_exit=after_exit,
+        script=script,
     )
 
 
@@ -141,6 +170,91 @@ async def test_a_server_that_died_before_the_quit_is_not_a_normal_quit(tmp_path)
     assert session.tool is not None and session.tool["read_the_post"]
     assert session.alive_before_quit is False
     assert any("already gone" in failure for failure in host_failures(session))
+
+
+def _server_pid(tmp_path: Path) -> int:
+    return int((tmp_path / "die.pid").read_text())
+
+
+async def test_the_post_exit_hook_runs_after_the_exit_and_before_stderr_closes(
+    tmp_path,
+):
+    seen: list[str] = []
+    at_hook: dict = {}
+
+    async def after_exit() -> None:
+        at_hook["lines"] = list(seen)
+        at_hook["ns"] = time.monotonic_ns()
+        at_hook["server_running"] = psutil.pid_exists(_server_pid(tmp_path)) and (
+            psutil.Process(_server_pid(tmp_path)).status() != psutil.STATUS_ZOMBIE
+        )
+
+    session = await _session(tmp_path, "linger", seen, after_exit=after_exit)
+
+    assert session.error is None and session.after_exit_error is None
+    assert at_hook["server_running"] is False
+    # The grandchild still held stderr when the hook ran, and the stub then
+    # waited for it as before.
+    assert "grandchild done" not in at_hook["lines"]
+    assert "grandchild done" in session.stderr and session.stderr_closed is True
+    assert session.eof_monotonic_ns is not None
+    assert session.exit_seen_monotonic_ns is not None
+    assert session.eof_monotonic_ns <= session.exit_seen_monotonic_ns <= at_hook["ns"]
+    assert host_failures(session) == []
+
+
+async def test_a_failed_post_exit_hook_is_recorded_and_the_quit_still_completes(
+    tmp_path,
+):
+    async def after_exit() -> None:
+        raise RuntimeError("planted")
+
+    session = await _session(tmp_path, "linger", after_exit=after_exit)
+
+    assert session.after_exit_error == "RuntimeError: planted"
+    assert session.error is None and session.teardown_error is None
+    assert session.exited_on_quit is True and session.killed_by_harness is False
+    # The stderr wait after the hook still ran.
+    assert "grandchild done" in session.stderr and session.stderr_closed is True
+
+
+async def test_the_post_exit_hook_never_runs_on_the_forced_cleanup(tmp_path):
+    ran: list[str] = []
+
+    async def fail_after_the_call() -> None:
+        raise RuntimeError("the row gave up before its quit")
+
+    async def after_exit() -> None:
+        ran.append("hook")
+
+    session = await _session(
+        tmp_path, "slow", after_call=fail_after_the_call, after_exit=after_exit
+    )
+
+    assert session.error == "RuntimeError: the row gave up before its quit"
+    assert session.killed_by_harness is True
+    assert ran == []
+    assert session.after_exit_error is None and session.exit_seen_monotonic_ns is None
+
+
+async def test_the_default_and_scripted_reads_carry_their_send_and_receipt(
+    tmp_path,
+):
+    async def script(call) -> None:
+        await call(READ_TOOL, {"num_posts": 1})
+
+    session = await _session(tmp_path, "slow", script=script)
+
+    assert session.error is None and session.script_error is None
+    assert session.tool is not None and len(session.scripted) == 1
+    default, scripted = session.tool, session.scripted[0]
+    for summary in (default, scripted):
+        assert summary["tool"] == READ_TOOL and summary["read_the_post"]
+        assert summary["began"] <= summary["ended"]
+        assert summary["began_monotonic_ns"] <= summary["ended_monotonic_ns"]
+    assert default["ended_monotonic_ns"] <= scripted["began_monotonic_ns"]
+    assert session.eof_monotonic_ns is not None
+    assert scripted["ended_monotonic_ns"] <= session.eof_monotonic_ns
 
 
 def test_the_actor_environment_carries_the_row_and_drops_inherited_settings(

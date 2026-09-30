@@ -55,6 +55,11 @@ the setting differs. The candidate must show no coordination effect (no owner,
 no forwarding, no daemon state) and the O1/O4 of the frozen Direct run with the
 same setting; the baseline, in K2, must be caught coordinating
 (``k2_r12_verdict``).
+
+**Row H-R3** (host quit with an idle browser): H-R1's actions, read at three
+checkpoints around the quit (``observe_checkpoint``): from the row's script
+before it, from the host stub's post-exit hook, and once the actors have left
+by themselves, before any cleanup. ``host_comparison`` judges the record.
 """
 
 from __future__ import annotations
@@ -97,7 +102,7 @@ from mcp import ClientSession
 from mcp.shared.message import SessionMessage
 from typing_extensions import Unpack
 
-from differential import lease_probe, r7_fault
+from differential import host_comparison, lease_probe, r7_fault
 from differential.baseline import (
     BaselineRefused,
     Runtime,
@@ -114,6 +119,7 @@ from differential.fault_overlay import (
     scenario_problems,
     selection_problems,
 )
+from differential.host_comparison import ROW_H_R3
 from differential.job_query import (
     SHIM_SHA256,
     Fates,
@@ -214,6 +220,7 @@ from differential.watcher import (
     invoked_module,
     possible_browser,
     process_user,
+    user_data_dir,
 )
 from linkedin_mcp_server import daemon_descriptor
 from linkedin_mcp_server.config.loaders import EnvironmentKeys
@@ -249,6 +256,16 @@ READ_TOOL_ARGUMENTS = {"num_posts": 1}
 #: below the frontend's time from election to first call would retire the
 #: owner before the row's one call reached it.
 IDLE_TIMEOUT_SECONDS = 20.0
+
+#: The comparison rows' own idle timeout (H-R3, and H-R2 after it), declared
+#: before any of them ran. Their freshness window runs from the send of the
+#: row's read, and that interval includes the browser's launch and, in daemon
+#: mode, the owner's election; within 20s, less the margin, a cold leg would
+#: have nothing left to observe. Kept above the Direct minimum hold (20s), so a
+#: second host is handed the profile by that hold and not raced by an idle
+#: close. The same in K1, K3 and K0, and recorded in the row's packet. Every
+#: other row keeps ``IDLE_TIMEOUT_SECONDS``.
+COMPARISON_IDLE_TIMEOUT_SECONDS = 60.0
 
 #: The largest wall-clock gap between two watcher samples a row accepts. The
 #: maximum accepted gap is an observation-quality budget, not proof that every
@@ -442,8 +459,13 @@ def actor_environment(
     daemon: bool,
     browsers: Path,
     chrome_path: str | None = None,
+    idle_timeout: float = IDLE_TIMEOUT_SECONDS,
 ) -> dict[str, str]:
-    """The server's environment: this one, minus every setting, plus the row's."""
+    """The server's environment: this one, minus every setting, plus the row's.
+
+    *idle_timeout* is the row's (``COMPARISON_IDLE_TIMEOUT_SECONDS`` for the
+    comparison rows), the same for both modes.
+    """
     settings = {
         value
         for name, value in vars(EnvironmentKeys).items()
@@ -465,7 +487,7 @@ def actor_environment(
             EnvironmentKeys.DAEMON_ENABLED: "true" if daemon else "false",
             EnvironmentKeys.HEADLESS: "true",
             EnvironmentKeys.LOG_LEVEL: "INFO",
-            EnvironmentKeys.BROWSER_IDLE_TIMEOUT: str(IDLE_TIMEOUT_SECONDS),
+            EnvironmentKeys.BROWSER_IDLE_TIMEOUT: str(idle_timeout),
             "LINKEDIN_MCP_CHECK_FOR_UPDATES": "off",
             "PLAYWRIGHT_BROWSERS_PATH": str(browsers),
         }
@@ -790,12 +812,14 @@ class HostQuitTransport(ClientTransport):
         cwd: Path,
         on_stderr: Callable[[str], None],
         exit_seconds: float = _HOST_EXIT_SECONDS,
+        after_exit: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.command = list(command)
         self.env = env
         self.cwd = cwd
         self.on_stderr = on_stderr
         self.exit_seconds = exit_seconds
+        self.after_exit = after_exit
         self.process: anyio.abc.Process | None = None
         self.pid: int | None = None
         self.quit_done = False
@@ -804,6 +828,11 @@ class HostQuitTransport(ClientTransport):
         self.stdin_close_error: str | None = None
         self.exited_on_quit: bool | None = None
         self.quit_seconds: float | None = None
+        #: When stdin EOF was requested and when the wait saw the exit, on the
+        #: harness's monotonic clock; the second only for an exit it saw.
+        self.eof_monotonic_ns: int | None = None
+        self.exit_seen_monotonic_ns: int | None = None
+        self.after_exit_error: str | None = None
         self.killed_by_harness = False
         self.stderr_closed: bool | None = None
         self._stderr_eof = anyio.Event()
@@ -825,11 +854,19 @@ class HostQuitTransport(ClientTransport):
             self._stderr_eof.set()
 
     async def host_quit(self) -> None:
-        """What a host does on quit: close the server's stdin, then wait."""
+        """What a host does on quit: close the server's stdin, then wait.
+
+        *after_exit*, when given, runs once the wait has seen the server exit,
+        before the bounded wait for its stderr to close: the first moment the
+        exit is known, not the moment this returns. It runs only here, never
+        on the forced cleanup in ``_stop``, and a failure of it is recorded
+        (``after_exit_error``) without skipping anything after it.
+        """
         process = self.process
         assert process is not None and process.stdin is not None
         self.alive_before_quit = process.returncode is None
         began = time.monotonic()
+        self.eof_monotonic_ns = time.monotonic_ns()
         try:
             await process.stdin.aclose()
             self.stdin_closed = True
@@ -840,7 +877,14 @@ class HostQuitTransport(ClientTransport):
             await process.wait()
         self.quit_seconds = round(time.monotonic() - began, 3)
         self.exited_on_quit = process.returncode is not None
+        if self.exited_on_quit:
+            self.exit_seen_monotonic_ns = time.monotonic_ns()
         self.quit_done = True
+        if self.exited_on_quit and self.after_exit is not None:
+            try:
+                await self.after_exit()
+            except Exception as exc:  # noqa: BLE001 - recorded; the quit goes on
+                self.after_exit_error = f"{type(exc).__name__}: {exc}"
         # A grandchild that inherited stderr keeps it open past the exit, so
         # this wait is bounded and its result is evidence, not a requirement.
         with anyio.move_on_after(_STDERR_EOF_SECONDS):
@@ -956,6 +1000,29 @@ def tool_summary(result: mcp_types.CallToolResult) -> dict[str, Any]:
     }
 
 
+async def timed_call(
+    client: Client, name: str, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """One tool call through the host's client, and its summary.
+
+    ``began`` is read before the request is sent and ``ended`` once the result
+    is back, each on the wall clock and on the harness's monotonic clock, so
+    the interval contains the whole call. The row's default read and every
+    scripted one go through here, so all of them carry the same times.
+    """
+    began = time.time()
+    began_monotonic_ns = time.monotonic_ns()
+    called = await client.call_tool_mcp(name, arguments, timeout=_CALL_SECONDS)
+    return {
+        "tool": name,
+        "began": began,
+        "ended": time.time(),
+        "began_monotonic_ns": began_monotonic_ns,
+        "ended_monotonic_ns": time.monotonic_ns(),
+        **tool_summary(called),
+    }
+
+
 @dataclass
 class HostSession:
     stderr: list[str] = field(default_factory=list)
@@ -969,10 +1036,15 @@ class HostSession:
     exited_on_quit: bool | None = None
     exit_code: int | None = None
     quit_seconds: float | None = None
+    #: When EOF was requested and the exit seen, on the monotonic clock.
+    eof_monotonic_ns: int | None = None
+    exit_seen_monotonic_ns: int | None = None
     stderr_closed: bool | None = None
     killed_by_harness: bool = False
     #: A failure before the quit completed: initialize, the call, the hook.
     error: str | None = None
+    #: How the post-exit observation failed; the quit went on regardless.
+    after_exit_error: str | None = None
     #: A failure while the client unwound after a completed quit. Evidence only.
     teardown_error: str | None = None
     #: H-R6: the call made after the owner was killed, and how it failed.
@@ -1000,6 +1072,7 @@ async def run_host_session(
     started: Callable[[int], None] | None = None,
     second_call: bool = False,
     script: Callable[[ToolCall], Awaitable[None]] | None = None,
+    after_exit: Callable[[], Awaitable[None]] | None = None,
 ) -> HostSession:
     """Initialize, call the read tool once, then quit the way a host does.
 
@@ -1009,7 +1082,9 @@ async def run_host_session(
     does not stop the host from quitting. *script*, when given, runs last
     before the quit with a function that calls tools through this client
     (H-R11); what it called is in ``scripted``, and its failure, recorded as
-    ``script_error``, does not stop the quit either.
+    ``script_error``, does not stop the quit either. *after_exit* runs once
+    the server is seen to exit on EOF (``HostQuitTransport.host_quit``), and
+    its failure is ``after_exit_error``.
     """
     session = HostSession()
 
@@ -1018,7 +1093,9 @@ async def run_host_session(
         session.user_lines.append(line)
         on_stderr(line)
 
-    transport = HostQuitTransport(command, env=env, cwd=cwd, on_stderr=remember)
+    transport = HostQuitTransport(
+        command, env=env, cwd=cwd, on_stderr=remember, after_exit=after_exit
+    )
     # The initialize handshake, as a host sends it. FastMCP 4's default probes
     # server/discover first and settles on the 2026-07-28 era with a FastMCP 4
     # server, a different path from the one every row so far measured.
@@ -1027,12 +1104,9 @@ async def run_host_session(
         async with client:
             if started is not None and transport.pid is not None:
                 started(transport.pid)
-            result = await client.call_tool_mcp(
-                tool,
-                READ_TOOL_ARGUMENTS if arguments is None else arguments,
-                timeout=_CALL_SECONDS,
+            session.tool = await timed_call(
+                client, tool, READ_TOOL_ARGUMENTS if arguments is None else arguments
             )
-            session.tool = tool_summary(result)
             session.user_lines += session.tool["text"].splitlines()
             if after_call is not None:
                 await after_call()
@@ -1050,19 +1124,7 @@ async def run_host_session(
             if script is not None:
 
                 async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-                    began = time.time()
-                    began_monotonic_ns = time.monotonic_ns()
-                    called = await client.call_tool_mcp(
-                        name, arguments, timeout=_CALL_SECONDS
-                    )
-                    summary: dict[str, Any] = {
-                        "tool": name,
-                        "began": began,
-                        "ended": time.time(),
-                        "began_monotonic_ns": began_monotonic_ns,
-                        "ended_monotonic_ns": time.monotonic_ns(),
-                        **tool_summary(called),
-                    }
+                    summary = await timed_call(client, name, arguments)
                     session.scripted.append(summary)
                     session.user_lines += summary["text"].splitlines()
                     return summary
@@ -1084,6 +1146,9 @@ async def run_host_session(
     session.stdin_close_error = transport.stdin_close_error
     session.exited_on_quit = transport.exited_on_quit
     session.quit_seconds = transport.quit_seconds
+    session.eof_monotonic_ns = transport.eof_monotonic_ns
+    session.exit_seen_monotonic_ns = transport.exit_seen_monotonic_ns
+    session.after_exit_error = transport.after_exit_error
     session.stderr_closed = transport.stderr_closed
     session.killed_by_harness = transport.killed_by_harness
     if transport.process is not None:
@@ -3536,6 +3601,174 @@ def end_owner(identity: OwnerIdentity) -> str:
     return "stopped" if dead else "still running"
 
 
+# --- Row H-R3: checkpoints around the host's quit ------------------------------
+
+#: How long one checkpoint may run on its owned thread. A census, one contender
+#: and one holder read take well under a second; a checkpoint that needs this
+#: is long past its window, and one that outlives it stops the row measuring.
+_CHECKPOINT_SECONDS = 60.0
+#: How many ancestors a root's lineage is read through before it gives up.
+_LINEAGE_DEPTH = 16
+
+
+def census_entry(process: Any) -> dict[str, Any]:
+    """One census process as ``host_comparison.census_roots`` reads it.
+
+    Its parent and start, read now, and the profile it is a browser root on
+    by the watcher's own reading of its arguments (``user_data_dir``), kept
+    as this machine spells it. A field that could not be read is None, which
+    leaves the root count unknown rather than smaller.
+    """
+    cmdline = list((getattr(process, "info", {}) or {}).get("cmdline") or [])
+    entry: dict[str, Any] = {
+        "pid": process.pid,
+        "ppid": None,
+        "start": None,
+        "profile": user_data_dir(cmdline),
+        "cmdline": cmdline,
+    }
+    with contextlib.suppress(psutil.Error):
+        entry["ppid"] = process.ppid()
+    with contextlib.suppress(psutil.Error):
+        entry["start"] = process.create_time()
+    return entry
+
+
+def lineage(
+    pid: int,
+    start: float,
+    *,
+    stop: tuple[int, float] | None,
+    open_process: Callable[[int], Any] = psutil.Process,
+) -> dict[str, Any]:
+    """The ancestors of the lifetime (*pid*, *start*), nearest first.
+
+    Each as ``[pid, start]``, read through ``parent``, which refuses a parent
+    younger than its child, and only up to *stop*: above the actor nothing is
+    needed, and a system process there may refuse the read. ``complete`` when
+    the walk reached *stop* or the top; a lifetime no longer at *pid*, or a
+    read that failed first, leaves it incomplete, never shown unrelated.
+    """
+    ancestors: list[list[float]] = []
+    try:
+        process = open_process(pid)
+        if abs(process.create_time() - start) > _START_TOLERANCE_SECONDS:
+            return {"ancestors": ancestors, "complete": False}
+        for _ in range(_LINEAGE_DEPTH):
+            parent = process.parent()
+            if parent is None:
+                return {"ancestors": ancestors, "complete": True}
+            life = [parent.pid, parent.create_time()]
+            ancestors.append(life)
+            if stop is not None and host_comparison.same_lifetime(life, stop):
+                return {"ancestors": ancestors, "complete": True}
+            process = parent
+    except psutil.Error:
+        pass
+    return {"ancestors": ancestors, "complete": False}
+
+
+def holder_association(
+    identity: tuple[int, int] | None,
+    holder: tuple[int, float],
+    *,
+    open_process: Callable[[int], Any] = psutil.Process,
+) -> dict[str, Any]:
+    """``lock_association`` for the lifetime *holder*, on the lock *identity*.
+
+    The pid is read as that lifetime on both sides of the association, so a
+    pid another process has taken meanwhile is not credited as the holder.
+    """
+
+    def same() -> bool:
+        try:
+            created = open_process(holder[0]).create_time()
+        except psutil.Error:
+            return False
+        return abs(created - holder[1]) <= _START_TOLERANCE_SECONDS
+
+    before = same()
+    found = lock_association(identity, holder[0])
+    return {
+        **found,
+        "holder": list(holder),
+        "identity": list(identity) if identity is not None else None,
+        "same_before": before,
+        "same_after": same(),
+    }
+
+
+def observe_checkpoint(
+    label: str,
+    account: ActorAccount,
+    *,
+    actor: tuple[Any, int, float] | None,
+    lock_path: Path,
+    lock: tuple[int, int] | None,
+    browser_exe: str | None = None,
+    browser_dir: str | Path | None = None,
+    platform: str = sys.platform,
+    process_iter: Callable[..., Iterable[Any]] | None = None,
+    open_process: Callable[[int], Any] = psutil.Process,
+) -> dict[str, Any]:
+    """One H-R3 checkpoint: the raw facts ``host_comparison`` classifies.
+
+    Read in turn, and not at one instant: the actor's liveness, the whole
+    profile census with each process's parent and start, each root's lineage
+    up to the actor, the lock file's identity, the contender's answer where
+    the platform has one, the holder where Linux can name it, and the actor's
+    liveness again. The two liveness reads bracket the rest, so a transition
+    during the checkpoint reads as one, never as either state. *actor* is the
+    handle the row identified it by, with its pid and start; *lock* the lock
+    file the row identified before the quit, or None to take it now. Its
+    interval is on both clocks, the monotonic one being the one the verdict
+    measures freshness on.
+    """
+    point: dict[str, Any] = {
+        "label": label,
+        "began": time.time(),
+        "began_ns": time.monotonic_ns(),
+    }
+    handle = actor[0] if actor is not None else None
+    life = (actor[1], actor[2]) if actor is not None else None
+    point["lifetime"] = list(life) if life is not None else None
+    alive_before = is_alive(handle)
+    census = profile_census(
+        account,
+        browser_exe=browser_exe,
+        browser_dir=browser_dir,
+        process_iter=process_iter,
+    )
+    point["census"] = {
+        "entries": [census_entry(process) for process in census.processes],
+        "unresolved": list(census.unresolved),
+    }
+    roots = host_comparison.census_roots(point["census"], account.browser_key) or []
+    point["lineages"] = [
+        {
+            "pid": pid,
+            "start": start,
+            **lineage(pid, start, stop=life, open_process=open_process),
+        }
+        for pid, start in roots
+    ]
+    now = lock_identity(lock_path)
+    identity = lock if lock is not None else now
+    contender, association = host_comparison.capabilities(platform)
+    found: dict[str, Any] = {"now": list(now) if now is not None else None}
+    if contender:
+        found["answer"] = lease_probe.run_probe(str(lock_path))
+    if association and life is not None:
+        found["association"] = holder_association(
+            identity, life, open_process=open_process
+        )
+    point["lock"] = found
+    point["actor_alive"] = [alive_before, is_alive(handle)]
+    point["ended"] = time.time()
+    point["ended_ns"] = time.monotonic_ns()
+    return point
+
+
 def compare_repeat(first: RowVector, second: RowVector) -> list[str]:
     """K0: every field of two runs of the same experiment must agree."""
     one, two = asdict(first), asdict(second)
@@ -3629,6 +3862,8 @@ class Observations:
     o2: O2Result | None = None
     #: H-R6: what the harness killed, and the guardian it had.
     killed: dict[str, Any] | None = None
+    #: The idle timeout the row's actors ran with.
+    idle_timeout: float = IDLE_TIMEOUT_SECONDS
 
 
 @dataclass
@@ -3656,6 +3891,8 @@ class RowResult:
     #: H-R6: what the harness killed, its guardian and the oracle's state.
     killed: dict[str, Any] | None = None
     o2: O2Result | None = None
+    #: H-R3: the checkpoint record and its verdict (``host_comparison``).
+    comparison: dict[str, Any] | None = None
 
     @property
     def label(self) -> str:
@@ -3733,7 +3970,7 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
         if owner.get("pid") and (owner.get("exit") or {}).get("how") != "exited":
             failures.append(
                 f"the owner did not exit within {_OWNER_EXIT_SLACK_SECONDS}s of "
-                f"its {IDLE_TIMEOUT_SECONDS}s idle timeout"
+                f"its {observed.idle_timeout}s idle timeout"
             )
     else:
         owner_published = (
@@ -4004,10 +4241,31 @@ async def measure_host_quit_row(
     idles out, and that settling and the teardown after it run whole even
     when the row is cancelled, the cancellation raised only once they are
     done. What it established is ``RowResult.unconfirmed``.
+    *row* ``H-R3`` (``host_comparison``) keeps H-R1's actions and takes three
+    checkpoints: from the script before the quit, from the host stub's
+    post-exit hook, and after the actors left by themselves and the profile's
+    browser was waited for passively, before any cleanup. Its record is
+    ``RowResult.comparison``, judged after ``judge_row``; none of the three
+    scenarios above combines with it.
 
     No row starts while anything an earlier row left is unsettled
     (``unconfirmed_close.settlement_problems``).
     """
+    comparing = row == ROW_H_R3
+    if comparing and (
+        kill_actor or job_query_shim is not None or unconfirmed_close is not None
+    ):
+        # Refused before anything is staged or spawned: H-R3 is the plain host
+        # quit, and a kill, a shim or a fault would be another scenario.
+        raise ValueError(
+            f"{ROW_H_R3} combines with no killed actor, job-query shim or "
+            f"unconfirmed close"
+        )
+    # Picked once: the actors' environment, staging included, the owner-exit
+    # wait, the row's judgement and the comparison record all read this one.
+    idle_timeout = (
+        COMPARISON_IDLE_TIMEOUT_SECONDS if comparing else IDLE_TIMEOUT_SECONDS
+    )
     r7 = unconfirmed_close
     # Before anything else, whichever row this is: an earlier row's worker or
     # helper still running could still be asking about a profile, and a
@@ -4061,7 +4319,13 @@ async def measure_host_quit_row(
             stage_frozen_session,
             runtime,
             account.profile,
-            actor_environment(account, proxy.url, daemon=False, browsers=browsers),
+            actor_environment(
+                account,
+                proxy.url,
+                daemon=False,
+                browsers=browsers,
+                idle_timeout=idle_timeout,
+            ),
         )
     else:
         staged = await stage_signed_in_session(
@@ -4093,7 +4357,12 @@ async def measure_host_quit_row(
             )
         chrome_path = browser_exe
     env = actor_environment(
-        account, proxy.url, daemon=daemon, browsers=browsers, chrome_path=chrome_path
+        account,
+        proxy.url,
+        daemon=daemon,
+        browsers=browsers,
+        chrome_path=chrome_path,
+        idle_timeout=idle_timeout,
     )
     #: H-R7: the fault's row directory, fresh for this execution, which only an
     #: overlay's actors are told about.
@@ -4202,6 +4471,26 @@ async def measure_host_quit_row(
     #: that it could not identify, by the pid named and the lifetime first
     #: read there.
     r7_publications: dict[tuple[int | None, float | None], Retained] = {}
+    #: H-R3: the raw record ``host_comparison.r3_problems`` judges, all of it
+    #: fit for the packet; None on every other row.
+    comparison: dict[str, Any] | None = (
+        {
+            "row": ROW_H_R3,
+            "mode": mode,
+            "platform": sys.platform,
+            "browser_key": account.browser_key,
+            "idle_timeout_seconds": idle_timeout,
+            "k2": dict(host_comparison.K2_NOT_APPLICABLE),
+            "actor": None,
+            "lock": None,
+            "checkpoints": [],
+            "observation_problems": [],
+        }
+        if comparing
+        else None
+    )
+    #: H-R3: the actor the checkpoints read, as its handle, pid and start.
+    r3_actor: list[tuple[Any, int, float]] = []
 
     async def kill_the_actor() -> None:
         """Associate the victim, find its guardian, attach the oracle, kill."""
@@ -4543,6 +4832,75 @@ async def measure_host_quit_row(
         r7_window["checkpoints"].append(point)
         emit("harness", "r7.lease", **point)
         return point
+
+    async def take_checkpoint(label: str) -> None:
+        """One H-R3 checkpoint on a thread the row owns, kept as it was read.
+
+        A failure is recorded on the checkpoint and not raised: the host still
+        quits and the row still settles, and the verdict fails the row. A
+        worker that outlives its bound stays owned, so the gate refuses every
+        later checkpoint and the preservation as well.
+        """
+        assert comparison is not None
+        point: dict[str, Any] = {"label": label}
+        try:
+            point = await run_owned(
+                f"checkpoint: {label}",
+                observe_checkpoint,
+                label,
+                account,
+                actor=r3_actor[0] if r3_actor else None,
+                lock_path=lock_path,
+                lock=tuple(comparison["lock"]) if comparison["lock"] else None,
+                browser_exe=browser_exe,
+                browser_dir=browsers,
+                seconds=_CHECKPOINT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 - the checkpoint's own evidence
+            point["error"] = f"{type(exc).__name__}: {exc}"
+        # Appended, never replaced: a first post-exit reading that settlement
+        # later contradicts stays what it was.
+        comparison["checkpoints"].append(point)
+        if label == host_comparison.BEFORE_QUIT:
+            comparison["lock"] = (point.get("lock") or {}).get("now")
+        emit("harness", "host.checkpoint", **point)
+
+    async def r3_script(call: ToolCall) -> None:
+        """Identify the actor the checkpoints read, then read before the quit.
+
+        It calls no tool: a call here would restart the owner's idle clock,
+        which the row's one read is the last thing allowed to do.
+        """
+        assert comparison is not None
+        if daemon:
+            if identified is None:
+                comparison["observation_problems"].append(
+                    "the owner was never identified"
+                )
+            else:
+                r3_actor.append(
+                    (identified.process, identified.pid, identified.create_time)
+                )
+        else:
+            process, created = await run_owned(
+                "associate the server",
+                associate_server,
+                server.get("pid", -1),
+                watcher.observed,
+                seconds=30.0,
+            )
+            if process is None or created is None:
+                comparison["observation_problems"].append(
+                    "the Direct server was never associated"
+                )
+            else:
+                r3_actor.append((process, process.pid, created))
+        if r3_actor:
+            comparison["actor"] = [r3_actor[0][1], r3_actor[0][2]]
+        await take_checkpoint(host_comparison.BEFORE_QUIT)
+
+    async def first_post_exit() -> None:
+        await take_checkpoint(host_comparison.FIRST_POST_EXIT)
 
     def hold_publication(pid: int | None, why: str) -> None:
         """Keep an owner published on the row's root that the row could not
@@ -5057,10 +5415,43 @@ async def measure_host_quit_row(
                 if shim is not None
                 else r7_script
                 if r7 is not None
+                else r3_script
+                if comparing
                 else None
             ),
+            after_exit=first_post_exit if comparing else None,
         )
         result.host = host
+        if comparison is not None:
+            tool = host.tool
+            comparison["call"] = (
+                {
+                    name: tool.get(name)
+                    for name in (
+                        "began",
+                        "ended",
+                        "began_monotonic_ns",
+                        "ended_monotonic_ns",
+                        "is_error",
+                        "read_the_post",
+                    )
+                }
+                if tool is not None
+                else None
+            )
+            comparison["script_error"] = host.script_error
+            comparison["after_exit_error"] = host.after_exit_error
+            comparison["host"] = {
+                "error": host.error,
+                "alive_before_quit": host.alive_before_quit,
+                "stdin_closed": host.stdin_closed,
+                "exited_on_quit": host.exited_on_quit,
+                "exit_code": host.exit_code,
+                "killed_by_harness": host.killed_by_harness,
+                "stderr_closed": host.stderr_closed,
+                "eof_ns": host.eof_monotonic_ns,
+                "exit_seen_ns": host.exit_seen_monotonic_ns,
+            }
         if r7 is not None:
             try:
                 await r7_after_quit()
@@ -5103,7 +5494,7 @@ async def measure_host_quit_row(
             if shim is not None:
                 owner["successor"] = dict(successor)
         if host.tool is not None:
-            emit("host_stub", "tool.result", tool=READ_TOOL, **host.tool)
+            emit("host_stub", "tool.result", **{"tool": READ_TOOL, **host.tool})
         emit(
             "host_stub",
             "process.exit",
@@ -5132,7 +5523,7 @@ async def measure_host_quit_row(
                 exited = await asyncio.to_thread(
                     wait_until_dead,
                     identified.process,
-                    IDLE_TIMEOUT_SECONDS + _OWNER_EXIT_SLACK_SECONDS,
+                    idle_timeout + _OWNER_EXIT_SLACK_SECONDS,
                 )
             except psutil.Error as exc:
                 exit_record["how"] = f"unknown ({type(exc).__name__})"
@@ -5142,6 +5533,14 @@ async def measure_host_quit_row(
                     exit_record["seconds_after_quit"] = round(
                         time.monotonic() - began, 3
                     )
+            if comparison is not None:
+                # Waited for, never caused: the owner's own exit, which
+                # ``settled`` has to follow.
+                comparison["owner_exit"] = {
+                    "how": exit_record["how"],
+                    "seen_ns": time.monotonic_ns(),
+                    "seconds_after_quit": exit_record.get("seconds_after_quit"),
+                }
             log_path = Path(owner.get("log_path") or "")
             if log_path.is_file():
                 lines = log_path.read_text(errors="replace").splitlines()
@@ -5172,6 +5571,12 @@ async def measure_host_quit_row(
         residual = await asyncio.to_thread(
             wait_for_no_browser, account, _BROWSER_GONE_SECONDS
         )
+        if comparison is not None:
+            # After the actors left by themselves and the passive wait above,
+            # and before anything below can intervene. That wait's empty list
+            # counts only the processes it could read; the complete census
+            # this takes is what says the profile is empty.
+            await take_checkpoint(host_comparison.SETTLED)
         actors_ended = time.time()
         after = snapshot(account.profile, expected_digest=staged.li_at_digest)
         result.after = after
@@ -5180,6 +5585,10 @@ async def measure_host_quit_row(
         row_failure = exc
         raise
     finally:
+        if comparison is not None:
+            # From here on the harness acts: a checkpoint after this marker
+            # could be reading its cleanup rather than the product.
+            comparison["cleanup_began_ns"] = time.monotonic_ns()
         if actors_ended is None:
             actors_ended = time.time()
         if r7 is not None and not r7_settling_began:
@@ -5465,6 +5874,10 @@ async def measure_host_quit_row(
     # The census, cleanup and owner checks, before H-R11 adds its own: the
     # continuation's validity carries these, and them once.
     settled_refusals = list(refusals)
+    if comparison is not None:
+        # A checkpoint worker or contender helper not shown finished could
+        # still be asking about the profile: nothing is launched on it.
+        refusals += [f"{ROW_H_R3}: {p}" for p in settlement_problems()]
     if shim is not None:
         # An installer whose end was not observed may still be running on the
         # profile's setup, so no session starts after the row until every one
@@ -5537,8 +5950,16 @@ async def measure_host_quit_row(
             owner_gates=gated,
             o2=o2,
             killed=killed or None,
+            idle_timeout=idle_timeout,
         )
     )
+    if comparison is not None:
+        # Selected by the row, so its record is required: a missing window, a
+        # failed hook or script fails here however healthy the vector is.
+        problems = host_comparison.r3_problems(comparison, daemon=daemon)
+        comparison["problems"] = problems
+        result.comparison = comparison
+        result.failures += [f"{ROW_H_R3}: {problem}" for problem in problems]
     if shim is not None:
         for fate in fates.fates.values():
             emit("harness", "installer.fate", **fate.as_event_fields())
@@ -5686,6 +6107,7 @@ async def measure_host_quit_row(
                     if result.unconfirmed is not None
                     else None
                 ),
+                "comparison": result.comparison,
             },
             indent=2,
             default=str,
