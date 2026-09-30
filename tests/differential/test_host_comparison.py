@@ -1439,10 +1439,10 @@ def test_a_venv_launcher_and_the_interpreter_it_starts_are_one_launch():
     # On Windows a venv's python.exe starts the interpreter with the same
     # command line: two owner processes, one launch.
     record = _r2_record(daemon=True, platform="win32")
-    launcher = [4000, 99.0, 1, "o", None, 99.01]
-    record["owner_processes"] = [launcher, [*OWNER, 4000, "o", None, 100.01]]
+    launcher = [4000, 99.0, 1, "o", None, 99.01, 150.0]
+    record["owner_processes"] = [launcher, [*OWNER, 4000, "o", None, 100.01, 150.0]]
     assert r2_problems(record, daemon=True) == []
-    record["owner_processes"] = [launcher, [*OWNER, 1, "o", None, 100.01]]
+    record["owner_processes"] = [launcher, [*OWNER, 1, "o", None, 100.01, 150.0]]
     assert any("the row started owners" in p for p in r2_problems(record, daemon=True))
 
 
@@ -1452,13 +1452,13 @@ def test_a_windows_release_gate_and_its_launcher_are_one_start_attempt():
     # 1776. One attempt, not an extra one.
     record = _r2_record(daemon=True, platform="win32")
     record["gate_processes"] = [
-        [1776, 90.0, 3100, "g", None, 90.01],
-        [1104, 90.0, 1776, "g", None, 90.01],
+        [1776, 90.0, 3100, "g", None, 90.01, 150.0],
+        [1104, 90.0, 1776, "g", None, 90.01, 150.0],
     ]
     assert r2_problems(record, daemon=True) == []
     record["gate_processes"] = [
-        [1776, 90.0, 3100, "g", None, 90.01],
-        [1104, 90.0, 3100, "g", None, 90.01],
+        [1776, 90.0, 3100, "g", None, 90.01, 150.0],
+        [1104, 90.0, 3100, "g", None, 90.01, 150.0],
     ]
     assert any(
         "an extra owner start was attempted" in p
@@ -2435,11 +2435,20 @@ _ONE_START = [
 ]
 
 
-def _judged_launches(events: list[dict], platform: str = "win32") -> list[str]:
+#: A watcher's ``sample_log`` of 10 ms samples every 50 ms from 85 s to 180 s.
+_SAMPLES = [[end / 100 - 0.01, end / 100] for end in range(8500, 18000, 5)]
+
+
+def _judged_launches(
+    events: list[dict], platform: str = "win32", samples: list | None = None
+) -> list[str]:
     """The owner and gate problems of a valid daemon H-R2 record, Windows by
-    default, whose launch lifetimes the real producer read from *events*."""
+    default, whose launch lifetimes the real producer read from *events* and
+    the watcher's *samples*."""
     owners, gates = harness.launch_lifetimes(
-        events, [harness.gate_script(harness.REPO_ROOT)]
+        events,
+        [harness.gate_script(harness.REPO_ROOT)],
+        _SAMPLES if samples is None else samples,
     )
     record = _r2_record(daemon=True, platform=platform)
     record["owner_processes"], record["gate_processes"] = owners, gates
@@ -2516,6 +2525,32 @@ def test_one_measured_windows_start_counts_once():
 def test_a_distinct_start_is_never_collapsed(events, reported):
     problems = _judged_launches(events)
     assert any(reported in p for p in problems), problems
+
+
+def test_a_launcher_read_early_in_the_childs_own_sample_ties_nothing():
+    # One sample reads the old launcher at its start (110.01), the launcher
+    # leaves, its number goes to a frontend that starts an owner with the same
+    # command, and the same sample reads that owner and ends at 110.06. Both
+    # carry 110.06; only the next sample (110.10) finds the launcher gone. No
+    # sample begun after 110.06 found the launcher, so nothing ties the two.
+    samples = [
+        *[entry for entry in _SAMPLES if entry[1] < 110.0],
+        [110.01, 110.06],
+        [110.10, 110.11],
+        *[entry for entry in _SAMPLES if entry[0] > 110.2],
+    ]
+    events = [
+        *_ONE_START,
+        _exited(1312, 99.99, 110.11),
+        {**_started(1312, 2836, 110.02, ["C:\\frontend.exe"]), "t": 110.11},
+        {**_started(4400, 1312, 110.03, _owner_command("job-1")), "t": 110.06},
+    ]
+    problems = _judged_launches(events, samples=samples)
+    assert any("the row started owners" in p for p in problems), problems
+
+
+def test_launch_lifetimes_without_the_sample_log_do_not_collapse():
+    assert _judged_launches(list(_ONE_START), samples=[])
 
 
 def test_an_equal_command_pair_collapses_only_on_windows():

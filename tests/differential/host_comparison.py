@@ -1003,17 +1003,21 @@ def same_invocation(parent: Sequence[Any], child: Sequence[Any]) -> bool:
     that starts the interpreter with the same command line, gate nonce and
     target included, and waits for it. So both carry the same command digest,
     and the child's parent is that lifetime: its pid, begun no later than the
-    child, and seen alive in the very sample that first saw the child. A
-    sampled exit is only when the watcher noticed the lifetime gone, so an
-    exit in that same sample could hide a pid reused in between, and does not
-    tie them. A matching number alone, a different command or a lifetime
-    without its digest or its sample times is its own launch. Each is
-    ``[pid, start, ppid, command digest, exit sample or None, first sample]``.
+    child, and still found by a sample that started after the one that first
+    saw the child ended. Only such a read shows that pid was the parent after
+    the child's birth; an exit or a first sample is stamped at a sample's end
+    and says nothing of when within it each process was read, so a pid
+    reused in between is not excluded by either. A matching number alone, a
+    different command or a lifetime without its digest or its sample times is
+    its own launch. Each is ``[pid, start, ppid, command digest, exit sample,
+    first sample, last read]`` (``harness.launch_lifetimes``).
     """
-    if len(parent) < 6 or len(child) < 6:
+    if len(parent) < 7 or len(child) < 7:
         return False
-    first = child[5]
-    if not isinstance(first, (int, float)) or isinstance(first, bool):
+    first, read = child[5], parent[6]
+    if not all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) for v in (first, read)
+    ):
         return False
     digest = child[3]
     if not isinstance(digest, str) or not digest or parent[3] != digest:
@@ -1023,12 +1027,7 @@ def same_invocation(parent: Sequence[Any], child: Sequence[Any]) -> bool:
     began, child_began = float(parent[1]), float(child[1])
     if began > child_began + _START_TOLERANCE_SECONDS:
         return False
-    ended = parent[4]
-    if ended is None:
-        return True
-    if not isinstance(ended, (int, float)) or isinstance(ended, bool):
-        return False
-    return float(ended) > float(first)
+    return float(read) > float(first)
 
 
 def owner_launches(processes: Sequence[Any], *, windows: bool) -> list[list]:

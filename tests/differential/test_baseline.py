@@ -693,7 +693,9 @@ def test_a_venv_launcher_and_its_interpreter_are_one_owner_start_attempt():
         },
         {**_gate_event(gate, in_row=False), "pid": 9, "ppid": 1, "t": 4.01},
     ]
-    owners, gates = harness.launch_lifetimes(events, scripts)
+    # Sampled every 50 ms from 4 s to 10 s, each sample 10 ms long.
+    samples = [[end / 100 - 0.01, end / 100] for end in range(400, 1000, 5)]
+    owners, gates = harness.launch_lifetimes(events, scripts, samples)
     assert host_comparison.owner_launches(gates, windows=True) == [[1776, 4.0]]
     assert host_comparison.owner_launches(owners, windows=True) == [[77, 5.0]]
     # Only there: elsewhere the same pair is two gate processes.
@@ -702,7 +704,7 @@ def test_a_venv_launcher_and_its_interpreter_are_one_owner_start_attempt():
     events.append(
         {**_gate_event(gate), "pid": 2000, "start_identity": 9.0, "ppid": 1, "t": 9.01}
     )
-    _, gates = harness.launch_lifetimes(events, scripts)
+    _, gates = harness.launch_lifetimes(events, scripts, samples)
     assert len(host_comparison.owner_launches(gates, windows=True)) == 2
 
 

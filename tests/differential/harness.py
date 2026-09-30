@@ -2151,18 +2151,41 @@ def owner_gates(observed: Iterable[dict[str, Any]], gates: Sequence[Path]) -> li
 
 
 def launch_lifetimes(
-    observed: Iterable[dict[str, Any]], gates: Sequence[Path]
+    observed: Iterable[dict[str, Any]],
+    gates: Sequence[Path],
+    samples: Sequence[Sequence[Any]] | None = None,
 ) -> tuple[list[list[Any]], list[list[Any]]]:
     """The owner processes and release gates this row's actors started.
 
-    Each as ``[pid, start, ppid, command digest, exit sample, first sample]``,
-    once per lifetime, from the watcher's records: what ``host_comparison``'s
-    ``same_invocation`` needs to count a Windows venv launcher and the
-    interpreter it starts with the same command as one launch, and nothing
-    else. The digest is of the whole command line, gate nonce and target
-    included; the exit sample is when the watcher saw that lifetime gone, or
-    None, and the first sample when it first saw it.
+    Each as ``[pid, start, ppid, command digest, exit sample, first sample,
+    last read]``, once per lifetime, from the watcher's records: what
+    ``host_comparison``'s ``same_invocation`` needs to count a Windows venv
+    launcher and the interpreter it starts with the same command as one
+    launch, and nothing else. The digest is of the whole command line, gate
+    nonce and target included; the exit sample is when the watcher saw that
+    lifetime gone, or None, and the first sample when it first saw it. A
+    sample's events all carry its end, while its processes were read one by
+    one from its start (*samples*, the watcher's ``sample_log``), so the last
+    read is the start of the last sample that still found the lifetime: the
+    latest moment it is known alive. None without the log.
     """
+    begins = sorted(
+        (float(entry[1]), float(entry[0]))
+        for entry in samples or []
+        if len(entry) >= 2
+        and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in entry[:2]
+        )
+    )
+
+    def last_read(exit_sample: float | None) -> float | None:
+        found = [
+            began
+            for ended, began in begins
+            if exit_sample is None or ended < exit_sample
+        ]
+        return found[-1] if found else None
+
     records = list(observed)
     exits: dict[tuple[int, float], float] = {}
     for record in records:
@@ -2205,7 +2228,15 @@ def launch_lifetimes(
                 None,
             )
             kept.append(
-                [pid, start, record.get("ppid"), digest, ended, record.get("t")]
+                [
+                    pid,
+                    start,
+                    record.get("ppid"),
+                    digest,
+                    ended,
+                    record.get("t"),
+                    last_read(ended),
+                ]
             )
     return owners, started
 
@@ -6346,6 +6377,7 @@ async def measure_host_quit_row(
             owners, gates = launch_lifetimes(
                 observed_events,
                 [gate_script(runtime.checkout), gate_script(REPO_ROOT)],
+                (result.watcher or {}).get("sample_log"),
             )
             comparison["owner_processes"] = owners
             comparison["gate_processes"] = gates
