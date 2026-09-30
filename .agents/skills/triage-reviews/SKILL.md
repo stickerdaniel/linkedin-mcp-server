@@ -40,7 +40,7 @@ For EVERY finding, verify against real code before accepting or rejecting:
 ## Phase 3: Fix & Ship
 
 1. Fix all **Valid** findings
-2. Run the project's lint/test commands (check AGENTS.md for exact commands)
+2. Run the project's lint/test commands
    - If lint/tests fail, fix the failures before committing
    - If a failure cannot be fixed automatically, skip that fix and report it as **Valid (unfixed)** in the Phase 4 table
 3. `git add` only changed files, `git commit` with message:
