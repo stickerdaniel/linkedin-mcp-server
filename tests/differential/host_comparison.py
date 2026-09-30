@@ -308,6 +308,18 @@ def read_checkpoint(
     return reading, roots
 
 
+def free_problems(lock: Any, original: Any, platform: str, *, label: str) -> list[str]:
+    """Why a lock reading taken at a boundary is not free on the lock the
+    row identified; nothing where the platform has no contender."""
+    state = _lock_state({"lock": lock}, original, capabilities(platform)[0])
+    if state in (FREE, UNOBSERVED):
+        return []
+    detail = _mapping(lock).get("error") or _mapping(_mapping(lock).get("answer")).get(
+        "reason"
+    )
+    return [f"{label}: the lock was {state}, not free ({detail})"]
+
+
 def window_problems(
     point: Mapping[str, Any],
     call: Mapping[str, Any] | None,
@@ -413,12 +425,28 @@ def _record_problems(
 
 
 def host_problems(host: Any, *, prefix: str = "") -> list[str]:
-    """Why *host* was not one normal quit: started, answered, closed on EOF,
-    exited by itself with status 0, and both times recorded in order."""
+    """Why *host* was not one normal quit: started, answered, alive when the
+    host quit, its stdin closed, then exited by itself with status 0, and
+    both times recorded in order.
+
+    An exit with status 0 and ordered times does not show that EOF reached a
+    live server: one that ended before the quit, or whose stdin could not be
+    closed, can record both. Each flag has to be recorded as True.
+    """
     host = _mapping(host)
     problems = []
     if host.get("error"):
         problems.append(f"{prefix}the host session failed: {host['error']}")
+    if host.get("alive_before_quit") is not True:
+        problems.append(
+            f"{prefix}the server was not shown alive when the host quit: "
+            f"{host.get('alive_before_quit')!r}"
+        )
+    if host.get("stdin_closed") is not True:
+        problems.append(
+            f"{prefix}the server's stdin was not shown closed: "
+            f"{host.get('stdin_closed')!r} ({host.get('stdin_close_error')})"
+        )
     if (
         host.get("exited_on_quit") is not True
         or host.get("exit_code") != 0
@@ -465,6 +493,13 @@ def _read_all(
         readings[str(label)] = read_checkpoint(
             point, key=key, actor=actor, lock=lock, platform=platform
         )
+        # Whatever the mode allows the profile to hold at this checkpoint, a
+        # census that could not be read whole is no observation of it.
+        if readings[str(label)][0].census == "incomplete":
+            problems.append(
+                f"{label}: the census is incomplete or malformed, so the "
+                f"observation is incomplete"
+            )
     return problems, found, readings
 
 
@@ -925,7 +960,9 @@ def _owner_problems(
             )
         if seen.get("instance_id") != instance:
             problems.append(f"{label}: the owner's instance changed")
-    if not (late_b or late_a2):
+    if not isinstance(record.get("owner_processes"), list):
+        problems.append("the row's owner processes were not recorded")
+    elif not (late_b or late_a2):
         launches = owner_launches(record.get("owner_processes") or [])
         if len(launches) != 1 or not _of_launch(
             actor, launches[0], record.get("owner_processes") or []
@@ -943,28 +980,77 @@ def _owner_problems(
     return problems
 
 
+def _launch_rows(processes: Any) -> list[Sequence[Any]]:
+    if not isinstance(processes, list):
+        return []
+    return [
+        p
+        for p in processes
+        if isinstance(p, Sequence)
+        and not isinstance(p, str)
+        and len(p) >= 3
+        and _lifetime(p[:2]) is not None
+    ]
+
+
+def same_invocation(parent: Sequence[Any], child: Sequence[Any]) -> bool:
+    """Whether *child* is the interpreter *parent* started for one invocation.
+
+    The one construction measured (run 36677572983 and every Windows K3/K0
+    of run 36679881422): a venv's ``python.exe`` is a launcher that starts
+    the interpreter with the same command line, gate nonce and target
+    included. So both carry the same command digest, and the child's parent
+    is that lifetime: its pid, begun no later than the child, and not
+    recorded gone before the child began. A matching number alone, a
+    different command or a lifetime without its digest is its own launch.
+    Each is ``[pid, start, ppid, command digest, recorded exit or None]``.
+    """
+    if len(parent) < 5 or len(child) < 5:
+        return False
+    digest = child[3]
+    if not isinstance(digest, str) or not digest or parent[3] != digest:
+        return False
+    if type(child[2]) is not int or child[2] != parent[0]:
+        return False
+    began, child_began = float(parent[1]), float(child[1])
+    if began > child_began + _START_TOLERANCE_SECONDS:
+        return False
+    ended = parent[4]
+    if ended is None:
+        return True
+    if not isinstance(ended, (int, float)) or isinstance(ended, bool):
+        return False
+    return float(ended) + _START_TOLERANCE_SECONDS >= child_began
+
+
 def owner_launches(processes: Sequence[Any]) -> list[list]:
     """Each launch among *processes*, as ``[pid, start]``.
 
-    *processes* are ``[pid, start, ppid]`` of every row process that ran one
-    command: the owner module, or its release gate. One whose parent is
-    another of them is the same launch: a Windows venv's ``python.exe`` is a
-    launcher that starts the interpreter with the same command line (measured
-    for a gate, run 36677572983: pid 1104 the child of 1776, one nonce).
+    *processes* are the lifetimes of every row process that ran one command,
+    the owner module or its release gate (``harness.launch_lifetimes``). One
+    that ``same_invocation`` ties to another of them is that launch, and
+    nothing else is collapsed.
     """
-    rows = [p for p in processes if _lifetime(p[:2]) is not None and len(p) == 3]
-    pids = {p[0] for p in rows}
-    return [list(p[:2]) for p in rows if p[2] not in pids]
+    rows = _launch_rows(processes)
+    return [
+        list(child[:2])
+        for child in rows
+        if not any(
+            parent is not child and same_invocation(parent, child) for parent in rows
+        )
+    ]
 
 
 def _of_launch(actor: Any, launch: Sequence[Any], processes: Sequence[Any]) -> bool:
-    """Whether *actor* is *launch*, or the interpreter it started."""
+    """Whether *actor* is *launch*, or the interpreter it started for it."""
     if same_lifetime(actor, launch):
         return True
+    rows = _launch_rows(processes)
+    parents = [p for p in rows if same_lifetime(p[:2], launch)]
     return any(
-        same_lifetime(p[:2], actor) and p[2] == launch[0]
-        for p in processes
-        if len(p) == 3
+        same_lifetime(child[:2], actor) and same_invocation(parent, child)
+        for child in rows
+        for parent in parents
     )
 
 

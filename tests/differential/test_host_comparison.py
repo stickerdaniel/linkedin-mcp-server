@@ -67,7 +67,7 @@ from differential.test_preservation_gate import (  # noqa: F401 - fixtures
     profile,
     row,
 )
-from differential.unconfirmed_close import R7Setup
+from differential.unconfirmed_close import R7Setup, UnsettledWorker
 from linkedin_mcp_server.config.loaders import EnvironmentKeys
 
 #: Taken before any fixture replaces them.
@@ -933,6 +933,8 @@ class _Scene:
         self.hold: dict[str, threading.Event] = {}
         self.exits = True
         self.timed = True
+        #: How host A's quit is recorded, when not the normal one.
+        self.flags: dict[str, Any] = {}
         self.preservation = AsyncMock(return_value=harness.PostQuit(valid=True))
         monkeypatch.setattr(harness, "observe_preservation", self.preservation)
         monkeypatch.setattr(harness, "observe_checkpoint", self.observe)
@@ -975,7 +977,7 @@ class _Scene:
                     await after_exit()
                 except Exception as exc:  # noqa: BLE001 - as the real transport keeps it
                     session.after_exit_error = f"{type(exc).__name__}: {exc}"
-            return session
+            return dataclasses.replace(session, **scene.flags)
 
         monkeypatch.setattr(harness, "run_host_session", host)
         if not daemon:
@@ -1437,9 +1439,9 @@ def test_a_venv_launcher_and_the_interpreter_it_starts_are_one_launch():
     # On Windows a venv's python.exe starts the interpreter with the same
     # command line: two owner processes, one launch.
     record = _r2_record(daemon=True, platform="win32")
-    record["owner_processes"] = [[4000, 99.0, 1], [*OWNER, 4000]]
+    record["owner_processes"] = [[4000, 99.0, 1, "o", None], [*OWNER, 4000, "o", None]]
     assert r2_problems(record, daemon=True) == []
-    record["owner_processes"] = [[4000, 99.0, 1], [*OWNER, 1]]
+    record["owner_processes"] = [[4000, 99.0, 1, "o", None], [*OWNER, 1, "o", None]]
     assert any("the row started owners" in p for p in r2_problems(record, daemon=True))
 
 
@@ -1448,9 +1450,15 @@ def test_a_windows_release_gate_and_its_launcher_are_one_start_attempt():
     # gate's interpreter with the same command line and nonce, pid 1104 under
     # 1776. One attempt, not an extra one.
     record = _r2_record(daemon=True, platform="win32")
-    record["gate_processes"] = [[1776, 90.0, 3100], [1104, 90.0, 1776]]
+    record["gate_processes"] = [
+        [1776, 90.0, 3100, "g", None],
+        [1104, 90.0, 1776, "g", None],
+    ]
     assert r2_problems(record, daemon=True) == []
-    record["gate_processes"] = [[1776, 90.0, 3100], [1104, 90.0, 3100]]
+    record["gate_processes"] = [
+        [1776, 90.0, 3100, "g", None],
+        [1104, 90.0, 3100, "g", None],
+    ]
     assert any(
         "an extra owner start was attempted" in p
         for p in r2_problems(record, daemon=True)
@@ -1951,7 +1959,24 @@ class _SecondHostScene(_Scene):
         self.readings[AFTER_B_QUIT] = lambda: self.reading(
             alive=True, occupied=daemon, lock="held" if daemon else "free"
         )
-        self.b: dict[str, Any] = {"exit_code": 0, "error": None}
+        self.b: dict[str, Any] = {
+            "exit_code": 0,
+            "error": None,
+            "alive_before_quit": True,
+            "stdin_closed": True,
+            "stdin_close_error": None,
+            # The stub's bounded cleanup returned with B's process unreaped.
+            "pending": False,
+        }
+        #: Host B's server as the transport hands it out: settled once it
+        #: has a return code.
+        self.b_process = SimpleNamespace(pid=4343, returncode=None)
+        #: Held open while set, so a cancellation lands while B runs.
+        self.b_active: asyncio.Event | None = None
+        self.b_running = asyncio.Event()
+        #: What the census after B reads, when set.
+        self.census_after_b: Callable[[], Any] | None = None
+        self.lock_before_a2 = "free"
         self.a2_fails = False
         self.a2_called = 0
         self.launched: list[dict] = []
@@ -1960,6 +1985,33 @@ class _SecondHostScene(_Scene):
         inner = harness.run_host_session
         scene = self
         real_row = gate.measure_host_quit_row
+        real_census = harness.profile_census
+
+        def census(*args, **kwargs):
+            # Only while host B's settlement is read: from B's start to A's
+            # own exit, never the staging before or the row's end after.
+            if (
+                scene.census_after_b is not None
+                and scene.b_running.is_set()
+                and FIRST_POST_EXIT not in scene.asked
+            ):
+                return scene.census_after_b()
+            return real_census(*args, **kwargs)
+
+        monkeypatch.setattr(harness, "profile_census", census)
+        monkeypatch.setattr(
+            harness,
+            "read_lock",
+            lambda path: {
+                "now": list(LOCK),
+                "answer": {
+                    "state": scene.lock_before_a2,
+                    "reason": "",
+                    "device": LOCK[0],
+                    "inode": LOCK[1],
+                },
+            },
+        )
 
         async def capture(**kwargs):
             scene.origin = kwargs["egress"][0]
@@ -2005,10 +2057,18 @@ class _SecondHostScene(_Scene):
             if after_call is None:
                 # Host B: its own session, from its own directory.
                 assert Path(cwd).name == "host-b"
+                on_process = kwargs.get("on_process")
+                if on_process is not None:
+                    on_process(scene.b_process)
                 kwargs["started"](4343)
                 session = harness.HostSession(pid=4343)
+                scene.b_running.set()
+                if scene.b_active is not None:
+                    await scene.b_active.wait()
                 if scene.b["error"] is not None:
+                    # The stub's cleanup killed and reaped it.
                     session.error = scene.b["error"]
+                    scene.b_process.returncode = -9
                     return session
                 lines = [harness._FORWARDING_LINE] if daemon else []
                 for line in lines:
@@ -2053,7 +2113,20 @@ class _SecondHostScene(_Scene):
             session.exited_on_quit = True
             session.exit_code = scene.b["exit_code"] if after_call is None else 0
             session.exit_seen_monotonic_ns = time.monotonic_ns()
-            if after_call is not None:
+            if after_call is None:
+                session.alive_before_quit = scene.b["alive_before_quit"]
+                session.stdin_closed = scene.b["stdin_closed"]
+                session.stdin_close_error = scene.b["stdin_close_error"]
+                if scene.b["pending"]:
+                    # Not seen to exit: the stub killed it, and its bounded
+                    # wait ended with no return code. No hook runs.
+                    session.exited_on_quit = False
+                    session.killed_by_harness = True
+                    session.exit_code = None
+                    session.exit_seen_monotonic_ns = None
+                    return session
+                scene.b_process.returncode = session.exit_code
+            else:
                 scene.handles[4242].gone = True
             if after_exit is not None:
                 try:
@@ -2112,11 +2185,12 @@ async def test_a_healthy_second_host_row_passes_and_publishes_one_record(second)
     assert "B" in hosts if second.daemon else hosts <= {"A", "B"}
 
 
-async def test_a_failed_host_b_fails_the_row_and_a_still_reads(second):
+async def test_a_failed_host_b_fails_the_row_and_a2_is_not_taken(second):
     second.b["error"] = "McpError: initialize timed out"
-    result, _ = await second.run()
+    result, preserved = await second.run()
     assert any("host B: the host session failed" in f for f in result.failures)
     assert any("the calls were" in f for f in result.failures)
+    assert second.a2_called == 0 and preserved == 0
 
 
 async def test_a_nonzero_host_b_exit_fails_the_row(second):
@@ -2229,3 +2303,427 @@ def test_the_origin_dates_each_request_on_the_harness_monotonic_clock():
     assert request.monotonic_ns is not None
     assert before <= request.monotonic_ns <= after
     assert request.t > 0 and request.session_valid is True
+
+
+# --- Repairs after review e1fo -------------------------------------------------
+#
+# E1FO-01: a normal quit needs the server alive when the host quit and its
+# stdin closed. E1FO-02: only the measured launcher construction is one
+# launch. E1FO-03: host B's settlement gates A2 and the preservation, and an
+# unsettled B stays owned. E1FO-04: every required checkpoint needs a complete
+# census.
+
+
+_BAD_QUITS = [
+    pytest.param({"alive_before_quit": False}, "not shown alive", id="gone-before-eof"),
+    pytest.param(
+        {"stdin_closed": False, "stdin_close_error": "BrokenPipeError: planted"},
+        "stdin was not shown closed",
+        id="stdin-close-failed",
+    ),
+    pytest.param({"alive_before_quit": None}, "not shown alive", id="alive-unread"),
+    pytest.param(
+        {"stdin_closed": None}, "stdin was not shown closed", id="stdin-unread"
+    ),
+]
+
+
+@pytest.mark.parametrize(("flags", "reported"), _BAD_QUITS)
+def test_a_quit_that_did_not_reach_a_live_server_fails_the_saved_records(
+    flags, reported
+):
+    # Host B in H-R2, host A in both rows, read as the packet is read.
+    for record, where in (
+        (_r2_record(daemon=True), "host_b"),
+        (_r2_record(daemon=False), "host"),
+        (_record(daemon=True), "host"),
+    ):
+        daemon = record["mode"] == "daemon"
+        record[where].update(flags)
+        saved = json.loads(json.dumps(record))
+        assert any(reported in p for p in problems_for(saved, daemon=daemon))
+        reference = (
+            _r2_record(daemon=daemon)
+            if record["row"] == ROW_H_R2
+            else _record(daemon=daemon)
+        )
+        assert semantic_differences(reference, saved, daemon=daemon)
+    missing = _r2_record(daemon=True)
+    del missing["host_b"]["stdin_closed"]
+    assert any(
+        "host B: the server's stdin was not shown closed" in p
+        for p in problems_for(missing, daemon=True)
+    )
+
+
+@pytest.mark.parametrize(("flags", "reported"), _BAD_QUITS)
+async def test_host_b_without_a_normal_quit_fails_the_row_and_takes_no_a2(
+    second, flags, reported
+):
+    second.b.update(flags)
+    result, preserved = await second.run()
+    assert any("host B: " in f and reported in f for f in result.failures)
+    assert any("A2 was not taken" in f for f in result.failures), result.failures
+    assert second.a2_called == 0 and preserved == 0
+
+
+@pytest.mark.parametrize(("flags", "reported"), _BAD_QUITS)
+async def test_host_a_without_a_normal_quit_fails_the_comparison(
+    scene, flags, reported
+):
+    scene.flags = flags
+    result, _ = await scene.run()
+    assert any(f.startswith(ROW_H_R3) and reported in f for f in result.failures), (
+        result.failures
+    )
+
+
+def _gate_command(nonce: str) -> list[str]:
+    return [
+        "C:\\venv\\Scripts\\python.exe",
+        "-I",
+        "-S",
+        "-u",
+        str(harness.gate_script(harness.REPO_ROOT)),
+        nonce * 64,
+        "--",
+        "C:\\venv\\Scripts\\python.exe",
+        "-m",
+        "linkedin_mcp_server.daemon_owner",
+    ]
+
+
+def _owner_command(job: str) -> list[str]:
+    return [
+        "C:\\venv\\Scripts\\python.exe",
+        "-P",
+        "-m",
+        "linkedin_mcp_server.daemon_owner",
+        "--job-name",
+        job,
+    ]
+
+
+def _started(pid: int, ppid: int, start: float, cmdline: list[str]) -> dict:
+    return {
+        "kind": "process.start",
+        "in_row": True,
+        "pid": pid,
+        "ppid": ppid,
+        "start_identity": start,
+        "cmdline": cmdline,
+        "t": start + 0.01,
+    }
+
+
+def _exited(pid: int, start: float, t: float) -> dict:
+    return {"kind": "process.exit", "pid": pid, "start_identity": start, "t": t}
+
+
+#: What the watcher recorded of one Windows owner start, as in run
+#: 36679881422's K3: a venv launcher and the interpreter it started with the
+#: same command, for the gate and for the owner, each launcher outliving its
+#: child's start.
+_ONE_START = [
+    _started(2172, 2836, 90.0, _gate_command("a")),
+    _started(8316, 2172, 90.005, _gate_command("a")),
+    _started(1312, 8316, 99.99, _owner_command("job-1")),
+    _started(OWNER[0], 1312, OWNER[1], _owner_command("job-1")),
+    _exited(2172, 90.0, 170.0),
+    _exited(8316, 90.0, 170.0),
+]
+
+
+def _judged_launches(events: list[dict]) -> list[str]:
+    """The owner and gate problems of a valid Windows daemon H-R2 record
+    whose launch lifetimes the real producer read from *events*."""
+    owners, gates = harness.launch_lifetimes(
+        events, [harness.gate_script(harness.REPO_ROOT)]
+    )
+    record = _r2_record(daemon=True, platform="win32")
+    record["owner_processes"], record["gate_processes"] = owners, gates
+    return [
+        p
+        for p in problems_for(json.loads(json.dumps(record)), daemon=True)
+        if "owner" in p or "gate" in p
+    ]
+
+
+def test_one_measured_windows_start_counts_once():
+    assert _judged_launches(list(_ONE_START)) == []
+
+
+@pytest.mark.parametrize(
+    ("events", "reported"),
+    [
+        pytest.param(
+            # A second gate, nested under the first, with its own nonce.
+            [*_ONE_START, _started(8400, 8316, 95.0, _gate_command("b"))],
+            "an extra owner start was attempted",
+            id="nested-gate-another-nonce",
+        ),
+        pytest.param(
+            # The same command again, under the launcher's number after that
+            # launcher was seen gone: a later process that reused it.
+            [
+                *_ONE_START[:4],
+                _exited(2172, 90.0, 100.0),
+                _exited(8316, 90.0, 170.0),
+                _started(9000, 2172, 150.0, _gate_command("a")),
+            ],
+            "an extra owner start was attempted",
+            id="historical-parent-number",
+        ),
+        pytest.param(
+            # The same command under the launcher's number, begun before it.
+            [*_ONE_START, _started(9100, 2172, 85.0, _gate_command("a"))],
+            "an extra owner start was attempted",
+            id="parent-younger-than-child",
+        ),
+        pytest.param(
+            # A second, independent start: its own launcher and interpreter.
+            [
+                *_ONE_START,
+                _started(7000, 2836, 130.0, _gate_command("e")),
+                _started(7001, 7000, 130.005, _gate_command("e")),
+            ],
+            "an extra owner start was attempted",
+            id="independent-pair",
+        ),
+        pytest.param(
+            # An owner under the first owner, with another job: its own start.
+            [*_ONE_START, _started(4400, OWNER[0], 140.0, _owner_command("job-2"))],
+            "the row started owners",
+            id="nested-owner-another-command",
+        ),
+    ],
+)
+def test_a_distinct_start_is_never_collapsed(events, reported):
+    problems = _judged_launches(events)
+    assert any(reported in p for p in problems), problems
+
+
+@pytest.mark.parametrize("field", ["owner_processes", "gate_processes"])
+def test_launch_lifetimes_without_their_invocation_do_not_collapse(field):
+    record = _r2_record(daemon=True, platform="win32")
+    owners, gates = harness.launch_lifetimes(
+        list(_ONE_START), [harness.gate_script(harness.REPO_ROOT)]
+    )
+    record["owner_processes"], record["gate_processes"] = owners, gates
+    # The earlier record shape: no command digest, no recorded exit.
+    record[field] = [entry[:3] for entry in record[field]]
+    assert problems_for(record, daemon=True)
+    del record[field]
+    assert any("not recorded" in p for p in problems_for(record, daemon=True))
+
+
+def _incomplete(point: dict) -> None:
+    point["census"]["unresolved"] = [777]
+
+
+@pytest.mark.parametrize(
+    ("build", "label", "change"),
+    [
+        pytest.param(
+            lambda: _record(daemon=False),
+            FIRST_POST_EXIT,
+            _incomplete,
+            id="r3-direct-first",
+        ),
+        pytest.param(
+            lambda: _record(daemon=True),
+            FIRST_POST_EXIT,
+            _incomplete,
+            id="r3-daemon-first",
+        ),
+        pytest.param(
+            lambda: _record(daemon=False), SETTLED, _incomplete, id="r3-direct-settled"
+        ),
+        pytest.param(
+            lambda: _r2_record(daemon=False),
+            AFTER_B_QUIT,
+            _incomplete,
+            id="r2-direct-after-b",
+        ),
+        pytest.param(
+            lambda: _r2_record(daemon=False),
+            FIRST_POST_EXIT,
+            _incomplete,
+            id="r2-direct-first",
+        ),
+        pytest.param(
+            lambda: _r2_record(daemon=True),
+            AFTER_A1,
+            _incomplete,
+            id="r2-daemon-after-a1",
+        ),
+        pytest.param(
+            lambda: _r2_record(daemon=False),
+            AFTER_B_QUIT,
+            lambda point: point.__setitem__("census", "unreadable"),
+            id="r2-malformed",
+        ),
+        pytest.param(
+            lambda: _record(daemon=False),
+            FIRST_POST_EXIT,
+            lambda point: point.pop("census"),
+            id="r3-missing",
+        ),
+    ],
+)
+def test_an_incomplete_census_at_any_required_checkpoint_fails(build, label, change):
+    record = build()
+    daemon = record["mode"] == "daemon"
+    change(_at(record, label))
+    problems = problems_for(record, daemon=daemon)
+    reported = f"{label}: the census is incomplete or malformed"
+    assert any(p.startswith(reported) for p in problems), problems
+    same_row = _r2_record if record["row"] == ROW_H_R2 else _record
+    refusals = (
+        comparison_refusals(same_row(daemon=False), record)
+        if daemon
+        else comparison_refusals(record, same_row(daemon=True))
+    )
+    assert any(reported in r for r in refusals), refusals
+    assert any(
+        reported in d for d in semantic_differences(build(), record, daemon=daemon)
+    )
+
+
+async def test_an_incomplete_direct_first_census_fails_the_row(
+    row,  # noqa: F811 - the imported fixture
+    monkeypatch,
+    tmp_path,
+):
+    scene = _Scene(row, monkeypatch, tmp_path, daemon=False)
+
+    def incomplete():
+        point = scene.reading(alive=False, occupied=False, lock="free")
+        point["census"]["unresolved"] = [777]
+        return point
+
+    scene.readings[FIRST_POST_EXIT] = incomplete
+    result, _ = await scene.run()
+    assert any("the census is incomplete" in f for f in result.failures), (
+        result.failures
+    )
+
+
+async def test_an_incomplete_census_after_b_quit_fails_the_row(
+    row,  # noqa: F811 - the imported fixture
+    monkeypatch,
+    tmp_path,
+):
+    scene = _SecondHostScene(row, monkeypatch, tmp_path, daemon=False)
+
+    def incomplete():
+        point = scene.reading(alive=True, occupied=False, lock="free")
+        point["census"]["unresolved"] = [777]
+        return point
+
+    scene.readings[AFTER_B_QUIT] = incomplete
+    result, _ = await scene.run()
+    assert any(
+        f"{AFTER_B_QUIT}: the census is incomplete" in f for f in result.failures
+    ), result.failures
+
+
+def _direct_second(row, monkeypatch, tmp_path):  # noqa: F811 - the imported fixture
+    return _SecondHostScene(row, monkeypatch, tmp_path, daemon=False)
+
+
+@pytest.mark.parametrize(
+    ("setup", "reported"),
+    [
+        pytest.param(
+            lambda scene, mp: setattr(
+                scene,
+                "census_after_b",
+                lambda: harness.ProfileCensus(unresolved=[987654]),
+            ),
+            "host B's browser is not shown gone",
+            id="unresolved-census",
+        ),
+        pytest.param(
+            lambda scene, mp: setattr(
+                scene,
+                "census_after_b",
+                lambda: (_ for _ in ()).throw(RuntimeError("planted census failure")),
+            ),
+            "host B's browser is not shown gone",
+            id="failed-census",
+        ),
+        pytest.param(
+            lambda scene, mp: (
+                mp.setattr(harness, "_BROWSER_GONE_SECONDS", 0.2),
+                setattr(
+                    scene,
+                    "census_after_b",
+                    lambda: harness.ProfileCensus(processes=[SimpleNamespace(pid=900)]),
+                ),
+            ),
+            "host B's browser is not shown gone",
+            id="residual-browser",
+        ),
+        pytest.param(
+            lambda scene, mp: setattr(scene, "lock_before_a2", "held"),
+            "before A2: the lock was held, not free",
+            id="lock-held-before-a2",
+        ),
+        pytest.param(
+            lambda scene, mp: setattr(scene, "lock_before_a2", "unknown"),
+            "before A2: the lock was unknown, not free",
+            id="contender-failed-before-a2",
+        ),
+    ],
+)
+async def test_an_unsettled_direct_host_b_takes_no_a2_and_no_preservation(
+    row,  # noqa: F811 - the imported fixture
+    monkeypatch,
+    tmp_path,
+    setup,
+    reported,
+):
+    scene = _direct_second(row, monkeypatch, tmp_path)
+    setup(scene, monkeypatch)
+    result, preserved = await scene.run()
+    assert any(reported in f for f in result.failures), result.failures
+    assert scene.a2_called == 0 and preserved == 0
+    published = scene.published()["comparison"]
+    assert any(reported in p for p in published["blocked"])
+
+
+async def test_a_host_b_pending_after_cleanup_stays_owned_until_it_settles(second):
+    second.b["pending"] = True
+    result, preserved = await second.run()
+    assert second.a2_called == 0 and preserved == 0
+    assert any("it stays retained" in f for f in result.failures), result.failures
+    left = unconfirmed_close.settlement_problems(grace=0.0)
+    assert any("host B's server 4343" in p for p in left), left
+    # A later row is refused while it stays owned.
+    with pytest.raises(UnsettledWorker):
+        await second.run()
+    # Once its own process object has a return code, nothing is held.
+    second.b_process.returncode = -9
+    assert unconfirmed_close.settlement_problems(grace=0.0) == []
+
+
+async def test_a_row_cancelled_while_host_b_runs_leaves_b_owned(second):
+    second.b_active = asyncio.Event()
+    task = asyncio.ensure_future(second.run())
+    try:
+        async with asyncio.timeout(10):
+            await second.b_running.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        second.b_active.set()
+    assert second.a2_called == 0
+    second.preservation.assert_not_awaited()
+    left = unconfirmed_close.settlement_problems(grace=0.0)
+    assert any("host B's server 4343" in p for p in left), left
+    with pytest.raises(UnsettledWorker):
+        await second.run()
+    second.b_process.returncode = 0
+    assert unconfirmed_close.settlement_problems(grace=0.0) == []

@@ -262,14 +262,14 @@ READ_TOOL_ARGUMENTS = {"num_posts": 1}
 #: owner before the row's one call reached it.
 IDLE_TIMEOUT_SECONDS = 20.0
 
-#: The comparison rows' own idle timeout (H-R3, and H-R2 after it), declared
-#: before any of them ran. Their freshness window runs from the send of the
-#: row's read, and that interval includes the browser's launch and, in daemon
-#: mode, the owner's election; within 20s, less the margin, a cold leg would
-#: have nothing left to observe. Kept above the Direct minimum hold (20s), so a
-#: second host is handed the profile by that hold and not raced by an idle
-#: close. The same in K1, K3 and K0, and recorded in the row's packet. Every
-#: other row keeps ``IDLE_TIMEOUT_SECONDS``.
+#: The comparison rows' own idle timeout (H-R3 and H-R2), a declared scenario
+#: setting chosen before any of them ran. Their freshness window runs from the
+#: send of the row's timed read, and that read can include the browser's
+#: launch; the owner is normally elected before it, during initialization.
+#: Kept above the Direct minimum hold (20s), so a second host is handed the
+#: profile by that hold and not raced by an idle close. The same in K1, K3 and
+#: K0, and recorded in the row's packet. Every other row keeps
+#: ``IDLE_TIMEOUT_SECONDS``.
 COMPARISON_IDLE_TIMEOUT_SECONDS = 60.0
 
 #: The largest wall-clock gap between two watcher samples a row accepts. The
@@ -818,6 +818,7 @@ class HostQuitTransport(ClientTransport):
         on_stderr: Callable[[str], None],
         exit_seconds: float = _HOST_EXIT_SECONDS,
         after_exit: Callable[[], Awaitable[None]] | None = None,
+        on_process: Callable[[Any], None] | None = None,
     ) -> None:
         self.command = list(command)
         self.env = env
@@ -825,6 +826,7 @@ class HostQuitTransport(ClientTransport):
         self.on_stderr = on_stderr
         self.exit_seconds = exit_seconds
         self.after_exit = after_exit
+        self.on_process = on_process
         self.process: anyio.abc.Process | None = None
         self.pid: int | None = None
         self.quit_done = False
@@ -924,6 +926,10 @@ class HostQuitTransport(ClientTransport):
         )
         self.process = process
         self.pid = process.pid
+        if self.on_process is not None:
+            # Before anything else can fail: whoever needs the process shown
+            # gone later holds this object, never its number.
+            self.on_process(process)
         read_send, read_receive = anyio.create_memory_object_stream[
             SessionMessage | Exception
         ](0)
@@ -1078,6 +1084,7 @@ async def run_host_session(
     second_call: bool = False,
     script: Callable[[ToolCall], Awaitable[None]] | None = None,
     after_exit: Callable[[], Awaitable[None]] | None = None,
+    on_process: Callable[[Any], None] | None = None,
 ) -> HostSession:
     """Initialize, call the read tool once, then quit the way a host does.
 
@@ -1089,7 +1096,8 @@ async def run_host_session(
     (H-R11); what it called is in ``scripted``, and its failure, recorded as
     ``script_error``, does not stop the quit either. *after_exit* runs once
     the server is seen to exit on EOF (``HostQuitTransport.host_quit``), and
-    its failure is ``after_exit_error``.
+    its failure is ``after_exit_error``. *on_process* is handed the server's
+    process object the moment it is spawned.
     """
     session = HostSession()
 
@@ -1099,7 +1107,12 @@ async def run_host_session(
         on_stderr(line)
 
     transport = HostQuitTransport(
-        command, env=env, cwd=cwd, on_stderr=remember, after_exit=after_exit
+        command,
+        env=env,
+        cwd=cwd,
+        on_stderr=remember,
+        after_exit=after_exit,
+        on_process=on_process,
     )
     # The initialize handshake, as a host sends it. FastMCP 4's default probes
     # server/discover first and settles on the 2026-07-28 era with a FastMCP 4
@@ -1197,6 +1210,7 @@ def host_summary(session: HostSession) -> dict[str, Any]:
         "error": session.error,
         "alive_before_quit": session.alive_before_quit,
         "stdin_closed": session.stdin_closed,
+        "stdin_close_error": session.stdin_close_error,
         "exited_on_quit": session.exited_on_quit,
         "exit_code": session.exit_code,
         "killed_by_harness": session.killed_by_harness,
@@ -2141,13 +2155,27 @@ def launch_lifetimes(
 ) -> tuple[list[list[Any]], list[list[Any]]]:
     """The owner processes and release gates this row's actors started.
 
-    Each as ``[pid, start, ppid]``, once per lifetime, from the watcher's
-    records: the parent is what lets ``host_comparison.owner_launches`` count
-    a Windows venv launcher and the interpreter it starts as one launch.
+    Each as ``[pid, start, ppid, command digest, recorded exit]``, once per
+    lifetime, from the watcher's records: what ``host_comparison``'s
+    ``same_invocation`` needs to count a Windows venv launcher and the
+    interpreter it starts with the same command as one launch, and nothing
+    else. The digest is of the whole command line, gate nonce and target
+    included; the exit is when the watcher saw that lifetime gone, or None.
     """
+    records = list(observed)
+    exits: dict[tuple[int, float], float] = {}
+    for record in records:
+        pid, start, t = record.get("pid"), record.get("start_identity"), record.get("t")
+        if (
+            record.get("kind") == "process.exit"
+            and isinstance(pid, int)
+            and isinstance(start, (int, float))
+            and isinstance(t, (int, float))
+        ):
+            exits[(pid, float(start))] = float(t)
     owners: list[list[Any]] = []
     started: list[list[Any]] = []
-    for record in observed:
+    for record in records:
         pid, start = record.get("pid"), record.get("start_identity")
         if not (
             record.get("kind") in ("process.start", "process.update")
@@ -2166,7 +2194,16 @@ def launch_lifetimes(
         if not any(
             host_comparison.same_lifetime(seen[:2], [pid, start]) for seen in kept
         ):
-            kept.append([pid, start, record.get("ppid")])
+            digest = hashlib.sha256(json.dumps(record["cmdline"]).encode()).hexdigest()
+            ended = next(
+                (
+                    t
+                    for (dead, began), t in exits.items()
+                    if host_comparison.same_lifetime([dead, began], [pid, start])
+                ),
+                None,
+            )
+            kept.append([pid, start, record.get("ppid"), digest, ended])
     return owners, started
 
 
@@ -3787,6 +3824,16 @@ def holder_association(
     }
 
 
+def read_lock(lock_path: Path) -> dict[str, Any]:
+    """The lock file's identity now and a fresh contender's answer, as a
+    checkpoint records them (``observe_checkpoint``)."""
+    now = lock_identity(lock_path)
+    found: dict[str, Any] = {"now": list(now) if now is not None else None}
+    if host_comparison.capabilities(sys.platform)[0]:
+        found["answer"] = lease_probe.run_probe(str(lock_path))
+    return found
+
+
 def observe_checkpoint(
     label: str,
     account: ActorAccount,
@@ -4618,9 +4665,11 @@ async def measure_host_quit_row(
     )
     #: H-R3: the actor the checkpoints read, as its handle, pid and start.
     r3_actor: list[tuple[Any, int, float]] = []
-    #: H-R2: host B's read, and when host B was seen to start.
+    #: H-R2: host B's read, when host B was seen to start, and the hold on
+    #: its server's process object.
     b_read: dict[str, Any] = {}
     b_started: dict[str, int] = {}
+    b_held: list[Retained] = []
 
     async def kill_the_actor() -> None:
         """Associate the victim, find its guardian, attach the oracle, kill."""
@@ -5061,14 +5110,43 @@ async def measure_host_quit_row(
             }
         comparison["owners"].append(seen)
 
-    def unsettled_before(action: str) -> bool:
-        """H-R2: whether anything the row started still runs before *action*;
-        if so it is recorded, and the action is not taken."""
+    def blocked_before(action: str, problems: Sequence[str] = ()) -> bool:
+        """H-R2: whether *action* may not be taken: *problems* found before
+        it, or anything the row started still not shown settled. Recorded,
+        and the reason the preservation session is refused as well."""
         assert comparison is not None
-        left = settlement_problems()
+        left = [*problems, *settlement_problems()]
         if left:
             comparison["observation_problems"].append(f"{action} was not taken: {left}")
+            comparison.setdefault("blocked", []).extend(left)
         return bool(left)
+
+    def hold_host_b(process: Any) -> None:
+        """Retain host B's server through its own process object from the
+        moment it is spawned, until that object has a return code: a later
+        step, and a later row, is refused meanwhile, cancellation included."""
+        b_held.append(
+            retain(
+                f"host B's server {process.pid}",
+                lambda grace, process=process: process.returncode is not None,
+            )
+        )
+
+    async def free_before_a2() -> list[str]:
+        """Direct H-R2: a fresh non-announcing contender on the lock the row
+        identified, at the boundary before A2; unobserved on Windows."""
+        assert comparison is not None
+        found: dict[str, Any] = {}
+        try:
+            found = await run_owned(
+                "the lock before A2", read_lock, lock_path, seconds=60.0
+            )
+        except Exception as exc:  # noqa: BLE001 - the reading's own evidence
+            found = {"error": f"{type(exc).__name__}: {exc}"}
+        comparison["lock_before_a2"] = found
+        return host_comparison.free_problems(
+            found, comparison.get("lock"), sys.platform, label="before A2"
+        )
 
     async def r2_script(call: ToolCall) -> None:
         """Host A's part of H-R2: after its read, host B on the same profile,
@@ -5097,7 +5175,7 @@ async def measure_host_quit_row(
         await take_checkpoint(host_comparison.AFTER_A1)
         if daemon:
             await read_owner("after A1")
-        if unsettled_before("host B"):
+        if blocked_before("host B"):
             return
         b_dir = work_dir / "host-b"
         b_dir.mkdir(exist_ok=True)
@@ -5113,7 +5191,12 @@ async def measure_host_quit_row(
             ),
             started=lambda pid: b_started.update(pid=pid, ns=time.monotonic_ns()),
             after_exit=after_b_quit,
+            on_process=hold_host_b,
         )
+        # Settled only once its own process object has a return code; the
+        # transport's bounded cleanup can return without one.
+        if b_held and b_held[0].check(0.0):
+            discharge(b_held[0])
         comparison["a_open"]["after_b_exit"] = is_alive(a_handle)
         comparison["host_b"] = {
             **host_summary(b),
@@ -5160,7 +5243,30 @@ async def measure_host_quit_row(
                 comparison["b_settlement"] = {"error": f"{type(exc).__name__}: {exc}"}
         else:
             await read_owner("after B")
-        if unsettled_before("A2"):
+        # Before A2: B quit normally and its process is gone, and in Direct
+        # mode its browser is shown gone by a complete census and, where the
+        # platform can say, the lock is free. Otherwise A only quits.
+        before_a2 = host_comparison.host_problems(
+            comparison["host_b"], prefix="host B: "
+        )
+        if b.after_exit_error:
+            before_a2.append(f"host B's post-exit hook failed: {b.after_exit_error}")
+        if not b_held:
+            before_a2.append("host B's server process was never held")
+        elif retained(b_held[0]):
+            before_a2.append(
+                "host B's server is not shown gone after its quit; it stays retained"
+            )
+        if not daemon:
+            settled = comparison.get("b_settlement") or {}
+            if (
+                settled.get("error")
+                or settled.get("remaining") != []
+                or settled.get("unresolved") != []
+            ):
+                before_a2.append(f"host B's browser is not shown gone: {settled}")
+            before_a2 += await free_before_a2()
+        if blocked_before("A2", before_a2):
             return
         await call(READ_TOOL, READ_TOOL_ARGUMENTS)
         if daemon:
@@ -6138,6 +6244,9 @@ async def measure_host_quit_row(
         # A checkpoint worker or contender helper not shown finished could
         # still be asking about the profile: nothing is launched on it.
         refusals += [f"{row}: {p}" for p in settlement_problems()]
+        # A step the row refused to take leaves it unsettled: nothing is
+        # launched on the profile after it either.
+        refusals += [f"{row}: {p}" for p in comparison.get("blocked") or []]
     if shim is not None:
         # An installer whose end was not observed may still be running on the
         # profile's setup, so no session starts after the row until every one
