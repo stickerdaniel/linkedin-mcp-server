@@ -24,8 +24,8 @@ FROM python:3.13.13-slim-bookworm@sha256:355bfa66770995d7e9a0da4b3473b44d0cb451f
 
 # The official MCP Registry proves ownership of an image by pulling its config
 # and comparing Config.Labels["io.modelcontextprotocol.server.name"] to the name
-# in server.json. A LABEL instruction is what writes that; a manifest annotation
-# is a different surface it never reads. It has to be on the runtime stage,
+# in .github/mcp/server.json. A LABEL instruction is what writes that; a manifest
+# annotation is a different surface it never reads. It has to be on the runtime stage,
 # because the builder's labels never ship.
 LABEL io.modelcontextprotocol.server.name="io.github.stickerdaniel/linkedin-mcp-server"
 

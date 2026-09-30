@@ -252,7 +252,7 @@ jobs:
           from pathlib import Path
 
           version = sys.argv[1]
-          path = Path("server.json")
+          path = Path(".github/mcp/server.json")
           doc = json.loads(path.read_text(encoding="utf-8"))
 
           doc["version"] = version
@@ -333,7 +333,7 @@ jobs:
           from pathlib import Path
 
           version = sys.argv[1]
-          server = json.loads(Path("server.json").read_text(encoding="utf-8"))
+          server = json.loads(Path(".github/mcp/server.json").read_text(encoding="utf-8"))
           manifest = json.loads(Path("manifest.json").read_text(encoding="utf-8"))
           plugin = json.loads(
               Path(
@@ -436,7 +436,7 @@ jobs:
           set -e
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add manifest.json docker-compose.yml server.json \
+          git add manifest.json docker-compose.yml .github/mcp/server.json \
             plugins/linkedin-mcp-server/.codex-plugin/plugin.json \
             plugins/linkedin-mcp-server/.mcp.json
           if git diff --staged --quiet; then

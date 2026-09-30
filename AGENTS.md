@@ -219,7 +219,7 @@ gt create -m "chore: Bump version to X.Y.Z"
 gt submit                        # merge PR to trigger release workflow
 ```
 
-The CI release workflow automatically updates `manifest.json`, `docker-compose.yml` and `server.json` with the new version. Do not update them manually.
+The CI release workflow automatically updates `manifest.json`, `docker-compose.yml` and `.github/mcp/server.json` with the new version. Do not update them manually.
 
 After the workflow completes, file a PR against
 [`docker/mcp-registry`](https://github.com/docker/mcp-registry) updating
@@ -236,9 +236,11 @@ this server no longer has, and `USER_AGENT` now refuses to start
 validates a changed entry by pulling the image and listing its tools over stdio,
 so the tag it moves to has to be a release where that works.
 
-`server.json` is a different registry: the official one at
+`.github/mcp/server.json` is a different registry: the official one at
 `registry.modelcontextprotocol.io`, which is a service reached through
-`mcp-publisher` and has no PR flow. This server has never been listed there.
+`mcp-publisher` and has no PR flow. Use the explicit path for
+`mcp-publisher validate .github/mcp/server.json` or
+`mcp-publisher publish .github/mcp/server.json`. This server has never been listed there.
 Publishing is a maintainer decision rather than a release step, and it cannot
 succeed before a release that carries the `mcp-name` token in `README.md` and
 the `io.modelcontextprotocol.server.name` label in the `Dockerfile`: ownership
@@ -261,8 +263,8 @@ A writable host bind needs the operator to name its exact path in
 `MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS`. By default the gateway allows
 binds only under the temporary directories and mounts those read-only, and a
 separate variable widens the read-only set without making anything writable. The
-session directory has to be written to, and no field in `server.json` can ask
-for that.
+session directory has to be written to, and no field in `.github/mcp/server.json`
+can ask for that.
 
 ## Commit Messages
 
@@ -341,6 +343,6 @@ test "$reviewed" = "$head"
 
 ## btca
 
-When you need up-to-date information about technologies used in this project, use the `btca-local` skill to search the actual source repos. `btca.config.jsonc` is the resource registry; every resource is pre-cloned at `~/.btca/agent/sandbox/<resourceName>` (e.g. `fastmcp`, `playwrightPython`). "Use btca with `<resource>` resource" means: search that clone. If a resource is missing from the sandbox, clone it with the url and branch from the manifest (the skill's "clone main by default" does not apply to registered resources).
+When you need up-to-date information about technologies used in this project, use the `btca-local` skill to search the actual source repos. `.agents/btca.config.jsonc` is the resource registry; every resource is pre-cloned at `~/.btca/agent/sandbox/<resourceName>` (e.g. `fastmcp`, `playwrightPython`). "Use btca with `<resource>` resource" means: search that clone. If a resource is missing from the sandbox, clone it with the url and branch from the manifest (the skill's "clone main by default" does not apply to registered resources).
 
-**New dependencies:** When adding a new dependency, always add its repo to `btca.config.jsonc` (verify the default branch first: `gh api repos/OWNER/REPO --jq '.default_branch'`) and clone it into the sandbox. Resource names are shared across projects in the sandbox, so pick a name that identifies the repo unambiguously (`playwrightPython`, not `playwright`).
+**New dependencies:** When adding a new dependency, always add its repo to `.agents/btca.config.jsonc` (verify the default branch first: `gh api repos/OWNER/REPO --jq '.default_branch'`) and clone it into the sandbox. Resource names are shared across projects in the sandbox, so pick a name that identifies the repo unambiguously (`playwrightPython`, not `playwright`).

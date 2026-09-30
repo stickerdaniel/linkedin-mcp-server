@@ -26,7 +26,7 @@ CLAUDE.md
 changelog.d
 docker-compose.yml
 Dockerfile
-btca.config.jsonc
+.agents/btca.config.jsonc
 *.mcpb
 *.dxt
 .DS_Store
