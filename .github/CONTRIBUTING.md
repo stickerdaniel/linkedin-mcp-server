@@ -15,7 +15,7 @@ uv run pytest --cov
 
 The [README](../README.md#setup-from-source-develop--contribute) covers running the server locally and logging in.
 
-## How scraping works
+## How the server reads LinkedIn
 
 ### Read the rendered page
 
@@ -43,7 +43,7 @@ Overlays such as contact info open as a modal, so they are read from the `<dialo
 
 ### Minimize DOM dependence
 
-LinkedIn changes its class names, `data-` attributes and component structure often. The scraper survives that by reading text and navigating by URL:
+LinkedIn changes its class names, `data-` attributes and component structure often. The server survives that by reading text and navigating by URL:
 
 - Extract data with `innerText`, not `querySelector` or DOM walking.
 - Navigate to a URL such as `/details/experience/` instead of clicking through the UI.
@@ -57,7 +57,7 @@ LinkedIn is used in many languages, so never tell connection state, buttons or a
 
 ### Return format
 
-Every scraping tool returns `{"url": str, "sections": {name: raw_text}}`. `sections` is the main payload. A tool may add:
+Every tool that reads LinkedIn returns `{"url": str, "sections": {name: raw_text}}`. `sections` is the main payload. A tool may add:
 
 - `references`: `{section: [{kind, url, text?, context?, value?}]}`, compact links to people, companies and posts. LinkedIn URLs are relative paths to save tokens.
 - `section_errors`: `{section: {error_type, error_message, ...}}` for a problem with one section, reported without failing the whole call.
@@ -118,7 +118,7 @@ uv run python scripts/generate_scraping_architecture.py --check
 
 ### Scraping policy traces
 
-The traces in `tests/fixtures/scraping-policy/` are reviewed fixtures, and the checker refuses to write into that directory. Generate candidates into a directory that does not exist yet and read the whole diff:
+The traces in `tests/fixtures/scraping-policy/` record every browser operation the code performs in fixed scenarios against a scripted page, such as navigations, waits and clicks, so a refactor can prove it did not change how the server behaves on LinkedIn. The checker only compares them and refuses to write into that directory. Generate candidates into a directory that does not exist yet and read the whole diff:
 
 ```bash
 uv run python scripts/check_scraping_policy_traces.py --output ../linkedin-mcp-policy-traces
