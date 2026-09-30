@@ -2580,11 +2580,13 @@ def test_a_reused_number_born_after_the_child_is_not_its_launcher():
             id="owner-number-reused-within-ms",
         ),
         pytest.param(
-            # The gate's number goes, 5 ms later, to a gate with another nonce.
+            # The gate interpreter leaves and its number goes, 7 ms after its
+            # birth, to a gate with another nonce. Its launcher is untouched,
+            # so without the second gate the start is valid.
             [
                 *_ONE_START,
-                _exited(2172, 90.0, 90.003),
-                _started(2172, 2836, 90.005, _gate_command("b")),
+                _exited(8316, 90.005, 90.02),
+                {**_started(8316, 2836, 90.012, _gate_command("b")), "t": 90.03},
             ],
             "an extra owner start was attempted",
             id="gate-number-reused-within-ms",
