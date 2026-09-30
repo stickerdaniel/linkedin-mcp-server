@@ -1407,6 +1407,10 @@ def _r2_record(*, daemon: bool = True, platform: str = "linux") -> dict:
             "unresolved": [],
             "ended_ns": 118_000 * MS,
         }
+        record["lock_before_a2"] = {
+            "now": list(LOCK),
+            "answer": {"state": "free", "reason": "", "device": 7, "inode": 99},
+        }
     return record
 
 
@@ -1766,6 +1770,21 @@ def test_one_changed_observation_fails_the_daemon_second_host(changes, reported)
             [_set("b_settlement", {"error": "UnsettledWorker: planted"})],
             "B's browser was not shown gone before A2",
             id="b-settlement-failed",
+        ),
+        pytest.param(
+            [_set("lock_before_a2/answer/state", "held")],
+            "before A2: the lock was held, not free",
+            id="lock-held-before-a2",
+        ),
+        pytest.param(
+            [_set("lock_before_a2/now", [7, 100])],
+            "before A2: the lock was replaced, not free",
+            id="lock-replaced-before-a2",
+        ),
+        pytest.param(
+            [_set("lock_before_a2", None)],
+            "before A2: the lock was unknown, not free",
+            id="lock-unread-before-a2",
         ),
         pytest.param(
             [_set("calls/1/began_monotonic_ns", 106_500 * MS)],

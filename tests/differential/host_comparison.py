@@ -922,6 +922,14 @@ def r2_problems(record: Mapping[str, Any], *, daemon: bool) -> list[str]:
         a2_sent = _ns((a2 or {}).get("began_monotonic_ns"))
         if ended is None or a2_sent is None or ended > a2_sent:
             problems.append("B's settlement is not shown to precede A2")
+        # The contender's reading the run gated A2 on, judged again from the
+        # record, so a packet can be checked without trusting the run's verdict.
+        problems += free_problems(
+            record.get("lock_before_a2"),
+            record.get("lock"),
+            str(record.get("platform")),
+            label="before A2",
+        )
     else:
         problems += _owner_problems(record, late_b=late_b, late_a2=late_a2)
 
