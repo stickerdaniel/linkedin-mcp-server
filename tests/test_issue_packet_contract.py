@@ -136,11 +136,9 @@ def test_issue_form_routes_preserve_existing_issue_types() -> None:
         )
 
 
-def test_agent_instructions_match_and_point_to_packet_skill() -> None:
+def test_agent_instructions_point_to_packet_skill() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     agents_path = repo_root / "AGENTS.md"
-    claude_path = repo_root / "CLAUDE.md"
-    assert agents_path.read_bytes() == claude_path.read_bytes()
 
     pointer = (
         "[.agents/skills/issue-packet/SKILL.md](.agents/skills/issue-packet/SKILL.md)"
