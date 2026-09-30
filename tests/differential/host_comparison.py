@@ -1007,7 +1007,9 @@ def same_invocation(parent: Sequence[Any], child: Sequence[Any]) -> bool:
     saw the child ended. Only such a read shows that pid was the parent after
     the child's birth; an exit or a first sample is stamped at a sample's end
     and says nothing of when within it each process was read, so a pid
-    reused in between is not excluded by either. A matching number alone, a
+    reused in between is not excluded by either. The two births are compared
+    exactly: both come from the same watcher, and a lifetime born even a
+    moment after the child cannot be its parent. A matching number alone, a
     different command or a lifetime without its digest or its sample times is
     its own launch. Each is ``[pid, start, ppid, command digest, exit sample,
     first sample, last read]`` (``harness.launch_lifetimes``).
@@ -1025,7 +1027,7 @@ def same_invocation(parent: Sequence[Any], child: Sequence[Any]) -> bool:
     if type(child[2]) is not int or child[2] != parent[0]:
         return False
     began, child_began = float(parent[1]), float(child[1])
-    if began > child_began + _START_TOLERANCE_SECONDS:
+    if began > child_began:
         return False
     return float(read) > float(first)
 

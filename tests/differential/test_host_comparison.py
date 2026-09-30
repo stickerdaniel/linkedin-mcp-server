@@ -2549,6 +2549,22 @@ def test_a_launcher_read_early_in_the_childs_own_sample_ties_nothing():
     assert any("the row started owners" in p for p in problems), problems
 
 
+def test_a_reused_number_born_after_the_child_is_not_its_launcher():
+    # A frontend (1312) starts the owner at 100.0 and leaves; its number goes
+    # to an independent owner, same command, born 5 ms later and read alive
+    # for long after. Born after the child, it cannot be the child's parent.
+    events = [
+        *_ONE_START[:2],
+        _started(1312, 2836, 99.99, ["C:\\frontend.exe"]),
+        _started(OWNER[0], 1312, OWNER[1], _owner_command("job-1")),
+        _exited(1312, 99.99, 100.06),
+        _started(1312, 2836, OWNER[1] + 0.005, _owner_command("job-1")),
+        *_ONE_START[4:],
+    ]
+    problems = _judged_launches(events)
+    assert any("the row started owners" in p for p in problems), problems
+
+
 def test_launch_lifetimes_without_the_sample_log_do_not_collapse():
     assert _judged_launches(list(_ONE_START), samples=[])
 
@@ -2563,9 +2579,11 @@ def test_an_equal_command_pair_collapses_only_on_windows():
 def test_launch_lifetimes_without_their_invocation_do_not_collapse(field):
     record = _r2_record(daemon=True, platform="win32")
     owners, gates = harness.launch_lifetimes(
-        list(_ONE_START), [harness.gate_script(harness.REPO_ROOT)]
+        list(_ONE_START), [harness.gate_script(harness.REPO_ROOT)], _SAMPLES
     )
     record["owner_processes"], record["gate_processes"] = owners, gates
+    # Intact, the pairs collapse and the record is valid.
+    assert problems_for(record, daemon=True) == []
     # The earlier record shape: no command digest, no recorded exit.
     record[field] = [entry[:3] for entry in record[field]]
     assert problems_for(record, daemon=True)
