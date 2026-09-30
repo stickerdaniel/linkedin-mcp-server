@@ -149,7 +149,7 @@ def test_owner_stand_down_keeps_its_replacement_guidance():
 
 
 def test_raises_tool_error_for_scraping_error():
-    with pytest.raises(ToolError, match="Scraping failed"):
+    with pytest.raises(ToolError, match="Could not read the page"):
         raise_tool_error(ScrapingError("bad html"))
 
 

@@ -14,7 +14,7 @@ work, health checks, or background maintenance.
 - Start with the smallest read operation that can answer the request.
 - Treat profile, company, job, post, feed, and message results as live LinkedIn
   evidence. Distinguish retrieved facts from inference.
-- Keep searches and result pages modest. Do not bulk scrape or spam.
+- Keep searches and result pages modest. Do not collect data in bulk or spam.
 - Never enable the plugin or its MCP server, edit Codex configuration, or start
   a login flow merely because LinkedIn might be useful. If either component is
   disabled, explain that state and stop.

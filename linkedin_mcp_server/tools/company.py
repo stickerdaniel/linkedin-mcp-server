@@ -37,7 +37,7 @@ def register_company_tools(
         timeout=tool_timeout,
         title="Get Company Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
-        tags={"company", "scraping"},
+        tags={"company"},
     )
     async def get_company_profile(
         company_name: str,
@@ -50,11 +50,11 @@ def register_company_tools(
         Args:
             company_name: LinkedIn company name (e.g., "docker", "anthropic", "microsoft"). A full company URL is accepted too and is reduced to the slug.
             ctx: FastMCP context for progress reporting
-            sections: Comma-separated list of extra sections to scrape.
+            sections: Comma-separated list of extra sections to read.
                 The about page is always included.
                 Available sections: posts, jobs
                 Examples: "posts", "posts,jobs"
-                Default (None) scrapes only the about page.
+                Default (None) reads only the about page.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
@@ -103,7 +103,7 @@ def register_company_tools(
         timeout=tool_timeout,
         title="Get Company Posts",
         annotations={"readOnlyHint": True, "openWorldHint": True},
-        tags={"company", "scraping"},
+        tags={"company"},
     )
     async def get_company_posts(
         company_name: str,
@@ -129,7 +129,7 @@ def register_company_tools(
             logger.info("Scraping company posts: %s", company_name)
 
             await ctx.report_progress(
-                progress=0, total=100, message="Starting company posts scrape"
+                progress=0, total=100, message="Reading company posts"
             )
 
             url = company_page_url(company_name, "/posts/")
@@ -216,7 +216,7 @@ def register_company_tools(
         timeout=tool_timeout,
         title="Get Company Employees",
         annotations={"readOnlyHint": True, "openWorldHint": True},
-        tags={"company", "scraping"},
+        tags={"company"},
     )
     async def get_company_employees(
         company_name: str,

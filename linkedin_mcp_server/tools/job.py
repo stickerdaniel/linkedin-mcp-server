@@ -29,7 +29,7 @@ def register_job_tools(
         timeout=tool_timeout,
         title="Get Job Details",
         annotations={"readOnlyHint": True, "openWorldHint": True},
-        tags={"job", "scraping"},
+        tags={"job"},
     )
     async def get_job_details(
         job_id: str,
@@ -57,7 +57,7 @@ def register_job_tools(
             logger.info("Scraping job: %s", job_id)
 
             await ctx.report_progress(
-                progress=0, total=100, message="Starting job scrape"
+                progress=0, total=100, message="Reading the job posting"
             )
 
             result = await extractor.scrape_job(job_id)
@@ -169,7 +169,7 @@ def register_job_tools(
         timeout=tool_timeout,
         title="Get Saved Jobs",
         annotations={"readOnlyHint": True, "openWorldHint": True},
-        tags={"job", "scraping"},
+        tags={"job"},
     )
     async def get_saved_jobs(
         ctx: Context,

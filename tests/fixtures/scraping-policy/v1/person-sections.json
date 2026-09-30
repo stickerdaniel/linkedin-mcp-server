@@ -126,7 +126,7 @@
     {
       "call": "scrape_person",
       "kind": "callback.progress",
-      "message": "Scraped main_profile (1/11)",
+      "message": "Read main_profile (1/11)",
       "percent": 9
     },
     {
@@ -249,7 +249,7 @@
     {
       "call": "scrape_person",
       "kind": "callback.progress",
-      "message": "Scraped experience (2/11)",
+      "message": "Read experience (2/11)",
       "percent": 17
     },
     {
@@ -372,7 +372,7 @@
     {
       "call": "scrape_person",
       "kind": "callback.progress",
-      "message": "Scraped education (3/11)",
+      "message": "Read education (3/11)",
       "percent": 26
     },
     {
@@ -495,7 +495,7 @@
     {
       "call": "scrape_person",
       "kind": "callback.progress",
-      "message": "Scraped interests (4/11)",
+      "message": "Read interests (4/11)",
       "percent": 35
     },
     {
@@ -618,7 +618,7 @@
     {
       "call": "scrape_person",
       "kind": "callback.progress",
-      "message": "Scraped honors (5/11)",
+      "message": "Read honors (5/11)",
       "percent": 43
     },
     {
@@ -741,7 +741,7 @@
     {
       "call": "scrape_person",
       "kind": "callback.progress",
-      "message": "Scraped languages (6/11)",
+      "message": "Read languages (6/11)",
       "percent": 52
     },
     {
@@ -864,7 +864,7 @@
     {
       "call": "scrape_person",
       "kind": "callback.progress",
-      "message": "Scraped certifications (7/11)",
+      "message": "Read certifications (7/11)",
       "percent": 60
     },
     {
@@ -987,7 +987,7 @@
     {
       "call": "scrape_person",
       "kind": "callback.progress",
-      "message": "Scraped skills (8/11)",
+      "message": "Read skills (8/11)",
       "percent": 69
     },
     {
@@ -1110,7 +1110,7 @@
     {
       "call": "scrape_person",
       "kind": "callback.progress",
-      "message": "Scraped projects (9/11)",
+      "message": "Read projects (9/11)",
       "percent": 78
     },
     {
@@ -1195,7 +1195,7 @@
     {
       "call": "scrape_person",
       "kind": "callback.progress",
-      "message": "Scraped contact_info (10/11)",
+      "message": "Read contact_info (10/11)",
       "percent": 86
     },
     {
@@ -1299,7 +1299,7 @@
     {
       "call": "scrape_person",
       "kind": "callback.progress",
-      "message": "Scraped posts (11/11)",
+      "message": "Read posts (11/11)",
       "percent": 95
     },
     {

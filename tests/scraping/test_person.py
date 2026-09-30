@@ -1099,9 +1099,9 @@ class TestScrapePersonCallbacks:
         assert cb.on_progress.await_count == 3
         messages = [c.args[0] for c in cb.on_progress.call_args_list]
         assert messages == [
-            "Scraped main_profile (1/3)",
-            "Scraped experience (2/3)",
-            "Scraped education (3/3)",
+            "Read main_profile (1/3)",
+            "Read experience (2/3)",
+            "Read education (3/3)",
         ]
         # Last section should be at 95%
         assert cb.on_progress.call_args_list[-1].args[1] == 95

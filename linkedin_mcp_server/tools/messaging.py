@@ -39,7 +39,7 @@ def register_messaging_tools(
         timeout=tool_timeout,
         title="Get Inbox",
         annotations={"readOnlyHint": True, "openWorldHint": True},
-        tags={"messaging", "scraping"},
+        tags={"messaging"},
     )
     async def get_inbox(
         ctx: Context,
@@ -97,7 +97,7 @@ def register_messaging_tools(
         # The docstring below has always said so. An unread message the user has
         # not seen is state, and losing it is not something a reader should do.
         annotations={"openWorldHint": True},
-        tags={"messaging", "scraping"},
+        tags={"messaging"},
     )
     async def get_conversation(
         ctx: Context,
