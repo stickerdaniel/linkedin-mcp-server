@@ -143,7 +143,7 @@ AI agent? Get a quick confirmation from the user before enabling automatic updat
 **Timeouts:**
 
 - `--timeout MS` - Timeout for a single page operation (default: 5000)
-- `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for heavy scrapes, slow networks, or a cold-start browser.
+- `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for calls that read many pages, slow networks, or a cold-start browser.
 - `--login-timeout SECONDS` - How long the login browser waits for you to finish signing in (default: 1800; 0 = no limit). `--login-viewer` ends the session after 30 minutes either way.
 - `--login-inline-wait SECONDS` - How long a tool call waits for a login to finish before telling the model to retry (default: 25, max 45; 0 = return at once)
 
@@ -498,7 +498,7 @@ username.
 **Timeouts:**
 
 - `--timeout MS` - Timeout for a single page operation (default: 5000)
-- `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for heavy scrapes, slow networks, or a cold-start browser.
+- `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for calls that read many pages, slow networks, or a cold-start browser.
 - `--login-timeout SECONDS` - How long the login browser waits for you to finish signing in (default: 1800; 0 = no limit). `--login-viewer` ends the session after 30 minutes either way.
 - `--login-inline-wait SECONDS` - How long a tool call waits for a login to finish before telling the model to retry (default: 25, max 45; 0 = return at once)
 
@@ -769,7 +769,7 @@ uv run -m linkedin_mcp_server
 **Timeouts:**
 
 - `--timeout MS` - Timeout for a single page operation (default: 5000)
-- `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for heavy scrapes, slow networks, or a cold-start browser.
+- `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for calls that read many pages, slow networks, or a cold-start browser.
 - `--login-timeout SECONDS` - How long the login browser waits for you to finish signing in (default: 1800; 0 = no limit). `--login-viewer` ends the session after 30 minutes either way.
 - `--login-inline-wait SECONDS` - How long a tool call waits for a login to finish before telling the model to retry (default: 25, max 45; 0 = return at once)
 
@@ -838,9 +838,9 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 </details>
 
 <details>
-<summary>Scraping issues</summary>
+<summary>Tool issues</summary>
 
-- Use `--no-headless` to see browser actions and debug scraping problems
+- Use `--no-headless` to watch the browser when a tool returns wrong or missing data
 - Add `--log-level DEBUG` to see more detailed logging
 
 </details>
