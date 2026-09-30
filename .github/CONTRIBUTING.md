@@ -77,7 +77,7 @@ For example, adding `certifications` to `get_person_profile`.
 
 **Tests**
 
-- [ ] Add it to `test_expected_keys` in `tests/test_fields.py`, and for a person section also to `test_all_sections`.
+- [ ] In `tests/test_fields.py`, add it to `test_exported_mapping_retains_exact_tuple_contract_and_identity` and `test_expected_keys`, and for a person section also to `test_all_sections`.
 - [ ] In `tests/scraping/test_person.py` or `tests/scraping/test_company.py`, add it to the all-sections navigation test and give it its own navigation test, such as `test_certifications_visits_details_page`.
 
 **Docs**
