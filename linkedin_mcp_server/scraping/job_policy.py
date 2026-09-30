@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Literal
 from urllib.parse import urlparse
 
 from linkedin_mcp_server.scraping.link_metadata import (
@@ -241,11 +242,16 @@ SCROLL_BUDGET_TOTAL = 60.0
 # server registered for the tool, including directly constructed servers.
 SEARCH_TIMEOUT_FRACTION = 0.8
 
-SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"
-# Where a saved-jobs navigation may legitimately end. LinkedIn redirects the
-# first to the second and drops the query doing so, so the tool navigates to
-# one and arrives at the other.
+# The job tracker, which lists the account's jobs one stage at a time with
+# `?stage=`. The old `/my-items/saved-jobs/` redirects here and drops the
+# query on the way, so the tool navigates here directly.
+SAVED_JOBS_URL = "https://www.linkedin.com/jobs-tracker/"
+# Where a tracker navigation may legitimately end. The old route stays allowed
+# for accounts the redirect has not reached.
 SAVED_JOBS_PATHS = frozenset({"/my-items/saved-jobs", "/jobs-tracker"})
+# The tracker tabs, as LinkedIn spells them in `?stage=`. A page without the
+# parameter shows saved jobs.
+JobsTrackerStage = Literal["saved", "in_progress", "applied", "archived"]
 
 # The my-items lists page in 10s, unlike job search. Verified live: ?start=10
 # returns the 11th saved job, while ?start=25 lands past the end of a two-page
