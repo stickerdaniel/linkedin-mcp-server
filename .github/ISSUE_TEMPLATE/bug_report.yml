@@ -65,7 +65,7 @@ body:
     id: evidence
     attributes:
       label: "Evidence"
-      description: "Paste the tool name and arguments as called, with private values replaced consistently. Include the returned url, present section names, section_errors or error_type, and a short redacted excerpt. If the result uses status instead, include it. State which keys were absent. For installer-only failures, give the launch command and setup error instead. A screenshot may show the page the scraper saw."
+      description: "Paste the tool name and arguments as called, with private values replaced consistently. Include the returned url, present section names, section_errors or error_type, and a short redacted excerpt. If the result uses status instead, include it. State which keys were absent. For installer-only failures, give the launch command and setup error instead. A screenshot may show the page the server saw."
     validations:
       required: true
   - type: textarea
