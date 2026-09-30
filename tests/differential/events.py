@@ -105,6 +105,8 @@ KINDS = frozenset(
         "r7.phase",
         "r7.calibration",
         "r7.continuation",
+        # H-R3: each checkpoint around the host's quit, as it was read.
+        "host.checkpoint",
     }
 )
 

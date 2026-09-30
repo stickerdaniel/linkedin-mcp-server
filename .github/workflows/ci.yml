@@ -363,6 +363,31 @@ jobs:
         timeout-minutes: 25
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_frozen_rows.py
 
+      # Rows H-R3, host quit with an idle browser, and H-R2, a second host
+      # while the first is open (tests/differential/host_comparison.py): H-R1's
+      # actions read at checkpoints around the quit, and a second host on the
+      # same profile between the first host's two reads. Each in K1 frozen, K3
+      # and K0, then K3 held to K1 and K0 to K3. After the frozen rows, whose
+      # baseline it reuses. Their actors idle out after 60s, not 20
+      # (harness.COMPARISON_IDLE_TIMEOUT_SECONDS), so an owner wait is bounded
+      # at 60 + 90. Six cells: four owners wait at most 4 x (60 + 90) = 600s,
+      # every cell ends with one passive browser wait (60) and H-R2 in Direct
+      # waits once more before A2, 7 x 60 = 420s; H-R2 in Direct also waits up
+      # to 25s for its second host's lease and launches three browsers. Those
+      # waits alone are 17 minutes, which left the 25 this step had for three
+      # cells too little; 45 leaves each cell about 4.5 minutes for staging,
+      # launches, reads and the preservation session beyond them. A cell that
+      # meets every bound at once does not fit, as in every other row's step,
+      # and fails.
+      - name: H-R3 and H-R2 host comparisons
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 45
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_host_comparison_rows.py
+
       # The signal oracle for H-R6 (tests/differential/signals.py): strace,
       # attached to the killed server or owner and its guardian. Ubuntu's
       # default kernel.yama.ptrace_scope is 1, which lets a tracer attach only
@@ -694,6 +719,19 @@ jobs:
           LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
         timeout-minutes: 25
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_frozen_rows.py
+
+      # Rows H-R3 and H-R2, as in the Ubuntu job. Windows has no lock
+      # contender, so its lock state is recorded as unobserved and never
+      # credited, and its owner release gates are recorded: one may be missed
+      # by sampling, and a second one seen is an extra start attempt.
+      - name: H-R3 and H-R2 host comparisons
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 45
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_host_comparison_rows.py
 
       # The signal oracle and row H-R6, as in the Ubuntu job. The oracle runs
       # on Linux only, where H-R6 requires it; macOS and Windows record it as
