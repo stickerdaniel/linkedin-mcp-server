@@ -23,7 +23,7 @@ The server reads what a signed-in LinkedIn page shows. It never calls Voyager or
 
 ### One section, one navigation
 
-Every section a tool offers maps to exactly one LinkedIn page. The assistant calling the tool asks only for the sections it needs, so each navigation it skips saves real time, and each page it does visit is read in full through `innerText`.
+Every section a tool offers maps to exactly one LinkedIn URL, and a section never combines several. The assistant calling the tool asks only for the sections it needs, so it skips the navigations it has no use for, and every page it visits is read in full through `innerText`.
 
 The sections live in `scraping/fields.py`:
 
@@ -37,11 +37,11 @@ PERSON_SECTIONS: dict[str, tuple[str, bool]] = {
 }
 ```
 
-Overlays such as contact info open as a modal, so they are read from the `<dialog>` element instead of the whole page. Never put more than one URL behind a section.
+Overlays such as contact info open as a modal, so they are read from the `<dialog>` element instead of the whole page.
 
-`scraping/person.py` and `scraping/company.py` own these sections and visit only the requested ones. `scraping/extractor.py` is a stable facade that delegates to them. The generated [scraping architecture reference](../docs/scraping-architecture.md) shows which module owns what, how they import each other, and which ones touch the page directly.
+`scraping/person.py` and `scraping/company.py` own these sections. `scraping/extractor.py` is a stable facade that delegates to them. The generated [scraping architecture reference](../docs/scraping-architecture.md) shows which module owns what, how they import each other, and which ones touch the page directly.
 
-### Stay away from the DOM
+### Minimize DOM dependence
 
 LinkedIn changes its class names, `data-` attributes and component structure often. The scraper survives that by reading text and navigating by URL:
 
@@ -53,7 +53,7 @@ LinkedIn changes its class names, `data-` attributes and component structure oft
 
 ### Detect state without reading labels
 
-LinkedIn is used in many languages, so logic that classifies something (connection state, which button is which, whether an action is available) must not compare visible text such as "Connect", "Message" or "Pending". Rely on URL patterns, on whether an attribute like `aria-label` or `aria-expanded` exists at all, or on structural counts. If text really is the only signal, put it in an explicit per-locale table and say in a comment that other locales are not covered.
+LinkedIn is used in many languages, so never tell connection state, buttons or available actions apart by comparing visible labels such as "Connect", "Message" or "Pending". Rely on URL patterns, on whether an attribute like `aria-label` or `aria-expanded` exists at all, or on structural counts. If text really is the only signal, put it in an explicit per-locale table and say in a comment that other locales are not covered.
 
 ### Return format
 
@@ -77,12 +77,12 @@ For example, adding `certifications` to `get_person_profile`.
 
 **Tests**
 
-- [ ] Add it to `test_expected_keys` and `test_all_sections` in `tests/test_fields.py`.
+- [ ] Add it to `test_expected_keys` in `tests/test_fields.py`, and for a person section also to `test_all_sections`.
 - [ ] In `tests/scraping/test_person.py` or `tests/scraping/test_company.py`, add it to the all-sections navigation test and give it its own navigation test, such as `test_certifications_visits_details_page`.
 
 **Docs**
 
-- [ ] The tool table in `README.md`, the feature list in `docs/docker-hub.md`, and the tool description in `manifest.json`.
+- [ ] Update the tool table in `README.md`, the feature list in `docs/docker-hub.md`, and the tool description in `manifest.json`.
 
 ## Adding a tool
 
@@ -97,11 +97,11 @@ For example, `search_companies`.
 **Tests**
 
 - [ ] Add a mock method to `_make_mock_extractor` and a test for the tool in `tests/test_tools.py`.
-- [ ] Test the workflow in the owner's `tests/scraping/test_<owner>.py`. If the facade gained a method, cover it in `tests/scraping/test_facade_*.py`.
+- [ ] Test the workflow in the owner's `tests/scraping/test_<owner>.py`. If the facade's delegates changed, cover them in `tests/scraping/test_facade_*.py`.
 
 **Docs**
 
-- [ ] The tool table in `README.md`, the feature list in `docs/docker-hub.md`, and the `tools` array in `manifest.json`.
+- [ ] Update the tool table in `README.md` and the feature list in `docs/docker-hub.md`, and add the tool to the `tools` array in `manifest.json`.
 
 ## Generated files
 
@@ -118,17 +118,20 @@ uv run python scripts/generate_scraping_architecture.py --check
 
 ### Scraping policy traces
 
-The traces in `tests/fixtures/scraping-policy/` are reviewed fixtures. The checker refuses to write into that directory, so generate candidates somewhere else, read the whole diff, and copy them in only if the policy change is intentional:
+The traces in `tests/fixtures/scraping-policy/` are reviewed fixtures, and the checker refuses to write into that directory. Generate candidates into a directory that does not exist yet and read the whole diff:
 
 ```bash
 uv run python scripts/check_scraping_policy_traces.py --output ../linkedin-mcp-policy-traces
 diff -ru tests/fixtures/scraping-policy/v1 ../linkedin-mcp-policy-traces
+```
+
+Copy them in only if you meant every change the diff shows:
+
+```bash
 cp ../linkedin-mcp-policy-traces/*.json tests/fixtures/scraping-policy/v1/
 rm -rf ../linkedin-mcp-policy-traces
 uv run python scripts/check_scraping_policy_traces.py --check
 ```
-
-The output directory must not exist before you generate.
 
 ## Before you open a PR
 
@@ -142,18 +145,18 @@ uv run pre-commit run --all-files   # ruff, ty and both generated-file checks
 1. Link the issue the change belongs to, or open one as described at the top.
 2. Branch from `main` as `feature/<issue>-<short-description>` or `fix/<issue>-<short-description>`.
 3. Implement the change with tests and docs, following the checklists above.
-4. Open the PR as a draft and mark it ready once it can be merged. AI agents review it first, then a maintainer.
-5. Finish the attribution line at the end of the PR template. CI fails until it names the model that wrote the change. The preferred form is `Generated with <model> for <job> in <harness>.`, with `via <host>` added when an outer tool wraps the harness.
-6. PRs are squash-merged, so the PR title becomes the commit on `main`. Write it as a [conventional commit](https://www.conventionalcommits.org/): `type(scope): subject`, imperative, under 50 characters. Commits inside the PR are only for review.
+4. Open the PR as a draft. Title it as a [conventional commit](https://www.conventionalcommits.org/), `type(scope): subject`, with an imperative subject under 50 characters. PRs are squash-merged, so the title becomes the commit subject on `main` and the commits inside the PR are only for review.
+5. Finish the attribution line at the end of the PR template. CI fails until it names the model. The preferred form is `Generated with <model> for <job> in <harness>.`, where the job is what the model did, such as implementation or review, and the harness is the coding tool that ran it, such as Claude Code or Codex CLI. Add `via <host>` if another app ran that tool.
+6. Add a changelog fragment if the PR needs one (see below).
+7. Mark the PR ready for review. AI agents review it first, then a maintainer.
 
 ### Changelog fragments
 
-A PR titled `feat` or `fix`, or marked breaking with a `!` right before the colon (`fix(scope)!: Change the error shape`), needs a changelog fragment. The PR Title check fails until it is there.
+A PR of type `feat` or `fix`, or one marked breaking with a `!` right before the colon (`fix(scope)!: Change the error shape`), needs a changelog fragment. The PR Title check fails until it is there.
 
-1. Open the PR as a draft to get its number.
-2. Add `changelog.d/<number>.feat.md`, `.fix.md` or `.breaking.md` to match the title. A breaking title always takes `.breaking.md`.
-3. Write one sentence of at most 90 characters that says what changes for users. Leave out the PR link, the release adds it.
-4. Push it to the same branch.
+1. Add `changelog.d/<PR number>.feat.md`, `.fix.md` or `.breaking.md` to match the title. A breaking title always takes `.breaking.md`.
+2. Write one sentence of at most 90 characters that says what changes for users. Leave out the PR link, the release adds it.
+3. Push it to the same branch.
 
 If you add or remove the breaking marker later, rename the fragment. Edit an existing fragment instead of running `towncrier create` again, which writes a second, numbered file that the check rejects.
 
