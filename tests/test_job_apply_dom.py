@@ -100,14 +100,6 @@ async def clicked(page) -> bool:
     return await page.evaluate("() => document.body.dataset.clicked === 'true'")
 
 
-def click_opens_tab(href: str) -> str:
-    return f"""
-    document.querySelector('main button').addEventListener('click', () => {{
-        window.open('{href}', '_blank');
-    }});
-    """
-
-
 def posting(control: str, *, state: str = "", below: str = "", script: str = "") -> str:
     """A top card, the description, and what sits below it.
 
@@ -154,7 +146,6 @@ async def dom_page(requested):
 @pytest.fixture(autouse=True)
 def _short_waits(monkeypatch):
     monkeypatch.setattr(job_pages, "_APPLY_READY_TIMEOUT", 1.0)
-    monkeypatch.setattr(job_pages, "_APPLY_ANSWER_TIMEOUT", 1.0)
 
 
 async def read(page, html: str) -> JobApplyRead:
@@ -171,22 +162,6 @@ async def test_easy_apply_is_the_postings_own_apply_route(dom_page):
     assert await read(dom_page, posting(EASY_APPLY)) == JobApplyRead("easy_apply")
 
 
-async def test_an_external_apply_is_read_off_its_dialog_and_never_loaded(
-    dom_page, requested
-):
-    """Continue's link is decoded, and neither it nor the employer is fetched."""
-    html = posting(
-        EXTERNAL,
-        below=OTHER_EASY_APPLY,
-        script=click_opens_dialog(safety(EMPLOYER_LINK)),
-    )
-
-    assert await read(dom_page, html) == JobApplyRead("external", EMPLOYER_LINK)
-    assert await clicked(dom_page)
-    assert not any("/safety/go" in url for url in requested)
-    assert not any(EMPLOYER_HOST in url for url in requested)
-
-
 async def test_an_external_apply_link_is_read_off_its_href_without_a_click(
     dom_page, requested
 ):
@@ -196,7 +171,15 @@ async def test_an_external_apply_link_is_read_off_its_href_without_a_click(
 
     assert await read(dom_page, html) == JobApplyRead("external", EMPLOYER_LINK)
     assert not await clicked(dom_page)
+    assert not any("/safety/go" in url for url in requested)
     assert not any(EMPLOYER_HOST in url for url in requested)
+
+
+async def test_an_outbound_link_that_is_not_apply_is_not_the_answer(dom_page):
+    link = safety("https://acme.example/")
+    html = posting(f'<a href="{link}">Our website</a>', script=NO_CLICK)
+
+    assert await read(dom_page, html) == JobApplyRead("unknown")
 
 
 async def test_an_external_apply_link_below_the_description_is_not_this_postings(
@@ -207,90 +190,39 @@ async def test_an_external_apply_link_below_the_description_is_not_this_postings
     assert await read(dom_page, html) == JobApplyRead("unknown")
 
 
-async def test_an_external_apply_link_naming_this_host_has_no_address(dom_page):
-    html = posting(external_link(safety("http://127.0.0.1:9/x")), script=NO_CLICK)
-
-    assert await read(dom_page, html) == JobApplyRead("external")
-
-
-async def test_a_tab_linkedin_opens_is_read_and_closed(dom_page):
-    html = posting(EXTERNAL, script=click_opens_tab(safety(EMPLOYER_LINK)))
-
-    assert await read(dom_page, html) == JobApplyRead("external", EMPLOYER_LINK)
-    assert dom_page.context.pages == [dom_page]
-
-
-async def test_an_outbound_link_outside_a_dialog_is_not_the_answer(dom_page):
-    link = safety("https://acme.example/")
-    html = posting(EXTERNAL, below=f'<a href="{link}">Our website</a>')
-
-    assert await read(dom_page, html) == JobApplyRead("external")
-
-
-async def test_an_apply_below_the_description_belongs_to_another_posting(dom_page):
-    """A "More jobs" card's Apply is neither this posting's type nor clicked."""
-    html = posting(
-        "", below=EXTERNAL, script=click_opens_dialog(safety("https://acme.example/"))
+async def test_an_external_apply_link_without_a_description_boundary_is_unknown(
+    dom_page,
+):
+    html = posting(external_link(safety(EMPLOYER_LINK)), script=NO_CLICK).replace(
+        "<h2>About the job</h2>", ""
     )
 
     assert await read(dom_page, html) == JobApplyRead("unknown")
-    assert not await clicked(dom_page)
-
-
-async def test_an_apply_without_a_description_boundary_is_not_clicked(dom_page):
-    html = posting(
-        "", below=EXTERNAL, script=click_opens_dialog(safety("https://acme.example/"))
-    ).replace("<h2>About the job</h2>", "")
-
-    result = await read(dom_page, html)
-
-    assert not await clicked(dom_page)
-    assert result == JobApplyRead("unknown")
-
-
-async def test_a_destination_inside_this_host_is_never_loaded(dom_page, requested):
-    """A posting naming the loopback answers external, and nothing is fetched."""
-    html = posting(EXTERNAL, script=click_opens_dialog(safety("http://127.0.0.1:9/x")))
-
-    assert await read(dom_page, html) == JobApplyRead("external")
-    assert not any("127.0.0.1" in url for url in requested)
 
 
 @pytest.mark.parametrize(
     "host",
-    ["%31%32%37.0.0.%31", "127.0.0.1\\@jobs.example.com"],
+    ["127.0.0.1:9", "%31%32%37.0.0.%31", "127.0.0.1\\@jobs.example.com"],
 )
-async def test_an_ambiguous_host_is_refused_before_navigation(
+async def test_an_external_apply_link_naming_this_host_has_no_address(
     dom_page, requested, host
 ):
-    html = posting(EXTERNAL, script=click_opens_dialog(safety(f"http://{host}/x")))
-
-    result = await read(dom_page, html)
-
-    assert not any("127.0.0.1" in url for url in requested)
-    assert result == JobApplyRead("external")
-
-
-async def test_a_tab_naming_this_host_is_refused_before_it_loads(dom_page, requested):
-    """A tab opened straight onto the loopback is never asked for.
-
-    The dialog cases above are refused by the policy, which the tab path never
-    reaches: LinkedIn, not this code, navigates the tab, so an address read off
-    the loaded tab has already been fetched by the time it is judged.
-    """
-    html = posting(EXTERNAL, script=click_opens_tab("http://127.0.0.1:9/x"))
+    html = posting(external_link(safety(f"http://{host}/x")), script=NO_CLICK)
 
     assert await read(dom_page, html) == JobApplyRead("external")
     assert not any("127.0.0.1" in url for url in requested)
 
 
-async def test_a_tabs_address_is_read_without_loading_it(dom_page, requested):
-    """The interstitial names its destination, so the tab need not be loaded."""
-    interstitial = safety(EMPLOYER_LINK)
-    html = posting(EXTERNAL, script=click_opens_tab(interstitial))
+async def test_an_apply_button_is_not_clicked(dom_page, requested):
+    """The button variant, measured once on 2026-09-14, is not read.
 
-    assert await read(dom_page, html) == JobApplyRead("external", EMPLOYER_LINK)
-    assert interstitial not in requested
+    Clicking it counts as an apply on the posting, so a posting carrying it
+    answers `unknown` rather than being clicked for its address.
+    """
+    html = posting(EXTERNAL, script=click_opens_dialog(safety(EMPLOYER_LINK)))
+
+    assert await read(dom_page, html) == JobApplyRead("unknown")
+    assert not await clicked(dom_page)
     assert not any(EMPLOYER_HOST in url for url in requested)
 
 
@@ -302,15 +234,12 @@ async def test_a_tabs_address_is_read_without_loading_it(dom_page, requested):
         "<p>Applied 5mo ago</p>",
     ],
 )
-async def test_an_applied_posting_is_not_clicked(dom_page, state):
+async def test_an_applied_posting_is_its_state(dom_page, state):
     html = posting(
-        EXTERNAL,
-        state=state,
-        script=click_opens_dialog(safety("https://acme.example/")),
+        external_link(safety("https://acme.example/")), state=state, script=NO_CLICK
     )
 
     assert await read(dom_page, html) == JobApplyRead("applied")
-    assert not await clicked(dom_page)
 
 
 @pytest.mark.parametrize(

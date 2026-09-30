@@ -911,7 +911,7 @@ async def _job_apply_scenario() -> dict[str, Any]:
     clock = FakeClock(recorder)
     page = _page(recorder).script(
         "evaluate:job_apply_signals",
-        {"easy_apply": True, "external": False, "applied": False, "closed": False},
+        {"easy_apply": True, "external_link": None, "applied": False, "closed": False},
     )
     extractor = _extractor(page)
     arguments = {"job_id": "123"}

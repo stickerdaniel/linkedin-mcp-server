@@ -257,10 +257,8 @@ SAVED_JOBS_PAGE_SIZE = 10
 ApplyType = Literal["easy_apply", "external", "applied", "closed", "unknown"]
 
 # LinkedIn's interstitial for links that leave the site, with the destination in
-# its `url` parameter. Measured on 2026-09-14: an external posting's Apply opens
-# a "Share your profile?" dialog whose Continue link is
-# `/safety/go/?url=https%3A%2F%2Fgrnh.se%2F...`. Measured on 2026-09-19: the
-# Apply itself is such a link on some postings.
+# its `url` parameter. Measured on 2026-09-19: an external posting's Apply is
+# such a link, `/safety/go/?url=https%3A%2F%2Fgrnh.se%2F...`.
 SAFETY_REDIRECT_PATH = "/safety/go"
 
 
@@ -326,7 +324,7 @@ def employer_apply_url(href: str) -> str | None:
 
 
 def apply_link_missing_section_error() -> dict[str, str]:
-    """The ``section_errors`` entry for an external Apply that led nowhere.
+    """The ``section_errors`` entry for an external Apply with no usable link.
 
     The posting is still external, which is worth keeping, but a type with no
     link and nothing beside it reads as a posting that has none. Being told is
@@ -335,7 +333,7 @@ def apply_link_missing_section_error() -> dict[str, str]:
     return {
         "error_type": "apply_link_missing",
         "error_message": (
-            "Apply was clicked but LinkedIn opened neither its dialog nor a tab, "
-            "so the employer's link could not be read."
+            "The Apply link names no employer address outside LinkedIn and "
+            "this host's own network, so none is returned."
         ),
     }

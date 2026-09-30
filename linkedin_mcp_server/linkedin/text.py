@@ -99,10 +99,11 @@ JOB_POSTING_EN_US = _JOB_POSTING_TEXT["en-US"]
 class JobApplyTextTable:
     """Visible-text policy for reading how a job posting takes applications."""
 
-    # The whole visible text of the button that sends the applicant to the
-    # employer's site. It has no href and no attribute naming it, unlike Easy
-    # Apply, an anchor into the posting's own `/apply/` route that needs no
-    # entry here.
+    # The whole visible text of the link that sends the applicant to the
+    # employer's site. Its href is LinkedIn's interstitial, which the
+    # description's own outbound links share, so the text is what tells it
+    # apart. Easy Apply, an anchor into the posting's own `/apply/` route,
+    # needs no entry here.
     external_apply_label: str
     # The headings that open the description. Posting-state lines are read
     # above the earliest of them only, so the same words in the description or

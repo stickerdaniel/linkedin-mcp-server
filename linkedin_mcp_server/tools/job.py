@@ -77,12 +77,7 @@ def register_job_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Get Job Apply URL",
-        annotations={
-            "readOnlyHint": False,
-            "destructiveHint": False,
-            "idempotentHint": True,
-            "openWorldHint": True,
-        },
+        annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job"},
     )
     async def get_job_apply_url(
@@ -92,10 +87,7 @@ def register_job_tools(
         """
         Get how a job posting takes applications, and the employer's application link.
 
-        For a posting that applies off LinkedIn this may click Apply, which
-        LinkedIn counts as an apply click on the posting and may later ask about. Call it
-        when preparing an application, not while browsing. It never submits an
-        application and never shares the profile with the job poster.
+        Reads the posting without clicking anything.
 
         Args:
             job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")

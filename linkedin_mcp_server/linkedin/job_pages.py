@@ -8,7 +8,6 @@ diagnostics that decide what a page *means* stay with the workflow.
 
 from __future__ import annotations
 
-from contextlib import suppress
 from dataclasses import dataclass
 
 import asyncio
@@ -16,7 +15,6 @@ import logging
 import re
 import time
 
-from patchright.async_api import Page, Request, Route
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import LinkedInOperationError
@@ -136,72 +134,30 @@ PROMOTED_JOB_IDS_JS = (
 }"""
 )
 
-# This posting's own external Apply, and nothing else's. The description
-# heading is the boundary the state lines already use: above it sits this
-# posting's control area, below it the "More jobs" cards, each carrying an
-# Apply of its own. Unscoped, a posting with no control of its own would be
-# called external on a neighbour's button and then click it, which LinkedIn
-# counts as an apply on the neighbour. Easy Apply needs no boundary, being
-# found by a URL only this posting's control can carry.
+# This posting's apply control and state, once they render. Easy Apply is found
+# by its URL, an anchor into the posting's own `/apply/` route that the "More
+# jobs" cards, each linking its own posting, cannot match. It is an
+# `<a href=".../jobs/view/<id>/apply/?openSDUIApplyFlow=true">` (measured on
+# 2026-09-14).
 #
-# Without the heading, no external button is proven to belong to this posting.
-# Wait for the boundary rather than risking a click on a recommended job.
+# The external control is an `<a target="_blank">` into the off-site
+# interstitial, which names the employer's page in its href (measured on
+# 2026-09-19), so it is answered without a click. It and the state lines are
+# read above the description heading only: below it sit the "More jobs" cards,
+# each with an Apply of its own. Without the heading nothing is proven to be
+# this posting's, and the read answers `unknown`.
+#
+# On 2026-09-14 the external control was a `<button>` with no href, whose click
+# opened a "Share your profile?" dialog or a tab. LinkedIn counts that click as
+# an apply on the posting, and no posting has shown the button since, so it is
+# not read: a posting carrying it answers `unknown` and is never clicked.
 #
 # The heading is found by walking text nodes rather than asking every element
 # for its text. Both find it; the walk visits fewer nodes and copies none of
 # them, and `textContent` on every element of a posting copies that posting
 # once per level of nesting. That is worth the difference because the readiness
 # poll runs this program on every frame for up to ten seconds.
-_EXTERNAL_APPLY_JS = r"""
-    const walk = document.createTreeWalker(main, NodeFilter.SHOW_TEXT);
-    let heading = null;
-    while (walk.nextNode()) {
-        if (descriptionHeadings.includes((walk.currentNode.nodeValue || '').trim())) {
-            heading = walk.currentNode;
-            break;
-        }
-    }
-    const above = (el) => Boolean(
-        heading && (heading.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING)
-    );
-    const labeled = (el) => (el.innerText || '').trim() === externalLabel;
-    const externalButton = [...main.querySelectorAll('button')].find(
-        (el) => above(el) && labeled(el)
-    ) || null;
-"""
-
-# The attribute that ties the click to the button the read chose. Set in the
-# breath before the click and never earlier, so that a re-render between the
-# two fails the click rather than moving it onto another posting's control.
-EXTERNAL_APPLY_MARK = "data-mcp-external-apply"
-
-MARK_EXTERNAL_APPLY_JS = (
-    """(opts) => {
-    const {externalLabel, descriptionHeadings} = opts;
-    const main = document.querySelector('main');
-    if (!main) return false;
-"""
-    + _EXTERNAL_APPLY_JS
-    + f"""    if (externalButton) {{
-        externalButton.setAttribute('{EXTERNAL_APPLY_MARK}', '');
-    }}
-    return Boolean(externalButton);
-}}"""
-)
-
-# This posting's apply control and state, once they render. Easy Apply is found
-# by its URL, an anchor into the posting's own `/apply/` route that the "More
-# jobs" cards, each linking its own posting, cannot match. The external control
-# and the state lines are text from the locale table, and all of them are read
-# above the description only. Easy Apply is an
-# `<a href=".../jobs/view/<id>/apply/?openSDUIApplyFlow=true">` (measured on
-# 2026-09-14). The external control comes in two shapes: a `<button>` with no
-# href whose click opens a dialog or a tab (2026-09-14), and an
-# `<a target="_blank">` into the off-site interstitial that names the employer's
-# page itself (2026-09-19). `external_link` is that anchor's href, so the second
-# shape is answered without a click.
-APPLY_SIGNALS_JS = (
-    r"""(opts) => {
+APPLY_SIGNALS_JS = r"""(opts) => {
     const {
         applyPath, redirectPath, externalLabel, descriptionHeadings, closedLines,
         appliedPattern,
@@ -215,66 +171,40 @@ APPLY_SIGNALS_JS = (
             return '';
         }
     };
-"""
-    + _EXTERNAL_APPLY_JS
-    + r"""    const lines = (main.innerText || '').split('\n').map((line) => line.trim());
+    const walk = document.createTreeWalker(main, NodeFilter.SHOW_TEXT);
+    let heading = null;
+    while (walk.nextNode()) {
+        if (descriptionHeadings.includes((walk.currentNode.nodeValue || '').trim())) {
+            heading = walk.currentNode;
+            break;
+        }
+    }
+    const above = (el) => Boolean(
+        heading && (heading.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING)
+    );
+    const lines = (main.innerText || '').split('\n').map((line) => line.trim());
     const end = lines.findIndex((line) => descriptionHeadings.includes(line));
     const top = end === -1 ? [] : lines.slice(0, end);
     const applied = new RegExp(appliedPattern);
     const anchors = [...main.querySelectorAll('a[href]')];
-    const link = anchors.find((anchor) => above(anchor) && labeled(anchor)
+    const link = anchors.find((anchor) => above(anchor)
+        && (anchor.innerText || '').trim() === externalLabel
         && pathOf(anchor) === redirectPath);
     return {
         easy_apply: anchors.some((anchor) => pathOf(anchor) === applyPath),
-        external: Boolean(externalButton),
         external_link: link ? link.href : null,
         applied: top.some((line) => applied.test(line)),
         closed: top.some((line) => closedLines.includes(line)),
     };
 }"""
-)
 
 APPLY_READY_JS = (
     "(opts) => {\n    const signals = (" + APPLY_SIGNALS_JS + ")(opts);\n"
     "    return Boolean(signals && Object.values(signals).some(Boolean));\n}"
 )
 
-# The link to the employer's site a dialog offers after Apply. Only inside a
-# dialog, because the description's own outbound links pass through the same
-# interstitial.
-DIALOG_REDIRECT_JS = r"""(redirectPath) => {
-    for (const dialog of document.querySelectorAll('dialog, [role="dialog"]')) {
-        for (const anchor of dialog.querySelectorAll('a[href]')) {
-            try {
-                const url = new URL(anchor.href);
-                if (url.pathname.replace(/\/+$/, '') === redirectPath) return url.href;
-            } catch (error) {}
-        }
-    }
-    return null;
-}"""
-
-# How long the apply control gets to render, and how long an external Apply gets
-# to answer with its dialog or a tab.
+# How long the apply control gets to render.
 _APPLY_READY_TIMEOUT = 10.0
-_APPLY_ANSWER_TIMEOUT = 10.0
-#: How long a refused tab gets to arrive as a page of its own. Refusing its
-#: document answers before the tab exists, and a tab nobody closes outlives the
-#: call.
-_TAB_ARRIVES_TIMEOUT = 1.0
-_APPLY_POLL = 0.25
-
-
-# A tab's first document is issued before the tab's frame exists, so asking
-# that request for its frame is what tells the two apart. The `window.open('',
-# '_blank')`-then-assign shape has a frame by the time it navigates, and is
-# caught by the frame belonging to another page instead.
-def _is_this_pages_own(request: Request, page: Page) -> bool:
-    """Whether ``request`` is the driven page's own document, not a tab's."""
-    try:
-        return request.frame.page is page
-    except Exception:
-        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,13 +296,9 @@ class JobPageReader:
     ) -> JobApplyRead:
         """Read how a posting takes applications, and an external one's address.
 
-        Applied, closed and Easy Apply postings are answered without a click,
-        and so is an external Apply that is a link, from its href. An external
-        Apply that is a button is clicked, which LinkedIn counts as an apply
-        click on the posting, and answers with a "Share your profile?" dialog
-        or a tab. Continue is never clicked: the dialog says it shares the full
-        profile with the job poster, and its link already names the
-        destination.
+        Nothing is clicked. An external Apply is a link whose href names the
+        employer's address; a posting whose Apply is anything else answers
+        `unknown`.
 
         The employer's address is answered as LinkedIn gives it and never
         loaded. It comes from whoever posted the job, and loading it would let
@@ -398,8 +324,8 @@ class JobPageReader:
             logger.debug("No apply control or posting state rendered on %s", url)
 
         signals = await page.evaluate(APPLY_SIGNALS_JS, opts)
-        # Both states before any control, so a posting in either is never
-        # clicked.
+        # Both states before any control, so a posting in either never reads
+        # as open.
         if signals and signals["applied"]:
             return JobApplyRead("applied")
         if signals and signals["closed"]:
@@ -410,85 +336,10 @@ class JobPageReader:
             return JobApplyRead(
                 "external", employer_apply_url(signals["external_link"])
             )
-        if not signals or not signals["external"]:
-            # A barrier served in place of the posting renders none of the
-            # above either, and it needs the relogin path rather than a type.
-            await self._navigator._raise_if_auth_barrier(url)
-            return JobApplyRead("unknown")
-
-        return JobApplyRead("external", await self._click_external_apply(text))
-
-    async def _click_external_apply(self, text: JobApplyTextTable) -> str | None:
-        """Click this posting's external Apply and read the address it reveals.
-
-        The button clicked is the one the read chose, found again by the same
-        boundary and clicked through a mark, so a "More jobs" card carrying the
-        same word cannot take the click. Whichever answers is read: a dialog
-        carrying the interstitial link, or a tab LinkedIn opens.
-
-        A tab is read from the request that would have loaded it, and that
-        request is refused, so the address is learned without being fetched.
-        Reading it off the loaded tab instead would mean the browser had
-        already asked for it, and an interstitial names its destination in a
-        query parameter, which `employer_apply_url` answers with: the tab
-        carries nothing that loading it would add.
-        """
-        page = self._session.page
-        opened: list[Page] = []
-        offered: list[str] = []
-
-        def record(tab: Page) -> None:
-            opened.append(tab)
-
-        async def refuse_a_tabs_document(intercepted: Route) -> None:
-            request = intercepted.request
-            if request.is_navigation_request() and not _is_this_pages_own(
-                request, page
-            ):
-                offered.append(request.url)
-                await intercepted.abort()
-                return
-            # Deferred rather than continued: another handler may own this one,
-            # and continuing would answer past it.
-            await intercepted.fallback()
-
-        page.context.on("page", record)
-        await page.context.route("**/*", refuse_a_tabs_document)
-        try:
-            marked = await page.evaluate(
-                MARK_EXTERNAL_APPLY_JS,
-                {
-                    "externalLabel": text.external_apply_label,
-                    "descriptionHeadings": list(text.description_headings),
-                },
-            )
-            if not marked:
-                return None
-            button = page.locator(f"main button[{EXTERNAL_APPLY_MARK}]")
-            await button.first.click(timeout=5000)
-            deadline = self._session.monotonic() + _APPLY_ANSWER_TIMEOUT
-            while self._session.monotonic() < deadline:
-                if offered:
-                    return employer_apply_url(offered[0])
-                # A tab that has opened but not yet named an address is still
-                # answered here: it reaches the refusal above when it navigates.
-                href = await page.evaluate(DIALOG_REDIRECT_JS, SAFETY_REDIRECT_PATH)
-                if isinstance(href, str):
-                    return employer_apply_url(href)
-                await self._session.delay(_APPLY_POLL)
-            return None
-        finally:
-            await page.context.unroute("**/*", refuse_a_tabs_document)
-            if offered and not opened:
-                # `record` is still listening, and fills `opened` from here.
-                with suppress(Exception):
-                    await page.context.wait_for_event(
-                        "page", timeout=_TAB_ARRIVES_TIMEOUT * 1000
-                    )
-            page.context.remove_listener("page", record)
-            for tab in dict.fromkeys(opened):
-                with suppress(Exception):
-                    await tab.close()
+        # A barrier served in place of the posting renders none of the above
+        # either, and it needs the relogin path rather than a type.
+        await self._navigator._raise_if_auth_barrier(url)
+        return JobApplyRead("unknown")
 
     async def _extract_job_ids(self, *, scoped: bool = False) -> list[str]:
         """Extract unique job IDs from job card links on the current page.
