@@ -22,7 +22,6 @@ requirements
 scripts
 tests
 AGENTS.md
-CLAUDE.md
 changelog.d
 docker-compose.yml
 Dockerfile
