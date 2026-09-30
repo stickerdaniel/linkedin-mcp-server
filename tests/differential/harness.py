@@ -2215,18 +2215,12 @@ def launch_lifetimes(
             kept = started
         else:
             continue
-        if not any(
-            host_comparison.same_lifetime(seen[:2], [pid, start]) for seen in kept
-        ):
+        # Exact, as the watcher itself tells lifetimes apart: a pid reused
+        # within any tolerance would otherwise merge two lifetimes, or lend
+        # one the other's exit.
+        if not any((seen[0], float(seen[1])) == (pid, float(start)) for seen in kept):
             digest = hashlib.sha256(json.dumps(record["cmdline"]).encode()).hexdigest()
-            ended = next(
-                (
-                    t
-                    for (dead, began), t in exits.items()
-                    if host_comparison.same_lifetime([dead, began], [pid, start])
-                ),
-                None,
-            )
+            ended = exits.get((pid, float(start)))
             kept.append(
                 [
                     pid,

@@ -2565,6 +2565,51 @@ def test_a_reused_number_born_after_the_child_is_not_its_launcher():
     assert any("the row started owners" in p for p in problems), problems
 
 
+@pytest.mark.parametrize(
+    ("events", "reported"),
+    [
+        pytest.param(
+            # The owner leaves and its number goes, 5 ms later, to an owner
+            # started for another job: two lifetimes, two starts.
+            [
+                *_ONE_START,
+                _exited(OWNER[0], OWNER[1], 100.004),
+                _started(OWNER[0], 2836, OWNER[1] + 0.005, _owner_command("job-2")),
+            ],
+            "the row started owners",
+            id="owner-number-reused-within-ms",
+        ),
+        pytest.param(
+            # The gate's number goes, 5 ms later, to a gate with another nonce.
+            [
+                *_ONE_START,
+                _exited(2172, 90.0, 90.003),
+                _started(2172, 2836, 90.005, _gate_command("b")),
+            ],
+            "an extra owner start was attempted",
+            id="gate-number-reused-within-ms",
+        ),
+    ],
+)
+def test_a_lifetime_reusing_a_number_within_milliseconds_stays_its_own(
+    events, reported
+):
+    problems = _judged_launches(events)
+    assert any(reported in p for p in problems), problems
+
+
+def test_an_earlier_lifetimes_exit_is_not_lent_to_the_launcher():
+    # A frontend under the launcher's number left 5 ms before the launcher
+    # was born there. Its exit is its own: the launcher is still read alive
+    # long after its interpreter, so the pair is one start.
+    events = [
+        _started(1312, 2836, 99.985, ["C:\\frontend.exe"]),
+        _exited(1312, 99.985, 99.99),
+        *_ONE_START,
+    ]
+    assert _judged_launches(events) == []
+
+
 def test_launch_lifetimes_without_the_sample_log_do_not_collapse():
     assert _judged_launches(list(_ONE_START), samples=[])
 
