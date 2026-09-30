@@ -159,5 +159,3 @@ A PR of type `feat` or `fix`, or one marked breaking with a `!` right before the
 3. Push it to the same branch.
 
 If you add or remove the breaking marker later, rename the fragment. Edit an existing fragment instead of running `towncrier create` again, which writes a second, numbered file that the check rejects.
-
-Renovate PRs need no fragment: Renovate cannot write one and stops updating a PR once someone else pushes to it. When a dependency update changes what users see, whoever merges it adds the sentence in a follow-up PR.
