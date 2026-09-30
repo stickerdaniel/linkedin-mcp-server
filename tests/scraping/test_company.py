@@ -383,7 +383,7 @@ class TestScrapeCompany:
             )
 
         assert [c.args for c in cb.on_progress.call_args_list] == [
-            ("Scraped about (1/3)", 32)
+            ("Read about (1/3)", 32)
         ]
         cb.on_complete.assert_awaited_once_with("company profile", result)
         cb.on_error.assert_not_awaited()
@@ -582,9 +582,9 @@ class TestScrapeCompanyCallbacks:
         assert cb.on_progress.await_count == 3
         messages = [c.args[0] for c in cb.on_progress.call_args_list]
         assert messages == [
-            "Scraped about (1/3)",
-            "Scraped posts (2/3)",
-            "Scraped jobs (3/3)",
+            "Read about (1/3)",
+            "Read posts (2/3)",
+            "Read jobs (3/3)",
         ]
         # 95 rather than 100 at the end: the walk reports its own last section,
         # and the remaining 5 belong to whoever assembles the answer.

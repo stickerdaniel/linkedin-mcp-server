@@ -34,7 +34,7 @@ def register_feed_tools(
         timeout=tool_timeout,
         title="Get Feed",
         annotations={"readOnlyHint": True, "openWorldHint": True},
-        tags={"feed", "scraping"},
+        tags={"feed"},
     )
     async def get_feed(
         ctx: Context,
@@ -68,7 +68,7 @@ def register_feed_tools(
             logger.info("Scraping feed (num_posts=%d)", num_posts)
 
             await ctx.report_progress(
-                progress=0, total=100, message="Starting feed scrape"
+                progress=0, total=100, message="Starting home feed"
             )
 
             extracted = await extractor.extract_feed(num_posts=num_posts)

@@ -67,7 +67,7 @@ def register_person_tools(
         timeout=tool_timeout,
         title="Get Person Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
-        tags={"person", "scraping"},
+        tags={"person"},
     )
     async def get_person_profile(
         linkedin_username: str,
@@ -81,11 +81,11 @@ def register_person_tools(
         Args:
             linkedin_username: LinkedIn username (e.g., "stickerdaniel", "williamhgates"). A full profile URL is accepted too and is reduced to the username.
             ctx: FastMCP context for progress reporting
-            sections: Comma-separated list of extra sections to scrape.
+            sections: Comma-separated list of extra sections to read.
                 The main profile page is always included.
                 Available sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts
                 Examples: "experience,education", "contact_info", "skills,projects", "honors,languages", "posts"
-                Default (None) scrapes only the main profile page.
+                Default (None) reads only the main profile page.
             max_scrolls: Maximum pagination attempts per section to load more content.
                 On detail sections (experience, certifications, skills, etc.) this
                 is the max number of "Show more" button clicks. On activity/posts
@@ -314,7 +314,7 @@ def register_person_tools(
         timeout=tool_timeout,
         title="Get Sidebar Profiles",
         annotations={"readOnlyHint": True, "openWorldHint": True},
-        tags={"person", "scraping"},
+        tags={"person"},
     )
     async def get_sidebar_profiles(
         linkedin_username: str,
@@ -329,7 +329,7 @@ def register_person_tools(
         linkedin.com/premium are skipped.
 
         Args:
-            linkedin_username: LinkedIn username of the profile page to scrape; a full profile URL is accepted too
+            linkedin_username: LinkedIn username of the profile page to read; a full profile URL is accepted too
                 (e.g., "stickerdaniel", "williamhgates")
             ctx: FastMCP context for progress reporting
 
@@ -364,7 +364,7 @@ def register_person_tools(
         timeout=tool_timeout,
         title="Get My Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
-        tags={"person", "scraping"},
+        tags={"person"},
     )
     async def get_my_profile(
         ctx: Context,
@@ -375,16 +375,16 @@ def register_person_tools(
         Get the authenticated user's own LinkedIn profile.
 
         Navigates to /in/me/ and resolves the redirect to obtain the real
-        username before scraping, so the url field in the result is the actual
+        username before reading the profile, so the url field in the result is the actual
         profile URL (e.g. linkedin.com/in/johndoe/) rather than /in/me/.
 
         Args:
             ctx: FastMCP context for progress reporting
-            sections: Comma-separated list of extra sections to scrape.
+            sections: Comma-separated list of extra sections to read.
                 The main profile page is always included.
                 Available sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts
                 Examples: "experience,education", "contact_info", "skills,projects"
-                Default (None) scrapes only the main profile page.
+                Default (None) reads only the main profile page.
             max_scrolls: Maximum pagination attempts per section (same as get_person_profile).
 
         Returns:

@@ -238,7 +238,7 @@
                 }
               ],
               "default": null,
-              "description": "Comma-separated list of extra sections to scrape.\nThe about page is always included.\nAvailable sections: posts, jobs\nExamples: \"posts\", \"posts,jobs\"\nDefault (None) scrapes only the about page."
+              "description": "Comma-separated list of extra sections to read.\nThe about page is always included.\nAvailable sections: posts, jobs\nExamples: \"posts\", \"posts,jobs\"\nDefault (None) reads only the about page."
             }
           },
           "required": [
@@ -378,7 +378,7 @@
                 }
               ],
               "default": null,
-              "description": "Comma-separated list of extra sections to scrape.\nThe main profile page is always included.\nAvailable sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts\nExamples: \"experience,education\", \"contact_info\", \"skills,projects\"\nDefault (None) scrapes only the main profile page."
+              "description": "Comma-separated list of extra sections to read.\nThe main profile page is always included.\nAvailable sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts\nExamples: \"experience,education\", \"contact_info\", \"skills,projects\"\nDefault (None) reads only the main profile page."
             }
           },
           "type": "object"
@@ -420,7 +420,7 @@
                 }
               ],
               "default": null,
-              "description": "Comma-separated list of extra sections to scrape.\nThe main profile page is always included.\nAvailable sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts\nExamples: \"experience,education\", \"contact_info\", \"skills,projects\", \"honors,languages\", \"posts\"\nDefault (None) scrapes only the main profile page."
+              "description": "Comma-separated list of extra sections to read.\nThe main profile page is always included.\nAvailable sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts\nExamples: \"experience,education\", \"contact_info\", \"skills,projects\", \"honors,languages\", \"posts\"\nDefault (None) reads only the main profile page."
             }
           },
           "required": [
@@ -457,7 +457,7 @@
           "additionalProperties": false,
           "properties": {
             "linkedin_username": {
-              "description": "LinkedIn username of the profile page to scrape; a full profile URL is accepted too\n(e.g., \"stickerdaniel\", \"williamhgates\")",
+              "description": "LinkedIn username of the profile page to read; a full profile URL is accepted too\n(e.g., \"stickerdaniel\", \"williamhgates\")",
               "type": "string"
             }
           },

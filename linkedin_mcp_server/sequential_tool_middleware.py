@@ -67,7 +67,7 @@ class SequentialToolExecutionMiddleware(Middleware):
         logger.debug("Waiting for scraper lock for tool '%s'", tool_name)
         await self._report_progress(
             context,
-            message="Queued waiting for scraper lock",
+            message="Queued waiting for the browser lock",
         )
 
         async with self._lock:
@@ -79,7 +79,7 @@ class SequentialToolExecutionMiddleware(Middleware):
             )
             await self._report_progress(
                 context,
-                message="Scraper lock acquired, starting tool",
+                message="Browser lock acquired, starting tool",
             )
             return await self._run_owning_the_profile(context, call_next, tool_name)
 

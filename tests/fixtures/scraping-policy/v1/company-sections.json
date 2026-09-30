@@ -104,7 +104,7 @@
     {
       "call": "scrape_company",
       "kind": "callback.progress",
-      "message": "Scraped about (1/3)",
+      "message": "Read about (1/3)",
       "percent": 32
     },
     {
@@ -208,7 +208,7 @@
     {
       "call": "scrape_company",
       "kind": "callback.progress",
-      "message": "Scraped posts (2/3)",
+      "message": "Read posts (2/3)",
       "percent": 63
     },
     {
@@ -304,7 +304,7 @@
     {
       "call": "scrape_company",
       "kind": "callback.progress",
-      "message": "Scraped jobs (3/3)",
+      "message": "Read jobs (3/3)",
       "percent": 95
     },
     {

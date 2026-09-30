@@ -268,7 +268,7 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
         logger.warning("Scraping error%s: %s", ctx, exception)
         _raise_tool_error_with_diagnostics(
             exception,
-            "Scraping failed. LinkedIn page structure may have changed.",
+            "Could not read the page. LinkedIn page structure may have changed.",
             context=context,
         )
 

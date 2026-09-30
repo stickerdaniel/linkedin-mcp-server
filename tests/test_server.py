@@ -809,12 +809,12 @@ class TestSequentialToolExecutionMiddleware:
                 call(
                     progress=0,
                     total=100,
-                    message="Queued waiting for scraper lock",
+                    message="Queued waiting for the browser lock",
                 ),
                 call(
                     progress=0,
                     total=100,
-                    message="Scraper lock acquired, starting tool",
+                    message="Browser lock acquired, starting tool",
                 ),
             ]
         )

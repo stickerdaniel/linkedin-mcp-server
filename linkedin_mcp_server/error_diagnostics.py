@@ -253,7 +253,7 @@ def _suggest_issue_title(
     if "/recent-activity/" in route:
         summary = f"recent-activity redirect loop in {section} on {current_runtime_id}"
     else:
-        summary = f"{section} scrape failure in {context} on {current_runtime_id}"
+        summary = f"{section} read failure in {context} on {current_runtime_id}"
     return f"{ISSUE_TITLE_PREFIX} {summary}"
 
 
@@ -300,6 +300,6 @@ def _issue_search_query(payload: dict[str, Any]) -> str:
     if "/recent-activity/" in route:
         summary = '"recent-activity redirect loop"'
     else:
-        section = payload.get("section_name") or "scrape"
+        section = payload.get("section_name") or "read failure"
         summary = f'"{section}"'
     return f"repo:stickerdaniel/linkedin-mcp-server is:issue is:open {summary}"
