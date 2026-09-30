@@ -57,7 +57,7 @@ def register_job_tools(
             logger.info("Scraping job: %s", job_id)
 
             await ctx.report_progress(
-                progress=0, total=100, message="Starting job posting"
+                progress=0, total=100, message="Reading the job posting"
             )
 
             result = await extractor.scrape_job(job_id)

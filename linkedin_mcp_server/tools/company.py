@@ -129,7 +129,7 @@ def register_company_tools(
             logger.info("Scraping company posts: %s", company_name)
 
             await ctx.report_progress(
-                progress=0, total=100, message="Starting company posts"
+                progress=0, total=100, message="Reading company posts"
             )
 
             url = company_page_url(company_name, "/posts/")

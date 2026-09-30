@@ -68,7 +68,7 @@ def register_feed_tools(
             logger.info("Scraping feed (num_posts=%d)", num_posts)
 
             await ctx.report_progress(
-                progress=0, total=100, message="Starting home feed"
+                progress=0, total=100, message="Reading the home feed"
             )
 
             extracted = await extractor.extract_feed(num_posts=num_posts)
