@@ -683,19 +683,27 @@ def test_a_venv_launcher_and_its_interpreter_are_one_owner_start_attempt():
     # interpreter started the owner. One attempt, one owner.
     gate, scripts = _gate(), [harness.gate_script(harness.REPO_ROOT)]
     events = [
-        {**_gate_event(gate), "pid": 1776, "ppid": 3100},
-        {**_gate_event(gate), "pid": 1104, "ppid": 1776},
-        {**_owner_event("process.start", in_row=True), "cmdline": _OWNER_TARGET},
-        {**_gate_event(gate, in_row=False), "pid": 9, "ppid": 1},
+        {**_gate_event(gate), "pid": 1776, "ppid": 3100, "t": 4.01},
+        {**_gate_event(gate), "pid": 1104, "ppid": 1776, "t": 4.01},
+        {
+            **_owner_event("process.start", in_row=True),
+            "cmdline": _OWNER_TARGET,
+            "ppid": 1104,
+            "t": 5.01,
+        },
+        {**_gate_event(gate, in_row=False), "pid": 9, "ppid": 1, "t": 4.01},
     ]
-    events[2]["ppid"] = 1104
     owners, gates = harness.launch_lifetimes(events, scripts)
-    assert host_comparison.owner_launches(gates) == [[1776, 4.0]]
-    assert host_comparison.owner_launches(owners) == [[77, 5.0]]
+    assert host_comparison.owner_launches(gates, windows=True) == [[1776, 4.0]]
+    assert host_comparison.owner_launches(owners, windows=True) == [[77, 5.0]]
+    # Only there: elsewhere the same pair is two gate processes.
+    assert len(host_comparison.owner_launches(gates, windows=False)) == 2
     # An attempt of its own is still a second one.
-    events.append({**_gate_event(gate), "pid": 2000, "start_identity": 9.0, "ppid": 1})
+    events.append(
+        {**_gate_event(gate), "pid": 2000, "start_identity": 9.0, "ppid": 1, "t": 9.01}
+    )
     _, gates = harness.launch_lifetimes(events, scripts)
-    assert len(host_comparison.owner_launches(gates)) == 2
+    assert len(host_comparison.owner_launches(gates, windows=True)) == 2
 
 
 def test_a_baseline_runtimes_gate_is_recognised_by_its_own_path(tmp_path):

@@ -1439,9 +1439,10 @@ def test_a_venv_launcher_and_the_interpreter_it_starts_are_one_launch():
     # On Windows a venv's python.exe starts the interpreter with the same
     # command line: two owner processes, one launch.
     record = _r2_record(daemon=True, platform="win32")
-    record["owner_processes"] = [[4000, 99.0, 1, "o", None], [*OWNER, 4000, "o", None]]
+    launcher = [4000, 99.0, 1, "o", None, 99.01]
+    record["owner_processes"] = [launcher, [*OWNER, 4000, "o", None, 100.01]]
     assert r2_problems(record, daemon=True) == []
-    record["owner_processes"] = [[4000, 99.0, 1, "o", None], [*OWNER, 1, "o", None]]
+    record["owner_processes"] = [launcher, [*OWNER, 1, "o", None, 100.01]]
     assert any("the row started owners" in p for p in r2_problems(record, daemon=True))
 
 
@@ -1451,13 +1452,13 @@ def test_a_windows_release_gate_and_its_launcher_are_one_start_attempt():
     # 1776. One attempt, not an extra one.
     record = _r2_record(daemon=True, platform="win32")
     record["gate_processes"] = [
-        [1776, 90.0, 3100, "g", None],
-        [1104, 90.0, 1776, "g", None],
+        [1776, 90.0, 3100, "g", None, 90.01],
+        [1104, 90.0, 1776, "g", None, 90.01],
     ]
     assert r2_problems(record, daemon=True) == []
     record["gate_processes"] = [
-        [1776, 90.0, 3100, "g", None],
-        [1104, 90.0, 3100, "g", None],
+        [1776, 90.0, 3100, "g", None, 90.01],
+        [1104, 90.0, 3100, "g", None, 90.01],
     ]
     assert any(
         "an extra owner start was attempted" in p
@@ -2434,13 +2435,13 @@ _ONE_START = [
 ]
 
 
-def _judged_launches(events: list[dict]) -> list[str]:
-    """The owner and gate problems of a valid Windows daemon H-R2 record
-    whose launch lifetimes the real producer read from *events*."""
+def _judged_launches(events: list[dict], platform: str = "win32") -> list[str]:
+    """The owner and gate problems of a valid daemon H-R2 record, Windows by
+    default, whose launch lifetimes the real producer read from *events*."""
     owners, gates = harness.launch_lifetimes(
         events, [harness.gate_script(harness.REPO_ROOT)]
     )
-    record = _r2_record(daemon=True, platform="win32")
+    record = _r2_record(daemon=True, platform=platform)
     record["owner_processes"], record["gate_processes"] = owners, gates
     return [
         p
@@ -2496,11 +2497,31 @@ def test_one_measured_windows_start_counts_once():
             "the row started owners",
             id="nested-owner-another-command",
         ),
+        pytest.param(
+            # The owner launcher leaves, its number goes to another process,
+            # and that one starts an owner with the same command, all between
+            # two samples: the sample that first sees the new owner is the one
+            # that sees the launcher gone, so nothing ties the two.
+            [
+                *_ONE_START,
+                _exited(1312, 99.99, 110.06),
+                {**_started(1312, 2836, 110.02, ["C:\\frontend.exe"]), "t": 110.06},
+                {**_started(4400, 1312, 110.03, _owner_command("job-1")), "t": 110.06},
+            ],
+            "the row started owners",
+            id="launcher-number-reused-between-samples",
+        ),
     ],
 )
 def test_a_distinct_start_is_never_collapsed(events, reported):
     problems = _judged_launches(events)
     assert any(reported in p for p in problems), problems
+
+
+def test_an_equal_command_pair_collapses_only_on_windows():
+    # The venv launcher is a Windows construction; elsewhere an owner under an
+    # owner with the same command is a second start.
+    assert _judged_launches(list(_ONE_START), platform="linux")
 
 
 @pytest.mark.parametrize("field", ["owner_processes", "gate_processes"])

@@ -2155,12 +2155,13 @@ def launch_lifetimes(
 ) -> tuple[list[list[Any]], list[list[Any]]]:
     """The owner processes and release gates this row's actors started.
 
-    Each as ``[pid, start, ppid, command digest, recorded exit]``, once per
-    lifetime, from the watcher's records: what ``host_comparison``'s
+    Each as ``[pid, start, ppid, command digest, exit sample, first sample]``,
+    once per lifetime, from the watcher's records: what ``host_comparison``'s
     ``same_invocation`` needs to count a Windows venv launcher and the
     interpreter it starts with the same command as one launch, and nothing
     else. The digest is of the whole command line, gate nonce and target
-    included; the exit is when the watcher saw that lifetime gone, or None.
+    included; the exit sample is when the watcher saw that lifetime gone, or
+    None, and the first sample when it first saw it.
     """
     records = list(observed)
     exits: dict[tuple[int, float], float] = {}
@@ -2203,7 +2204,9 @@ def launch_lifetimes(
                 ),
                 None,
             )
-            kept.append([pid, start, record.get("ppid"), digest, ended])
+            kept.append(
+                [pid, start, record.get("ppid"), digest, ended, record.get("t")]
+            )
     return owners, started
 
 

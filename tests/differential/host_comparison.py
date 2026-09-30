@@ -939,6 +939,7 @@ def _owner_problems(
     fresh, and no other owner started, nor more than one release gate."""
     problems = []
     actor = record.get("actor")
+    windows = record.get("platform") == "win32"
     reads = {
         o.get("label"): o for o in record.get("owners") or [] if isinstance(o, Mapping)
     }
@@ -963,7 +964,7 @@ def _owner_problems(
     if not isinstance(record.get("owner_processes"), list):
         problems.append("the row's owner processes were not recorded")
     elif not (late_b or late_a2):
-        launches = owner_launches(record.get("owner_processes") or [])
+        launches = owner_launches(record.get("owner_processes") or [], windows=windows)
         if len(launches) != 1 or not _of_launch(
             actor, launches[0], record.get("owner_processes") or []
         ):
@@ -973,9 +974,10 @@ def _owner_problems(
     gates = record.get("gate_processes")
     if not isinstance(gates, list):
         problems.append("the row's release gates were not recorded")
-    elif len(owner_launches(gates)) > 1:
+    elif len(owner_launches(gates, windows=windows)) > 1:
         problems.append(
-            f"an extra owner start was attempted: release gates {owner_launches(gates)}"
+            f"an extra owner start was attempted: release gates "
+            f"{owner_launches(gates, windows=windows)}"
         )
     return problems
 
@@ -996,16 +998,22 @@ def _launch_rows(processes: Any) -> list[Sequence[Any]]:
 def same_invocation(parent: Sequence[Any], child: Sequence[Any]) -> bool:
     """Whether *child* is the interpreter *parent* started for one invocation.
 
-    The one construction measured (run 36677572983 and every Windows K3/K0
-    of run 36679881422): a venv's ``python.exe`` is a launcher that starts
-    the interpreter with the same command line, gate nonce and target
-    included. So both carry the same command digest, and the child's parent
-    is that lifetime: its pid, begun no later than the child, and not
-    recorded gone before the child began. A matching number alone, a
-    different command or a lifetime without its digest is its own launch.
-    Each is ``[pid, start, ppid, command digest, recorded exit or None]``.
+    The one construction measured, on Windows only (run 36677572983 and every
+    Windows K3/K0 of run 36679881422): a venv's ``python.exe`` is a launcher
+    that starts the interpreter with the same command line, gate nonce and
+    target included, and waits for it. So both carry the same command digest,
+    and the child's parent is that lifetime: its pid, begun no later than the
+    child, and seen alive in the very sample that first saw the child. A
+    sampled exit is only when the watcher noticed the lifetime gone, so an
+    exit in that same sample could hide a pid reused in between, and does not
+    tie them. A matching number alone, a different command or a lifetime
+    without its digest or its sample times is its own launch. Each is
+    ``[pid, start, ppid, command digest, exit sample or None, first sample]``.
     """
-    if len(parent) < 5 or len(child) < 5:
+    if len(parent) < 6 or len(child) < 6:
+        return False
+    first = child[5]
+    if not isinstance(first, (int, float)) or isinstance(first, bool):
         return False
     digest = child[3]
     if not isinstance(digest, str) or not digest or parent[3] != digest:
@@ -1020,18 +1028,20 @@ def same_invocation(parent: Sequence[Any], child: Sequence[Any]) -> bool:
         return True
     if not isinstance(ended, (int, float)) or isinstance(ended, bool):
         return False
-    return float(ended) + _START_TOLERANCE_SECONDS >= child_began
+    return float(ended) > float(first)
 
 
-def owner_launches(processes: Sequence[Any]) -> list[list]:
+def owner_launches(processes: Sequence[Any], *, windows: bool) -> list[list]:
     """Each launch among *processes*, as ``[pid, start]``.
 
     *processes* are the lifetimes of every row process that ran one command,
-    the owner module or its release gate (``harness.launch_lifetimes``). One
-    that ``same_invocation`` ties to another of them is that launch, and
-    nothing else is collapsed.
+    the owner module or its release gate (``harness.launch_lifetimes``). On
+    Windows, one that ``same_invocation`` ties to another of them is that
+    launch; nothing else is collapsed, and elsewhere nothing at all.
     """
     rows = _launch_rows(processes)
+    if not windows:
+        return [list(row[:2]) for row in rows]
     return [
         list(child[:2])
         for child in rows
@@ -1042,7 +1052,11 @@ def owner_launches(processes: Sequence[Any]) -> list[list]:
 
 
 def _of_launch(actor: Any, launch: Sequence[Any], processes: Sequence[Any]) -> bool:
-    """Whether *actor* is *launch*, or the interpreter it started for it."""
+    """Whether *actor* is *launch*, or the interpreter it started for it.
+
+    Only a Windows launch has one: elsewhere ``owner_launches`` keeps every
+    process as its own launch, so a single launch has no other process.
+    """
     if same_lifetime(actor, launch):
         return True
     rows = _launch_rows(processes)
@@ -1133,7 +1147,12 @@ def semantics(record: Mapping[str, Any]) -> dict[str, Any]:
                 for o in record.get("owners") or []
                 if isinstance(o, Mapping)
             ],
-            owner_launches=len(owner_launches(record.get("owner_processes") or [])),
+            owner_launches=len(
+                owner_launches(
+                    record.get("owner_processes") or [],
+                    windows=record.get("platform") == "win32",
+                )
+            ),
             a_open=dict(_mapping(record.get("a_open"))),
         )
     return read
