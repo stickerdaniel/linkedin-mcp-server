@@ -125,7 +125,7 @@ Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSO
 | `USER_DATA_DIR` | `~/.linkedin-mcp/profile` | Browser profile directory. The container default always works; any other path needs one run with `--claim-profile-root` first. |
 | `LOG_LEVEL` | `WARNING` | Logging level: DEBUG, INFO, WARNING, ERROR |
 | `TIMEOUT` | `5000` | Browser timeout in milliseconds |
-| `TOOL_TIMEOUT` | `180` | Timeout for a whole tool call, in seconds. Raise it for heavy scrapes, slow networks, or a cold-start browser. |
+| `TOOL_TIMEOUT` | `180` | Timeout for a whole tool call, in seconds. Raise it for calls that read many pages, slow networks, or a cold-start browser. |
 | `LOGIN_TIMEOUT` | `1800` | How long the login browser waits for you to finish signing in, in seconds (`0` = no limit). The Docker viewer ends the login after 30 minutes either way. |
 | `LOGIN_INLINE_WAIT` | `25` | How long a tool call waits for a login to finish, in seconds (max 45). Not used in Docker, where `--login --login-viewer` is the login path. |
 | `BROWSER_WAIT` | `25` | How long to wait for another server process to hand over the shared browser, in seconds (max 45; `0` = report busy at once). |
