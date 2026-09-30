@@ -39,7 +39,7 @@ PERSON_SECTIONS: dict[str, tuple[str, bool]] = {
 
 Overlays such as contact info open as a modal, so they are read from the `<dialog>` element instead of the whole page.
 
-`scraping/person.py` and `scraping/company.py` own these sections. `scraping/extractor.py` is a stable facade that delegates to them. The generated [scraping architecture reference](../docs/scraping-architecture.md) shows which module owns what, how they import each other, and which ones touch the page directly.
+`scraping/person.py` and `scraping/company.py` own these sections. `scraping/extractor.py` is a stable facade that delegates to them. The generated [architecture reference](../docs/scraping-architecture.md) shows which module owns what, how they import each other, and which ones touch the page directly.
 
 ### Minimize DOM dependence
 
@@ -107,16 +107,16 @@ For example, `search_companies`.
 
 Pre-commit fails when either of these is out of date.
 
-### Scraping architecture reference
+### Architecture reference
 
-`docs/scraping-architecture.md` is generated from the AST of the scraping package, so don't edit it by hand. Regenerate it after you change module imports, public owners, the facade's coroutines or construction state, or which modules touch the page directly:
+`docs/scraping-architecture.md` is generated from the AST of the `scraping` package, so don't edit it by hand. Regenerate it after you change module imports, public owners, the facade's coroutines or construction state, or which modules touch the page directly:
 
 ```bash
 uv run python scripts/generate_scraping_architecture.py
 uv run python scripts/generate_scraping_architecture.py --check
 ```
 
-### Scraping policy traces
+### Policy traces
 
 The traces in `tests/fixtures/scraping-policy/` record every browser operation the code performs in fixed scenarios against a scripted page, such as navigations, waits and clicks, so a refactor can prove it did not change how the server behaves on LinkedIn. The checker only compares them and refuses to write into that directory. Generate candidates into a directory that does not exist yet and read the whole diff:
 
