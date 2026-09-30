@@ -1,4 +1,4 @@
-"""What a host's quit leaves, read at checkpoints: row H-R3's own evidence.
+"""What a host's quit leaves, read at checkpoints: rows H-R3 and H-R2.
 
 **The row.** The host actions are H-R1's: start, one ``get_feed`` call, stdin
 EOF. What H-R3 adds is three readings of the profile around that quit, taken
@@ -37,6 +37,15 @@ is not yet empty and settlement follows; the daemon's must still show the
 owner, its root and the held lock, in a fresh window. Neither mode needs the
 browser or the lease to outlive the owner's process: at settlement the owner
 has exited by itself and the profile is empty and free.
+
+**H-R2** puts a second host, B, inside A's life on the same profile, with
+the same launch: A reads (A1), B starts, reads and quits, A reads again (A2)
+and quits. Its checkpoints are ``after A1``, ``after B quit`` (from B's own
+post-exit hook), then A's ``first post-exit`` and ``settled``. Every read has
+to be served by a request that arrived inside its own interval
+(``attribute_requests``). In daemon mode the hot reuse is the claim: one
+owner lifetime and instance throughout, B forwarding to it, and each gap
+fresh from the last send; a late gap says the reuse was not observed.
 
 No process is read here: this module holds readers and verdicts only.
 """
@@ -383,18 +392,13 @@ def _points(record: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return [point for point in points if isinstance(point, Mapping)]
 
 
-def r3_problems(record: Mapping[str, Any], *, daemon: bool) -> list[str]:
-    """Why H-R3's record does not establish its row; empty when it does.
-
-    Every checkpoint, in order and once, with its own times; the read, the
-    script, the post-exit hook and the EOF exit all recorded and normal; and
-    each reading what its mode requires. A late window is reported and not
-    judged; any problem fails the row.
-    """
+def _record_problems(
+    record: Mapping[str, Any], *, row: str, daemon: bool, role: str
+) -> list[str]:
+    """What every comparison record needs before any checkpoint is read."""
     mode = "daemon" if daemon else "direct"
-    role = "owner" if daemon else "server"
     problems: list[str] = []
-    if record.get("row") != ROW_H_R3:
+    if record.get("row") != row:
         problems.append(f"the record is for row {record.get('row')!r}")
     if record.get("mode") != mode:
         problems.append(f"the record is for mode {record.get('mode')!r}, not {mode}")
@@ -405,38 +409,50 @@ def r3_problems(record: Mapping[str, Any], *, daemon: bool) -> list[str]:
         if record.get(name):
             problems.append(f"{what}: {record[name]}")
     problems += [str(p) for p in record.get("observation_problems") or []]
+    return problems
 
-    call = record.get("call")
-    if not isinstance(call, Mapping):
-        call = None
-        problems.append("the read call was not recorded")
-    elif call.get("is_error") is not False or call.get("read_the_post") is not True:
-        problems.append("the read did not return the synthetic post")
-    host = _mapping(record.get("host"))
+
+def host_problems(host: Any, *, prefix: str = "") -> list[str]:
+    """Why *host* was not one normal quit: started, answered, closed on EOF,
+    exited by itself with status 0, and both times recorded in order."""
+    host = _mapping(host)
+    problems = []
+    if host.get("error"):
+        problems.append(f"{prefix}the host session failed: {host['error']}")
     if (
         host.get("exited_on_quit") is not True
         or host.get("exit_code") != 0
         or host.get("killed_by_harness") is not False
     ):
         problems.append(
-            f"the host's quit was not a normal EOF exit: exited "
+            f"{prefix}the host's quit was not a normal EOF exit: exited "
             f"{host.get('exited_on_quit')!r}, status {host.get('exit_code')!r}, "
             f"killed {host.get('killed_by_harness')!r}"
         )
     eof, exit_seen = _ns(host.get("eof_ns")), _ns(host.get("exit_seen_ns"))
     if eof is None or exit_seen is None or exit_seen < eof:
-        problems.append("the EOF and the exit after it are not recorded in order")
-    actor = record.get("actor")
-    if _lifetime(actor) is None:
-        problems.append(f"the {role} was never identified")
+        problems.append(
+            f"{prefix}the EOF and the exit after it are not recorded in order"
+        )
+    return problems
 
+
+def _read_all(
+    record: Mapping[str, Any], labels: Sequence[str]
+) -> tuple[
+    list[str],
+    dict[Any, Mapping[str, Any]],
+    dict[str, tuple[Reading, list[tuple[int, float]] | None]],
+]:
+    """Every checkpoint, once and in *labels*' order, each classified."""
+    problems: list[str] = []
     points = _points(record)
-    labels = [point.get("label") for point in points]
-    if labels != list(CHECKPOINTS):
-        problems.append(f"the checkpoints were {labels}, not {list(CHECKPOINTS)}")
+    found_labels = [point.get("label") for point in points]
+    if found_labels != list(labels):
+        problems.append(f"the checkpoints were {found_labels}, not {list(labels)}")
     found = {point.get("label"): point for point in points}
     key, lock = str(record.get("browser_key")), record.get("lock")
-    platform = str(record.get("platform"))
+    platform, actor = str(record.get("platform")), record.get("actor")
     readings: dict[str, tuple[Reading, list[tuple[int, float]] | None]] = {}
     for label, point in found.items():
         if point.get("error"):
@@ -449,73 +465,526 @@ def r3_problems(record: Mapping[str, Any], *, daemon: bool) -> list[str]:
         readings[str(label)] = read_checkpoint(
             point, key=key, actor=actor, lock=lock, platform=platform
         )
+    return problems, found, readings
 
-    idle = record.get("idle_timeout_seconds")
+
+def _same_root(
+    readings: Mapping[str, tuple[Reading, list[tuple[int, float]] | None]],
+    label: str,
+    earlier: str,
+) -> list[str]:
+    roots = readings[label][1]
+    before = readings.get(earlier, (None, None))[1]
+    if roots is not None and before is not None and len(roots) == 1:
+        if not same_lifetime(roots[0], before[0] if before else None):
+            return [f"{label}: the root is not the one {earlier} read"]
+    return []
+
+
+def _post_exit_problems(
+    record: Mapping[str, Any],
+    found: Mapping[Any, Mapping[str, Any]],
+    readings: Mapping[str, tuple[Reading, list[tuple[int, float]] | None]],
+    *,
+    daemon: bool,
+    role: str,
+    anchor: Mapping[str, Any] | None,
+    earlier: str,
+) -> list[str]:
+    """``first post-exit``: after the host's exit; for the owner, in a fresh
+    window from *anchor*, still its root and its lease; Direct, as read."""
+    after = found.get(FIRST_POST_EXIT)
+    if after is None or FIRST_POST_EXIT not in readings:
+        return []
+    problems = []
+    reading = readings[FIRST_POST_EXIT][0]
+    exit_seen = _ns(_mapping(record.get("host")).get("exit_seen_ns"))
+    if exit_seen is None or after["began_ns"] < exit_seen:
+        problems.append(f"{FIRST_POST_EXIT}: it began before the exit was seen")
+    if daemon:
+        late = window_problems(
+            after, anchor, idle_timeout=record.get("idle_timeout_seconds")
+        )
+        problems += late
+        if not late:
+            problems += held_problems(reading, role=role)
+            problems += _same_root(readings, FIRST_POST_EXIT, earlier)
+    else:
+        # Kept as read: whether the profile is empty yet is the record's, and
+        # settlement is judged at ``settled``. What is required is a reading
+        # at all: the server gone, and a lock state where the platform can
+        # give one.
+        if reading.actor != "gone":
+            problems.append(
+                f"{FIRST_POST_EXIT}: the server was {reading.actor}, not gone"
+            )
+        if reading.lock not in (HELD, FREE, UNOBSERVED):
+            problems.append(f"{FIRST_POST_EXIT}: the lock was {reading.lock}")
+    return problems
+
+
+def _settled_problems(
+    record: Mapping[str, Any],
+    found: Mapping[Any, Mapping[str, Any]],
+    readings: Mapping[str, tuple[Reading, list[tuple[int, float]] | None]],
+    *,
+    daemon: bool,
+    role: str,
+) -> list[str]:
+    """``settled``: after the owner's own exit, before the cleanup, the
+    profile empty and free."""
+    settled = found.get(SETTLED)
+    if settled is None or SETTLED not in readings:
+        return []
+    problems = released_problems(readings[SETTLED][0], role=role)
+    previous = _ns((found.get(FIRST_POST_EXIT) or {}).get("ended_ns"))
+    if previous is None or settled["began_ns"] < previous:
+        problems.append(f"{SETTLED}: it began before {FIRST_POST_EXIT} ended")
+    cleanup = _ns(record.get("cleanup_began_ns"))
+    if cleanup is None or settled["ended_ns"] > cleanup:
+        problems.append(f"{SETTLED}: it is not shown to precede the cleanup")
+    if daemon:
+        left = _mapping(record.get("owner_exit"))
+        if left.get("how") != "exited":
+            problems.append(
+                f"the owner was not seen to exit by itself: {left.get('how')!r}"
+            )
+        seen = _ns(left.get("seen_ns"))
+        if seen is None or settled["began_ns"] < seen:
+            problems.append(f"{SETTLED}: it began before the owner's exit was seen")
+    return problems
+
+
+def r3_problems(record: Mapping[str, Any], *, daemon: bool) -> list[str]:
+    """Why H-R3's record does not establish its row; empty when it does.
+
+    Every checkpoint, in order and once, with its own times; the read, the
+    script, the post-exit hook and the EOF exit all recorded and normal; and
+    each reading what its mode requires. A late window is reported and not
+    judged; any problem fails the row.
+    """
+    role = "owner" if daemon else "server"
+    problems = _record_problems(record, row=ROW_H_R3, daemon=daemon, role=role)
+    call = record.get("call")
+    if not isinstance(call, Mapping):
+        call = None
+        problems.append("the read call was not recorded")
+    elif call.get("is_error") is not False or call.get("read_the_post") is not True:
+        problems.append("the read did not return the synthetic post")
+    host = _mapping(record.get("host"))
+    problems += host_problems(host)
+    if _lifetime(record.get("actor")) is None:
+        problems.append(f"the {role} was never identified")
+
+    read, found, readings = _read_all(record, CHECKPOINTS)
+    problems += read
+    eof = _ns(host.get("eof_ns"))
     before = found.get(BEFORE_QUIT)
     if before is not None and BEFORE_QUIT in readings:
-        late = window_problems(before, call, idle_timeout=idle)
+        late = window_problems(
+            before, call, idle_timeout=record.get("idle_timeout_seconds")
+        )
         problems += late
         if eof is not None and _ns(before.get("ended_ns")) is not None:
             if before["ended_ns"] > eof:
                 problems.append(f"{BEFORE_QUIT}: it ended after the EOF was sent")
         if not late:
             problems += held_problems(readings[BEFORE_QUIT][0], role=role)
+    problems += _post_exit_problems(
+        record,
+        found,
+        readings,
+        daemon=daemon,
+        role=role,
+        anchor=call,
+        earlier=BEFORE_QUIT,
+    )
+    problems += _settled_problems(record, found, readings, daemon=daemon, role=role)
+    return problems
 
-    after = found.get(FIRST_POST_EXIT)
-    if after is not None and FIRST_POST_EXIT in readings:
-        reading, roots = readings[FIRST_POST_EXIT]
-        if exit_seen is None or after["began_ns"] < exit_seen:
-            problems.append(f"{FIRST_POST_EXIT}: it began before the exit was seen")
-        if daemon:
-            late = window_problems(after, call, idle_timeout=idle)
-            problems += late
-            if not late:
-                problems += held_problems(reading, role=role)
-                earlier = readings.get(BEFORE_QUIT, (None, None))[1]
-                if roots is not None and earlier is not None and len(roots) == 1:
-                    if not same_lifetime(roots[0], earlier[0] if earlier else None):
-                        problems.append(
-                            f"{FIRST_POST_EXIT}: the root is not the one "
-                            f"{BEFORE_QUIT} read"
-                        )
+
+# --- Row H-R2: a second host while the first is open ------------------------------
+
+ROW_H_R2 = "H-R2"
+
+AFTER_A1 = "after A1"
+AFTER_B_QUIT = "after B quit"
+R2_CHECKPOINTS = (AFTER_A1, AFTER_B_QUIT, FIRST_POST_EXIT, SETTLED)
+#: The three reads, in order: which host made each, and its name.
+R2_CALLS = (("A", "A1"), ("B", "B"), ("A", "A2"))
+#: When the row read which owner the descriptor names, in daemon mode.
+OWNER_READS = ("after A1", "after B", "after A2")
+
+
+def _is_feed(request: Mapping[str, Any]) -> bool:
+    path = str(request.get("path") or "")
+    host = str(request.get("host") or "")
+    return path.split("?", 1)[0] == "/feed/" and host.split(":", 1)[0] == (
+        "www.linkedin.com"
+    )
+
+
+@dataclass(frozen=True)
+class Attribution:
+    """The origin's feed requests against the calls' intervals.
+
+    ``claimed`` counts, per call, the session-carrying feed requests only
+    its own interval contains; ``outside`` and ``unplaced`` are diagnostics
+    (a request no interval contains, one with no monotonic arrival), and
+    ``contested`` the requests two intervals could claim.
+    """
+
+    claimed: dict[str, int]
+    outside: int
+    unplaced: int
+    contested: tuple[str, ...]
+    problems: tuple[str, ...]
+
+
+def attribute_requests(
+    calls: Sequence[Mapping[str, Any]], requests: Sequence[Mapping[str, Any]]
+) -> Attribution:
+    """Which call each feed request belongs to, by its arrival alone.
+
+    The intervals, each a call's send to its receipt on the harness's
+    monotonic clock, must be ordered and must not overlap. Each call needs a
+    session-carrying ``/feed/`` request inside its own interval: several
+    count as that call's, never as more calls, and one from another call's
+    interval is never borrowed. A request two intervals could claim settles
+    neither; one outside every interval stays a diagnostic.
+    """
+    problems: list[str] = []
+    intervals: list[tuple[str, int, int]] = []
+    for call in calls:
+        name = str(call.get("call"))
+        began = _ns(call.get("began_monotonic_ns"))
+        ended = _ns(call.get("ended_monotonic_ns"))
+        if began is None or ended is None or ended < began:
+            problems.append(f"{name}: the call's interval is missing or reversed")
+            continue
+        intervals.append((name, began, ended))
+    for (first, _, first_end), (second, second_began, _) in zip(
+        intervals, intervals[1:]
+    ):
+        if second_began < first_end:
+            problems.append(f"{first} and {second}: the call intervals overlap")
+    claimed = {name: 0 for name, _, _ in intervals}
+    outside = unplaced = 0
+    contested: list[str] = []
+    for request in requests:
+        if not _is_feed(request) or request.get("session_valid") is not True:
+            continue
+        arrived = _ns(request.get("monotonic_ns"))
+        if arrived is None:
+            unplaced += 1
+            continue
+        owners = [name for name, began, ended in intervals if began <= arrived <= ended]
+        if not owners:
+            outside += 1
+        elif len(owners) > 1:
+            contested.append(f"{arrived} could be {' or '.join(owners)}'s")
         else:
-            # Kept as read: whether the profile is empty yet is the record's,
-            # and settlement is judged at ``settled``. What is required is a
-            # reading at all: the server gone, and a lock state where the
-            # platform can give one.
-            if reading.actor != "gone":
+            claimed[owners[0]] += 1
+    for name in claimed:
+        if claimed[name] < 1:
+            problems.append(
+                f"{name}: no session-carrying feed request arrived inside its "
+                f"own interval"
+            )
+    if contested:
+        problems.append(f"a request is claimed by two calls: {contested}")
+    return Attribution(
+        claimed=claimed,
+        outside=outside,
+        unplaced=unplaced,
+        contested=tuple(contested),
+        problems=tuple(problems),
+    )
+
+
+def distinct_roots(events: Sequence[Mapping[str, Any]], key: str) -> list[list]:
+    """Every browser root the watcher reported on *key*, as ``[pid, start]``.
+
+    Evidence only: from its ``browser.roots`` changes, each pid paired with
+    the start it recorded for a row process there (None when it has none).
+    """
+    starts: dict[int, set[float]] = {}
+    for event in events:
+        if event.get("kind") in ("process.start", "process.update"):
+            pid, start = event.get("pid"), event.get("start_identity")
+            if type(pid) is int and isinstance(start, (int, float)):
+                starts.setdefault(pid, set()).add(float(start))
+    pids: set[int] = set()
+    for event in events:
+        if event.get("kind") == "browser.roots":
+            for pid in _mapping(event.get("roots")).get(key) or []:
+                if type(pid) is int:
+                    pids.add(pid)
+    found: list[list] = []
+    for pid in sorted(pids):
+        for start in sorted(starts[pid]) if pid in starts else [None]:
+            found.append([pid, start])
+    return found
+
+
+#: What the Direct driver logs, at INFO, when it gives the browser up.
+_HANDED_OVER = "Another process is waiting for the browser; handing over"
+_IDLE_CLOSED = "Closing idle browser after"
+
+
+def handoff_reading(lines: Sequence[str]) -> str:
+    """How host A's server gave its browser up, from its own log: evidence
+    only, since the log level is a setting and a release can go unlogged."""
+    if any(_HANDED_OVER in line for line in lines):
+        return "handed over"
+    if any(_IDLE_CLOSED in line for line in lines):
+        return "idle release"
+    return "unobserved"
+
+
+def _call(record: Mapping[str, Any], name: str) -> Mapping[str, Any] | None:
+    for call in record.get("calls") or []:
+        if isinstance(call, Mapping) and call.get("call") == name:
+            return call
+    return None
+
+
+def _span(label: str, call: Mapping[str, Any] | None) -> dict[str, Any]:
+    """A call's own interval, as a window ``window_problems`` can read."""
+    call = call or {}
+    return {
+        "label": label,
+        "began_ns": call.get("began_monotonic_ns"),
+        "ended_ns": call.get("ended_monotonic_ns"),
+    }
+
+
+def r2_problems(record: Mapping[str, Any], *, daemon: bool) -> list[str]:
+    """Why H-R2's record does not establish its row; empty when it does.
+
+    Both hosts quit normally, B nested inside A's life, the same launch for
+    both; all three reads succeed, each served by a request inside its own
+    interval; every checkpoint in order. Daemon: in windows fresh from the
+    last send, the owner's root and lease after A1, after B's quit and after
+    A's exit, one owner lifetime and instance throughout, B forwarding, and
+    no second owner started. A late gap is evidence that the hot reuse was
+    not observed, never a finding. Direct: B's leftovers settled before A2.
+    """
+    role = "owner" if daemon else "server"
+    idle = record.get("idle_timeout_seconds")
+    problems = _record_problems(record, row=ROW_H_R2, daemon=daemon, role=role)
+    host, other = _mapping(record.get("host")), _mapping(record.get("host_b"))
+    problems += host_problems(host)
+    problems += host_problems(other, prefix="host B: ")
+    if other.get("after_exit_error"):
+        problems.append(f"host B's post-exit hook failed: {other['after_exit_error']}")
+    if _lifetime(record.get("actor")) is None:
+        problems.append(f"the {role} was never identified")
+
+    calls = {name: _call(record, name) for _, name in R2_CALLS}
+    listed = [
+        (c.get("host"), c.get("call"))
+        for c in record.get("calls") or []
+        if isinstance(c, Mapping)
+    ]
+    if listed != list(R2_CALLS):
+        problems.append(f"the calls were {listed}, not {list(R2_CALLS)}")
+    for name, call in calls.items():
+        if call is None:
+            continue
+        if call.get("is_error") is not False or call.get("read_the_post") is not True:
+            problems.append(f"{name} did not return the synthetic post")
+    attribution = attribute_requests(
+        [call for call in calls.values() if call is not None],
+        [r for r in record.get("requests") or [] if isinstance(r, Mapping)],
+    )
+    problems += list(attribution.problems)
+
+    # The same launch for both hosts, and B wholly inside A's life.
+    launch = _mapping(record.get("launch"))
+    a, b = _mapping(launch.get("A")), _mapping(launch.get("B"))
+    if (
+        not a
+        or a.get("command") != b.get("command")
+        or (a.get("env_sha256") != b.get("env_sha256"))
+    ):
+        problems.append("host B did not start as host A did")
+    opened = _mapping(record.get("a_open"))
+    for moment in ("at_b_start", "after_b_exit"):
+        if opened.get(moment) is not True:
+            problems.append(f"host A was not shown open {moment.replace('_', ' ')}")
+    b_launched = _ns(other.get("launched_ns"))
+    b_exit, a_eof = _ns(other.get("exit_seen_ns")), _ns(host.get("eof_ns"))
+    if b_exit is None or a_eof is None or b_exit > a_eof:
+        problems.append("host B's exit is not shown before host A's EOF")
+    forwarded = other.get("forwarded")
+    if daemon and forwarded is not True:
+        problems.append("host B did not report forwarding to the shared owner")
+    if not daemon and forwarded is not False:
+        problems.append("host B reached a shared owner in Direct mode")
+
+    read, found, readings = _read_all(record, R2_CHECKPOINTS)
+    problems += read
+    a1, b_call, a2 = calls["A1"], calls["B"], calls["A2"]
+
+    first = found.get(AFTER_A1)
+    if first is not None and AFTER_A1 in readings:
+        late = window_problems(first, a1, idle_timeout=idle)
+        problems += late
+        if b_launched is None or first["ended_ns"] > b_launched:
+            problems.append(f"{AFTER_A1}: it is not shown to end before B started")
+        if not late:
+            problems += held_problems(readings[AFTER_A1][0], role=role)
+
+    # The idle-sensitive gaps: B's read must reach the owner A1 left, and
+    # A2's the owner B left, each inside the idle timeout from the send.
+    late_b = late_a2 = False
+    if daemon:
+        gap = window_problems(_span("B's read", b_call), a1, idle_timeout=idle)
+        late_b = bool(gap)
+        problems += [f"hot reuse not established: {p}" for p in gap]
+        gap = window_problems(_span("A2's read", a2), b_call, idle_timeout=idle)
+        late_a2 = bool(gap)
+        problems += [f"hot reuse not established: {p}" for p in gap]
+    elif b_call is not None and b_launched is not None:
+        if _ns(b_call.get("began_monotonic_ns")) is None or (
+            b_call["began_monotonic_ns"] < b_launched
+        ):
+            problems.append("B's read is not shown after host B started")
+
+    middle = found.get(AFTER_B_QUIT)
+    if middle is not None and AFTER_B_QUIT in readings:
+        reading = readings[AFTER_B_QUIT][0]
+        if b_exit is None or middle["began_ns"] < b_exit:
+            problems.append(f"{AFTER_B_QUIT}: it began before B's exit was seen")
+        a2_sent = _ns((a2 or {}).get("began_monotonic_ns"))
+        if a2_sent is not None and middle["ended_ns"] > a2_sent:
+            problems.append(f"{AFTER_B_QUIT}: it ended after A2 was sent")
+        if daemon:
+            late = window_problems(middle, b_call, idle_timeout=idle)
+            problems += late
+            if not late and not late_b:
+                problems += held_problems(reading, role=role)
+                problems += _same_root(readings, AFTER_B_QUIT, AFTER_A1)
+        else:
+            # Kept as read; host A is still open, whether or not it holds
+            # the browser again yet.
+            if reading.actor != "alive":
                 problems.append(
-                    f"{FIRST_POST_EXIT}: the server was {reading.actor}, not gone"
+                    f"{AFTER_B_QUIT}: the server of host A was {reading.actor}"
                 )
             if reading.lock not in (HELD, FREE, UNOBSERVED):
-                problems.append(f"{FIRST_POST_EXIT}: the lock was {reading.lock}")
+                problems.append(f"{AFTER_B_QUIT}: the lock was {reading.lock}")
 
-    settled = found.get(SETTLED)
-    if settled is not None and SETTLED in readings:
-        problems += released_problems(readings[SETTLED][0], role=role)
-        previous = _ns((after or {}).get("ended_ns"))
-        if previous is None or settled["began_ns"] < previous:
-            problems.append(f"{SETTLED}: it began before {FIRST_POST_EXIT} ended")
-        cleanup = _ns(record.get("cleanup_began_ns"))
-        if cleanup is None or settled["ended_ns"] > cleanup:
-            problems.append(f"{SETTLED}: it is not shown to precede the cleanup")
-        if daemon:
-            left = _mapping(record.get("owner_exit"))
-            if left.get("how") != "exited":
-                problems.append(
-                    f"the owner was not seen to exit by itself: {left.get('how')!r}"
-                )
-            seen = _ns(left.get("seen_ns"))
-            if seen is None or settled["began_ns"] < seen:
-                problems.append(f"{SETTLED}: it began before the owner's exit was seen")
+    if not daemon:
+        settled = _mapping(record.get("b_settlement"))
+        if settled.get("remaining") != [] or settled.get("unresolved") != []:
+            problems.append(
+                f"B's browser was not shown gone before A2: remaining "
+                f"{settled.get('remaining')!r}, unresolved {settled.get('unresolved')!r}"
+            )
+        ended = _ns(settled.get("ended_ns"))
+        a2_sent = _ns((a2 or {}).get("began_monotonic_ns"))
+        if ended is None or a2_sent is None or ended > a2_sent:
+            problems.append("B's settlement is not shown to precede A2")
+    else:
+        problems += _owner_problems(record, late_b=late_b, late_a2=late_a2)
+
+    problems += _post_exit_problems(
+        record, found, readings, daemon=daemon, role=role, anchor=a2, earlier=AFTER_A1
+    )
+    problems += _settled_problems(record, found, readings, daemon=daemon, role=role)
     return problems
+
+
+def _owner_problems(
+    record: Mapping[str, Any], *, late_b: bool, late_a2: bool
+) -> list[str]:
+    """The same owner lifetime and instance at every read the gaps leave
+    fresh, and no other owner started, nor more than one release gate."""
+    problems = []
+    actor = record.get("actor")
+    reads = {
+        o.get("label"): o for o in record.get("owners") or [] if isinstance(o, Mapping)
+    }
+    instance = _mapping(reads.get(OWNER_READS[0])).get("instance_id")
+    if not isinstance(instance, str) or not instance:
+        problems.append("the owner's instance was not read after A1")
+    skipped = {"after B": late_b, "after A2": late_b or late_a2}
+    for label in OWNER_READS:
+        if skipped.get(label):
+            continue
+        seen = _mapping(reads.get(label))
+        if not seen:
+            problems.append(f"the owner was not read {label}")
+            continue
+        if not same_lifetime(seen.get("lifetime"), actor):
+            problems.append(
+                f"{label}: the descriptor names {seen.get('lifetime')!r}, not the "
+                f"owner A1 reached ({seen.get('problem')})"
+            )
+        if seen.get("instance_id") != instance:
+            problems.append(f"{label}: the owner's instance changed")
+    if not (late_b or late_a2):
+        launches = owner_launches(record.get("owner_processes") or [])
+        if len(launches) != 1 or not _of_launch(
+            actor, launches[0], record.get("owner_processes") or []
+        ):
+            problems.append(
+                f"the row started owners {launches}, not only the one A1 reached"
+            )
+    gates = record.get("owner_gates") or []
+    if len(gates) > 1:
+        problems.append(f"an extra owner start was attempted: release gates {gates}")
+    return problems
+
+
+def owner_launches(processes: Sequence[Any]) -> list[list]:
+    """Each owner launch among the row's owner processes, as ``[pid, start]``.
+
+    *processes* are ``[pid, start, ppid]`` of every row process that ran the
+    owner module. One whose parent is another of them is the same launch: a
+    Windows venv's ``python.exe`` is a launcher that starts the interpreter
+    with the same command line.
+    """
+    rows = [p for p in processes if _lifetime(p[:2]) is not None and len(p) == 3]
+    pids = {p[0] for p in rows}
+    return [list(p[:2]) for p in rows if p[2] not in pids]
+
+
+def _of_launch(actor: Any, launch: Sequence[Any], processes: Sequence[Any]) -> bool:
+    """Whether *actor* is *launch*, or the interpreter it started."""
+    if same_lifetime(actor, launch):
+        return True
+    return any(
+        same_lifetime(p[:2], actor) and p[2] == launch[0]
+        for p in processes
+        if len(p) == 3
+    )
+
+
+def problems_for(record: Mapping[str, Any], *, daemon: bool) -> list[str]:
+    """The verdict for whichever comparison row *record* is."""
+    if record.get("row") == ROW_H_R2:
+        return r2_problems(record, daemon=daemon)
+    return r3_problems(record, daemon=daemon)
+
+
+def _anchor(record: Mapping[str, Any], label: str) -> Mapping[str, Any] | None:
+    """The send a checkpoint's freshness is counted from."""
+    if record.get("row") == ROW_H_R2:
+        name = {AFTER_A1: "A1", AFTER_B_QUIT: "B"}.get(label, "A2")
+        return _call(record, name)
+    call = record.get("call")
+    return call if isinstance(call, Mapping) else None
 
 
 def _window(point: Mapping[str, Any], record: Mapping[str, Any]) -> str:
     """``fresh``, ``late``, or ``invalid`` when its times cannot say."""
-    call = record.get("call") if isinstance(record.get("call"), Mapping) else None
     problems = window_problems(
-        point, call, idle_timeout=record.get("idle_timeout_seconds")
+        point,
+        _anchor(record, str(point.get("label"))),
+        idle_timeout=record.get("idle_timeout_seconds"),
     )
     if not problems:
         return "fresh"
@@ -528,8 +997,9 @@ def semantics(record: Mapping[str, Any]) -> dict[str, Any]:
     host = _mapping(record.get("host"))
     left = _mapping(record.get("owner_exit"))
     found = {point.get("label"): point for point in _points(record)}
+    second = record.get("row") == ROW_H_R2
     checkpoints = {}
-    for label in CHECKPOINTS:
+    for label in R2_CHECKPOINTS if second else CHECKPOINTS:
         point = found.get(label)
         if point is None:
             checkpoints[label] = None
@@ -542,7 +1012,7 @@ def semantics(record: Mapping[str, Any]) -> dict[str, Any]:
             platform=str(record.get("platform")),
         )
         checkpoints[label] = {**asdict(reading), "window": _window(point, record)}
-    return {
+    read: dict[str, Any] = {
         "row": record.get("row"),
         "mode": record.get("mode"),
         "read": (call.get("is_error"), call.get("read_the_post")),
@@ -550,6 +1020,32 @@ def semantics(record: Mapping[str, Any]) -> dict[str, Any]:
         "owner_exit": left.get("how"),
         "checkpoints": checkpoints,
     }
+    if second:
+        other = _mapping(record.get("host_b"))
+        calls = [c for c in record.get("calls") or [] if isinstance(c, Mapping)]
+        attribution = attribute_requests(
+            calls, [r for r in record.get("requests") or [] if isinstance(r, Mapping)]
+        )
+        read.update(
+            read=[
+                (c.get("call"), c.get("is_error"), c.get("read_the_post"))
+                for c in calls
+            ],
+            host_b=(
+                other.get("exited_on_quit"),
+                other.get("exit_code"),
+                other.get("forwarded"),
+            ),
+            served={name: n > 0 for name, n in attribution.claimed.items()},
+            owners=[
+                (o.get("label"), same_lifetime(o.get("lifetime"), record.get("actor")))
+                for o in record.get("owners") or []
+                if isinstance(o, Mapping)
+            ],
+            owner_launches=len(owner_launches(record.get("owner_processes") or [])),
+            a_open=dict(_mapping(record.get("a_open"))),
+        )
+    return read
 
 
 def semantic_differences(
@@ -566,7 +1062,7 @@ def semantic_differences(
         if record is None:
             refusals.append(f"no {name} record to compare")
             continue
-        problems = r3_problems(record, daemon=daemon)
+        problems = problems_for(record, daemon=daemon)
         if problems:
             refusals.append(f"the {name} record is not valid: {problems}")
     if refusals:
@@ -575,10 +1071,10 @@ def semantic_differences(
     one, two = semantics(reference), semantics(repeat)
     differences = []
     for name in one:
-        if name != "checkpoints" and one[name] != two[name]:
-            differences.append(f"{name}: {one[name]!r} then {two[name]!r}")
-    for label in CHECKPOINTS:
-        first, second = one["checkpoints"][label], two["checkpoints"][label]
+        if name != "checkpoints" and one[name] != two.get(name):
+            differences.append(f"{name}: {one[name]!r} then {two.get(name)!r}")
+    for label, first in one["checkpoints"].items():
+        second = two["checkpoints"].get(label)
         if first != second:
             differences.append(f"{label}: {first!r} then {second!r}")
     return differences
@@ -600,7 +1096,7 @@ def comparison_refusals(
         if record is None:
             refusals.append(f"no {name} record to compare")
             continue
-        problems = r3_problems(record, daemon=is_daemon)
+        problems = problems_for(record, daemon=is_daemon)
         if problems:
             refusals.append(f"the {name} record is not valid: {problems}")
     return refusals

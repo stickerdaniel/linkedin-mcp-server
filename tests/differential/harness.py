@@ -60,6 +60,11 @@ same setting; the baseline, in K2, must be caught coordinating
 checkpoints around the quit (``observe_checkpoint``): from the row's script
 before it, from the host stub's post-exit hook, and once the actors have left
 by themselves, before any cleanup. ``host_comparison`` judges the record.
+
+**Row H-R2** (a second host while the first is open): host A reads, then its
+script runs a second host, B, with the same command, environment and profile;
+B reads and quits, and A reads again and quits. The checkpoints add one after
+A1 and one from B's own post-exit hook.
 """
 
 from __future__ import annotations
@@ -119,7 +124,7 @@ from differential.fault_overlay import (
     scenario_problems,
     selection_problems,
 )
-from differential.host_comparison import ROW_H_R3
+from differential.host_comparison import ROW_H_R2, ROW_H_R3
 from differential.job_query import (
     SHIM_SHA256,
     Fates,
@@ -1184,6 +1189,56 @@ def host_failures(session: HostSession) -> list[str]:
             f"after stdin EOF"
         )
     return failures
+
+
+def host_summary(session: HostSession) -> dict[str, Any]:
+    """How a host session ended, as the comparison rows record it."""
+    return {
+        "error": session.error,
+        "alive_before_quit": session.alive_before_quit,
+        "stdin_closed": session.stdin_closed,
+        "exited_on_quit": session.exited_on_quit,
+        "exit_code": session.exit_code,
+        "killed_by_harness": session.killed_by_harness,
+        "stderr_closed": session.stderr_closed,
+        "eof_ns": session.eof_monotonic_ns,
+        "exit_seen_ns": session.exit_seen_monotonic_ns,
+    }
+
+
+def call_summary(
+    summary: Mapping[str, Any] | None,
+    *,
+    host: str | None = None,
+    call: str | None = None,
+) -> dict[str, Any] | None:
+    """A call's times and outcome, without its text; labelled for H-R2."""
+    if summary is None:
+        return None
+    found = {
+        name: summary.get(name)
+        for name in (
+            "began",
+            "ended",
+            "began_monotonic_ns",
+            "ended_monotonic_ns",
+            "is_error",
+            "read_the_post",
+        )
+    }
+    if call is not None:
+        found.update(host=host, call=call)
+    return found
+
+
+def launch_digest(command: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
+    """What a host was started with: its command, and a digest of its whole
+    environment, whose values stay on the runner."""
+    text = json.dumps(sorted(env.items()))
+    return {
+        "command": list(command),
+        "env_sha256": hashlib.sha256(text.encode()).hexdigest(),
+    }
 
 
 # --- Process helpers -----------------------------------------------------------
@@ -3769,6 +3824,30 @@ def observe_checkpoint(
     return point
 
 
+def observe_owner(
+    label: str,
+    account: ActorAccount,
+    observed: Callable[[], Iterable[dict[str, Any]]],
+) -> dict[str, Any]:
+    """H-R2: which owner the row's descriptor names now, tied to a lifetime
+    the watcher saw this row start (``identify_owner``), and its instance."""
+    seen: dict[str, Any] = {"label": label, "lifetime": None, "instance_id": None}
+    try:
+        published = daemon_descriptor.read(account.auth_root)
+    except Exception as exc:  # noqa: BLE001 - the reading's own evidence
+        seen["problem"] = f"the descriptor could not be read: {exc!r}"
+        return seen
+    if published is None:
+        seen["problem"] = "no owner is published"
+        return seen
+    seen["instance_id"] = published.instance_id
+    found, problem = identify_owner(published, account, observed())
+    seen["problem"] = problem
+    if found is not None:
+        seen["lifetime"] = [found.pid, found.create_time]
+    return seen
+
+
 def compare_repeat(first: RowVector, second: RowVector) -> list[str]:
     """K0: every field of two runs of the same experiment must agree."""
     one, two = asdict(first), asdict(second)
@@ -4246,20 +4325,25 @@ async def measure_host_quit_row(
     post-exit hook, and after the actors left by themselves and the profile's
     browser was waited for passively, before any cleanup. Its record is
     ``RowResult.comparison``, judged after ``judge_row``; none of the three
-    scenarios above combines with it.
+    scenarios above combines with it. *row* ``H-R2`` does the same around a
+    second host: after the first read the script runs host B with the same
+    command and environment, reads once more and quits, with checkpoints after
+    A1 and from B's own post-exit hook. Both use
+    ``COMPARISON_IDLE_TIMEOUT_SECONDS``.
 
     No row starts while anything an earlier row left is unsettled
     (``unconfirmed_close.settlement_problems``).
     """
-    comparing = row == ROW_H_R3
+    comparing = row in (ROW_H_R3, ROW_H_R2)
+    second_host = row == ROW_H_R2
     if comparing and (
         kill_actor or job_query_shim is not None or unconfirmed_close is not None
     ):
-        # Refused before anything is staged or spawned: H-R3 is the plain host
-        # quit, and a kill, a shim or a fault would be another scenario.
+        # Refused before anything is staged or spawned: the comparison rows
+        # are plain host quits, and a kill, a shim or a fault would be another
+        # scenario.
         raise ValueError(
-            f"{ROW_H_R3} combines with no killed actor, job-query shim or "
-            f"unconfirmed close"
+            f"{row} combines with no killed actor, job-query shim or unconfirmed close"
         )
     # Picked once: the actors' environment, staging included, the owner-exit
     # wait, the row's judgement and the comparison record all read this one.
@@ -4471,11 +4555,11 @@ async def measure_host_quit_row(
     #: that it could not identify, by the pid named and the lifetime first
     #: read there.
     r7_publications: dict[tuple[int | None, float | None], Retained] = {}
-    #: H-R3: the raw record ``host_comparison.r3_problems`` judges, all of it
-    #: fit for the packet; None on every other row.
+    #: H-R3 and H-R2: the raw record ``host_comparison`` judges, all of it fit
+    #: for the packet; None on every other row.
     comparison: dict[str, Any] | None = (
         {
-            "row": ROW_H_R3,
+            "row": row,
             "mode": mode,
             "platform": sys.platform,
             "browser_key": account.browser_key,
@@ -4485,12 +4569,24 @@ async def measure_host_quit_row(
             "lock": None,
             "checkpoints": [],
             "observation_problems": [],
+            **(
+                {
+                    "launch": {"A": launch_digest(command, env)},
+                    "a_open": {},
+                    "owners": [],
+                }
+                if second_host
+                else {}
+            ),
         }
         if comparing
         else None
     )
     #: H-R3: the actor the checkpoints read, as its handle, pid and start.
     r3_actor: list[tuple[Any, int, float]] = []
+    #: H-R2: host B's read, and when host B was seen to start.
+    b_read: dict[str, Any] = {}
+    b_started: dict[str, int] = {}
 
     async def kill_the_actor() -> None:
         """Associate the victim, find its guardian, attach the oracle, kill."""
@@ -4861,16 +4957,13 @@ async def measure_host_quit_row(
         # Appended, never replaced: a first post-exit reading that settlement
         # later contradicts stays what it was.
         comparison["checkpoints"].append(point)
-        if label == host_comparison.BEFORE_QUIT:
+        if label in (host_comparison.BEFORE_QUIT, host_comparison.AFTER_A1):
             comparison["lock"] = (point.get("lock") or {}).get("now")
         emit("harness", "host.checkpoint", **point)
 
-    async def r3_script(call: ToolCall) -> None:
-        """Identify the actor the checkpoints read, then read before the quit.
-
-        It calls no tool: a call here would restart the owner's idle clock,
-        which the row's one read is the last thing allowed to do.
-        """
+    async def identify_actor() -> None:
+        """The actor the checkpoints read: the owner the row found, or the
+        Direct server as the watcher recorded it."""
         assert comparison is not None
         if daemon:
             if identified is None:
@@ -4897,10 +4990,147 @@ async def measure_host_quit_row(
                 r3_actor.append((process, process.pid, created))
         if r3_actor:
             comparison["actor"] = [r3_actor[0][1], r3_actor[0][2]]
+
+    async def r3_script(call: ToolCall) -> None:
+        """Identify the actor the checkpoints read, then read before the quit.
+
+        It calls no tool: a call here would restart the owner's idle clock,
+        which the row's one read is the last thing allowed to do.
+        """
+        await identify_actor()
         await take_checkpoint(host_comparison.BEFORE_QUIT)
 
     async def first_post_exit() -> None:
         await take_checkpoint(host_comparison.FIRST_POST_EXIT)
+
+    async def after_b_quit() -> None:
+        await take_checkpoint(host_comparison.AFTER_B_QUIT)
+
+    async def read_owner(label: str) -> None:
+        """H-R2: which owner the descriptor names now, on an owned thread."""
+        assert comparison is not None
+        try:
+            seen = await run_owned(
+                f"owner: {label}",
+                observe_owner,
+                label,
+                account,
+                watcher.observed,
+                seconds=30.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - the reading's own evidence
+            seen = {
+                "label": label,
+                "lifetime": None,
+                "instance_id": None,
+                "problem": f"{type(exc).__name__}: {exc}",
+            }
+        comparison["owners"].append(seen)
+
+    def unsettled_before(action: str) -> bool:
+        """H-R2: whether anything the row started still runs before *action*;
+        if so it is recorded, and the action is not taken."""
+        assert comparison is not None
+        left = settlement_problems()
+        if left:
+            comparison["observation_problems"].append(f"{action} was not taken: {left}")
+        return bool(left)
+
+    async def r2_script(call: ToolCall) -> None:
+        """Host A's part of H-R2: after its read, host B on the same profile,
+        then A's second read. A stays open throughout; B quits by itself.
+
+        Only A2 is called through A, and B starts from A's own command and
+        environment; only its working directory is its own.
+        """
+        assert comparison is not None
+        await identify_actor()
+        # Host A's own process, to show it open across B: the Direct server
+        # itself, and in daemon mode the frontend the watcher recorded.
+        a_handle = r3_actor[0][0] if r3_actor and not daemon else None
+        if daemon:
+            a_handle, _ = await run_owned(
+                "associate host A",
+                associate_server,
+                server.get("pid", -1),
+                watcher.observed,
+                seconds=30.0,
+            )
+            if a_handle is None:
+                comparison["observation_problems"].append(
+                    "host A's frontend was never associated"
+                )
+        await take_checkpoint(host_comparison.AFTER_A1)
+        if daemon:
+            await read_owner("after A1")
+        if unsettled_before("host B"):
+            return
+        b_dir = work_dir / "host-b"
+        b_dir.mkdir(exist_ok=True)
+        comparison["launch"]["B"] = launch_digest(command, env)
+        comparison["a_open"]["at_b_start"] = is_alive(a_handle)
+        launched_ns = time.monotonic_ns()
+        b = await run_host_session(
+            command,
+            env=env,
+            cwd=b_dir,
+            on_stderr=lambda line: emit(
+                "frontend", "user.output", stream="stderr", host="B", line=line
+            ),
+            started=lambda pid: b_started.update(pid=pid, ns=time.monotonic_ns()),
+            after_exit=after_b_quit,
+        )
+        comparison["a_open"]["after_b_exit"] = is_alive(a_handle)
+        comparison["host_b"] = {
+            **host_summary(b),
+            "pid": b.pid,
+            "launched_ns": launched_ns,
+            "started_ns": b_started.get("ns"),
+            "after_exit_error": b.after_exit_error,
+            "forwarded": any(_FORWARDING_LINE in line for line in b.stderr),
+        }
+        if b.tool is not None:
+            b_read.update(b.tool)
+            emit(
+                "host_stub",
+                "tool.result",
+                **{"tool": READ_TOOL, **b.tool, "host": "B", "call": "B"},
+            )
+        emit("host_stub", "process.exit", host="B", **comparison["host_b"])
+        if not daemon:
+            # Direct: B's server closed its browser at its quit. A bounded
+            # passive wait, and a census that has to be complete, before A2
+            # asks for the profile; nothing is ended here.
+            try:
+                await run_owned(
+                    "host B's browser",
+                    wait_for_no_browser,
+                    account,
+                    _BROWSER_GONE_SECONDS,
+                    seconds=_BROWSER_GONE_SECONDS + 30.0,
+                )
+                census = await run_owned(
+                    "the census after host B",
+                    profile_census,
+                    account,
+                    browser_exe=browser_exe,
+                    browser_dir=browsers,
+                    seconds=60.0,
+                )
+                comparison["b_settlement"] = {
+                    "remaining": census.pids,
+                    "unresolved": list(census.unresolved),
+                    "ended_ns": time.monotonic_ns(),
+                }
+            except Exception as exc:  # noqa: BLE001 - the settlement's own evidence
+                comparison["b_settlement"] = {"error": f"{type(exc).__name__}: {exc}"}
+        else:
+            await read_owner("after B")
+        if unsettled_before("A2"):
+            return
+        await call(READ_TOOL, READ_TOOL_ARGUMENTS)
+        if daemon:
+            await read_owner("after A2")
 
     def hold_publication(pid: int | None, why: str) -> None:
         """Keep an owner published on the row's root that the row could not
@@ -5405,7 +5635,11 @@ async def measure_host_quit_row(
             env=env,
             cwd=work_dir,
             on_stderr=lambda line: emit(
-                "frontend", "user.output", stream="stderr", line=line
+                "frontend",
+                "user.output",
+                stream="stderr",
+                line=line,
+                **({"host": "A"} if second_host else {}),
             ),
             after_call=after_call,
             started=lambda pid: server.update(pid=pid),
@@ -5415,6 +5649,8 @@ async def measure_host_quit_row(
                 if shim is not None
                 else r7_script
                 if r7 is not None
+                else r2_script
+                if second_host
                 else r3_script
                 if comparing
                 else None
@@ -5423,35 +5659,24 @@ async def measure_host_quit_row(
         )
         result.host = host
         if comparison is not None:
-            tool = host.tool
-            comparison["call"] = (
-                {
-                    name: tool.get(name)
-                    for name in (
-                        "began",
-                        "ended",
-                        "began_monotonic_ns",
-                        "ended_monotonic_ns",
-                        "is_error",
-                        "read_the_post",
-                    )
-                }
-                if tool is not None
-                else None
-            )
+            if second_host:
+                # Every read, labelled with its host, in the order made: a
+                # read that never happened is missing, not borrowed.
+                reads = [
+                    call_summary(host.tool, host="A", call="A1"),
+                    call_summary(b_read or None, host="B", call="B"),
+                    call_summary(
+                        host.scripted[0] if host.scripted else None,
+                        host="A",
+                        call="A2",
+                    ),
+                ]
+                comparison["calls"] = [read for read in reads if read is not None]
+            else:
+                comparison["call"] = call_summary(host.tool)
             comparison["script_error"] = host.script_error
             comparison["after_exit_error"] = host.after_exit_error
-            comparison["host"] = {
-                "error": host.error,
-                "alive_before_quit": host.alive_before_quit,
-                "stdin_closed": host.stdin_closed,
-                "exited_on_quit": host.exited_on_quit,
-                "exit_code": host.exit_code,
-                "killed_by_harness": host.killed_by_harness,
-                "stderr_closed": host.stderr_closed,
-                "eof_ns": host.eof_monotonic_ns,
-                "exit_seen_ns": host.exit_seen_monotonic_ns,
-            }
+            comparison["host"] = host_summary(host)
         if r7 is not None:
             try:
                 await r7_after_quit()
@@ -5809,6 +6034,7 @@ async def measure_host_quit_row(
                 path=request.path,
                 cookie_names=list(request.cookie_names),
                 session_valid=request.session_valid,
+                monotonic_ns=request.monotonic_ns,
             )
         for decision in row_decisions:
             emit(
@@ -5877,7 +6103,7 @@ async def measure_host_quit_row(
     if comparison is not None:
         # A checkpoint worker or contender helper not shown finished could
         # still be asking about the profile: nothing is launched on it.
-        refusals += [f"{ROW_H_R3}: {p}" for p in settlement_problems()]
+        refusals += [f"{row}: {p}" for p in settlement_problems()]
     if shim is not None:
         # An installer whose end was not observed may still be running on the
         # profile's setup, so no session starts after the row until every one
@@ -5956,10 +6182,51 @@ async def measure_host_quit_row(
     if comparison is not None:
         # Selected by the row, so its record is required: a missing window, a
         # failed hook or script fails here however healthy the vector is.
-        problems = host_comparison.r3_problems(comparison, daemon=daemon)
+        if second_host:
+            # From the row's completed history: its feed requests, with their
+            # arrival on the monotonic clock, the owners and release gates it
+            # started, and, as evidence only, its distinct roots and how host
+            # A's server gave the browser up.
+            comparison["requests"] = [
+                {
+                    "host": request.host,
+                    "path": request.path,
+                    "session_valid": request.session_valid,
+                    "t": request.t,
+                    "monotonic_ns": request.monotonic_ns,
+                }
+                for request in feed_requests(row_requests)
+            ]
+            owners: list[list[Any]] = []
+            for entry in observed_events:
+                pid, start = entry.get("pid"), entry.get("start_identity")
+                if (
+                    entry.get("kind") in ("process.start", "process.update")
+                    and entry.get("in_row") is True
+                    and isinstance(entry.get("cmdline"), list)
+                    and invoked_module(entry["cmdline"]) == OWNER_MODULE
+                    and isinstance(pid, int)
+                    and isinstance(start, (int, float))
+                    and not any(
+                        host_comparison.same_lifetime(seen[:2], [pid, start])
+                        for seen in owners
+                    )
+                ):
+                    owners.append([pid, start, entry.get("ppid")])
+            comparison["owner_processes"] = owners
+            comparison["owner_gates"] = list(gated)
+            comparison["evidence"] = {
+                "distinct_roots": host_comparison.distinct_roots(
+                    observed_events, account.browser_key
+                ),
+                "handoff": host_comparison.handoff_reading(host.stderr),
+            }
+        # Selected by the row, so its record is required: a missing window, a
+        # failed hook or script fails here however healthy the vector is.
+        problems = host_comparison.problems_for(comparison, daemon=daemon)
         comparison["problems"] = problems
         result.comparison = comparison
-        result.failures += [f"{ROW_H_R3}: {problem}" for problem in problems]
+        result.failures += [f"{row}: {problem}" for problem in problems]
     if shim is not None:
         for fate in fates.fates.values():
             emit("harness", "installer.fate", **fate.as_event_fields())

@@ -289,6 +289,10 @@ class OriginRequest:
     #: Whether the request's ``li_at`` is a session this origin accepts. None
     #: while it accepts none. The value itself is compared, never recorded.
     session_valid: bool | None = None
+    #: Arrival on the harness's monotonic clock, which the origin shares with
+    #: the host stub's call intervals because both run in the harness's own
+    #: process. None for a request recorded without one.
+    monotonic_ns: int | None = None
 
 
 class _OriginHandler(BaseHTTPRequestHandler):
@@ -304,6 +308,7 @@ class _OriginHandler(BaseHTTPRequestHandler):
                 cookie_names=cookie_names(self.headers.get("Cookie")),
                 t=time.time(),
                 session_valid=origin.judge_session(self.headers.get("Cookie")),
+                monotonic_ns=time.monotonic_ns(),
             )
         )
         if self.path.split("?", 1)[0] == "/feed/":

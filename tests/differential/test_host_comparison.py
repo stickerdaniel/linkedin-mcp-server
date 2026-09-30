@@ -1,14 +1,16 @@
-"""H-R3's verdict, its producer and its place in the row, without a browser.
+"""H-R3's and H-R2's verdicts, their producer and their place in the row.
 
-Three families. The **contract** tests start from an explicit, valid raw
-record per mode and platform, change one observation, and run the verdict the
-row runs (``host_comparison.r3_problems``); none derives its expectation from
-the verdict. The **producer** tests run ``harness.observe_checkpoint`` over a
+Three families, none of them with a browser. The **contract** tests start
+from an explicit, valid raw record per row, mode and platform, change one
+observation, and run the verdict the row runs (``host_comparison.r3_problems``
+and ``r2_problems``); none derives its expectation from the verdict. The **producer** tests run ``harness.observe_checkpoint`` over a
 modelled process table and hand what it read to that verdict. The **wiring**
 tests go through the real row entry, ``measure_host_quit_row``, on the
 preservation gate's modelled row, with the host session and the checkpoint
 reader replaced by doubles that keep the real seams: the row's own script,
 its post-exit hook, its settlement gate and its published ``failures.json``.
+For H-R2 the second host goes through that same host seam, started by the
+row's own script, and every read adds a request to the origin while it runs.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
+import io
 import json
 import sys
 import threading
@@ -30,21 +33,35 @@ import psutil
 import pytest
 
 from differential import harness, lease_probe, unconfirmed_close
+from differential import test_preservation_gate as gate
 from differential.baseline import Runtime
 from differential.events import EventLog
 from differential.host_comparison import (
+    _HANDED_OVER,
+    AFTER_A1,
+    AFTER_B_QUIT,
     BEFORE_QUIT,
     CHECKPOINTS,
     FIRST_POST_EXIT,
     K2_NOT_APPLICABLE,
+    OWNER_READS,
+    R2_CALLS,
+    ROW_H_R2,
     ROW_H_R3,
     SETTLED,
+    attribute_requests,
     census_roots,
     comparison_refusals,
+    distinct_roots,
+    handoff_reading,
+    problems_for,
+    r2_problems,
     r3_problems,
     semantic_differences,
     semantics,
 )
+from differential import synthetic_origin
+from differential.synthetic_origin import OriginRequest
 from differential.test_preservation_gate import (  # noqa: F401 - fixtures
     _SETTLED,
     profile,
@@ -236,7 +253,7 @@ def _set(path: str, value: Any) -> Callable[[dict], None]:
     def change(record: dict) -> None:
         parts = path.split("/")
         target: Any = record
-        if parts[0] in CHECKPOINTS:
+        if parts[0] in (*CHECKPOINTS, AFTER_A1, AFTER_B_QUIT):
             target = _at(record, parts.pop(0))
         for part in parts[:-1]:
             target = target[int(part)] if isinstance(target, list) else target[part]
@@ -1247,3 +1264,951 @@ async def test_the_row_picks_its_idle_timeout_once_for_every_use(
     if row_id == ROW_H_R3:
         assert result.comparison is not None
         assert result.comparison["idle_timeout_seconds"] == idle
+
+
+# --- H-R2: a second host while the first is open ---------------------------------
+
+
+def _read(host: str, call: str, began_ms: int, ended_ms: int) -> dict:
+    return {
+        "host": host,
+        "call": call,
+        "began": 1_000.0 + began_ms / 1000,
+        "ended": 1_000.0 + ended_ms / 1000,
+        "began_monotonic_ns": began_ms * MS,
+        "ended_monotonic_ns": ended_ms * MS,
+        "is_error": False,
+        "read_the_post": True,
+    }
+
+
+def _request(at_ms: int | None, *, valid: bool = True, path: str = "/feed/") -> dict:
+    return {
+        "host": "www.linkedin.com",
+        "path": path,
+        "session_valid": valid,
+        "t": 1_000.0,
+        "monotonic_ns": at_ms * MS if at_ms is not None else None,
+    }
+
+
+def _host(eof_ms: int, exit_ms: int) -> dict:
+    return {
+        "error": None,
+        "alive_before_quit": True,
+        "stdin_closed": True,
+        "exited_on_quit": True,
+        "exit_code": 0,
+        "killed_by_harness": False,
+        "stderr_closed": True,
+        "eof_ns": eof_ms * MS,
+        "exit_seen_ns": exit_ms * MS,
+    }
+
+
+def _r2_record(*, daemon: bool = True, platform: str = "linux") -> dict:
+    """A valid H-R2 record, times in seconds of the monotonic clock:
+
+    A1 100-104, after A1 105-106, B started 107, B's read 112-114, B exits
+    116, after B quit 116.1-117, A2 120-121, A exits 123, first post-exit
+    123.1-124, the owner leaves at 185, settled 190-191, cleanup 192. Each
+    daemon gap ends within the 55s the 60s idle timeout leaves.
+    """
+    actor = OWNER if daemon else SERVER
+    launch = {"command": ["python", "-m", "linkedin_mcp_server"], "env_sha256": "e"}
+    record: dict[str, Any] = {
+        "row": ROW_H_R2,
+        "mode": "daemon" if daemon else "direct",
+        "platform": platform,
+        "browser_key": KEY,
+        "idle_timeout_seconds": 60.0,
+        "k2": dict(K2_NOT_APPLICABLE),
+        "actor": list(actor),
+        "lock": list(LOCK),
+        "observation_problems": [],
+        "script_error": None,
+        "after_exit_error": None,
+        "launch": {"A": dict(launch), "B": dict(launch)},
+        "a_open": {"at_b_start": True, "after_b_exit": True},
+        "calls": [
+            _read("A", "A1", 100_000, 104_000),
+            _read("B", "B", 112_000, 114_000),
+            _read("A", "A2", 120_000, 121_000),
+        ],
+        "requests": [_request(102_000), _request(113_000), _request(120_500)],
+        "host": _host(122_000, 123_000),
+        "host_b": {
+            **_host(115_000, 116_000),
+            "pid": 4343,
+            "launched_ns": 107_000 * MS,
+            "started_ns": 107_100 * MS,
+            "after_exit_error": None,
+            "forwarded": daemon,
+        },
+        "checkpoints": [
+            _point(
+                AFTER_A1,
+                105_000,
+                106_000,
+                actor=actor,
+                alive=True,
+                occupied=True,
+                lock="held",
+            ),
+            _point(
+                AFTER_B_QUIT,
+                116_100,
+                117_000,
+                actor=actor,
+                alive=True,
+                occupied=daemon,
+                lock="held" if daemon else "free",
+            ),
+            _point(
+                FIRST_POST_EXIT,
+                123_100,
+                124_000,
+                actor=actor,
+                alive=daemon,
+                occupied=daemon,
+                lock="held" if daemon else "free",
+            ),
+            _point(
+                SETTLED,
+                190_000,
+                191_000,
+                actor=actor,
+                alive=False,
+                occupied=False,
+                lock="free",
+            ),
+        ],
+        "owner_processes": [[*actor, 1]] if daemon else [],
+        "owner_gates": [],
+        "evidence": {"distinct_roots": [[500, 110.0]], "handoff": "unobserved"},
+        "cleanup_began_ns": 192_000 * MS,
+    }
+    if daemon:
+        record["owners"] = [
+            {"label": label, "lifetime": list(actor), "instance_id": "i-1"}
+            for label in OWNER_READS
+        ]
+        record["owner_exit"] = {
+            "how": "exited",
+            "seen_ns": 185_000 * MS,
+            "seconds_after_quit": 62.0,
+        }
+    else:
+        record["b_settlement"] = {
+            "remaining": [],
+            "unresolved": [],
+            "ended_ns": 118_000 * MS,
+        }
+    return record
+
+
+def _shift(record: Any, *, since_ms: int, by_ms: int) -> None:
+    """Move every monotonic reading at or after *since_ms* by *by_ms*."""
+    if isinstance(record, dict):
+        for name, value in record.items():
+            if name.endswith("_ns") and type(value) is int and value >= since_ms * MS:
+                record[name] = value + by_ms * MS
+            else:
+                _shift(value, since_ms=since_ms, by_ms=by_ms)
+    elif isinstance(record, list):
+        for value in record:
+            _shift(value, since_ms=since_ms, by_ms=by_ms)
+
+
+def _r2_call(record: dict, name: str) -> dict:
+    return next(c for c in record["calls"] if c["call"] == name)
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
+@pytest.mark.parametrize("daemon", [True, False], ids=["daemon", "direct"])
+def test_a_valid_second_host_record_passes(daemon, platform):
+    record = _r2_record(daemon=daemon, platform=platform)
+    assert r2_problems(record, daemon=daemon) == []
+    assert problems_for(record, daemon=daemon) == []
+
+
+def test_a_venv_launcher_and_the_interpreter_it_starts_are_one_launch():
+    # On Windows a venv's python.exe starts the interpreter with the same
+    # command line: two owner processes, one launch.
+    record = _r2_record(daemon=True, platform="win32")
+    record["owner_processes"] = [[4000, 99.0, 1], [*OWNER, 4000]]
+    assert r2_problems(record, daemon=True) == []
+    record["owner_processes"] = [[4000, 99.0, 1], [*OWNER, 1]]
+    assert any("the row started owners" in p for p in r2_problems(record, daemon=True))
+
+
+def test_a_windows_release_gate_is_recorded_and_one_is_no_problem():
+    record = _r2_record(daemon=True, platform="win32")
+    record["owner_gates"] = [77]
+    assert r2_problems(record, daemon=True) == []
+
+
+def _gone(name: str) -> Callable[[dict], None]:
+    def change(record: dict) -> None:
+        record["calls"] = [c for c in record["calls"] if c["call"] != name]
+
+    return change
+
+
+def _requests(*at_ms: int | None) -> Callable[[dict], None]:
+    return _set("requests", [_request(at) for at in at_ms])
+
+
+def _owner(label: str, **fields: Any) -> Callable[[dict], None]:
+    def change(record: dict) -> None:
+        for seen in record["owners"]:
+            if seen["label"] == label:
+                seen.update(fields)
+
+    return change
+
+
+def _r2_second_root(record: dict) -> None:
+    _at(record, AFTER_B_QUIT)["census"]["entries"].append(_entry(600, 1, 120.0))
+
+
+R2_DAEMON_CASES = [
+    # Clocks and gaps.
+    pytest.param(
+        # A1 sent at 50s and back at 104s: counted from its receipt, B's read
+        # would be 10s later; from its send it is 64s, past the owner's idle.
+        [_set("calls/0/began_monotonic_ns", 50_000 * MS)],
+        "hot reuse not established: B's read: the window is late",
+        id="receipt-would-hide-the-b-gap",
+    ),
+    pytest.param(
+        [lambda r: _shift(r, since_ms=120_000, by_ms=50_000)],
+        "hot reuse not established: A2's read: the window is late",
+        id="late-a2-gap",
+    ),
+    pytest.param(
+        [_set(f"{AFTER_B_QUIT}/ended_ns", 173_000 * MS)],
+        f"{AFTER_B_QUIT}: the window is late",
+        id="late-after-b-quit",
+    ),
+    pytest.param(
+        [_set("calls/1/began_monotonic_ns", None)],
+        "B: the call's interval is missing or reversed",
+        id="b-read-untimed",
+    ),
+    pytest.param(
+        [_set("calls/1/began_monotonic_ns", 103_000 * MS)],
+        "A1 and B: the call intervals overlap",
+        id="overlapping-reads",
+    ),
+    pytest.param(
+        [_set(f"{AFTER_A1}/ended_ns", 107_500 * MS)],
+        f"{AFTER_A1}: it is not shown to end before B started",
+        id="after-a1-overlaps-b",
+    ),
+    pytest.param(
+        [_set(f"{AFTER_B_QUIT}/began_ns", 115_500 * MS)],
+        f"{AFTER_B_QUIT}: it began before B's exit was seen",
+        id="after-b-quit-before-b-exit",
+    ),
+    pytest.param(
+        [_set(f"{AFTER_B_QUIT}/ended_ns", 120_500 * MS)],
+        f"{AFTER_B_QUIT}: it ended after A2 was sent",
+        id="after-b-quit-overlaps-a2",
+    ),
+    pytest.param(
+        [_set("host_b/exit_seen_ns", 122_500 * MS)],
+        "host B's exit is not shown before host A's EOF",
+        id="b-outlives-a",
+    ),
+    # Nesting and launch.
+    pytest.param(
+        [_set("a_open/after_b_exit", False)],
+        "host A was not shown open after b exit",
+        id="a-closed-during-b",
+    ),
+    pytest.param(
+        [_set("a_open/at_b_start", None)],
+        "host A was not shown open at b start",
+        id="a-unread-at-b-start",
+    ),
+    pytest.param(
+        [_set("launch/B/env_sha256", "other")],
+        "host B did not start as host A did",
+        id="b-another-environment",
+    ),
+    pytest.param(
+        [_set("launch/B/command", ["python", "-m", "other"])],
+        "host B did not start as host A did",
+        id="b-another-command",
+    ),
+    # Host B's own session.
+    pytest.param(
+        [_set("host_b", {}), _gone("B")],
+        "host B: the host's quit was not a normal EOF exit",
+        id="no-host-b",
+    ),
+    pytest.param(
+        [_set("host_b/error", "McpError: initialize timed out"), _gone("B")],
+        "host B: the host session failed: McpError",
+        id="b-initialization-failed",
+    ),
+    pytest.param(
+        [_set("host_b/exit_code", 1)],
+        "host B: the host's quit was not a normal EOF exit",
+        id="b-nonzero-exit",
+    ),
+    pytest.param(
+        [_set("host_b/killed_by_harness", True)],
+        "host B: the host's quit was not a normal EOF exit",
+        id="b-forced-eof-cleanup",
+    ),
+    pytest.param(
+        [_set("host_b/after_exit_error", "OSError: planted")],
+        "host B's post-exit hook failed",
+        id="b-hook-error",
+    ),
+    pytest.param(
+        [_set("host_b/forwarded", False)],
+        "host B did not report forwarding to the shared owner",
+        id="b-did-not-forward",
+    ),
+    # The reads.
+    pytest.param([_gone("B")], "the calls were", id="missing-b-read"),
+    pytest.param([_gone("A2")], "the calls were", id="missing-a2"),
+    pytest.param(
+        [_set("calls/2/read_the_post", False)],
+        "A2 did not return the synthetic post",
+        id="a2-failed",
+    ),
+    pytest.param(
+        [_set("calls/1/is_error", True)],
+        "B did not return the synthetic post",
+        id="b-read-failed",
+    ),
+    pytest.param(
+        [_set("script_error", "RuntimeError: planted")],
+        "the row's script failed",
+        id="script-error",
+    ),
+    pytest.param(
+        [_set("after_exit_error", "RuntimeError: planted")],
+        "the post-exit hook failed",
+        id="a-hook-error",
+    ),
+    # Request attribution.
+    pytest.param(
+        # B's only request arrived while A1 ran: A1's, never B's.
+        [_requests(102_000, 103_000, 120_500)],
+        "B: no session-carrying feed request arrived inside its own interval",
+        id="b-cannot-borrow-a1s-request",
+    ),
+    pytest.param(
+        [_requests(102_000, 113_000)],
+        "A2: no session-carrying feed request arrived inside its own interval",
+        id="missing-origin-request",
+    ),
+    pytest.param(
+        [
+            _set(
+                "requests",
+                [_request(102_000), _request(113_000, valid=False), _request(120_500)],
+            )
+        ],
+        "B: no session-carrying feed request",
+        id="b-request-without-the-session",
+    ),
+    pytest.param(
+        [_requests(102_000, None, 120_500)],
+        "B: no session-carrying feed request",
+        id="b-request-unplaced",
+    ),
+    # Checkpoints.
+    pytest.param(
+        [_set(f"{AFTER_B_QUIT}/actor_alive", [False, False])],
+        f"{AFTER_B_QUIT}: the owner was gone, not alive",
+        id="owner-lost-while-b-ran",
+    ),
+    pytest.param(
+        [_r2_second_root],
+        f"{AFTER_B_QUIT}: 2 browser roots on the profile, not one",
+        id="a-second-root-after-b",
+    ),
+    pytest.param(
+        [_set(f"{AFTER_B_QUIT}/census/entries/0/start", 150.0)],
+        f"{AFTER_B_QUIT}: the root is not the one {AFTER_A1} read",
+        id="another-root-after-b",
+    ),
+    pytest.param(
+        [_set(f"{AFTER_A1}/census/unresolved", [777])],
+        f"{AFTER_A1}: unknown browser roots on the profile, not one",
+        id="unresolved-census-after-a1",
+    ),
+    pytest.param(
+        [_set(f"{AFTER_B_QUIT}/lock/now", [7, 100])],
+        f"{AFTER_B_QUIT}: the lock was replaced, not held",
+        id="lock-replaced-after-b",
+    ),
+    pytest.param(
+        [_set(f"{AFTER_A1}/lock/answer/state", "unknown")],
+        f"{AFTER_A1}: the lock was unknown, not held",
+        id="contender-failed-after-a1",
+    ),
+    pytest.param(
+        [_set(f"{SETTLED}/lock/answer/state", "unknown")],
+        f"{SETTLED}: the lock was unknown, not free",
+        id="unknown-is-not-free",
+    ),
+    pytest.param(
+        [_set("cleanup_began_ns", 190_500 * MS)],
+        f"{SETTLED}: it is not shown to precede the cleanup",
+        id="settlement-after-cleanup",
+    ),
+    pytest.param([_drop(AFTER_B_QUIT)], "the checkpoints were", id="missing-window"),
+    # The owner and the election.
+    pytest.param(
+        [_owner("after B", lifetime=[OWNER[0], 150.0])],
+        "after B: the descriptor names",
+        id="another-owner-lifetime-after-b",
+    ),
+    pytest.param(
+        [_owner("after A2", instance_id="i-2")],
+        "after A2: the owner's instance changed",
+        id="instance-changed",
+    ),
+    pytest.param(
+        [lambda r: r["owners"].pop(1)],
+        "the owner was not read after B",
+        id="owner-unread-after-b",
+    ),
+    pytest.param(
+        [_owner("after A1", instance_id=None)],
+        "the owner's instance was not read after A1",
+        id="no-instance-after-a1",
+    ),
+    pytest.param(
+        [_set("owner_processes", [[*OWNER, 1], [9999, 130.0, 1]])],
+        "the row started owners",
+        id="a-second-owner-elected",
+    ),
+    pytest.param(
+        [_set("owner_gates", [77, 78])],
+        "an extra owner start was attempted",
+        id="extra-release-gate",
+    ),
+    pytest.param(
+        [_set("owner_exit/how", "still running")],
+        "the owner was not seen to exit by itself",
+        id="owner-never-left",
+    ),
+]
+
+
+@pytest.mark.parametrize(("changes", "reported"), R2_DAEMON_CASES)
+def test_one_changed_observation_fails_the_daemon_second_host(changes, reported):
+    record = _r2_record(daemon=True)
+    for change in changes:
+        change(record)
+    problems = r2_problems(record, daemon=True)
+    assert any(reported in problem for problem in problems), problems
+
+
+@pytest.mark.parametrize(
+    ("changes", "reported"),
+    [
+        pytest.param(
+            [_set("host_b/forwarded", True)],
+            "host B reached a shared owner in Direct mode",
+            id="b-forwarded-in-direct",
+        ),
+        pytest.param(
+            [_set("b_settlement/remaining", [900])],
+            "B's browser was not shown gone before A2",
+            id="b-browser-left",
+        ),
+        pytest.param(
+            [_set("b_settlement/unresolved", [901])],
+            "B's browser was not shown gone before A2",
+            id="b-census-incomplete",
+        ),
+        pytest.param(
+            [_set("b_settlement/ended_ns", 120_500 * MS)],
+            "B's settlement is not shown to precede A2",
+            id="b-settled-after-a2",
+        ),
+        pytest.param(
+            [_set("b_settlement", {"error": "UnsettledWorker: planted"})],
+            "B's browser was not shown gone before A2",
+            id="b-settlement-failed",
+        ),
+        pytest.param(
+            [_set("calls/1/began_monotonic_ns", 106_500 * MS)],
+            "B's read is not shown after host B started",
+            id="b-read-before-b-started",
+        ),
+        pytest.param(
+            [_set(f"{AFTER_B_QUIT}/actor_alive", [False, False])],
+            f"{AFTER_B_QUIT}: the server of host A was gone",
+            id="a-server-gone-after-b",
+        ),
+        pytest.param(
+            [_set(f"{AFTER_B_QUIT}/lock/answer/state", "unknown")],
+            f"{AFTER_B_QUIT}: the lock was unknown",
+            id="contender-failed-after-b",
+        ),
+        pytest.param(
+            [_set(f"{AFTER_A1}/lock/association/state", "not the holder")],
+            f"{AFTER_A1}: the holder is not the actor, not the server",
+            id="linux-holder-after-a1",
+        ),
+    ],
+)
+def test_one_changed_observation_fails_the_direct_second_host(changes, reported):
+    record = _r2_record(daemon=False)
+    for change in changes:
+        change(record)
+    problems = r2_problems(record, daemon=False)
+    assert any(reported in problem for problem in problems), problems
+
+
+def test_a_direct_reading_after_b_quit_is_kept_as_read():
+    # B's browser still on the profile when B's own hook read it, and gone by
+    # the bounded passive wait before A2: the record keeps both.
+    record = _r2_record(daemon=False)
+    _at(record, AFTER_B_QUIT).update(
+        _point(
+            AFTER_B_QUIT,
+            116_100,
+            117_000,
+            actor=SERVER,
+            alive=True,
+            occupied=True,
+            lock="held",
+            root=(800, 113.0),
+        )
+    )
+    assert r2_problems(record, daemon=False) == []
+    assert semantics(record)["checkpoints"][AFTER_B_QUIT]["census"] == "occupied"
+
+
+def test_a_late_gap_is_evidence_never_a_second_owner_finding():
+    # The owner idled out while B started, so B elected its own: the row
+    # reports that the reuse was not observed, and judges no owner change.
+    record = _r2_record(daemon=True)
+    _shift(record, since_ms=107_000, by_ms=60_000)
+    _owner("after B", lifetime=[9999, 130.0], instance_id="i-2")(record)
+    _owner("after A2", lifetime=[9999, 130.0], instance_id="i-2")(record)
+    record["owner_processes"] = [[*OWNER, 1], [9999, 130.0, 1]]
+    problems = r2_problems(record, daemon=True)
+    assert any("hot reuse not established: B's read" in p for p in problems)
+    assert not [
+        p
+        for p in problems
+        if "descriptor names" in p
+        or "instance changed" in p
+        or "started owners" in p
+        or p.startswith(f"{AFTER_B_QUIT}: the owner")
+    ], problems
+
+
+def test_requests_outside_every_read_are_diagnostics_and_extra_ones_count_once():
+    record = _r2_record(daemon=True)
+    record["requests"] += [
+        _request(110_000),
+        _request(113_200),
+        _request(113_900),
+        _request(119_000, path="/feed/?refresh=1"),
+        _request(113_500, path="/voyager/api"),
+    ]
+    assert r2_problems(record, daemon=True) == []
+    found = attribute_requests(record["calls"], record["requests"])
+    assert found.claimed == {"A1": 1, "B": 3, "A2": 1}
+    assert found.outside == 2
+    assert semantics(record)["read"] == semantics(_r2_record())["read"]
+
+
+def test_a_request_two_reads_could_claim_settles_neither():
+    calls = [
+        _read("A", "A1", 100_000, 104_000),
+        _read("B", "B", 104_000, 108_000),
+    ]
+    found = attribute_requests(calls, [_request(104_000), _request(106_000)])
+    assert found.contested
+    assert any("claimed by two calls" in p for p in found.problems)
+    assert any(p.startswith("A1: no session-carrying") for p in found.problems)
+
+
+def test_k0_of_the_second_host_reports_a_different_reading_after_b_quit():
+    # Two valid Direct runs: B's browser gone when its own hook read, or not
+    # yet gone and settled before A2.
+    empty, lingering = _r2_record(daemon=False), _r2_record(daemon=False)
+    _at(lingering, AFTER_B_QUIT).update(
+        _point(
+            AFTER_B_QUIT,
+            116_100,
+            117_000,
+            actor=SERVER,
+            alive=True,
+            occupied=True,
+            lock="held",
+            root=(800, 113.0),
+        )
+    )
+    differences = semantic_differences(empty, lingering, daemon=False)
+    assert len(differences) == 1 and differences[0].startswith(AFTER_B_QUIT)
+
+
+def test_the_evidence_is_derived_and_never_judged():
+    events = [
+        {"kind": "process.start", "pid": 500, "start_identity": 110.0},
+        {"kind": "browser.roots", "roots": {KEY: [500]}},
+        {"kind": "browser.roots", "roots": {}},
+        {"kind": "process.start", "pid": 600, "start_identity": 130.0},
+        {"kind": "browser.roots", "roots": {KEY: [600], "/elsewhere": [700]}},
+    ]
+    assert distinct_roots(events, KEY) == [[500, 110.0], [600, 130.0]]
+    assert handoff_reading(["x", f"{_HANDED_OVER} (held 20.1s)"]) == "handed over"
+    assert handoff_reading(["Closing idle browser after 60s"]) == "idle release"
+    assert handoff_reading([]) == "unobserved"
+    record = _r2_record(daemon=False)
+    record["evidence"] = {"distinct_roots": [], "handoff": "anything"}
+    assert r2_problems(record, daemon=False) == []
+
+
+@pytest.mark.parametrize("daemon", [True, False], ids=["daemon", "direct"])
+def test_the_second_host_verdict_survives_the_published_packet(daemon):
+    good = json.loads(json.dumps(_r2_record(daemon=daemon)))
+    assert problems_for(good, daemon=daemon) == []
+    bad = _r2_record(daemon=daemon)
+    _gone("A2")(bad)
+    assert problems_for(json.loads(json.dumps(bad)), daemon=daemon)
+
+
+def test_k0_of_the_second_host_compares_classifications_only():
+    other = _r2_record(daemon=True)
+    _shift(other, since_ms=0, by_ms=500_000)
+    other["actor"] = [9876, 300.0]
+    other["owner_processes"] = [[9876, 300.0, 1]]
+    for seen in other["owners"]:
+        seen.update(lifetime=[9876, 300.0], instance_id="i-9")
+    for point in other["checkpoints"]:
+        point["lifetime"] = [9876, 300.0]
+        for lineage in point["lineages"]:
+            lineage["ancestors"][-1] = [9876, 300.0]
+        association = point["lock"]["association"]
+        association["holder"] = [9876, 300.0]
+    assert r2_problems(other, daemon=True) == []
+    assert semantic_differences(_r2_record(), other, daemon=True) == []
+    changed = _r2_record(daemon=True)
+    changed["a_open"]["after_b_exit"] = False
+    assert semantic_differences(_r2_record(), changed, daemon=True)
+    assert semantic_differences(None, _r2_record(), daemon=True)
+    assert comparison_refusals(_r2_record(daemon=False), None)
+    assert comparison_refusals(_r2_record(daemon=False), _r2_record()) == []
+
+
+# --- H-R2 wiring: host A's script runs host B through the same seam ---------------
+
+
+class _Alive:
+    """A process handle that reads as running until marked gone."""
+
+    def __init__(self, pid: int):
+        self.pid, self.gone = pid, False
+
+    def status(self) -> str:
+        if self.gone:
+            raise psutil.NoSuchProcess(self.pid)
+        return psutil.STATUS_RUNNING
+
+
+class _SecondHostScene(_Scene):
+    """H-R2 through the real row: host A's double runs the row's own script,
+    whose host B goes through the same ``run_host_session`` double. Every
+    read adds a feed request to the origin while it runs, with its arrival
+    on the monotonic clock, as the real origin records it."""
+
+    def __init__(self, modelled_row, monkeypatch, tmp_path, *, daemon: bool):
+        super().__init__(modelled_row, monkeypatch, tmp_path, daemon=daemon)
+        self.readings[AFTER_A1] = self.readings[BEFORE_QUIT]
+        self.readings[AFTER_B_QUIT] = lambda: self.reading(
+            alive=True, occupied=daemon, lock="held" if daemon else "free"
+        )
+        self.b: dict[str, Any] = {"exit_code": 0, "error": None}
+        self.a2_fails = False
+        self.a2_called = 0
+        self.launched: list[dict] = []
+        self.origin: Any = None
+        self.handles = {4242: _Alive(4242), 4343: _Alive(4343)}
+        inner = harness.run_host_session
+        scene = self
+        real_row = gate.measure_host_quit_row
+
+        async def capture(**kwargs):
+            scene.origin = kwargs["egress"][0]
+            return await real_row(**kwargs)
+
+        monkeypatch.setattr(gate, "measure_host_quit_row", capture)
+        monkeypatch.setattr(
+            harness,
+            "associate_server",
+            lambda pid, observed, **kw: (
+                (scene.handles.get(pid), 7.0) if pid in scene.handles else (None, None)
+            ),
+        )
+
+        def timed(host: str) -> dict:
+            began, began_ns = time.time(), time.monotonic_ns()
+            scene.origin.requests.append(
+                OriginRequest(
+                    "www.linkedin.com",
+                    "www.linkedin.com",
+                    "/feed/",
+                    ("li_at",),
+                    t=time.time(),
+                    session_valid=True,
+                    monotonic_ns=time.monotonic_ns(),
+                )
+            )
+            return {
+                "tool": harness.READ_TOOL,
+                "began": began,
+                "ended": time.time(),
+                "began_monotonic_ns": began_ns,
+                "ended_monotonic_ns": time.monotonic_ns(),
+                "is_error": False,
+                "read_the_post": True,
+                "text": f"read by {host}",
+            }
+
+        async def host(command, *, env, cwd, on_stderr, **kwargs):
+            after_call = kwargs.get("after_call")
+            script, after_exit = kwargs.get("script"), kwargs.get("after_exit")
+            scene.launched.append({"command": list(command), "env": dict(env)})
+            if after_call is None:
+                # Host B: its own session, from its own directory.
+                assert Path(cwd).name == "host-b"
+                kwargs["started"](4343)
+                session = harness.HostSession(pid=4343)
+                if scene.b["error"] is not None:
+                    session.error = scene.b["error"]
+                    return session
+                lines = [harness._FORWARDING_LINE] if daemon else []
+                for line in lines:
+                    on_stderr(line)
+                session.stderr = lines
+                session.tool = timed("B")
+            else:
+                base = await inner(
+                    command,
+                    env=env,
+                    cwd=cwd,
+                    on_stderr=on_stderr,
+                    **{
+                        name: value
+                        for name, value in kwargs.items()
+                        if name not in ("script", "after_exit")
+                    },
+                )
+                session = dataclasses.replace(
+                    base,
+                    pid=4242,
+                    stderr=list(base.stderr) if daemon else [],
+                    user_lines=[],
+                    tool=timed("A"),
+                )
+                if script is not None:
+
+                    async def call(name, arguments):
+                        scene.a2_called += 1
+                        if scene.a2_fails:
+                            raise RuntimeError("planted: A2 was never answered")
+                        summary = timed("A")
+                        session.scripted.append(summary)
+                        return summary
+
+                    try:
+                        await script(call)
+                    except Exception as exc:  # noqa: BLE001 - as the real session keeps it
+                        session.script_error = f"{type(exc).__name__}: {exc}"
+            session.alive_before_quit = session.stdin_closed = True
+            session.eof_monotonic_ns = time.monotonic_ns()
+            session.exited_on_quit = True
+            session.exit_code = scene.b["exit_code"] if after_call is None else 0
+            session.exit_seen_monotonic_ns = time.monotonic_ns()
+            if after_call is not None:
+                scene.handles[4242].gone = True
+            if after_exit is not None:
+                try:
+                    await after_exit()
+                except Exception as exc:  # noqa: BLE001 - as the real transport keeps it
+                    session.after_exit_error = f"{type(exc).__name__}: {exc}"
+            return session
+
+        monkeypatch.setattr(harness, "run_host_session", host)
+
+    async def run(self, **options):
+        observed = (
+            [
+                {
+                    "kind": "process.start",
+                    "actor": "owner",
+                    "in_row": True,
+                    "pid": 42,
+                    "ppid": 1,
+                    "start_identity": 1.0,
+                    "cmdline": ["python", "-m", "linkedin_mcp_server.daemon_owner"],
+                }
+            ]
+            if self.daemon
+            else []
+        )
+        return await super().run(row=ROW_H_R2, observed=observed, **options)
+
+
+@pytest.fixture(params=[True, False], ids=["daemon", "direct"])
+def second(request, row, monkeypatch, tmp_path):  # noqa: F811 - the imported fixture
+    return _SecondHostScene(row, monkeypatch, tmp_path, daemon=request.param)
+
+
+async def test_a_healthy_second_host_row_passes_and_publishes_one_record(second):
+    result, preserved = await second.run()
+
+    assert result.failures == [], result.failures
+    assert preserved == 1
+    assert second.asked == [AFTER_A1, AFTER_B_QUIT, FIRST_POST_EXIT, SETTLED]
+    published = second.published()["comparison"]
+    assert [(c["host"], c["call"]) for c in published["calls"]] == list(R2_CALLS)
+    assert published["host_b"]["exit_code"] == 0
+    assert published["launch"]["A"] == published["launch"]["B"]
+    assert published["a_open"] == {"at_b_start": True, "after_b_exit": True}
+    assert all(r["monotonic_ns"] is not None for r in published["requests"][-3:])
+    assert r2_problems(published, daemon=second.daemon) == []
+    # Both hosts from one command and environment; only B's directory differs.
+    a, b = second.launched
+    assert a == b
+    hosts = {
+        r.get("host")
+        for r in second.row.log.records()
+        if r["kind"] == "user.output" and r["actor"] == "frontend"
+    }
+    assert "B" in hosts if second.daemon else hosts <= {"A", "B"}
+
+
+async def test_a_failed_host_b_fails_the_row_and_a_still_reads(second):
+    second.b["error"] = "McpError: initialize timed out"
+    result, _ = await second.run()
+    assert any("host B: the host session failed" in f for f in result.failures)
+    assert any("the calls were" in f for f in result.failures)
+
+
+async def test_a_nonzero_host_b_exit_fails_the_row(second):
+    second.b["exit_code"] = 3
+    result, _ = await second.run()
+    assert any(
+        "host B: the host's quit was not a normal EOF exit" in f
+        for f in result.failures
+    ), result.failures
+
+
+async def test_a_failed_a2_fails_the_row(second):
+    second.a2_fails = True
+    result, _ = await second.run()
+    assert any("the row's script failed" in f for f in result.failures)
+    assert any("the calls were" in f for f in result.failures)
+
+
+async def test_an_unsettled_worker_blocks_host_b_and_a2(second, monkeypatch):
+    monkeypatch.setattr(harness, "_CHECKPOINT_SECONDS", 0.3)
+    second.hold[AFTER_A1] = threading.Event()
+    try:
+        result, preserved = await second.run()
+    finally:
+        second.hold[AFTER_A1].set()
+    # Neither B nor A2 started while the first reader still ran.
+    assert len(second.launched) == 1
+    assert AFTER_B_QUIT not in second.asked
+    assert preserved == 0
+    assert any("host B was not taken" in f for f in result.failures), result.failures
+    deadline = time.monotonic() + 10
+    while unconfirmed_close.running_workers() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+
+
+async def test_the_second_host_row_refuses_another_scenario(monkeypatch, tmp_path):
+    staged = AsyncMock()
+    monkeypatch.setattr(harness, "stage_signed_in_session", staged)
+    with pytest.raises(ValueError, match=ROW_H_R2):
+        await harness.measure_host_quit_row(
+            profile=tmp_path / "auth" / "profile",
+            experiment="K3",
+            daemon=True,
+            egress=cast(Any, (SimpleNamespace(), SimpleNamespace())),
+            log=EventLog(tmp_path / "evidence", run="refused"),
+            work_dir=tmp_path / "row",
+            row=ROW_H_R2,
+            kill_actor=True,
+        )
+    staged.assert_not_awaited()
+
+
+async def test_the_second_host_row_uses_the_comparison_idle_timeout(
+    second, monkeypatch
+):
+    environments: list[str] = []
+
+    def actor_environment(*args, **kwargs):
+        env = REAL_ACTOR_ENVIRONMENT(*args, **kwargs)
+        environments.append(env[EnvironmentKeys.BROWSER_IDLE_TIMEOUT])
+        return env
+
+    monkeypatch.setattr(harness, "actor_environment", actor_environment)
+    result, _ = await second.run()
+    idle = str(harness.COMPARISON_IDLE_TIMEOUT_SECONDS)
+    assert environments == [idle]
+    assert {
+        launch["env"][EnvironmentKeys.BROWSER_IDLE_TIMEOUT]
+        for launch in second.launched
+    } == {idle}
+    assert result.comparison is not None
+    assert result.comparison["idle_timeout_seconds"] == float(idle)
+
+
+async def test_an_unsettled_reader_after_b_blocks_a2(second, monkeypatch):
+    monkeypatch.setattr(harness, "_CHECKPOINT_SECONDS", 0.3)
+    second.hold[AFTER_B_QUIT] = threading.Event()
+    try:
+        result, preserved = await second.run()
+    finally:
+        second.hold[AFTER_B_QUIT].set()
+    assert second.a2_called == 0
+    assert preserved == 0
+    assert any("A2 was not taken" in f for f in result.failures), result.failures
+    deadline = time.monotonic() + 10
+    while unconfirmed_close.running_workers() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+
+
+def test_the_origin_dates_each_request_on_the_harness_monotonic_clock():
+    # The handler itself, without a socket: what it records for one GET.
+    recorded: list[OriginRequest] = []
+    handler = object.__new__(synthetic_origin._OriginHandler)
+    handler.server = cast(
+        Any,
+        SimpleNamespace(record=recorded.append, judge_session=lambda header: True),
+    )
+    handler.connection = SimpleNamespace(_synthetic_server_name="www.linkedin.com")
+    handler.headers = cast(Any, {"Host": "www.linkedin.com", "Cookie": "li_at=x"})
+    handler.path = "/feed/"
+    handler.request_version = "HTTP/1.1"
+    handler.requestline = "GET /feed/ HTTP/1.1"
+    handler.command = "GET"
+    handler.client_address = ("127.0.0.1", 1)
+    handler.wfile = io.BytesIO()
+    before = time.monotonic_ns()
+    handler.do_GET()
+    after = time.monotonic_ns()
+    [request] = recorded
+    assert request.monotonic_ns is not None
+    assert before <= request.monotonic_ns <= after
+    assert request.t > 0 and request.session_valid is True
