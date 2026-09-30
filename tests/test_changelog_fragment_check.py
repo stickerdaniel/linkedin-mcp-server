@@ -504,7 +504,7 @@ def test_version_bump_may_delete_every_fragment(tmp_path: Path) -> None:
         tmp_path,
         "chore: Bump version to 4.26.0",
         [
-            _file("CHANGELOG.md", "modified"),
+            _file("docs/CHANGELOG.md", "modified"),
             _file("changelog.d/1076.fix.md", "removed", "@@ -1 +0,0 @@\n-Old."),
             _file("changelog.d/weird-name.md", "removed", "@@ -1 +0,0 @@\n-Old."),
         ],

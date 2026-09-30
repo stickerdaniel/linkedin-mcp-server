@@ -122,7 +122,7 @@ _DEPENDENCY_SYNC = (
 )
 _PROJECT_INSTALL = (
     "RUN uv pip install --python /app/.venv/bin/python --no-deps "
-    "--compile-bytecode --build-constraints build-constraints.txt ."
+    "--compile-bytecode --build-constraints requirements/build-constraints.txt ."
 )
 
 
@@ -152,11 +152,11 @@ _PROJECT_BUILDING_COMMANDS = (
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DOCKERFILE = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
 _DOCKERFILE_INSTRUCTIONS = _logical_lines(_DOCKERFILE)
-_ENTRYPOINT_PATH = _REPO_ROOT / "docker-entrypoint.sh"
+_ENTRYPOINT_PATH = _REPO_ROOT / "scripts/docker-entrypoint.sh"
 _ENTRYPOINT = _ENTRYPOINT_PATH.read_text(encoding="utf-8")
 _README = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
 _DOCKER_GUIDE = (_REPO_ROOT / "docs" / "docker-hub.md").read_text(encoding="utf-8")
-_BUILD_CONSTRAINTS_PATH = _REPO_ROOT / "build-constraints.txt"
+_BUILD_CONSTRAINTS_PATH = _REPO_ROOT / "requirements/build-constraints.txt"
 _PYPROJECT_PATH = _REPO_ROOT / "pyproject.toml"
 # Pinned: the probe runs against the developer's own machine, and `latest`
 # is whatever the registry serves that day.
@@ -167,10 +167,10 @@ _PROBE_IMAGE = (
 
 # `test_the_built_project_records_the_pinned_backend` builds the builder stage,
 # so a missing input fails it: that stage is where the pin is decided and it is
-# cheap to build. `docker-entrypoint.sh` is the exception, copied in the second
+# cheap to build. `scripts/docker-entrypoint.sh` is the exception, copied in the second
 # stage, which only a full image build would reach. Excluding it produced a
 # green suite and a broken `docker build .`, so it is named here.
-_CONTEXT_INPUTS = ("build-constraints.txt", "docker-entrypoint.sh")
+_CONTEXT_INPUTS = ("requirements/build-constraints.txt", "scripts/docker-entrypoint.sh")
 
 # These must not reach the build. The environment names cover the root, a
 # suffix and a nested directory, which is the whole of what `**/.env*` claims.
@@ -377,11 +377,11 @@ def test_every_build_requirement_is_pinned_with_hashes() -> None:
         f"build requirements with extras need their own hashed entries: {extras}"
     )
 
-    sources = _pinned_requirements(_REPO_ROOT / "build-constraints.in")
+    sources = _pinned_requirements(_REPO_ROOT / "requirements/build-constraints.in")
     compiled = _pinned_requirements(_BUILD_CONSTRAINTS_PATH)
 
     assert required <= sources.keys(), (
-        f"build requirements missing from build-constraints.in: "
+        f"build requirements missing from requirements/build-constraints.in: "
         f"{sorted(required - sources.keys())}"
     )
     assert sources.keys() <= compiled.keys(), (
@@ -401,7 +401,9 @@ def test_every_build_requirement_is_pinned_with_hashes() -> None:
         for name, (source, _) in sources.items()
         if compiled[name][0].specifier != source.specifier
     }
-    assert not drifted, f"build-constraints.in and .txt disagree: {drifted}"
+    assert not drifted, (
+        f"requirements/build-constraints.in and .txt disagree: {drifted}"
+    )
 
 
 @pytest.mark.image_build
@@ -440,7 +442,7 @@ def test_the_built_project_records_the_pinned_backend() -> None:
     `&`, an `ENV=1` prefix, an extra space, an inert marker and a second
     frontend each passed an inference while the build did something else.
 
-    The version alone would not be enough. `build-constraints.txt` normally
+    The version alone would not be enough. `requirements/build-constraints.txt` normally
     pins whatever is current, and Renovate keeps it that way, so an
     unconstrained build resolves the same number and produces the same wheel.
     It reads as proof exactly when it proves nothing. The second build settles
@@ -526,7 +528,7 @@ def test_the_built_project_records_the_pinned_backend() -> None:
             input=(
                 f"FROM {tag}\n"
                 "RUN sed -i s/--hash=sha256:/--hash=sha256:0/g "
-                "build-constraints.txt\n"
+                "requirements/build-constraints.txt\n"
                 f"{_PROJECT_INSTALL} --force-reinstall\n"
             ),
             capture_output=True,

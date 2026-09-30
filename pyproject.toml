@@ -84,6 +84,31 @@ select = ["E4", "E7", "E9", "F"]
 # Ruff 0.16 added Markdown formatting; keep the formatter's previous file scope.
 exclude = ["*.md"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-v --strict-markers -ra"
+markers = [
+    "browser_dom: evaluates extractor JS against a real chromium DOM; skipped when no browser is installed",
+    "browser_contract: measures browser API behavior against real Chromium; skipped when no browser is installed",
+    "slow: spawns real server processes; each case starts the full server graph",
+    "image_build: shells out to a docker daemon; skipped where there is none",
+    "browser_identity: the identity gate; fails rather than skips in CI",
+    "real_control_peer: starts a real owner that attaches to the control rendezvous itself, so no stand-in peer is planted",
+    "differential_browser: native differential row; launches real Chromium against the synthetic origin and runs only on a disposable CI runner that trusts the run's test CA",
+    "differential_row(row, experiment, column): a differential harness case, counted per row, experiment and platform in counts.json whether it runs, skips or fails",
+]
+
+[tool.coverage.run]
+source = ["linkedin_mcp_server"]
+branch = true
+omit = ["linkedin_mcp_server/__main__.py"]
+
+[tool.coverage.report]
+fail_under = 45
+show_missing = true
+
 [dependency-groups]
 dev = [
     "aiohttp>=3.14.3",
@@ -101,7 +126,7 @@ dev = [
 
 [tool.towncrier]
 directory = "changelog.d"
-filename = "CHANGELOG.md"
+filename = "docs/CHANGELOG.md"
 start_string = "<!-- towncrier release notes start -->\n"
 title_format = "## {version} ({project_date})"
 issue_format = "[#{issue}](https://github.com/stickerdaniel/linkedin-mcp-server/pull/{issue})"

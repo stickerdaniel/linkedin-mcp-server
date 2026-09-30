@@ -213,8 +213,8 @@ section LinkedIn rate-limits, `send_message` takes three, and
 git checkout main && git pull
 uv version --bump minor          # or: major, patch — updates pyproject.toml AND uv.lock
 uv run towncrier build --version "$(uv version --short)" --yes
-# optional: under the new version heading in CHANGELOG.md, above the categories, add a `### Highlights` list of up to three `**Lead-in.** sentence ([#N](link))` bullets
-git add pyproject.toml uv.lock CHANGELOG.md  # CHANGELOG.md again, for the Highlights edit
+# optional: under the new version heading in docs/CHANGELOG.md, above the categories, add a `### Highlights` list of up to three `**Lead-in.** sentence ([#N](link))` bullets
+git add pyproject.toml uv.lock docs/CHANGELOG.md  # docs/CHANGELOG.md again, for the Highlights edit
 gt create -m "chore: Bump version to X.Y.Z"
 gt submit                        # merge PR to trigger release workflow
 ```
@@ -272,7 +272,7 @@ for that.
 
 ## Development Workflow
 
-Always read [`CONTRIBUTING.md`](CONTRIBUTING.md) before filing an issue or working on this repository.
+Always read [`CONTRIBUTING.md`](.github/CONTRIBUTING.md) before filing an issue or working on this repository.
 
 - Write a short synthetic prompt that would reproduce the PR diff if given to a fresh Claude Code session. Don't copy the user's first message — distill the conversation into a single instruction that captures the full scope of changes. This tells the maintainer what was intended, which is often more useful than reviewing the full diff. Use a Markdown blockquote under a `## Synthetic prompt` heading.
 - The final non-empty line of every PR body must disclose every model used. CI skips the summary block Macroscope appends, so leave the attribution where you wrote it. CI accepts `Generated with <model>` or `Generated with <model>.` as the minimum. The final period is optional only for this model-only form. Prefer the detailed form `Generated with <model> for <job> in <harness>.`; for example, `Generated with Claude Opus 5 for implementation in Claude Code via T3 Code.` A harness is the coding-agent runtime that invokes the model and tools, such as Claude Code or Codex CLI. Add an outer host or wrapper with optional `via <host>`. For multiple models, use `Generated with <model 1> for <job 1> and <model 2> for <job 2> in <harness>.`; `and` separates model/job pairs exclusively, and commas or `/` list multiple jobs for one model.

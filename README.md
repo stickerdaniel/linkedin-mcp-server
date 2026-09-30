@@ -11,6 +11,8 @@
 
 An MCP server that connects AI assistants like Claude to LinkedIn through your own logged-in browser session. Look up profiles and companies, send messages, manage your inbox, or search for jobs. All browser actions run locally on your machine.
 
+See the [changelog](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/docs/CHANGELOG.md) for release history.
+
 > This is an independent open-source project, not affiliated with, authorized by, endorsed by, or sponsored by LinkedIn or Microsoft. LinkedIn is a trademark of LinkedIn Corporation and is used here only to identify the service this software interacts with.
 
 <br/>
@@ -711,7 +713,7 @@ With a paid provider, use a sticky residential session that holds one address (n
 
 ## Setup from Source (Develop & Contribute)
 
-Contributions are welcome. See [CONTRIBUTING.md](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/CONTRIBUTING.md) for architecture guidelines and checklists. Search existing issues first, then use the [issue forms](https://github.com/stickerdaniel/linkedin-mcp-server/issues/new/choose) for anything new. AI agents follow the [issue-packet skill](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/.agents/skills/issue-packet/SKILL.md).
+Contributions are welcome. See [CONTRIBUTING.md](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/.github/CONTRIBUTING.md) for architecture guidelines and checklists. Search existing issues first, then use the [issue forms](https://github.com/stickerdaniel/linkedin-mcp-server/issues/new/choose) for anything new. AI agents follow the [issue-packet skill](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/.agents/skills/issue-packet/SKILL.md).
 
 **Prerequisites:** [Git](https://git-scm.com/downloads) and [uv](https://docs.astral.sh/uv/) installed
 

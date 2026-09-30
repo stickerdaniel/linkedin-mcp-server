@@ -76,7 +76,7 @@ jobs:
           echo "Previous version: $PREVIOUS"
           git ls-remote --exit-code --tags origin "refs/tags/v$PREVIOUS"
           PULLS=$(python3 scripts/compose_release_notes.py --list-pull-requests \
-            --changelog CHANGELOG.md \
+            --changelog docs/CHANGELOG.md \
             --version "$VERSION" \
             --repository "$GITHUB_REPOSITORY")
           : > "$RUNNER_TEMP/pr-authors.txt"
@@ -112,8 +112,8 @@ jobs:
           python3 -c 'import json, sys; print(json.dumps(sys.stdin.read().split()))' \
             < "$RUNNER_TEMP/first-contributors.txt" > "$RUNNER_TEMP/first-contributors.json"
           python3 scripts/compose_release_notes.py \
-            --changelog CHANGELOG.md \
-            --template RELEASE_NOTES_TEMPLATE.md \
+            --changelog docs/CHANGELOG.md \
+            --template .github/RELEASE_NOTES_TEMPLATE.md \
             --fragments-dir changelog.d \
             --version "$VERSION" \
             --previous-version "$PREVIOUS" \
@@ -153,13 +153,13 @@ jobs:
         with:
           enable-cache: true
 
-      # build-constraints.txt pins the build backend to a hashed version, so a
+      # requirements/build-constraints.txt pins the build backend to a hashed version, so a
       # tampered setuptools release cannot slip into the distributions. The
       # requirement in pyproject.toml stays a lower bound, because an exact pin
       # there would be baked into every published sdist.
       - name: Build package distributions
         run: |
-          uv build --no-sources --build-constraint build-constraints.txt --require-hashes
+          uv build --no-sources --build-constraint requirements/build-constraints.txt --require-hashes
           echo "Built package distributions:"
           ls -lh dist/
 

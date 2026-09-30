@@ -72,7 +72,7 @@ def test_template_ends_with_editable_attribution_placeholder() -> None:
 
 
 def test_guardrails_updates_have_isolated_and_bounded_automerge_rules() -> None:
-    config = json.loads((_REPO_ROOT / "renovate.json").read_text())
+    config = json.loads((_REPO_ROOT / ".github" / "renovate.json").read_text())
     automatic, manual = config["packageRules"][-2:]
     for rule in (automatic, manual):
         assert rule["matchManagers"] == ["github-actions"]

@@ -14,7 +14,8 @@ _MARKER = "<!-- towncrier release notes start -->"
 
 def _fixture(tmp_path: Path, fragments: dict[str, str]) -> Path:
     shutil.copy(_REPO_ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
-    shutil.copy(_REPO_ROOT / "CHANGELOG.md", tmp_path / "CHANGELOG.md")
+    (tmp_path / "docs").mkdir()
+    shutil.copy(_REPO_ROOT / "docs/CHANGELOG.md", tmp_path / "docs/CHANGELOG.md")
     fragments_dir = tmp_path / "changelog.d"
     fragments_dir.mkdir()
     shutil.copy(_REPO_ROOT / "changelog.d" / "README.md", fragments_dir)
@@ -83,7 +84,7 @@ def test_build_writes_below_the_header_and_marker(tmp_path: Path) -> None:
     result = _build(root, "--keep")
 
     assert result.returncode == 0, result.stdout + result.stderr
-    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    changelog = (root / "docs/CHANGELOG.md").read_text(encoding="utf-8")
     assert changelog.startswith("# Changelog\n")
     assert changelog.count(_MARKER) == 1
     assert changelog.index(_MARKER) < changelog.index("\n## 9.9.9 (2026-09-24)\n")
@@ -92,7 +93,7 @@ def test_build_writes_below_the_header_and_marker(tmp_path: Path) -> None:
 
 def test_changelog_carries_the_configured_marker_once() -> None:
     config = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text("utf-8"))
-    changelog = (_REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    changelog = (_REPO_ROOT / "docs/CHANGELOG.md").read_text(encoding="utf-8")
 
     assert config["tool"]["towncrier"]["start_string"] == f"{_MARKER}\n"
     assert changelog.count(_MARKER) == 1
