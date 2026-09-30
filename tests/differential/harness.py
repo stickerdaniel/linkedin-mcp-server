@@ -2136,6 +2136,40 @@ def owner_gates(observed: Iterable[dict[str, Any]], gates: Sequence[Path]) -> li
     )
 
 
+def launch_lifetimes(
+    observed: Iterable[dict[str, Any]], gates: Sequence[Path]
+) -> tuple[list[list[Any]], list[list[Any]]]:
+    """The owner processes and release gates this row's actors started.
+
+    Each as ``[pid, start, ppid]``, once per lifetime, from the watcher's
+    records: the parent is what lets ``host_comparison.owner_launches`` count
+    a Windows venv launcher and the interpreter it starts as one launch.
+    """
+    owners: list[list[Any]] = []
+    started: list[list[Any]] = []
+    for record in observed:
+        pid, start = record.get("pid"), record.get("start_identity")
+        if not (
+            record.get("kind") in ("process.start", "process.update")
+            and record.get("in_row") is True
+            and isinstance(record.get("cmdline"), list)
+            and isinstance(pid, int)
+            and isinstance(start, (int, float))
+        ):
+            continue
+        if invoked_module(record["cmdline"]) == OWNER_MODULE:
+            kept = owners
+        elif owner_gate(record["cmdline"], gates):
+            kept = started
+        else:
+            continue
+        if not any(
+            host_comparison.same_lifetime(seen[:2], [pid, start]) for seen in kept
+        ):
+            kept.append([pid, start, record.get("ppid")])
+    return owners, started
+
+
 def row_expectations(
     vector: RowVector, *, expect_owner: bool | None = None
 ) -> list[str]:
@@ -6197,23 +6231,12 @@ async def measure_host_quit_row(
                 }
                 for request in feed_requests(row_requests)
             ]
-            owners: list[list[Any]] = []
-            for entry in observed_events:
-                pid, start = entry.get("pid"), entry.get("start_identity")
-                if (
-                    entry.get("kind") in ("process.start", "process.update")
-                    and entry.get("in_row") is True
-                    and isinstance(entry.get("cmdline"), list)
-                    and invoked_module(entry["cmdline"]) == OWNER_MODULE
-                    and isinstance(pid, int)
-                    and isinstance(start, (int, float))
-                    and not any(
-                        host_comparison.same_lifetime(seen[:2], [pid, start])
-                        for seen in owners
-                    )
-                ):
-                    owners.append([pid, start, entry.get("ppid")])
+            owners, gates = launch_lifetimes(
+                observed_events,
+                [gate_script(runtime.checkout), gate_script(REPO_ROOT)],
+            )
             comparison["owner_processes"] = owners
+            comparison["gate_processes"] = gates
             comparison["owner_gates"] = list(gated)
             comparison["evidence"] = {
                 "distinct_roots": host_comparison.distinct_roots(

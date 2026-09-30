@@ -1385,6 +1385,7 @@ def _r2_record(*, daemon: bool = True, platform: str = "linux") -> dict:
         ],
         "owner_processes": [[*actor, 1]] if daemon else [],
         "owner_gates": [],
+        "gate_processes": [],
         "evidence": {"distinct_roots": [[500, 110.0]], "handoff": "unobserved"},
         "cleanup_began_ns": 192_000 * MS,
     }
@@ -1442,10 +1443,26 @@ def test_a_venv_launcher_and_the_interpreter_it_starts_are_one_launch():
     assert any("the row started owners" in p for p in r2_problems(record, daemon=True))
 
 
-def test_a_windows_release_gate_is_recorded_and_one_is_no_problem():
+def test_a_windows_release_gate_and_its_launcher_are_one_start_attempt():
+    # Measured on Windows (run 36677572983): the venv's python.exe started the
+    # gate's interpreter with the same command line and nonce, pid 1104 under
+    # 1776. One attempt, not an extra one.
     record = _r2_record(daemon=True, platform="win32")
-    record["owner_gates"] = [77]
+    record["gate_processes"] = [[1776, 90.0, 3100], [1104, 90.0, 1776]]
     assert r2_problems(record, daemon=True) == []
+    record["gate_processes"] = [[1776, 90.0, 3100], [1104, 90.0, 3100]]
+    assert any(
+        "an extra owner start was attempted" in p
+        for p in r2_problems(record, daemon=True)
+    )
+
+
+def test_release_gates_that_were_never_recorded_fail():
+    record = _r2_record(daemon=True, platform="win32")
+    del record["gate_processes"]
+    assert "the row's release gates were not recorded" in r2_problems(
+        record, daemon=True
+    )
 
 
 def _gone(name: str) -> Callable[[dict], None]:
@@ -1692,7 +1709,7 @@ R2_DAEMON_CASES = [
         id="a-second-owner-elected",
     ),
     pytest.param(
-        [_set("owner_gates", [77, 78])],
+        [_set("gate_processes", [[77, 90.0, 1], [78, 91.0, 1]])],
         "an extra owner start was attempted",
         id="extra-release-gate",
     ),

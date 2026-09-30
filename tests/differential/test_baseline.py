@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from differential import harness
+from differential import harness, host_comparison
 from differential.baseline import (
     BaselineRefused,
     Runtime,
@@ -675,6 +675,27 @@ def test_the_gate_names_this_runtimes_own_script():
     assert harness.owner_gate(command, [harness.gate_script(harness.REPO_ROOT)])
     # Another runtime's gate script, at the same shape, is someone else's.
     assert not harness.owner_gate(command, [harness.gate_script(Path("/elsewhere"))])
+
+
+def test_a_venv_launcher_and_its_interpreter_are_one_owner_start_attempt():
+    # Measured on Windows (run 36677572983): the venv's python.exe started the
+    # gate's interpreter with the same command line and nonce, and that
+    # interpreter started the owner. One attempt, one owner.
+    gate, scripts = _gate(), [harness.gate_script(harness.REPO_ROOT)]
+    events = [
+        {**_gate_event(gate), "pid": 1776, "ppid": 3100},
+        {**_gate_event(gate), "pid": 1104, "ppid": 1776},
+        {**_owner_event("process.start", in_row=True), "cmdline": _OWNER_TARGET},
+        {**_gate_event(gate, in_row=False), "pid": 9, "ppid": 1},
+    ]
+    events[2]["ppid"] = 1104
+    owners, gates = harness.launch_lifetimes(events, scripts)
+    assert host_comparison.owner_launches(gates) == [[1776, 4.0]]
+    assert host_comparison.owner_launches(owners) == [[77, 5.0]]
+    # An attempt of its own is still a second one.
+    events.append({**_gate_event(gate), "pid": 2000, "start_identity": 9.0, "ppid": 1})
+    _, gates = harness.launch_lifetimes(events, scripts)
+    assert len(host_comparison.owner_launches(gates)) == 2
 
 
 def test_a_baseline_runtimes_gate_is_recognised_by_its_own_path(tmp_path):

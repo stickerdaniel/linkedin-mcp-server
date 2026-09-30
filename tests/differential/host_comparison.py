@@ -933,19 +933,24 @@ def _owner_problems(
             problems.append(
                 f"the row started owners {launches}, not only the one A1 reached"
             )
-    gates = record.get("owner_gates") or []
-    if len(gates) > 1:
-        problems.append(f"an extra owner start was attempted: release gates {gates}")
+    gates = record.get("gate_processes")
+    if not isinstance(gates, list):
+        problems.append("the row's release gates were not recorded")
+    elif len(owner_launches(gates)) > 1:
+        problems.append(
+            f"an extra owner start was attempted: release gates {owner_launches(gates)}"
+        )
     return problems
 
 
 def owner_launches(processes: Sequence[Any]) -> list[list]:
-    """Each owner launch among the row's owner processes, as ``[pid, start]``.
+    """Each launch among *processes*, as ``[pid, start]``.
 
-    *processes* are ``[pid, start, ppid]`` of every row process that ran the
-    owner module. One whose parent is another of them is the same launch: a
-    Windows venv's ``python.exe`` is a launcher that starts the interpreter
-    with the same command line.
+    *processes* are ``[pid, start, ppid]`` of every row process that ran one
+    command: the owner module, or its release gate. One whose parent is
+    another of them is the same launch: a Windows venv's ``python.exe`` is a
+    launcher that starts the interpreter with the same command line (measured
+    for a gate, run 36677572983: pid 1104 the child of 1776, one nonce).
     """
     rows = [p for p in processes if _lifetime(p[:2]) is not None and len(p) == 3]
     pids = {p[0] for p in rows}
