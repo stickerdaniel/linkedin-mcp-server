@@ -47,7 +47,7 @@ import pytest
 from packaging.version import Version
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_SERVER_JSON = _REPO_ROOT / "server.json"
+_SERVER_JSON = _REPO_ROOT / ".github" / "mcp" / "server.json"
 _README = _REPO_ROOT / "README.md"
 _RELEASE_WORKFLOW = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
     encoding="utf-8"

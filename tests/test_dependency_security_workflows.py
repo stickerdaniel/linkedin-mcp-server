@@ -322,7 +322,9 @@ def test_new_workflow_actions_are_sha_pinned() -> None:
 
 
 def test_dependency_review_source_is_registered() -> None:
-    registry = (_REPO_ROOT / "btca.config.jsonc").read_text(encoding="utf-8")
+    registry = (_REPO_ROOT / ".agents" / "btca.config.jsonc").read_text(
+        encoding="utf-8"
+    )
 
     assert '"name": "githubDependencyReviewAction"' in registry
     assert '"url": "https://github.com/actions/dependency-review-action"' in registry
