@@ -813,8 +813,9 @@ jobs:
 
   # Calls that lose their caller (tests/differential/call_loss.py), calls
   # that race the owner's retirement (tests/differential/retirement_race.py),
-  # and calls that lose the owner before or after dispatch
-  # (tests/differential/owner_loss.py), in a job of their own rather than more steps in `platform-behaviour`,
+  # calls that lose the owner before or after dispatch
+  # (tests/differential/owner_loss.py), and the profile commands beside a
+  # live owner (tests/differential/profile_commands.py), in a job of their own rather than more steps in `platform-behaviour`,
   # whose budget the rows before them already fill. Four legs: the Ubuntu x64
   # job's platform and the three `platform-behaviour` runs on, each with its
   # own browser build. The setup is the one the differential steps above
@@ -829,7 +830,7 @@ jobs:
     # The camelCase read shims off, for the reason given at `windows-daemon`.
     env:
       FASTMCP_MCP_CAMELCASE_COMPAT: "false"
-    # Four groups of rows per leg, so no job's bound comes near the hosted
+    # Five groups of rows per leg, so no job's bound comes near the hosted
     # runner's six hours. The sum of a group's step bounds: 45 for a cold
     # browser download for each runtime and the frozen baseline (bound 15),
     # with room for Windows, the slowest leg, to sync and install twice; then
@@ -838,8 +839,9 @@ jobs:
     # `idle` 50 for each of the two H-R13 steps and 35 for each of the four
     # turnover lanes (285), and `owner` 5 for the oracle, 40 for each of the
     # three H-R8 lanes that kill, 45 for the stopped owner and 50 for H-R9
-    # (265).
-    timeout-minutes: ${{ matrix.rows == 'pipes' && 165 || matrix.rows == 'processes' && 185 || matrix.rows == 'owner' && 265 || 285 }}
+    # (265), and `commands` 30 for H-R10a's logout, 40 for its declined and
+    # no-terminal cells, 40 for H-R10b and 30 for H-R15 (185).
+    timeout-minutes: ${{ matrix.rows == 'pipes' && 165 || matrix.rows == 'processes' && 185 || matrix.rows == 'owner' && 265 || matrix.rows == 'commands' && 185 || 285 }}
     strategy:
       fail-fast: false
       matrix:
@@ -851,7 +853,10 @@ jobs:
         # `owner`: the owner killed, stopped or answered for by a declared
         # responder before a call, and killed after a message's dispatch
         # (tests/differential/owner_loss.py).
-        rows: [pipes, processes, idle, owner]
+        # `commands`: --logout, --login, --import-from-browser and --status
+        # beside a live owner (tests/differential/profile_commands.py); on
+        # Windows only the cells on pipes run, the terminal ones are skips.
+        rows: [pipes, processes, idle, owner, commands]
         include:
           - os: ubuntu-latest
             browsers: ~/.cache/ms-playwright
@@ -1224,6 +1229,74 @@ jobs:
           LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
         timeout-minutes: 50
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_loss_rows.py -k message
+
+      # Row H-R10a, a confirmed logout beside an idle owner, on a terminal:
+      # K1 frozen after its server settled, K3 retiring the owner, and K0 (K2
+      # recorded not applicable); counted skips on Windows, which has no
+      # pseudo-terminal. Each cell is the calibration's seven minutes and
+      # its own waits: the host's quit (90s), Direct's settlement (60s and a
+      # census) or a checkpoint (60s), the logout from its start (a prompt
+      # within 60s, then the product's own 60s wait for the profile and the
+      # clear, bound 90s) and the residual browser wait (60s); nothing is
+      # preserved after a clear. Three cells come to at most 27 minutes: 30.
+      - name: Log out beside an idle owner
+        if: matrix.rows == 'commands'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 30
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_profile_command_rows.py -k logout
+
+      # H-R10a's daemon cells, K3 and K0, K1 a counted skip: the retirement
+      # declined on a terminal (a skip on Windows), and no terminal at all, on
+      # pipes. Each adds to the calibration's seven minutes the host's quit
+      # (90s), two checkpoints (60s each), the logout (a prompt within 60s
+      # and the answer's end within 15s), the 5s watch, the owner's own idle
+      # exit (60 + 90s) and the residual browser wait (60s). Four cells come
+      # to at most 38 minutes: 40.
+      - name: Decline or lack a terminal beside an idle owner
+        if: matrix.rows == 'commands'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 40
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_profile_command_rows.py -k "decline or no_terminal"
+
+      # Row H-R10b: logout, login and import inside the three held sections
+      # of one read, K1 frozen, K3 and K0, counted skips on Windows. Each
+      # cell adds to the calibration's seven minutes three commands (a prompt
+      # within 60s, then at most 18s inside its hold), the read's end (120s),
+      # the owner's idle exit (60 + 90s) and the residual browser wait (60s).
+      # Three cells come to at most 39 minutes: 40.
+      - name: Run profile commands beside a busy owner
+        if: matrix.rows == 'commands'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 40
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_profile_command_rows.py -k busy
+
+      # Row H-R15: --status on pipes beside the open host's owner or Direct
+      # server, K1 frozen, K3 and K0, on every leg. Each cell adds to the
+      # calibration's seven minutes two checkpoints and two root readings
+      # (60s each), the status (90s) and a read, then the owner's idle exit
+      # (60 + 90s) and the residual browser wait (60s). Three cells come to
+      # at most 30 minutes: 30.
+      - name: Check the status beside a live owner
+        if: matrix.rows == 'commands'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 30
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_profile_command_rows.py -k status
 
       # The rows' evidence packet (``events.PUBLISHED_FILES``), under a name
       # apart from the other jobs' packets. Always, so a red row keeps what
