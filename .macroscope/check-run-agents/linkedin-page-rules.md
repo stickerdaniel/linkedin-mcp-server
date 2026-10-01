@@ -1,5 +1,5 @@
 ---
-title: Scraping Rules
+title: LinkedIn Page Rules
 model: gpt-6-sol
 reasoning: xhigh
 input: incremental
@@ -14,9 +14,9 @@ maxBudgetPerPR: 15
 conclusion: neutral
 ---
 
-# Scraping rules review
+# LinkedIn page rules review
 
-Enforce the sections **Scraping Rules** and **Tool Return Format** of the repository guide below on the changed lines. The other sections are background.
+Enforce the sections **LinkedIn Page Rules** and **Tool Return Format** of the repository guide below on the changed lines. The other sections are background.
 
 @/AGENTS.md
 

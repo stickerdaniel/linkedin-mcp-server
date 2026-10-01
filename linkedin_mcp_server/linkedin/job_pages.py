@@ -17,7 +17,7 @@ import time
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+from linkedin_mcp_server.core.exceptions import LinkedInOperationError
 from linkedin_mcp_server.core.utils import (
     _JOB_CARD_SELECTOR,
     _RAIL_PICK_JS,
@@ -40,7 +40,7 @@ from linkedin_mcp_server.linkedin.job_policy import (
 )
 from linkedin_mcp_server.linkedin.link_metadata import build_references
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.linkedin.text import (
     filter_linkedin_noise_lines,
     truncate_linkedin_noise,
@@ -173,12 +173,12 @@ class JobPageReader:
     A page service under the job workflows rather than a peer of them. It
     consumes `PageNavigator` for navigation watching, document-origin checks
     and settling, and answers with a `JobPageCapture`; which page to ask for
-    next, and what an answer means, belong to `jobs.JobScraper`.
+    next, and what an answer means, belong to `jobs.JobReader`.
     """
 
     def __init__(
         self,
-        session: ScrapingSession,
+        session: PageSession,
         navigator: PageNavigator,
         content: PageContentReader,
     ):
@@ -286,7 +286,7 @@ class JobPageReader:
                 logger.warning("Search page %s still rate-limited after retry", url)
             return self._captured(result, charge.seconds)
 
-        except LinkedInScraperException:
+        except LinkedInOperationError:
             raise
         except Exception as e:
             logger.warning("Failed to extract search page %s: %s", url, e)
@@ -483,7 +483,7 @@ class JobPageReader:
                     )
                 return self._captured(result)
 
-            except LinkedInScraperException:
+            except LinkedInOperationError:
                 raise
             except Exception as e:
                 logger.warning("Failed to extract saved jobs page %s: %s", url, e)

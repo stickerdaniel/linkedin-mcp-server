@@ -56,15 +56,15 @@
         "coroutine": true,
         "signature": "(self, username: 'str') -> 'dict[str, Any]'"
       },
-      "scrape_company": {
+      "read_company": {
         "coroutine": true,
         "signature": "(self, company_name: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None) -> 'dict[str, Any]'"
       },
-      "scrape_job": {
+      "read_job": {
         "coroutine": true,
         "signature": "(self, job_id: 'str') -> 'dict[str, Any]'"
       },
-      "scrape_person": {
+      "read_person": {
         "coroutine": true,
         "signature": "(self, username: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None, max_scrolls: 'int | None' = None, *, main_profile_already_loaded: 'bool' = False, allow_self_alias: 'bool' = False) -> 'dict[str, Any]'"
       },
@@ -103,9 +103,9 @@
       "get_my_profile",
       "get_saved_jobs",
       "get_sidebar_profiles",
-      "scrape_company",
-      "scrape_job",
-      "scrape_person",
+      "read_company",
+      "read_job",
+      "read_person",
       "search_companies",
       "search_conversations",
       "search_jobs",

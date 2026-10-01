@@ -1,4 +1,4 @@
-"""Tests for scraping section config dicts and section parsers."""
+"""Tests for section config dicts and section parsers."""
 
 from collections import namedtuple
 

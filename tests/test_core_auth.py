@@ -182,7 +182,7 @@ async def test_the_quick_check_asks_the_page_for_a_picker():
     A picker served in place of the page that was asked for carries that
     page's address and that page's title. The quick check runs after every
     navigation, so leaving the container to the full check let a picker in an
-    uncovered locale reach every scraping tool as page text. It costs one
+    uncovered locale reach every reading tool as page text. It costs one
     selector count; the body read is what the quick path exists to skip.
     """
     page = _barrier_page(picker=True)

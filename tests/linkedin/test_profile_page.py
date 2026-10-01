@@ -8,12 +8,12 @@ from linkedin_mcp_server.linkedin import message_sender as message_sender_module
 from linkedin_mcp_server.linkedin.message_sender import MessageSender
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 
 
 def _reader(page) -> ProfilePageReader:
     """Wire the reader the way the facade does."""
-    session = ScrapingSession(page)
+    session = PageSession(page)
     sender = MessageSender(session, PageNavigator(session))
     return ProfilePageReader(session, sender._read_profile_message_target)
 

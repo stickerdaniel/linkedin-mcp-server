@@ -1,5 +1,5 @@
 """
-LinkedIn person profile scraping tools.
+LinkedIn person profile reading tools.
 
 Uses innerText extraction for resilient profile data capture
 with configurable section selection.
@@ -111,13 +111,13 @@ def register_person_tools(
             requested, unknown = parse_person_sections(sections)
 
             logger.info(
-                "Scraping profile: %s (sections=%s)",
+                "Reading profile: %s (sections=%s)",
                 linkedin_username,
                 sections,
             )
 
             cb = MCPContextProgressCallback(ctx)
-            result = await extractor.scrape_person(
+            result = await extractor.read_person(
                 linkedin_username,
                 requested,
                 callbacks=cb,
@@ -401,7 +401,7 @@ def register_person_tools(
             extractor = await get_ready_extractor(ctx, tool_name="get_my_profile")
             requested, unknown = parse_person_sections(sections)
 
-            logger.info("Scraping own profile (sections=%s)", sections)
+            logger.info("Reading own profile (sections=%s)", sections)
 
             cb = MCPContextProgressCallback(ctx)
             result = await extractor.get_my_profile(

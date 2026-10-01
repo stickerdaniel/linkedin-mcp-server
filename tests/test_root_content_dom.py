@@ -19,7 +19,7 @@ import pytest
 from patchright.async_api import async_playwright
 
 from linkedin_mcp_server.linkedin.content import PageContentReader
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 
 #: CI uses ``--dist loadgroup``. Keep every test that launches Chromium on one
 #: worker so browser startups cannot compete with the DOM cases' wall-clock
@@ -71,7 +71,7 @@ async def read(page: Any, html: str, selectors: list[str]) -> dict[str, Any]:
         lambda route: route.fulfill(content_type="text/html", body=html),
     )
     await page.goto(BASE_URL)
-    reader = PageContentReader(ScrapingSession(page))
+    reader = PageContentReader(PageSession(page))
     return await reader._extract_root_content(selectors)
 
 

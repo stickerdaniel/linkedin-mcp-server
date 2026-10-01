@@ -1,5 +1,5 @@
 """
-LinkedIn company profile scraping tools.
+LinkedIn company profile reading tools.
 
 Uses innerText extraction for resilient company data capture
 with configurable section selection.
@@ -70,21 +70,19 @@ def register_company_tools(
             that facet.
         """
         try:
-            # Validate before starting the browser; the scraper normalizes the original reference.
+            # Validate before starting the browser; the reader normalizes the original reference.
             normalize_company_identifier(company_name)
             extractor = await get_ready_extractor(ctx, tool_name="get_company_profile")
             requested, unknown = parse_company_sections(sections)
 
             logger.info(
-                "Scraping company: %s (sections=%s)",
+                "Reading company: %s (sections=%s)",
                 company_name,
                 sections,
             )
 
             cb = MCPContextProgressCallback(ctx)
-            result = await extractor.scrape_company(
-                company_name, requested, callbacks=cb
-            )
+            result = await extractor.read_company(company_name, requested, callbacks=cb)
 
             if unknown:
                 result["unknown_sections"] = unknown
@@ -126,7 +124,7 @@ def register_company_tools(
         try:
             company_name = normalize_company_identifier(company_name)
             extractor = await get_ready_extractor(ctx, tool_name="get_company_posts")
-            logger.info("Scraping company posts: %s", company_name)
+            logger.info("Reading company posts: %s", company_name)
 
             await ctx.report_progress(
                 progress=0, total=100, message="Reading company posts"
@@ -252,13 +250,13 @@ def register_company_tools(
             References include /in/ profile paths for listed employees.
         """
         try:
-            # Preserve the reference for the scraper's single normalization pass.
+            # Preserve the reference for the reader's single normalization pass.
             normalize_company_identifier(company_name)
             extractor = await get_ready_extractor(
                 ctx, tool_name="get_company_employees"
             )
             logger.info(
-                "Scraping company employees: %s (keywords=%s)", company_name, keywords
+                "Reading company employees: %s (keywords=%s)", company_name, keywords
             )
 
             await ctx.report_progress(

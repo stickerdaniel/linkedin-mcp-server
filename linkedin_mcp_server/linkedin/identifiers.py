@@ -121,7 +121,7 @@ _RESERVED = {"me"}
 # `/school/` and `/showcase/` were accepted here and are not any more. Nothing in
 # this module can build an address under either one, so their slug was rebuilt
 # under `/company/`, which 301-redirects to the organization root. That is right
-# for the root and wrong for everything the company scrape appends: measured,
+# for the root and wrong for everything the company read appends: measured,
 # `/company/<school-slug>/jobs/` redirects to the school root too, and the
 # extractor does not check where it landed, so root content was recorded under
 # the section the caller asked for. A bare slug still works, because that is the

@@ -22,7 +22,7 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 from linkedin_mcp_server.linkedin.connection import ActionSignals
 from linkedin_mcp_server.linkedin.connection_actions import ConnectionActions
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 
 PREMIUM_MESSAGE = (
     "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium"
@@ -42,7 +42,7 @@ def _actions(page, read_main_profile: Any = None) -> ConnectionActions:
     async def unread(_username: str) -> dict[str, Any]:
         raise AssertionError("this case does not read a profile")
 
-    session = ScrapingSession(page)
+    session = PageSession(page)
     return ConnectionActions(
         session,
         PageNavigator(session),

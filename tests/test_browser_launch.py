@@ -3,7 +3,7 @@
 Both launch paths go through `build_launch_options`, and the reason this file
 exists is that the interesting failure is silent. Without a channel, Playwright
 picks the *binary* from the `headless` flag alone, so `--login` (which forces
-headed) minted every session in the full browser while scraping used the
+headed) minted every session in the full browser while page reading used the
 stripped headless shell. Nothing errors; the two browsers simply differ in
 plugins, `window.chrome` and notification permissions.
 """

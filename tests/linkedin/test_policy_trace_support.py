@@ -1,4 +1,4 @@
-"""Tests for the strict deterministic scraping trace doubles."""
+"""Tests for the strict deterministic policy trace doubles."""
 
 from __future__ import annotations
 

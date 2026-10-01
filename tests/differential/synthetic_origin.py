@@ -110,9 +110,9 @@ _POST_FILLER = (
 # * ``nav a[href*="/feed"]`` is the selector ``core.auth.is_logged_in`` takes
 #   as signed in; the URL fallback there would also accept the non-empty body.
 # * ``<main>`` makes ``detect_rate_limit`` skip its body-text heuristic, and is
-#   what ``FeedScraper`` waits for and reads; its text is over the 200
-#   characters that end ``FeedScraper``'s content wait at once.
-# * The permalink sits in the document itself, which ``FeedScraper`` reads for
+#   what ``FeedReader`` waits for and reads; its text is over the 200
+#   characters that end ``FeedReader``'s content wait at once.
+# * The permalink sits in the document itself, which ``FeedReader`` reads for
 #   ``POST_SLUG_URL_RE`` because ``/feed/`` is a feed payload URL, so one post
 #   is captured before the first scroll and the scroll loop stops there.
 _FEED_PAGE = (

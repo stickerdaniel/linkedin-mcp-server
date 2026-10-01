@@ -1,4 +1,4 @@
-"""Tests for the home-feed scraping owner."""
+"""Tests for the home-feed workflow owner."""
 
 from __future__ import annotations
 
@@ -22,9 +22,9 @@ from linkedin_mcp_server.linkedin.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     ExtractedSection,
 )
-from linkedin_mcp_server.linkedin.feed import FeedScraper
+from linkedin_mcp_server.linkedin.feed import FeedReader
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 
 from .policy_scenarios import _COMMON_ALLOWED, _page, _root, boundaries
 from .support.policy_trace import (
@@ -35,10 +35,10 @@ from .support.policy_trace import (
 )
 
 
-def _scraper(page) -> FeedScraper:
+def _reader(page) -> FeedReader:
     """Wire the feed owner the way the facade does."""
-    session = ScrapingSession(page)
-    return FeedScraper(session, PageNavigator(session), PageContentReader(session))
+    session = PageSession(page)
+    return FeedReader(session, PageNavigator(session), PageContentReader(session))
 
 
 class _ListenerPage:
@@ -79,7 +79,7 @@ class TestFeedListenerLifecycle:
 
     async def test_the_removed_listener_is_the_object_that_was_registered(self, caplog):
         page = _ListenerPage()
-        scraper = _scraper(page)
+        reader = _reader(page)
 
         async def body(
             url: str,
@@ -92,10 +92,10 @@ class TestFeedListenerLifecycle:
             return ExtractedSection(text="Feed content", references=[])
 
         with (
-            patch.object(scraper, "_extract_feed_body", body),
+            patch.object(reader, "_extract_feed_body", body),
             caplog.at_level(logging.DEBUG, logger=feed_module.__name__),
         ):
-            result = await scraper._extract_feed_once(3)
+            result = await reader._extract_feed_once(3)
 
         assert result.text == "Feed content"
         assert len(page.added) == 1
@@ -107,7 +107,7 @@ class TestFeedListenerLifecycle:
 
     async def test_the_reads_are_drained_even_when_the_removal_raises(self, caplog):
         page = _ListenerPage(removal_error=RuntimeError("listener already gone"))
-        scraper = _scraper(page)
+        reader = _reader(page)
         reads: list[asyncio.Task[None]] = []
 
         async def failing_read() -> None:
@@ -126,10 +126,10 @@ class TestFeedListenerLifecycle:
             return ExtractedSection(text="Feed content", references=[])
 
         with (
-            patch.object(scraper, "_extract_feed_body", body),
+            patch.object(reader, "_extract_feed_body", body),
             caplog.at_level(logging.DEBUG, logger=feed_module.__name__),
         ):
-            result = await scraper._extract_feed_once(1)
+            result = await reader._extract_feed_once(1)
 
         # The removal failure is swallowed rather than replacing the result.
         assert result.text == "Feed content"
@@ -150,7 +150,7 @@ class TestExtractFeedFailures:
     """The envelope ``extract_feed`` wraps around one attempt.
 
     Two lines decide which of ``get_feed``'s two paths a failure takes. A
-    ``LinkedInScraperException`` is re-raised so the tool can hand it to
+    ``LinkedInOperationError`` is re-raised so the tool can hand it to
     ``handle_auth_error`` and ask the caller to close the stale browser and
     sign in again; anything else becomes a section error on a call that
     otherwise reports success. Swallowing the first turns a challenged
@@ -168,25 +168,23 @@ class TestExtractFeedFailures:
 
         return _extract_feed_once
 
-    async def test_a_scraper_exception_reaches_the_tool_unwrapped(self):
-        scraper = _scraper(_ListenerPage())
+    async def test_an_operation_error_reaches_the_tool_unwrapped(self):
+        reader = _reader(_ListenerPage())
         challenged = AuthenticationError("LinkedIn challenged this session")
 
-        with patch.object(
-            scraper, "_extract_feed_once", self._once_raising(challenged)
-        ):
+        with patch.object(reader, "_extract_feed_once", self._once_raising(challenged)):
             with pytest.raises(AuthenticationError) as raised:
-                await scraper.extract_feed(num_posts=10)
+                await reader.extract_feed(num_posts=10)
 
         assert raised.value is challenged
 
     async def test_any_other_failure_becomes_a_section_error(self, caplog):
-        scraper = _scraper(_ListenerPage())
+        reader = _reader(_ListenerPage())
         broken = RuntimeError("feed payload parser failed")
 
-        with patch.object(scraper, "_extract_feed_once", self._once_raising(broken)):
+        with patch.object(reader, "_extract_feed_once", self._once_raising(broken)):
             with caplog.at_level(logging.WARNING):
-                result = await scraper.extract_feed(num_posts=10)
+                result = await reader.extract_feed(num_posts=10)
 
         assert result.text == ""
         assert result.references == []
@@ -239,11 +237,11 @@ class TestFeedScrollCeiling:
             "mouse.wheel",
             *[self._one_batch_per_wheel(page, index) for index in range(self._CEILING)],
         )
-        scraper = _scraper(page)
+        reader = _reader(page)
 
         async with boundaries(recorder, clock):
             with recorder.context("extract_feed", "feed"):
-                result = await scraper.extract_feed(num_posts=self._NUM_POSTS)
+                result = await reader.extract_feed(num_posts=self._NUM_POSTS)
 
         wheels = [event for event in recorder.events if event["kind"] == "mouse.wheel"]
         # Exactly the literal, in both directions: a thirteenth wheel finds no
@@ -283,13 +281,13 @@ class TestFeedScrollRecovery:
         )
         page = _page(recorder).script("evaluate:root_content", _root("Feed content"))
         page.script("mouse.wheel", lambda: page.emit("response", response))
-        scraper = _scraper(page)
+        reader = _reader(page)
         delay_calls = 0
         real_wait = asyncio.wait
         real_monotonic = time.monotonic
         waits: list[tuple[float | None, int]] = []
 
-        async def delay(_session: ScrapingSession, seconds: float) -> None:
+        async def delay(_session: PageSession, seconds: float) -> None:
             nonlocal delay_calls
             delay_calls += 1
             if delay_calls == 2:
@@ -304,13 +302,13 @@ class TestFeedScrollRecovery:
         begun = time.monotonic()
         async with boundaries(recorder, clock):
             with (
-                patch.object(ScrapingSession, "delay", delay),
+                patch.object(PageSession, "delay", delay),
                 patch.object(feed_module.asyncio, "wait", observing_wait),
                 patch.object(session_module.time, "monotonic", real_monotonic),
                 recorder.context("extract_feed", "feed"),
             ):
                 result = await asyncio.wait_for(
-                    scraper.extract_feed(num_posts=1), timeout=3.0
+                    reader.extract_feed(num_posts=1), timeout=3.0
                 )
         elapsed = time.monotonic() - begun
 
@@ -349,14 +347,14 @@ class TestFeedScrollRecovery:
             "mouse.wheel",
             lambda: (page.emit("response", broken), page.emit("response", valid)),
         )
-        scraper = _scraper(page)
+        reader = _reader(page)
 
         async with boundaries(recorder, clock):
             with (
                 caplog.at_level(logging.WARNING, logger=feed_module.__name__),
                 recorder.context("extract_feed", "feed"),
             ):
-                result = await scraper.extract_feed(num_posts=1)
+                result = await reader.extract_feed(num_posts=1)
 
         records = [
             record
@@ -382,11 +380,11 @@ class TestFeedScrollRecovery:
             "mouse.wheel",
             *[lambda: page.emit("response", duplicate) for _ in range(4)],
         )
-        scraper = _scraper(page)
+        reader = _reader(page)
 
         async with boundaries(recorder, clock):
             with recorder.context("extract_feed", "feed"):
-                result = await scraper.extract_feed(num_posts=2)
+                result = await reader.extract_feed(num_posts=2)
 
         wheels = [event for event in recorder.events if event["kind"] == "mouse.wheel"]
         assert len(wheels) == 4
@@ -422,7 +420,7 @@ class TestFeedOutputBoundaries:
         )
         clock = FakeClock(recorder)
         page = _page(recorder).script("evaluate:root_content", _root(raw))
-        scraper = _scraper(page)
+        reader = _reader(page)
         captured = ["https://www.linkedin.com/posts/output-ugcPost-1234567890-example"]
 
         async with boundaries(recorder, clock):
@@ -430,7 +428,7 @@ class TestFeedOutputBoundaries:
                 caplog.at_level(logging.WARNING, logger=feed_module.__name__),
                 recorder.context("extract_feed", "feed"),
             ):
-                result = await scraper._extract_feed_body(
+                result = await reader._extract_feed_body(
                     "https://www.linkedin.com/feed/",
                     1,
                     captured,
@@ -472,7 +470,7 @@ class TestDrainListenerTasks:
 
     async def test_an_empty_list_is_a_no_op(self):
         begun = time.monotonic()
-        await FeedScraper._drain_listener_tasks([])
+        await FeedReader._drain_listener_tasks([])
         assert time.monotonic() - begun < 0.5
 
     async def test_an_empty_list_never_suspends(self):
@@ -497,7 +495,7 @@ class TestDrainListenerTasks:
         await asyncio.sleep(0)
         before = turns
         try:
-            await FeedScraper._drain_listener_tasks([])
+            await FeedReader._drain_listener_tasks([])
             after = turns
         finally:
             counter.cancel()
@@ -516,7 +514,7 @@ class TestDrainListenerTasks:
 
         reads = [asyncio.create_task(read(index)) for index in range(3)]
         begun = time.monotonic()
-        await FeedScraper._drain_listener_tasks(reads)
+        await FeedReader._drain_listener_tasks(reads)
         elapsed = time.monotonic() - begun
 
         assert order == [0, 2]
@@ -540,7 +538,7 @@ class TestDrainListenerTasks:
 
         begun = time.monotonic()
         with caplog.at_level(logging.WARNING):
-            await FeedScraper._drain_listener_tasks([read])
+            await FeedReader._drain_listener_tasks([read])
         elapsed = time.monotonic() - begun
 
         assert read.cancelled()
@@ -564,9 +562,7 @@ class TestDrainListenerTasks:
         await asyncio.wait({failed})
         blocked = await self._blocked_read()
 
-        drain = asyncio.create_task(
-            FeedScraper._drain_listener_tasks([failed, blocked])
-        )
+        drain = asyncio.create_task(FeedReader._drain_listener_tasks([failed, blocked]))
         await asyncio.sleep(0.05)
         drain.cancel()
 
@@ -584,7 +580,7 @@ class TestDrainListenerTasks:
         """
         read = await self._blocked_read()
 
-        drain = asyncio.create_task(FeedScraper._drain_listener_tasks([read]))
+        drain = asyncio.create_task(FeedReader._drain_listener_tasks([read]))
         # Let the drain reach its first wait before cancelling it.
         await asyncio.sleep(0.05)
         drain.cancel()
@@ -604,7 +600,7 @@ class TestDrainListenerTasks:
         """A second request lands while the helper is already in teardown."""
         read = await self._blocked_read()
 
-        drain = asyncio.create_task(FeedScraper._drain_listener_tasks([read]))
+        drain = asyncio.create_task(FeedReader._drain_listener_tasks([read]))
         await asyncio.sleep(0.05)
         drain.cancel()
         await asyncio.sleep(0)
@@ -648,7 +644,7 @@ class TestDrainListenerTasks:
 
         read = asyncio.create_task(stubborn())
         await started.wait()
-        drain = asyncio.create_task(FeedScraper._drain_listener_tasks([failed, read]))
+        drain = asyncio.create_task(FeedReader._drain_listener_tasks([failed, read]))
 
         try:
             with caplog.at_level(logging.WARNING):
@@ -708,7 +704,7 @@ class TestDrainListenerTasks:
 
         with pytest.raises(TimeoutError):
             with anyio.fail_after(0.2):
-                await FeedScraper._drain_listener_tasks([task])
+                await FeedReader._drain_listener_tasks([task])
 
         # Asserted without awaiting anything first: further loop iterations
         # would let the read unwind on its own, and the assertions would then
@@ -746,7 +742,7 @@ class TestDrainListenerTasks:
         reached_the_caller = False
         with pytest.raises(TimeoutError):
             with anyio.fail_after(2.3):
-                await FeedScraper._drain_listener_tasks([task])
+                await FeedReader._drain_listener_tasks([task])
                 # Nothing between here and the scope's close suspends, which
                 # is exactly get_feed's own report_progress when the client
                 # sent no progress token.
@@ -781,7 +777,7 @@ class TestDrainListenerTasks:
 
         read = asyncio.create_task(stubborn())
         await started.wait()
-        drain = asyncio.create_task(FeedScraper._drain_listener_tasks([read]))
+        drain = asyncio.create_task(FeedReader._drain_listener_tasks([read]))
 
         try:
             with caplog.at_level(logging.WARNING):
@@ -820,7 +816,7 @@ async def test_listener_drain_waits_two_seconds_then_cancels_with_one_second_cap
 
     monkeypatch.setattr(asyncio, "wait", wait)
 
-    await FeedScraper._drain_listener_tasks([task])
+    await FeedReader._drain_listener_tasks([task])
 
     assert task.cancelled()
     assert waits == [2.0, 1.0]
@@ -849,7 +845,7 @@ async def test_listener_drain_logs_an_uncooperative_task(monkeypatch, caplog):
     monkeypatch.setattr(asyncio, "wait", wait)
 
     with caplog.at_level(logging.WARNING):
-        await FeedScraper._drain_listener_tasks([cast(asyncio.Task[None], task)])
+        await FeedReader._drain_listener_tasks([cast(asyncio.Task[None], task)])
 
     assert task.cancelled is True
     assert waits == [2.0, 1.0]
@@ -887,7 +883,7 @@ class TestFeedToolDeadline:
             task = asyncio.create_task(read())
             reads.append(task)
             await started.wait()
-            await FeedScraper._drain_listener_tasks([task])
+            await FeedReader._drain_listener_tasks([task])
             return ExtractedSection(text="synthetic feed", references=[])
 
         mcp = FastMCP("deadline-test")

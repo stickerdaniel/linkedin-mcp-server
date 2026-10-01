@@ -22,12 +22,12 @@ from linkedin_mcp_server.linkedin.contracts import (
 from linkedin_mcp_server.linkedin.link_metadata import Reference
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.posts import PostSearch
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 
 
 def _search(page) -> PostSearch:
     """Wire the post-search owner the way the facade does."""
-    session = ScrapingSession(page)
+    session = PageSession(page)
     navigator = PageNavigator(session)
     return PostSearch(SectionCapture(session, navigator, PageContentReader(session)))
 

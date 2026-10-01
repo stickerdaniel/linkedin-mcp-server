@@ -6,7 +6,7 @@ or touches that area: the structural signal probe, the More menu, the
 incoming-request Accept click, the invite dialog, the non-submitting
 note-quota probe and the verification re-read after a write.
 
-Per the AGENTS.md Scraping Rules every decision here rests on a URL pattern
+Per the AGENTS.md LinkedIn Page Rules every decision here rests on a URL pattern
 (``/preload/custom-invite/?vanityName=USER``, ``/in/USER/edit/intro/``,
 ``/messaging/compose/``), on the *presence* of an ARIA attribute
 (``aria-label`` on a button versus an anchor, ``aria-expanded`` on the menu
@@ -39,7 +39,7 @@ from linkedin_mcp_server.linkedin.identifiers import (
     person_profile_url,
 )
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ function findActionRoot(main) {
 #   [button aria-expanded, no aria-label (More)]
 #
 # All checks are attribute presence and structural counts per the
-# AGENTS.md Scraping Rules — no label values are read. Every guard kills
+# AGENTS.md LinkedIn Page Rules — no label values are read. Every guard kills
 # a known false positive: total-button-count === 3 and labeled === 2
 # exclude video-player control bars (play/mute/captions all carry
 # aria-label); the unlabeled-expander check excludes player settings
@@ -148,7 +148,7 @@ function findIncomingActionRow(main) {
 """
 
 # Locale-independent connection-state probe. Returns four booleans;
-# per AGENTS.md Scraping Rules, every signal is based on URL patterns
+# per AGENTS.md LinkedIn Page Rules, every signal is based on URL patterns
 # or ARIA-attribute *presence* — never on label text values.
 #
 # - hasInvite: vanityName-scoped invite anchor anywhere in document.
@@ -298,7 +298,7 @@ def _connection_result(
 
 # One main-profile read of one member, by username. The person workflow owns
 # that read and this one only ever needs its ``main_profile`` text, so the
-# borrow is a callable rather than the scraper: this module never learns what
+# borrow is a callable rather than the reader: this module never learns what
 # the facade is, and the day the read moves again only the wiring does.
 ReadMainProfile = Callable[[str], Awaitable[dict[str, Any]]]
 
@@ -308,7 +308,7 @@ class ConnectionActions:
 
     def __init__(
         self,
-        session: ScrapingSession,
+        session: PageSession,
         navigator: PageNavigator,
         read_main_profile: ReadMainProfile,
     ):
@@ -464,7 +464,7 @@ class ConnectionActions:
         relationship state.
 
         Detection uses URL patterns and ARIA attribute presence only — never
-        text values — per the AGENTS.md Scraping Rules. The vanityName invite
+        text values — per the AGENTS.md LinkedIn Page Rules. The vanityName invite
         anchor is searched document-wide because LinkedIn renders the More
         menu's contents in a portal-mounted ``[role='menu']`` outside ``<main>``;
         the URL is uniquely scoped to the target user, so document-wide

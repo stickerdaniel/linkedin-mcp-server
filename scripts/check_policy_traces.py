@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare generated semantic scraping traces with canonical fixtures."""
+"""Compare generated semantic policy traces with canonical fixtures."""
 
 from __future__ import annotations
 

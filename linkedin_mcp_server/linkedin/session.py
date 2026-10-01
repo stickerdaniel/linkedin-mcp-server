@@ -1,4 +1,4 @@
-"""Shared page binding and browser helper boundaries for scraping services."""
+"""Shared page binding and browser helper boundaries for page workflows."""
 
 from __future__ import annotations
 
@@ -26,8 +26,8 @@ NAV_DELAY = 2.0
 
 
 @dataclass(frozen=True, slots=True)
-class ScrapingSession:
-    """Immutable page adapter shared by every scraping service."""
+class PageSession:
+    """Immutable page adapter shared by every page workflow."""
 
     page: Page
 

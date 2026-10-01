@@ -92,7 +92,7 @@ def build_launch_options(
         #     return options2.headless ? "chromium-headless-shell" : "chromium";
         #
         # `--login` forces headless=False and so mints every session in the full
-        # browser, while scraping defaults to headless=True and uses the
+        # browser, while page reading defaults to headless=True and uses the
         # stripped headless shell, which has no plugins, no `window.chrome` and
         # an incoherent notification permission. One session, two browsers.
         #

@@ -195,7 +195,7 @@ _call_being_made: contextvars.ContextVar[_CallBinding | None] = contextvars.Cont
 #: second timeout, queued two seconds behind another call, succeeded after 2.02s.
 #: So under real concurrency this deadline can expire while the call is still
 #: waiting its turn, and because cancellation is not forwarded, the owner may go
-#: on scraping afterwards. That is the orphaned call #606 names, and the heartbeat
+#: on reading afterwards. That is the orphaned call #606 names, and the heartbeat
 #: is what will bound it.
 _TIMEOUT_MARGIN_SECONDS = 30.0
 

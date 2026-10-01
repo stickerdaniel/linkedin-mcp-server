@@ -21,11 +21,11 @@ from linkedin_mcp_server.linkedin.message_sender import (
     _MESSAGE_CONFIRMATION_READY_JS,
 )
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 
 
 def _sender(page) -> MessageSender:
-    session = ScrapingSession(page)
+    session = PageSession(page)
     return MessageSender(session, PageNavigator(session))
 
 
@@ -263,7 +263,7 @@ class TestSendMessage:
             patch.object(
                 PageNavigator, "_navigate_to_page", new_callable=AsyncMock
             ) as navigate,
-            patch.object(ScrapingSession, "check_rate_limit", new_callable=AsyncMock),
+            patch.object(PageSession, "check_rate_limit", new_callable=AsyncMock),
             patch.object(
                 sender,
                 "_read_profile_message_target",
@@ -313,7 +313,7 @@ class TestSendMessage:
         sender = _sender(mock_page)
         with (
             patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
-            patch.object(ScrapingSession, "check_rate_limit", new_callable=AsyncMock),
+            patch.object(PageSession, "check_rate_limit", new_callable=AsyncMock),
             patch.object(
                 sender,
                 "_read_profile_message_target",
@@ -382,7 +382,7 @@ class TestSendMessage:
         return (
             target,
             patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
-            patch.object(ScrapingSession, "check_rate_limit", new_callable=AsyncMock),
+            patch.object(PageSession, "check_rate_limit", new_callable=AsyncMock),
             patch.object(
                 sender,
                 "_read_profile_message_target",
@@ -468,7 +468,7 @@ class TestSendMessage:
             patch.object(
                 PageNavigator, "_navigate_to_page", new_callable=AsyncMock
             ) as navigate,
-            patch.object(ScrapingSession, "check_rate_limit", new_callable=AsyncMock),
+            patch.object(PageSession, "check_rate_limit", new_callable=AsyncMock),
             patch.object(
                 sender,
                 "_read_profile_message_target",

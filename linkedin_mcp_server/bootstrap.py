@@ -3871,7 +3871,7 @@ def _consume_background_setup_failure() -> str | None:
 async def ensure_tool_ready_or_raise(
     tool_name: str, ctx: Context | None = None
 ) -> None:
-    """Gate scrape/search tools on browser setup and authentication readiness."""
+    """Gate read/search tools on browser setup and authentication readiness."""
     initialize_bootstrap()
     await _refresh_background_task_state()
     detail = _consume_background_setup_failure()
@@ -4170,7 +4170,7 @@ async def _start_login_if_needed(
             "sign in by itself. Retry this tool: the client will open a login "
             "window.",
             # The readiness gate runs before the tool body, so nothing has been
-            # scraped and the client may run the call again once it has signed in.
+            # read and the client may run the call again once it has signed in.
             nothing_ran_yet=True,
         )
 
@@ -4225,7 +4225,7 @@ async def _start_login_if_needed(
     # ---- lock released ----
 
     # Await an import (ours or a peer's). On success the caller falls through to
-    # the scrape; on failure we re-enter to take the manual-login path.
+    # the page read; on failure we re-enter to take the manual-login path.
     if import_task is not None:
         try:
             await import_task
@@ -4292,7 +4292,7 @@ async def _start_login_if_needed(
         if _auth_ready():
             _state.auth_state = AuthState.READY
             # Resume one-shot: the caller falls through to
-            # get_or_create_browser()/ensure_authenticated()/scrape.
+            # get_or_create_browser()/ensure_authenticated()/read.
             return
         if _state.account_restricted:
             raise AccountRestrictedError()

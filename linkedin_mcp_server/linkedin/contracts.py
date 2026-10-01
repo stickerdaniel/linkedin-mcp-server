@@ -1,4 +1,4 @@
-"""Section contracts shared by every scraping workflow."""
+"""Section contracts shared by every page workflow."""
 
 from __future__ import annotations
 

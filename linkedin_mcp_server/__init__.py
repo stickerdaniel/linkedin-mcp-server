@@ -4,11 +4,11 @@ LinkedIn MCP Server package.
 
 A Model Context Protocol (MCP) server that provides LinkedIn integration capabilities
 for AI assistants. This package enables secure LinkedIn profile, company, and job
-data scraping through a standardized MCP interface.
+data reading through a standardized MCP interface.
 
 Key Features:
 - Secure LinkedIn authentication via session files
-- LinkedIn profile, company, and job data scraping
+- Reading LinkedIn profile, company, and job data
 - MCP-compliant server implementation using FastMCP
 - Playwright browser automation with session persistence
 - Layered configuration system with secure credential storage

@@ -151,7 +151,7 @@ async def _detect_auth_barrier(
         # Ahead of the quick check's exit, and not behind it, because the two
         # signals it does read are exactly the two this page defeats. The
         # quick check runs after every navigation, so a picker served in a
-        # locale the table below does not cover reached every scraping tool
+        # locale the table below does not cover reached every reading tool
         # as page text. It costs one selector count, where the body read
         # below is what the quick check exists to skip.
         try:

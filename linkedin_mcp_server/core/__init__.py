@@ -1,4 +1,4 @@
-"""Core browser management, authentication, and scraping utilities."""
+"""Core browser management, authentication, and page-reading utilities."""
 
 from typing import TYPE_CHECKING
 
@@ -13,12 +13,12 @@ from .exceptions import (
     AccountRestrictedError,
     AuthenticationError,
     ElementNotFoundError,
-    LinkedInScraperException,
+    LinkedInOperationError,
     NetworkError,
+    PageReadError,
     ProfileNotFoundError,
     ProxyConnectionError,
     RateLimitError,
-    ScrapingError,
 )
 from .proxy_errors import (
     as_proxy_error,
@@ -59,12 +59,12 @@ __all__ = [
     "detect_auth_barrier",
     "detect_auth_barrier_quick",
     "ElementNotFoundError",
-    "LinkedInScraperException",
+    "LinkedInOperationError",
     "NetworkError",
+    "PageReadError",
     "ProfileNotFoundError",
     "ProxyConnectionError",
     "RateLimitError",
-    "ScrapingError",
     "as_proxy_error",
     "goto_reporting_proxy_errors",
     "is_proxy_error",

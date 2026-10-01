@@ -14,7 +14,7 @@ from patchright.async_api import Page, async_playwright
 
 from linkedin_mcp_server.linkedin.connection_actions import ConnectionActions
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 
 pytestmark = [
     pytest.mark.browser_dom,
@@ -67,7 +67,7 @@ def _actions(page) -> ConnectionActions:
     async def unreachable(_username: str) -> dict[str, Any]:
         raise AssertionError("the dialog cases never read a profile")
 
-    session = ScrapingSession(cast(Page, page))
+    session = PageSession(cast(Page, page))
     return ConnectionActions(session, PageNavigator(session), unreachable)
 
 

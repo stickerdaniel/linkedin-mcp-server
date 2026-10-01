@@ -1,4 +1,4 @@
-"""Dump LinkedIn scraper output as timestamped local snapshots.
+"""Dump the extractor output for LinkedIn pages as timestamped local snapshots.
 
 Uses the same code paths as production (parse_person_sections / parse_company_sections).
 
@@ -58,9 +58,9 @@ async def main():
         extractor = LinkedInExtractor(browser.page)
 
         for username, sections_str in PERSON_TARGETS:
-            print(f"\n--- Scraping person: {username} (sections: {sections_str}) ---")
+            print(f"\n--- Reading person: {username} (sections: {sections_str}) ---")
             fields, _ = parse_person_sections(sections_str)
-            result = await extractor.scrape_person(username, fields)
+            result = await extractor.read_person(username, fields)
 
             dump_path = run_dir / f"person_{username}.json"
             dump_path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
@@ -71,9 +71,9 @@ async def main():
                 print(f"  {section_name}: {len(text)} chars")
 
         for company, sections_str in COMPANY_TARGETS:
-            print(f"\n--- Scraping company: {company} (sections: {sections_str}) ---")
+            print(f"\n--- Reading company: {company} (sections: {sections_str}) ---")
             fields, _ = parse_company_sections(sections_str)
-            result = await extractor.scrape_company(company, fields)
+            result = await extractor.read_company(company, fields)
 
             dump_path = run_dir / f"company_{company}.json"
             dump_path.write_text(json.dumps(result, indent=2, ensure_ascii=False))

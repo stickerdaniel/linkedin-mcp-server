@@ -1,16 +1,16 @@
-"""Custom exceptions for LinkedIn scraping operations."""
+"""Custom exceptions for LinkedIn operations."""
 
 
-class LinkedInScraperException(Exception):
-    """Base exception for LinkedIn scraper."""
+class LinkedInOperationError(Exception):
+    """Base exception for LinkedIn operations."""
 
     pass
 
 
-class InvalidReferenceError(LinkedInScraperException):
+class InvalidReferenceError(LinkedInOperationError):
     """A caller-supplied profile, company, job or thread reference is unusable.
 
-    Separate from the other scraper errors because nothing is broken: the
+    Separate from the other operation errors because nothing is broken: the
     argument is wrong and the message says how to correct it. `raise_tool_error`
     keeps it free of issue-report diagnostics for that reason.
     """
@@ -18,13 +18,13 @@ class InvalidReferenceError(LinkedInScraperException):
     pass
 
 
-class AuthenticationError(LinkedInScraperException):
+class AuthenticationError(LinkedInOperationError):
     """Raised when authentication fails."""
 
     pass
 
 
-class AccountRestrictedError(LinkedInScraperException):
+class AccountRestrictedError(LinkedInOperationError):
     """LinkedIn restricted the account and wants identity verification.
 
     Deliberately not an ``AuthenticationError``: every tool routes that class
@@ -45,7 +45,7 @@ class AccountRestrictedError(LinkedInScraperException):
         )
 
 
-class RateLimitError(LinkedInScraperException):
+class RateLimitError(LinkedInOperationError):
     """Raised when rate limiting is detected."""
 
     def __init__(self, message: str, suggested_wait_time: int = 300):
@@ -53,19 +53,19 @@ class RateLimitError(LinkedInScraperException):
         self.suggested_wait_time = suggested_wait_time
 
 
-class ElementNotFoundError(LinkedInScraperException):
+class ElementNotFoundError(LinkedInOperationError):
     """Raised when an expected element is not found."""
 
     pass
 
 
-class ProfileNotFoundError(LinkedInScraperException):
+class ProfileNotFoundError(LinkedInOperationError):
     """Raised when a profile/page returns 404."""
 
     pass
 
 
-class NetworkError(LinkedInScraperException):
+class NetworkError(LinkedInOperationError):
     """Raised when network-related issues occur."""
 
     pass
@@ -84,7 +84,7 @@ class ProxyConnectionError(NetworkError):
     pass
 
 
-class ScrapingError(LinkedInScraperException):
-    """Raised when scraping fails for various reasons."""
+class PageReadError(LinkedInOperationError):
+    """Raised when reading a page fails for various reasons."""
 
     pass

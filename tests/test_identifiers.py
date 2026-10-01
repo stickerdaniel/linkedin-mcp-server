@@ -11,7 +11,7 @@ import pytest
 
 from linkedin_mcp_server.core.exceptions import (
     InvalidReferenceError,
-    LinkedInScraperException,
+    LinkedInOperationError,
 )
 from linkedin_mcp_server.linkedin.identifiers import (
     company_page_url,
@@ -94,14 +94,14 @@ class TestNormalizePersonIdentifier:
     def test_refuses_a_malformed_escape(self, value: str):
         # unquote leaves a broken escape untouched instead of raising, so it
         # would otherwise survive into the URL.
-        with pytest.raises(LinkedInScraperException):
+        with pytest.raises(LinkedInOperationError):
             normalize_person_identifier(value)
 
     @pytest.mark.parametrize(
         "value", ["felix%2Ffoo", "felix%20foo", "felix%2E%2E%2Ffeed"]
     )
     def test_refuses_syntax_the_escapes_were_hiding(self, value: str):
-        with pytest.raises(LinkedInScraperException):
+        with pytest.raises(LinkedInOperationError):
             normalize_person_identifier(value)
 
     def test_preserves_case(self):
@@ -115,7 +115,7 @@ class TestNormalizePersonIdentifier:
     def test_refuses_a_value_that_would_escape_the_profile_path(self):
         # A browser resolves the dot segments away before the request, so this
         # navigates to /feed/ and returns the feed as if it were a profile.
-        with pytest.raises(LinkedInScraperException):
+        with pytest.raises(LinkedInOperationError):
             normalize_person_identifier("williamhgates/../../feed")
 
     @pytest.mark.parametrize(
@@ -162,7 +162,7 @@ class TestNormalizePersonIdentifier:
     def test_never_collapses_a_link_into_the_signed_in_alias(self):
         # /in/me is LinkedIn's alias for the operator's own profile. Resolving a
         # link into it answers confidently about the wrong person.
-        with pytest.raises(LinkedInScraperException):
+        with pytest.raises(LinkedInOperationError):
             normalize_person_identifier("https://www.linkedin.com/in/me")
 
     @pytest.mark.parametrize(
@@ -178,7 +178,7 @@ class TestNormalizePersonIdentifier:
         ],
     )
     def test_refuses_a_linkedin_link_that_is_not_a_personal_profile(self, value: str):
-        with pytest.raises(LinkedInScraperException):
+        with pytest.raises(LinkedInOperationError):
             normalize_person_identifier(value)
 
     @pytest.mark.parametrize(
@@ -186,7 +186,7 @@ class TestNormalizePersonIdentifier:
         ["https://lnkd.in/eXaMpLe1", "lnkd.in/eXaMpLe1", "http://www.lnkd.in/eXaMpLe1"],
     )
     def test_refuses_a_short_link_that_only_a_redirect_resolves(self, value: str):
-        with pytest.raises(LinkedInScraperException, match="shortened"):
+        with pytest.raises(LinkedInOperationError, match="shortened"):
             normalize_person_identifier(value)
 
     @pytest.mark.parametrize(
@@ -203,7 +203,7 @@ class TestNormalizePersonIdentifier:
         ],
     )
     def test_refuses_a_value_that_cannot_name_a_person(self, value: str):
-        with pytest.raises(LinkedInScraperException):
+        with pytest.raises(LinkedInOperationError):
             normalize_person_identifier(value)
 
 
@@ -244,7 +244,7 @@ class TestNormalizeCompanyIdentifier:
     def test_refuses_a_route_it_cannot_build(self, value: str):
         # The slug used to be rebuilt under /company/, which 301-redirects to the
         # organization root. Right for the root, wrong for every section the
-        # company scrape appends: /company/<school-slug>/jobs/ redirects to the
+        # company read appends: /company/<school-slug>/jobs/ redirects to the
         # school root too, and nothing checks where it landed, so root content
         # was recorded under the requested section.
         with pytest.raises(InvalidReferenceError):
@@ -264,7 +264,7 @@ class TestNormalizeCompanyIdentifier:
         ],
     )
     def test_refuses_a_value_that_cannot_name_a_company(self, value: str):
-        with pytest.raises(LinkedInScraperException):
+        with pytest.raises(LinkedInOperationError):
             normalize_company_identifier(value)
 
 

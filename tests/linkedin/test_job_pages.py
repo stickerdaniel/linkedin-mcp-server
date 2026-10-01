@@ -16,13 +16,13 @@ from linkedin_mcp_server.linkedin.contracts import ExtractedSection
 from linkedin_mcp_server.linkedin.job_pages import JobPageReader, _ScrollCharge
 from linkedin_mcp_server.linkedin.link_metadata import Reference
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin.support.navigation import navigate
 
 
 def _reader(page) -> JobPageReader:
     """Wire the page reader the way the facade does."""
-    session = ScrapingSession(page)
+    session = PageSession(page)
     navigator = PageNavigator(session)
     return JobPageReader(session, navigator, PageContentReader(session))
 

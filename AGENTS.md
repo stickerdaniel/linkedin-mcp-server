@@ -17,7 +17,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Docker build: `docker build -t linkedin-mcp-server .`
 - Install browser: `uv run patchright install chromium`
 
-## Scraping Rules
+## LinkedIn Page Rules
 
 - **Voyager / private API.** Out of scope. [Read the rendered page](docs/decisions/2026-09-16-rendered-page.md).
 - **One section = one navigation.** Each entry in `PERSON_SECTIONS` / `COMPANY_SECTIONS` (`linkedin/fields.py`) maps to exactly one page navigation. Never combine multiple URLs behind a single section.
@@ -137,7 +137,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Tool Return Format
 
-All scraping tools return: `{url, sections: {name: raw_text}}`.
+All tools that read LinkedIn return: `{url, sections: {name: raw_text}}`.
 
 Optional additional keys:
 

@@ -1,4 +1,4 @@
-"""Tests for the section contracts every scraping workflow returns."""
+"""Tests for the section contracts every page workflow returns."""
 
 from typing import Any
 

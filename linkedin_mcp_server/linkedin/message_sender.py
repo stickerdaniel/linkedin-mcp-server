@@ -14,7 +14,7 @@ import anyio
 import anyio.lowlevel
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+from linkedin_mcp_server.core.exceptions import LinkedInOperationError
 import linkedin_mcp_server.linkedin.contracts as contracts
 from linkedin_mcp_server.linkedin.identifiers import (
     normalize_person_identifier,
@@ -22,7 +22,7 @@ from linkedin_mcp_server.linkedin.identifiers import (
     person_profile_url,
 )
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 
 logger = logging.getLogger(__name__)
 
@@ -1092,7 +1092,7 @@ def _normalize_profile_urn(value: str | None) -> str | None:
         return None
     try:
         candidate = normalize_profile_urn(value)
-    except LinkedInScraperException:
+    except LinkedInOperationError:
         return None
     return candidate.removeprefix(_PROFILE_URN_PREFIX)
 
@@ -1103,7 +1103,7 @@ def _profile_path_from_url(value: str) -> str | None:
         return None
     try:
         username = normalize_person_identifier(value)
-    except LinkedInScraperException:
+    except LinkedInOperationError:
         return None
     canonical_path = urlparse(person_profile_url(username, "/")).path
     return parsed.path if parsed.path == canonical_path else None
@@ -1158,7 +1158,7 @@ def _message_page_url_is_safe(value: str, profile_urn: str) -> bool:
 class MessageSender:
     """Compose and send messages through LinkedIn's browser UI."""
 
-    def __init__(self, session: ScrapingSession, navigator: PageNavigator):
+    def __init__(self, session: PageSession, navigator: PageNavigator):
         self._session = session
         self._navigator = navigator
         self._page = session.page

@@ -24,19 +24,19 @@ from linkedin_mcp_server.linkedin.contracts import (
     ExtractedSection,
 )
 from linkedin_mcp_server.linkedin.job_pages import JobPageCapture, JobPageReader
-from linkedin_mcp_server.linkedin.jobs import JobScraper
+from linkedin_mcp_server.linkedin.jobs import JobReader
 from linkedin_mcp_server.linkedin.link_metadata import Reference
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin.support.navigation import navigate
 
 
-def _scraper(page) -> JobScraper:
+def _reader(page) -> JobReader:
     """Wire the job owner the way the facade does."""
-    session = ScrapingSession(page)
+    session = PageSession(page)
     navigator = PageNavigator(session)
     content = PageContentReader(session)
-    return JobScraper(
+    return JobReader(
         navigator,
         SectionCapture(session, navigator, content),
         JobPageReader(session, navigator, content),
@@ -71,16 +71,16 @@ def captured(
     )
 
 
-class TestScrapeJob:
-    async def test_scrape_job(self, mock_page):
-        scraper = _scraper(mock_page)
+class TestReadJob:
+    async def test_read_job(self, mock_page):
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted("Job: Software Engineer"),
         ) as capture:
-            result = await scraper.scrape_job("12345")
+            result = await reader.read_job("12345")
 
         capture.assert_awaited_once_with(
             "https://www.linkedin.com/jobs/view/12345/",
@@ -92,25 +92,23 @@ class TestScrapeJob:
         assert "pages_visited" not in result
         assert "sections_requested" not in result
 
-    async def test_scrape_job_omits_rate_limited_sentinel(self, mock_page):
-        scraper = _scraper(mock_page)
+    async def test_read_job_omits_rate_limited_sentinel(self, mock_page):
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted(RATE_LIMITED_SECTION_TEXT),
         ):
-            result = await scraper.scrape_job("12345")
+            result = await reader.read_job("12345")
 
         assert result["sections"] == {}
         assert result["section_errors"]["job_posting"]["error_type"] == "rate_limit"
 
-    async def test_scrape_job_omits_orphaned_references_when_text_empty(
-        self, mock_page
-    ):
-        scraper = _scraper(mock_page)
+    async def test_read_job_omits_orphaned_references_when_text_empty(self, mock_page):
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted(
@@ -118,7 +116,7 @@ class TestScrapeJob:
                 [{"kind": "job", "url": "/jobs/view/12345/", "text": "Engineer"}],
             ),
         ):
-            result = await scraper.scrape_job("12345")
+            result = await reader.read_job("12345")
 
         assert result["sections"] == {}
         assert "references" not in result
@@ -128,9 +126,9 @@ class TestScrapeJob:
 
         Only the context tells a caller which one is the posting it asked for.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted(
@@ -150,24 +148,22 @@ class TestScrapeJob:
                 ],
             ),
         ):
-            result = await scraper.scrape_job("12345")
+            result = await reader.read_job("12345")
 
         assert [ref.get("context") for ref in result["references"]["job_posting"]] == [
             "job posting",
             "similar job",
         ]
 
-    async def test_scrape_job_reports_a_posting_without_its_description(
-        self, mock_page
-    ):
-        scraper = _scraper(mock_page)
+    async def test_read_job_reports_a_posting_without_its_description(self, mock_page):
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted("Software Engineer\nAcme\nEasy Apply"),
         ):
-            result = await scraper.scrape_job("12345")
+            result = await reader.read_job("12345")
 
         assert result["sections"] == {
             "job_posting": "Software Engineer\nAcme\nEasy Apply"
@@ -175,15 +171,15 @@ class TestScrapeJob:
         error = result["section_errors"]["job_posting"]
         assert error["error_type"] == "description_missing"
 
-    async def test_scrape_job_with_its_description_reports_nothing(self, mock_page):
-        scraper = _scraper(mock_page)
+    async def test_read_job_with_its_description_reports_nothing(self, mock_page):
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted("Software Engineer\nAbout the job\nBuild agents"),
         ):
-            result = await scraper.scrape_job("12345")
+            result = await reader.read_job("12345")
 
         assert "job_posting" in result["sections"]
         assert "section_errors" not in result
@@ -223,22 +219,22 @@ class TestSearchJobs:
 
     async def test_returns_job_ids(self, mock_page):
         """search_jobs should return a job_ids list extracted from hrefs."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 new_callable=AsyncMock,
                 return_value=captured(mock_page, extracted("Job 1\nJob 2\nJob 3")),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["111", "222", "333"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -248,16 +244,16 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=1)
+            result = await reader.search_jobs("python", max_pages=1)
 
         assert result["job_ids"] == ["111", "222", "333"]
         assert "search_results" in result["sections"]
 
     async def test_returns_references(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 new_callable=AsyncMock,
                 return_value=captured(
@@ -269,13 +265,13 @@ class TestSearchJobs:
                 ),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["111"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -285,7 +281,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=1)
+            result = await reader.search_jobs("python", max_pages=1)
 
         assert result["references"] == {
             "search_results": [
@@ -296,7 +292,7 @@ class TestSearchJobs:
     async def test_componentkey_jobs_without_anchors_get_fallback_references(
         self, mock_page
     ):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         page = extracted(
             "Redesigned job cards",
             [
@@ -311,18 +307,18 @@ class TestSearchJobs:
 
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(mock_page, [page]),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["222", "111"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -332,7 +328,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=1)
+            result = await reader.search_jobs("python", max_pages=1)
 
         assert result["job_ids"] == ["222", "111"]
         assert result["references"]["search_results"] == [
@@ -348,7 +344,7 @@ class TestSearchJobs:
 
     async def test_reconciles_uncapped_raw_references_in_dom_order(self, mock_page):
         """Rail jobs survive the page cap without losing DOM interleaving."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         ancillary = [
             {
                 "href": f"https://www.linkedin.com/company/company-{index}/",
@@ -397,13 +393,13 @@ class TestSearchJobs:
                 return_value=raw_page,
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["111", "222", "111", "333"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -423,7 +419,7 @@ class TestSearchJobs:
                 return_value=False,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=1)
+            result = await reader.search_jobs("python", max_pages=1)
 
         assert result["job_ids"] == ["111", "222", "333"]
         assert result["references"]["search_results"] == [
@@ -485,22 +481,22 @@ class TestSearchJobs:
         two disagreed about exactly one address.
         """
         mock_page.url = "https://www.linkedin.com/jobs/search?keywords=python"
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 new_callable=AsyncMock,
                 return_value=captured(mock_page, extracted("Job 1")),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["111"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -510,7 +506,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=1)
+            result = await reader.search_jobs("python", max_pages=1)
 
         assert result["job_ids"] == ["111"]
 
@@ -522,22 +518,22 @@ class TestSearchJobs:
         page can look like.
         """
         mock_page.url = "https://example.com/jobs/search?keywords=python"
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 new_callable=AsyncMock,
                 return_value=captured(mock_page, extracted("Job 1")),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["111"],
             ) as ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -547,7 +543,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=1)
+            result = await reader.search_jobs("python", max_pages=1)
 
         assert result["job_ids"] == []
         ids.assert_not_called()
@@ -558,7 +554,7 @@ class TestSearchJobs:
         A live search rendered 11 cards per navigation while advertising 25
         per page, so a fixed stride skipped 13 of every 24 jobs.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         page1_ids = ["100", "200", "300"]
         page2_ids = ["400", "500"]
         id_pages = iter([page1_ids, page2_ids])
@@ -575,16 +571,16 @@ class TestSearchJobs:
 
         with (
             patch.object(
-                scraper._pages, "_extract_search_page", side_effect=mock_extract
+                reader._pages, "_extract_search_page", side_effect=mock_extract
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=lambda **kw: next(id_pages),
             ) as mock_ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -594,7 +590,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=2)
+            result = await reader.search_jobs("python", max_pages=2)
 
         assert result["job_ids"] == ["100", "200", "300", "400", "500"]
         assert len(urls_visited) == 2
@@ -610,7 +606,7 @@ class TestSearchJobs:
         assert page2["start"] == ["3"]  # page 1 rendered three cards
 
     async def test_references_keep_all_jobs_beyond_the_per_section_cap(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         id_pages = [
             [str(1000 + index) for index in range(11)],
             [str(2000 + index) for index in range(11)],
@@ -652,13 +648,13 @@ class TestSearchJobs:
                 side_effect=raw_pages,
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=id_pages,
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -682,7 +678,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=2)
+            result = await reader.search_jobs("python", max_pages=2)
 
         expected_ids = [job_id for page_ids in id_pages for job_id in page_ids]
         references = result["references"]["search_results"]
@@ -699,22 +695,22 @@ class TestSearchJobs:
 
     async def test_deduplication_across_pages(self, mock_page):
         """Duplicate job IDs across pages should be deduplicated."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         id_pages = iter([["100", "200"], ["200", "300"]])
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(mock_page, [extracted("text")] * 2),
             ) as mock_extract,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=lambda **kw: next(id_pages),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -724,7 +720,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=2)
+            result = await reader.search_jobs("python", max_pages=2)
 
         assert result["job_ids"] == ["100", "200", "300"]
         assert mock_extract.await_count == 2
@@ -738,11 +734,11 @@ class TestSearchJobs:
         for Python in Berlin comes back as Python anywhere and reads as
         though Berlin had none.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
 
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(
                     mock_page,
@@ -751,13 +747,13 @@ class TestSearchJobs:
                 ),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["901"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -767,7 +763,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", location="Berlin", max_pages=1)
+            result = await reader.search_jobs("python", location="Berlin", max_pages=1)
 
         assert result["job_ids"] == ["901"]
         error = result["section_errors"]["search_results"]
@@ -787,11 +783,11 @@ class TestSearchJobs:
     async def test_encoded_facet_is_one_filter_and_drop_detection_keeps_it(
         self, mock_page, lands_on: str | None, expected_dropped: bool
     ):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
 
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(
                     mock_page,
@@ -800,13 +796,13 @@ class TestSearchJobs:
                 ),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["901"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -816,7 +812,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs(
+            result = await reader.search_jobs(
                 "python",
                 job_type="x&f_EA=true",
                 easy_apply=True,
@@ -844,7 +840,7 @@ class TestSearchJobs:
         still in the response, and a caller reading only the stop reason acts
         on Berlin jobs that are not from Berlin.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         pages = iter(
             [
                 extracted("python jobs"),
@@ -863,15 +859,15 @@ class TestSearchJobs:
             return captured(mock_page, next(pages))
 
         with (
-            patch.object(scraper._pages, "_extract_search_page", side_effect=land),
+            patch.object(reader._pages, "_extract_search_page", side_effect=land),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["901"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -881,7 +877,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", location="Berlin", max_pages=2)
+            result = await reader.search_jobs("python", location="Berlin", max_pages=2)
 
         assert result["job_ids"] == ["901"]
         message = result["section_errors"]["search_results"]["error_message"]
@@ -897,11 +893,11 @@ class TestSearchJobs:
         by value and not by presence, because the same shape covers LinkedIn
         answering a different question rather than none.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
 
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(
                     mock_page,
@@ -910,13 +906,13 @@ class TestSearchJobs:
                 ),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["901"],
             ) as mock_ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -926,7 +922,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", location="Berlin")
+            result = await reader.search_jobs("python", location="Berlin")
 
         assert result["job_ids"] == []
         assert mock_ids.await_count == 0
@@ -945,11 +941,11 @@ class TestSearchJobs:
         keeps the query and honours `start`, so the destination is the search
         and not a replacement of it.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
 
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(
                     mock_page,
@@ -960,13 +956,13 @@ class TestSearchJobs:
                 ),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["111", "222"],
             ) as mock_ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -976,7 +972,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=1)
+            result = await reader.search_jobs("python", max_pages=1)
 
         assert result["job_ids"] == ["111", "222"]
         assert mock_ids.await_count == 1
@@ -991,11 +987,11 @@ class TestSearchJobs:
         accepted this route the search raised first and said nothing about
         the location.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
 
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(
                     mock_page,
@@ -1006,13 +1002,13 @@ class TestSearchJobs:
                 ),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["111"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1022,7 +1018,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", location="Berlin", max_pages=1)
+            result = await reader.search_jobs("python", location="Berlin", max_pages=1)
 
         assert result["job_ids"] == ["111"]
         error = result["section_errors"]["search_results"]
@@ -1036,7 +1032,7 @@ class TestSearchJobs:
         `job_ids` correctly left it out, so a caller following the references
         acts on a job this search never returned.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         page = extracted(
             "Job results",
             [
@@ -1048,18 +1044,18 @@ class TestSearchJobs:
 
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(mock_page, [page]),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["111"],
             ) as mock_ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1069,7 +1065,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=1)
+            result = await reader.search_jobs("python", max_pages=1)
 
         # The exclusion is the rail scope, and the double answers the same
         # ids either way, so asking for it is the only thing that can fail
@@ -1090,10 +1086,10 @@ class TestSearchJobs:
         stops on the repeated ids with nothing to say why. The saved list
         does exactly this since LinkedIn moved it.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(
                     mock_page,
@@ -1102,13 +1098,13 @@ class TestSearchJobs:
                 ),
             ) as mock_extract,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["101", "102"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1118,7 +1114,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=3)
+            result = await reader.search_jobs("python", max_pages=3)
 
         assert result["job_ids"] == ["101", "102"]
         assert result["sections"]["search_results"] == "the first page"
@@ -1132,7 +1128,7 @@ class TestSearchJobs:
 
     async def test_no_new_id_page_can_upgrade_duplicate_metadata(self, mock_page):
         """The stopping page still contributes richer duplicate metadata."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         id_pages = iter([["100", "200"], ["100", "200"]])
         extract_call_count = 0
 
@@ -1178,16 +1174,16 @@ class TestSearchJobs:
 
         with (
             patch.object(
-                scraper._pages, "_extract_search_page", side_effect=mock_extract
+                reader._pages, "_extract_search_page", side_effect=mock_extract
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=lambda **kw: next(id_pages),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1197,7 +1193,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=5)
+            result = await reader.search_jobs("python", max_pages=5)
 
         assert result["job_ids"] == ["100", "200"]
         assert extract_call_count == 2
@@ -1219,7 +1215,7 @@ class TestSearchJobs:
         The bound is a result count, not a page count: the offset advances by
         rendered cards, so comparing it to a page index would never trigger.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         # One advertised page is 25 results and the first navigation renders
         # exactly 25, which is the boundary: the offset reaches the end
         # without passing it. Rendering more would clear `>=` and `>` alike
@@ -1227,19 +1223,19 @@ class TestSearchJobs:
         id_pages = iter([[str(i) for i in range(25)], ["900"]])
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 new_callable=AsyncMock,
                 return_value=captured(mock_page, extracted("text")),
             ) as mock_extract,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=lambda **kw: next(id_pages),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=1,
@@ -1249,7 +1245,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=10)
+            result = await reader.search_jobs("python", max_pages=10)
 
         # One navigation despite max_pages=10
         assert mock_extract.await_count == 1
@@ -1274,7 +1270,7 @@ class TestSearchJobs:
                 return self.now
 
         clock = Clock()
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         seen: list[float | None] = []
 
         async def read_page(url, section_name, scroll_deadline=None, **kwargs):
@@ -1295,15 +1291,15 @@ class TestSearchJobs:
 
         with (
             patch.object(jobs_module, "time", clock),
-            patch.object(scraper._pages, "_extract_search_page", side_effect=read_page),
+            patch.object(reader._pages, "_extract_search_page", side_effect=read_page),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=pages,
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1313,7 +1309,7 @@ class TestSearchJobs:
                 side_effect=sleep,
             ),
         ):
-            await scraper.search_jobs("python", max_pages=10, tool_timeout=100000)
+            await reader.search_jobs("python", max_pages=10, tool_timeout=100000)
 
         assert len(seen) == 10
         assert seen[0] == 12.0  # the per-page cap, whatever max_pages says
@@ -1336,7 +1332,7 @@ class TestSearchJobs:
                 return self.now
 
         clock = Clock()
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         seen: list[float | None] = []
 
         async def read_page(url, section_name, scroll_deadline=None, **kwargs):
@@ -1353,15 +1349,15 @@ class TestSearchJobs:
 
         with (
             patch.object(jobs_module, "time", clock),
-            patch.object(scraper._pages, "_extract_search_page", side_effect=read_page),
+            patch.object(reader._pages, "_extract_search_page", side_effect=read_page),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=pages,
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1371,7 +1367,7 @@ class TestSearchJobs:
                 side_effect=sleep,
             ),
         ):
-            await scraper.search_jobs("python", max_pages=10, tool_timeout=100000)
+            await reader.search_jobs("python", max_pages=10, tool_timeout=100000)
 
         assert seen == [12.0] * 10
 
@@ -1400,7 +1396,7 @@ class TestSearchJobs:
                 return self.now
 
         clock = Clock()
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         seen: list[float | None] = []
 
         async def read_page(url, section_name, scroll_deadline=None, **kwargs):
@@ -1417,15 +1413,15 @@ class TestSearchJobs:
 
         with (
             patch.object(jobs_module, "time", clock),
-            patch.object(scraper._pages, "_extract_search_page", side_effect=read_page),
+            patch.object(reader._pages, "_extract_search_page", side_effect=read_page),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=pages,
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1435,7 +1431,7 @@ class TestSearchJobs:
                 side_effect=sleep,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=10)
+            result = await reader.search_jobs("python", max_pages=10)
 
         # Seven pages end at 142.9s; an eighth would need 163.6s.
         assert len(seen) == 7
@@ -1461,7 +1457,7 @@ class TestSearchJobs:
                 return self.now
 
         clock = Clock()
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         seen: list[float | None] = []
 
         async def read_page(url, section_name, scroll_deadline=None, **kwargs):
@@ -1477,15 +1473,15 @@ class TestSearchJobs:
 
         with (
             patch.object(jobs_module, "time", clock),
-            patch.object(scraper._pages, "_extract_search_page", side_effect=read_page),
+            patch.object(reader._pages, "_extract_search_page", side_effect=read_page),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=pages,
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1496,7 +1492,7 @@ class TestSearchJobs:
             ),
         ):
             # 176.25 * _SEARCH_TIMEOUT_FRACTION is a 141s budget.
-            result = await scraper.search_jobs(
+            result = await reader.search_jobs(
                 "python", max_pages=10, tool_timeout=176.25
             )
 
@@ -1505,22 +1501,22 @@ class TestSearchJobs:
 
     async def test_zero_max_pages_fetches_nothing(self, mock_page):
         """max_pages=0 should fetch zero pages (validation at tool boundary)."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 new_callable=AsyncMock,
                 return_value=captured(mock_page, extracted("text")),
             ) as mock_extract,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=[],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1530,29 +1526,29 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=0)
+            result = await reader.search_jobs("python", max_pages=0)
 
         assert result["job_ids"] == []
         assert mock_extract.await_count == 0
 
     async def test_single_page(self, mock_page):
         """max_pages=1 should only visit one page; filters appear in URL."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 new_callable=AsyncMock,
                 return_value=captured(mock_page, extracted("Job posting text")),
             ) as mock_extract,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["42"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1562,7 +1558,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs(
+            result = await reader.search_jobs(
                 "python",
                 "Remote",
                 max_pages=1,
@@ -1581,12 +1577,12 @@ class TestSearchJobs:
 
     async def test_page_texts_joined_with_separator(self, mock_page):
         """Multiple pages should join text with --- separator."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         text_pages = iter(["Page 1 content", "Page 2 content"])
         id_pages = iter([["100"], ["200"]])
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 new_callable=AsyncMock,
                 side_effect=self._navigating(
@@ -1594,13 +1590,13 @@ class TestSearchJobs:
                 ),
             ) as mock_extract,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=lambda **kw: next(id_pages),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1610,7 +1606,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=2)
+            result = await reader.search_jobs("python", max_pages=2)
 
         assert "\n---\n" in result["sections"]["search_results"]
         assert "Page 1 content" in result["sections"]["search_results"]
@@ -1619,21 +1615,21 @@ class TestSearchJobs:
 
     async def test_empty_results(self, mock_page):
         """Should handle empty results gracefully and skip ID extraction."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(mock_page, [extracted("")]),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=[],
             ) as mock_ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1643,7 +1639,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("nonexistent_xyz")
+            result = await reader.search_jobs("nonexistent_xyz")
 
         assert result["job_ids"] == []
         assert result["sections"] == {}
@@ -1658,10 +1654,10 @@ class TestSearchJobs:
         successful search with no jobs, although LinkedIn answered no search
         at all.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(
                     mock_page,
@@ -1670,13 +1666,13 @@ class TestSearchJobs:
                 ),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=[],
             ) as mock_ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1686,7 +1682,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=1)
+            result = await reader.search_jobs("python", max_pages=1)
 
         assert result["job_ids"] == []
         assert result["sections"] == {}
@@ -1697,10 +1693,10 @@ class TestSearchJobs:
 
     async def test_empty_redesign_page_reports_a_dropped_filter(self, mock_page):
         """A clean empty result cannot hide a location the redirect dropped."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(
                     mock_page,
@@ -1711,13 +1707,13 @@ class TestSearchJobs:
                 ),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=[],
             ) as mock_ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1727,7 +1723,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", location="Berlin", max_pages=1)
+            result = await reader.search_jobs("python", location="Berlin", max_pages=1)
 
         error = result["section_errors"]["search_results"]
         assert error["error_type"] == "filters_dropped"
@@ -1742,7 +1738,7 @@ class TestSearchJobs:
         short-circuit, the search silently stops and presents page one as the
         complete answer.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         pages = iter([extracted("Page 1"), extracted("")])
         calls = 0
 
@@ -1760,18 +1756,18 @@ class TestSearchJobs:
 
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=navigate_page,
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["111"],
             ) as mock_ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1781,7 +1777,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=2)
+            result = await reader.search_jobs("python", max_pages=2)
 
         assert result["job_ids"] == ["111"]
         assert result["sections"]["search_results"] == "Page 1"
@@ -1791,10 +1787,10 @@ class TestSearchJobs:
 
     async def test_no_ids_on_first_page_captures_text(self, mock_page):
         """Non-empty text with zero job IDs should be returned in sections."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 # Navigating, or the page keeps the fixture's `keywords=python`
                 # while the search asks for something else, and the check that
@@ -1804,13 +1800,13 @@ class TestSearchJobs:
                 ),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=[],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1820,7 +1816,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("xyzzy123", max_pages=1)
+            result = await reader.search_jobs("xyzzy123", max_pages=1)
 
         assert result["job_ids"] == []
         assert result["sections"]["search_results"] == "No matching jobs found"
@@ -1832,25 +1828,25 @@ class TestSearchJobs:
         links, so the postings came back as `job_ids` with nothing to say
         they were not matches, and a second page repeated them.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         recommendations = extracted(
             "Jobs you may be interested in\nJump to active job details\n"
             "MLOps Engineer (H/F/X)\nShadow"
         )
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(mock_page, [recommendations] * 2),
             ) as mock_extract,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["4458422026", "4458003726"],
             ) as mock_ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1860,7 +1856,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("founder's associate", max_pages=2)
+            result = await reader.search_jobs("founder's associate", max_pages=2)
 
         assert result["job_ids"] == []
         assert result["sections"] == {}
@@ -1877,25 +1873,25 @@ class TestSearchJobs:
         The matches already read are the whole answer, so they are returned
         without an error, and the recommendations are not appended to them.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         pages = [
             extracted("python in France\n1 result\nPython Developer"),
             extracted("Jobs you may be interested in\nMLOps Engineer (H/F/X)"),
         ]
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(mock_page, pages),
             ) as mock_extract,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["111"],
             ) as mock_ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1905,7 +1901,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=3)
+            result = await reader.search_jobs("python", max_pages=3)
 
         assert result["job_ids"] == ["111"]
         assert result["sections"]["search_results"] == (
@@ -1917,7 +1913,7 @@ class TestSearchJobs:
 
     async def test_discarded_recommendations_do_not_warn_about_filters(self, mock_page):
         """A dropped filter on the discarded substitute page changes no result."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         pages = iter(
             [
                 extracted("python in Berlin\n1 result\nPython Developer"),
@@ -1940,18 +1936,18 @@ class TestSearchJobs:
 
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=navigate_page,
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["111"],
             ) as mock_ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1961,7 +1957,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", location="Berlin", max_pages=2)
+            result = await reader.search_jobs("python", location="Berlin", max_pages=2)
 
         assert result["job_ids"] == ["111"]
         assert result["sections"]["search_results"] == (
@@ -1975,25 +1971,25 @@ class TestSearchJobs:
 
         LinkedIn's "500+" is a lower bound, so it is reported as one.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         pages = [
             extracted("python in France\n500+ results\nPython Developer"),
             extracted("python in France\n28 results\nData Engineer"),
         ]
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(mock_page, pages),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=[["111"], ["222"]],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2003,27 +1999,27 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=2)
+            result = await reader.search_jobs("python", max_pages=2)
 
         assert result["job_ids"] == ["111", "222"]
         assert result["total"] == {"count": 500, "exact": False}
 
     async def test_a_page_without_a_count_reports_no_total(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(mock_page, [extracted("Job 1")]),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["111"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2033,35 +2029,35 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=1)
+            result = await reader.search_jobs("python", max_pages=1)
 
         assert "total" not in result
 
     async def test_promoted_ids_are_the_flagged_results_in_order(self, mock_page):
         """Only ids the search returned, whatever else the read reports."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(
                     mock_page, [extracted("Page 1"), extracted("Page 2")]
                 ),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=[["111", "333"], ["222"]],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_promoted_job_ids",
                 new_callable=AsyncMock,
                 side_effect=[["999", "111"], ["222"]],
             ) as mock_promoted,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2071,34 +2067,34 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=2)
+            result = await reader.search_jobs("python", max_pages=2)
 
         assert result["job_ids"] == ["111", "333", "222"]
         assert result["promoted_job_ids"] == ["111", "222"]
         mock_promoted.assert_awaited_with("Promoted")
 
     async def test_no_promoted_results_is_an_empty_list(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(mock_page, [extracted("Page 1")]),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["111"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_promoted_job_ids",
                 new_callable=AsyncMock,
                 return_value=[],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2108,33 +2104,33 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=1)
+            result = await reader.search_jobs("python", max_pages=1)
 
         assert result["promoted_job_ids"] == []
 
     async def test_a_failed_promoted_read_keeps_the_results(self, mock_page):
         """An empty list would claim nothing was promoted, so the key goes."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(mock_page, [extracted("Page 1")]),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["111"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_promoted_job_ids",
                 new_callable=AsyncMock,
                 side_effect=PatchrightError("Execution context was destroyed"),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2144,7 +2140,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=1)
+            result = await reader.search_jobs("python", max_pages=1)
 
         assert result["job_ids"] == ["111"]
         assert result["sections"]["search_results"] == "Page 1"
@@ -2157,23 +2153,23 @@ class TestSearchJobs:
 
         The failed page's jobs would then pass for jobs nobody promoted.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(
                     mock_page, [extracted("Page 1"), extracted("Page 2")]
                 ),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=[["111"], ["222"]],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_promoted_job_ids",
                 new_callable=AsyncMock,
                 side_effect=[
@@ -2182,7 +2178,7 @@ class TestSearchJobs:
                 ],
             ) as mock_promoted,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2192,7 +2188,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=2)
+            result = await reader.search_jobs("python", max_pages=2)
 
         assert result["job_ids"] == ["111", "222"]
         assert mock_promoted.await_count == 2
@@ -2206,11 +2202,11 @@ class TestSearchJobs:
         a search that found those words. A section error is not enough
         either: only the auth error starts the relogin the tool has.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         mock_page.url = "https://www.linkedin.com/uas/login"
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 new_callable=AsyncMock,
                 return_value=captured(
@@ -2228,13 +2224,13 @@ class TestSearchJobs:
                 ),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=[],
             ) as mock_ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2245,7 +2241,7 @@ class TestSearchJobs:
             ),
         ):
             with pytest.raises(AuthenticationError, match="--login"):
-                await scraper.search_jobs("python", max_pages=2)
+                await reader.search_jobs("python", max_pages=2)
 
         mock_ids.assert_not_awaited()
 
@@ -2257,11 +2253,11 @@ class TestSearchJobs:
         it held. An empty result with nothing beside it is not an option
         either: that is what an exhausted search looks like.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         mock_page.url = "https://www.linkedin.com/feed/"
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 new_callable=AsyncMock,
                 return_value=captured(
@@ -2279,13 +2275,13 @@ class TestSearchJobs:
                 ),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=[],
             ) as mock_ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2295,7 +2291,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=2)
+            result = await reader.search_jobs("python", max_pages=2)
 
         mock_ids.assert_not_awaited()
         assert result["job_ids"] == []
@@ -2305,22 +2301,22 @@ class TestSearchJobs:
 
     async def test_rate_limited_skips_ids_and_text(self, mock_page):
         """Rate-limited pages should yield no IDs or text."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 new_callable=AsyncMock,
                 return_value=captured(mock_page, extracted(RATE_LIMITED_SECTION_TEXT)),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["100"],
             ) as mock_ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2330,7 +2326,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=1)
+            result = await reader.search_jobs("python", max_pages=1)
 
         assert result["job_ids"] == []
         assert result["sections"] == {}
@@ -2339,10 +2335,10 @@ class TestSearchJobs:
 
     async def test_rate_limit_wins_over_an_unexpected_landing(self, mock_page):
         """The specific diagnosis survives a simultaneous route failure."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(
                     mock_page,
@@ -2351,7 +2347,7 @@ class TestSearchJobs:
                 ),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["100"],
@@ -2361,7 +2357,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=1)
+            result = await reader.search_jobs("python", max_pages=1)
 
         assert result["section_errors"]["search_results"]["error_type"] == (
             "rate_limit"
@@ -2374,10 +2370,10 @@ class TestSearchJobs:
             "error_type": "navigation_error",
             "error_message": "the search page did not load",
         }
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(
                     mock_page,
@@ -2386,7 +2382,7 @@ class TestSearchJobs:
                 ),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["100"],
@@ -2396,7 +2392,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=1)
+            result = await reader.search_jobs("python", max_pages=1)
 
         assert result["section_errors"]["search_results"] == failure
         mock_ids.assert_not_awaited()
@@ -2410,7 +2406,7 @@ class TestSearchJobs:
         surviving duplicate or a pane job leaking in all show up here rather
         than as a reference count that happens to match.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         page = extracted(
             "Job results",
             [
@@ -2422,18 +2418,18 @@ class TestSearchJobs:
         )
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_search_page",
                 side_effect=self._navigating(mock_page, [page]),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["111", "222", "333", "444"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2443,7 +2439,7 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.search_jobs("python", max_pages=1)
+            result = await reader.search_jobs("python", max_pages=1)
 
         references = result["references"]["search_results"]
         jobs = [reference for reference in references if reference["kind"] == "job"]
@@ -2486,22 +2482,22 @@ class TestGetSavedJobs:
         return navigate
 
     async def test_returns_job_ids(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_saved_jobs_page",
                 new_callable=AsyncMock,
                 return_value=captured(mock_page, extracted("Saved Job 1\nSaved Job 2")),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["111", "222"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_list_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2511,7 +2507,7 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_saved_jobs(max_pages=1)
+            result = await reader.get_saved_jobs(max_pages=1)
 
         assert result["job_ids"] == ["111", "222"]
         assert "saved_jobs" in result["sections"]
@@ -2526,22 +2522,22 @@ class TestGetSavedJobs:
         presented as the user's own list.
         """
         mock_page.url = "https://interstitial.example/my-items/saved-jobs/"
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_saved_jobs_page",
                 new_callable=AsyncMock,
                 return_value=captured(mock_page, extracted("Captive portal")),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["999"],
             ) as ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_list_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2551,7 +2547,7 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_saved_jobs(max_pages=1)
+            result = await reader.get_saved_jobs(max_pages=1)
 
         assert result["job_ids"] == []
         assert "saved_jobs" not in result["sections"]
@@ -2561,10 +2557,10 @@ class TestGetSavedJobs:
 
     async def test_returns_references(self, mock_page):
         """References are keyed by the section name, per the return contract."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_saved_jobs_page",
                 new_callable=AsyncMock,
                 return_value=captured(
@@ -2576,13 +2572,13 @@ class TestGetSavedJobs:
                 ),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["111"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_list_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2592,7 +2588,7 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_saved_jobs(max_pages=1)
+            result = await reader.get_saved_jobs(max_pages=1)
 
         assert result["references"] == {
             "saved_jobs": [{"kind": "job", "url": "/jobs/view/111/", "text": "Job 1"}]
@@ -2600,24 +2596,24 @@ class TestGetSavedJobs:
 
     async def test_page_texts_joined_with_separator(self, mock_page):
         """Multi-page text is joined so the caller can tell pages apart."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         id_pages = iter([["100"], ["200"]])
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_saved_jobs_page",
                 side_effect=self._navigating(
                     mock_page, [extracted("page one"), extracted("page two")]
                 ),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=lambda **kw: next(id_pages),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_list_pages",
                 new_callable=AsyncMock,
                 return_value=2,
@@ -2627,13 +2623,13 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_saved_jobs(max_pages=2)
+            result = await reader.get_saved_jobs(max_pages=2)
 
         assert result["sections"]["saved_jobs"] == "page one\n---\npage two"
 
     async def test_pagination_uses_start_offset(self, mock_page):
         """The my-items list pages in 10s, not the 25 used by job search."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         id_pages = iter([["100", "200"], ["300"], ["400"]])
         urls_visited: list[str] = []
 
@@ -2645,16 +2641,16 @@ class TestGetSavedJobs:
 
         with (
             patch.object(
-                scraper._pages, "_extract_saved_jobs_page", side_effect=mock_extract
+                reader._pages, "_extract_saved_jobs_page", side_effect=mock_extract
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=lambda **kw: next(id_pages),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_list_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2664,7 +2660,7 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_saved_jobs(max_pages=3)
+            result = await reader.get_saved_jobs(max_pages=3)
 
         assert result["job_ids"] == ["100", "200", "300", "400"]
         assert urls_visited == [
@@ -2674,22 +2670,22 @@ class TestGetSavedJobs:
         ]
 
     async def test_early_stop_no_new_ids(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         id_pages = iter([["100"], ["100"]])
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_saved_jobs_page",
                 side_effect=self._navigating(mock_page, [extracted("text")] * 2),
             ) as mock_extract,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=lambda **kw: next(id_pages),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_list_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2699,7 +2695,7 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_saved_jobs(max_pages=5)
+            result = await reader.get_saved_jobs(max_pages=5)
 
         assert result["job_ids"] == ["100"]
         # Stops on the repeat page rather than exhausting max_pages
@@ -2717,7 +2713,7 @@ class TestGetSavedJobs:
         mock_page.wait_for_selector = AsyncMock(
             side_effect=PlaywrightTimeoutError("no main")
         )
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
             patch(
@@ -2736,7 +2732,7 @@ class TestGetSavedJobs:
             ),
             pytest.raises(AuthenticationError, match="--login"),
         ):
-            await scraper.get_saved_jobs(max_pages=1)
+            await reader.get_saved_jobs(max_pages=1)
 
     async def test_a_redirect_while_scrolling_the_list_is_an_auth_error(
         self, mock_page
@@ -2766,7 +2762,7 @@ class TestGetSavedJobs:
                 "most likely because of a navigation."
             )
 
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
             patch(
@@ -2784,7 +2780,7 @@ class TestGetSavedJobs:
             ),
             pytest.raises(AuthenticationError, match="--login"),
         ):
-            await scraper.get_saved_jobs(max_pages=1)
+            await reader.get_saved_jobs(max_pages=1)
 
     async def test_a_blank_foreign_page_is_not_an_empty_list(self, mock_page):
         """An empty page returned before the route is judged says nothing.
@@ -2795,16 +2791,16 @@ class TestGetSavedJobs:
         saved looks like.
         """
         mock_page.url = "https://interstitial.example/blank"
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_saved_jobs_page",
                 new_callable=AsyncMock,
                 return_value=captured(mock_page, extracted("")),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_list_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2814,7 +2810,7 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_saved_jobs(max_pages=1)
+            result = await reader.get_saved_jobs(max_pages=1)
 
         assert result["job_ids"] == []
         assert "saved_jobs" in result["section_errors"]
@@ -2822,16 +2818,16 @@ class TestGetSavedJobs:
     async def test_an_empty_list_is_still_an_empty_list(self, mock_page):
         """An account with nothing saved renders nothing, and that is not an error."""
         mock_page.url = "https://www.linkedin.com/jobs-tracker/"
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_saved_jobs_page",
                 new_callable=AsyncMock,
                 return_value=captured(mock_page, extracted("")),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_list_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2841,7 +2837,7 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_saved_jobs(max_pages=1)
+            result = await reader.get_saved_jobs(max_pages=1)
 
         assert result["job_ids"] == []
         assert "section_errors" not in result
@@ -2855,10 +2851,10 @@ class TestGetSavedJobs:
         the no-new-ids branch stops the loop, and every further offset costs
         another navigation for the same page.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_saved_jobs_page",
                 side_effect=self._navigating(
                     mock_page,
@@ -2867,13 +2863,13 @@ class TestGetSavedJobs:
                 ),
             ) as mock_extract,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["100", "200"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_list_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2883,7 +2879,7 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_saved_jobs(max_pages=3)
+            result = await reader.get_saved_jobs(max_pages=3)
 
         assert result["job_ids"] == ["100", "200"]
         assert result["sections"]["saved_jobs"] == "the list"
@@ -2896,22 +2892,22 @@ class TestGetSavedJobs:
 
     async def test_stops_at_total_pages(self, mock_page):
         """The pager's page count caps pagination below max_pages."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         id_pages = iter([["100"], ["200"], ["300"]])
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_saved_jobs_page",
                 side_effect=self._navigating(mock_page, [extracted("text")] * 3),
             ) as mock_extract,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=lambda **kw: next(id_pages),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_list_pages",
                 new_callable=AsyncMock,
                 return_value=2,
@@ -2921,7 +2917,7 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_saved_jobs(max_pages=10)
+            result = await reader.get_saved_jobs(max_pages=10)
 
         # Both pages the pager reports, and no more.
         assert mock_extract.await_count == 2
@@ -2936,23 +2932,23 @@ class TestGetSavedJobs:
         the caller can tell "LinkedIn asked us to slow down" apart from "there
         were no more pages" — which look identical otherwise.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         pages = iter([extracted("first page"), extracted(RATE_LIMITED_SECTION_TEXT)])
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_saved_jobs_page",
                 new_callable=AsyncMock,
                 side_effect=lambda *a, **kw: captured(mock_page, next(pages)),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["100"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_list_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -2962,7 +2958,7 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_saved_jobs(max_pages=3)
+            result = await reader.get_saved_jobs(max_pages=3)
 
         assert result["job_ids"] == ["100"]
         # The blocked page contributes nothing; page 1 survives intact.
@@ -2979,22 +2975,22 @@ class TestGetSavedJobs:
         which is indistinguishable from having nothing saved.
         """
         mock_page.url = "https://www.linkedin.com/jobs-tracker/"
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_saved_jobs_page",
                 new_callable=AsyncMock,
                 return_value=captured(mock_page, extracted("Saved Job 1")),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["111"],
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_list_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -3004,7 +3000,7 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_saved_jobs(max_pages=1)
+            result = await reader.get_saved_jobs(max_pages=1)
 
         assert result["job_ids"] == ["111"]
         assert result["sections"]["saved_jobs"] == "Saved Job 1"
@@ -3016,23 +3012,23 @@ class TestGetSavedJobs:
         `saved_jobs` left the dead browser registered and offered no
         relogin, so the next call walked into the same wall.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         mock_page.url = "https://www.linkedin.com/uas/login"
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_saved_jobs_page",
                 new_callable=AsyncMock,
                 return_value=captured(mock_page, extracted("Login page content")),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["999"],
             ) as mock_ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_list_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -3043,7 +3039,7 @@ class TestGetSavedJobs:
             ),
         ):
             with pytest.raises(AuthenticationError, match="--login"):
-                await scraper.get_saved_jobs(max_pages=2)
+                await reader.get_saved_jobs(max_pages=2)
 
         # Never mine IDs off a page that is not the saved-jobs list.
         mock_ids.assert_not_awaited()
@@ -3057,23 +3053,23 @@ class TestGetSavedJobs:
         an option either: that is what an account with nothing saved looks
         like.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         mock_page.url = "https://www.linkedin.com/feed/"
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_saved_jobs_page",
                 new_callable=AsyncMock,
                 return_value=captured(mock_page, extracted("Some other page")),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["999"],
             ) as mock_ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_list_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -3083,7 +3079,7 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_saved_jobs(max_pages=2)
+            result = await reader.get_saved_jobs(max_pages=2)
 
         mock_ids.assert_not_awaited()
         assert result["job_ids"] == []
@@ -3107,7 +3103,7 @@ class TestGetSavedJobs:
         was asked to, and nothing but the count read moves it, so a check
         taken before that read passes and one taken after it stops.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
 
         async def read_page(url, *args, **kwargs):
             mock_page.url = url
@@ -3119,16 +3115,16 @@ class TestGetSavedJobs:
 
         with (
             patch.object(
-                scraper._pages, "_extract_saved_jobs_page", side_effect=read_page
+                reader._pages, "_extract_saved_jobs_page", side_effect=read_page
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["100"],
             ) as mock_ids,
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_list_pages",
                 side_effect=count_pages_and_drift,
             ),
@@ -3137,7 +3133,7 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_saved_jobs(max_pages=2)
+            result = await reader.get_saved_jobs(max_pages=2)
 
         mock_ids.assert_not_awaited()
         assert result["job_ids"] == []
@@ -3153,7 +3149,7 @@ class TestGetSavedJobs:
         the cap over the joined list, which is the only thing standing
         between a ten-page walk and a hundred references in one section.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         pages = [
             extracted(
                 f"page {page}",
@@ -3176,18 +3172,18 @@ class TestGetSavedJobs:
         )
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_saved_jobs_page",
                 side_effect=self._navigating(mock_page, pages),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=lambda *a, **kw: next(id_pages),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_list_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -3197,7 +3193,7 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_saved_jobs(max_pages=2)
+            result = await reader.get_saved_jobs(max_pages=2)
 
         references = result["references"]["saved_jobs"]
         assert len(references) == 15
@@ -3212,7 +3208,7 @@ class TestGetSavedJobs:
         and the whole list would read as unlabelled, which is what the caller
         gets no other signal about.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         pages = [
             extracted("page 1", [{"kind": "job", "url": "/jobs/view/100/"}]),
             extracted(
@@ -3231,18 +3227,18 @@ class TestGetSavedJobs:
         id_pages = iter([["100"], ["200"]])
         with (
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_saved_jobs_page",
                 side_effect=self._navigating(mock_page, pages),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 side_effect=lambda *a, **kw: next(id_pages),
             ),
             patch.object(
-                scraper._pages,
+                reader._pages,
                 "_get_total_list_pages",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -3252,7 +3248,7 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_saved_jobs(max_pages=2)
+            result = await reader.get_saved_jobs(max_pages=2)
 
         assert result["references"]["saved_jobs"] == [
             {

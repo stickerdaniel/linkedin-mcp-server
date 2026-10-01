@@ -1,4 +1,4 @@
-"""Tests for the person-profile scraping owner."""
+"""Tests for the person-profile workflow owner."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from linkedin_mcp_server.callbacks import ProgressCallback
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     InvalidReferenceError,
-    LinkedInScraperException,
+    LinkedInOperationError,
     ProxyConnectionError,
 )
 from linkedin_mcp_server.linkedin import person as person_module
@@ -29,26 +29,26 @@ from linkedin_mcp_server.linkedin.contracts import (
 )
 from linkedin_mcp_server.linkedin.link_metadata import Reference
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.person import PersonScraper
+from linkedin_mcp_server.linkedin.person import PersonReader
 from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 
 
-def _scraper(page, *, message_target: Any = None) -> PersonScraper:
+def _reader(page, *, message_target: Any = None) -> PersonReader:
     """Wire the person owner the way the facade does.
 
     The top-card read the profile URN comes from belongs to the facade until
     the message sender owns it, so the default here is what a page with no
     resolvable action answers: no target, and therefore no URN.
     """
-    session = ScrapingSession(page)
+    session = PageSession(page)
     navigator = PageNavigator(session)
     capture = SectionCapture(session, navigator, PageContentReader(session))
 
     async def read_message_target() -> Any:
         return SimpleNamespace(target=message_target)
 
-    return PersonScraper(
+    return PersonReader(
         session,
         navigator,
         capture,
@@ -65,21 +65,21 @@ def extracted(
     return ExtractedSection(text=text, references=references or [], error=error)
 
 
-class TestScrapePersonUrls:
-    """Test that scrape_person visits the correct URLs per section set."""
+class TestReadPersonUrls:
+    """Test that read_person visits the correct URLs per section set."""
 
     async def test_baseline_always_included(self, mock_page):
         """Passing only experience still visits main profile."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
             ) as mock_extract,
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 return_value=extracted(""),
@@ -89,7 +89,7 @@ class TestScrapePersonUrls:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person("testuser", {"experience"})
+            result = await reader.read_person("testuser", {"experience"})
 
         urls = [call.args[0] for call in mock_extract.call_args_list]
         assert "main_profile" in result["sections"]
@@ -97,16 +97,16 @@ class TestScrapePersonUrls:
         assert any("/details/experience/" in u for u in urls)
 
     async def test_basic_info_only_visits_main_profile(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("profile text"),
             ) as mock_extract,
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 return_value=extracted(""),
@@ -116,7 +116,7 @@ class TestScrapePersonUrls:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person("testuser", {"main_profile"})
+            result = await reader.read_person("testuser", {"main_profile"})
 
         urls = [call.args[0] for call in mock_extract.call_args_list]
         assert len(urls) == 1
@@ -132,16 +132,16 @@ class TestScrapePersonUrls:
         https://www.linkedin.com/in/https://de.linkedin.com/in/testuser, which
         LinkedIn does not serve, and the tool reports that page as a profile.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("profile text"),
             ) as mock_extract,
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 return_value=extracted(""),
@@ -151,7 +151,7 @@ class TestScrapePersonUrls:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person(
+            result = await reader.read_person(
                 "https://de.linkedin.com/in/testuser", {"main_profile"}
             )
 
@@ -162,12 +162,12 @@ class TestScrapePersonUrls:
     async def test_a_dot_segment_value_never_reaches_a_navigation(self, mock_page):
         # A browser resolves ../ away before the request, so this would open the
         # feed and return it as a profile.
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture, "capture", new_callable=AsyncMock
+            reader._capture, "capture", new_callable=AsyncMock
         ) as mock_extract:
-            with pytest.raises(LinkedInScraperException):
-                await scraper.scrape_person("testuser/../../feed", {"main_profile"})
+            with pytest.raises(LinkedInOperationError):
+                await reader.read_person("testuser/../../feed", {"main_profile"})
         mock_extract.assert_not_called()
 
     async def test_an_already_encoded_username_is_not_encoded_twice(self, mock_page):
@@ -175,19 +175,19 @@ class TestScrapePersonUrls:
 
         It reads the segment out of page.url after the /in/me/ redirect, and a
         browser reports that path percent-encoded. Escaping it again turns %D0
-        into %25D0, which is a different profile path, so the own-profile scrape
+        into %25D0, which is a different profile path, so the own-profile read
         of any member with a non-ASCII vanity would navigate somewhere else.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("profile text"),
             ) as mock_extract,
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 return_value=extracted(""),
@@ -197,7 +197,7 @@ class TestScrapePersonUrls:
                 new_callable=AsyncMock,
             ),
         ):
-            await scraper.scrape_person(
+            await reader.read_person(
                 "%D0%B0%D0%BD%D0%B4%D1%80%D0%B5%D0%B9", {"main_profile"}
             )
 
@@ -206,11 +206,11 @@ class TestScrapePersonUrls:
             "https://www.linkedin.com/in/%D0%B0%D0%BD%D0%B4%D1%80%D0%B5%D0%B9/"
         ]
 
-    async def test_scrape_person_returns_section_errors(self, mock_page):
-        scraper = _scraper(mock_page)
+    async def test_read_person_returns_section_errors(self, mock_page):
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 side_effect=[
@@ -223,7 +223,7 @@ class TestScrapePersonUrls:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person("testuser", {"posts"})
+            result = await reader.read_person("testuser", {"posts"})
 
         assert result["sections"]["main_profile"] == "profile text"
         assert (
@@ -231,16 +231,16 @@ class TestScrapePersonUrls:
         )
 
     async def test_experience_education_visits_correct_urls(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
             ) as mock_extract,
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 return_value=extracted(""),
@@ -250,7 +250,7 @@ class TestScrapePersonUrls:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person(
+            result = await reader.read_person(
                 "testuser", {"main_profile", "experience", "education"}
             )
 
@@ -262,7 +262,7 @@ class TestScrapePersonUrls:
         assert set(result["sections"]) == {"main_profile", "experience", "education"}
 
     async def test_all_sections_visit_all_urls(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         all_sections = {
             "main_profile",
             "experience",
@@ -278,13 +278,13 @@ class TestScrapePersonUrls:
         }
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
             ) as mock_extract,
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 return_value=extracted("contact text"),
@@ -294,7 +294,7 @@ class TestScrapePersonUrls:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person("testuser", all_sections)
+            result = await reader.read_person("testuser", all_sections)
 
         page_urls = [call.args[0] for call in mock_extract.call_args_list]
         overlay_urls = [call.args[0] for call in mock_overlay.call_args_list]
@@ -322,16 +322,16 @@ class TestScrapePersonUrls:
         assert set(result["sections"]) == all_sections
 
     async def test_posts_visits_recent_activity(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("Post 1\nPost 2"),
             ) as mock_extract,
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 return_value=extracted(""),
@@ -341,23 +341,23 @@ class TestScrapePersonUrls:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person("test-user", {"posts"})
+            result = await reader.read_person("test-user", {"posts"})
 
         urls = [call.args[0] for call in mock_extract.call_args_list]
         assert any("/recent-activity/all/" in url for url in urls)
         assert "posts" in result["sections"]
 
     async def test_certifications_visits_details_page(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("Python for Data Science\nIBM"),
             ) as mock_extract,
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 return_value=extracted(""),
@@ -367,23 +367,23 @@ class TestScrapePersonUrls:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person("test-user", {"certifications"})
+            result = await reader.read_person("test-user", {"certifications"})
 
         urls = [call.args[0] for call in mock_extract.call_args_list]
         assert any("/details/certifications/" in url for url in urls)
         assert "certifications" in result["sections"]
 
     async def test_skills_visits_details_page(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("Python\nData Analysis"),
             ) as mock_extract,
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 return_value=extracted(""),
@@ -393,23 +393,23 @@ class TestScrapePersonUrls:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person("test-user", {"skills"})
+            result = await reader.read_person("test-user", {"skills"})
 
         urls = [call.args[0] for call in mock_extract.call_args_list]
         assert any("/details/skills/" in url for url in urls)
         assert "skills" in result["sections"]
 
     async def test_projects_visits_details_page(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("Portfolio Website\nBuilt with React"),
             ) as mock_extract,
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 return_value=extracted(""),
@@ -419,23 +419,23 @@ class TestScrapePersonUrls:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person("test-user", {"projects"})
+            result = await reader.read_person("test-user", {"projects"})
 
         urls = [call.args[0] for call in mock_extract.call_args_list]
         assert any("/details/projects/" in url for url in urls)
         assert "projects" in result["sections"]
 
-    async def test_scrape_person_passes_max_scrolls(self, mock_page):
-        scraper = _scraper(mock_page)
+    async def test_read_person_passes_max_scrolls(self, mock_page):
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
             ) as mock_extract,
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 return_value=extracted(""),
@@ -445,7 +445,7 @@ class TestScrapePersonUrls:
                 new_callable=AsyncMock,
             ),
         ):
-            await scraper.scrape_person("test-user", {"certifications"}, max_scrolls=15)
+            await reader.read_person("test-user", {"certifications"}, max_scrolls=15)
 
         assert [
             capture_call.kwargs["plan"].mode
@@ -464,7 +464,7 @@ class TestScrapePersonUrls:
             "posts": ("/patched-activity/", False),
             "custom": ("/patched-custom/", False),
         }
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         calls = []
 
         async def record_capture(url, section_name, plan):
@@ -478,13 +478,13 @@ class TestScrapePersonUrls:
         with (
             patch.object(person_module, "PERSON_SECTIONS", table),
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 side_effect=record_capture,
             ),
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 side_effect=record_overlay,
@@ -494,7 +494,7 @@ class TestScrapePersonUrls:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person("testuser", set(table), max_scrolls=13)
+            result = await reader.read_person("testuser", set(table), max_scrolls=13)
 
         assert [section_name for _url, section_name, _plan in calls] == list(table)
         assert [
@@ -518,11 +518,11 @@ class TestScrapePersonUrls:
         assert list(result["sections"]) == list(table)
 
 
-class TestScrapePersonPacing:
+class TestReadPersonPacing:
     """The person-section walk paces gaps rather than individual captures."""
 
     async def test_selected_sections_are_paced_in_config_order(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         events = []
 
         async def capture(_url, section_name, plan):
@@ -537,11 +537,11 @@ class TestScrapePersonPacing:
             events.append(("delay", seconds))
 
         with (
-            patch.object(scraper._capture, "capture", side_effect=capture),
-            patch.object(scraper._capture, "_extract_overlay", side_effect=overlay),
-            patch.object(ScrapingSession, "delay", side_effect=delay),
+            patch.object(reader._capture, "capture", side_effect=capture),
+            patch.object(reader._capture, "_extract_overlay", side_effect=overlay),
+            patch.object(PageSession, "delay", side_effect=delay),
         ):
-            await scraper.scrape_person(
+            await reader.read_person(
                 "testuser", {"main_profile", "experience", "contact_info"}
             )
 
@@ -559,7 +559,7 @@ class TestScrapePersonPacing:
         ids=["one-section", "no-recognized-section"],
     )
     async def test_a_single_selected_section_has_no_gap(self, mock_page, requested):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         events = []
 
         async def capture(_url, section_name, plan):
@@ -570,15 +570,15 @@ class TestScrapePersonPacing:
             events.append(("delay", seconds))
 
         with (
-            patch.object(scraper._capture, "capture", side_effect=capture),
-            patch.object(ScrapingSession, "delay", side_effect=delay),
+            patch.object(reader._capture, "capture", side_effect=capture),
+            patch.object(PageSession, "delay", side_effect=delay),
         ):
-            await scraper.scrape_person("testuser", requested)
+            await reader.read_person("testuser", requested)
 
         assert events == [("capture", "main_profile")]
 
     async def test_rate_limit_stops_before_later_capture_and_gap(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         events = []
 
         async def capture(_url, section_name, plan):
@@ -591,10 +591,10 @@ class TestScrapePersonPacing:
             events.append(("delay", seconds))
 
         with (
-            patch.object(scraper._capture, "capture", side_effect=capture),
-            patch.object(ScrapingSession, "delay", side_effect=delay),
+            patch.object(reader._capture, "capture", side_effect=capture),
+            patch.object(PageSession, "delay", side_effect=delay),
         ):
-            result = await scraper.scrape_person(
+            result = await reader.read_person(
                 "testuser", {"main_profile", "experience", "posts"}
             )
 
@@ -609,7 +609,7 @@ class TestScrapePersonPacing:
     async def test_reused_main_profile_leaves_one_gap_before_next_section(
         self, mock_page
     ):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         mock_page.url = "https://www.linkedin.com/in/testuser/"
         events = []
 
@@ -625,16 +625,14 @@ class TestScrapePersonPacing:
             events.append(("delay", seconds))
 
         with (
+            patch.object(reader._capture, "_extract_loaded_section", side_effect=reuse),
+            patch.object(reader._capture, "capture", side_effect=capture),
+            patch.object(PageSession, "delay", side_effect=delay),
             patch.object(
-                scraper._capture, "_extract_loaded_section", side_effect=reuse
-            ),
-            patch.object(scraper._capture, "capture", side_effect=capture),
-            patch.object(ScrapingSession, "delay", side_effect=delay),
-            patch.object(
-                scraper._navigator, "_navigate_to_page", new_callable=AsyncMock
+                reader._navigator, "_navigate_to_page", new_callable=AsyncMock
             ) as navigate,
         ):
-            await scraper.scrape_person(
+            await reader.read_person(
                 "testuser",
                 {"main_profile", "experience"},
                 main_profile_already_loaded=True,
@@ -648,14 +646,14 @@ class TestScrapePersonPacing:
         navigate.assert_not_awaited()
 
 
-class TestScrapePersonSectionOutcomes:
+class TestReadPersonSectionOutcomes:
     """What one section's result does to the walk and to the response."""
 
     async def test_references_are_grouped_by_section(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 side_effect=[
@@ -682,7 +680,7 @@ class TestScrapePersonSectionOutcomes:
                 ],
             ),
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 return_value=extracted(""),
@@ -692,7 +690,7 @@ class TestScrapePersonSectionOutcomes:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person("testuser", {"posts"})
+            result = await reader.read_person("testuser", {"posts"})
 
         assert result["references"] == {
             "main_profile": [
@@ -711,10 +709,10 @@ class TestScrapePersonSectionOutcomes:
                 raise Exception("Simulated failure")
             return extracted(f"text for {url}")
 
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 side_effect=extract_with_failure,
             ),
@@ -723,7 +721,7 @@ class TestScrapePersonSectionOutcomes:
                 return_value={"issue_template_path": "/tmp/issue.md"},
             ),
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 return_value=extracted(""),
@@ -733,7 +731,7 @@ class TestScrapePersonSectionOutcomes:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person(
+            result = await reader.read_person(
                 "testuser", {"main_profile", "experience", "education"}
             )
 
@@ -756,10 +754,10 @@ class TestScrapePersonSectionOutcomes:
         remaining sections would be another navigation each, immediately after
         being told to slow down.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 side_effect=[
@@ -768,7 +766,7 @@ class TestScrapePersonSectionOutcomes:
                 ],
             ) as mock_extract,
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 return_value=extracted(""),
@@ -778,7 +776,7 @@ class TestScrapePersonSectionOutcomes:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person("testuser", {"posts"})
+            result = await reader.read_person("testuser", {"posts"})
 
         assert "main_profile" not in result["sections"]
         assert result["section_errors"]["main_profile"]["error_type"] == "rate_limit"
@@ -794,16 +792,16 @@ class TestScrapePersonSectionOutcomes:
         a diagnostic — losing the one thing this section had to report. There
         is nothing to read a URN from on a page with no content anyway.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted(RATE_LIMITED_SECTION_TEXT),
             ),
             patch.object(
-                scraper._profile_page,
+                reader._profile_page,
                 "_extract_profile_urn",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("execution context destroyed"),
@@ -813,17 +811,17 @@ class TestScrapePersonSectionOutcomes:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person("testuser", set())
+            result = await reader.read_person("testuser", set())
 
         mock_urn.assert_not_awaited()
         assert result["section_errors"]["main_profile"]["error_type"] == "rate_limit"
 
     async def test_earlier_sections_survive_a_later_rate_limit(self, mock_page):
         """Stopping early keeps what was already gathered."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 side_effect=[
@@ -832,7 +830,7 @@ class TestScrapePersonSectionOutcomes:
                 ],
             ),
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 return_value=extracted(""),
@@ -842,7 +840,7 @@ class TestScrapePersonSectionOutcomes:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person("testuser", {"posts"})
+            result = await reader.read_person("testuser", {"posts"})
 
         assert result["sections"]["main_profile"] == "Profile text"
         assert result["section_errors"]["posts"]["error_type"] == "rate_limit"
@@ -899,7 +897,7 @@ class TestMissingContactOverlay:
     @staticmethod
     @contextmanager
     def browser(
-        scraper: PersonScraper,
+        reader: PersonReader,
         mock_page,
         pages: dict[str, dict[tuple[str, ...], list[dict]]],
         events: list[tuple[str, Any]],
@@ -927,8 +925,8 @@ class TestMissingContactOverlay:
         mock_page.evaluate = AsyncMock(side_effect=evaluate)
         diagnostic_failure = PermissionError("diagnostic directory is unwritable")
         boundaries = (
-            patch.object(scraper._navigator, "_navigate_to_page", side_effect=navigate),
-            patch.object(ScrapingSession, "delay", side_effect=delay),
+            patch.object(reader._navigator, "_navigate_to_page", side_effect=navigate),
+            patch.object(PageSession, "delay", side_effect=delay),
             patch(
                 "linkedin_mcp_server.linkedin.session.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -962,7 +960,7 @@ class TestMissingContactOverlay:
         base = "https://www.linkedin.com/in/testuser"
         overlay = f"{base}/overlay/contact-info/"
         posts = f"{base}/recent-activity/all/"
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         events: list[tuple[str, Any]] = []
         pages = {
             f"{base}/": {
@@ -985,8 +983,8 @@ class TestMissingContactOverlay:
             posts: {MAIN_ROOT: [_root("Ada posted\nEngines are neat")]},
         }
 
-        with self.browser(scraper, mock_page, pages, events):
-            result = await scraper.scrape_person(
+        with self.browser(reader, mock_page, pages, events):
+            result = await reader.read_person(
                 "testuser", {"main_profile", "contact_info", "posts"}
             )
 
@@ -1007,7 +1005,7 @@ class TestMissingContactOverlay:
     async def test_a_throttled_missing_overlay_still_stops_the_walk(self, mock_page):
         base = "https://www.linkedin.com/in/testuser"
         overlay = f"{base}/overlay/contact-info/"
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         events: list[tuple[str, Any]] = []
         pages = {
             f"{base}/": {MAIN_ROOT: [_root(PROFILE_TEXT)]},
@@ -1019,8 +1017,8 @@ class TestMissingContactOverlay:
             f"{base}/recent-activity/all/": {MAIN_ROOT: [_root("Ada posted")]},
         }
 
-        with self.browser(scraper, mock_page, pages, events):
-            result = await scraper.scrape_person(
+        with self.browser(reader, mock_page, pages, events):
+            result = await reader.read_person(
                 "testuser", {"main_profile", "contact_info", "posts"}
             )
 
@@ -1040,7 +1038,7 @@ class TestMissingContactOverlay:
         profile = "https://www.linkedin.com/in/realuser/"
         overlay = "https://www.linkedin.com/in/realuser/overlay/contact-info/"
         mock_page.url = profile
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         events: list[tuple[str, Any]] = []
         pages = {
             profile: {MAIN_ROOT: [_root(PROFILE_TEXT)]},
@@ -1050,8 +1048,8 @@ class TestMissingContactOverlay:
             },
         }
 
-        with self.browser(scraper, mock_page, pages, events, redirects={me: profile}):
-            result = await scraper.get_my_profile(sections={"contact_info"})
+        with self.browser(reader, mock_page, pages, events, redirects={me: profile}):
+            result = await reader.get_my_profile(sections={"contact_info"})
 
         assert events == [("goto", me), ("delay", 2.0), ("goto", overlay)]
         assert result["url"] == profile
@@ -1059,11 +1057,11 @@ class TestMissingContactOverlay:
         assert result["section_errors"] == {"contact_info": _missing_root(overlay)}
 
 
-class TestScrapePersonCallbacks:
-    """Test that scrape_person invokes callbacks at each stage."""
+class TestReadPersonCallbacks:
+    """Test that read_person invokes callbacks at each stage."""
 
-    async def test_scrape_person_calls_callbacks(self, mock_page):
-        scraper = _scraper(mock_page)
+    async def test_read_person_calls_callbacks(self, mock_page):
+        reader = _reader(mock_page)
         cb = MagicMock(spec=ProgressCallback)
         cb.on_start = AsyncMock()
         cb.on_progress = AsyncMock()
@@ -1072,13 +1070,13 @@ class TestScrapePersonCallbacks:
 
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
             ),
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 return_value=extracted("overlay text"),
@@ -1088,7 +1086,7 @@ class TestScrapePersonCallbacks:
                 new_callable=AsyncMock,
             ),
         ):
-            await scraper.scrape_person(
+            await reader.read_person(
                 "testuser", {"experience", "education"}, callbacks=cb
             )
 
@@ -1110,12 +1108,12 @@ class TestScrapePersonCallbacks:
         assert cb.on_complete.call_args[0][0] == "person profile"
         cb.on_error.assert_not_awaited()
 
-    async def test_scrape_person_no_callbacks_by_default(self, mock_page):
-        """Without callbacks, scrape_person works identically to before."""
-        scraper = _scraper(mock_page)
+    async def test_read_person_no_callbacks_by_default(self, mock_page):
+        """Without callbacks, read_person works identically to before."""
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
@@ -1125,12 +1123,12 @@ class TestScrapePersonCallbacks:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person("testuser", {"main_profile"})
+            result = await reader.read_person("testuser", {"main_profile"})
 
         assert "main_profile" in result["sections"]
 
-    async def test_scrape_person_calls_on_error(self, mock_page):
-        scraper = _scraper(mock_page)
+    async def test_read_person_calls_on_error(self, mock_page):
+        reader = _reader(mock_page)
         cb = MagicMock(spec=ProgressCallback)
         cb.on_start = AsyncMock()
         cb.on_progress = AsyncMock()
@@ -1139,62 +1137,62 @@ class TestScrapePersonCallbacks:
 
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
-                side_effect=LinkedInScraperException("boom"),
+                side_effect=LinkedInOperationError("boom"),
             ),
             patch(
                 "linkedin_mcp_server.linkedin.session.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
-            with pytest.raises(LinkedInScraperException):
-                await scraper.scrape_person("testuser", {"main_profile"}, callbacks=cb)
+            with pytest.raises(LinkedInOperationError):
+                await reader.read_person("testuser", {"main_profile"}, callbacks=cb)
 
         cb.on_start.assert_awaited_once()
         cb.on_error.assert_awaited_once()
         error_arg = cb.on_error.call_args[0][0]
-        assert isinstance(error_arg, LinkedInScraperException)
+        assert isinstance(error_arg, LinkedInOperationError)
         assert "boom" in str(error_arg)
         cb.on_complete.assert_not_awaited()
 
 
 class TestMainProfileAlreadyLoaded:
-    """Reuse path for scrape_person when get_my_profile already loaded the page."""
+    """Reuse path for read_person when get_my_profile already loaded the page."""
 
     async def test_get_my_profile_passes_already_loaded_flag(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         mock_page.url = "https://www.linkedin.com/in/realuser/"
         with (
             patch.object(
                 PageNavigator, "_navigate_to_page", new_callable=AsyncMock
             ) as nav,
             patch.object(
-                scraper,
-                "scrape_person",
+                reader,
+                "read_person",
                 new_callable=AsyncMock,
                 return_value={"url": "...", "sections": {}},
-            ) as scrape,
+            ) as read_person,
         ):
-            await scraper.get_my_profile(sections={"main_profile"})
+            await reader.get_my_profile(sections={"main_profile"})
 
         nav.assert_awaited_once_with("https://www.linkedin.com/in/me/")
-        assert scrape.await_count == 1
-        assert scrape.call_args.kwargs["main_profile_already_loaded"] is True
+        assert read_person.await_count == 1
+        assert read_person.call_args.kwargs["main_profile_already_loaded"] is True
 
-    async def test_scrape_person_already_loaded_skips_navigation(self, mock_page):
-        scraper = _scraper(mock_page)
+    async def test_read_person_already_loaded_skips_navigation(self, mock_page):
+        reader = _reader(mock_page)
         mock_page.url = "https://www.linkedin.com/in/foo/"
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_loaded_section",
                 new_callable=AsyncMock,
                 return_value=extracted("reused"),
             ) as loaded,
             patch.object(
-                scraper._capture, "capture", new_callable=AsyncMock
+                reader._capture, "capture", new_callable=AsyncMock
             ) as extract_page,
             patch.object(
                 PageNavigator, "_navigate_to_page", new_callable=AsyncMock
@@ -1204,7 +1202,7 @@ class TestMainProfileAlreadyLoaded:
                 new_callable=AsyncMock,
             ),
         ):
-            await scraper.scrape_person(
+            await reader.read_person(
                 "foo", {"main_profile"}, main_profile_already_loaded=True
             )
 
@@ -1212,20 +1210,18 @@ class TestMainProfileAlreadyLoaded:
         extract_page.assert_not_awaited()
         nav.assert_not_awaited()
 
-    async def test_scrape_person_already_loaded_url_mismatch_falls_back(
-        self, mock_page
-    ):
-        scraper = _scraper(mock_page)
+    async def test_read_person_already_loaded_url_mismatch_falls_back(self, mock_page):
+        reader = _reader(mock_page)
         mock_page.url = "https://www.linkedin.com/feed/"
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("fallback"),
             ) as extract_page,
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_loaded_section",
                 new_callable=AsyncMock,
             ) as loaded,
@@ -1234,26 +1230,26 @@ class TestMainProfileAlreadyLoaded:
                 new_callable=AsyncMock,
             ),
         ):
-            await scraper.scrape_person(
+            await reader.read_person(
                 "foo", {"main_profile"}, main_profile_already_loaded=True
             )
 
         extract_page.assert_awaited_once()
         loaded.assert_not_awaited()
 
-    async def test_scrape_person_already_loaded_rate_limit_falls_back(self, mock_page):
-        scraper = _scraper(mock_page)
+    async def test_read_person_already_loaded_rate_limit_falls_back(self, mock_page):
+        reader = _reader(mock_page)
         mock_page.url = "https://www.linkedin.com/in/foo/"
 
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_loaded_section",
                 new_callable=AsyncMock,
                 return_value=extracted(RATE_LIMITED_SECTION_TEXT),
             ) as loaded,
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("retry succeeded"),
@@ -1263,7 +1259,7 @@ class TestMainProfileAlreadyLoaded:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person(
+            result = await reader.read_person(
                 "foo", {"main_profile"}, main_profile_already_loaded=True
             )
 
@@ -1272,20 +1268,20 @@ class TestMainProfileAlreadyLoaded:
         assert result["sections"]["main_profile"] == "retry succeeded"
 
 
-class TestScrapePersonProfileUrn:
+class TestReadPersonProfileUrn:
     async def test_includes_profile_urn_in_result_when_found(self, mock_page):
-        """scrape_person includes profile_urn in result when _extract_profile_urn returns a value."""
+        """read_person includes profile_urn in result when _extract_profile_urn returns a value."""
         urn = "ACoAAB1IelEBLEkqTkNbZ-a1D8mq5R-6C1ihSEk"
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("profile text"),
             ),
             patch.object(
-                scraper._profile_page,
+                reader._profile_page,
                 "_extract_profile_urn",
                 new_callable=AsyncMock,
                 return_value=urn,
@@ -1295,22 +1291,22 @@ class TestScrapePersonProfileUrn:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person("testuser", {"main_profile"})
+            result = await reader.read_person("testuser", {"main_profile"})
 
         assert result["profile_urn"] == urn
 
     async def test_omits_profile_urn_when_not_found(self, mock_page):
-        """scrape_person omits profile_urn key when _extract_profile_urn returns None."""
-        scraper = _scraper(mock_page)
+        """read_person omits profile_urn key when _extract_profile_urn returns None."""
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("profile text"),
             ),
             patch.object(
-                scraper._profile_page,
+                reader._profile_page,
                 "_extract_profile_urn",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -1320,7 +1316,7 @@ class TestScrapePersonProfileUrn:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_person("testuser", {"main_profile"})
+            result = await reader.read_person("testuser", {"main_profile"})
 
         assert "profile_urn" not in result
 
@@ -1335,10 +1331,10 @@ class TestGetMyProfileAlias:
         an instruction to call itself.
         """
         mock_page.url = "https://www.linkedin.com/in/me/"
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("profile text"),
@@ -1349,21 +1345,21 @@ class TestGetMyProfileAlias:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_my_profile()
+            result = await reader.get_my_profile()
 
         # The alias survives normalization, and because the page is already on
-        # it, the scrape reuses the loaded document instead of navigating again.
+        # it, the read reuses the loaded document instead of navigating again.
         assert result["url"] == "https://www.linkedin.com/in/me/"
         assert "main_profile" in result["sections"]
         mock_extract.assert_not_called()
 
     async def test_refuses_the_alias_from_an_ordinary_caller(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture, "capture", new_callable=AsyncMock
+            reader._capture, "capture", new_callable=AsyncMock
         ) as mock_extract:
             with pytest.raises(InvalidReferenceError):
-                await scraper.scrape_person("me", {"main_profile"})
+                await reader.read_person("me", {"main_profile"})
         mock_extract.assert_not_called()
 
 
@@ -1387,7 +1383,7 @@ class TestGetSidebarProfiles:
         )
         mock_page.url = "https://www.linkedin.com/in/testuser/"
 
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
             patch(
@@ -1404,7 +1400,7 @@ class TestGetSidebarProfiles:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_sidebar_profiles("testuser")
+            result = await reader.get_sidebar_profiles("testuser")
 
         assert result["url"] == "https://www.linkedin.com/in/testuser/"
         mpfy = result["sidebar_profiles"]["more_profiles_for_you"]
@@ -1434,10 +1430,10 @@ class TestGetSidebarProfiles:
         async def delay(seconds):
             events.append(("delay", seconds))
 
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
-            patch.object(scraper._navigator, "_navigate_to_page", side_effect=navigate),
-            patch.object(ScrapingSession, "delay", side_effect=delay),
+            patch.object(reader._navigator, "_navigate_to_page", side_effect=navigate),
+            patch.object(PageSession, "delay", side_effect=delay),
             patch(
                 "linkedin_mcp_server.linkedin.session.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -1448,7 +1444,7 @@ class TestGetSidebarProfiles:
                 return_value=False,
             ),
         ):
-            await scraper.get_sidebar_profiles("testuser")
+            await reader.get_sidebar_profiles("testuser")
 
         assert events == [
             ("navigate", "https://www.linkedin.com/in/testuser/"),
@@ -1478,10 +1474,10 @@ class TestGetSidebarProfiles:
         async def delay(seconds):
             events.append(("delay", seconds))
 
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
-            patch.object(scraper._navigator, "_navigate_to_page", side_effect=navigate),
-            patch.object(ScrapingSession, "delay", side_effect=delay),
+            patch.object(reader._navigator, "_navigate_to_page", side_effect=navigate),
+            patch.object(PageSession, "delay", side_effect=delay),
             patch(
                 "linkedin_mcp_server.linkedin.session.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -1492,7 +1488,7 @@ class TestGetSidebarProfiles:
                 return_value=False,
             ),
         ):
-            await scraper.get_sidebar_profiles("testuser")
+            await reader.get_sidebar_profiles("testuser")
 
         assert events == [
             ("navigate", "https://www.linkedin.com/in/testuser/"),
@@ -1524,10 +1520,10 @@ class TestGetSidebarProfiles:
         async def delay(seconds):
             events.append(("delay", seconds))
 
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
-            patch.object(scraper._navigator, "_navigate_to_page", side_effect=navigate),
-            patch.object(ScrapingSession, "delay", side_effect=delay),
+            patch.object(reader._navigator, "_navigate_to_page", side_effect=navigate),
+            patch.object(PageSession, "delay", side_effect=delay),
             patch(
                 "linkedin_mcp_server.linkedin.session.detect_rate_limit",
                 new_callable=AsyncMock,
@@ -1538,7 +1534,7 @@ class TestGetSidebarProfiles:
                 return_value=False,
             ),
         ):
-            await scraper.get_sidebar_profiles("testuser")
+            await reader.get_sidebar_profiles("testuser")
 
         assert events == [
             ("navigate", "https://www.linkedin.com/in/testuser/"),
@@ -1562,10 +1558,10 @@ class TestGetSidebarProfiles:
             ),
         ],
     )
-    async def test_scraper_exception_from_show_all_propagates(
+    async def test_operation_error_from_show_all_propagates(
         self,
         mock_page,
-        error_type: type[LinkedInScraperException],
+        error_type: type[LinkedInOperationError],
         message: str,
     ):
         sidebar_js_result = {
@@ -1577,7 +1573,7 @@ class TestGetSidebarProfiles:
         mock_page.evaluate = AsyncMock(return_value=sidebar_js_result)
         mock_page.url = "https://www.linkedin.com/in/testuser/"
 
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
                 PageNavigator,
@@ -1596,7 +1592,7 @@ class TestGetSidebarProfiles:
             ),
             pytest.raises(error_type, match=message),
         ):
-            await scraper.get_sidebar_profiles("testuser")
+            await reader.get_sidebar_profiles("testuser")
 
     async def test_raw_exception_from_show_all_keeps_inline_profiles(self, mock_page):
         show_all_url = "https://www.linkedin.com/search/results/people/?keywords=test"
@@ -1607,7 +1603,7 @@ class TestGetSidebarProfiles:
         mock_page.evaluate = AsyncMock(return_value=sidebar_js_result)
         mock_page.url = "https://www.linkedin.com/in/testuser/"
 
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
                 PageNavigator,
@@ -1626,7 +1622,7 @@ class TestGetSidebarProfiles:
             ),
             patch.object(person_module.logger, "debug") as debug_mock,
         ):
-            result = await scraper.get_sidebar_profiles("testuser")
+            result = await reader.get_sidebar_profiles("testuser")
 
         assert result == {
             "url": "https://www.linkedin.com/in/testuser/",
@@ -1649,7 +1645,7 @@ class TestGetSidebarProfiles:
         mock_page.evaluate = AsyncMock(return_value=sidebar_js_result)
         mock_page.url = "https://www.linkedin.com/in/testuser/"
 
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         navigate_mock = AsyncMock()
         with (
             patch.object(PageNavigator, "_navigate_to_page", navigate_mock),
@@ -1663,7 +1659,7 @@ class TestGetSidebarProfiles:
                 return_value=False,
             ),
         ):
-            result = await scraper.get_sidebar_profiles("testuser")
+            result = await reader.get_sidebar_profiles("testuser")
 
         navigate_mock.assert_awaited_once()  # only the initial profile navigation
         mock_page.evaluate.assert_awaited_once()  # no show_all JS call
@@ -1688,7 +1684,7 @@ class TestGetSidebarProfiles:
             if navigate_call_count >= 2:
                 mock_page.url = "https://www.linkedin.com/premium/grow-your-network/"
 
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(PageNavigator, "_navigate_to_page", side_effect=fake_navigate),
             patch(
@@ -1705,7 +1701,7 @@ class TestGetSidebarProfiles:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.get_sidebar_profiles("testuser")
+            result = await reader.get_sidebar_profiles("testuser")
 
         mock_page.evaluate.assert_awaited_once()  # sidebar JS only, no show_all expansion
         assert result["sidebar_profiles"]["more_profiles_for_you"] == ["/in/alice/"]
@@ -1717,7 +1713,7 @@ class TestGetSidebarProfiles:
         mock_page.evaluate = AsyncMock(return_value={"sections": {}, "showAllUrls": {}})
         mock_page.url = "https://www.linkedin.com/in/testuser/"
 
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
             patch(
@@ -1730,7 +1726,7 @@ class TestGetSidebarProfiles:
                 return_value=False,
             ),
         ):
-            result = await scraper.get_sidebar_profiles("testuser")
+            result = await reader.get_sidebar_profiles("testuser")
 
         assert result == {
             "url": "https://www.linkedin.com/in/testuser/",
@@ -1795,9 +1791,9 @@ class TestSidebarProgramText:
 
 class TestSearchPeople:
     async def test_search_people_omits_orphaned_references(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted(
@@ -1811,92 +1807,92 @@ class TestSearchPeople:
                 ],
             ),
         ) as capture:
-            result = await scraper.search_people("python")
+            result = await reader.search_people("python")
 
         assert capture.call_args.kwargs["plan"].mode is CaptureMode.SEARCH_RESULTS
         assert result["sections"] == {}
         assert "references" not in result
 
     async def test_search_people_network_filter_first_degree(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted("Jane Doe"),
         ):
-            result = await scraper.search_people("engineer", network=["F"])
+            result = await reader.search_people("engineer", network=["F"])
 
         assert "network=%5B%22F%22%5D" in result["url"]
 
     async def test_search_people_network_filter_multi_degree(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted("Jane Doe"),
         ):
-            result = await scraper.search_people("engineer", network=["F", "S"])
+            result = await reader.search_people("engineer", network=["F", "S"])
 
         assert "network=%5B%22F%22%2C%22S%22%5D" in result["url"]
 
     async def test_search_people_current_company_filter(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted("Jane Doe"),
         ):
-            result = await scraper.search_people("engineer", current_company="1115")
+            result = await reader.search_people("engineer", current_company="1115")
 
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
 
     async def test_search_people_invalid_network_token_raises(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with pytest.raises(ValueError, match="Invalid network token"):
-            await scraper.search_people("engineer", network=["X"])
+            await reader.search_people("engineer", network=["X"])
 
         mock_page.goto.assert_not_awaited()
 
     async def test_search_people_rejects_plain_company_name(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with pytest.raises(ValueError, match="must be a numeric"):
-            await scraper.search_people("engineer", current_company="SAP")
+            await reader.search_people("engineer", current_company="SAP")
 
         mock_page.goto.assert_not_awaited()
 
     async def test_search_people_rejects_unicode_digit_company(self, mock_page):
         """LinkedIn URN ids are ASCII decimal; reject Unicode digits even
         though ``str.isdigit()`` would accept them."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with pytest.raises(ValueError, match="must be a numeric"):
-            await scraper.search_people("engineer", current_company="١١١٥")
+            await reader.search_people("engineer", current_company="١١١٥")
 
         mock_page.goto.assert_not_awaited()
 
     async def test_search_people_empty_current_company_is_noop(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted("Jane Doe"),
         ):
-            result = await scraper.search_people("engineer", current_company="")
+            result = await reader.search_people("engineer", current_company="")
 
         assert "currentCompany" not in result["url"]
 
     async def test_search_people_combines_all_filters(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted("Jane Doe"),
         ):
-            result = await scraper.search_people(
+            result = await reader.search_people(
                 "engineer",
                 location="Seattle",
                 network=["F"],

@@ -5,11 +5,11 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 from linkedin_mcp_server.linkedin.content import PageContentReader
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 
 
 def _reader(page) -> PageContentReader:
-    return PageContentReader(ScrapingSession(page))
+    return PageContentReader(PageSession(page))
 
 
 async def test_root_content_filters_empty_href_before_resolution(mock_page):

@@ -1,1 +1,1 @@
-"""Strict support doubles for scraping tests."""
+"""Strict support doubles for linkedin package tests."""

@@ -344,7 +344,7 @@ class FrontendAuthRepairMiddleware(Middleware):
         # the replay each stay inside one while their sum stays inside nothing.
         # Measured shape: a sign-in finishing near the end of the wait, followed
         # by a replay taking a full budget of its own, put the client past its
-        # deadline with the answer already in hand. An abandoned scrape costs a
+        # deadline with the answer already in hand. An abandoned read costs a
         # wasted page load and nothing else.
         remaining = _what_is_left_of_this_call(
             self._tool_timeout, time.monotonic() - began

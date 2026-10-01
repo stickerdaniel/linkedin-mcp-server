@@ -1,4 +1,4 @@
-"""Raw page content reads shared by every scraping workflow."""
+"""Raw page content reads shared by every page workflow."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import logging
 import re
 from typing import Any
 
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.linkedin.text import strip_linkedin_noise
 
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class PageContentReader:
     """Read innerText and raw anchor metadata off the bound page."""
 
-    def __init__(self, session: ScrapingSession):
+    def __init__(self, session: PageSession):
         self._session = session
 
     async def get_page_text(self) -> str:

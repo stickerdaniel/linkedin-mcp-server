@@ -66,7 +66,7 @@ For every open PR, on top of its linked-issue score:
 
 - **Mergeability**: `mergeable: MERGEABLE` + `mergeStateStatus: CLEAN` + `statusCheckRollup` all green → ✓. Otherwise note what blocks (CI red, conflicts, requested changes, draft).
 - **Scope**: `additions + deletions` and `changedFiles`. Flag scope creep. Cross-check `gh pr diff <N> --name-only`.
-- **Locale + DOM safety audit**: do `gh pr diff <N> | grep -E "['\"](Connect|Follow|Message|Pending|1st|2nd|3rd)['\"]"` (matches both Python-style `'Connect'` and JS/Go-style `"Connect"`). Any string match on locale-dependent button text is a red flag per `AGENTS.md` scraping rules. Also flag class-name selectors (`.entity-result__item`). Minimal generic selectors only.
+- **Locale + DOM safety audit**: do `gh pr diff <N> | grep -E "['\"](Connect|Follow|Message|Pending|1st|2nd|3rd)['\"]"` (matches both Python-style `'Connect'` and JS/Go-style `"Connect"`). Any string match on locale-dependent button text is a red flag per the `AGENTS.md` LinkedIn Page Rules. Also flag class-name selectors (`.entity-result__item`). Minimal generic selectors only.
 - **One-section-one-navigation**: if the PR touches `PERSON_SECTIONS` / `COMPANY_SECTIONS` in `linkedin/fields.py`, check that each entry still maps to exactly one URL.
 - **Test coverage**: does the diff add coverage beside the canonical owner from `docs/linkedin-architecture.md`? Most owners use `tests/linkedin/test_<owner>.py`; `fields`, `identifiers`, and `link_metadata` use `tests/test_fields.py`, `tests/test_identifiers.py`, and `tests/test_link_metadata.py`. Facade-only changes belong in `tests/linkedin/test_facade_*.py`. Mandatory for new tool surfaces, strongly preferred for bug fixes.
 - **Contributor audit**:
@@ -76,7 +76,7 @@ For every open PR, on top of its linked-issue score:
   ```
   Compute: prior merged PRs in this repo, average time-to-merge, ratio of merged-vs-closed-unmerged. First-time contributors are not penalised. A contributor whose previous PRs were all closed-unmerged with maintainer pushback is a yellow flag on a large diff. Cite specific PR numbers.
 
-For very large or architecturally-loaded PRs (changes spanning canonical scraping owners or the generated graph in `docs/linkedin-architecture.md`, `client/`, or session/auth code), spawn an `Explore` subagent to deep-dive how the PR integrates with the codebase and report integration risk. Treat `linkedin/extractor.py` as the thin facade, not the default workflow owner. Use this sparingly: only for PRs over ~200 LOC or PRs touching core paths.
+For very large or architecturally-loaded PRs (changes spanning canonical page workflow owners or the generated graph in `docs/linkedin-architecture.md`, `client/`, or session/auth code), spawn an `Explore` subagent to deep-dive how the PR integrates with the codebase and report integration risk. Treat `linkedin/extractor.py` as the thin facade, not the default workflow owner. Use this sparingly: only for PRs over ~200 LOC or PRs touching core paths.
 
 ## 5. Rank and report
 
@@ -112,7 +112,7 @@ End with one paragraph naming the next concrete action, and which downstream ski
 
 ## Non-negotiables
 
-- Read-only. Do not check out, start the MCP server, run scrapers, apply labels, comment, close, or assign.
+- Read-only. Do not check out, start the MCP server, call its LinkedIn tools, apply labels, comment, close, or assign.
 - Cite evidence inline (PR/issue numbers, file paths, contributor PR history).
 - Locale-dependence and DOM-class-selector usage are hard fails.
 - Never recommend "merge as-is" for a PR that has not passed the locale/test/scope checks.

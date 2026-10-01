@@ -16,12 +16,12 @@ import sys
 import pytest
 
 from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.linkedin.company import CompanyScraper
+from linkedin_mcp_server.linkedin.company import CompanyReader
 from linkedin_mcp_server.linkedin.conversations import ConversationReader
 from linkedin_mcp_server.linkedin.fields import COMPANY_SECTIONS, PERSON_SECTIONS
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.person import PersonScraper
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.person import PersonReader
+from linkedin_mcp_server.linkedin.session import PageSession
 
 from . import policy_scenarios
 from .policy_scenarios import (
@@ -107,7 +107,7 @@ async def test_full_auth_boundary_propagates_a_detected_barrier():
     recorder = TraceRecorder("full-auth-barrier", {"boundary.auth"})
     clock = FakeClock(recorder)
     page = ScriptedPage(recorder)
-    navigator = PageNavigator(ScrapingSession(cast(Any, page)))
+    navigator = PageNavigator(PageSession(cast(Any, page)))
 
     async with boundaries(recorder, clock, auth_result="account picker"):
         with pytest.raises(AuthenticationError, match="interactive re-authentication"):
@@ -183,11 +183,11 @@ async def test_facade_results_keep_raw_values_and_optional_key_shape():
     assert person["references"]["experience"][0]["text"] == "Employer 0"
 
 
-async def test_scrape_job_traces_keep_success_and_error_results_separate():
+async def test_read_job_traces_keep_success_and_error_results_separate():
     traces = await build_policy_traces()
-    successful_job = traces["scrape-job.json"]["result"]
-    failed_job = traces["scrape-job-error.json"]["result"]
-    headless_job = traces["scrape-job-description-missing.json"]["result"]
+    successful_job = traces["read-job.json"]["result"]
+    failed_job = traces["read-job-error.json"]["result"]
+    headless_job = traces["read-job-description-missing.json"]["result"]
 
     assert successful_job["sections"] == {
         "job_posting": "About the job\nResult content"
@@ -212,7 +212,7 @@ async def test_scrape_job_traces_keep_success_and_error_results_separate():
 
 
 async def test_facade_trace_detects_section_text_corruption():
-    original = CompanyScraper.search_companies
+    original = CompanyReader.search_companies
 
     @wraps(original)
     async def corrupt_sections(self: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -220,14 +220,14 @@ async def test_facade_trace_detects_section_text_corruption():
         result["sections"] = {name: "corrupted text" for name in result["sections"]}
         return result
 
-    with patch.object(CompanyScraper, "search_companies", corrupt_sections):
+    with patch.object(CompanyReader, "search_companies", corrupt_sections):
         mutated = await build_policy_traces()
 
     assert "corrupted text" in policy_trace_diff(mutated)
 
 
 async def test_facade_trace_detects_lost_references():
-    original = PersonScraper.scrape_person
+    original = PersonReader.read_person
     removed: list[dict[str, Any]] = []
 
     @wraps(original)
@@ -238,7 +238,7 @@ async def test_facade_trace_detects_lost_references():
             removed.append(references)
         return result
 
-    with patch.object(PersonScraper, "scrape_person", drop_references):
+    with patch.object(PersonReader, "read_person", drop_references):
         mutated = await build_policy_traces()
 
     assert removed
@@ -246,7 +246,7 @@ async def test_facade_trace_detects_lost_references():
 
 
 async def test_facade_trace_detects_optional_key_drift():
-    original = CompanyScraper.search_companies
+    original = CompanyReader.search_companies
 
     @wraps(original)
     async def add_optional_key(self: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -254,7 +254,7 @@ async def test_facade_trace_detects_optional_key_drift():
         result["section_errors"] = {}
         return result
 
-    with patch.object(CompanyScraper, "search_companies", add_optional_key):
+    with patch.object(CompanyReader, "search_companies", add_optional_key):
         mutated = await build_policy_traces()
 
     assert '+    "section_errors": {}' in policy_trace_diff(mutated)
