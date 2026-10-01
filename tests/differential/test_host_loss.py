@@ -976,6 +976,31 @@ def test_windows_records_the_lease_unobserved_and_needs_no_guardian():
     assert any("guardian is not shown to drain" in p for p in problems)
 
 
+def test_a_hold_that_let_go_past_its_deadline_is_invalid_even_when_served():
+    """The release was asked for on time, but the origin's handler resumed
+    late: the page was served 25 s after it entered. A ``served`` label does
+    not make that hold one the row declared."""
+    record = _valid(ROW_H_R4_EOF)
+    _gate(record, released_monotonic_ns=(4_000 + 25_000) * MS)
+    problems = loss_problems(record, daemon=True)
+    late = [p for p in problems if "past the gate's" in p]
+    assert late and all(p.startswith(INVALID) for p in late), problems
+
+
+def test_a_late_loss_leaves_what_follows_the_release_unjudged():
+    """The loss came 14.9 s after the entry and the page was served 0.1 s
+    later: an owner may still be inside its expiry window, so the education
+    page two seconds after the loss is no finding, only invalid evidence."""
+    record = _valid(ROW_H_R4_EOF)
+    lost = 4_000 + 14_900
+    record["loss"]["monotonic_ns"] = lost * MS
+    record["host"]["lost_ns"] = lost * MS
+    _add(record, _NEXT, lost + 2_100)
+    problems = loss_problems(record, daemon=True)
+    assert any("inside an owner's" in p for p in problems), problems
+    assert all(p.startswith(INVALID) for p in problems), problems
+
+
 def test_windows_counts_a_venv_launcher_and_its_gate_as_the_owners_one_start():
     """The shape measured on windows-latest: a venv launcher of the release
     gate, the interpreter it started with the same command, and the owner the
@@ -1290,6 +1315,7 @@ class _LossScene(_CalibrationScene):
         for name, value in (
             ("RELEASE_SECONDS", 0.5),
             ("RELEASE_TOLERANCE_SECONDS", 1.0),
+            ("LOSS_TO_RELEASE_SECONDS", 0.2),
             ("CONTINUATION_SECONDS", 0.5),
             ("SECOND_SEND_SECONDS", 0.1),
         ):

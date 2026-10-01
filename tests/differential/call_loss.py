@@ -521,6 +521,13 @@ RELEASE_SECONDS = 15.0
 #: How late the release may be asked for before the evidence is invalid:
 #: with it, still three seconds inside the gate's deadline.
 RELEASE_TOLERANCE_SECONDS = 2.0
+#: The least time, from the loss to the hold actually letting go, for a read
+#: going on after it to be a finding: the contract's objective as an owner
+#: meets it at its latest, as in ``RELEASE_SECONDS``. A release scheduled from
+#: the entry is late enough only if the loss came promptly after the entry; a
+#: loss the harness made late leaves an owner still inside its expiry window
+#: when the page comes free, so what follows says nothing.
+LOSS_TO_RELEASE_SECONDS = 12.1
 #: How long the origin is watched after the release for the read going on.
 #: Had it gone on, the education page would follow the released one after
 #: the product's ``NAV_DELAY`` (2 s) and the experience page's capture.
@@ -850,6 +857,21 @@ def loss_reading(record: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _inside_expiry_window(record: Mapping[str, Any], lost: int | None) -> bool:
+    """Whether the held page was served to a browser still there sooner than
+    ``LOSS_TO_RELEASE_SECONDS`` after the loss. A hold that let go because the
+    browser left (``PEER_GONE``) leaves nothing to read on from."""
+    gate = _gate(record, person_path(LOSS_USERNAME, HELD_SECTION)) or {}
+    hold_ended = _ns(gate.get("released_monotonic_ns"))
+    return (
+        gate.get("terminal") == SERVED
+        and lost is not None
+        and hold_ended is not None
+        and hold_ended >= lost
+        and (hold_ended - lost) / 1e9 < LOSS_TO_RELEASE_SECONDS
+    )
+
+
 def _loss_invalid(record: Mapping[str, Any], case: LossCase) -> list[str]:
     """Why the record does not measure the loss it declares: each reason
     starts with ``INVALID`` and is never a product finding."""
@@ -886,6 +908,25 @@ def _loss_invalid(record: Mapping[str, Any], case: LossCase) -> list[str]:
         hold_ended = _ns(gate.get("released_monotonic_ns"))
         if lost is not None and hold_ended is not None and hold_ended < lost:
             found.append("the hold had ended before the loss")
+        if hold_ended is None:
+            found.append("the hold's end has no time")
+        else:
+            # When the hold let go, not when its release was asked for: a
+            # handler resumed late still records ``served``.
+            held = (hold_ended - entered) / 1e9
+            if held > GATE_DEADLINE_SECONDS:
+                found.append(
+                    f"the hold let go {held:.1f}s after its entry, past the "
+                    f"gate's {GATE_DEADLINE_SECONDS}s deadline"
+                )
+            if _inside_expiry_window(record, lost):
+                assert lost is not None
+                after = (hold_ended - lost) / 1e9
+                found.append(
+                    f"the hold let go {after:.1f}s after the loss, inside an "
+                    f"owner's {LOSS_TO_RELEASE_SECONDS}s expiry window: what "
+                    f"followed says nothing of the read going on"
+                )
         terminal = gate.get("terminal")
         if terminal == DEADLINE:
             found.append("the hold ran out its deadline before the release")
@@ -1066,18 +1107,21 @@ def _loss_findings(
         found.append(
             f"the host records the loss {host.get('lost')!r}, not {case.termination}"
         )
+    # Inside an owner's expiry window the read may still go on; that case is
+    # invalid evidence (``_loss_invalid``), so nothing after it is judged.
+    judged = not _inside_expiry_window(record, lost)
     next_page = {person_path(LOSS_USERNAME, NEXT_SECTION)}
     _, after, unknown = _counts(_requests(record, next_page), lost)
-    if after or unknown:
+    if judged and (after or unknown):
         found.append(
             f"the read went on after the loss: the {NEXT_SECTION} page was "
             f"requested {after + unknown} times after it"
         )
     held_page = {person_path(LOSS_USERNAME, HELD_SECTION)}
     _, after, unknown = _counts(_requests(record, held_page), lost)
-    if after or unknown:
+    if judged and (after or unknown):
         found.append("the held page was asked for again after the loss")
-    if case.second:
+    if judged and case.second:
         second_pages = _person_paths(SECOND_USERNAME)
         _, after, unknown = _counts(_requests(record, second_pages), lost)
         if after or unknown:
