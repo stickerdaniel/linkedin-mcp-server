@@ -80,7 +80,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from differential import lease_probe
-from differential.host_comparison import host_problems, same_lifetime
+from differential.host_comparison import (
+    _of_launch,
+    host_problems,
+    owner_launches,
+    same_lifetime,
+)
 from differential.synthetic_origin import (
     DEADLINE,
     GATE_DEADLINE_SECONDS,
@@ -703,7 +708,6 @@ async def loss_script(ctx: RowContext) -> None:
             record["owner_after_fresh"] = await seams.owner_reading(
                 "after the fresh read"
             )
-            record["owner_starts"] = seams.owner_starts()
             lines = [line for line in seams.owner_log() if EXPIRY_LINE in line]
             record["expiry_lines"] = len(lines)
             record["cause"] = CAUSE_EXPIRY if lines else CAUSE_UNOBSERVED
@@ -766,8 +770,32 @@ def _owner_kept(record: Mapping[str, Any]) -> bool:
             and seen.get("instance_id") == identified[2]
         ):
             return False
-    starts = _sequence(record.get("owner_starts"))
-    return bool(starts) and all(same_lifetime(s, identified[:2]) for s in starts)
+    return _other_launches(record, identified[:2]) == []
+
+
+def _other_launches(record: Mapping[str, Any], owner: Sequence[Any]) -> list | None:
+    """The owner launches the row started besides *owner*'s, or None unread.
+
+    Counted from the lifetimes recorded after the watcher stopped
+    (``owner_processes``, ``gate_processes``) the way ``host_comparison``
+    counts them: on Windows a venv launcher and the interpreter it started
+    with the same command are one launch, and *owner* may be either. A second
+    release gate is a second start attempted, even one that never ran.
+    """
+    owners = record.get("owner_processes")
+    gates = record.get("gate_processes")
+    if not isinstance(owners, list) or not isinstance(gates, list):
+        return None
+    windows = str(record.get("platform", "")).startswith("win")
+    launches = owner_launches(owners, windows=windows)
+    others = [launch for launch in launches if not _of_launch(owner, launch, owners)]
+    if len(launches) == len(others):
+        # The identified owner is not among the launches at all.
+        others.append(["identified owner not launched by the row", *owner])
+    gate_launches = owner_launches(gates, windows=windows)
+    if len(gate_launches) > 1:
+        others += [["release gate", *launch] for launch in gate_launches[1:]]
+    return others
 
 
 def loss_reading(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -997,15 +1025,14 @@ def _hot_reuse_findings(record: Mapping[str, Any]) -> list[str]:
                 f"instance {seen.get('instance_id')!r}, not the identified "
                 f"{list(identified)}; hot reuse of the same owner is not shown"
             )
-    starts = _sequence(record.get("owner_starts"))
-    successors = [start for start in starts if not same_lifetime(start, identified[:2])]
-    if successors:
+    successors = _other_launches(record, identified[:2])
+    if successors is None:
+        found.append("the row's owner and release gate lifetimes were not recorded")
+    elif successors:
         found.append(
             f"the row started another owner, recorded apart as a successor: "
             f"{successors}; hot reuse of the same owner is not shown"
         )
-    elif not starts:
-        found.append("the watcher's owner starts were not read")
     lost = _ns(_mapping(record.get("loss")).get("monotonic_ns"))
     fresh_call = _mapping(_mapping(record.get("fresh")).get("call"))
     began = _ns(fresh_call.get("began_monotonic_ns"))

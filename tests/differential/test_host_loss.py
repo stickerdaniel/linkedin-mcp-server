@@ -270,7 +270,30 @@ async def test_a_stub_host_refuses_a_phase_it_does_not_run(tmp_path):
 
 # --- The verdict --------------------------------------------------------------------
 
-_OWNER = [4242, 1000.5, "instance-a"]
+_OWNER_PID, _OWNER_START = 4242, 1000.5
+_OWNER = [_OWNER_PID, _OWNER_START, "instance-a"]
+
+
+def _owner_lifetime(
+    pid: int,
+    start: float,
+    *,
+    ppid: int = 1,
+    digest: str = "owner",
+    first: float | None = None,
+    last: float | None = None,
+) -> list:
+    """One lifetime as ``harness.launch_lifetimes`` records it: pid, start,
+    ppid, command digest, exit sample, first sample, last read."""
+    return [
+        pid,
+        start,
+        ppid,
+        digest,
+        None,
+        start + 0.1 if first is None else first,
+        start + 100.0 if last is None else last,
+    ]
 
 
 def _request(path: str, ms: int, *, valid: bool | None = True) -> dict:
@@ -403,7 +426,8 @@ def _valid(row: str = ROW_H_R4_EOF, *, daemon: bool = True) -> dict:
                 "alive": True,
                 "seen_ns": 34_000 * MS,
             },
-            owner_starts=[_OWNER[:2]],
+            owner_processes=[_owner_lifetime(_OWNER_PID, _OWNER_START)],
+            gate_processes=[],
             expiry_lines=0,
             cause=CAUSE_UNOBSERVED,
         )
@@ -664,7 +688,7 @@ _CONTROLS = [
     pytest.param(
         _ROWS,
         True,
-        lambda r: r["owner_starts"].append([4243, 1700.0]),
+        lambda r: r["owner_processes"].append(_owner_lifetime(4243, 1700.0)),
         "the row started another owner, recorded apart as a successor",
         False,
         id="successor-started",
@@ -918,8 +942,8 @@ _CONTROLS = [
     pytest.param(
         _ROWS,
         True,
-        lambda r: r.update(owner_starts=[]),
-        "the watcher's owner starts were not read",
+        lambda r: r.pop("owner_processes"),
+        "the row's owner and release gate lifetimes were not recorded",
         False,
         id="owner-starts-unread",
     ),
@@ -950,6 +974,47 @@ def test_windows_records_the_lease_unobserved_and_needs_no_guardian():
     problems = loss_problems(record, daemon=False)
     assert any("the profile lease was 'unobserved'" in p for p in problems)
     assert any("guardian is not shown to drain" in p for p in problems)
+
+
+def test_windows_counts_a_venv_launcher_and_its_gate_as_the_owners_one_start():
+    """The shape measured on windows-latest: a venv launcher of the release
+    gate, the interpreter it started with the same command, and the owner the
+    gate started. One start, so hot reuse holds; a second gate does not."""
+    record = _valid(ROW_H_R4_EOF)
+    record["platform"] = "win32"
+    launcher = _owner_lifetime(7256, 1000.08, ppid=3628, digest="gate", last=1090.0)
+    gate = _owner_lifetime(7884, 1000.09, ppid=7256, digest="gate", first=1000.2)
+    record["gate_processes"] = [launcher, gate]
+    # The owner's own venv launcher, and the interpreter it started, which is
+    # the owner the row identified.
+    owner_launcher = _owner_lifetime(
+        2524, _OWNER_START - 0.01, ppid=7884, digest="owner", last=1090.0
+    )
+    record["owner_processes"] = [
+        owner_launcher,
+        _owner_lifetime(
+            _OWNER_PID, _OWNER_START, ppid=2524, digest="owner", first=1000.6
+        ),
+    ]
+    assert loss_problems(record, daemon=True) == []
+
+    record["gate_processes"].append(
+        _owner_lifetime(9000, 1500.0, ppid=3628, digest="gate-2")
+    )
+    problems = loss_problems(record, daemon=True)
+    assert any("recorded apart as a successor" in p for p in problems), problems
+    # Elsewhere nothing is collapsed: the same pairs are two starts each.
+    record["gate_processes"] = [launcher, gate]
+    record["platform"] = "linux"
+    problems = loss_problems(record, daemon=True)
+    assert any("recorded apart as a successor" in p for p in problems), problems
+
+
+def test_an_identified_owner_the_row_never_launched_is_no_hot_reuse():
+    record = _valid(ROW_H_R4_EOF)
+    record["owner_processes"] = []
+    problems = loss_problems(record, daemon=True)
+    assert any("identified owner not launched by the row" in p for p in problems)
 
 
 def test_invalid_evidence_is_told_apart_from_a_finding():
@@ -1378,7 +1443,9 @@ class _LossScene(_CalibrationScene):
                     "actor": "owner",
                     "in_row": True,
                     "pid": 42,
+                    "ppid": 7,
                     "start_identity": 42.0,
+                    "cmdline": ["python", "-m", harness.OWNER_MODULE],
                 }
             ],
         )
@@ -1592,7 +1659,7 @@ async def test_a_lost_frontend_keeps_its_owner_and_reads_through_it_again(
     assert record["owner_identified"] == [42, 42.0, "first"]
     for label in ("owner_after_loss", "owner_after_fresh"):
         assert record[label]["lifetime"] == [42, 42.0] and record[label]["alive"]
-    assert record["owner_starts"] == [[42, 42.0]]
+    assert [p[:2] for p in record["owner_processes"]] == [[42, 42.0]]
     assert record["fresh"]["forwarded"] is True
     # No expiry line: the cause is unobserved, and that is no failure.
     assert record["cause"] == CAUSE_UNOBSERVED

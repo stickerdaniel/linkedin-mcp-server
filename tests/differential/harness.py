@@ -5087,8 +5087,6 @@ class LossSeams:
     owner_reading: Callable[[str], Awaitable[dict[str, Any]]]
     #: The identified owner's log, as written so far.
     owner_log: Callable[[], list[str]]
-    #: Every owner lifetime the watcher saw the row start, as ``[pid, start]``.
-    owner_starts: Callable[[], list[list[Any]]]
 
 
 @dataclass
@@ -7134,9 +7132,6 @@ async def measure_host_quit_row(
                 fresh_read=loss_fresh_read,
                 owner_reading=loss_owner_reading,
                 owner_log=loss_owner_log,
-                owner_starts=lambda: [
-                    list(start) for start in row_owner_starts(watcher.observed())
-                ],
             )
             if lifecycle.termination != NORMAL_EOF
             else None
@@ -7791,6 +7786,18 @@ async def measure_host_quit_row(
             }
             for request in row_requests
         ]
+        # The owners and release gates the row started, once per lifetime,
+        # read after the watcher stopped so each carries its last read: what a
+        # loss row's verdict counts launches from (``owner_launches``), which
+        # ties a Windows venv launcher to the interpreter it started. The
+        # watcher labels a gate that runs the owner as an owner too.
+        owners, gates = launch_lifetimes(
+            observed_events,
+            [gate_script(runtime.checkout), gate_script(REPO_ROOT)],
+            (result.watcher or {}).get("sample_log"),
+        )
+        row_record["owner_processes"] = owners
+        row_record["gate_processes"] = gates
     if comparison is not None:
         # Selected by the row, so its record is required: a missing window, a
         # failed hook or script fails here however healthy the vector is.
