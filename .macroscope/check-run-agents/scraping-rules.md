@@ -4,7 +4,7 @@ model: gpt-6-sol
 reasoning: xhigh
 input: incremental
 include:
-  - "linkedin_mcp_server/scraping/**"
+  - "linkedin_mcp_server/linkedin/**"
   - "linkedin_mcp_server/tools/**"
   - "linkedin_mcp_server/core/**"
 requires:

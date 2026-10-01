@@ -12,9 +12,9 @@ from typing import Any, cast
 import pytest
 from patchright.async_api import Page, async_playwright
 
-from linkedin_mcp_server.scraping.connection_actions import ConnectionActions
-from linkedin_mcp_server.scraping.navigation import PageNavigator
-from linkedin_mcp_server.scraping.session import ScrapingSession
+from linkedin_mcp_server.linkedin.connection_actions import ConnectionActions
+from linkedin_mcp_server.linkedin.navigation import PageNavigator
+from linkedin_mcp_server.linkedin.session import ScrapingSession
 
 pytestmark = [
     pytest.mark.browser_dom,

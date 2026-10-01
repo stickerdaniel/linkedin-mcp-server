@@ -1,4 +1,4 @@
-"""Browser-DOM tests for the raw content read in ``scraping/content.py``.
+"""Browser-DOM tests for the raw content read in ``linkedin/content.py``.
 
 The unit suite mocks ``page.evaluate``, so the reader's JavaScript never runs
 there: root selection, the anchor filter, href resolution and the heading walk
@@ -18,8 +18,8 @@ from typing import Any
 import pytest
 from patchright.async_api import async_playwright
 
-from linkedin_mcp_server.scraping.content import PageContentReader
-from linkedin_mcp_server.scraping.session import ScrapingSession
+from linkedin_mcp_server.linkedin.content import PageContentReader
+from linkedin_mcp_server.linkedin.session import ScrapingSession
 
 #: CI uses ``--dist loadgroup``. Keep every test that launches Chromium on one
 #: worker so browser startups cannot compete with the DOM cases' wall-clock

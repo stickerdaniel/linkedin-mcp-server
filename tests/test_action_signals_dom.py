@@ -2,7 +2,7 @@
 """Browser-DOM tests for the locale independence of the action-area reads.
 
 The unit suite mocks ``page.evaluate``, so the programs in
-``scraping/connection_actions.py`` never execute there. These tests run the
+``linkedin/connection_actions.py`` never execute there. These tests run the
 real ones against synthetic HTML in headless chromium.
 
 Every fixture is built from one set of templates, three sets of words and
@@ -39,18 +39,18 @@ from typing import Any, cast
 import pytest
 from patchright.async_api import Page, async_playwright
 
-from linkedin_mcp_server.scraping.connection import (
+from linkedin_mcp_server.linkedin.connection import (
     ConnectionState,
     detect_connection_state,
 )
-from linkedin_mcp_server.scraping.connection_actions import (
+from linkedin_mcp_server.linkedin.connection_actions import (
     ACTION_SIGNALS_JS,
     CLICK_INCOMING_ACCEPT_JS,
     OPEN_MORE_BUTTON_JS,
     ConnectionActions,
 )
-from linkedin_mcp_server.scraping.navigation import PageNavigator
-from linkedin_mcp_server.scraping.session import ScrapingSession
+from linkedin_mcp_server.linkedin.navigation import PageNavigator
+from linkedin_mcp_server.linkedin.session import ScrapingSession
 
 #: CI uses ``--dist loadgroup``. Keep every test that launches Chromium on one
 #: worker so browser startups cannot compete with the DOM cases' wall-clock

@@ -8,11 +8,11 @@ from fastmcp import FastMCP
 from fastmcp.tools import FunctionTool
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
-from linkedin_mcp_server.scraping.contracts import (
+from linkedin_mcp_server.linkedin.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     SEND_INTERRUPTED_WARNING,
 )
-from linkedin_mcp_server.scraping.contracts import ExtractedSection
+from linkedin_mcp_server.linkedin.contracts import ExtractedSection
 
 
 async def get_tool_fn(
@@ -610,7 +610,7 @@ class TestPersonTool:
         being collapsed to the generic "Error calling tool" mask."""
         from fastmcp.exceptions import ToolError
 
-        from linkedin_mcp_server.scraping.contracts import FilterValidationError
+        from linkedin_mcp_server.linkedin.contracts import FilterValidationError
         from linkedin_mcp_server.tools.person import register_person_tools
 
         mock_extractor = MagicMock()
@@ -865,7 +865,7 @@ class TestCompanyTools:
     async def test_company_collision_slug_reaches_scraper(
         self, mock_context, serve_extractor, tool_name, slug
     ):
-        from linkedin_mcp_server.scraping.company import CompanyScraper
+        from linkedin_mcp_server.linkedin.company import CompanyScraper
         from linkedin_mcp_server.tools.company import register_company_tools
 
         capture = MagicMock()
@@ -1517,15 +1517,15 @@ class TestMessagingTools:
         """
         from fastmcp.exceptions import ToolError
 
-        from linkedin_mcp_server.scraping.content import PageContentReader
-        from linkedin_mcp_server.scraping.conversations import (
+        from linkedin_mcp_server.linkedin.content import PageContentReader
+        from linkedin_mcp_server.linkedin.conversations import (
             ConversationReader,
             _StoppedRow,
             _ThreadRefScan,
         )
-        from linkedin_mcp_server.scraping.navigation import PageNavigator
-        from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
-        from linkedin_mcp_server.scraping.session import ScrapingSession
+        from linkedin_mcp_server.linkedin.navigation import PageNavigator
+        from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
+        from linkedin_mcp_server.linkedin.session import ScrapingSession
         from linkedin_mcp_server.tools.messaging import register_messaging_tools
 
         async def no_message_target() -> Any:
@@ -2269,7 +2269,7 @@ class TestPostTools:
         a ToolError carrying the same message, not the generic mask."""
         from fastmcp.exceptions import ToolError
 
-        from linkedin_mcp_server.scraping.contracts import FilterValidationError
+        from linkedin_mcp_server.linkedin.contracts import FilterValidationError
         from linkedin_mcp_server.tools.post import register_post_tools
 
         mock_extractor = MagicMock()

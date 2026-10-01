@@ -34,7 +34,7 @@ from differential.synthetic_origin import (
     cookie_names,
     cookie_values,
 )
-from linkedin_mcp_server.scraping.feed_payload import POST_SLUG_URL_RE
+from linkedin_mcp_server.linkedin.feed_payload import POST_SLUG_URL_RE
 from linkedin_mcp_server.session_state import (
     QUARANTINE_PREFIX,
     portable_cookie_path,

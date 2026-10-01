@@ -2,8 +2,8 @@
 
 from urllib.parse import quote
 
-from linkedin_mcp_server.scraping.fields import COMPANY_SECTIONS, PERSON_SECTIONS
-from linkedin_mcp_server.scraping.link_metadata import (
+from linkedin_mcp_server.linkedin.fields import COMPANY_SECTIONS, PERSON_SECTIONS
+from linkedin_mcp_server.linkedin.link_metadata import (
     _REFERENCE_CAPS,
     RawReference,
     build_references,
