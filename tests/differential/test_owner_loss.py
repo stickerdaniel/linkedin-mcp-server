@@ -445,6 +445,8 @@ def _base(row: str, *, daemon: bool) -> dict:
         "requests": [_request("/feed/", 500)],
         "owner_processes": [_lifetime(*_A[:2])] if daemon else [],
         "gate_processes": [],
+        # The owner's own browser, as ``harness.browser_lineage`` records it.
+        "browser_roots": [[5000, 999.6, None, *_A[:2]]] if daemon else [],
     }
     if daemon:
         record["owner_identified"] = list(_A)
@@ -585,6 +587,7 @@ def _h_r8(row: str, *, daemon: bool = True) -> dict:
     record["calls"].append(_read(1_200, 9_000))
     record["requests"] += _pages(user, 3_000, 4_000, 5_000)
     record["owner_processes"].append(_lifetime(*_B[:2]))
+    record["browser_roots"].append([6000, 1002.6, None, *_B[:2]])
     return record
 
 
@@ -662,6 +665,7 @@ def _h_r9(*, daemon: bool = True) -> dict:
         record["calls"].append(_read(28_500, 36_000))
         record["requests"] += _pages(FOLLOW_USERNAME, 29_000, 31_000, 33_000)
         record["owner_processes"].append(_lifetime(4343, 1010.0))
+        record["browser_roots"].append([6100, 1011.0, None, 4343, 1010.0])
     else:
         record["calls"].append(
             _call(MESSAGE_TOOL, 1_200, 3_100, outcome=RAISED, exception="McpError")
@@ -751,7 +755,7 @@ _CONTROLS = [
         lambda: _h_r8(_UNREACH),
         True,
         lambda r: _move_pages(r, USERNAMES[_UNREACH], 1_300, 4_000, 5_000),
-        "pages of the read are not shown after the successor's launch",
+        "the successor did not read them",
         False,
         id="unreachable-page-before-the-successor",
     ),
@@ -1305,19 +1309,31 @@ def test_windows_counts_a_venv_launcher_and_its_gate_as_one_owner_launch():
     )
 
 
-def test_candidates_the_stopped_owner_outlasted_are_no_replacement():
+def test_a_successor_is_credited_only_through_recorded_browsers():
+    """Without the row's browser roots nobody can say which launch read the
+    pages, so a successor is not shown to have read them."""
+    for record in (_h_r8(_UNREACH), _h_r9()):
+        del record["browser_roots"]
+        problems = owner_loss.problems_for(record, daemon=True)
+        assert any("were not recorded" in p for p in problems), problems
+
+
+def test_candidates_that_read_nothing_are_no_replacement():
     """Measured on three POSIX legs: while the stopped owner held the lock the
-    election started two candidates, each gone 1.3 s later with the owner
-    still alive. One seen gone only after the owner was may have served."""
+    election started two candidates, each gone 1.3 s later and neither with a
+    browser. One that ran a browser of its own may have read, whenever it went;
+    one still running is not shown gone."""
     record = _h_r8(ROW_OWNER_ERROR)
     for pid, start in ((4601, 1005.0), (4602, 1016.0)):
         candidate = _lifetime(pid, start)
         candidate[4] = start + 1.3
         record["owner_processes"].append(candidate)
     assert owner_loss.problems_for(record, daemon=True) == []
-    late = _lifetime(4603, 1020.0)
-    late[4] = record["owner_processes"][0][6] + 1.0
-    record["owner_processes"].append(late)
+    record["browser_roots"].append([7200, 1005.5, 1006.0, 4601, 1005.0])
+    problems = owner_loss.problems_for(record, daemon=True)
+    assert any("the stopped owner is not shown kept" in p for p in problems), problems
+    record["browser_roots"].pop()
+    record["owner_processes"].append(_lifetime(4603, 1020.0))
     problems = owner_loss.problems_for(record, daemon=True)
     assert any("the stopped owner is not shown kept" in p for p in problems), problems
 
@@ -1397,6 +1413,26 @@ def _owner_record(pid: int, start: float) -> dict:
         "start_identity": start,
         "cmdline": ["python", "-m", harness.OWNER_MODULE],
     }
+
+
+def _browser_records(owner: int, pid: int, start: float) -> list[dict]:
+    """The watcher's records of the driver an owner started and the browser
+    root that driver started, as ``harness.browser_lineage`` reads them."""
+    return [
+        {
+            "t": time.time(),
+            "kind": "process.start",
+            "actor": actor,
+            "in_row": True,
+            "pid": child,
+            "ppid": parent,
+            "start_identity": start,
+        }
+        for actor, child, parent in (
+            ("driver", pid, owner),
+            ("browser", pid + 1, pid),
+        )
+    ]
 
 
 class _OwnerLossScene(_CalibrationScene):
@@ -1511,6 +1547,7 @@ class _OwnerLossScene(_CalibrationScene):
         self._line("The published daemon is not answering; electing a new one")
         self.successor_start = time.time()
         self.records.append(_owner_record(43, self.successor_start))
+        self.records += _browser_records(43, 4300, self.successor_start)
         self._line("Attached to a replacement shared browser owner")
 
     def _record(self, session, name: str) -> dict:
@@ -1722,9 +1759,9 @@ async def test_a_read_served_before_the_successor_fails_the_row(losing):
     result = await losing.run(ROW_UNREACHABLE)
 
     findings = [p for p in result.record["problems"] if not p.startswith(INVALID)]
-    assert any("not shown after the successor's launch" in p for p in findings), (
-        result.record["problems"]
-    )
+    assert any("the successor did not read them" in p for p in findings), result.record[
+        "problems"
+    ]
 
 
 async def test_a_responder_on_the_dead_owners_port_is_met_and_classified(losing):

@@ -90,6 +90,7 @@ import asyncio
 import json
 import os
 import socket
+import socketserver
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -121,12 +122,14 @@ from differential.lease_probe import FREE
 from differential.retirement_race import (
     DELIVERED,
     FAILED,
-    _lost_the_lock,
     NO_SILENT_CUT,
     SILENT,
     UNANSWERED,
     WARM_TOOL,
+    _browsers_of,
     _calls,
+    _members,
+    _read_nothing,
     _emit_attempts,
     _page_problems,
     _read_ok,
@@ -363,6 +366,15 @@ class DeclaredResponder(ThreadingHTTPServer):
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         super().__init__((host, port), _ResponderHandler)
+
+    def server_bind(self) -> None:
+        """Bind, and name the server by its address. ``HTTPServer``'s own
+        names it through ``socket.getfqdn``, a reverse lookup that was seen
+        to take past this bind's 30 s bound on a macOS runner."""
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
 
     def note(self, request: dict[str, Any]) -> None:
         with self._lock:
@@ -731,13 +743,13 @@ def _launches(
     others = _other_launches(record, identified[:2])
     if others is None:
         return None
-    # An election candidate started while the identified owner still held
-    # the lock, stopped or not, that was gone before it: the election's own
-    # backoff (``retirement_race._lost_the_lock``), never a second owner.
+    # An election candidate the backoff started while the identified owner
+    # held the lock, stopped or not, that is shown to have read nothing: gone,
+    # and no browser of its own (``retirement_race._read_nothing``).
     others = [
         entry
         for entry in others
-        if not (type(entry[0]) is int and _lost_the_lock(entry, record, identified))
+        if not (type(entry[0]) is int and _read_nothing(entry, record))
     ]
     owners = [list(entry) for entry in others if type(entry[0]) is int]
     gates = [list(entry) for entry in others if entry[0] == "release gate"]
@@ -755,10 +767,12 @@ def _successor_problems(
     label: str,
     began: float | None,
     ended: float | None,
+    username: str,
 ) -> list[str]:
-    """A successor this window started: published after it, other than the
-    lost owner, the one launch the row made besides that owner's, and launched
-    between *began* and *ended* on the wall clock."""
+    """A successor this window started, which read *username*'s pages: published
+    after it, other than the lost owner, the one launch the row made besides
+    that owner's, launched between *began* and *ended* on the wall clock, and
+    every one of those pages read through a browser it launched."""
     identified = _identified(record)
     if identified is None:
         return ["the lost owner was never identified"]
@@ -795,20 +809,41 @@ def _successor_problems(
             f"the successor was not started inside the window: launched "
             f"{start - began:+.1f}s from its start"
         )
+    # Which launch read a page is told by the browser it went through, never
+    # by when the processes started: an owner releases its lock before it
+    # exits, so a launch can read and be gone before the successor takes over.
+    pages = [
+        _number(_mapping(request).get("t"))
+        for request in _sequence(record.get("requests"))
+        if str(_mapping(request).get("path", "")).startswith(f"/in/{username}/")
+        and began is not None
+        and (_number(_mapping(request).get("t")) or 0.0) >= began
+    ]
+    browsers = _browsers_of(_members(mine[0], record), record) if mine else None
+    if not pages:
+        found.append("the window read no page")
+    elif browsers is None:
+        found.append(
+            "the row's browsers and who launched them were not recorded, so the "
+            "successor is not shown to have read the pages"
+        )
+    else:
+        unread = [
+            page
+            for page in pages
+            if page is None
+            or not any(
+                (_number(root[1]) or 0.0) - START_TOLERANCE_SECONDS <= page
+                and (root[2] is None or page <= (_number(root[2]) or 0.0))
+                for root in browsers
+            )
+        ]
+        if unread:
+            found.append(
+                f"{len(unread)} of the pages were read through no browser of the "
+                f"successor: the successor did not read them"
+            )
     return found
-
-
-def _successor_start(record: Mapping[str, Any], label: str) -> float | None:
-    identified = _identified(record)
-    lifetime = _sequence(_mapping(record.get(label)).get("lifetime"))
-    if identified is None or len(lifetime) != 2:
-        return None
-    launched = _launches(record, identified)
-    if launched is None:
-        return None
-    processes = _sequence(record.get("owner_processes"))
-    mine = [e for e in launched[0] if _of_launch(lifetime, e, processes)]
-    return _number(mine[0][-1]) if len(mine) == 1 else None
 
 
 def _owner_kept(record: Mapping[str, Any], label: str) -> bool:
@@ -1072,24 +1107,8 @@ def _lost_owner_findings(
         "owner_after_read",
         _number(read.get("began")),
         _number(read.get("ended")),
+        username,
     )
-    start = _successor_start(record, "owner_after_read")
-    pages = [
-        _mapping(request)
-        for section in EXPECTED_SECTIONS
-        for request in _requests_for(record, person_path(username, section))
-    ]
-    early = [
-        p.get("path")
-        for p in pages
-        if start is None
-        or _number(p.get("t")) is None
-        or (_number(p.get("t")) or 0.0) < start - START_TOLERANCE_SECONDS
-    ]
-    if early:
-        found.append(
-            f"pages of the read are not shown after the successor's launch: {early}"
-        )
     if case.fault == RESPOND:
         requests = [
             _mapping(r)
@@ -1415,6 +1434,7 @@ def _h_r9_daemon(
         "owner_after_read",
         _number(send.get("began")),
         _number(follow.get("ended")),
+        FOLLOW_USERNAME,
     )
     return found
 
