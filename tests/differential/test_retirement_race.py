@@ -1583,6 +1583,15 @@ def test_a_cut_lane_needs_its_second_page_held_across_the_drains_end():
     gate["released_monotonic_ns"] = 30_000 * MS
     problems = _problems(record, True)
     assert any("did not span the end of the drain" in p for p in problems), problems
+    # The owner's drain may start before its answer reaches the row: an
+    # answer 2 s late, and the hold cut at the owner's own drain end, between
+    # send + 30 s and answer + 30 s, is the lane working.
+    record = _turnover(ROW_CUT)
+    record["stand_down"]["answered_ns"] = record["stand_down"]["sent_ns"] + 2_000 * MS
+    gate = next(g for g in record["gates"] if g["path"] == second)
+    gate["released_monotonic_ns"] = record["stand_down"]["sent_ns"] + 31_000 * MS
+    problems = _problems(record, True)
+    assert not any("did not span the end of the drain" in p for p in problems), problems
 
 
 def test_the_new_work_may_fail_explicitly_but_never_silently():

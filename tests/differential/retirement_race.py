@@ -1419,17 +1419,17 @@ def _turnover_invalid(
         )
     if case.past_drain:
         # Work held past the drain is what this lane exists for: the second
-        # hold must be entered before the drain ran out and still be held
-        # when it did, or the call merely stalled between pages.
+        # hold must be entered before the drain could run out and still be
+        # held when it first could, or the call merely stalled between pages.
+        # The owner starts its drain once its serving loop notices the
+        # stand-down, no earlier than the request was sent and possibly
+        # before its answer reached the row; so the earliest the drain can
+        # run out is counted from the send.
         second_gates = _gates(record, person_path(username, "experience"))
         second = second_gates[0] if len(second_gates) == 1 else {}
         held_from = _ns(second.get("entered_monotonic_ns"))
         held_until = _ns(second.get("released_monotonic_ns"))
-        drained = (
-            answered + int(TURNOVER_DRAIN_SECONDS * 1e9)
-            if answered is not None
-            else None
-        )
+        drained = sent + int(TURNOVER_DRAIN_SECONDS * 1e9) if sent is not None else None
         if second.get("terminal") == DEADLINE:
             found.append(f"{INVALID}the second hold ran out its deadline")
         if held_from is None:
