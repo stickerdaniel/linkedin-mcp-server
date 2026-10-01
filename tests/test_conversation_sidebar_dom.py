@@ -1,7 +1,7 @@
 """Browser-DOM tests for the messaging sidebar programs.
 
 The unit suite mocks ``page.evaluate``, so the three programs in
-``scraping/conversations.py`` never execute there: the click-to-capture loop,
+``linkedin/conversations.py`` never execute there: the click-to-capture loop,
 the scrollable-region walk and the main-text wait are all asserted as call
 arguments and nothing else. These cases run them in headless chromium.
 
@@ -33,11 +33,11 @@ import json
 import pytest
 from patchright.async_api import Page, async_playwright
 
-from linkedin_mcp_server.scraping.content import PageContentReader
-from linkedin_mcp_server.scraping.conversations import ConversationReader
-from linkedin_mcp_server.scraping.navigation import PageNavigator
-from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
-from linkedin_mcp_server.scraping.session import ScrapingSession
+from linkedin_mcp_server.linkedin.content import PageContentReader
+from linkedin_mcp_server.linkedin.conversations import ConversationReader
+from linkedin_mcp_server.linkedin.navigation import PageNavigator
+from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
+from linkedin_mcp_server.linkedin.session import ScrapingSession
 
 #: CI uses ``--dist loadgroup``. Keep every test that launches Chromium on one
 #: worker so browser startups cannot compete with the DOM cases' wall-clock
@@ -1295,7 +1295,7 @@ class TestTheMainTextWaitAgainstRealDom:
         )
 
         with caplog.at_level(
-            "DEBUG", logger="linkedin_mcp_server.scraping.conversations"
+            "DEBUG", logger="linkedin_mcp_server.linkedin.conversations"
         ):
             await _reader(dom_page)._wait_for_main_text(
                 minimum_length=100, timeout=300, log_context="Messaging inbox"

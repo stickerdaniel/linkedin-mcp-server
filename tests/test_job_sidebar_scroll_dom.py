@@ -18,7 +18,7 @@ import pytest
 from patchright.async_api import async_playwright
 
 from linkedin_mcp_server.core.utils import _JOB_CARD_SELECTOR, scroll_job_sidebar
-from linkedin_mcp_server.scraping.job_pages import JOB_IDS_JS
+from linkedin_mcp_server.linkedin.job_pages import JOB_IDS_JS
 
 
 async def job_ids(page, *, scoped: bool = False) -> list[str]:

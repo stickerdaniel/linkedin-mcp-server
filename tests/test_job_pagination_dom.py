@@ -20,10 +20,10 @@ from __future__ import annotations
 import pytest
 from patchright.async_api import async_playwright
 
-from linkedin_mcp_server.scraping.content import PageContentReader
-from linkedin_mcp_server.scraping.job_pages import JobPageReader
-from linkedin_mcp_server.scraping.navigation import PageNavigator
-from linkedin_mcp_server.scraping.session import ScrapingSession
+from linkedin_mcp_server.linkedin.content import PageContentReader
+from linkedin_mcp_server.linkedin.job_pages import JobPageReader
+from linkedin_mcp_server.linkedin.navigation import PageNavigator
+from linkedin_mcp_server.linkedin.session import ScrapingSession
 
 #: CI uses ``--dist loadgroup``. Keep every test that launches Chromium on one
 #: worker so browser startups cannot compete with the DOM cases' wall-clock

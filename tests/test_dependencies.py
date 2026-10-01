@@ -95,7 +95,7 @@ class TestGetReadyExtractor:
                 new_callable=AsyncMock,
             ) as mock_ensure_auth,
         ):
-            from linkedin_mcp_server.scraping import LinkedInExtractor
+            from linkedin_mcp_server.linkedin import LinkedInExtractor
 
             extractor = await get_ready_extractor(ctx=None, tool_name="test_tool")
 

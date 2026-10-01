@@ -1332,12 +1332,12 @@ class TestRepeatingOnlyWhatIsSafe:
 
         The builder lives in `daemon_proxy` on purpose: this is the transport
         saying it knows nothing, not a scraping outcome, and no daemon module
-        imports from `scraping/`. The cost of that is two places naming the same
+        imports from `linkedin/`. The cost of that is two places naming the same
         keys, so the names are pinned against their source here rather than
         left to drift until a client reads one of them and not the other.
         """
         from linkedin_mcp_server.daemon_liveness import unknown_outcome
-        from linkedin_mcp_server.scraping.contracts import message_action_result
+        from linkedin_mcp_server.linkedin.contracts import message_action_result
 
         reported = unknown_outcome(tool="send_message", reason="the owner went away")
         a_send = message_action_result("https://www.linkedin.com/in/x/", "sent", "ok")

@@ -20,7 +20,7 @@ from linkedin_mcp_server.drivers.browser import (
     get_or_create_browser,
     set_headless,
 )
-from linkedin_mcp_server.scraping import (
+from linkedin_mcp_server.linkedin import (
     LinkedInExtractor,
     parse_company_sections,
     parse_person_sections,

@@ -18,9 +18,9 @@ from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scraping.contracts import RATE_LIMITED_SECTION_TEXT
-from linkedin_mcp_server.scraping.contracts import rate_limited_section_error
-from linkedin_mcp_server.scraping.link_metadata import Reference
+from linkedin_mcp_server.linkedin.contracts import RATE_LIMITED_SECTION_TEXT
+from linkedin_mcp_server.linkedin.contracts import rate_limited_section_error
+from linkedin_mcp_server.linkedin.link_metadata import Reference
 
 logger = logging.getLogger(__name__)
 

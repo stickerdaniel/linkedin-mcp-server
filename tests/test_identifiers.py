@@ -13,7 +13,7 @@ from linkedin_mcp_server.core.exceptions import (
     InvalidReferenceError,
     LinkedInScraperException,
 )
-from linkedin_mcp_server.scraping.identifiers import (
+from linkedin_mcp_server.linkedin.identifiers import (
     company_page_url,
     job_view_url,
     messaging_thread_url,

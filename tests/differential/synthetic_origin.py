@@ -73,7 +73,7 @@ FEED_MARKER = "linkedin-mcp-synthetic-feed-7f3c"
 #: if the product's own extractor read the page.
 POST_MARKER = "linkedin-mcp-synthetic-post-5d2e"
 
-#: A permalink in the shape ``scraping.feed_payload.POST_SLUG_URL_RE`` reads out
+#: A permalink in the shape ``linkedin.feed_payload.POST_SLUG_URL_RE`` reads out
 #: of the ``/feed/`` document. It is never requested: nothing follows it.
 SYNTHETIC_POST_URL = (
     "https://www.linkedin.com/posts/synthetic-author-activity-7000000000000000001-synth"
