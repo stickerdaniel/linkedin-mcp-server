@@ -145,10 +145,17 @@ from differential.job_query_model import (
     source_sha256,
 )
 from differential.session import (
+    CALLER,
+    EXPECTABLE,
+    LOGOUT,
+    PRESERVATION,
+    PROBE,
     RETAINED,
+    ROW,
     UNCERTAIN,
     ProfileSnapshot,
     r17_outcome,
+    shown,
     snapshot,
     stage_signed_in_session,
     write_synthetic_cookie_file,
@@ -1887,7 +1894,7 @@ def retire_daemon_state(
 
 @dataclass(frozen=True)
 class RowVector:
-    """What K0 compares across repeats. O1 and O4 are what K3 compares to K1.
+    """What K0 compares across repeats. O1 to O4 are what K3 compares to K1.
 
     No pid, instance or time: those differ between two healthy runs.
     """
@@ -1939,6 +1946,11 @@ class RowVector:
     #: H-R6, daemon mode: the frontend's second call after the owner was
     #: killed read the post again.
     recovered: bool | None = None
+    #: O3: the protected changes between the row's two readings, by kind
+    #: (``protected_kinds``), that no action the user authorized covers.
+    o3_protected: tuple[str, ...] = ()
+    #: The protected changes the row's authorized action does cover.
+    o3_authorized: tuple[str, ...] = ()
 
 
 _ASSOCIATE_SECONDS = 5.0
@@ -2236,13 +2248,18 @@ def launch_lifetimes(
 
 
 def row_expectations(
-    vector: RowVector, *, expect_owner: bool | None = None
+    vector: RowVector,
+    *,
+    expect_owner: bool | None = None,
+    expect_session: str = RETAINED,
 ) -> list[str]:
     """What a row requires; each unmet one is a failure.
 
     *expect_owner* says whether the row should reach a shared owner, which is
     the configured mode unless the row says otherwise: H-R12 enables the
     daemon with a custom browser and requires the Direct behaviour.
+    *expect_session* is the R17 outcome the row declares, one of
+    ``EXPECTABLE``; any other declaration fails rather than waiving anything.
     """
     if expect_owner is None:
         expect_owner = vector.mode == "daemon"
@@ -2259,8 +2276,12 @@ def row_expectations(
         failures.append("no /feed/ request in the row carried the staged session")
     if not vector.tool_succeeded:
         failures.append(f"{READ_TOOL} did not return the synthetic post")
-    if vector.o4_session != RETAINED:
-        failures.append(f"O4: the session was {vector.o4_session}, not retained")
+    if expect_session not in EXPECTABLE:
+        failures.append(f"O4: a row cannot expect the session {expect_session!r}")
+    elif vector.o4_session != expect_session:
+        failures.append(
+            f"O4: the session was {vector.o4_session}, not {expect_session}"
+        )
     if not vector.host_exit_clean:
         failures.append("the host quit was not a normal one")
     if not vector.cleanup_clean:
@@ -2972,6 +2993,51 @@ def restoration_changes(
     return problems
 
 
+#: O3's kinds of protected change. Kinds, never values: a generation or a
+#: quarantine name differs between two healthy runs, and the vector holds
+#: nothing that does.
+GENERATION_CHANGED = "generation-changed"
+GENERATION_REMOVED = "generation-removed"
+SESSION_UNUSABLE = "session-unusable"
+QUARANTINED = "quarantined"
+PROFILE_REMOVED = "profile-removed"
+NO_LONGER_READABLE = "no-longer-readable"
+#: The after-reading was never taken, so O3 could not be read.
+O3_UNOBSERVED = "unobserved"
+
+#: The protected changes each authorized action is allowed to make: exactly
+#: what ``clear_auth_state`` removes. A logout that left another generation
+#: behind, or quarantined anything, did something the user did not ask for.
+_AUTHORIZED_CHANGES = {
+    LOGOUT: frozenset({GENERATION_REMOVED, SESSION_UNUSABLE, PROFILE_REMOVED}),
+}
+
+
+def _protected(before: ProfileSnapshot, at: ProfileSnapshot) -> list[tuple[str, str]]:
+    found = []
+    if at.generation != before.generation:
+        found.append(
+            (
+                GENERATION_REMOVED if at.generation is None else GENERATION_CHANGED,
+                f"the login generation changed from {before.generation!r} to "
+                f"{at.generation!r}",
+            )
+        )
+    if before.li_at_usable and not at.li_at_usable:
+        found.append(
+            (SESSION_UNUSABLE, "the staged session's li_at is no longer usable")
+        )
+    quarantined = sorted(set(at.quarantine) - set(before.quarantine))
+    if quarantined:
+        found.append((QUARANTINED, f"quarantined: {quarantined}"))
+    if before.profile_present and not at.profile_present:
+        found.append((PROFILE_REMOVED, "the browser profile is gone"))
+    unreadable = sorted(set(at.unreadable) - set(before.unreadable))
+    if unreadable:
+        found.append((NO_LONGER_READABLE, f"no longer readable: {unreadable}"))
+    return found
+
+
 def protected_changes(before: ProfileSnapshot, at: ProfileSnapshot) -> list[str]:
     """What the product changed of the protected session by the recovery boundary.
 
@@ -2982,23 +3048,29 @@ def protected_changes(before: ProfileSnapshot, at: ProfileSnapshot) -> list[str]
     allowed: another login generation, a staged session no longer usable, a
     new quarantine, a missing profile, an artefact that no longer reads.
     """
-    problems = []
-    if at.generation != before.generation:
-        problems.append(
-            f"the login generation changed from {before.generation!r} to "
-            f"{at.generation!r}"
-        )
-    if before.li_at_usable and not at.li_at_usable:
-        problems.append("the staged session's li_at is no longer usable")
-    quarantined = sorted(set(at.quarantine) - set(before.quarantine))
-    if quarantined:
-        problems.append(f"quarantined: {quarantined}")
-    if before.profile_present and not at.profile_present:
-        problems.append("the browser profile is gone")
-    unreadable = sorted(set(at.unreadable) - set(before.unreadable))
-    if unreadable:
-        problems.append(f"no longer readable: {unreadable}")
-    return problems
+    return [message for _, message in _protected(before, at)]
+
+
+def protected_kinds(
+    before: ProfileSnapshot, after: ProfileSnapshot | None, authorized: str | None
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """O3 for one row: its protected changes, by kind, split by authorization.
+
+    The first are the changes no action the user confirmed covers, the second
+    those *authorized* does. The same changes ``protected_changes`` names,
+    read between the row's before and after readings. A row without an
+    after-reading has an O3 nobody could read, which no action covers.
+    """
+    if after is None:
+        return (O3_UNOBSERVED,), ()
+    allowed = (
+        _AUTHORIZED_CHANGES.get(authorized, frozenset()) if authorized else frozenset()
+    )
+    kinds = sorted({kind for kind, _ in _protected(before, after)})
+    return (
+        tuple(kind for kind in kinds if kind not in allowed),
+        tuple(kind for kind in kinds if kind in allowed),
+    )
 
 
 def fault_witnesses(
@@ -3968,7 +4040,7 @@ def compare_repeat(first: RowVector, second: RowVector) -> list[str]:
 
 
 def compare_to_direct(direct: RowVector, daemon: RowVector) -> list[str]:
-    """K3 against a Direct reference: O1, O2 and O4 must be ``=``.
+    """K3 against a Direct reference: O1, O2, O3 and O4 must be ``=``.
 
     O2 is ``=`` when the row's states are the same, the daemon row sent no
     class of signal that neither Direct's construction nor the reference's
@@ -3977,6 +4049,11 @@ def compare_to_direct(direct: RowVector, daemon: RowVector) -> list[str]:
     row reads depends on whether a recipient outlived the next sample, not on
     what was sent. Two unobserved states compare equal as labels, which says
     nothing of what either row's unobserved actors sent.
+
+    O3 is ``=`` unless the daemon row made a protected change that the
+    reference did not and that no action the user authorized covers. Equal O4
+    outcomes are not equal O3: two sessions can both be lost while only one
+    mode quarantined it. A change only Direct made is Direct mutating more.
     """
     differences = []
     for name in ("o1_single_browser", "o2", "o4_session"):
@@ -3997,6 +4074,12 @@ def compare_to_direct(direct: RowVector, daemon: RowVector) -> list[str]:
     extra = classes_direct_would_not_send(daemon.signal_classes, direct.signal_classes)
     if extra:
         differences.append(f"o2: signals Direct would not send: {extra}")
+    mutated = sorted(set(daemon.o3_protected) - set(direct.o3_protected))
+    if mutated:
+        differences.append(
+            f"o3: protected changes Direct did not make and nobody "
+            f"authorized: {mutated}"
+        )
     return differences
 
 
@@ -4052,6 +4135,12 @@ class Observations:
     killed: dict[str, Any] | None = None
     #: The idle timeout the row's actors ran with.
     idle_timeout: float = IDLE_TIMEOUT_SECONDS
+    #: The R17 outcome the row declares it expects, one of ``EXPECTABLE``.
+    expect_session: str = RETAINED
+    #: The user action the row recorded the user confirming (``LOGOUT``), or
+    #: None. A record of the confirmation only; what it did is read from
+    #: ``after``.
+    authorized: str | None = None
 
 
 @dataclass
@@ -4189,18 +4278,24 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
         failures += post_quit.failures
 
     row_feed = feed_requests(observed.row_requests)
-    user_lines = list(host.user_lines)
+    # Each line keeps its phase and recipient: the preservation probe's output
+    # is recorded with the rest, and never as the row's caller being told.
+    user_output = shown(ROW, CALLER, host.user_lines)
     if post_quit is not None:
-        user_lines += post_quit.user_lines
+        user_output += shown(PRESERVATION, PROBE, post_quit.user_lines)
     if observed.after is None:
         o4 = UNCERTAIN
     else:
         o4 = r17_outcome(
             observed.before,
             observed.after,
-            user_lines,
+            user_output,
             post_quit=post_quit.valid if post_quit is not None else None,
+            user_cleared=observed.authorized == LOGOUT,
         )
+    o3_protected, o3_authorized = protected_kinds(
+        observed.before, observed.after, observed.authorized
+    )
 
     vector = RowVector(
         mode="daemon" if observed.daemon else "direct",
@@ -4228,8 +4323,13 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
         signal_classes=o2.classes if o2 is not None else (),
         guardian_owner_group=killed.get("guardian_owner_group"),
         recovered=_recovered(host) if killed and observed.daemon else None,
+        o3_protected=o3_protected,
+        o3_authorized=o3_authorized,
     )
-    return vector, row_expectations(vector, expect_owner=expect_owner) + failures
+    expected = row_expectations(
+        vector, expect_owner=expect_owner, expect_session=observed.expect_session
+    )
+    return vector, expected + failures
 
 
 def _recovered(host: HostSession) -> bool:
