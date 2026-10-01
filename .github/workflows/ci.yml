@@ -822,19 +822,25 @@ jobs:
   # under. Serial, like every native row, and its evidence uploaded whatever
   # happened, under names of its own.
   differential-calls:
-    name: Differential calls (${{ matrix.os }})
+    name: Differential calls (${{ matrix.os }}, ${{ matrix.rows }})
     runs-on: ${{ matrix.os }}
     # The camelCase read shims off, for the reason given at `windows-daemon`.
     env:
       FASTMCP_MCP_CAMELCASE_COMPAT: "false"
-    # The sum of the steps' bounds: 45 for a cold browser download for each
-    # runtime and the frozen baseline (bound 15), with room for Windows, the
-    # slowest leg, to sync and install twice; 5 for the oracle; 30 for H-CAL;
-    # and 45 for each of the five loss steps.
-    timeout-minutes: 305
+    # Two groups of rows per leg, so neither job's bound comes near the
+    # hosted runner's six hours. The sum of a group's step bounds: 45 for a
+    # cold browser download for each runtime and the frozen baseline (bound
+    # 15), with room for Windows, the slowest leg, to sync and install twice;
+    # then `pipes` 30 for H-CAL and 45 for each of its two loss steps (165),
+    # `processes` 5 for the oracle and 45 for each of its three (185).
+    timeout-minutes: ${{ matrix.rows == 'pipes' && 165 || 185 }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        # `pipes`: H-CAL and the two losses through the host's own pipes.
+        # `processes`: the losses that end a process, which the oracle traces.
+        rows: [pipes, processes]
         include:
           - os: ubuntu-latest
             browsers: ~/.cache/ms-playwright
@@ -970,6 +976,7 @@ jobs:
       # seven minutes for staging, launches, the two reads, the quit and the
       # preservation session beyond its waits.
       - name: Hold and release a section of a person read
+        if: matrix.rows == 'pipes'
         env:
           LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
           LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
@@ -982,7 +989,7 @@ jobs:
       # server or the frontend, and on Linux a row that kills an actor is held
       # to a complete trace. macOS and Windows record it as unavailable.
       - name: Install the signal oracle
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.rows == 'processes'
         timeout-minutes: 5
         shell: bash
         run: |
@@ -1009,6 +1016,7 @@ jobs:
       # residual browser wait (60s); and a fresh host's start and read (two
       # minutes). Three cells come to at most 42 minutes: 45 each.
       - name: Lose the host mid-read by stdin EOF
+        if: matrix.rows == 'pipes'
         env:
           LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
           LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
@@ -1018,6 +1026,7 @@ jobs:
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py -k eof
 
       - name: Lose the host mid-read by abrupt pipe loss
+        if: matrix.rows == 'pipes'
         env:
           LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
           LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
@@ -1027,6 +1036,7 @@ jobs:
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py -k pipe
 
       - name: Kill the host process mid-read
+        if: matrix.rows == 'processes'
         env:
           LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
           LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
@@ -1036,6 +1046,7 @@ jobs:
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py -k host_killed
 
       - name: Lose the host with two requests outstanding
+        if: matrix.rows == 'processes'
         env:
           LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
           LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
@@ -1045,6 +1056,7 @@ jobs:
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py -k two_requests
 
       - name: Kill the server or frontend mid-read
+        if: matrix.rows == 'processes'
         env:
           LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
           LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
@@ -1060,7 +1072,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: differential-calls-evidence-${{ matrix.os }}
+          name: differential-calls-evidence-${{ matrix.os }}-${{ matrix.rows }}
           path: ${{ runner.temp }}/differential-calls-evidence
           if-no-files-found: warn
           retention-days: 14
