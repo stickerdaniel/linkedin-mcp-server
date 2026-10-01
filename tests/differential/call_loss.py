@@ -332,6 +332,21 @@ def calibration_problems(
             problems.append(f"the hold was released by {released_by!r}, not by the row")
         if ordinal != 1:
             problems.append(f"the gate held request {ordinal!r}, not the first")
+        # When the hold let go, not when its release was asked for: a handler
+        # resumed late still records ``served``.
+        timed = _gate(record, person_path(str(record.get("username")), HELD_SECTION))
+        began = _ns((timed or {}).get("entered_monotonic_ns"))
+        let_go = _ns((timed or {}).get("released_monotonic_ns"))
+        if entered and (began is None or let_go is None):
+            problems.append("the hold's entry or end has no time")
+        elif entered and began is not None and let_go is not None:
+            held = (let_go - began) / 1e9
+            if held > GATE_DEADLINE_SECONDS:
+                problems.append(
+                    f"the hold let go {held:.1f}s after its entry, past the "
+                    f"gate's {GATE_DEADLINE_SECONDS}s deadline: the evidence is "
+                    f"invalid, not a finding"
+                )
     for section, count in read["requests"].items():
         if count != 1:
             problems.append(f"the {section} page was requested {count} times, not once")

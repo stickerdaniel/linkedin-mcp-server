@@ -711,6 +711,20 @@ _BROKEN = [
         id="never-entered",
     ),
     pytest.param(
+        # Released at once, but the handler resumed 25 s later: still served.
+        lambda r: _gate(
+            r,
+            released_monotonic_ns=r["gates"][0]["entered_monotonic_ns"] + 25_000 * MS,
+        ),
+        "past the gate's 20.0s deadline",
+        id="let-go-past-the-deadline",
+    ),
+    pytest.param(
+        lambda r: _gate(r, released_monotonic_ns=None),
+        "the hold's entry or end has no time",
+        id="hold-end-untimed",
+    ),
+    pytest.param(
         lambda r: _gate(r, terminal=DEADLINE, released_by=None),
         "the hold ran out its deadline before the row released it",
         id="deadline",
