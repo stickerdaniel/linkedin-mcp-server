@@ -121,6 +121,7 @@ from differential.lease_probe import FREE
 from differential.retirement_race import (
     DELIVERED,
     FAILED,
+    _lost_the_lock,
     NO_SILENT_CUT,
     SILENT,
     UNANSWERED,
@@ -730,6 +731,14 @@ def _launches(
     others = _other_launches(record, identified[:2])
     if others is None:
         return None
+    # An election candidate started while the identified owner still held
+    # the lock, stopped or not, that was gone before it: the election's own
+    # backoff (``retirement_race._lost_the_lock``), never a second owner.
+    others = [
+        entry
+        for entry in others
+        if not (type(entry[0]) is int and _lost_the_lock(entry, record, identified))
+    ]
     owners = [list(entry) for entry in others if type(entry[0]) is int]
     gates = [list(entry) for entry in others if entry[0] == "release gate"]
     # The identified owner not among the row's launches at all.

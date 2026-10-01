@@ -1305,6 +1305,23 @@ def test_windows_counts_a_venv_launcher_and_its_gate_as_one_owner_launch():
     )
 
 
+def test_candidates_the_stopped_owner_outlasted_are_no_replacement():
+    """Measured on three POSIX legs: while the stopped owner held the lock the
+    election started two candidates, each gone 1.3 s later with the owner
+    still alive. One seen gone only after the owner was may have served."""
+    record = _h_r8(ROW_OWNER_ERROR)
+    for pid, start in ((4601, 1005.0), (4602, 1016.0)):
+        candidate = _lifetime(pid, start)
+        candidate[4] = start + 1.3
+        record["owner_processes"].append(candidate)
+    assert owner_loss.problems_for(record, daemon=True) == []
+    late = _lifetime(4603, 1020.0)
+    late[4] = record["owner_processes"][0][6] + 1.0
+    record["owner_processes"].append(late)
+    problems = owner_loss.problems_for(record, daemon=True)
+    assert any("the stopped owner is not shown kept" in p for p in problems), problems
+
+
 def test_every_row_here_is_declared_with_its_verdict_and_seams():
     for row, case in H_R8_CASES.items():
         lifecycle = harness.ROWS[row]
