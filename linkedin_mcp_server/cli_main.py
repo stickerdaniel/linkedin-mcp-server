@@ -266,10 +266,11 @@ def _owner_to_retire(config: AppConfig) -> "Attachment | None":
 def _shared_browser_recorded(config: AppConfig) -> bool:
     """Whether a trusted shared browser of this runtime is recorded for the profile.
 
-    For ``--status`` to name what may hold the profile. The same reading of
-    files as ``_owner_to_retire`` and nothing more, made only by a process that
-    would itself use a shared browser, and silent: an unreadable record means
-    nothing is named, never that the status check failed.
+    For ``--status`` to name what may hold the profile. The same local lookup
+    as ``_owner_to_retire``, which prepares the daemon state directories but
+    contacts no owner, made only by a process that would itself use a shared
+    browser, and silent: an unreadable record means nothing is named, never
+    that the status check failed.
     """
     from linkedin_mcp_server.daemon import (
         OwnerState,
