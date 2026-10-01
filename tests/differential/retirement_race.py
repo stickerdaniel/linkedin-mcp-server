@@ -824,6 +824,23 @@ def _common(
         problems.append(
             f"{INVALID}the record names {record.get('username')!r} as its username"
         )
+    # Every hold, by when it let go rather than its label: a handler resumed
+    # late still records ``served`` after the gate's deadline.
+    for gate in _sequence(record.get("gates")):
+        entered = _ns(_mapping(gate).get("entered_monotonic_ns"))
+        let_go = _ns(_mapping(gate).get("released_monotonic_ns"))
+        if entered is None:
+            continue
+        if let_go is None:
+            problems.append(
+                f"{INVALID}the hold on {_mapping(gate).get('path')} has no end time"
+            )
+        elif (let_go - entered) / 1e9 > GATE_DEADLINE_SECONDS:
+            problems.append(
+                f"{INVALID}the hold on {_mapping(gate).get('path')} let go "
+                f"{(let_go - entered) / 1e9:.1f}s after its entry, past the "
+                f"gate's {GATE_DEADLINE_SECONDS}s deadline"
+            )
     return problems
 
 
@@ -859,10 +876,17 @@ def _other_launches(
     return others
 
 
-def _exited(entry: Sequence[Any], record: Mapping[str, Any]) -> bool:
-    """Whether the watcher saw the launch *entry* names exit: an owner launch
-    ``[pid, start]``, or ``["release gate", pid, start]``. A launch it never
-    saw exit, or one ``_other_launches`` only names, has not."""
+def _lost_the_lock(
+    entry: Sequence[Any], record: Mapping[str, Any], owner: Sequence[Any]
+) -> bool:
+    """Whether the launch *entry* names, an owner launch ``[pid, start]`` or
+    ``["release gate", pid, start]``, is shown to be an election candidate
+    that never held the lock: every process of the launch (on Windows the
+    venv launcher and the interpreter it started) seen gone by a sample that
+    began while the retiring *owner* was still seen alive, and so still held
+    the lock. A launch with any process not seen gone, or gone only after the
+    owner, may have served and is not shown to be one.
+    """
     if not entry:
         return False
     if entry[0] == "release gate":
@@ -871,12 +895,20 @@ def _exited(entry: Sequence[Any], record: Mapping[str, Any]) -> bool:
         lifetimes, launch = _sequence(record.get("owner_processes")), entry
     else:
         return False
-    return any(
-        same_lifetime(_sequence(lifetime)[:2], launch[:2])
-        and len(_sequence(lifetime)) > 4
-        and _sequence(lifetime)[4] is not None
-        for lifetime in lifetimes
-    )
+    owners = [_sequence(p) for p in _sequence(record.get("owner_processes"))]
+    holder = [p for p in owners if same_lifetime(p[:2], owner[:2])]
+    # The retiring owner's last read: the latest moment it is known alive.
+    alive_until = _number(holder[0][6]) if holder and len(holder[0]) > 6 else None
+    members = [
+        _sequence(p)
+        for p in lifetimes
+        if same_lifetime(_sequence(p)[:2], launch[:2])
+        or _of_launch(_sequence(p)[:2], launch, lifetimes)
+    ]
+    if alive_until is None or not members:
+        return False
+    gone = [_number(member[4]) if len(member) > 4 else None for member in members]
+    return all(at is not None and at <= alive_until for at in gone)
 
 
 def _started(entry: Sequence[Any]) -> float | None:
@@ -920,9 +952,10 @@ def _owner_kept(record: Mapping[str, Any], label: str) -> bool:
 
 
 def _successor_problems(
-    record: Mapping[str, Any], label: str, call: Mapping[str, Any]
+    record: Mapping[str, Any], label: str, call: Mapping[str, Any], username: str
 ) -> list[str]:
-    """A successor this call started: published after it, the one launch the
+    """A successor this call started, which read *username*'s pages for it:
+    published after it, launched before those pages were read, the one launch the
     row made besides the retiring owner's, and launched inside the call's own
     wall interval, so it cannot be one another call elected."""
     identified = _identified(record)
@@ -952,10 +985,12 @@ def _successor_problems(
     # While the retiring owner still holds the lock, the election starts
     # candidates on its backoff (``daemon_election._owner_start_delay_after``)
     # and each one that cannot take the lock exits. Those are the election
-    # doing its job; a launch besides the successor that the watcher did not
-    # see exit is a second owner the row cannot account for.
+    # doing its job; any other launch besides the successor is a second owner
+    # the row cannot account for.
     extra = [
-        entry for entry in others if entry not in mine and not _exited(entry, record)
+        entry
+        for entry in others
+        if entry not in mine and not _lost_the_lock(entry, record, identified)
     ]
     if extra:
         found.append(f"the row launched other owners besides the successor: {extra}")
@@ -970,6 +1005,24 @@ def _successor_problems(
             f"the successor was not started by this call: launched "
             f"{start - began:+.1f}s from its send, outside its interval"
         )
+    # The pages the call read must come after the successor existed, or the
+    # successor cannot be what read them.
+    pages = [
+        _number(_mapping(request).get("t"))
+        for request in _sequence(record.get("requests"))
+        if str(_mapping(request).get("path", "")).startswith(f"/in/{username}/")
+        and began is not None
+        and (_number(_mapping(request).get("t")) or 0) >= began
+    ]
+    if start is not None and pages:
+        first = min(page for page in pages if page is not None)
+        if first < start - START_TOLERANCE_SECONDS:
+            found.append(
+                f"the call's first page was read {start - first:.1f}s before "
+                f"the successor was launched: the successor did not read it"
+            )
+    elif start is not None:
+        found.append("the call read no page after it was sent")
     return found
 
 
@@ -1163,7 +1216,12 @@ def _hold_roots_problems(
         < float(record.get("idle_timeout_seconds") or 0) + OWNER_GRACE_SECONDS
     ):
         found.append(f"{INVALID}the browser was read before an idle cut could land")
-    if requested is not None and past is not None and past > requested:
+    # The reading lasts from its stamp to its census being done: all of it
+    # must fall inside the hold, not only its start.
+    done = _ns(points[1].get("done_ns"))
+    if done is None:
+        found.append(f"{INVALID}the browser reading past the threshold has no end")
+    elif requested is not None and done > requested:
         found.append(f"{INVALID}the browser was read after the hold ended")
     if found:
         return found
@@ -1229,7 +1287,7 @@ def retirement_problems(record: Mapping[str, Any], *, daemon: bool) -> list[str]
             record, username, read, after=seen, after_label="the retirement"
         )
         if daemon:
-            problems += _successor_problems(record, "owner_after_read", read)
+            problems += _successor_problems(record, "owner_after_read", read, username)
         else:
             problems += _reopened_problems(record)
     if daemon:
@@ -1428,7 +1486,7 @@ def _second_problems(
             after=gone if gone_how == "exited" else None,
             after_label="the retiring owner was seen gone",
         )
-        found += _successor_problems(record, "owner_after", second)
+        found += _successor_problems(record, "owner_after", second, second_name)
     return found
 
 

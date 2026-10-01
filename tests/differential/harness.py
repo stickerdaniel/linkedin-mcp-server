@@ -4698,7 +4698,9 @@ def observe_roots(
 ) -> dict[str, Any]:
     """The browser roots on the row's profile now, each ``[pid, start]``, by
     the watcher's own predicate (``host_comparison.census_roots``); None
-    when the census could not say. Stamped on both clocks as it began."""
+    when the census could not say. Stamped on both clocks as it began, and
+    on the monotonic clock as its census was done (``done_ns``): a reading
+    lies between the two, never at the first alone."""
     point: dict[str, Any] = {
         "label": label,
         "seen": time.time(),
@@ -4714,6 +4716,7 @@ def observe_roots(
         "entries": [census_entry(process) for process in census.processes],
         "unresolved": list(census.unresolved),
     }
+    point["done_ns"] = time.monotonic_ns()
     roots = host_comparison.census_roots(found, account.browser_key)
     point["roots"] = [list(root) for root in roots] if roots is not None else None
     point["unresolved"] = list(census.unresolved)

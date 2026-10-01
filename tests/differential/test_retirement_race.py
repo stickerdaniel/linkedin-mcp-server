@@ -508,6 +508,8 @@ def test_the_roots_reading_names_one_lifetime_per_tree(tmp_path):
     point = harness.observe_roots("now", account, process_iter=lambda *_a: tree)
     assert point["roots"] == [[500, 1000.5]]
     assert point["label"] == "now" and isinstance(point["seen_ns"], int)
+    # The reading spans its census: stamped as it began and as it was done.
+    assert point["done_ns"] >= point["seen_ns"]
     second = [*tree, _Process(700, 1, 1001.0, str(account.profile))]
     assert (
         len(
@@ -666,6 +668,7 @@ def _admission(*, daemon: bool = True) -> dict:
                 "roots": [[5000, 1000.5]],
                 "seen": 1014.0,
                 "seen_ns": 14_000 * MS,
+                "done_ns": 14_050 * MS,
             },
         ],
         read_window={"attempts": [], "idle_closes": 0},
@@ -1602,6 +1605,74 @@ def test_election_candidates_that_exited_are_no_second_owner():
     assert any("other owners besides the successor" in p for p in problems), problems
 
 
+def test_a_hold_served_past_its_deadline_is_invalid():
+    """Released on time, but served 21 s after it entered: still labelled
+    served, and the row declared no such hold."""
+    record = _admission()
+    gate = record["gates"][0]
+    gate["released_monotonic_ns"] = gate["entered_monotonic_ns"] + 21_000 * MS
+    problems = _problems(record, True)
+    assert any("past the gate's" in p for p in problems), problems
+    assert all(p.startswith(INVALID) for p in problems), problems
+    del gate["released_monotonic_ns"]
+    assert any("has no end time" in p for p in _problems(record, True))
+
+
+def test_a_reading_begun_in_the_hold_but_done_after_it_is_invalid():
+    """The census started inside the hold and read the roots after the
+    release: its stamp alone would place it inside."""
+    record = _admission()
+    point = next(p for p in record["roots"] if p["label"] == "past the threshold")
+    point["done_ns"] = 15_950 * MS
+    problems = _problems(record, True)
+    assert any("read after the hold ended" in p for p in problems), problems
+    assert all(p.startswith(INVALID) for p in problems), problems
+    del point["done_ns"]
+    assert any("has no end" in p for p in _problems(record, True))
+
+
+def test_a_candidate_gone_only_after_the_retiring_owner_may_have_served():
+    """Seen gone only once the retiring owner was gone too: it could have
+    taken the lock in between, so it is no lost candidate."""
+    record = _turnover(ROW_REFUSED)
+    alive_until = record["owner_processes"][0][6]
+    late = _lifetime(4705, 1015.0)
+    late[4] = alive_until + 0.5
+    record["owner_processes"].append(late)
+    problems = _problems(record, True)
+    assert any("other owners besides the successor" in p for p in problems), problems
+
+
+def test_a_windows_candidate_needs_every_process_of_its_launch_gone():
+    """A venv launcher seen gone while the interpreter it started was never
+    seen gone: the launch is not shown to have lost."""
+    record = _turnover(ROW_REFUSED)
+    record["platform"] = "win32"
+    launcher = _lifetime(4801, 1012.0, digest="candidate", last=1013.5)
+    launcher[4] = 1013.6
+    interpreter = _lifetime(4802, 1012.1, ppid=4801, digest="candidate", first=1012.2)
+    record["owner_processes"] += [launcher, interpreter]
+    problems = _problems(record, True)
+    assert any("other owners besides the successor" in p for p in problems), problems
+    interpreter[4] = 1013.4
+    assert _problems(record, True) == []
+
+
+def test_a_successor_launched_after_the_pages_were_read_did_not_read_them():
+    record = _turnover(ROW_REFUSED)
+    second = SECOND_USERNAMES[ROW_REFUSED]
+    first_page = min(
+        r["t"] for r in record["requests"] if r["path"].startswith(f"/in/{second}/")
+    )
+    successor = record["owner_after"]["lifetime"]
+    for lifetime in record["owner_processes"]:
+        if lifetime[:2] == successor:
+            lifetime[1] = first_page + 3.0
+    record["owner_after"]["lifetime"] = [successor[0], first_page + 3.0]
+    problems = _problems(record, True)
+    assert any("the successor did not read it" in p for p in problems), problems
+
+
 def test_a_refusal_by_an_owner_already_gone_reads_as_unanswered():
     record = _turnover(ROW_REFUSED)
     record["second_attempts"][0] = {"attempt": "preflight", "classification": None}
@@ -1745,6 +1816,7 @@ class _RaceScene(_CalibrationScene):
             "roots": [list(self.browser)] if self.browser else [],
             "seen": time.time(),
             "seen_ns": time.monotonic_ns(),
+            "done_ns": time.monotonic_ns(),
         }
 
     def _close(self) -> None:
