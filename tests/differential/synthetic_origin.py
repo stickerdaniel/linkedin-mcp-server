@@ -36,15 +36,30 @@ those ends is recorded apart (``Gate``), and none of them is the browser
 having received anything: a write that returned is only bytes handed to the
 socket, which on this path is the proxy's tunnel.
 
+**A sign-in can be staged** (``SyntheticOrigin.arm_login``,
+``reject_sessions``, ``release_login``). Healthy is the default and serves
+every row as before. Once the harness rejects the sessions it accepted, a
+``/feed/`` request without an accepted session is answered 302 to the login
+wall with the redirect's query, and that wall asks nothing. The wall the
+product's own login opens, at exactly ``/login``, is served at once, and its
+script asks a completion request again and again, each answered at once;
+once the harness released it, that answer sets a fresh synthetic ``li_at``
+with ``Set-Cookie`` and the page goes on to the feed. So only a login ever
+asks, and only after a release is anything issued. Every session the origin
+issued, rejected or was sent is recorded by digest and never by value
+(``LoginFixture``).
+
 Run as a script to issue into a directory: ``python synthetic_origin.py DIR``.
 """
 
 from __future__ import annotations
 
 import datetime
+import hashlib
 import hmac
 import ipaddress
 import re
+import secrets
 import select
 import socket
 import ssl
@@ -52,7 +67,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -216,6 +231,149 @@ def page_for(path: str) -> tuple[bytes, int]:
         section = next(name for name, end in PERSON_PAGES.items() if end == suffix)
         return _person_page(section), 200
     return b"", 404
+
+
+# --- Signing in ----------------------------------------------------------------
+
+#: The wall the product's login opens (``setup._run_login``), and where a
+#: rejected ``/feed/`` sends the browser. ``core.auth`` reads both the path
+#: and the title as an auth barrier.
+LOGIN_PATH = "/login"
+#: Where a rejected ``/feed/`` is sent, in the shape of LinkedIn's own: the
+#: wall's path, which every auth check reads, with the page it came from.
+LOGIN_REDIRECT = f"{LOGIN_PATH}?session_redirect=%2Ffeed%2F"
+#: The wall's completion request: answered at once, every time.
+LOGIN_POLL_PATH = "/synthetic-login/poll"
+#: On the wall and on nothing LinkedIn serves.
+LOGIN_MARKER = "linkedin-mcp-synthetic-login-6a4d"
+#: How long the wall's script waits between two asks.
+LOGIN_POLL_INTERVAL_SECONDS = 0.5
+#: How long the script gives one ask before it aborts it and asks again. The
+#: origin answers each at once, so this is only the bound a lost answer
+#: meets, and it sits below both limits a request here meets: the product's
+#: 30 s navigation timeout and the proxy relay's 30 s idle cut
+#: (``_RELAY_IDLE_SECONDS``).
+LOGIN_POLL_TIMEOUT_SECONDS = 5.0
+#: How long an issued ``li_at`` lives: as long as the staged one
+#: (``session.synthetic_cookies``).
+ISSUED_SESSION_SECONDS = 30 * 24 * 60 * 60
+#: The prefix of every value the origin issues. The value itself never
+#: leaves this process but in the ``Set-Cookie`` answer to the browser.
+ISSUED_PREFIX = "synthetic-issued-"
+
+#: Who let the sign-in complete: the row, never the teardown, which closes
+#: it instead (``SyntheticOrigin.close_login``).
+COMPLETED_BY_ROW = "row"
+
+# The least a login wall needs, derived from the product's login: the title is
+# one ``core.auth._LOGIN_TITLE_PATTERNS`` names and the path an auth blocker;
+# no ``#rememberme-div``, so ``resolve_remember_me_prompt`` gives up after its
+# own wait and ``wait_for_manual_login`` reads the context's cookies. The
+# script asks one completion request at a time; the answer that issues a
+# session carries it in ``Set-Cookie``, which a same-origin fetch stores, and
+# the page then goes on to the feed as a signed-in LinkedIn would.
+_LOGIN_PAGE = (
+    "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+    "<title>Sign In | LinkedIn</title></head><body>"
+    f"<main><h1>Sign in</h1><p>{LOGIN_MARKER}</p></main>"
+    "<script>(async () => {"
+    "for (;;) {"
+    "let issued = false;"
+    "const controller = new AbortController();"
+    "const timer = setTimeout(() => controller.abort(), "
+    f"{int(LOGIN_POLL_TIMEOUT_SECONDS * 1000)});"
+    "try {"
+    f"const answer = await fetch('{LOGIN_POLL_PATH}', "
+    "{cache: 'no-store', credentials: 'same-origin', signal: controller.signal});"
+    "issued = answer.status === 200;"
+    "} catch (error) {}"
+    "clearTimeout(timer);"
+    "if (issued) { location.replace('/feed/'); return; }"
+    "await new Promise((resolve) => setTimeout(resolve, "
+    f"{int(LOGIN_POLL_INTERVAL_SECONDS * 1000)}));"
+    "}"
+    "})();</script>"
+    "</body></html>"
+).encode()
+
+#: The wall a redirected browser sees: the same barrier, and no script.
+_REDIRECTED_WALL = (
+    "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+    "<title>Sign In | LinkedIn</title></head><body>"
+    f"<main><h1>Sign in</h1><p>{LOGIN_MARKER}</p></main>"
+    "</body></html>"
+).encode()
+
+#: How each completion ask was answered. ``pending``: not released yet.
+#: ``issued``: a fresh session, the first for this browser. ``already``: the
+#: browser already sends one this origin issued, so nothing new. ``closed``:
+#: asked after the row closed the sign-in.
+PENDING = "pending"
+ISSUED = "issued"
+ALREADY = "already"
+CLOSED = "closed"
+
+
+def session_digest(value: str | bytes) -> str:
+    """The digest a session is recorded by; the value never is."""
+    raw = value.encode() if isinstance(value, str) else value
+    return hashlib.sha256(raw).hexdigest()
+
+
+@dataclass
+class LoginFixture:
+    """What the origin's sign-in saw, by digest and monotonic time only."""
+
+    #: The wall and its completion request are served.
+    armed: bool = False
+    armed_ns: int | None = None
+    #: Each rejection the harness made: the digests it took back, and when.
+    rejections: list[dict[str, Any]] = field(default_factory=list)
+    #: Each request for ``LOGIN_PATH``, and each ``/feed/`` sent there.
+    walls: list[int] = field(default_factory=list)
+    redirects: list[int] = field(default_factory=list)
+    #: Each completion ask: when, and how it was answered.
+    polls: list[tuple[int, str]] = field(default_factory=list)
+    released_ns: int | None = None
+    released_by: str | None = None
+    #: The phase the release named, carried by every session it issued.
+    released_phase: str | None = None
+    closed_ns: int | None = None
+    #: Each session issued: its digest, when, the phase, its ordinal.
+    issued: list[dict[str, Any]] = field(default_factory=list)
+
+    def as_record(self) -> dict[str, Any]:
+        pending = [at for at, answer in self.polls if answer == PENDING]
+        return {
+            "armed": self.armed,
+            "armed_ns": self.armed_ns,
+            "rejections": [dict(item) for item in self.rejections],
+            "walls": list(self.walls),
+            "redirects": list(self.redirects),
+            "polls": len(self.polls),
+            "first_poll_ns": self.polls[0][0] if self.polls else None,
+            "last_poll_ns": self.polls[-1][0] if self.polls else None,
+            "last_pending_ns": pending[-1] if pending else None,
+            "answers": {
+                answer: sum(1 for _, seen in self.polls if seen == answer)
+                for answer in (PENDING, ISSUED, ALREADY, CLOSED)
+            },
+            "released_ns": self.released_ns,
+            "released_by": self.released_by,
+            "released_phase": self.released_phase,
+            "closed_ns": self.closed_ns,
+            "issued": [dict(item) for item in self.issued],
+        }
+
+
+def _issued_cookie(value: str) -> str:
+    """The ``Set-Cookie`` value an issued session is answered with: the
+    domain the product stores LinkedIn's cookies under, an expiry, and the
+    flags a signed-in LinkedIn session carries."""
+    return (
+        f"li_at={value}; Domain=.linkedin.com; Path=/; "
+        f"Max-Age={ISSUED_SESSION_SECONDS}; Secure; HttpOnly; SameSite=None"
+    )
 
 
 # --- Holding one request -------------------------------------------------------
@@ -579,6 +737,12 @@ class OriginRequest:
     #: the host stub's call intervals because both run in the harness's own
     #: process. None for a request recorded without one.
     monotonic_ns: int | None = None
+    #: The digest of every ``li_at`` the request sent, never its value: which
+    #: session, the staged one or one the origin issued, it carried.
+    session_digests: tuple[str, ...] = ()
+    #: Answered 302 to the login wall: a ``/feed/`` without an accepted
+    #: session once the harness rejected the sessions it had accepted.
+    redirected: bool = False
 
 
 class _OriginHandler(BaseHTTPRequestHandler):
@@ -586,18 +750,29 @@ class _OriginHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         origin = self.server
+        header = self.headers.get("Cookie")
+        path = self.path.split("?", 1)[0]
+        valid = origin.judge_session(header)
+        walled = origin.walls(path, valid)
         origin.record(
             OriginRequest(
                 server_name=getattr(self.connection, "_synthetic_server_name", None),
                 host=self.headers.get("Host"),
                 path=self.path,
-                cookie_names=cookie_names(self.headers.get("Cookie")),
+                cookie_names=cookie_names(header),
                 t=time.time(),
-                session_valid=origin.judge_session(self.headers.get("Cookie")),
+                session_valid=valid,
                 monotonic_ns=time.monotonic_ns(),
+                session_digests=tuple(
+                    session_digest(value) for value in cookie_values(header, "li_at")
+                ),
+                redirected=walled,
             )
         )
-        gate = origin.gate_for(self.path.split("?", 1)[0])
+        if walled or origin.serves_login(path):
+            self._sign_in(origin, path, header, walled=walled, query="?" in self.path)
+            return
+        gate = origin.gate_for(path)
         ended: str | None = None
         if gate is not None:
             # Entered before any byte of the answer, and waited on with no lock
@@ -627,6 +802,49 @@ class _OriginHandler(BaseHTTPRequestHandler):
             # read as the start of the next request.
             self.close_connection = True
 
+    def _sign_in(
+        self,
+        origin: SyntheticOrigin,
+        path: str,
+        header: str | None,
+        *,
+        walled: bool,
+        query: bool,
+    ) -> None:
+        """The wall, a rejected feed's way to it, and the completion ask,
+        each answered at once.
+
+        Only the product's login opens the wall itself, at exactly
+        ``LOGIN_PATH``; a browser a rejected feed sent there arrives with the
+        redirect's query and is served a wall that asks for nothing, so no
+        ask, and no session, ever comes from anything but a login.
+        """
+        cookie: str | None = None
+        if walled:
+            origin.note_wall(redirect=True)
+            status, body = 302, b""
+        elif path == LOGIN_PATH and query:
+            status, body = 200, _REDIRECTED_WALL
+        elif path == LOGIN_PATH:
+            origin.note_wall()
+            status, body = 200, _LOGIN_PAGE
+        else:
+            answer, cookie = origin.complete_login(header)
+            status = 200 if answer in (ISSUED, ALREADY) else 204
+            body = answer.encode() if status == 200 else b""
+        self.send_response(status)
+        if walled:
+            self.send_header("Location", LOGIN_REDIRECT)
+        if cookie is not None:
+            self.send_header("Set-Cookie", cookie)
+        self.send_header("Cache-Control", "no-store")
+        if status != 204:
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
     def log_message(self, format: str, *args: Any) -> None:
         pass
 
@@ -645,6 +863,11 @@ class SyntheticOrigin(ThreadingHTTPServer):
         #: that shows up on the server side.
         self.failures: list[str] = []
         self._sessions: list[bytes] = []
+        #: Sessions the harness took back (``reject_sessions``).
+        self._rejected: list[bytes] = []
+        #: Sessions this origin issued itself (``complete_login``).
+        self._issued: list[bytes] = []
+        self._login = LoginFixture()
         self._gates: list[Gate] = []
         context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         context.load_cert_chain(certificates / LEAF_FILE, certificates / LEAF_KEY_FILE)
@@ -660,16 +883,21 @@ class SyntheticOrigin(ThreadingHTTPServer):
     def accept_session(self, li_at: str) -> None:
         """Treat *li_at* as a session this origin issued.
 
-        Held in memory only. The origin issues no refreshed session of its
-        own, so the staged value is the only one a row's browser may send.
+        Held in memory only. The origin refreshes no session of its own, so
+        the staged value is the only one a row's browser may send, until a
+        row stages a sign-in and the origin issues a fresh one
+        (``complete_login``).
         """
         with self._lock:
             self._sessions.append(li_at.encode())
 
     def judge_session(self, header: str | None) -> bool | None:
+        """Whether *header* sends a session this origin accepts now; None
+        while it has never accepted or rejected any."""
         with self._lock:
             sessions = list(self._sessions)
-        if not sessions:
+            judged = bool(sessions or self._rejected)
+        if not judged:
             return None
         sent = [value.encode() for value in cookie_values(header, "li_at")]
         return any(
@@ -677,6 +905,126 @@ class SyntheticOrigin(ThreadingHTTPServer):
             for value in sent
             for session in sessions
         )
+
+    def accepts_digest(self, digest: str) -> bool:
+        """Whether the session with *digest* is one this origin accepts now:
+        the origin's own judgement of a session on disk, read without any
+        browser asking it."""
+        with self._lock:
+            sessions = list(self._sessions)
+        return any(session_digest(session) == digest for session in sessions)
+
+    # --- Signing in ----------------------------------------------------------
+
+    def arm_login(self) -> None:
+        """Serve the login wall and its completion request from now on."""
+        with self._lock:
+            if not self._login.armed:
+                self._login.armed = True
+                self._login.armed_ns = time.monotonic_ns()
+
+    def reject_sessions(self) -> dict[str, Any]:
+        """The harness's own rejection of every session accepted so far.
+
+        From here a ``/feed/`` without an accepted session is answered 302 to
+        the wall, which is served, as is the completion request. What is
+        taken back, and when, is recorded by digest; the time is read under
+        the same lock that takes them, so no request is judged in between.
+        """
+        with self._lock:
+            taken = list(self._sessions)
+            self._sessions.clear()
+            self._rejected.extend(taken)
+            at = time.monotonic_ns()
+            if not self._login.armed:
+                self._login.armed = True
+                self._login.armed_ns = at
+            found = {
+                "digests": [session_digest(session) for session in taken],
+                "monotonic_ns": at,
+            }
+            self._login.rejections.append(found)
+        return dict(found)
+
+    def walls(self, path: str, valid: bool | None) -> bool:
+        """Whether a request for *path* judged *valid* meets the wall."""
+        with self._lock:
+            rejected = bool(self._rejected)
+        return path == "/feed/" and rejected and valid is not True
+
+    def serves_login(self, path: str) -> bool:
+        with self._lock:
+            armed = self._login.armed
+        return armed and path in (LOGIN_PATH, LOGIN_POLL_PATH)
+
+    def note_wall(self, *, redirect: bool = False) -> None:
+        """A request served the wall, or (*redirect*) sent there."""
+        with self._lock:
+            seen = self._login.redirects if redirect else self._login.walls
+            seen.append(time.monotonic_ns())
+
+    def release_login(
+        self, *, by: str = COMPLETED_BY_ROW, phase: str = "row"
+    ) -> dict[str, Any]:
+        """Let the next completion asks issue fresh sessions. The first
+        release names who released and the phase every issue carries."""
+        with self._lock:
+            if self._login.released_ns is None:
+                self._login.released_ns = time.monotonic_ns()
+                self._login.released_by = by
+                self._login.released_phase = phase
+            return {
+                "released_ns": self._login.released_ns,
+                "released_by": self._login.released_by,
+                "phase": self._login.released_phase,
+            }
+
+    def close_login(self) -> None:
+        """No session is issued from now on, released or not: the teardown's,
+        so nothing still asking after the row can sign in."""
+        with self._lock:
+            if self._login.closed_ns is None:
+                self._login.closed_ns = time.monotonic_ns()
+
+    def complete_login(self, header: str | None) -> tuple[str, str | None]:
+        """One completion ask: how it is answered, and the ``Set-Cookie``
+        value when it issues a session. Decided and recorded under one lock,
+        so two asks never both issue for one release."""
+        sent = [value.encode() for value in cookie_values(header, "li_at")]
+        with self._lock:
+            login = self._login
+            at = time.monotonic_ns()
+            if any(
+                hmac.compare_digest(value, issued)
+                for value in sent
+                for issued in self._issued
+            ):
+                login.polls.append((at, ALREADY))
+                return ALREADY, None
+            if login.closed_ns is not None:
+                login.polls.append((at, CLOSED))
+                return CLOSED, None
+            if login.released_ns is None:
+                login.polls.append((at, PENDING))
+                return PENDING, None
+            value = f"{ISSUED_PREFIX}{secrets.token_urlsafe(24)}"
+            self._issued.append(value.encode())
+            self._sessions.append(value.encode())
+            login.polls.append((at, ISSUED))
+            login.issued.append(
+                {
+                    "digest": session_digest(value),
+                    "issued_ns": at,
+                    "phase": login.released_phase,
+                    "ordinal": len(login.issued) + 1,
+                }
+            )
+        return ISSUED, _issued_cookie(value)
+
+    def login_record(self) -> dict[str, Any]:
+        """What the sign-in saw so far, fit for a row's packet."""
+        with self._lock:
+            return self._login.as_record()
 
     def record(self, request: OriginRequest) -> None:
         with self._lock:

@@ -115,6 +115,12 @@ KINDS = frozenset(
         "loss",
         "phase",
         "attempt",
+        # A staged sign-in: the authorization the row recorded, the origin's
+        # rejection and release, and the lineage read beside R17.
+        "authorization",
+        "login.rejected",
+        "login.released",
+        "r17.lineage",
     }
 )
 
@@ -133,6 +139,11 @@ LOSSES = frozenset(
         "owner-killed",
     }
 )
+#: Which authorization a row recorded (``session.LOGIN``, ``IMPORT`` and
+#: ``ORIGIN_REJECTED``; a logout is recorded on its row's own record).
+AUTHORIZATIONS = frozenset({"login", "import", "origin-rejected"})
+#: What ``session.replacement_lineage`` reads.
+LINEAGES = frozenset({"none", "replaced", "lost", "unauthorized", "uncertain"})
 #: Which attempt the frontend made. Each is reported by the frontend's own
 #: output, never inferred from browser navigations.
 ATTEMPTS = frozenset({"preflight", "dispatch", "election", "replay"})
@@ -144,6 +155,16 @@ def _text(value: Any) -> bool:
 
 def _count(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _digests(value: Any) -> bool:
+    """A list of SHA-256 digests, never a value they were taken of."""
+    return isinstance(value, list) and all(
+        isinstance(item, str)
+        and len(item) == 64
+        and set(item) <= set("0123456789abcdef")
+        for item in value
+    )
 
 
 def _one_of(choices: frozenset[str]) -> Callable[[Any], bool]:
@@ -173,6 +194,13 @@ KIND_FIELDS: dict[str, dict[str, Callable[[Any], bool]]] = {
         "attempt": _one_of(ATTEMPTS),
         "classification": lambda value: value is None or _text(value),
     },
+    "authorization": {
+        "authorization": _one_of(AUTHORIZATIONS),
+        "monotonic_ns": _count,
+    },
+    "login.rejected": {"digests": _digests, "monotonic_ns": _count},
+    "login.released": {"released_ns": _count, "released_by": _text},
+    "r17.lineage": {"reading": _one_of(LINEAGES)},
 }
 
 EXPERIMENTS = frozenset({"K0", "K1", "K2", "K3"})

@@ -2311,6 +2311,9 @@ def test_the_origin_dates_each_request_on_the_harness_monotonic_clock():
             judge_session=lambda header: True,
             # No gate armed: the request is answered at once.
             gate_for=lambda path: None,
+            # No sign-in staged: no wall, and no login served.
+            walls=lambda path, valid: False,
+            serves_login=lambda path: False,
         ),
     )
     handler.connection = SimpleNamespace(_synthetic_server_name="www.linkedin.com")
