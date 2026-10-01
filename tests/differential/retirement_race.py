@@ -718,15 +718,22 @@ def _read_ok(call: Mapping[str, Any]) -> bool:
 
 def branch(call: Mapping[str, Any] | None) -> str:
     """How a call after a retirement ended (``DELIVERED``, ``FAILED`` or
-    ``SILENT``). An error the caller sees, raised or returned, is explicit;
-    a result that looks like success without its data, a cancellation or no
-    end at all is not."""
+    ``SILENT``). An error the caller sees, raised or returned, is explicit,
+    and so is a result that names every section it could not read in its
+    ``section_errors``; a result that looks like success without its data, a
+    cancellation or no end at all is not."""
     call = _mapping(call)
     if _read_ok(call):
         return DELIVERED
     outcome = call.get("outcome")
     if outcome == "raised" or (outcome == "returned" and call.get("is_error") is True):
         return FAILED
+    if outcome == "returned" and call.get("is_error") is False:
+        marked = set(_sequence(call.get("marked_sections")))
+        errors = set(_sequence(call.get("section_errors")))
+        missing = set(EXPECTED_SECTIONS) - marked
+        if missing and missing <= errors:
+            return FAILED
     return SILENT
 
 
@@ -852,6 +859,26 @@ def _other_launches(
     return others
 
 
+def _exited(entry: Sequence[Any], record: Mapping[str, Any]) -> bool:
+    """Whether the watcher saw the launch *entry* names exit: an owner launch
+    ``[pid, start]``, or ``["release gate", pid, start]``. A launch it never
+    saw exit, or one ``_other_launches`` only names, has not."""
+    if not entry:
+        return False
+    if entry[0] == "release gate":
+        lifetimes, launch = _sequence(record.get("gate_processes")), entry[1:]
+    elif type(entry[0]) is int:
+        lifetimes, launch = _sequence(record.get("owner_processes")), entry
+    else:
+        return False
+    return any(
+        same_lifetime(_sequence(lifetime)[:2], launch[:2])
+        and len(_sequence(lifetime)) > 4
+        and _sequence(lifetime)[4] is not None
+        for lifetime in lifetimes
+    )
+
+
 def _started(entry: Sequence[Any]) -> float | None:
     return _number(entry[-1]) if entry else None
 
@@ -922,7 +949,14 @@ def _successor_problems(
     ]
     if len(mine) != 1:
         found.append("the successor is not an owner the row was seen to launch")
-    extra = [entry for entry in others if entry not in mine]
+    # While the retiring owner still holds the lock, the election starts
+    # candidates on its backoff (``daemon_election._owner_start_delay_after``)
+    # and each one that cannot take the lock exits. Those are the election
+    # doing its job; a launch besides the successor that the watcher did not
+    # see exit is a second owner the row cannot account for.
+    extra = [
+        entry for entry in others if entry not in mine and not _exited(entry, record)
+    ]
     if extra:
         found.append(f"the row launched other owners besides the successor: {extra}")
     began, ended = _number(call.get("began")), _number(call.get("ended"))
