@@ -214,6 +214,10 @@ OWNER_LOSS_IDLE_TIMEOUT_SECONDS = CALIBRATION_IDLE_TIMEOUT_SECONDS
 #: preflight's bound, so the call meets the stopped owner, and short of the
 #: election's own budget (90 s), so recovery may still be waiting for it.
 STOP_SECONDS = 20.0
+#: How late the resume may come after ``STOP_SECONDS`` before the experiment
+#: is not the one declared: a stop that ran on toward the idle timeout lets a
+#: healthy owner retire as it wakes, which would read as a replacement.
+RESUME_TOLERANCE_SECONDS = 5.0
 #: How long the frontend's preflight may take to fail against the stopped
 #: owner: its own read timeout (``daemon_liveness.HEARTBEAT_SECONDS``, 2 s)
 #: and the frontend's scheduling.
@@ -886,6 +890,23 @@ def _common(record: Mapping[str, Any], *, daemon: bool) -> list[str]:
     calls = [_mapping(call) for call in _sequence(record.get("calls"))]
     if not calls or calls[0].get("tool") != WARM_TOOL or not _read_ok_feed(calls[0]):
         problems.append(f"{INVALID}the warm-up read is not recorded as returned")
+    # Every hold, by when it let go rather than its label: a handler resumed
+    # late still records ``served`` after the gate's deadline.
+    for gate in _sequence(record.get("gates")):
+        entered = _ns(_mapping(gate).get("entered_monotonic_ns"))
+        let_go = _ns(_mapping(gate).get("released_monotonic_ns"))
+        if entered is None:
+            continue
+        if let_go is None:
+            problems.append(
+                f"{INVALID}the hold on {_mapping(gate).get('path')} has no end time"
+            )
+        elif (let_go - entered) / 1e9 > GATE_DEADLINE_SECONDS:
+            problems.append(
+                f"{INVALID}the hold on {_mapping(gate).get('path')} let go "
+                f"{(let_go - entered) / 1e9:.1f}s after its entry, past the "
+                f"gate's {GATE_DEADLINE_SECONDS}s deadline"
+            )
     return problems
 
 
@@ -1030,6 +1051,16 @@ def _stop_invalid(record: Mapping[str, Any], read: Mapping[str, Any]) -> list[st
         found.append(
             f"{INVALID}the owner was resumed {(resumed - stopped) / 1e9:.1f}s after "
             f"the stop, before its declared {STOP_SECONDS}s"
+        )
+    if (
+        resumed is not None
+        and (resumed - stopped) / 1e9 > STOP_SECONDS + RESUME_TOLERANCE_SECONDS
+    ):
+        found.append(
+            f"{INVALID}the owner was resumed {(resumed - stopped) / 1e9:.1f}s after "
+            f"the stop, past its declared {STOP_SECONDS}s and "
+            f"{RESUME_TOLERANCE_SECONDS}s tolerance: what it did on waking is "
+            f"not this lane's to judge"
         )
     return found
 

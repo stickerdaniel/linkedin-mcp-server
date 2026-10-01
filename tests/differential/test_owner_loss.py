@@ -1309,6 +1309,28 @@ def test_windows_counts_a_venv_launcher_and_its_gate_as_one_owner_launch():
     )
 
 
+def test_a_held_recipient_page_served_past_its_deadline_is_invalid():
+    """Released on time, but the handler resumed late: served 22 s after it
+    entered. The label does not make it the hold the row declared."""
+    record = _h_r9()
+    gate = record["gates"][0]
+    gate["released_monotonic_ns"] = gate["entered_monotonic_ns"] + 22_000 * MS
+    problems = owner_loss.problems_for(record, daemon=True)
+    assert any("past the gate's" in p for p in problems), problems
+    assert all(p.startswith(INVALID) for p in problems), problems
+
+
+def test_an_owner_resumed_far_past_its_stop_is_no_finding():
+    """Stopped 80 s instead of 20: what a healthy owner did on waking near its
+    idle timeout is not this lane's to judge."""
+    record = _h_r8(ROW_OWNER_ERROR)
+    fault = record["fault"]
+    fault["resumed_ns"] = fault["stopped_ns"] + 80_000 * MS
+    problems = owner_loss.problems_for(record, daemon=True)
+    assert any("past its declared" in p for p in problems), problems
+    assert any(p.startswith(INVALID) for p in problems), problems
+
+
 def test_a_successor_is_credited_only_through_recorded_browsers():
     """Without the row's browser roots nobody can say which launch read the
     pages, so a successor is not shown to have read them."""
