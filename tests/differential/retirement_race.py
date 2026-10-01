@@ -876,39 +876,60 @@ def _other_launches(
     return others
 
 
-def _lost_the_lock(
-    entry: Sequence[Any], record: Mapping[str, Any], owner: Sequence[Any]
-) -> bool:
-    """Whether the launch *entry* names, an owner launch ``[pid, start]`` or
-    ``["release gate", pid, start]``, is shown to be an election candidate
-    that never held the lock: every process of the launch (on Windows the
-    venv launcher and the interpreter it started) seen gone by a sample that
-    began while the retiring *owner* was still seen alive, and so still held
-    the lock. A launch with any process not seen gone, or gone only after the
-    owner, may have served and is not shown to be one.
-    """
+def _members(entry: Sequence[Any], record: Mapping[str, Any]) -> list[Sequence[Any]]:
+    """Every recorded lifetime of the launch *entry* names, an owner launch
+    ``[pid, start]`` or ``["release gate", pid, start]``: the launch itself
+    and, on Windows, the interpreter its venv launcher started."""
     if not entry:
-        return False
+        return []
     if entry[0] == "release gate":
         lifetimes, launch = _sequence(record.get("gate_processes")), entry[1:]
     elif type(entry[0]) is int:
         lifetimes, launch = _sequence(record.get("owner_processes")), entry
     else:
-        return False
-    owners = [_sequence(p) for p in _sequence(record.get("owner_processes"))]
-    holder = [p for p in owners if same_lifetime(p[:2], owner[:2])]
-    # The retiring owner's last read: the latest moment it is known alive.
-    alive_until = _number(holder[0][6]) if holder and len(holder[0]) > 6 else None
-    members = [
+        return []
+    return [
         _sequence(p)
         for p in lifetimes
         if same_lifetime(_sequence(p)[:2], launch[:2])
         or _of_launch(_sequence(p)[:2], launch, lifetimes)
     ]
-    if alive_until is None or not members:
+
+
+def _browsers_of(
+    members: Sequence[Sequence[Any]], record: Mapping[str, Any]
+) -> list[Sequence[Any]] | None:
+    """The browser roots (``harness.browser_lineage``) one of *members*
+    launched, or None when the roots were not recorded or one of them names
+    no launcher, so whose it was cannot be said."""
+    roots = record.get("browser_roots")
+    if not isinstance(roots, list):
+        return None
+    found = []
+    for root in map(_sequence, roots):
+        if len(root) < 5 or root[3] is None or root[4] is None:
+            return None
+        if any(same_lifetime([root[3], root[4]], member[:2]) for member in members):
+            found.append(root)
+    return found
+
+
+def _read_nothing(entry: Sequence[Any], record: Mapping[str, Any]) -> bool:
+    """Whether the launch *entry* names is shown to have read nothing: every
+    process of it seen gone, and no browser launched by any of them. A launch
+    that read a page had a browser of its own, so this holds whether or not
+    it ever took the lock; how its process timing fell says nothing either
+    way, since an owner releases the lock before it exits. An unrecorded or
+    unattributable browser leaves it not shown."""
+    members = _members(entry, record)
+    if not members or not all(
+        len(member) > 4 and member[4] is not None for member in members
+    ):
         return False
-    gone = [_number(member[4]) if len(member) > 4 else None for member in members]
-    return all(at is not None and at <= alive_until for at in gone)
+    if entry[0] == "release gate":
+        # A gate runs no browser; the owner it started is a launch of its own.
+        return True
+    return _browsers_of(members, record) == []
 
 
 def _started(entry: Sequence[Any]) -> float | None:
@@ -985,12 +1006,12 @@ def _successor_problems(
     # While the retiring owner still holds the lock, the election starts
     # candidates on its backoff (``daemon_election._owner_start_delay_after``)
     # and each one that cannot take the lock exits. Those are the election
-    # doing its job; any other launch besides the successor is a second owner
-    # the row cannot account for.
+    # doing its job; any other launch besides the successor that is not shown
+    # to have read nothing is a second owner the row cannot account for.
     extra = [
         entry
         for entry in others
-        if entry not in mine and not _lost_the_lock(entry, record, identified)
+        if entry not in mine and not _read_nothing(entry, record)
     ]
     if extra:
         found.append(f"the row launched other owners besides the successor: {extra}")
@@ -1005,8 +1026,8 @@ def _successor_problems(
             f"the successor was not started by this call: launched "
             f"{start - began:+.1f}s from its send, outside its interval"
         )
-    # The pages the call read must come after the successor existed, or the
-    # successor cannot be what read them.
+    # Every page the call read came through a browser the successor launched,
+    # alive when the page was asked for: the only reader the record can name.
     pages = [
         _number(_mapping(request).get("t"))
         for request in _sequence(record.get("requests"))
@@ -1014,15 +1035,30 @@ def _successor_problems(
         and began is not None
         and (_number(_mapping(request).get("t")) or 0) >= began
     ]
-    if start is not None and pages:
-        first = min(page for page in pages if page is not None)
-        if first < start - START_TOLERANCE_SECONDS:
-            found.append(
-                f"the call's first page was read {start - first:.1f}s before "
-                f"the successor was launched: the successor did not read it"
-            )
-    elif start is not None:
+    browsers = _browsers_of(_members(mine[0], record), record) if mine else None
+    if not pages:
         found.append("the call read no page after it was sent")
+    elif browsers is None:
+        found.append(
+            "the row's browsers and who launched them were not recorded, so the "
+            "successor is not shown to have read the call's pages"
+        )
+    else:
+        unread = [
+            page
+            for page in pages
+            if page is None
+            or not any(
+                (_number(root[1]) or 0) - START_TOLERANCE_SECONDS <= page
+                and (root[2] is None or page <= (_number(root[2]) or 0))
+                for root in browsers
+            )
+        ]
+        if unread:
+            found.append(
+                f"{len(unread)} of the call's pages were read through no browser "
+                f"of the successor: the successor did not read them"
+            )
     return found
 
 

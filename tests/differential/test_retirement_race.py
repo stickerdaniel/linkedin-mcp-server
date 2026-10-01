@@ -636,6 +636,8 @@ def _base(row: str, *, daemon: bool, idle: float) -> dict:
             owner_identified=list(_A),
             owner_processes=[_lifetime(*_A[:2])],
             gate_processes=[],
+            # The owner's own browser, as ``harness.browser_lineage`` records it.
+            browser_roots=[[5000, 1000.5, None, *_A[:2]]],
             script_began=1000.95,
             published={"written": 999.0},
         )
@@ -732,6 +734,10 @@ def _retirement(*, daemon: bool = True) -> dict:
                 "seen_ns": 30_500 * MS,
             },
             owner_processes=[_lifetime(*_A[:2]), _lifetime(*_B[:2])],
+            browser_roots=[
+                [5000, 1000.5, 1010.9, *_A[:2]],
+                [6000, 1014.0, None, *_B[:2]],
+            ],
         )
     else:
         record["retirement"]["browser_gone"] = {"remaining": []}
@@ -819,6 +825,7 @@ def _turnover(row: str) -> dict:
             "seen_ns": 61_000 * MS,
         }
         record["owner_processes"].append(_lifetime(*successor[:2]))
+        record["browser_roots"].append([7000, 1043.0, None, *successor[:2]])
         if case.second == QUEUED:
             record["owner_log"]["cut"] = 2
             record["owner_log"]["cut_lines"] = 2
@@ -1631,14 +1638,20 @@ def test_a_reading_begun_in_the_hold_but_done_after_it_is_invalid():
     assert any("has no end" in p for p in _problems(record, True))
 
 
-def test_a_candidate_gone_only_after_the_retiring_owner_may_have_served():
-    """Seen gone only once the retiring owner was gone too: it could have
-    taken the lock in between, so it is no lost candidate."""
+def test_a_candidate_that_ran_a_browser_may_have_read_and_is_no_loser():
+    """An owner releases its lock before it exits, so a candidate can take it
+    while the retiring process is still alive, read, and exit before it. Its
+    process timing says nothing; the browser it launched does. A browser
+    nobody can attribute leaves every candidate unexcused too."""
     record = _turnover(ROW_REFUSED)
-    alive_until = record["owner_processes"][0][6]
-    late = _lifetime(4705, 1015.0)
-    late[4] = alive_until + 0.5
-    record["owner_processes"].append(late)
+    candidate = _lifetime(4705, 1015.0)
+    candidate[4] = 1030.0
+    record["owner_processes"].append(candidate)
+    assert _problems(record, True) == []
+    record["browser_roots"].append([7100, 1016.0, 1029.0, 4705, 1015.0])
+    problems = _problems(record, True)
+    assert any("other owners besides the successor" in p for p in problems), problems
+    record["browser_roots"][-1][3:] = [None, None]
     problems = _problems(record, True)
     assert any("other owners besides the successor" in p for p in problems), problems
 
@@ -1658,19 +1671,24 @@ def test_a_windows_candidate_needs_every_process_of_its_launch_gone():
     assert _problems(record, True) == []
 
 
-def test_a_successor_launched_after_the_pages_were_read_did_not_read_them():
+def test_a_page_no_browser_of_the_successor_was_alive_for_was_not_its_read():
+    """The successor's browser started only after the call's first page was
+    asked for: some other browser read it, whatever the processes' timing."""
     record = _turnover(ROW_REFUSED)
     second = SECOND_USERNAMES[ROW_REFUSED]
     first_page = min(
         r["t"] for r in record["requests"] if r["path"].startswith(f"/in/{second}/")
     )
-    successor = record["owner_after"]["lifetime"]
-    for lifetime in record["owner_processes"]:
-        if lifetime[:2] == successor:
-            lifetime[1] = first_page + 3.0
-    record["owner_after"]["lifetime"] = [successor[0], first_page + 3.0]
+    record["browser_roots"][-1][1] = first_page + 3.0
     problems = _problems(record, True)
-    assert any("the successor did not read it" in p for p in problems), problems
+    assert any("the successor did not read them" in p for p in problems), problems
+    # Nor does a browser that was gone before the page.
+    record["browser_roots"][-1][1:3] = [1042.0, first_page - 1.0]
+    problems = _problems(record, True)
+    assert any("the successor did not read them" in p for p in problems), problems
+    del record["browser_roots"]
+    problems = _problems(record, True)
+    assert any("were not recorded" in p for p in problems), problems
 
 
 def test_a_refusal_by_an_owner_already_gone_reads_as_unanswered():
@@ -1948,6 +1966,61 @@ def _owner_record(pid: int, start: float) -> dict:
     }
 
 
+def test_each_browser_root_is_tied_to_the_process_that_drove_it():
+    """Root, its children, the driver and the owner as the watcher records
+    them: one root, named with the owner behind its driver and when it went.
+    A child is inside its root's tree; a pid reused by a later process is not
+    an earlier child's parent; a root whose driver was never seen names no
+    launcher."""
+
+    def start(actor: str, pid: int, ppid: int, at: float) -> dict:
+        return {
+            "kind": "process.start",
+            "actor": actor,
+            "in_row": True,
+            "pid": pid,
+            "ppid": ppid,
+            "start_identity": at,
+        }
+
+    events = [
+        # An earlier process with the driver's pid, long gone: not the parent.
+        start("other", 11, 1, 50.0),
+        start("owner", 10, 1, 100.0),
+        start("driver", 11, 10, 101.0),
+        start("browser", 12, 11, 102.0),
+        start("browser", 13, 12, 102.5),
+        {"kind": "process.exit", "pid": 12, "start_identity": 102.0, "t": 150.0},
+        # The driver's pid, reused only after this root started.
+        start("other", 11, 1, 300.0),
+        start("browser", 20, 19, 200.0),
+    ]
+    assert harness.browser_lineage(events) == [
+        [12, 102.0, 150.0, 10, 100.0],
+        [20, 200.0, None, None, None],
+    ]
+
+
+def _browser_records(owner: int, pid: int, start: float) -> list[dict]:
+    """The watcher's records of the driver an owner started and the browser
+    root that driver started, as ``harness.browser_lineage`` reads them."""
+    return [
+        {
+            "t": time.time(),
+            "kind": "process.start",
+            "actor": actor,
+            "in_row": True,
+            "pid": child,
+            "ppid": parent,
+            "start_identity": start,
+        }
+        for actor, child, parent in (
+            ("driver", pid, owner),
+            ("browser", pid + 1, pid),
+        )
+    ]
+
+
 class _ModelledOwner:
     """An owner's process as the row holds it: running until *gone* says
     otherwise, never signalled."""
@@ -2103,6 +2176,7 @@ class _TurnoverScene(_RaceScene):
         self.on_stderr("INFO Attached to a replacement owner; running the call again")
         # A successor takes a while to start its browser.
         await asyncio.sleep(0.3)
+        self.records += _browser_records(43, 4300, time.time())
         for section in self.pages:
             await asyncio.to_thread(self._read, person_path(username, section))
         record.update(

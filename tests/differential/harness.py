@@ -2818,6 +2818,62 @@ def owner_gates(observed: Iterable[dict[str, Any]], gates: Sequence[Path]) -> li
     )
 
 
+def browser_lineage(observed: Iterable[dict[str, Any]]) -> list[list[Any]]:
+    """Every browser root the watcher saw this row's actors start, with the
+    process that launched it: ``[pid, start, gone, owner pid, owner start]``.
+
+    A root is a browser process whose parent is not itself a browser (the
+    watcher's own tree rule, ``watcher.browser_roots``); its parent is the
+    driver, and the driver's parent the process that drove it, which in a
+    daemon row is an owner. A parent is the latest lifetime of that pid
+    started no later than its child. *gone* is when the watcher saw the root
+    exit, or None; the launcher's fields are None where the watcher never saw
+    that ancestor. A launch that read a page had a browser of its own, so this
+    names which launch could have read what, whatever its process timing.
+    """
+    lifetimes: dict[tuple[int, float], dict[str, Any]] = {}
+    gone: dict[tuple[int, float], float] = {}
+    for record in observed:
+        pid, start = record.get("pid"), record.get("start_identity")
+        if type(pid) is not int or not isinstance(start, (int, float)):
+            continue
+        key = (pid, float(start))
+        if record.get("kind") in ("process.start", "process.update"):
+            lifetimes.setdefault(key, record)
+        elif record.get("kind") == "process.exit" and isinstance(
+            record.get("t"), (int, float)
+        ):
+            gone.setdefault(key, float(record["t"]))
+
+    def parent_of(child: dict[str, Any]) -> tuple[tuple[int, float], dict] | None:
+        ppid, born = child.get("ppid"), float(child["start_identity"])
+        found = [
+            (key, record)
+            for key, record in lifetimes.items()
+            if key[0] == ppid and key[1] <= born + _START_TOLERANCE_SECONDS
+        ]
+        return max(found, key=lambda item: item[0][1]) if found else None
+
+    roots = []
+    for key, record in sorted(lifetimes.items(), key=lambda item: item[0][1]):
+        if record.get("actor") != "browser":
+            continue
+        parent = parent_of(record)
+        if parent is not None and parent[1].get("actor") == "browser":
+            continue
+        launcher = parent_of(parent[1]) if parent is not None else None
+        roots.append(
+            [
+                key[0],
+                key[1],
+                gone.get(key),
+                launcher[0][0] if launcher is not None else None,
+                launcher[0][1] if launcher is not None else None,
+            ]
+        )
+    return roots
+
+
 def launch_lifetimes(
     observed: Iterable[dict[str, Any]],
     gates: Sequence[Path],
@@ -8104,6 +8160,7 @@ async def measure_host_quit_row(
         )
         row_record["owner_processes"] = owners
         row_record["gate_processes"] = gates
+        row_record["browser_roots"] = browser_lineage(observed_events)
     if comparison is not None:
         # Selected by the row, so its record is required: a missing window, a
         # failed hook or script fails here however healthy the vector is.
