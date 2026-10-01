@@ -2001,6 +2001,49 @@ def test_each_browser_root_is_tied_to_the_process_that_drove_it():
     ]
 
 
+def test_a_browser_first_seen_before_its_exec_still_counts_as_the_launchs_read():
+    """A child sampled between fork and exec carries its driver's command
+    line, and only a later record says it became the browser. It is still the
+    candidate's browser, so the candidate is not excused; and a process born
+    after the browser is never its parent."""
+
+    def seen(kind: str, actor: str, pid: int, ppid: int, at: float, **more) -> dict:
+        return {
+            "kind": kind,
+            "actor": actor,
+            "in_row": True,
+            "pid": pid,
+            "ppid": ppid,
+            "start_identity": at,
+            **more,
+        }
+
+    events = [
+        seen("process.start", "owner", 4705, 1, 1015.0),
+        seen("process.start", "driver", 4706, 4705, 1015.2),
+        seen("process.start", "driver", 4707, 4706, 1015.4),
+        seen("process.update", "browser", 4707, 4706, 1015.4),
+        seen("process.exit", "browser", 4707, 4706, 1015.4, t=1020.0),
+    ]
+    roots = harness.browser_lineage(events)
+    assert roots == [[4707, 1015.4, 1020.0, 4705, 1015.0]]
+    record = _turnover(ROW_REFUSED)
+    candidate = _lifetime(4705, 1015.0)
+    candidate[4] = 1021.0
+    record["owner_processes"].append(candidate)
+    record["browser_roots"] += roots
+    problems = _problems(record, True)
+    assert any("other owners besides the successor" in p for p in problems), problems
+    # A lifetime of the browser's parent pid born 5 ms after it is not its parent.
+    late = [
+        seen("process.start", "owner", 50, 1, 100.0),
+        seen("process.start", "driver", 51, 50, 100.1),
+        seen("process.start", "browser", 52, 51, 100.2),
+        seen("process.start", "other", 51, 9, 100.205),
+    ]
+    assert harness.browser_lineage(late) == [[52, 100.2, None, 50, 100.0]]
+
+
 def _browser_records(owner: int, pid: int, start: float) -> list[dict]:
     """The watcher's records of the driver an owner started and the browser
     root that driver started, as ``harness.browser_lineage`` reads them."""

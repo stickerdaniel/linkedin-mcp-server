@@ -2826,49 +2826,60 @@ def browser_lineage(observed: Iterable[dict[str, Any]]) -> list[list[Any]]:
     watcher's own tree rule, ``watcher.browser_roots``); its parent is the
     driver, and the driver's parent the process that drove it, which in a
     daemon row is an owner. A parent is the latest lifetime of that pid
-    started no later than its child. *gone* is when the watcher saw the root
-    exit, or None; the launcher's fields are None where the watcher never saw
-    that ancestor. A launch that read a page had a browser of its own, so this
-    names which launch could have read what, whatever its process timing.
+    started no later than its child, with no tolerance: a child is never born
+    before its parent, on any clock the watcher reads. *gone* is when the
+    watcher saw the root exit, or None; the launcher's fields are None where
+    the watcher never saw that ancestor. A launch that read a page had a
+    browser of its own, so this names which launch could have read what,
+    whatever its process timing.
+
+    A lifetime is a browser if any record of it says so: a child sampled
+    between fork and exec is first seen with its parent's command line and
+    only later as the browser it became. Its parent is the one its first
+    record names, before any reparenting.
     """
-    lifetimes: dict[tuple[int, float], dict[str, Any]] = {}
+    first: dict[tuple[int, float], dict[str, Any]] = {}
+    browsers: set[tuple[int, float]] = set()
     gone: dict[tuple[int, float], float] = {}
     for record in observed:
         pid, start = record.get("pid"), record.get("start_identity")
         if type(pid) is not int or not isinstance(start, (int, float)):
             continue
         key = (pid, float(start))
-        if record.get("kind") in ("process.start", "process.update"):
-            lifetimes.setdefault(key, record)
-        elif record.get("kind") == "process.exit" and isinstance(
+        if record.get("kind") not in (
+            "process.start",
+            "process.update",
+            "process.exit",
+        ):
+            continue
+        first.setdefault(key, record)
+        if record.get("actor") == "browser":
+            browsers.add(key)
+        if record.get("kind") == "process.exit" and isinstance(
             record.get("t"), (int, float)
         ):
             gone.setdefault(key, float(record["t"]))
 
-    def parent_of(child: dict[str, Any]) -> tuple[tuple[int, float], dict] | None:
-        ppid, born = child.get("ppid"), float(child["start_identity"])
-        found = [
-            (key, record)
-            for key, record in lifetimes.items()
-            if key[0] == ppid and key[1] <= born + _START_TOLERANCE_SECONDS
-        ]
-        return max(found, key=lambda item: item[0][1]) if found else None
+    def parent_of(
+        child: tuple[int, float],
+    ) -> tuple[int, float] | None:
+        ppid = first[child].get("ppid")
+        found = [key for key in first if key[0] == ppid and key[1] <= child[1]]
+        return max(found, key=lambda key: key[1]) if found else None
 
     roots = []
-    for key, record in sorted(lifetimes.items(), key=lambda item: item[0][1]):
-        if record.get("actor") != "browser":
+    for key in sorted(browsers, key=lambda key: key[1]):
+        parent = parent_of(key)
+        if parent is not None and parent in browsers:
             continue
-        parent = parent_of(record)
-        if parent is not None and parent[1].get("actor") == "browser":
-            continue
-        launcher = parent_of(parent[1]) if parent is not None else None
+        launcher = parent_of(parent) if parent is not None else None
         roots.append(
             [
                 key[0],
                 key[1],
                 gone.get(key),
-                launcher[0][0] if launcher is not None else None,
-                launcher[0][1] if launcher is not None else None,
+                launcher[0] if launcher is not None else None,
+                launcher[1] if launcher is not None else None,
             ]
         )
     return roots
