@@ -1570,6 +1570,38 @@ def test_the_new_work_may_fail_explicitly_but_never_silently():
     assert branch(record["calls"][2]) == SILENT
 
 
+def test_a_result_naming_every_section_it_missed_is_an_explicit_failure():
+    """The shape frozen Direct returned on windows-latest after its browser
+    idled closed: the profile read, both sections named in
+    ``section_errors``. The caller is told; that is no silent cut. A section
+    missing without being named is."""
+    record = _retirement(daemon=False)
+    record["calls"][-1].update(
+        sections=["main_profile"],
+        marked_sections=["main_profile"],
+        section_errors=["education", "experience"],
+    )
+    assert branch(record["calls"][-1]) == FAILED
+    assert _problems(record, False) == []
+    record["calls"][-1].update(section_errors=["education"])
+    assert branch(record["calls"][-1]) == SILENT
+
+
+def test_election_candidates_that_exited_are_no_second_owner():
+    """While a retiring owner holds the lock the election starts candidates
+    on its backoff, and each exits: measured on three legs during the
+    turnover drain. One the watcher did not see exit still fails."""
+    record = _turnover(ROW_REFUSED)
+    for pid, start in ((4701, 1012.0), (4702, 1013.0), (4703, 1015.0)):
+        candidate = _lifetime(pid, start)
+        candidate[4] = start + 0.8
+        record["owner_processes"].append(candidate)
+    assert _problems(record, True) == []
+    record["owner_processes"].append(_lifetime(4704, 1016.0))
+    problems = _problems(record, True)
+    assert any("other owners besides the successor" in p for p in problems), problems
+
+
 def test_a_refusal_by_an_owner_already_gone_reads_as_unanswered():
     record = _turnover(ROW_REFUSED)
     record["second_attempts"][0] = {"attempt": "preflight", "classification": None}
