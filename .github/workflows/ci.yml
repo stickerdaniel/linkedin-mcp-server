@@ -811,36 +811,41 @@ jobs:
 
       - run: uv cache prune --ci
 
-  # Calls that lose their caller (tests/differential/call_loss.py), in a job of
-  # their own rather than more steps in `platform-behaviour`, whose budget the
-  # rows before them already fill. Four legs: the Ubuntu x64 job's platform
-  # and the three `platform-behaviour` runs on, each with its own browser
-  # build. The setup is the one the differential steps above need, copied
-  # step for step: the browser for the candidate and the frozen baseline, the
-  # run's certificates, the trust and the fence behind the disposable-runner
-  # guard, a display on Linux, and on Linux the signal oracle H-R5 kills
-  # under. Serial, like every native row, and its evidence uploaded whatever
-  # happened, under names of its own.
+  # Calls that lose their caller (tests/differential/call_loss.py), and calls
+  # that race the owner's retirement (tests/differential/retirement_race.py),
+  # in a job of their own rather than more steps in `platform-behaviour`,
+  # whose budget the rows before them already fill. Four legs: the Ubuntu x64
+  # job's platform and the three `platform-behaviour` runs on, each with its
+  # own browser build. The setup is the one the differential steps above
+  # need, copied step for step: the browser for the candidate and the frozen
+  # baseline, the run's certificates, the trust and the fence behind the
+  # disposable-runner guard, a display on Linux, and on Linux the signal
+  # oracle H-R5 kills under. Serial, like every native row, and its evidence
+  # uploaded whatever happened, under names of its own.
   differential-calls:
     name: Differential calls (${{ matrix.os }}, ${{ matrix.rows }})
     runs-on: ${{ matrix.os }}
     # The camelCase read shims off, for the reason given at `windows-daemon`.
     env:
       FASTMCP_MCP_CAMELCASE_COMPAT: "false"
-    # Two groups of rows per leg, so neither job's bound comes near the
-    # hosted runner's six hours. The sum of a group's step bounds: 45 for a
-    # cold browser download for each runtime and the frozen baseline (bound
-    # 15), with room for Windows, the slowest leg, to sync and install twice;
-    # then `pipes` 30 for H-CAL and 45 for each of its two loss steps (165),
-    # `processes` 5 for the oracle and 45 for each of its three (185).
-    timeout-minutes: ${{ matrix.rows == 'pipes' && 165 || 185 }}
+    # Three groups of rows per leg, so no job's bound comes near the hosted
+    # runner's six hours. The sum of a group's step bounds: 45 for a cold
+    # browser download for each runtime and the frozen baseline (bound 15),
+    # with room for Windows, the slowest leg, to sync and install twice; then
+    # `pipes` 30 for H-CAL and 45 for each of its two loss steps (165),
+    # `processes` 5 for the oracle and 45 for each of its three (185), and
+    # `idle` 50 for each of the two H-R13 steps and 35 for each of the four
+    # turnover lanes (285).
+    timeout-minutes: ${{ matrix.rows == 'pipes' && 165 || matrix.rows == 'processes' && 185 || 285 }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
         # `pipes`: H-CAL and the two losses through the host's own pipes.
         # `processes`: the losses that end a process, which the oracle traces.
-        rows: [pipes, processes]
+        # `idle`: the reads that race the owner's retirement, idle or asked
+        # for (tests/differential/retirement_race.py); nothing is killed.
+        rows: [pipes, processes, idle]
         include:
           - os: ubuntu-latest
             browsers: ~/.cache/ms-playwright
@@ -1064,6 +1069,85 @@ jobs:
           LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
         timeout-minutes: 45
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py -k killed_mid_read
+
+      # Row H-R13: the read raced against the owner's idle exit, with its own
+      # 8s idle timeout (retirement_race.IDLE_RACE_TIMEOUT_SECONDS), in K1
+      # frozen, K3 and K0 (K2 recorded not applicable), one step per lane.
+      # Each cell is the calibration's seven minutes with an idle timeout of
+      # 8s instead of 60s, plus its own waits. Admission wins: the hold (at
+      # most 18s), the owner's or Direct's idle exit after the read (8 + 60s)
+      # and the browser after it (60s). Retirement wins: the idle line (8 +
+      # 60s), the owner's exit or the browser (60s), and the call through an
+      # election (bound 180s). Then the owner's or successor's own idle exit
+      # (8 + 90s) and the residual browser wait (60s). Three cells come to at
+      # most 45 minutes: 50 each.
+      - name: Race an admitted read against the idle exit
+        if: matrix.rows == 'idle'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 50
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_idle_race_rows.py -k admitted
+
+      - name: Call after the owner idled out
+        if: matrix.rows == 'idle'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 50
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_idle_race_rows.py -k idled_out
+
+      # The turnover lanes, daemon only: K3 and K0, with K1 a counted skip
+      # (a policy, not parity) and K2 recorded not applicable, in the
+      # calibration's 60s configuration. Each cell adds to the calibration's
+      # seven minutes: the stand-down and the reads through the drain (30s)
+      # or past it, each read bounded at 180s; the owner's stand-down (90s);
+      # where a successor served, its idle exit (60 + 90s); and the residual
+      # browser wait (60s). Two cells come to at most 30 minutes: 35 each.
+      # They do not discharge W6.
+      - name: Turn the owner over with held work inside the drain
+        if: matrix.rows == 'idle'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 35
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_idle_race_rows.py -k "turns_over and drain"
+
+      - name: Refuse new work after a turnover
+        if: matrix.rows == 'idle'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 35
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_idle_race_rows.py -k "turns_over and refused"
+
+      - name: Cut a read that outlasts the drain
+        if: matrix.rows == 'idle'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 35
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_idle_race_rows.py -k "turns_over and cut"
+
+      - name: Refuse a queued read as not run
+        if: matrix.rows == 'idle'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 35
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_idle_race_rows.py -k "turns_over and queued"
 
       # The rows' evidence packet (``events.PUBLISHED_FILES``), under a name
       # apart from the other jobs' packets. Always, so a red row keeps what
