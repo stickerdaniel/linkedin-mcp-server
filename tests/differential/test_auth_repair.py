@@ -34,7 +34,7 @@ from typing import Any, cast
 
 import pytest
 
-from differential import auth_repair, harness, synthetic_origin
+from differential import auth_repair, harness, model_coverage, synthetic_origin
 from differential.auth_repair import (
     AUTH_IDLE_TIMEOUT_SECONDS,
     BOUNDS,
@@ -49,6 +49,7 @@ from differential.auth_repair import (
     MODEL_COVERAGE,
     REPLAY_LINE,
     RESPONSE_LOSS_OPEN,
+    RESPONSE_LOSS_REFERENCES,
     ROW_COLD,
     ROW_FAILED,
     ROW_LOGIN,
@@ -1276,17 +1277,10 @@ def test_a_lineage_expectation_needs_a_sign_in_and_a_policy_that_cannot_repair()
 # --- What stays with the models ----------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "branch",
-    [
-        pytest.param(
-            branch,
-            marks=pytest.mark.differential_row(row=row, experiment="K3", column="unit"),
-        )
-        for branch, (row, _) in MODEL_COVERAGE.items()
-    ],
-)
+@pytest.mark.parametrize("branch", list(MODEL_COVERAGE))
 def test_each_branch_left_to_the_models_names_tests_that_exist(branch):
+    """A check of the mapping only: never counted as any branch's coverage,
+    which comes from the mapped tests' own runs."""
     _row, nodes = MODEL_COVERAGE[branch]
     root = Path(__file__).resolve().parents[2]
     assert nodes
@@ -1295,15 +1289,18 @@ def test_each_branch_left_to_the_models_names_tests_that_exist(branch):
         assert name in _functions(root / path), node
 
 
-def test_the_response_loss_lane_is_labelled_open_and_its_models_as_latch_models():
-    [branch] = [name for name in MODEL_COVERAGE if name.startswith("response loss")]
-
-    assert "latch models, not response-loss tests" in branch
+def test_the_response_loss_lane_is_open_and_its_latch_models_never_count():
+    """The latch models stand beside the open lane as references; the
+    accounting never counts them as its coverage."""
+    root = Path(__file__).resolve().parents[2]
     assert "stays open" in RESPONSE_LOSS_OPEN
-    assert all(
-        node.startswith("tests/test_bootstrap.py::TestTheOwnerStaysQuiescent")
-        for node in MODEL_COVERAGE[branch][1]
-    )
+    assert not any(name.startswith("response loss") for name in MODEL_COVERAGE)
+    rows = model_coverage.model_rows()
+    for node in RESPONSE_LOSS_REFERENCES:
+        assert node.startswith("tests/test_bootstrap.py::TestTheOwnerStaysQuiescent")
+        path, _, name = node.partition("::")
+        assert name in _functions(root / path), node
+        assert node not in rows
 
 
 # --- The relay's boundary, process-free -----------------------------------------------------

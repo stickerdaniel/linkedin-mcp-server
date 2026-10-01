@@ -76,6 +76,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from differential import model_coverage
 from differential.call_loss import (
     CALIBRATION_IDLE_TIMEOUT_SECONDS,
     INVALID,
@@ -1102,56 +1103,16 @@ IMPORT_NOT_NATIVE = (
     "keychain or DPAPI first. Not run natively on any leg; mapped to its model"
 )
 
-#: Every R16 and R10a-login branch the native cells do not reach, with the
-#: exact existing tests that model it: counted as model coverage, never as
-#: native. Each entry's first element names the row it stands beside.
-MODEL_COVERAGE: dict[str, tuple[str, tuple[str, ...]]] = {
-    "response loss (latch models, not response-loss tests)": (
-        ROW_COLD,
-        (
-            "tests/test_bootstrap.py::TestTheOwnerStaysQuiescentUntilANewSessionLands"
-            "::test_every_later_call_names_the_same_broken_session",
-            "tests/test_bootstrap.py::TestTheOwnerStaysQuiescentUntilANewSessionLands"
-            "::test_the_gate_refuses_before_it_can_reach_a_browser",
-            "tests/test_bootstrap.py::TestTheOwnerStaysQuiescentUntilANewSessionLands"
-            "::test_an_abandoned_login_leaves_it_latched",
-        ),
-    ),
-    "browser_open marker": (
-        ROW_COLD,
-        (
-            "tests/test_daemon_auth.py::TestTheFrontendActsOnTheMarker"
-            "::test_no_login_starts_while_the_profile_may_still_be_held",
-        ),
-    ),
-    "frontend wait expiring while the login continues": (
-        ROW_FAILED,
-        (
-            "tests/test_daemon_auth.py::TestTheRepairRunsForReal"
-            "::test_a_sign_in_slower_than_the_wait_gives_up_without_replaying",
-        ),
-    ),
-    "non-replayable or mutating call repaired, never replayed": (
-        ROW_COLD,
-        (
-            "tests/test_daemon_auth.py::TestTheFrontendActsOnTheMarker"
-            "::test_a_call_that_had_already_started_is_never_run_again",
-            "tests/test_daemon_auth.py::TestTheRepairRunsForReal"
-            "::test_a_tool_that_changes_something_is_never_replayed",
-        ),
-    ),
-    "two frontends meeting one dead session": (
-        ROW_SECOND,
-        (
-            "tests/test_bootstrap.py::TestTwoClientsMeetingOneDeadSession"
-            "::test_the_generation_stops_the_second_client",
-        ),
-    ),
-    "import beside an idle owner": (
-        ROW_LOGIN,
-        (
-            "tests/test_cli_main.py::TestRetiringASharedBrowser"
-            "::test_import_waits_for_the_profile_after_an_idle_owner_retires",
-        ),
-    ),
-}
+#: What the response-loss lane stands beside while it stays open: latch
+#: models, which are not response-loss tests, so never counted as its
+#: coverage (``RESPONSE_LOSS_OPEN``).
+RESPONSE_LOSS_REFERENCES: tuple[str, ...] = (
+    "tests/test_bootstrap.py::TestTheOwnerStaysQuiescentUntilANewSessionLands"
+    "::test_every_later_call_names_the_same_broken_session",
+    "tests/test_bootstrap.py::TestTheOwnerStaysQuiescentUntilANewSessionLands"
+    "::test_the_gate_refuses_before_it_can_reach_a_browser",
+    "tests/test_bootstrap.py::TestTheOwnerStaysQuiescentUntilANewSessionLands"
+    "::test_an_abandoned_login_leaves_it_latched",
+)
+
+MODEL_COVERAGE = model_coverage.AUTH_MODEL_COVERAGE

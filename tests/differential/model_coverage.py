@@ -67,14 +67,14 @@ MODEL_COVERAGE: dict[str, tuple[str, tuple[str, ...]]] = {
         ),
     ),
     "login success under an idle owner": (
-        "H-R10a-logout",
+        "H-R10a-login",
         (
             "tests/test_cli_main.py::TestRetiringASharedBrowser"
             "::test_login_starts_after_an_idle_owner_retires",
         ),
     ),
     "import success under an idle owner": (
-        "H-R10a-logout",
+        "H-R10a-login",
         (
             "tests/test_cli_main.py::TestRetiringASharedBrowser"
             "::test_import_waits_for_the_profile_after_an_idle_owner_retires",
@@ -83,10 +83,58 @@ MODEL_COVERAGE: dict[str, tuple[str, tuple[str, ...]]] = {
 }
 
 
+#: Every R16 and R10a-login branch the native cells do not reach, with the
+#: exact existing tests that model it: counted as model coverage when they
+#: run, never as native. Each entry's first element names its row.
+AUTH_MODEL_COVERAGE: dict[str, tuple[str, tuple[str, ...]]] = {
+    "browser_open marker": (
+        "H-R16-cold",
+        (
+            "tests/test_daemon_auth.py::TestTheFrontendActsOnTheMarker"
+            "::test_no_login_starts_while_the_profile_may_still_be_held",
+        ),
+    ),
+    "frontend wait expiring while the login continues": (
+        "H-R16-failed",
+        (
+            "tests/test_daemon_auth.py::TestTheRepairRunsForReal"
+            "::test_a_sign_in_slower_than_the_wait_gives_up_without_replaying",
+        ),
+    ),
+    "non-replayable or mutating call repaired, never replayed": (
+        "H-R16-cold",
+        (
+            "tests/test_daemon_auth.py::TestTheFrontendActsOnTheMarker"
+            "::test_a_call_that_had_already_started_is_never_run_again",
+            "tests/test_daemon_auth.py::TestTheRepairRunsForReal"
+            "::test_a_tool_that_changes_something_is_never_replayed",
+        ),
+    ),
+    "two frontends meeting one dead session": (
+        "H-R16-second",
+        (
+            "tests/test_bootstrap.py::TestTwoClientsMeetingOneDeadSession"
+            "::test_the_generation_stops_the_second_client",
+        ),
+    ),
+    "import beside an idle owner": (
+        "H-R10a-login",
+        (
+            "tests/test_cli_main.py::TestRetiringASharedBrowser"
+            "::test_import_waits_for_the_profile_after_an_idle_owner_retires",
+        ),
+    ),
+}
+
+
+#: Every mapping the accounting counts.
+COUNTED = {**MODEL_COVERAGE, **AUTH_MODEL_COVERAGE}
+
+
 def model_rows() -> dict[str, list[str]]:
     """Each mapped test's node id, without parameters, and the rows it models."""
     found: dict[str, list[str]] = {}
-    for row, nodes in MODEL_COVERAGE.values():
+    for row, nodes in COUNTED.values():
         for node in nodes:
             rows = found.setdefault(node, [])
             if row not in rows:
