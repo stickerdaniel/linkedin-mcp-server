@@ -811,16 +811,17 @@ jobs:
 
       - run: uv cache prune --ci
 
-  # Calls that lose their caller (tests/differential/call_loss.py), and calls
+  # Calls that lose their caller (tests/differential/call_loss.py), calls
   # that race the owner's retirement (tests/differential/retirement_race.py),
-  # in a job of their own rather than more steps in `platform-behaviour`,
+  # and calls that lose the owner before or after dispatch
+  # (tests/differential/owner_loss.py), in a job of their own rather than more steps in `platform-behaviour`,
   # whose budget the rows before them already fill. Four legs: the Ubuntu x64
   # job's platform and the three `platform-behaviour` runs on, each with its
   # own browser build. The setup is the one the differential steps above
   # need, copied step for step: the browser for the candidate and the frozen
   # baseline, the run's certificates, the trust and the fence behind the
   # disposable-runner guard, a display on Linux, and on Linux the signal
-  # oracle H-R5 kills under. Serial, like every native row, and its evidence
+  # oracle H-R5, H-R8 and H-R9 kill under. Serial, like every native row, and its evidence
   # uploaded whatever happened, under names of its own.
   differential-calls:
     name: Differential calls (${{ matrix.os }}, ${{ matrix.rows }})
@@ -828,15 +829,17 @@ jobs:
     # The camelCase read shims off, for the reason given at `windows-daemon`.
     env:
       FASTMCP_MCP_CAMELCASE_COMPAT: "false"
-    # Three groups of rows per leg, so no job's bound comes near the hosted
+    # Four groups of rows per leg, so no job's bound comes near the hosted
     # runner's six hours. The sum of a group's step bounds: 45 for a cold
     # browser download for each runtime and the frozen baseline (bound 15),
     # with room for Windows, the slowest leg, to sync and install twice; then
     # `pipes` 30 for H-CAL and 45 for each of its two loss steps (165),
-    # `processes` 5 for the oracle and 45 for each of its three (185), and
+    # `processes` 5 for the oracle and 45 for each of its three (185),
     # `idle` 50 for each of the two H-R13 steps and 35 for each of the four
-    # turnover lanes (285).
-    timeout-minutes: ${{ matrix.rows == 'pipes' && 165 || matrix.rows == 'processes' && 185 || 285 }}
+    # turnover lanes (285), and `owner` 5 for the oracle, 40 for each of the
+    # three H-R8 lanes that kill, 45 for the stopped owner and 50 for H-R9
+    # (265).
+    timeout-minutes: ${{ matrix.rows == 'pipes' && 165 || matrix.rows == 'processes' && 185 || matrix.rows == 'owner' && 265 || 285 }}
     strategy:
       fail-fast: false
       matrix:
@@ -845,7 +848,10 @@ jobs:
         # `processes`: the losses that end a process, which the oracle traces.
         # `idle`: the reads that race the owner's retirement, idle or asked
         # for (tests/differential/retirement_race.py); nothing is killed.
-        rows: [pipes, processes, idle]
+        # `owner`: the owner killed, stopped or answered for by a declared
+        # responder before a call, and killed after a message's dispatch
+        # (tests/differential/owner_loss.py).
+        rows: [pipes, processes, idle, owner]
         include:
           - os: ubuntu-latest
             browsers: ~/.cache/ms-playwright
@@ -991,10 +997,11 @@ jobs:
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py -k "held_profile or held_read"
 
       # The signal oracle, as in `platform-behaviour`: H-R5 kills the Direct
-      # server or the frontend, and on Linux a row that kills an actor is held
-      # to a complete trace. macOS and Windows record it as unavailable.
+      # server or the frontend, H-R8 and H-R9 the owner or the Direct server,
+      # and on Linux a row that kills an actor is held to a complete trace.
+      # macOS and Windows record it as unavailable.
       - name: Install the signal oracle
-        if: runner.os == 'Linux' && matrix.rows == 'processes'
+        if: runner.os == 'Linux' && (matrix.rows == 'processes' || matrix.rows == 'owner')
         timeout-minutes: 5
         shell: bash
         run: |
@@ -1148,6 +1155,75 @@ jobs:
           LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
         timeout-minutes: 35
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_idle_race_rows.py -k "turns_over and queued"
+
+      # Row H-R8: the owner out of service between two calls, in K1 frozen
+      # (the same requests through Direct, no hop), K3 and K0 (K2 recorded
+      # not applicable), one step per lane, in the calibration's 60s
+      # configuration. Each cell is the calibration's seven minutes plus its
+      # own waits: the kill and the owner's death (15s), the read through an
+      # election and a replay (bound 180s), the oracle's stop (30s), then the
+      # successor's own idle exit (60 + 90s) and the residual browser wait
+      # (60s). Three cells come to at most 37 minutes: 40 each. The stopped
+      # owner adds its declared 20s stop and a later read (another 180s
+      # bound) to K3 and K0, and runs nowhere on Windows (counted skips):
+      # 45. Retiring is H-R13's.
+      - name: Lose the owner before a call
+        if: matrix.rows == 'owner'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 40
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_loss_rows.py -k unreachable
+
+      - name: Stop the owner before a call
+        if: matrix.rows == 'owner'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 45
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_loss_rows.py -k stopped
+
+      - name: Answer the dead owner's preflight with 404
+        if: matrix.rows == 'owner'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 40
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_loss_rows.py -k responder_404
+
+      - name: Answer the dead owner's preflight with 500
+        if: matrix.rows == 'owner'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 40
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_loss_rows.py -k responder_500
+
+      # Row H-R9: a message's first navigation held, then the Direct server
+      # (K1 frozen) or the owner (K3, K0) killed. Each cell adds to the
+      # calibration's seven minutes: the message through an election (bound
+      # 180s), the release 15s after entry and the 10s watch; in K1 the
+      # guardian and browser settlement (60s each) and a fresh host's read
+      # (two minutes); in K3 and K0 a read through the successor (180s) and
+      # its idle exit (60 + 90s); the oracle's stop (30s) and the residual
+      # browser wait (60s). Three cells come to at most 47 minutes: 50.
+      - name: Lose the owner after a message's dispatch
+        if: matrix.rows == 'owner'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 50
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_loss_rows.py -k message
 
       # The rows' evidence packet (``events.PUBLISHED_FILES``), under a name
       # apart from the other jobs' packets. Always, so a red row keeps what
