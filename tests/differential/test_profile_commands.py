@@ -32,7 +32,7 @@ from typing import Any, cast
 import psutil
 import pytest
 
-from differential import harness, profile_commands
+from differential import accounting, harness, model_coverage, profile_commands
 from differential.call_loss import EXPECTED_SECTIONS, INVALID, PERSON_TOOL
 from differential.harness import (
     MUST_REMAIN_CLEARED,
@@ -125,6 +125,18 @@ if mode == "wait":
     time.sleep(600)
 if mode == "silent":
     sys.exit(4)
+if mode == "helper":
+    # A helper with its own output, which outlives the command: a browser
+    # the command launched is one. Bounded by its own deadline.
+    import subprocess
+    subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
+    time.sleep(0.5)
+    print("started a helper", flush=True)
+    sys.exit(0)
 """
 
 
@@ -212,6 +224,26 @@ async def test_a_command_left_running_is_ended_by_the_teardown_and_says_so(
     assert command.settled(10) is True
     record = command.record()
     assert record["ended_by_harness"] is True and record["returncode"] is not None
+
+
+async def test_a_command_is_not_settled_while_a_helper_it_started_runs(tmp_path):
+    """The command exits and its output ends, but the helper it started with
+    output of its own still runs: not settled, and the teardown ends that
+    helper too, and only it."""
+    command = _driver(tmp_path, "helper", terminal=False)
+    try:
+        assert await command.expect("started a helper", 30) is not None
+        await command.wait(30)
+        assert command.returncode == 0
+        assert command.settled(1.0) is False
+        record = command.record()
+        assert record["output_ended"] is True
+        assert record["descendants_alive"] and record["descendants"]
+    finally:
+        command.end()
+    assert command.settled(10) is True
+    record = command.record()
+    assert record["ended_by_harness"] is True and record["descendants_alive"] == []
 
 
 async def test_a_prompt_that_never_comes_is_given_up_once_the_command_is_gone(
@@ -1123,23 +1155,58 @@ def _functions(path: Path) -> set[str]:
     return found
 
 
-@pytest.mark.parametrize(
-    "branch",
-    [
-        pytest.param(
-            branch,
-            marks=pytest.mark.differential_row(row=row, experiment="K3", column="unit"),
-        )
-        for branch, (row, _) in MODEL_COVERAGE.items()
-    ],
-)
+@pytest.mark.parametrize("branch", list(MODEL_COVERAGE))
 def test_each_branch_left_to_the_models_names_tests_that_exist(branch):
+    """A check of the mapping only: never counted as any branch's coverage,
+    which comes from the mapped tests' own runs."""
     _row, nodes = MODEL_COVERAGE[branch]
     root = Path(__file__).resolve().parents[2]
     assert nodes
     for node in nodes:
         path, _, name = node.partition("::")
         assert name in _functions(root / path), node
+
+
+def test_each_mapped_test_models_one_row():
+    assert all(len(rows) == 1 for rows in model_coverage.model_rows().values())
+
+
+def test_the_mapped_tests_count_as_model_coverage_and_nothing_else_does():
+    """The accounting marks a mapped test, parametrized or not, as its row's
+    model coverage; a test it does not map, or one already counted as a row
+    of its own, is left as it was."""
+
+    class _Item:
+        def __init__(self, nodeid: str, marked: bool = False) -> None:
+            self.nodeid = nodeid
+            self.markers = (
+                [pytest.mark.differential_row(row="X").mark] if marked else []
+            )
+
+        def get_closest_marker(self, name: str):
+            found = [m for m in self.markers if m.name == name]
+            return found[-1] if found else None
+
+        def add_marker(self, marker) -> None:
+            self.markers.append(marker.mark)
+
+    node, row = next(iter(model_coverage.model_rows().items()))
+    items = [
+        _Item(node),
+        _Item(f"{node}[case]"),
+        _Item("tests/test_cli_main.py::test_not_mapped"),
+        _Item(node, marked=True),
+    ]
+    accounting.pytest_collection_modifyitems(cast(Any, None), cast(Any, items))
+    for item in items[:2]:
+        marker = item.get_closest_marker("differential_row")
+        assert marker is not None and marker.kwargs == {
+            "row": row[0],
+            "experiment": "K3",
+            "column": "unit",
+        }
+    assert items[2].get_closest_marker("differential_row") is None
+    assert items[3].get_closest_marker("differential_row").kwargs == {"row": "X"}
 
 
 # --- The session quits a host its script quit only once ----------------------------------

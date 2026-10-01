@@ -92,6 +92,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from differential import model_coverage
 from differential.call_loss import (
     CALIBRATION_IDLE_TIMEOUT_SECONDS,
     ENTRY_SECONDS,
@@ -361,6 +362,43 @@ class TerminalCommand:
         self.error: str | None = None
         self.answers: list[dict[str, Any]] = []
         self.expected: list[dict[str, Any]] = []
+        #: Every descendant seen while the command ran, by its lifetime
+        #: ``(pid, create time)``: what the command started, which outlives
+        #: its exit and its output (a browser it launched, a helper with its
+        #: own output) and must be settled too.
+        self.descendants: dict[tuple[int, float], Any] = {}
+
+    def _collect(self) -> None:
+        """Record the command's descendants now. Only while it is alive: once
+        it exits they are reparented, and nothing names them as its any more,
+        so every poll before the exit collects."""
+        import psutil
+
+        if self.process is None or self.process.poll() is not None:
+            return
+        try:
+            children = psutil.Process(self.process.pid).children(recursive=True)
+        except psutil.Error:
+            return
+        for child in children:
+            try:
+                self.descendants.setdefault((child.pid, child.create_time()), child)
+            except psutil.Error:
+                continue
+
+    def _alive_descendants(self) -> list[tuple[int, float]]:
+        """The recorded descendants still running as the same lifetime."""
+        import psutil
+
+        alive = []
+        for key, process in self.descendants.items():
+            try:
+                if process.is_running() and process.create_time() == key[1]:
+                    if process.status() != psutil.STATUS_ZOMBIE:
+                        alive.append(key)
+            except psutil.Error:
+                continue
+        return alive
 
     def start(self) -> None:
         # Read before the child exists, so nothing it prints can be stamped
@@ -519,6 +557,7 @@ class TerminalCommand:
 
     def _poll(self) -> None:
         assert self.process is not None
+        self._collect()
         code = self.process.poll()
         if code is not None and self.returncode is None:
             self.returncode = code
@@ -540,8 +579,9 @@ class TerminalCommand:
         return self.exited_ns
 
     def settled(self, grace: float) -> bool:
-        """Whether the command has exited and its output ended, waiting up to
-        *grace* for the second. Never signals."""
+        """Whether the command has exited, its output ended and every
+        descendant it was seen to start is gone, waiting up to *grace* for
+        the output and the descendants. Never signals."""
         if self.process is None:
             return True
         if self.returncode is None:
@@ -550,19 +590,37 @@ class TerminalCommand:
             return False
         if self._reader is not None:
             self._reader.join(grace)
-        return not self._reading()
+        deadline = time.monotonic() + grace
+        while self._alive_descendants() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return not self._reading() and not self._alive_descendants()
 
     def end(self) -> None:
-        """The teardown's: kill a command still running and wait for it."""
-        if self.process is None or self.process.poll() is not None:
+        """The teardown's: kill a command still running, and every descendant
+        it was seen to start that still runs as the same lifetime, and wait
+        for them. Only processes it recorded, each checked against its
+        creation time first; never a process group."""
+        if self.process is not None and self.process.poll() is None:
+            self.ended_by_harness = True
+            self._collect()
+            try:
+                self.process.kill()
+                self.process.wait(timeout=10)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                self.error = f"{type(exc).__name__}: {exc}"
+            self._poll()
+        left = self._alive_descendants()
+        if not left:
             return
         self.ended_by_harness = True
-        try:
-            self.process.kill()
-            self.process.wait(timeout=10)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            self.error = f"{type(exc).__name__}: {exc}"
-        self._poll()
+        for key in left:
+            process = self.descendants[key]
+            try:
+                if process.create_time() == key[1]:
+                    process.kill()
+                    process.wait(timeout=10)
+            except Exception as exc:  # noqa: BLE001 - recorded; the next goes on
+                self.error = f"{type(exc).__name__}: {exc}"
 
     def lines(self) -> list[tuple[int, str]]:
         """Each line of the transcript with when its end arrived; an
@@ -595,6 +653,8 @@ class TerminalCommand:
             "interrupted_ns": self.interrupted_ns,
             "ended_by_harness": self.ended_by_harness,
             "output_ended": self.process is not None and not self._reading(),
+            "descendants": [list(key) for key in self.descendants],
+            "descendants_alive": [list(key) for key in self._alive_descendants()],
             "error": self.error,
             "expected": [dict(item) for item in self.expected],
             "answers": [dict(item) for item in self.answers],
@@ -1857,77 +1917,6 @@ def comparison_refusals(
     return _refusals([("Direct", direct, False), ("daemon", daemon, True)])
 
 
-# --- What stays with the models --------------------------------------------------
+# --- What stays with the models
 
-#: Every R10 branch the native cells do not reach, with the exact existing
-#: tests that model it: counted as model coverage, never as native.
-MODEL_COVERAGE: dict[str, tuple[str, tuple[str, ...]]] = {
-    "queued busy": (
-        ROW_BUSY,
-        (
-            "tests/test_daemon_liveness.py::TestAdmissionAndRetirementAreOneDecision"
-            "::test_a_queued_call_counts_as_busy",
-            "tests/test_daemon_liveness.py::TestTheControlRoutes"
-            "::test_a_busy_owner_refuses_and_changes_nothing",
-            "tests/test_cli_main.py::TestRetiringASharedBrowser"
-            "::test_a_busy_owner_is_left_alone_and_nothing_changes",
-        ),
-    ),
-    "lost reply": (
-        ROW_LOGOUT,
-        (
-            "tests/test_cli_main.py::TestRetiringASharedBrowser"
-            "::test_a_lost_answer_is_never_reported_as_unsent",
-        ),
-    ),
-    "post-send cancellation": (
-        ROW_LOGOUT,
-        (
-            "tests/test_cli_main.py::TestRetiringASharedBrowser"
-            "::test_an_interrupt_after_sending_says_it_may_be_retiring",
-            "tests/test_cli_main.py::TestRetiringASharedBrowser"
-            "::test_an_interrupt_while_waiting_says_it_may_be_retiring",
-            "tests/test_cli_main.py::TestRetiringASharedBrowser"
-            "::test_an_interrupt_after_an_accepted_reply_says_it_may_be_retiring",
-        ),
-    ),
-    "malformed success reply": (
-        ROW_LOGOUT,
-        (
-            "tests/test_cli_main.py::TestRetiringASharedBrowser"
-            "::test_an_answer_this_build_does_not_recognise",
-        ),
-    ),
-    "lease timeout": (
-        ROW_LOGOUT,
-        (
-            "tests/test_cli_main.py::TestRetiringASharedBrowser"
-            "::test_a_profile_that_does_not_come_free_is_left_untouched",
-            "tests/test_cli_main.py::TestRetiringASharedBrowser"
-            "::test_an_import_whose_profile_stays_busy_is_refused_plainly",
-        ),
-    ),
-    "successor race": (
-        ROW_LOGOUT,
-        (
-            "tests/test_cli_main.py::TestRetiringASharedBrowser"
-            "::test_a_profile_that_does_not_come_free_is_left_untouched",
-            "tests/test_daemon_liveness.py::TestTheControlRoutes"
-            "::test_a_call_cannot_slip_in_between_the_verdict_and_the_retirement",
-        ),
-    ),
-    "login success under an idle owner": (
-        ROW_LOGOUT,
-        (
-            "tests/test_cli_main.py::TestRetiringASharedBrowser"
-            "::test_login_starts_after_an_idle_owner_retires",
-        ),
-    ),
-    "import success under an idle owner": (
-        ROW_LOGOUT,
-        (
-            "tests/test_cli_main.py::TestRetiringASharedBrowser"
-            "::test_import_waits_for_the_profile_after_an_idle_owner_retires",
-        ),
-    ),
-}
+MODEL_COVERAGE = model_coverage.MODEL_COVERAGE

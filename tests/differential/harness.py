@@ -7930,7 +7930,8 @@ async def measure_host_quit_row(
         """End every command the script left running: a harness failure, and
         recorded as one, never a settlement."""
         for started in commands_started:
-            if started.returncode is None and started.started_ns is not None:
+            if started.started_ns is not None and not started.settled(0.0):
+                # Running, or exited with a descendant it started still alive.
                 started.end()
                 teardown.append(
                     f"the row left the profile command {started.label} running; "
