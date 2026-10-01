@@ -818,8 +818,8 @@ jobs:
   # build. The setup is the one the differential steps above need, copied
   # step for step: the browser for the candidate and the frozen baseline, the
   # run's certificates, the trust and the fence behind the disposable-runner
-  # guard, and a display on Linux. No strace: no cell here needs a signal
-  # claim. Serial, like every native row, and its evidence uploaded whatever
+  # guard, a display on Linux, and on Linux the signal oracle H-R5 kills
+  # under. Serial, like every native row, and its evidence uploaded whatever
   # happened, under names of its own.
   differential-calls:
     name: Differential calls (${{ matrix.os }})
@@ -827,10 +827,11 @@ jobs:
     # The camelCase read shims off, for the reason given at `windows-daemon`.
     env:
       FASTMCP_MCP_CAMELCASE_COMPAT: "false"
-    # A cold browser download for each runtime, the frozen baseline (bound
-    # 15) and the row step below (bound 30), with room for Windows, the
-    # slowest leg, to sync and install twice.
-    timeout-minutes: 75
+    # The sum of the steps' bounds: 45 for a cold browser download for each
+    # runtime and the frozen baseline (bound 15), with room for Windows, the
+    # slowest leg, to sync and install twice; 5 for the oracle; 30 for H-CAL;
+    # and 45 for each of the five loss steps.
+    timeout-minutes: 305
     strategy:
       fail-fast: false
       matrix:
@@ -975,7 +976,82 @@ jobs:
           LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
           LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
         timeout-minutes: 30
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py -k "held_profile or held_read"
+
+      # The signal oracle, as in `platform-behaviour`: H-R5 kills the Direct
+      # server or the frontend, and on Linux a row that kills an actor is held
+      # to a complete trace. macOS and Windows record it as unavailable.
+      - name: Install the signal oracle
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
+            echo "Refusing to trace processes outside a disposable GitHub-hosted runner" >&2
+            exit 1
+          fi
+          if ! command -v strace >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq strace
+          fi
+          strace -V | head -1
+          echo "kernel.yama.ptrace_scope: $(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)"
+          sudo -n true
+
+      # Rows H-R4 and H-R5: the same read lost once its held page entered,
+      # released 15s after that entry (call_loss.RELEASE_SECONDS), in K1
+      # frozen, K3 and K0 (K2 recorded not applicable), one step per row,
+      # chosen by keyword. Each cell adds to the calibration's seven minutes:
+      # the release and the 10s watch after it; the server's or frontend's
+      # own exit (bound 90s); in K1 the browser wait (60s), the census and
+      # the lease; in K3 and K0 the owner's idle exit (60 + 90s); the
+      # residual browser wait (60s); and a fresh host's start and read (two
+      # minutes). Three cells come to at most 42 minutes: 45 each.
+      - name: Lose the host mid-read by stdin EOF
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 45
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py -k eof
+
+      - name: Lose the host mid-read by abrupt pipe loss
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 45
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py -k pipe
+
+      - name: Kill the host process mid-read
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 45
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py -k host_killed
+
+      - name: Lose the host with two requests outstanding
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 45
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py -k two_requests
+
+      - name: Kill the server or frontend mid-read
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 45
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py -k killed_mid_read
 
       # The rows' evidence packet (``events.PUBLISHED_FILES``), under a name
       # apart from the other jobs' packets. Always, so a red row keeps what
