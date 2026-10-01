@@ -2306,7 +2306,12 @@ def test_the_origin_dates_each_request_on_the_harness_monotonic_clock():
     handler = object.__new__(synthetic_origin._OriginHandler)
     handler.server = cast(
         Any,
-        SimpleNamespace(record=recorded.append, judge_session=lambda header: True),
+        SimpleNamespace(
+            record=recorded.append,
+            judge_session=lambda header: True,
+            # No gate armed: the request is answered at once.
+            gate_for=lambda path: None,
+        ),
     )
     handler.connection = SimpleNamespace(_synthetic_server_name="www.linkedin.com")
     handler.headers = cast(Any, {"Host": "www.linkedin.com", "Cookie": "li_at=x"})

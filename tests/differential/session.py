@@ -23,20 +23,27 @@ different value is a different session, not a refreshed one.
 **R17 reads the artefacts and never records a cookie value.** The source
 generation; the cookie file's hash and names; whether it holds a ``li_at`` with
 the staged value, on ``.linkedin.com``, not expired; whether the browser
-profile directory is still there; the quarantine directories; and Chromium's
-``Last Version``. Together with what the user was shown and one post-quit
-observation of the session in use, it derives one of five outcomes:
+profile directory is still there; the quarantine directories, listed by this
+module's own reader; and Chromium's ``Last Version``. Together with what the
+row's caller was shown, the user action the row recorded as confirmed, and one
+post-quit observation of the session in use, it derives one of five outcomes:
 
 * ``retained``: the same generation, the staged ``li_at`` still usable on disk,
   the profile present, no new quarantine, *and* the post-quit observation saw
   the origin accept the session.
-* ``cleared-by-user``: gone, and the row says the user asked for that.
-* ``lost-announced``: gone, and after the last line that reported a successful
-  sign-in, some line told the user the session needs signing in again
-  (``announces_loss``).
-* ``lost-silent``: gone, and nothing said so.
+* ``cleared-by-user``: the row recorded the user's confirmed logout, *and* the
+  after-reading shows what a logout leaves: no generation, no cookie file, no
+  profile, no quarantine. Either alone is not enough: a confirmation over a
+  session that is still there, or only partly gone, is no clear.
+* ``lost-announced``: gone, and during the row a line told the row's own caller
+  that the session needs signing in again (``announced_to_caller``).
+* ``lost-silent``: gone, and nothing said so to that caller.
 * ``uncertain``: a reading failed or was malformed, there was no session to
   lose, or the post-quit observation could not be made.
+
+What a row expects, what it observed, and what the user authorized are three
+separate things: the expectation is the row's declaration, the outcome is read
+from the artefacts, and the authorization is only ever a recorded confirmation.
 """
 
 from __future__ import annotations
@@ -44,6 +51,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import secrets
 import time
@@ -55,9 +63,9 @@ from typing import Any
 from linkedin_mcp_server.browser_import.extract import LinkedInCookie
 from linkedin_mcp_server.common_utils import secure_write_text
 from linkedin_mcp_server.session_state import (
+    QUARANTINE_PREFIX,
     canonical,
     portable_cookie_path,
-    quarantine_dirs,
     source_state_path,
     write_source_state,
 )
@@ -68,6 +76,23 @@ LOST_ANNOUNCED = "lost-announced"
 LOST_SILENT = "lost-silent"
 UNCERTAIN = "uncertain"
 OUTCOMES = (RETAINED, CLEARED_BY_USER, LOST_ANNOUNCED, LOST_SILENT, UNCERTAIN)
+
+#: What a row may declare it expects. Never a loss: no expectation waives one,
+#: and a loss the row brings about on purpose is an authorization the row
+#: records, not a string it declares. Never ``uncertain``, which is a reading
+#: that failed.
+EXPECTABLE = (RETAINED, CLEARED_BY_USER)
+
+#: A user action a row records once the user confirmed it: ``--logout``.
+LOGOUT = "logout"
+
+#: When a line was shown: during the row, or in the preservation check after it.
+ROW = "row"
+PRESERVATION = "preservation"
+#: Who it was shown to: the row's own caller. Anyone else is named by the row,
+#: such as the preservation probe or a second host.
+CALLER = "caller"
+PROBE = "probe"
 
 #: The ``auth_minimal`` bridge preset, which is also inside ``bridge_core``.
 SYNTHETIC_COOKIE_NAMES = ("li_at", "JSESSIONID", "bcookie", "bscookie", "lidc")
@@ -93,12 +118,20 @@ _LOSS = re.compile(
 )
 
 #: A report of a successful sign-in. It matches the loss table's words, and it
-#: is the opposite of a loss notice, so it is judged first.
+#: is the opposite of a loss notice, so it is judged first. The later entries
+#: are the product's own: ``daemon_auth`` after a repair (``The sign-in
+#: finished``, ``Signed in; ...``), a peer's session found in place
+#: (``daemon_auth``, ``setup``, ``session_state``, ``error_handler``,
+#: ``browser_import``), and ``core.auth`` once a manual login has its cookie.
 _SUCCESS = re.compile(
     r"\bsuccessfully (?:signed|logged) in\b"
     r"|\b(?:signed|logged) in successfully\b"
     r"|\bsession is valid\b"
-    r"|\bimported and validated\b",
+    r"|\bimported and validated\b"
+    r"|\bthe sign-in finished\b"
+    r"|\bsigned in; (?:running|not repeating)\b"
+    r"|\balready signed in\b"
+    r"|\blogin completed successfully\b",
     re.IGNORECASE,
 )
 
@@ -249,12 +282,52 @@ class ProfileSnapshot:
             self.generation is not None and self.li_at_usable and self.profile_present
         )
 
+    @property
+    def cleared(self) -> bool:
+        """What ``session_state.clear_auth_state`` leaves, every part read.
+
+        No generation, no cookie file, no browser profile and no quarantine.
+        An artefact that exists and does not read is ``unreadable``, which is
+        never cleared, though it leaves no hash or generation behind either.
+        """
+        return (
+            not self.unreadable
+            and self.generation is None
+            and self.cookies_sha256 is None
+            and not self.profile_present
+            and not self.quarantine
+        )
+
     def as_event_fields(self) -> dict[str, Any]:
         fields = asdict(self)
         for name in ("cookie_names", "quarantine", "unreadable"):
             fields[name] = list(fields[name])
         fields["usable"] = self.usable
+        fields["cleared"] = self.cleared
         return fields
+
+
+def read_quarantine(profile: Path) -> tuple[tuple[str, ...], list[str]]:
+    """The quarantine directories beside *profile*, and every listing failure.
+
+    The product's ``quarantine_dirs`` globs, and a glob reads a directory it
+    could not list as an empty one, which here would read as "nothing was
+    quarantined". This reader says so instead. The same selection otherwise:
+    the prefix, and a directory or a link to one. A missing auth root has
+    nothing in it, which is a reading, not a failure.
+    """
+    root = canonical(profile).parent
+    names: list[str] = []
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if entry.name.startswith(QUARANTINE_PREFIX) and entry.is_dir():
+                    names.append(entry.name)
+    except FileNotFoundError:
+        return (), []
+    except OSError as exc:
+        return (), [f"quarantine: {type(exc).__name__}"]
+    return tuple(sorted(names)), []
 
 
 def _judge_li_at(
@@ -353,7 +426,8 @@ def snapshot(
         profile_present = False
         unreadable.append(f"profile: {type(exc).__name__}")
 
-    quarantine = tuple(path.name for path in quarantine_dirs(profile))
+    quarantine, listing = read_quarantine(profile)
+    unreadable += listing
 
     last_version: str | None = None
     version_file = directory / LAST_VERSION_FILE
@@ -375,25 +449,50 @@ def snapshot(
     )
 
 
-def announces_loss(lines: Iterable[str]) -> bool:
-    """Whether the user was told of a loss after the last reported sign-in.
+@dataclass(frozen=True)
+class Shown:
+    """One line of output, with when it was shown and to whom."""
 
-    Order matters: a notice that was followed by a successful sign-in has been
-    answered, and a success line is never itself a notice of loss.
+    phase: str
+    recipient: str
+    line: str
+
+
+def shown(phase: str, recipient: str, lines: Iterable[str]) -> list[Shown]:
+    return [Shown(phase, recipient, line) for line in lines]
+
+
+def announces_loss(lines: Iterable[str]) -> bool:
+    """Whether some line tells the user the session needs signing in again.
+
+    A success line is never itself a notice, and it takes no earlier notice
+    back: a sign-in that repaired the session afterwards does not undo the
+    user having been told it was lost.
     """
-    announced = False
-    for line in lines:
-        if _SUCCESS.search(line):
-            announced = False
-        elif _LOSS.search(line):
-            announced = True
-    return announced
+    return any(not _SUCCESS.search(line) and _LOSS.search(line) for line in lines)
+
+
+def announced_to_caller(output: Iterable[Shown | str]) -> bool:
+    """Whether the row's own caller was told of a loss during the row.
+
+    Only that recipient in that phase. The preservation probe runs after the
+    row on the harness's behalf, and a notice it prints says the session was
+    gone by then, not that anyone told the user; another host's output reached
+    someone else. A bare string is a line the caller was shown during the row.
+    """
+    lines = []
+    for item in output:
+        if isinstance(item, str):
+            lines.append(item)
+        elif item.phase == ROW and item.recipient == CALLER:
+            lines.append(item.line)
+    return announces_loss(lines)
 
 
 def r17_outcome(
     before: ProfileSnapshot,
     after: ProfileSnapshot,
-    user_output: Iterable[str],
+    user_output: Iterable[Shown | str],
     *,
     post_quit: bool | None,
     user_cleared: bool = False,
@@ -402,7 +501,8 @@ def r17_outcome(
 
     *post_quit* is whether a session started after the row found the origin
     accepting the staged session: True, False, or None when that observation
-    could not be made.
+    could not be made. *user_cleared* is the row's record that the user
+    confirmed a logout; the clear itself is read from *after*.
     """
     if before.unreadable or after.unreadable or not before.usable:
         return UNCERTAIN
@@ -415,6 +515,6 @@ def r17_outcome(
         return RETAINED
     if kept and post_quit is None:
         return UNCERTAIN
-    if user_cleared:
+    if user_cleared and after.cleared:
         return CLEARED_BY_USER
-    return LOST_ANNOUNCED if announces_loss(user_output) else LOST_SILENT
+    return LOST_ANNOUNCED if announced_to_caller(user_output) else LOST_SILENT

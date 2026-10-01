@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -107,8 +107,73 @@ KINDS = frozenset(
         "r7.continuation",
         # H-R3: each checkpoint around the host's quit, as it was read.
         "host.checkpoint",
+        # Calls that lose their caller: a request held at the origin and how
+        # it was let go, a loss the harness caused, a row's phase boundary,
+        # and each attempt the frontend made (``KIND_FIELDS``).
+        "gate.entered",
+        "gate.released",
+        "loss",
+        "phase",
+        "attempt",
     }
 )
+
+#: How a held request was let go: answered, its deadline expired, or the peer
+#: that sent it was gone.
+GATE_TERMINALS = frozenset({"served", "deadline", "peer-gone"})
+#: What the harness ended: a host's stdin at EOF, its pipes closed abruptly, or
+#: one actor killed.
+LOSSES = frozenset(
+    {
+        "eof",
+        "pipe",
+        "host-killed",
+        "frontend-killed",
+        "server-killed",
+        "owner-killed",
+    }
+)
+#: Which attempt the frontend made. Each is reported by the frontend's own
+#: output, never inferred from browser navigations.
+ATTEMPTS = frozenset({"preflight", "dispatch", "election", "replay"})
+
+
+def _text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _one_of(choices: frozenset[str]) -> Callable[[Any], bool]:
+    return lambda value: value in choices
+
+
+#: The fields a kind requires beyond ``BASE_FIELDS``, each with its check.
+#: Times are on the harness's monotonic clock, in nanoseconds, which every
+#: writer of these kinds shares. ``classification`` is required and may be
+#: null: an attempt that was not classified says so.
+KIND_FIELDS: dict[str, dict[str, Callable[[Any], bool]]] = {
+    "gate.entered": {"path": _text, "ordinal": _count, "entered_monotonic_ns": _count},
+    "gate.released": {
+        "path": _text,
+        "ordinal": _count,
+        "entered_monotonic_ns": _count,
+        "released_monotonic_ns": _count,
+        "terminal": _one_of(GATE_TERMINALS),
+    },
+    "loss": {
+        "loss": _one_of(LOSSES),
+        "target": _one_of(ACTORS),
+        "monotonic_ns": _count,
+    },
+    "phase": {"name": _text, "monotonic_ns": _count},
+    "attempt": {
+        "attempt": _one_of(ATTEMPTS),
+        "classification": lambda value: value is None or _text(value),
+    },
+}
 
 EXPERIMENTS = frozenset({"K0", "K1", "K2", "K3"})
 
@@ -140,6 +205,13 @@ def validate(record: Mapping[str, Any]) -> None:
     for name in ("run", "row", "platform"):
         if not isinstance(record[name], str) or not record[name]:
             raise ValueError(f"event field {name} is empty: {record[name]!r}")
+    for name, valid in KIND_FIELDS.get(record["kind"], {}).items():
+        if name not in record:
+            raise ValueError(f"{record['kind']} event lacks {name}: {dict(record)}")
+        if not valid(record[name]):
+            raise ValueError(
+                f"{record['kind']} event field {name} is invalid: {record[name]!r}"
+            )
 
 
 class EventLog:

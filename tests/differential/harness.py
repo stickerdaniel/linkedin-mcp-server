@@ -65,6 +65,19 @@ by themselves, before any cleanup. ``host_comparison`` judges the record.
 script runs a second host, B, with the same command, environment and profile;
 B reads and quits, and A reads again and quits. The checkpoints add one after
 A1 and one from B's own post-exit hook.
+
+**Row lifecycles** (``ROWS``): every row is declared before it may run, with
+its first call, how its host is expected to end, what its preservation may
+do, its idle timeout and, for a row that keeps a raw record, the verdict that
+judges it (``ROW_VERDICTS``), appended after ``judge_row``. An undeclared row,
+or a declaration that does not hold together, is refused before anything is
+staged or spawned. A row declared since then runs its own script on a
+``RowContext``; the scripts of H-R2, H-R3, H-R7 and H-R11 stay where they
+are. **Row H-CAL** (``call_loss``) is the first such row: an unfaulted person
+read through a held, then released, section page. **Rows H-R4 and H-R5**
+lose that read once its held page entered, each by a termination of its own
+(``RowLifecycle.termination``), through ``LossSeams``; a host killed whole
+is a process of its own (``StubHost``).
 """
 
 from __future__ import annotations
@@ -73,11 +86,13 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import math
 import os
 import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import (
     AsyncIterator,
@@ -89,7 +104,7 @@ from collections.abc import (
 )
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -107,7 +122,7 @@ from mcp import ClientSession
 from mcp.shared.message import SessionMessage
 from typing_extensions import Unpack
 
-from differential import host_comparison, lease_probe, r7_fault
+from differential import call_loss, host_comparison, lease_probe, r7_fault
 from differential.baseline import (
     BaselineRefused,
     Runtime,
@@ -145,10 +160,17 @@ from differential.job_query_model import (
     source_sha256,
 )
 from differential.session import (
+    CALLER,
+    EXPECTABLE,
+    LOGOUT,
+    PRESERVATION,
+    PROBE,
     RETAINED,
+    ROW,
     UNCERTAIN,
     ProfileSnapshot,
     r17_outcome,
+    shown,
     snapshot,
     stage_signed_in_session,
     write_synthetic_cookie_file,
@@ -170,8 +192,12 @@ from differential.signals import (
     derive_o2,
 )
 from differential.synthetic_origin import (
+    GATE_DEADLINE_SECONDS,
+    PERSON_MARKERS,
     POST_MARKER,
+    RELEASED_BY_TEARDOWN,
     EgressProxy,
+    Gate,
     SyntheticOrigin,
 )
 from differential.unconfirmed_close import (
@@ -182,6 +208,7 @@ from differential.unconfirmed_close import (
     BEFORE_QUIT,
     BEFORE_RECOVERY,
     LOCK_FILE,
+    ROW_H_R7,
     Deferral,
     PhaseReading,
     R7Continuation,
@@ -229,6 +256,8 @@ from differential.watcher import (
 )
 from linkedin_mcp_server import daemon_descriptor
 from linkedin_mcp_server.config.loaders import EnvironmentKeys
+from linkedin_mcp_server.daemon_auth import MARKER_KEY as AUTH_MARKER_KEY
+from linkedin_mcp_server.daemon_liveness import REFUSAL_KEY
 from linkedin_mcp_server.session_state import portable_cookie_path
 
 REAL_AUTH_ROOT_NAME = ".linkedin-mcp"
@@ -253,6 +282,67 @@ DIRECT_REFERENCE = "same-revision Direct reference"
 #: to LinkedIn's layout. See ``synthetic_origin._FEED_PAGE``.
 READ_TOOL = "get_feed"
 READ_TOOL_ARGUMENTS = {"num_posts": 1}
+#: H-R6 and H-R11, whose native cells name these rows.
+ROW_H_R6 = "H-R6"
+ROW_H_R11 = "H-R11"
+
+
+@dataclass(frozen=True)
+class InitialCall:
+    """A row's first call through its host, and what its result must show.
+
+    *sections* empty: the synthetic post, which only the feed read can return.
+    Otherwise every named section, each carrying its own page's marker
+    (``synthetic_origin.PERSON_MARKERS``).
+    """
+
+    tool: str
+    arguments: Mapping[str, Any]
+    sections: tuple[str, ...] = ()
+
+    def succeeded(self, summary: Mapping[str, Any] | None) -> bool:
+        if summary is None or summary["is_error"]:
+            return False
+        if not self.sections:
+            return bool(summary["read_the_post"])
+        return set(self.sections) <= set(summary.get("marked_sections") or ())
+
+    @property
+    def unmet(self) -> str:
+        """The failure a result that did not show it reads as."""
+        if not self.sections:
+            return f"{self.tool} did not return the synthetic post"
+        return (
+            f"{self.tool} did not return the synthetic sections {list(self.sections)}"
+        )
+
+
+#: Every row's first call so far: one ``get_feed`` read of the synthetic post.
+FEED_READ = InitialCall(READ_TOOL, READ_TOOL_ARGUMENTS)
+
+#: How a row's host is expected to end. ``normal``: stdin EOF and a wait
+#: (``HostQuitTransport.host_quit``), judged by ``host_failures``. The rest
+#: lose the server mid-call (``call_loss.LOSS_TERMINATIONS``): stdin closed,
+#: both pipes closed, the host process killed, or the server or frontend
+#: killed. Such a host is never quit; its row's script observes what settles
+#: by itself from its own body, after the lost call ended and before the
+#: client leaves, so before the corrective ``_stop``, and its own verdict
+#: judges how the server ended (``judge_row``). The transport's
+#: ``before_stop`` hook is no place for that: FastMCP's client stops waiting
+#: for a session still unwinding after about ten seconds and returns while
+#: the hook runs on.
+NORMAL_EOF = "normal"
+TERMINATIONS = frozenset({NORMAL_EOF, *call_loss.LOSS_TERMINATIONS})
+
+#: What the session after the row may do. ``ordinary``: the post-quit Direct
+#: session (``observe_preservation``), which can repair what it finds, since
+#: its read may sign in again. ``must-remain-cleared`` and ``must-not-repair``:
+#: a row whose cleared or failed session is the finding, which no session
+#: that can repair may touch before it is judged.
+ORDINARY = "ordinary"
+MUST_REMAIN_CLEARED = "must-remain-cleared"
+MUST_NOT_REPAIR = "must-not-repair"
+PRESERVATIONS = frozenset({ORDINARY, MUST_REMAIN_CLEARED, MUST_NOT_REPAIR})
 
 #: The owner leaves through its own idle exit once the host has quit, so the
 #: daemon row ends through the product's path rather than a signal. Set for
@@ -819,6 +909,7 @@ class HostQuitTransport(ClientTransport):
         exit_seconds: float = _HOST_EXIT_SECONDS,
         after_exit: Callable[[], Awaitable[None]] | None = None,
         on_process: Callable[[Any], None] | None = None,
+        before_stop: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.command = list(command)
         self.env = env
@@ -827,6 +918,14 @@ class HostQuitTransport(ClientTransport):
         self.exit_seconds = exit_seconds
         self.after_exit = after_exit
         self.on_process = on_process
+        #: Runs once the client has left, however it left, shielded from its
+        #: cancellation and before the corrective ``_stop``. It bounds itself,
+        #: and briefly: FastMCP's client stops waiting for a session still
+        #: unwinding after about ten seconds, so a long observation belongs in
+        #: the row's script (``TERMINATIONS``). Its failure is
+        #: ``before_stop_error``.
+        self.before_stop = before_stop
+        self.before_stop_error: str | None = None
         self.process: anyio.abc.Process | None = None
         self.pid: int | None = None
         self.quit_done = False
@@ -841,7 +940,16 @@ class HostQuitTransport(ClientTransport):
         self.exit_seen_monotonic_ns: int | None = None
         self.after_exit_error: str | None = None
         self.killed_by_harness = False
+        #: When the corrective ``_stop`` killed a server still running.
+        self.stopped_monotonic_ns: int | None = None
         self.stderr_closed: bool | None = None
+        #: A loss a row made instead of a quit (``lose``, ``mark_lost``): its
+        #: termination, when it was made, and how making it failed. Once set,
+        #: the session never quits this host; the corrective ``_stop`` still
+        #: runs when the client leaves.
+        self.lost: str | None = None
+        self.lost_monotonic_ns: int | None = None
+        self.loss_error: str | None = None
         self._stderr_eof = anyio.Event()
 
     async def _pump_stderr(self, process: anyio.abc.Process) -> None:
@@ -898,11 +1006,56 @@ class HostQuitTransport(ClientTransport):
             await self._stderr_eof.wait()
         self.stderr_closed = self._stderr_eof.is_set()
 
+    def mark_lost(self, termination: str) -> None:
+        """Record that the row lost this host's server by *termination*, so
+        the session does not quit it; whoever caused the loss made it."""
+        self.lost = termination
+        self.lost_monotonic_ns = time.monotonic_ns()
+
+    async def lose(self, termination: str) -> None:
+        """Lose the server mid-call as a host can, with no MCP shutdown and no
+        wait for its exit.
+
+        ``call_loss.EOF_LOSS`` closes its stdin, so it reads EOF.
+        ``call_loss.PIPE_LOSS`` closes the read end of its stdout as well, so
+        its next write finds the pipe broken: what the kernel does to both
+        pipes when a host goes away, named pipe loss here and never host
+        death, which ``StubHost`` makes. A failure is ``loss_error``.
+        """
+        process = self.process
+        assert process is not None and process.stdin is not None
+        self.mark_lost(termination)
+        errors = []
+        try:
+            await process.stdin.aclose()
+        except Exception as exc:  # noqa: BLE001 - recorded, and judged by the row
+            errors.append(f"closing stdin: {type(exc).__name__}: {exc}")
+        if termination == call_loss.PIPE_LOSS:
+            problem = close_read_end(process, 1)
+            if problem is not None:
+                errors.append(problem)
+        self.loss_error = "; ".join(errors) or None
+
+    async def server_exit(self, seconds: float) -> dict[str, Any]:
+        """Whether the server exits by itself within *seconds*: waited for on
+        the host's own handle, never caused."""
+        process = self.process
+        assert process is not None
+        with anyio.move_on_after(seconds):
+            await process.wait()
+        code = process.returncode
+        return {
+            "how": "exited" if code is not None else "still running",
+            "code": code,
+            "seen_ns": time.monotonic_ns(),
+        }
+
     async def _stop(self, process: anyio.abc.Process) -> None:
         """Cleanup only: a server still running when the stub leaves."""
         if process.returncode is not None:
             return
         self.killed_by_harness = True
+        self.stopped_monotonic_ns = time.monotonic_ns()
         with contextlib.suppress(ProcessLookupError, OSError):
             process.kill()
         with anyio.move_on_after(15):
@@ -984,8 +1137,31 @@ class HostQuitTransport(ClientTransport):
                     yield session
             finally:
                 with anyio.CancelScope(shield=True):
+                    if self.before_stop is not None:
+                        try:
+                            await self.before_stop()
+                        except Exception as exc:  # noqa: BLE001 - recorded; the stop still runs
+                            self.before_stop_error = f"{type(exc).__name__}: {exc}"
                     await self._stop(process)
                 tasks.cancel_scope.cancel()
+
+
+def close_read_end(process: Any, fd: int) -> str | None:
+    """Close the harness's end of *process*'s output pipe *fd* for real.
+
+    ``aclose`` on an anyio process stream only fails the reader and leaves the
+    pipe open, so a server writing to it would never find it broken. The
+    asyncio subprocess transport underneath owns the pipe, and closing its
+    pipe transport closes the descriptor, at the loop's next turn, on POSIX
+    and on Windows alike. A pipe that cannot be reached is the answer.
+    """
+    inner = getattr(process, "_process", None)
+    transport = getattr(inner, "_transport", None)
+    pipe = transport.get_pipe_transport(fd) if transport is not None else None
+    if pipe is None:
+        return f"the read end of pipe {fd} could not be reached"
+    pipe.close()
+    return None
 
 
 def tool_summary(result: mcp_types.CallToolResult) -> dict[str, Any]:
@@ -1002,17 +1178,61 @@ def tool_summary(result: mcp_types.CallToolResult) -> dict[str, Any]:
         structured = structured["result"]
     sections = structured.get("sections")
     feed = sections.get("feed") if isinstance(sections, dict) else None
+    status, retry_safe = structured.get("status"), structured.get("retry_safe")
     return {
         "is_error": bool(result.is_error),
         "sections": sorted(sections) if isinstance(sections, dict) else [],
         "section_errors": sorted(structured.get("section_errors") or {}),
         "read_the_post": isinstance(feed, str) and POST_MARKER in feed,
+        # Each person section whose text carries its own page's marker.
+        "marked_sections": sorted(
+            name
+            for name, marker in PERSON_MARKERS.items()
+            if isinstance(sections, dict)
+            and isinstance(sections.get(name), str)
+            and marker in sections[name]
+        ),
+        # A transport's answer for a call whose effect is unknown.
+        "status": status if isinstance(status, str) else None,
+        "retry_safe": retry_safe if isinstance(retry_safe, bool) else None,
+        "meta": meta_summary(result.meta),
         "text": "\n".join(texts)[:2000],
     }
 
 
+def meta_summary(meta: Any) -> dict[str, Any]:
+    """The result's ``_meta`` by key, and the daemon's own markers by kind.
+
+    Names and labels only. The owner's refusal names its kind, and the auth
+    marker its reason and whether a replay was safe; a generation, an
+    instance or anything a session is made of stays out.
+    """
+    meta = meta if isinstance(meta, dict) else {}
+    refusal, auth = meta.get(REFUSAL_KEY), meta.get(AUTH_MARKER_KEY)
+    return {
+        "keys": sorted(str(key) for key in meta),
+        "refusal": refusal.get("daemon") if isinstance(refusal, dict) else None,
+        "auth": (
+            {name: auth.get(name) for name in ("reason", "replayable", "browser_open")}
+            if isinstance(auth, dict)
+            else None
+        ),
+    }
+
+
+#: How a call through the host's client ended: a result came back (an error
+#: result included), the client raised, or the call was cancelled.
+RETURNED = "returned"
+RAISED = "raised"
+CANCELLED = "cancelled"
+
+
 async def timed_call(
-    client: Client, name: str, arguments: dict[str, Any]
+    client: Client,
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """One tool call through the host's client, and its summary.
 
@@ -1020,18 +1240,41 @@ async def timed_call(
     is back, each on the wall clock and on the harness's monotonic clock, so
     the interval contains the whole call. The row's default read and every
     scripted one go through here, so all of them carry the same times.
+
+    The record is appended to *records* before the request is sent and
+    completed however the call ends: on a raise or a cancellation it is
+    given its ``outcome`` and the exception's class, and then the exception
+    is raised again. A client's exception says nothing about whether the
+    request reached the server, so the record never claims that either way.
     """
-    began = time.time()
-    began_monotonic_ns = time.monotonic_ns()
-    called = await client.call_tool_mcp(name, arguments, timeout=_CALL_SECONDS)
-    return {
+    record: dict[str, Any] = {
         "tool": name,
-        "began": began,
-        "ended": time.time(),
-        "began_monotonic_ns": began_monotonic_ns,
-        "ended_monotonic_ns": time.monotonic_ns(),
-        **tool_summary(called),
+        "began": time.time(),
+        "began_monotonic_ns": time.monotonic_ns(),
     }
+    if records is not None:
+        records.append(record)
+    try:
+        called = await client.call_tool_mcp(name, arguments, timeout=_CALL_SECONDS)
+    except BaseException as exc:
+        cancelled = isinstance(
+            exc, (asyncio.CancelledError, anyio.get_cancelled_exc_class())
+        )
+        record.update(
+            ended=time.time(),
+            ended_monotonic_ns=time.monotonic_ns(),
+            outcome=CANCELLED if cancelled else RAISED,
+            exception=type(exc).__name__,
+            error=str(exc)[:500],
+        )
+        raise
+    record.update(
+        ended=time.time(),
+        ended_monotonic_ns=time.monotonic_ns(),
+        outcome=RETURNED,
+        **tool_summary(called),
+    )
+    return record
 
 
 @dataclass
@@ -1064,6 +1307,18 @@ class HostSession:
     #: What a row's scripted phase called, in order, and how it failed.
     scripted: list[dict[str, Any]] = field(default_factory=list)
     script_error: str | None = None
+    #: Every timed call's record in the order sent, each completed however it
+    #: ended (``timed_call``): a raised or cancelled one keeps its own.
+    calls: list[dict[str, Any]] = field(default_factory=list)
+    #: How the transport's ``before_stop`` hook failed, if it did.
+    before_stop_error: str | None = None
+    #: A loss the row made instead of a quit (``HostQuitTransport.lose``):
+    #: its termination, when it was made and how making it failed; and when
+    #: the corrective stop killed a server still running.
+    lost: str | None = None
+    lost_monotonic_ns: int | None = None
+    loss_error: str | None = None
+    stopped_monotonic_ns: int | None = None
 
 
 #: A row's scripted phase: it is handed a function that calls one tool through
@@ -1085,6 +1340,8 @@ async def run_host_session(
     script: Callable[[ToolCall], Awaitable[None]] | None = None,
     after_exit: Callable[[], Awaitable[None]] | None = None,
     on_process: Callable[[Any], None] | None = None,
+    row_script: TransportScript | None = None,
+    before_stop: Callable[[], Awaitable[None]] | None = None,
 ) -> HostSession:
     """Initialize, call the read tool once, then quit the way a host does.
 
@@ -1097,8 +1354,13 @@ async def run_host_session(
     ``script_error``, does not stop the quit either. *after_exit* runs once
     the server is seen to exit on EOF (``HostQuitTransport.host_quit``), and
     its failure is ``after_exit_error``. *on_process* is handed the server's
-    process object the moment it is spawned.
+    process object the moment it is spawned. *row_script* is a declared row's
+    scripted phase, run where *script* would be, with the live transport as
+    well; the two are one or the other. *before_stop* is the transport's
+    hook of that name.
     """
+    if script is not None and row_script is not None:
+        raise ValueError("a host session runs one scripted phase, not two")
     session = HostSession()
 
     def remember(line: str) -> None:
@@ -1113,6 +1375,7 @@ async def run_host_session(
         on_stderr=remember,
         after_exit=after_exit,
         on_process=on_process,
+        before_stop=before_stop,
     )
     # The initialize handshake, as a host sends it. FastMCP 4's default probes
     # server/discover first and settles on the 2026-07-28 era with a FastMCP 4
@@ -1123,7 +1386,10 @@ async def run_host_session(
             if started is not None and transport.pid is not None:
                 started(transport.pid)
             session.tool = await timed_call(
-                client, tool, READ_TOOL_ARGUMENTS if arguments is None else arguments
+                client,
+                tool,
+                READ_TOOL_ARGUMENTS if arguments is None else arguments,
+                records=session.calls,
             )
             session.user_lines += session.tool["text"].splitlines()
             if after_call is not None:
@@ -1139,25 +1405,36 @@ async def run_host_session(
                     session.user_lines += session.second_tool["text"].splitlines()
                 except Exception as exc:  # noqa: BLE001 - the recovery's evidence
                     session.second_error = f"{type(exc).__name__}: {exc}"
-            if script is not None:
+            if script is not None or row_script is not None:
 
                 async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-                    summary = await timed_call(client, name, arguments)
+                    summary = await timed_call(
+                        client, name, arguments, records=session.calls
+                    )
                     session.scripted.append(summary)
                     session.user_lines += summary["text"].splitlines()
                     return summary
 
                 try:
-                    await script(call)
+                    if row_script is not None:
+                        await row_script(call, transport)
+                    elif script is not None:
+                        await script(call)
                 except Exception as exc:  # noqa: BLE001 - the script's own evidence
                     session.script_error = f"{type(exc).__name__}: {exc}"
-            await transport.host_quit()
+            # A host the row lost is not quit: its server already had its end.
+            if transport.lost is None:
+                await transport.host_quit()
     except Exception as exc:  # noqa: BLE001 - reported as the row's evidence
         detail = f"{type(exc).__name__}: {exc}"
-        if transport.quit_done:
+        if transport.quit_done or transport.lost is not None:
             session.teardown_error = detail
         else:
             session.error = detail
+    session.lost = transport.lost
+    session.lost_monotonic_ns = transport.lost_monotonic_ns
+    session.loss_error = transport.loss_error
+    session.stopped_monotonic_ns = transport.stopped_monotonic_ns
     session.pid = transport.pid
     session.alive_before_quit = transport.alive_before_quit
     session.stdin_closed = transport.stdin_closed
@@ -1169,8 +1446,376 @@ async def run_host_session(
     session.after_exit_error = transport.after_exit_error
     session.stderr_closed = transport.stderr_closed
     session.killed_by_harness = transport.killed_by_harness
+    session.before_stop_error = transport.before_stop_error
     if transport.process is not None:
         session.exit_code = transport.process.returncode
+    return session
+
+
+# --- A host in a process of its own --------------------------------------------
+
+STUB_HOST_SCRIPT = Path(__file__).with_name("stub_host.py")
+#: How long a killed or quitting stub host may take to be reaped. It is the
+#: harness's own child, holding nothing but pipes.
+_STUB_EXIT_SECONDS = 15.0
+
+
+class StubHostGone(RuntimeError):
+    """The stub host's control channel closed with an answer outstanding."""
+
+
+class StubCallFailed(RuntimeError):
+    """The stub host's client raised on a call; the message names its class."""
+
+
+class StubHost:
+    """A host as a process of its own: the one a row can kill whole.
+
+    ``stub_host.py`` runs the harness's own host stub (``HostQuitTransport``
+    under the same client) and so owns the server's three pipes; the harness
+    drives it over the stub's stdin and stdout, one JSON object a line, and
+    reads the server's stderr relayed on the stub's. Killing it (``lose``) is
+    what a host's death does to its server: every pipe the host held breaks
+    at once, and nothing else is sent. The observer stays outside, in this
+    process. The stub is the harness's child, in its process group, and the
+    server the stub's, in the same group, as the child of a host that does
+    not detach it lands.
+
+    Its command line names no server module, so the watcher counts it as a
+    row process and never as a frontend; the server's command and directory
+    go over the control channel, and its environment is the stub's own.
+    *server_handle* is the server as the row tied it to the watcher's record
+    (``associate_server``): the only handle its exit is observed through,
+    and the only one the corrective stop may end it by.
+    """
+
+    def __init__(
+        self,
+        command: Sequence[str],
+        *,
+        env: dict[str, str],
+        cwd: Path,
+        on_stderr: Callable[[str], None],
+    ) -> None:
+        self.command = list(command)
+        self.env = env
+        self.cwd = cwd
+        self.on_stderr = on_stderr
+        self.process: anyio.abc.Process | None = None
+        #: The server's pid, as the stub reported it.
+        self.pid: int | None = None
+        self.server_handle: Any = None
+        self.lost: str | None = None
+        self.lost_monotonic_ns: int | None = None
+        self.loss_error: str | None = None
+        self.killed_by_harness = False
+        self.stopped_monotonic_ns: int | None = None
+        self.quit_done = False
+        #: How the stub's own quit of the server ended, as it reported it.
+        self.quit: dict[str, Any] = {}
+        self._ids = 0
+        self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
+        self._ready: asyncio.Future[dict[str, Any]] | None = None
+        self._quit: asyncio.Future[dict[str, Any]] | None = None
+
+    async def _send(self, order: Mapping[str, Any]) -> None:
+        process = self.process
+        assert process is not None and process.stdin is not None
+        try:
+            await process.stdin.send((json.dumps(dict(order)) + "\n").encode())
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError, OSError) as exc:
+            raise StubHostGone(f"the stub host took no order: {exc!r}") from exc
+
+    def _answer(self, event: Mapping[str, Any]) -> None:
+        kind = event.get("event")
+        if kind in ("ready", "failed") and self._ready is not None:
+            if not self._ready.done():
+                if kind == "ready":
+                    self._ready.set_result(dict(event))
+                else:
+                    self._ready.set_exception(
+                        StubCallFailed(f"the stub host failed: {event.get('error')}")
+                    )
+        elif kind in ("returned", "raised"):
+            ident = event.get("id")
+            waiting = self._pending.pop(ident, None) if isinstance(ident, int) else None
+            if waiting is not None and not waiting.done():
+                waiting.set_result(dict(event))
+        elif kind == "quit" and self._quit is not None and not self._quit.done():
+            self._quit.set_result(dict(event))
+
+    async def _pump_events(self, process: anyio.abc.Process) -> None:
+        assert process.stdout is not None
+        buffer = ""
+        try:
+            async for chunk in TextReceiveStream(process.stdout, errors="replace"):
+                lines = (buffer + chunk).split("\n")
+                buffer = lines.pop()
+                for line in lines:
+                    if line.strip():
+                        try:
+                            self._answer(json.loads(line))
+                        except ValueError:
+                            self.on_stderr(f"stub host: unreadable report {line!r}")
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+            pass
+        finally:
+            gone = StubHostGone("the stub host's control channel closed")
+            for waiting in (self._ready, self._quit, *self._pending.values()):
+                if waiting is not None and not waiting.done():
+                    waiting.set_exception(gone)
+            self._pending.clear()
+
+    async def _pump_stderr(self, process: anyio.abc.Process) -> None:
+        assert process.stderr is not None
+        buffer = ""
+        with contextlib.suppress(anyio.ClosedResourceError, anyio.BrokenResourceError):
+            async for chunk in TextReceiveStream(process.stderr, errors="replace"):
+                lines = (buffer + chunk).split("\n")
+                buffer = lines.pop()
+                for line in lines:
+                    self.on_stderr(line.rstrip("\r"))
+        if buffer:
+            self.on_stderr(buffer.rstrip("\r"))
+
+    @contextlib.asynccontextmanager
+    async def running(self) -> AsyncIterator[StubHost]:
+        """The stub started, its server started and initialized, until left;
+        then the corrective stop, whatever ended it."""
+        process = await anyio.open_process(
+            [sys.executable, str(STUB_HOST_SCRIPT)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=self.env,
+            cwd=str(self.cwd),
+        )
+        self.process = process
+        loop = asyncio.get_running_loop()
+        self._ready = loop.create_future()
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(self._pump_events, process)
+            tasks.start_soon(self._pump_stderr, process)
+            try:
+                await self._send(
+                    {"op": "start", "command": self.command, "cwd": str(self.cwd)}
+                )
+                with anyio.fail_after(_INIT_SECONDS + 30.0):
+                    ready = await self._ready
+                pid = ready.get("server_pid")
+                self.pid = pid if isinstance(pid, int) else None
+                yield self
+            finally:
+                with anyio.CancelScope(shield=True):
+                    await self._stop(process)
+                tasks.cancel_scope.cancel()
+
+    async def call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        records: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """One tool call through the stub's client, recorded as ``timed_call``
+        records one: appended before the order is sent, completed however it
+        ends, and raised again on a failure or a cancellation."""
+        record: dict[str, Any] = {
+            "tool": name,
+            "began": time.time(),
+            "began_monotonic_ns": time.monotonic_ns(),
+        }
+        if records is not None:
+            records.append(record)
+        self._ids += 1
+        ident = self._ids
+        answer: asyncio.Future[dict[str, Any]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._pending[ident] = answer
+        try:
+            await self._send(
+                {"op": "call", "id": ident, "tool": name, "arguments": arguments}
+            )
+            with anyio.fail_after(_CALL_SECONDS):
+                event = await answer
+            if event.get("event") != "returned":
+                raise StubCallFailed(f"{event.get('exception')}: {event.get('error')}")
+        except BaseException as exc:
+            self._pending.pop(ident, None)
+            cancelled = isinstance(
+                exc, (asyncio.CancelledError, anyio.get_cancelled_exc_class())
+            )
+            record.update(
+                ended=time.time(),
+                ended_monotonic_ns=time.monotonic_ns(),
+                outcome=CANCELLED if cancelled else RAISED,
+                exception=type(exc).__name__,
+                error=str(exc)[:500],
+            )
+            raise
+        record.update(
+            ended=time.time(),
+            ended_monotonic_ns=time.monotonic_ns(),
+            outcome=RETURNED,
+            **dict(event.get("summary") or {}),
+        )
+        return record
+
+    def mark_lost(self, termination: str) -> None:
+        """As ``HostQuitTransport.mark_lost``."""
+        self.lost = termination
+        self.lost_monotonic_ns = time.monotonic_ns()
+
+    async def lose(self, termination: str) -> None:
+        """Kill the stub host whole: SIGKILL on POSIX, TerminateProcess on
+        Windows, through its own process object. The server is told nothing."""
+        process = self.process
+        assert process is not None
+        self.mark_lost(termination)
+        try:
+            process.kill()
+        except (ProcessLookupError, OSError) as exc:
+            self.loss_error = f"the stub host could not be killed: {exc!r}"
+            return
+        with anyio.move_on_after(_STUB_EXIT_SECONDS):
+            await process.wait()
+        if process.returncode is None:
+            self.loss_error = (
+                f"the stub host was still running {_STUB_EXIT_SECONDS}s after "
+                f"it was killed"
+            )
+
+    async def server_exit(self, seconds: float) -> dict[str, Any]:
+        """Whether the server, no child of this process, is seen gone within
+        *seconds* through the handle the row tied it by; waited for, never
+        caused."""
+        try:
+            how = await run_owned(
+                "the stub host's server's exit",
+                exit_state,
+                self.server_handle,
+                seconds,
+                seconds=seconds + 30.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - an unanswered wait settles nothing
+            how = f"unknown: {type(exc).__name__}: {exc}"
+        return {"how": how, "code": None, "seen_ns": time.monotonic_ns()}
+
+    async def quit_host(self) -> None:
+        """Have the stub quit its server as a host does, and leave itself."""
+        process = self.process
+        assert process is not None
+        self._quit = asyncio.get_running_loop().create_future()
+        await self._send({"op": "quit"})
+        with anyio.move_on_after(_HOST_EXIT_SECONDS + 30.0):
+            self.quit = dict((await self._quit).get("host") or {})
+        self.quit_done = True
+        with anyio.move_on_after(_STUB_EXIT_SECONDS):
+            await process.wait()
+
+    async def _stop(self, process: anyio.abc.Process) -> None:
+        """Cleanup only: the stub, then its server, if either still runs.
+
+        The server is ended only through the handle the row tied it by; one
+        never tied is left to the row's own residual checks.
+        """
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                process.kill()
+            with anyio.move_on_after(_STUB_EXIT_SECONDS):
+                await process.wait()
+        handle = self.server_handle
+        if handle is not None and is_alive(handle) is not False:
+            self.killed_by_harness = True
+            self.stopped_monotonic_ns = time.monotonic_ns()
+            with contextlib.suppress(psutil.Error):
+                handle.kill()
+            await asyncio.to_thread(exit_state, handle, _STUB_EXIT_SECONDS)
+
+
+#: The live host a declared row's script is handed: the transport of the
+#: harness's own host stub, or a stub host in a process of its own.
+LiveHost = HostQuitTransport | StubHost
+#: A declared row's scripted phase (``RowLifecycle.script``): the host's
+#: timed call, and the live host it talks through.
+TransportScript = Callable[[ToolCall, LiveHost], Awaitable[None]]
+
+
+async def run_stub_host_session(
+    command: Sequence[str],
+    *,
+    env: dict[str, str],
+    cwd: Path,
+    on_stderr: Callable[[str], None],
+    after_call: Callable[[], Awaitable[None]] | None = None,
+    tool: str = READ_TOOL,
+    arguments: dict[str, Any] | None = None,
+    started: Callable[[int], None] | None = None,
+    row_script: TransportScript | None = None,
+    **unsupported: Any,
+) -> HostSession:
+    """``run_host_session`` through a ``StubHost``: initialize, read, run the
+    row's script, and quit the way a host does unless the script lost it.
+
+    Only what a declared row passes is run; a scripted phase of an older row,
+    a second call or a post-exit hook is refused rather than dropped.
+    """
+    refused = sorted(name for name, value in unsupported.items() if value)
+    if refused:
+        raise ValueError(f"the stub host runs no {refused}")
+    session = HostSession()
+
+    def remember(line: str) -> None:
+        session.stderr.append(line)
+        session.user_lines.append(line)
+        on_stderr(line)
+
+    host = StubHost(command, env=env, cwd=cwd, on_stderr=remember)
+    try:
+        async with host.running():
+            if started is not None and host.pid is not None:
+                started(host.pid)
+            session.tool = await host.call(
+                tool,
+                READ_TOOL_ARGUMENTS if arguments is None else arguments,
+                records=session.calls,
+            )
+            session.user_lines += session.tool["text"].splitlines()
+            if after_call is not None:
+                await after_call()
+            if row_script is not None:
+
+                async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+                    summary = await host.call(name, arguments, records=session.calls)
+                    session.scripted.append(summary)
+                    session.user_lines += summary["text"].splitlines()
+                    return summary
+
+                try:
+                    await row_script(call, host)
+                except Exception as exc:  # noqa: BLE001 - the script's own evidence
+                    session.script_error = f"{type(exc).__name__}: {exc}"
+            if host.lost is None:
+                await host.quit_host()
+    except Exception as exc:  # noqa: BLE001 - reported as the row's evidence
+        detail = f"{type(exc).__name__}: {exc}"
+        if host.quit_done or host.lost is not None:
+            session.teardown_error = detail
+        else:
+            session.error = detail
+    session.pid = host.pid
+    session.lost = host.lost
+    session.lost_monotonic_ns = host.lost_monotonic_ns
+    session.loss_error = host.loss_error
+    session.killed_by_harness = host.killed_by_harness
+    session.stopped_monotonic_ns = host.stopped_monotonic_ns
+    quit_ = host.quit
+    session.alive_before_quit = quit_.get("alive_before_quit")
+    session.stdin_closed = quit_.get("stdin_closed")
+    session.exited_on_quit = quit_.get("exited_on_quit")
+    session.exit_code = quit_.get("exit_code")
+    session.quit_seconds = quit_.get("quit_seconds")
     return session
 
 
@@ -1217,6 +1862,10 @@ def host_summary(session: HostSession) -> dict[str, Any]:
         "stderr_closed": session.stderr_closed,
         "eof_ns": session.eof_monotonic_ns,
         "exit_seen_ns": session.exit_seen_monotonic_ns,
+        "lost": session.lost,
+        "lost_ns": session.lost_monotonic_ns,
+        "loss_error": session.loss_error,
+        "stop_ns": session.stopped_monotonic_ns,
     }
 
 
@@ -1243,6 +1892,11 @@ def call_summary(
     if call is not None:
         found.update(host=host, call=call)
     return found
+
+
+def call_record(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """A call's whole terminal record (``timed_call``) but its text."""
+    return {name: value for name, value in summary.items() if name != "text"}
 
 
 def launch_digest(command: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
@@ -1887,7 +2541,7 @@ def retire_daemon_state(
 
 @dataclass(frozen=True)
 class RowVector:
-    """What K0 compares across repeats. O1 and O4 are what K3 compares to K1.
+    """What K0 compares across repeats. O1 to O4 are what K3 compares to K1.
 
     No pid, instance or time: those differ between two healthy runs.
     """
@@ -1939,6 +2593,11 @@ class RowVector:
     #: H-R6, daemon mode: the frontend's second call after the owner was
     #: killed read the post again.
     recovered: bool | None = None
+    #: O3: the protected changes between the row's two readings, by kind
+    #: (``protected_kinds``), that no action the user authorized covers.
+    o3_protected: tuple[str, ...] = ()
+    #: The protected changes the row's authorized action does cover.
+    o3_authorized: tuple[str, ...] = ()
 
 
 _ASSOCIATE_SECONDS = 5.0
@@ -2236,13 +2895,21 @@ def launch_lifetimes(
 
 
 def row_expectations(
-    vector: RowVector, *, expect_owner: bool | None = None
+    vector: RowVector,
+    *,
+    expect_owner: bool | None = None,
+    expect_session: str = RETAINED,
+    initial: InitialCall = FEED_READ,
 ) -> list[str]:
     """What a row requires; each unmet one is a failure.
 
     *expect_owner* says whether the row should reach a shared owner, which is
     the configured mode unless the row says otherwise: H-R12 enables the
     daemon with a custom browser and requires the Direct behaviour.
+    *expect_session* is the R17 outcome the row declares, one of
+    ``EXPECTABLE``; any other declaration fails rather than waiving anything.
+    *initial* is the row's declared first call, whose unmet result is named
+    as that call's own failure.
     """
     if expect_owner is None:
         expect_owner = vector.mode == "daemon"
@@ -2258,9 +2925,13 @@ def row_expectations(
     if not vector.feed_carried_session:
         failures.append("no /feed/ request in the row carried the staged session")
     if not vector.tool_succeeded:
-        failures.append(f"{READ_TOOL} did not return the synthetic post")
-    if vector.o4_session != RETAINED:
-        failures.append(f"O4: the session was {vector.o4_session}, not retained")
+        failures.append(initial.unmet)
+    if expect_session not in EXPECTABLE:
+        failures.append(f"O4: a row cannot expect the session {expect_session!r}")
+    elif vector.o4_session != expect_session:
+        failures.append(
+            f"O4: the session was {vector.o4_session}, not {expect_session}"
+        )
     if not vector.host_exit_clean:
         failures.append("the host quit was not a normal one")
     if not vector.cleanup_clean:
@@ -2972,6 +3643,51 @@ def restoration_changes(
     return problems
 
 
+#: O3's kinds of protected change. Kinds, never values: a generation or a
+#: quarantine name differs between two healthy runs, and the vector holds
+#: nothing that does.
+GENERATION_CHANGED = "generation-changed"
+GENERATION_REMOVED = "generation-removed"
+SESSION_UNUSABLE = "session-unusable"
+QUARANTINED = "quarantined"
+PROFILE_REMOVED = "profile-removed"
+NO_LONGER_READABLE = "no-longer-readable"
+#: The after-reading was never taken, so O3 could not be read.
+O3_UNOBSERVED = "unobserved"
+
+#: The protected changes each authorized action is allowed to make: exactly
+#: what ``clear_auth_state`` removes. A logout that left another generation
+#: behind, or quarantined anything, did something the user did not ask for.
+_AUTHORIZED_CHANGES = {
+    LOGOUT: frozenset({GENERATION_REMOVED, SESSION_UNUSABLE, PROFILE_REMOVED}),
+}
+
+
+def _protected(before: ProfileSnapshot, at: ProfileSnapshot) -> list[tuple[str, str]]:
+    found = []
+    if at.generation != before.generation:
+        found.append(
+            (
+                GENERATION_REMOVED if at.generation is None else GENERATION_CHANGED,
+                f"the login generation changed from {before.generation!r} to "
+                f"{at.generation!r}",
+            )
+        )
+    if before.li_at_usable and not at.li_at_usable:
+        found.append(
+            (SESSION_UNUSABLE, "the staged session's li_at is no longer usable")
+        )
+    quarantined = sorted(set(at.quarantine) - set(before.quarantine))
+    if quarantined:
+        found.append((QUARANTINED, f"quarantined: {quarantined}"))
+    if before.profile_present and not at.profile_present:
+        found.append((PROFILE_REMOVED, "the browser profile is gone"))
+    unreadable = sorted(set(at.unreadable) - set(before.unreadable))
+    if unreadable:
+        found.append((NO_LONGER_READABLE, f"no longer readable: {unreadable}"))
+    return found
+
+
 def protected_changes(before: ProfileSnapshot, at: ProfileSnapshot) -> list[str]:
     """What the product changed of the protected session by the recovery boundary.
 
@@ -2982,23 +3698,29 @@ def protected_changes(before: ProfileSnapshot, at: ProfileSnapshot) -> list[str]
     allowed: another login generation, a staged session no longer usable, a
     new quarantine, a missing profile, an artefact that no longer reads.
     """
-    problems = []
-    if at.generation != before.generation:
-        problems.append(
-            f"the login generation changed from {before.generation!r} to "
-            f"{at.generation!r}"
-        )
-    if before.li_at_usable and not at.li_at_usable:
-        problems.append("the staged session's li_at is no longer usable")
-    quarantined = sorted(set(at.quarantine) - set(before.quarantine))
-    if quarantined:
-        problems.append(f"quarantined: {quarantined}")
-    if before.profile_present and not at.profile_present:
-        problems.append("the browser profile is gone")
-    unreadable = sorted(set(at.unreadable) - set(before.unreadable))
-    if unreadable:
-        problems.append(f"no longer readable: {unreadable}")
-    return problems
+    return [message for _, message in _protected(before, at)]
+
+
+def protected_kinds(
+    before: ProfileSnapshot, after: ProfileSnapshot | None, authorized: str | None
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """O3 for one row: its protected changes, by kind, split by authorization.
+
+    The first are the changes no action the user confirmed covers, the second
+    those *authorized* does. The same changes ``protected_changes`` names,
+    read between the row's before and after readings. A row without an
+    after-reading has an O3 nobody could read, which no action covers.
+    """
+    if after is None:
+        return (O3_UNOBSERVED,), ()
+    allowed = (
+        _AUTHORIZED_CHANGES.get(authorized, frozenset()) if authorized else frozenset()
+    )
+    kinds = sorted({kind for kind, _ in _protected(before, after)})
+    return (
+        tuple(kind for kind in kinds if kind not in allowed),
+        tuple(kind for kind in kinds if kind in allowed),
+    )
 
 
 def fault_witnesses(
@@ -3968,7 +4690,7 @@ def compare_repeat(first: RowVector, second: RowVector) -> list[str]:
 
 
 def compare_to_direct(direct: RowVector, daemon: RowVector) -> list[str]:
-    """K3 against a Direct reference: O1, O2 and O4 must be ``=``.
+    """K3 against a Direct reference: O1, O2, O3 and O4 must be ``=``.
 
     O2 is ``=`` when the row's states are the same, the daemon row sent no
     class of signal that neither Direct's construction nor the reference's
@@ -3977,6 +4699,11 @@ def compare_to_direct(direct: RowVector, daemon: RowVector) -> list[str]:
     row reads depends on whether a recipient outlived the next sample, not on
     what was sent. Two unobserved states compare equal as labels, which says
     nothing of what either row's unobserved actors sent.
+
+    O3 is ``=`` unless the daemon row made a protected change that the
+    reference did not and that no action the user authorized covers. Equal O4
+    outcomes are not equal O3: two sessions can both be lost while only one
+    mode quarantined it. A change only Direct made is Direct mutating more.
     """
     differences = []
     for name in ("o1_single_browser", "o2", "o4_session"):
@@ -3997,6 +4724,12 @@ def compare_to_direct(direct: RowVector, daemon: RowVector) -> list[str]:
     extra = classes_direct_would_not_send(daemon.signal_classes, direct.signal_classes)
     if extra:
         differences.append(f"o2: signals Direct would not send: {extra}")
+    mutated = sorted(set(daemon.o3_protected) - set(direct.o3_protected))
+    if mutated:
+        differences.append(
+            f"o3: protected changes Direct did not make and nobody "
+            f"authorized: {mutated}"
+        )
     return differences
 
 
@@ -4052,6 +4785,16 @@ class Observations:
     killed: dict[str, Any] | None = None
     #: The idle timeout the row's actors ran with.
     idle_timeout: float = IDLE_TIMEOUT_SECONDS
+    #: The R17 outcome the row declares it expects, one of ``EXPECTABLE``.
+    expect_session: str = RETAINED
+    #: The user action the row recorded the user confirming (``LOGOUT``), or
+    #: None. A record of the confirmation only; what it did is read from
+    #: ``after``.
+    authorized: str | None = None
+    #: The row's declared first call, which ``tool_succeeded`` judges.
+    initial: InitialCall = FEED_READ
+    #: How the row's host was declared to end (``TERMINATIONS``).
+    termination: str = NORMAL_EOF
 
 
 @dataclass
@@ -4081,6 +4824,9 @@ class RowResult:
     o2: O2Result | None = None
     #: H-R3: the checkpoint record and its verdict (``host_comparison``).
     comparison: dict[str, Any] | None = None
+    #: A declared row's raw record and its verdict (``ROW_VERDICTS``), for a
+    #: row whose script runs on a ``RowContext``.
+    record: dict[str, Any] | None = None
 
     @property
     def label(self) -> str:
@@ -4109,8 +4855,23 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
     host = observed.host
     failures: list[str] = []
     killed = observed.killed or {}
+    normal = observed.termination == NORMAL_EOF
 
-    if killed.get("actor") == "frontend" and killed.get("exit") == "killed":
+    if not normal:
+        # The row lost its host on purpose, so there is no quit to judge, and
+        # how its server ended is the row's own verdict's. Only a failure
+        # before the loss, or a loss that never came, counts here.
+        host_problems = (
+            [f"the host session failed before its loss: {host.error}"]
+            if host.error
+            else []
+        )
+        if host.lost != observed.termination:
+            host_problems.append(
+                f"the host's declared loss, {observed.termination}, was not "
+                f"what happened: {host.lost!r}"
+            )
+    elif killed.get("actor") == "frontend" and killed.get("exit") == "killed":
         # H-R6 in Direct: the server is the host's own process and the harness
         # killed it after its call, so it cannot quit. Only a failure before
         # that kill counts against the host.
@@ -4189,18 +4950,24 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
         failures += post_quit.failures
 
     row_feed = feed_requests(observed.row_requests)
-    user_lines = list(host.user_lines)
+    # Each line keeps its phase and recipient: the preservation probe's output
+    # is recorded with the rest, and never as the row's caller being told.
+    user_output = shown(ROW, CALLER, host.user_lines)
     if post_quit is not None:
-        user_lines += post_quit.user_lines
+        user_output += shown(PRESERVATION, PROBE, post_quit.user_lines)
     if observed.after is None:
         o4 = UNCERTAIN
     else:
         o4 = r17_outcome(
             observed.before,
             observed.after,
-            user_lines,
+            user_output,
             post_quit=post_quit.valid if post_quit is not None else None,
+            user_cleared=observed.authorized == LOGOUT,
         )
+    o3_protected, o3_authorized = protected_kinds(
+        observed.before, observed.after, observed.authorized
+    )
 
     vector = RowVector(
         mode="daemon" if observed.daemon else "direct",
@@ -4210,11 +4977,7 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
         o4_session=o4,
         origin_saw_feed=bool(row_feed),
         feed_carried_session=any(r.session_valid is True for r in row_feed),
-        tool_succeeded=(
-            host.tool is not None
-            and not host.tool["is_error"]
-            and host.tool["read_the_post"]
-        ),
+        tool_succeeded=observed.initial.succeeded(host.tool),
         owner_published=owner_published,
         fell_back=observed.daemon and not forwarded,
         owner_launched=bool(observed.owner_launches),
@@ -4227,9 +4990,18 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
         oracle_collection=o2.collection if o2 is not None else ORACLE_UNAVAILABLE,
         signal_classes=o2.classes if o2 is not None else (),
         guardian_owner_group=killed.get("guardian_owner_group"),
-        recovered=_recovered(host) if killed and observed.daemon else None,
+        # H-R6's second call; a row that kills on its own trigger makes none.
+        recovered=_recovered(host) if killed and observed.daemon and normal else None,
+        o3_protected=o3_protected,
+        o3_authorized=o3_authorized,
     )
-    return vector, row_expectations(vector, expect_owner=expect_owner) + failures
+    expected = row_expectations(
+        vector,
+        expect_owner=expect_owner,
+        expect_session=observed.expect_session,
+        initial=observed.initial,
+    )
+    return vector, expected + failures
 
 
 def _recovered(host: HostSession) -> bool:
@@ -4250,6 +5022,340 @@ def repeat_verdict(reference: RowVector | None, result: RowResult) -> list[str]:
     elif reference is not None:
         problems += compare_repeat(reference, result.vector)
     return problems
+
+
+# --- Row lifecycles --------------------------------------------------------------
+
+
+class RowVerdict(Protocol):
+    """A row's own verdict over its raw record: every problem, or nothing."""
+
+    def __call__(self, record: Mapping[str, Any], *, daemon: bool) -> list[str]: ...
+
+
+#: How often a declared row's script looks at an event another thread sets.
+_EVENT_POLL_SECONDS = 0.01
+#: How long the teardown waits for a released hold to record its end; a hold
+#: polls for its release every ``synthetic_origin._PEER_POLL_SECONDS``.
+_GATE_END_SECONDS = 5.0
+
+
+async def wait_for(event: threading.Event, seconds: float) -> bool:
+    """Whether *event* is set within *seconds*, polled on the loop.
+
+    Polled rather than waited on in a thread, so nothing is left running past
+    the bound for the row to own.
+    """
+    deadline = time.monotonic() + seconds
+    while not event.is_set():
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(_EVENT_POLL_SECONDS)
+    return True
+
+
+@dataclass(frozen=True)
+class LossSeams:
+    """What a row that loses its host mid-call may do (``RowContext.loss``).
+
+    One action and passive readings. ``lose`` is the only thing here that
+    ends anything, and only the host's own side: its pipes, the stub host's
+    process, or the server or frontend the host started, through the handle
+    the row tied it by (the H-R6 kill path, with its guardian found and the
+    signal oracle attached in ``prepare``). Never the owner. Every reading
+    waits and sends nothing, runs on a thread the row owns where it blocks,
+    and stamps itself on the monotonic clock (``seen_ns``), so a verdict can
+    tell a reading taken before the harness's corrective cleanup from one
+    after it. Each answers a record; none raises.
+    """
+
+    #: Get ready for *termination* before the read: associate the victim,
+    #: find its guardian and attach the oracle, or tie the stub's server.
+    prepare: Callable[[str], Awaitable[dict[str, Any]]]
+    #: Make the loss now; its record carries the kind, target and time.
+    lose: Callable[[str], Awaitable[dict[str, Any]]]
+    #: Whether the host's server or frontend exits within the seconds given.
+    server_exit: Callable[[float], Awaitable[dict[str, Any]]]
+    #: Direct: the profile's browser waited for, the census, the guardian's
+    #: exit when one was prepared, and the lease where the platform answers.
+    settlement: Callable[[], Awaitable[dict[str, Any]]]
+    #: A fresh host with the row's own command and environment: one read of
+    #: the feed and a normal quit.
+    fresh_read: Callable[[], Awaitable[dict[str, Any]]]
+    #: Which owner the descriptor names now, and whether the identified one
+    #: is alive.
+    owner_reading: Callable[[str], Awaitable[dict[str, Any]]]
+    #: The identified owner's log, as written so far.
+    owner_log: Callable[[], list[str]]
+
+
+@dataclass
+class RowContext:
+    """What a declared row's script may use (``RowLifecycle.script``).
+
+    Narrow on purpose: the host's timed call, its live transport, the origin
+    and its proxy, the account, checkpoint readings, the event log and the
+    owned-worker helpers. The owner stays the row's: ``owner`` reads the one
+    the row identified, and nothing here replaces, signals or ends it. Nothing
+    here cleans up either; the row's teardown releases every gate armed
+    through ``hold``, whatever the script did or did not do.
+
+    A held request is released by the script, on its own schedule, and never
+    only after ``transport.host_quit``: that waits for the server's exit,
+    which a request still held can keep from happening until its deadline.
+
+    A row that loses its host mid-call (``RowLifecycle.termination``) also
+    gets ``loss``: the one way it may end the host's server, and the passive
+    readings it takes afterwards.
+    """
+
+    row: str
+    daemon: bool
+    #: The host's timed call (``timed_call``). It raises on a failure or a
+    #: cancellation, after completing its record in ``HostSession.calls``.
+    call: ToolCall
+    #: The live host the row talks through: closing its stdin is how a row
+    #: quits its host before the session would.
+    transport: LiveHost
+    origin: SyntheticOrigin
+    proxy: EgressProxy
+    account: ActorAccount
+    #: The row's raw record, judged by its ``ROW_VERDICTS`` entry. What the
+    #: script observes goes here and nowhere else.
+    record: dict[str, Any]
+    #: The owner the row identified, as it stands when asked; None before.
+    owner: Callable[[], OwnerIdentity | None]
+    browser_exe: str | None
+    browser_dir: Path
+    _emit: Callable[..., None]
+    _gates: list[Gate]
+    #: Only on a row that loses its host (``LossSeams``).
+    loss: LossSeams | None = None
+
+    def emit(self, actor: str, kind: str, **fields: Any) -> None:
+        self._emit(actor, kind, **fields)
+
+    def hold(
+        self, path: str, *, ordinal: int = 1, seconds: float = GATE_DEADLINE_SECONDS
+    ) -> Gate:
+        """Arm a gate on the origin (``SyntheticOrigin.hold``); its events go
+        to the row's log as the origin's."""
+
+        def report(kind: str, **fields: Any) -> None:
+            self._emit("origin", kind, **fields)
+
+        gate = self.origin.hold(path, ordinal=ordinal, seconds=seconds, on_event=report)
+        self._gates.append(gate)
+        return gate
+
+    async def entered(self, gate: Gate, seconds: float) -> bool:
+        """Whether *gate*'s request entered it within *seconds*."""
+        return await wait_for(gate.entered, seconds)
+
+    async def ended(self, gate: Gate, seconds: float) -> bool:
+        """Whether *gate*'s hold recorded its terminal within *seconds*."""
+        return await wait_for(gate.ended, seconds)
+
+    async def checkpoint(
+        self, label: str, *, actor: tuple[Any, int, float] | None = None
+    ) -> dict[str, Any]:
+        """One checkpoint on a thread the row owns (``observe_checkpoint``),
+        appended to the record as it was read.
+
+        A failure is recorded on the checkpoint and not raised; a worker that
+        outlives its bound stays owned and refuses every later measurement.
+        """
+        point: dict[str, Any] = {"label": label}
+        try:
+            point = await run_owned(
+                f"checkpoint: {label}",
+                observe_checkpoint,
+                label,
+                self.account,
+                actor=actor,
+                lock_path=self.account.auth_root / LOCK_FILE,
+                lock=None,
+                browser_exe=self.browser_exe,
+                browser_dir=self.browser_dir,
+                seconds=_CHECKPOINT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 - the checkpoint's own evidence
+            point["error"] = f"{type(exc).__name__}: {exc}"
+        self.record.setdefault("checkpoints", []).append(point)
+        self.emit("harness", "host.checkpoint", **point)
+        return point
+
+    async def run_owned(
+        self,
+        label: str,
+        func: Callable[..., Any],
+        *args: Any,
+        seconds: float,
+        **kw: Any,
+    ) -> Any:
+        """Blocking work on a thread the row owns (``unconfirmed_close``)."""
+        return await run_owned(label, func, *args, seconds=seconds, **kw)
+
+    @staticmethod
+    def retain(label: str, check: Callable[[float], bool]) -> Retained:
+        """Hold *label* until *check* answers settled; every later
+        measurement is refused meanwhile (``unconfirmed_close.retain``)."""
+        return retain(label, check)
+
+
+@dataclass(frozen=True)
+class RowLifecycle:
+    """How one row runs, declared before it may (``ROWS``)."""
+
+    initial: InitialCall = FEED_READ
+    #: One of ``TERMINATIONS``.
+    termination: str = NORMAL_EOF
+    #: One of ``PRESERVATIONS``.
+    preservation: str = ORDINARY
+    #: Fed to staging, the actors, the owner's exit wait, the judgement and
+    #: the record alike, the same in every column of the row.
+    idle_timeout: float = IDLE_TIMEOUT_SECONDS
+    #: The row keeps a raw record, judged by its ``ROW_VERDICTS`` entry.
+    recorded: bool = False
+    #: Whether a killed actor, a job-query shim or an unconfirmed close may
+    #: combine with the row, as each does with the row that runs it.
+    scenarios: bool = True
+    #: The row's own scripted phase, after its first call. None for every row
+    #: whose script predates ``RowContext``.
+    script: Callable[[RowContext], Awaitable[None]] | None = None
+    #: What the record says of K2, for a row without a K2 column.
+    k2: Mapping[str, Any] | None = None
+
+
+ROW_H_CAL = call_loss.ROW_H_CAL
+
+#: Every row ``measure_host_quit_row`` runs. H-R2 and H-R3 idle out after
+#: ``COMPARISON_IDLE_TIMEOUT_SECONDS``, H-CAL after the value the call-loss
+#: rows it calibrates use, and every other row after ``IDLE_TIMEOUT_SECONDS``.
+ROWS: dict[str, RowLifecycle] = {
+    ROW_H_R1: RowLifecycle(),
+    ROW_H_R2: RowLifecycle(
+        idle_timeout=COMPARISON_IDLE_TIMEOUT_SECONDS, recorded=True, scenarios=False
+    ),
+    ROW_H_R3: RowLifecycle(
+        idle_timeout=COMPARISON_IDLE_TIMEOUT_SECONDS, recorded=True, scenarios=False
+    ),
+    ROW_H_R6: RowLifecycle(),
+    ROW_H_R7: RowLifecycle(),
+    ROW_H_R11: RowLifecycle(),
+    ROW_H_R12: RowLifecycle(),
+    ROW_H_CAL: RowLifecycle(
+        idle_timeout=call_loss.CALIBRATION_IDLE_TIMEOUT_SECONDS,
+        recorded=True,
+        scenarios=False,
+        script=call_loss.calibration_script,
+        k2=call_loss.K2_NOT_APPLICABLE,
+    ),
+    # H-R4 and H-R5: the calibrated read, lost once its held page entered,
+    # each by its own termination, in the calibration's configuration.
+    **{
+        row: RowLifecycle(
+            termination=case.termination,
+            idle_timeout=call_loss.LOSS_IDLE_TIMEOUT_SECONDS,
+            recorded=True,
+            scenarios=False,
+            script=call_loss.loss_script,
+            k2=call_loss.LOSS_K2_NOT_APPLICABLE,
+        )
+        for row, case in call_loss.LOSS_CASES.items()
+    },
+}
+
+#: The verdict over each recorded row's raw record, appended after
+#: ``judge_row``. A recorded row without one is refused before it runs.
+ROW_VERDICTS: dict[str, RowVerdict] = {
+    ROW_H_R2: host_comparison.problems_for,
+    ROW_H_R3: host_comparison.problems_for,
+    ROW_H_CAL: call_loss.calibration_problems,
+    **{row: call_loss.loss_problems for row in call_loss.LOSS_CASES},
+}
+
+
+def _positive_seconds(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def lifecycle_problems(row: str, lifecycle: RowLifecycle) -> list[str]:
+    """Why *lifecycle* does not hold together as *row*'s declaration."""
+    problems = []
+    if lifecycle.termination not in TERMINATIONS:
+        problems.append(f"no termination {lifecycle.termination!r}")
+    if lifecycle.preservation not in PRESERVATIONS:
+        problems.append(f"no preservation policy {lifecycle.preservation!r}")
+    if not _positive_seconds(lifecycle.idle_timeout):
+        problems.append(f"an idle timeout of {lifecycle.idle_timeout!r}")
+    if not lifecycle.initial.tool:
+        problems.append("a first call with no tool")
+    if lifecycle.recorded and row not in ROW_VERDICTS:
+        problems.append("a record with no verdict to judge it")
+    if not lifecycle.recorded and row in ROW_VERDICTS:
+        problems.append("a verdict with no record to judge")
+    if lifecycle.script is not None and not lifecycle.recorded:
+        problems.append("a script whose observations have no record")
+    if lifecycle.termination in call_loss.LOSS_TERMINATIONS:
+        # Only the row's own script makes and observes its loss, and a kill,
+        # a shim or a fault on top of it would be another scenario.
+        if lifecycle.script is None:
+            problems.append("a loss with no script to make it")
+        if lifecycle.scenarios:
+            problems.append("a loss that combines with other scenarios")
+    return problems
+
+
+def declared_row(
+    row: str, *, scenario: bool, idle_timeout: float | None
+) -> tuple[RowLifecycle, float]:
+    """*row*'s declaration and the idle timeout it runs with, or a refusal.
+
+    Raised before anything is staged or spawned: an undeclared row, a
+    declaration that does not hold together, a scenario the row does not
+    combine with, or an idle timeout that is not a positive number of seconds.
+    *idle_timeout* None is the row's declared one.
+    """
+    lifecycle = ROWS.get(row)
+    if lifecycle is None:
+        raise ValueError(f"{row!r} is no declared row; declared: {sorted(ROWS)}")
+    problems = lifecycle_problems(row, lifecycle)
+    if problems:
+        raise ValueError(f"{row} is declared with {'; '.join(problems)}")
+    if scenario and not lifecycle.scenarios:
+        # The comparison rows are plain host quits, and a kill, a shim or a
+        # fault would be another scenario.
+        raise ValueError(
+            f"{row} combines with no killed actor, job-query shim or unconfirmed close"
+        )
+    idle = lifecycle.idle_timeout if idle_timeout is None else idle_timeout
+    if not _positive_seconds(idle):
+        raise ValueError(f"{row} cannot run with an idle timeout of {idle!r}")
+    return lifecycle, float(idle)
+
+
+def preservation_policy_refusals(policy: str) -> list[str]:
+    """Why the ordinary post-quit session may not run under *policy*.
+
+    That session is a Direct host whose read signs in again when it finds the
+    session gone, so it can repair exactly what a clearing or failed-login
+    row is judged on. Such a row's preservation is refused until it has a
+    session that observes without repairing.
+    """
+    if policy == ORDINARY:
+        return []
+    if policy in (MUST_REMAIN_CLEARED, MUST_NOT_REPAIR):
+        return [
+            f"the row's preservation policy is {policy}, and the ordinary "
+            f"post-quit session can repair the session it would observe"
+        ]
+    return [f"the row declares no known preservation policy: {policy!r}"]
 
 
 # --- Running the row -----------------------------------------------------------
@@ -4400,6 +5506,7 @@ async def measure_host_quit_row(
     kill_actor: bool = False,
     job_query_shim: ShimVenv | None = None,
     unconfirmed_close: R7Setup | None = None,
+    idle_timeout: float | None = None,
 ) -> RowResult:
     """Run a host-quit row once and return its outcome vector and evidence.
 
@@ -4440,25 +5547,31 @@ async def measure_host_quit_row(
     A1 and from B's own post-exit hook. Both use
     ``COMPARISON_IDLE_TIMEOUT_SECONDS``.
 
+    Every *row* is declared in ``ROWS``; an undeclared one, a declaration
+    that does not hold together, or a scenario the row does not combine with
+    is refused before anything is staged or spawned (``declared_row``). A
+    declared row's first call is its ``RowLifecycle.initial``, its
+    preservation obeys its policy, and a row with a ``script`` runs it on a
+    ``RowContext`` and keeps the raw record its ``ROW_VERDICTS`` entry judges
+    (``RowResult.record``), whose held requests the teardown releases.
+    *idle_timeout* is the row's declared one unless given, and is the one
+    value staging, the actors, the owner's exit wait, the judgement and the
+    record read.
+
     No row starts while anything an earlier row left is unsettled
     (``unconfirmed_close.settlement_problems``).
     """
+    # Before anything else, whatever the row: nothing is claimed, staged or
+    # spawned for a row that cannot run as declared.
+    lifecycle, idle_timeout = declared_row(
+        row,
+        scenario=(
+            kill_actor or job_query_shim is not None or unconfirmed_close is not None
+        ),
+        idle_timeout=idle_timeout,
+    )
     comparing = row in (ROW_H_R3, ROW_H_R2)
     second_host = row == ROW_H_R2
-    if comparing and (
-        kill_actor or job_query_shim is not None or unconfirmed_close is not None
-    ):
-        # Refused before anything is staged or spawned: the comparison rows
-        # are plain host quits, and a kill, a shim or a fault would be another
-        # scenario.
-        raise ValueError(
-            f"{row} combines with no killed actor, job-query shim or unconfirmed close"
-        )
-    # Picked once: the actors' environment, staging included, the owner-exit
-    # wait, the row's judgement and the comparison record all read this one.
-    idle_timeout = (
-        COMPARISON_IDLE_TIMEOUT_SECONDS if comparing else IDLE_TIMEOUT_SECONDS
-    )
     r7 = unconfirmed_close
     # Before anything else, whichever row this is: an earlier row's worker or
     # helper still running could still be asking about a profile, and a
@@ -4623,8 +5736,16 @@ async def measure_host_quit_row(
     # watcher's start on, its ``finally`` ends every helper already started.
     canaries = Canaries()
     canary_problems: list[str] = []
+    # A row that kills an actor on its own trigger is held to the oracle as
+    # H-R6 is.
     oracle = SignalOracle(
-        work_dir, required=(kill_actor or r7 is not None) and ORACLE_REQUIRED
+        work_dir,
+        required=(
+            kill_actor
+            or r7 is not None
+            or lifecycle.termination == call_loss.ACTOR_KILLED
+        )
+        and ORACLE_REQUIRED,
     )
     actors_began = time.time()
 
@@ -4691,6 +5812,28 @@ async def measure_host_quit_row(
         if comparing
         else None
     )
+    #: A declared row's raw record (``RowLifecycle.script``), all of it fit for
+    #: the packet; None on every row whose script predates ``RowContext``.
+    row_record: dict[str, Any] | None = (
+        {
+            "row": row,
+            "mode": mode,
+            "platform": sys.platform,
+            "browser_key": account.browser_key,
+            "idle_timeout_seconds": idle_timeout,
+            "lifecycle": {
+                "initial": lifecycle.initial.tool,
+                "termination": lifecycle.termination,
+                "preservation": lifecycle.preservation,
+            },
+            "k2": dict(lifecycle.k2) if lifecycle.k2 is not None else None,
+            "observation_problems": [],
+        }
+        if lifecycle.script is not None
+        else None
+    )
+    #: Every gate the row's script armed; the teardown releases each one.
+    armed_gates: list[Gate] = []
     #: H-R3: the actor the checkpoints read, as its handle, pid and start.
     r3_actor: list[tuple[Any, int, float]] = []
     #: H-R2: host B's read, when host B was seen to start, and the hold on
@@ -4699,20 +5842,33 @@ async def measure_host_quit_row(
     b_started: dict[str, int] = {}
     b_held: list[Retained] = []
 
+    #: The process the row is about to kill, once ``prepare_kill`` tied it.
+    victim: list[Any] = []
+
     async def kill_the_actor() -> None:
         """Associate the victim, find its guardian, attach the oracle, kill."""
-        if daemon:
+        await prepare_kill()
+        await fire_kill()
+
+    async def prepare_kill(*, server_only: bool = False) -> None:
+        """Associate the victim, find its guardian and attach the oracle.
+
+        The owner in daemon mode, else the server the host started; with
+        *server_only*, that server in either mode (the frontend in daemon
+        mode), never the owner.
+        """
+        if daemon and not server_only:
             if identified is None:
                 killed["exit"] = "not killed: the owner was never identified"
                 return
             role, pid = "owner", identified.pid
-            victim, start = identified.process, identified.create_time
+            process, start = identified.process, identified.create_time
         else:
             role, pid = "frontend", server.get("pid", -1)
-            victim, start = await asyncio.to_thread(
+            process, start = await asyncio.to_thread(
                 associate_server, pid, watcher.observed
             )
-            if victim is None:
+            if process is None:
                 killed["exit"] = f"not killed: server {pid} was never associated"
                 return
         guardian = await asyncio.to_thread(wait_for_guardian, watcher.observed, pid)
@@ -4734,9 +5890,17 @@ async def measure_host_quit_row(
             "ptrace_scope": oracle.scope,
             "required": oracle.required,
         }
+        victim.append(process)
+
+    async def fire_kill() -> None:
+        """Kill the victim ``prepare_kill`` tied, and wait for it to be dead;
+        nothing at all when it tied none."""
+        if not victim:
+            return
+        process = victim[0]
         try:
             # SIGKILL on POSIX, TerminateProcess on Windows: psutil's kill().
-            victim.kill()
+            process.kill()
         except psutil.NoSuchProcess:
             killed["exit"] = "gone before the kill"
         except psutil.Error as exc:
@@ -4744,7 +5908,7 @@ async def measure_host_quit_row(
         else:
             try:
                 dead = await asyncio.to_thread(
-                    wait_until_dead, victim, _OWNER_KILL_WAIT_SECONDS
+                    wait_until_dead, process, _OWNER_KILL_WAIT_SECONDS
                 )
             except psutil.Error as exc:
                 killed["exit"] = f"killed, death unconfirmed ({type(exc).__name__})"
@@ -5767,6 +6931,230 @@ async def measure_host_quit_row(
                 "by": "itself" if by_itself else "the harness, after measurement",
             }
 
+    #: A losing row's live host, as the session handed it to the script.
+    live: list[LiveHost] = []
+    #: How many fresh hosts a losing row's script started.
+    fresh_hosts: list[HostSession] = []
+
+    async def prepare_loss(termination: str) -> dict[str, Any]:
+        """``LossSeams.prepare``: tie what the loss will end before the read."""
+        if termination == call_loss.ACTOR_KILLED:
+            await prepare_kill(server_only=True)
+            return {
+                name: killed.get(name)
+                for name in ("actor", "pid", "start_identity", "guardian", "oracle")
+            } | ({} if victim else {"error": killed.get("exit")})
+        if termination == call_loss.HOST_KILLED:
+            host = live[0]
+            try:
+                process, created = await run_owned(
+                    "associate the stub host's server",
+                    associate_server,
+                    server.get("pid", -1),
+                    watcher.observed,
+                    seconds=30.0,
+                )
+            except Exception as exc:  # noqa: BLE001 - the preparation's own evidence
+                return {"error": f"{type(exc).__name__}: {exc}"}
+            if process is None or created is None:
+                return {"error": f"server {server.get('pid')} was never associated"}
+            if isinstance(host, StubHost):
+                host.server_handle = process
+            return {"server": [process.pid, created]}
+        return {}
+
+    async def make_loss(termination: str) -> dict[str, Any]:
+        """``LossSeams.lose``: the loss, on the host's side only, now."""
+        host = live[0]
+        if termination == call_loss.ACTOR_KILLED:
+            host.mark_lost(termination)
+            await fire_kill()
+            error = None if killed.get("exit") == "killed" else killed.get("exit")
+        else:
+            await host.lose(termination)
+            error = host.loss_error
+        name, target = call_loss.loss_event(termination, daemon=daemon)
+        found = {
+            "kind": termination,
+            "loss": name,
+            "target": target,
+            "monotonic_ns": host.lost_monotonic_ns,
+            "error": error,
+        }
+        if termination == call_loss.ACTOR_KILLED:
+            found["killed"] = {k: v for k, v in killed.items() if k != "oracle"}
+        if isinstance(found["monotonic_ns"], int):
+            emit(
+                "harness",
+                "loss",
+                loss=name,
+                target=target,
+                monotonic_ns=found["monotonic_ns"],
+                termination=termination,
+                error=error,
+            )
+        return found
+
+    async def loss_server_exit(seconds: float) -> dict[str, Any]:
+        """``LossSeams.server_exit``: the host's own handle or the tied one."""
+        return await live[0].server_exit(seconds)
+
+    async def loss_settlement() -> dict[str, Any]:
+        """``LossSeams.settlement``: what the profile shows by itself."""
+        found: dict[str, Any] = {}
+        try:
+            guardian = killed.get("guardian")
+            if isinstance(guardian, int):
+                # H-R5 in Direct: the killed server's guardian drains the
+                # browser and leaves, which is the settlement being read.
+                found["guardian_exit"] = await run_owned(
+                    "the killed server's guardian",
+                    lifetime_exit_state,
+                    watcher.observed(),
+                    guardian,
+                    _BROWSER_GONE_SECONDS,
+                    seconds=_BROWSER_GONE_SECONDS + 30.0,
+                )
+            found["waited"] = await run_owned(
+                "the browser after the loss",
+                wait_for_no_browser,
+                account,
+                _BROWSER_GONE_SECONDS,
+                seconds=_BROWSER_GONE_SECONDS + 30.0,
+            )
+            census = await run_owned(
+                "the census after the loss",
+                profile_census,
+                account,
+                browser_exe=browser_exe,
+                browser_dir=browsers,
+                seconds=60.0,
+            )
+            found["remaining"] = census.pids
+            found["unresolved"] = list(census.unresolved)
+            lock = await run_owned(
+                "the lock after the loss", read_lock, lock_path, seconds=60.0
+            )
+            answer = lock.get("answer")
+            found["lease"] = (
+                answer.get("state")
+                if isinstance(answer, Mapping)
+                else call_loss.LEASE_UNOBSERVED
+            )
+        except Exception as exc:  # noqa: BLE001 - the reading's own evidence
+            found["error"] = f"{type(exc).__name__}: {exc}"
+        found["seen_ns"] = time.monotonic_ns()
+        return found
+
+    async def loss_fresh_read() -> dict[str, Any]:
+        """``LossSeams.fresh_read``: the row's command and environment again,
+        in a directory of its own, retained until its server is gone."""
+        left = settlement_problems()
+        if left:
+            return {"made": False, "why": f"unsettled: {left}"}
+        directory = work_dir / f"fresh-{len(fresh_hosts) + 1}"
+        directory.mkdir(exist_ok=True)
+        held: list[Retained] = []
+
+        def hold(process: Any) -> None:
+            held.append(
+                retain(
+                    f"the fresh host's server {process.pid}",
+                    lambda grace, process=process: process.returncode is not None,
+                )
+            )
+
+        launched_ns = time.monotonic_ns()
+        fresh = await run_host_session(
+            command,
+            env=env,
+            cwd=directory,
+            on_stderr=lambda line: emit(
+                "frontend", "user.output", stream="stderr", host="fresh", line=line
+            ),
+            on_process=hold,
+        )
+        fresh_hosts.append(fresh)
+        if held and held[0].check(0.0):
+            discharge(held[0])
+        if fresh.tool is not None:
+            emit("host_stub", "tool.result", **{**fresh.tool, "host": "fresh"})
+        return {
+            "made": True,
+            "launched_ns": launched_ns,
+            "host": host_summary(fresh),
+            "call": call_record(fresh.tool) if fresh.tool is not None else None,
+            "forwarded": any(_FORWARDING_LINE in line for line in fresh.stderr),
+            "quit_problems": host_failures(fresh),
+            "retained": bool(held) and retained(held[0]),
+        }
+
+    async def loss_owner_reading(label: str) -> dict[str, Any]:
+        """``LossSeams.owner_reading``: the descriptor's owner, on a thread
+        the row owns, and the identified one's liveness."""
+        try:
+            seen = await run_owned(
+                f"owner: {label}",
+                observe_owner,
+                label,
+                account,
+                watcher.observed,
+                seconds=30.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - the reading's own evidence
+            seen = {
+                "label": label,
+                "lifetime": None,
+                "instance_id": None,
+                "problem": f"{type(exc).__name__}: {exc}",
+            }
+        seen["alive"] = is_alive(identified.process) if identified else None
+        seen["seen_ns"] = time.monotonic_ns()
+        return seen
+
+    def loss_owner_log() -> list[str]:
+        """``LossSeams.owner_log``: the row's own daemon log, read now."""
+        path = Path(owner.get("log_path") or "")
+        if not path.is_file():
+            return []
+        return path.read_text(errors="replace").splitlines()
+
+    async def declared_script(call: ToolCall, transport: LiveHost) -> None:
+        """The row's own script, on the context it is allowed."""
+        assert lifecycle.script is not None and row_record is not None
+        live.append(transport)
+        seams = (
+            LossSeams(
+                prepare=prepare_loss,
+                lose=make_loss,
+                server_exit=loss_server_exit,
+                settlement=loss_settlement,
+                fresh_read=loss_fresh_read,
+                owner_reading=loss_owner_reading,
+                owner_log=loss_owner_log,
+            )
+            if lifecycle.termination != NORMAL_EOF
+            else None
+        )
+        await lifecycle.script(
+            RowContext(
+                row=row,
+                daemon=daemon,
+                call=call,
+                transport=transport,
+                origin=origin,
+                proxy=proxy,
+                account=account,
+                record=row_record,
+                owner=lambda: identified,
+                browser_exe=browser_exe,
+                browser_dir=browsers,
+                _emit=emit,
+                _gates=armed_gates,
+                loss=seams,
+            )
+        )
+
     async def after_call() -> None:
         await find_the_owner()
         if kill_actor:
@@ -5798,7 +7186,14 @@ async def measure_host_quit_row(
             required=oracle.required,
         )
         actors_began = time.time()
-        host = await run_host_session(
+        # A row that kills its host whole needs a host in a process of its
+        # own; every other one is the harness's in-process host stub.
+        host_session = (
+            run_stub_host_session
+            if lifecycle.termination == call_loss.HOST_KILLED
+            else run_host_session
+        )
+        host = await host_session(
             command,
             env=env,
             cwd=work_dir,
@@ -5811,6 +7206,8 @@ async def measure_host_quit_row(
             ),
             after_call=after_call,
             started=lambda pid: server.update(pid=pid),
+            tool=lifecycle.initial.tool,
+            arguments=dict(lifecycle.initial.arguments),
             second_call=kill_actor and daemon,
             script=(
                 job_query_script
@@ -5824,8 +7221,14 @@ async def measure_host_quit_row(
                 else None
             ),
             after_exit=first_post_exit if comparing else None,
+            **({"row_script": declared_script} if lifecycle.script is not None else {}),
         )
         result.host = host
+        if row_record is not None:
+            # Every call the host made, each as it ended, without its text.
+            row_record["calls"] = [call_record(summary) for summary in host.calls]
+            row_record["script_error"] = host.script_error
+            row_record["host"] = host_summary(host)
         if comparison is not None:
             if second_host:
                 # Every read, labelled with its host, in the order made: a
@@ -5982,6 +7385,17 @@ async def measure_host_quit_row(
             # From here on the harness acts: a checkpoint after this marker
             # could be reading its cleanup rather than the product.
             comparison["cleanup_began_ns"] = time.monotonic_ns()
+        # Whatever the script left held is let go before anything is ended, so
+        # no browser waits out a deadline on the harness's account. A release
+        # here is the teardown's, and the gate's record says so.
+        for armed in armed_gates:
+            armed.release(by=RELEASED_BY_TEARDOWN)
+        if row_record is not None:
+            row_record["cleanup_began_ns"] = time.monotonic_ns()
+            for armed in armed_gates:
+                if armed.entered.is_set():
+                    await wait_for(armed.ended, _GATE_END_SECONDS)
+            row_record["gates"] = [armed.as_record() for armed in armed_gates]
         if actors_ended is None:
             actors_ended = time.time()
         if r7 is not None and not r7_settling_began:
@@ -6294,6 +7708,13 @@ async def measure_host_quit_row(
         r7_refusals += settlement_problems()
         r7_window["before_preservation"] = r7_refusals
         refusals += [f"H-R7: {p}" for p in r7_refusals]
+    if row_record is not None:
+        # A worker the script started and did not see finish could still be
+        # asking about the profile: nothing is launched on it.
+        refusals += [f"{row}: {p}" for p in settlement_problems()]
+    # A row whose finding is a cleared or failed session launches nothing
+    # that could repair it (``preservation_policy_refusals``).
+    refusals += preservation_policy_refusals(lifecycle.preservation)
     post_quit: PostQuit | None
     if refusals:
         # Nothing is launched. The session's fate after the row is unknown, and
@@ -6348,8 +7769,35 @@ async def measure_host_quit_row(
             o2=o2,
             killed=killed or None,
             idle_timeout=idle_timeout,
+            initial=lifecycle.initial,
+            termination=lifecycle.termination,
         )
     )
+    if row_record is not None:
+        # From the row's completed history: what the origin served, in order,
+        # with its arrival on the monotonic clock the call records share.
+        row_record["requests"] = [
+            {
+                "host": request.host,
+                "path": request.path,
+                "session_valid": request.session_valid,
+                "t": request.t,
+                "monotonic_ns": request.monotonic_ns,
+            }
+            for request in row_requests
+        ]
+        # The owners and release gates the row started, once per lifetime,
+        # read after the watcher stopped so each carries its last read: what a
+        # loss row's verdict counts launches from (``owner_launches``), which
+        # ties a Windows venv launcher to the interpreter it started. The
+        # watcher labels a gate that runs the owner as an owner too.
+        owners, gates = launch_lifetimes(
+            observed_events,
+            [gate_script(runtime.checkout), gate_script(REPO_ROOT)],
+            (result.watcher or {}).get("sample_log"),
+        )
+        row_record["owner_processes"] = owners
+        row_record["gate_processes"] = gates
     if comparison is not None:
         # Selected by the row, so its record is required: a missing window, a
         # failed hook or script fails here however healthy the vector is.
@@ -6382,11 +7830,20 @@ async def measure_host_quit_row(
                 ),
                 "handoff": host_comparison.handoff_reading(host.stderr),
             }
-        # Selected by the row, so its record is required: a missing window, a
-        # failed hook or script fails here however healthy the vector is.
-        problems = host_comparison.problems_for(comparison, daemon=daemon)
-        comparison["problems"] = problems
         result.comparison = comparison
+    if lifecycle.recorded:
+        # Selected by the row, so its record is required: a missing window, a
+        # failed hook or script fails here however healthy the vector is. The
+        # verdict is the row's registered one (``ROW_VERDICTS``), never none.
+        judged = comparison if comparison is not None else row_record
+        problems = (
+            ROW_VERDICTS[row](judged, daemon=daemon)
+            if judged is not None
+            else ["the row kept no record for its verdict to judge"]
+        )
+        if judged is not None:
+            judged["problems"] = problems
+        result.record = row_record
         result.failures += [f"{row}: {problem}" for problem in problems]
     if shim is not None:
         for fate in fates.fates.values():
@@ -6536,6 +7993,7 @@ async def measure_host_quit_row(
                     else None
                 ),
                 "comparison": result.comparison,
+                **({"record": result.record} if result.record is not None else {}),
             },
             indent=2,
             default=str,
