@@ -182,6 +182,11 @@ NO_TERMINAL_ON_WINDOWS = (
 #: status on pipes is measured on its policy and not on its encoding, and
 #: output unbuffered, so a line on pipes is stamped when it was written.
 COMMAND_ENV = {"PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+#: Where a command carries its marker (``TerminalCommand.marker``). Every
+#: process it starts inherits it, so the teardown can find them whatever
+#: became of their ancestry; only a process that clears its own environment
+#: escapes, and no command here starts one.
+COMMAND_MARKER_ENV = "LINKEDIN_MCP_DIFFERENTIAL_COMMAND_MARKER"
 
 LOGOUT_ARGS = ("--logout",)
 LOGIN_ARGS = ("--login",)
@@ -341,7 +346,11 @@ class TerminalCommand:
             raise ValueError(NO_TERMINAL_ON_WINDOWS)
         self.argv = list(argv)
         self.args = list(args)
-        self.env = dict(env)
+        #: A value only this command's process tree carries, inherited by
+        #: every process it starts, however it detaches: the authoritative
+        #: boundary of what it started (``_marked``). Fresh per command.
+        self.marker = secrets.token_hex(16)
+        self.env = {**env, COMMAND_MARKER_ENV: self.marker}
         self.cwd = Path(cwd)
         self.terminal = terminal
         self.label = label
@@ -386,12 +395,39 @@ class TerminalCommand:
             except psutil.Error:
                 continue
 
-    def _alive_descendants(self) -> list[tuple[int, float]]:
-        """The recorded descendants still running as the same lifetime."""
+    def _marked(self) -> None:
+        """Record every process now carrying this command's marker. A process
+        inherits its parent's environment however it detaches, double fork
+        and new session included, so this finds what ancestry cannot: a
+        helper started just before the command exits, or one that left the
+        tree. A process another user owns cannot carry it and is skipped; one
+        that cleared its own environment escapes, which the docstring of
+        ``COMMAND_MARKER_ENV`` states."""
         import psutil
 
+        own = os.getpid()
+        for process in psutil.process_iter():
+            if process.pid == own:
+                continue
+            try:
+                if process.environ().get(COMMAND_MARKER_ENV) != self.marker:
+                    continue
+                key = (process.pid, process.create_time())
+            except (psutil.Error, OSError):
+                continue
+            self.descendants.setdefault(key, process)
+
+    def _alive_descendants(self) -> list[tuple[int, float]]:
+        """The descendants recorded or now marked, still running as the same
+        lifetime: the command itself excluded."""
+        import psutil
+
+        self._marked()
         alive = []
+        own = self.process.pid if self.process is not None else None
         for key, process in self.descendants.items():
+            if key[0] == own and self.returncode is None:
+                continue
             try:
                 if process.is_running() and process.create_time() == key[1]:
                     if process.status() != psutil.STATUS_ZOMBIE:

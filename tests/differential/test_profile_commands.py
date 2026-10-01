@@ -125,6 +125,32 @@ if mode == "wait":
     time.sleep(600)
 if mode == "silent":
     sys.exit(4)
+if mode == "helper-now":
+    # The helper started as the command exits at once: no poll sees it as
+    # a child before it is reparented.
+    import subprocess
+    subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
+    sys.exit(0)
+if mode == "daemonize":
+    # A helper that detaches by double fork and a new session, while the
+    # command itself stays a while: never its descendant by ancestry.
+    import os
+    if os.fork() == 0:
+        os.setsid()
+        if os.fork() == 0:
+            devnull = os.open(os.devnull, os.O_RDWR)
+            for fd in (0, 1, 2):
+                os.dup2(devnull, fd)
+            time.sleep(60)
+            os._exit(0)
+        os._exit(0)
+    time.sleep(0.5)
+    print("detached a helper", flush=True)
+    sys.exit(0)
 if mode == "helper":
     # A helper with its own output, which outlives the command: a browser
     # the command launched is one. Bounded by its own deadline.
@@ -244,6 +270,31 @@ async def test_a_command_is_not_settled_while_a_helper_it_started_runs(tmp_path)
     assert command.settled(10) is True
     record = command.record()
     assert record["ended_by_harness"] is True and record["descendants_alive"] == []
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "helper-now",
+        pytest.param("daemonize", marks=posix),
+    ],
+)
+async def test_a_helper_no_ancestry_names_is_still_the_commands_to_settle(
+    tmp_path, mode
+):
+    """One started as the command exits, or detached by double fork into a
+    session of its own: no poll sees it as a child, but it carries the
+    command's marker, so the command is not settled and the teardown ends it."""
+    command = _driver(tmp_path, mode, terminal=False)
+    try:
+        await command.wait(30)
+        assert command.returncode == 0
+        assert command.settled(1.0) is False
+        assert command.record()["descendants_alive"]
+    finally:
+        command.end()
+    assert command.settled(10) is True
+    assert command.record()["descendants_alive"] == []
 
 
 async def test_a_prompt_that_never_comes_is_given_up_once_the_command_is_gone(
