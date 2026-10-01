@@ -7,7 +7,7 @@ arguments and nothing else. These cases run them in headless chromium.
 
 The click loop is the reason this file exists. Selecting a conversation row
 marks the thread read on LinkedIn, so the order of the name filter and the
-click is the closest thing to a write anywhere in the scraping package, and
+click is the closest thing to a write anywhere in the linkedin package, and
 that ordering lives entirely inside the JavaScript. A mocked ``evaluate``
 cannot tell a loop that filters first from one that clicks first. The same
 holds for thread ownership: whether a row is credited with the thread its own
@@ -37,7 +37,7 @@ from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.conversations import ConversationReader
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 
 #: CI uses ``--dist loadgroup``. Keep every test that launches Chromium on one
 #: worker so browser startups cannot compete with the DOM cases' wall-clock
@@ -59,7 +59,7 @@ async def _no_message_target() -> Any:
 
 def _reader(page: Page) -> ConversationReader:
     """Wire the conversation owner the way the facade does."""
-    session = ScrapingSession(page)
+    session = PageSession(page)
     return ConversationReader(
         session,
         PageNavigator(session),

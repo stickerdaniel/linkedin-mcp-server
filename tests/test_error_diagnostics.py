@@ -67,7 +67,7 @@ def test_format_tool_error_with_diagnostics_prefers_existing_issue_comment_flow(
         },
     }
 
-    message = format_tool_error_with_diagnostics("Scrape failed", diagnostics)
+    message = format_tool_error_with_diagnostics("Read failed", diagnostics)
 
     assert "- Local diagnostic notes: /tmp/issue.md" in message
     assert "- Local trace artifacts: /tmp/trace" in message
@@ -83,7 +83,7 @@ def test_format_tool_error_with_diagnostics_prefers_existing_issue_comment_flow(
 
 def test_format_tool_error_empty_search_still_requires_packet_search():
     message = format_tool_error_with_diagnostics(
-        "Scrape failed",
+        "Read failed",
         {
             "issue_template_path": "/tmp/issue.md",
             "existing_issues": [],

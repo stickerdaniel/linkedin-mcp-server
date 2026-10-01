@@ -209,7 +209,7 @@ cython_debug/
 # Portable cookie file (contains session data)
 cookies.json
 
-# Local snapshot dumps (contain scraped LinkedIn data)
+# Local snapshot dumps (contain LinkedIn data read by the server)
 scripts/snapshot_dumps/
 
 # Debug artifacts

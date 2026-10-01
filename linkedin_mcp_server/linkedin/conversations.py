@@ -13,7 +13,7 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import (
     InvalidReferenceError,
-    LinkedInScraperException,
+    LinkedInOperationError,
 )
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.identifiers import (
@@ -29,7 +29,7 @@ from linkedin_mcp_server.linkedin.link_metadata import (
 )
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.linkedin.text import (
     strip_conversation_chrome,
     strip_linkedin_noise,
@@ -258,7 +258,7 @@ class ConversationReader:
 
     def __init__(
         self,
-        session: ScrapingSession,
+        session: PageSession,
         navigator: PageNavigator,
         content: PageContentReader,
         profile_page: ProfilePageReader,
@@ -275,7 +275,7 @@ class ConversationReader:
         text: str,
         references: list[Reference] | None = None,
     ) -> dict[str, Any]:
-        """Build a standard single-section scraping response."""
+        """Build a standard single-section page response."""
         result: dict[str, Any] = {"url": url, "sections": {}}
         if text:
             result["sections"][section_name] = text
@@ -290,7 +290,7 @@ class ConversationReader:
         timeout: int = 10000,
         log_context: str,
     ) -> None:
-        """Wait for main content to populate enough text to scrape."""
+        """Wait for main content to populate enough text to read."""
         try:
             await self._session.page.wait_for_function(
                 """({ minimumLength }) => {
@@ -608,7 +608,7 @@ class ConversationReader:
         from a row that could not be verified.
         """
         if index < 0:
-            raise LinkedInScraperException(f"index must be non-negative (got {index}).")
+            raise LinkedInOperationError(f"index must be non-negative (got {index}).")
 
         linkedin_username = normalize_person_identifier(linkedin_username)
         profile_url = person_profile_url(linkedin_username, "/")
@@ -623,7 +623,7 @@ class ConversationReader:
         await self._session.dismiss_modal()
         display_name = await self._profile_page._read_profile_display_name()
         if not display_name:
-            raise LinkedInScraperException(
+            raise LinkedInOperationError(
                 f"Could not resolve a display name for {linkedin_username}."
             )
 
@@ -634,21 +634,21 @@ class ConversationReader:
                 # Not InvalidReferenceError: the username is valid and the page
                 # could not be verified, which is worth an issue report.
                 if resolution.barrier is not None:
-                    raise LinkedInScraperException(
+                    raise LinkedInOperationError(
                         _unverified_index_message(index, linkedin_username, resolution)
                     )
                 if not thread_urls:
-                    raise LinkedInScraperException(
+                    raise LinkedInOperationError(
                         f"Could not find a conversation for {linkedin_username}."
                     )
-                raise LinkedInScraperException(
+                raise LinkedInOperationError(
                     f"index {index} out of range: only {len(thread_urls)} "
                     f"thread(s) exist for {linkedin_username}."
                 )
 
             await self._navigator._navigate_to_page(thread_urls[index])
         except PlaywrightTimeoutError as exc:
-            raise LinkedInScraperException(
+            raise LinkedInOperationError(
                 "Messaging search results did not load in time."
             ) from exc
 

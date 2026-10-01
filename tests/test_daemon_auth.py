@@ -37,7 +37,7 @@ from linkedin_mcp_server.exceptions import (
 
 
 def _owner_that_fails_with(
-    error: Exception, *, then: str = "scraped ok"
+    error: Exception, *, then: str = "read ok"
 ) -> tuple[FastMCP, list[int]]:
     """An owner whose tool fails with *error* once, then succeeds.
 
@@ -45,21 +45,21 @@ def _owner_that_fails_with(
     how every real tool body ends. The second part matters more than it looks:
     ``mask_error_details`` replaces the text of anything that is not already a
     ``ToolError`` before the middleware ever sees it, so a test that raised the
-    domain exception raw would assert against ``"Error calling tool 'scrape'"``
+    domain exception raw would assert against ``"Error calling tool 'read_page'"``
     and conclude the owner's wording is lost when it is not.
     """
     owner = FastMCP("owner", mask_error_details=True)
     calls: list[int] = []
 
-    # Annotated read-only, like the scraping tools it stands for. The annotation
+    # Annotated read-only, like the reading tools it stands for. The annotation
     # is load-bearing rather than decoration: only a tool that declares itself
     # read-only is ever replayed, because a replay the client never sees the
     # result of would repeat whatever the tool did.
     @owner.tool(annotations={"readOnlyHint": True})
-    async def scrape() -> str:
+    async def read_page() -> str:
         calls.append(1)
         if len(calls) == 1:
-            raise_tool_error(error, "scrape")
+            raise_tool_error(error, "read_page")
         return then
 
     owner.add_middleware(OwnerAuthSignalMiddleware())
@@ -100,7 +100,7 @@ class TestTheMarkerSurvivesTheHop:
             return_value=False,
         ):
             async with Client(owner) as client:
-                result = await client.call_tool("scrape", raise_on_error=False)
+                result = await client.call_tool("read_page", raise_on_error=False)
 
         assert result.is_error is True
         assert result.meta is not None
@@ -127,7 +127,7 @@ class TestTheMarkerSurvivesTheHop:
             # No repair middleware: this asserts what crosses the hop, which a
             # working frontend consumes.
             async with Client(_proxy_to(owner, repairing=False)) as client:
-                result = await client.call_tool("scrape", raise_on_error=False)
+                result = await client.call_tool("read_page", raise_on_error=False)
 
         assert result.meta[MARKER_KEY]["reason"] == "stale"
         assert result.meta[MARKER_KEY]["replayable"] is False
@@ -146,14 +146,14 @@ class TestTheMarkerSurvivesTheHop:
         ):
             async with Client(owner) as client:
                 with pytest.raises(ToolError, match="no session"):
-                    await client.call_tool("scrape")
+                    await client.call_tool("read_page")
 
     async def test_an_unrelated_failure_is_left_alone(self):
         # The middleware must not turn every error into an invitation to log in.
         owner, _calls = _owner_that_fails_with(RuntimeError("the page moved"))
 
         async with Client(owner) as client:
-            result = await client.call_tool("scrape", raise_on_error=False)
+            result = await client.call_tool("read_page", raise_on_error=False)
 
         assert result.is_error is True
         assert MARKER_KEY not in (result.meta or {})
@@ -165,14 +165,14 @@ class TestTheMarkerSurvivesTheHop:
         owner = FastMCP("owner", mask_error_details=True)
 
         @owner.tool
-        async def scrape() -> str:
+        async def read_page() -> str:
             try:
                 raise_tool_error(
                     AuthMissingOnOwnerError("no session", nothing_ran_yet=True),
-                    "scrape",
+                    "read_page",
                 )
             except Exception as exc:  # what a real tool body does next
-                raise_tool_error(exc, "scrape")
+                raise_tool_error(exc, "read_page")
 
         owner.add_middleware(OwnerAuthSignalMiddleware())
 
@@ -181,7 +181,7 @@ class TestTheMarkerSurvivesTheHop:
             return_value=False,
         ):
             async with Client(owner) as client:
-                result = await client.call_tool("scrape", raise_on_error=False)
+                result = await client.call_tool("read_page", raise_on_error=False)
 
         assert result.meta[MARKER_KEY]["reason"] == "missing"
 
@@ -221,14 +221,14 @@ class TestTheFrontendActsOnTheMarker:
 
         with self._profile_is_free(), self._repair() as repair:
             async with Client(_proxy_to(owner)) as client:
-                result = await client.call_tool("scrape", raise_on_error=False)
+                result = await client.call_tool("read_page", raise_on_error=False)
 
         repair.assert_awaited_once_with("missing", None)
         # Twice on the owner: the failure, then the replay. Not three times, which
         # is what a retry loop without a bound would give.
         assert len(calls) == 2
         assert result.is_error is False
-        assert result.content[0].text == "scraped ok"
+        assert result.content[0].text == "read ok"
 
     async def test_a_restricted_account_reaches_the_client_without_a_repair(self):
         # LinkedIn's restriction is not bad auth: a login cannot lift it, so the
@@ -238,7 +238,7 @@ class TestTheFrontendActsOnTheMarker:
 
         with self._profile_is_free(), self._repair() as repair:
             async with Client(_proxy_to(owner)) as client:
-                result = await client.call_tool("scrape", raise_on_error=False)
+                result = await client.call_tool("read_page", raise_on_error=False)
 
         repair.assert_not_awaited()
         assert len(calls) == 1
@@ -274,7 +274,7 @@ class TestTheFrontendActsOnTheMarker:
             ),
         ):
             async with Client(_proxy_to(owner)) as client:
-                result = await client.call_tool("scrape", raise_on_error=False)
+                result = await client.call_tool("read_page", raise_on_error=False)
 
         assert len(calls) == 1
         assert result.is_error is True
@@ -285,12 +285,12 @@ class TestTheFrontendActsOnTheMarker:
         # and connection requests, so a replay could repeat a side effect the user
         # never asked for twice.
         owner, calls = _owner_that_fails_with(
-            AuthStaleOnOwnerError("session died mid-scrape", nothing_ran_yet=False)
+            AuthStaleOnOwnerError("session died mid-read", nothing_ran_yet=False)
         )
 
         with self._profile_is_free(), self._repair() as repair:
             async with Client(_proxy_to(owner)) as client:
-                result = await client.call_tool("scrape", raise_on_error=False)
+                result = await client.call_tool("read_page", raise_on_error=False)
 
         # Repaired, because the next call should succeed, but not replayed.
         repair.assert_awaited_once_with("stale", None)
@@ -313,7 +313,7 @@ class TestTheFrontendActsOnTheMarker:
             self._repair() as repair,
         ):
             async with Client(_proxy_to(owner)) as client:
-                result = await client.call_tool("scrape", raise_on_error=False)
+                result = await client.call_tool("read_page", raise_on_error=False)
 
         repair.assert_not_awaited()
         assert len(calls) == 1
@@ -326,7 +326,7 @@ class TestTheFrontendActsOnTheMarker:
         owner = FastMCP("owner", mask_error_details=True)
 
         @owner.tool
-        async def scrape() -> str:
+        async def read_page() -> str:
             return "unreachable"
 
         class FromTheFuture(Middleware):
@@ -349,7 +349,7 @@ class TestTheFrontendActsOnTheMarker:
 
         with self._repair() as repair:
             async with Client(_proxy_to(owner)) as client:
-                result = await client.call_tool("scrape", raise_on_error=False)
+                result = await client.call_tool("read_page", raise_on_error=False)
 
         repair.assert_not_awaited()
         assert result.is_error is True
@@ -360,7 +360,7 @@ class TestTheFrontendActsOnTheMarker:
         owner = FastMCP("owner", mask_error_details=True)
 
         @owner.tool
-        async def scrape() -> str:
+        async def read_page() -> str:
             return "unreachable"
 
         class Malformed(Middleware):
@@ -385,7 +385,7 @@ class TestTheFrontendActsOnTheMarker:
 
         with self._repair() as repair:
             async with Client(_proxy_to(owner)) as client:
-                await client.call_tool("scrape", raise_on_error=False)
+                await client.call_tool("read_page", raise_on_error=False)
 
         repair.assert_not_awaited()
 
@@ -403,7 +403,7 @@ class TestTheFrontendActsOnTheMarker:
             ),
         ):
             async with Client(_proxy_to(owner)) as client:
-                result = await client.call_tool("scrape", raise_on_error=False)
+                result = await client.call_tool("read_page", raise_on_error=False)
 
         # No replay against an owner that still cannot serve the call, and the
         # failure the owner reported is still the honest answer.
@@ -414,15 +414,15 @@ class TestTheFrontendActsOnTheMarker:
         owner = FastMCP("owner", mask_error_details=True)
 
         @owner.tool
-        async def scrape() -> str:
-            return "scraped ok"
+        async def read_page() -> str:
+            return "read ok"
 
         with self._repair() as repair:
             async with Client(_proxy_to(owner)) as client:
-                result = await client.call_tool("scrape")
+                result = await client.call_tool("read_page")
 
         repair.assert_not_awaited()
-        assert result.content[0].text == "scraped ok"
+        assert result.content[0].text == "read ok"
         # And no control value rides along on a success, which a second proxy
         # layer would otherwise read and act on.
         assert MARKER_KEY not in (result.meta or {})
@@ -440,18 +440,18 @@ class TestTheFrontendActsOnTheMarker:
         calls: list[int] = []
 
         @owner.tool(annotations={"readOnlyHint": True})
-        async def scrape() -> str:
+        async def read_page() -> str:
             calls.append(1)
             raise_tool_error(
                 AuthMissingOnOwnerError("still no session", nothing_ran_yet=True),
-                "scrape",
+                "read_page",
             )
 
         owner.add_middleware(OwnerAuthSignalMiddleware())
 
         with self._profile_is_free(), self._repair() as repair:
             async with Client(_proxy_to(owner)) as client:
-                result = await client.call_tool("scrape", raise_on_error=False)
+                result = await client.call_tool("read_page", raise_on_error=False)
 
         assert len(calls) == 2
         # And the login is attempted once, not once per attempt.
@@ -480,12 +480,12 @@ class TestTheFrontendActsOnTheMarker:
             ),
         ):
             async with Client(_proxy_to(owner)) as client:
-                result = await client.call_tool("scrape", raise_on_error=False)
+                result = await client.call_tool("read_page", raise_on_error=False)
 
         # Replayed, and the owner served it the second time.
         assert len(calls) == 2
         assert result.is_error is False
-        assert result.content[0].text == "scraped ok"
+        assert result.content[0].text == "read ok"
 
 
 class TestTheRepairRunsForReal:
@@ -561,11 +561,11 @@ class TestTheRepairRunsForReal:
 
         with self._profile_is_free(), self._a_login_that(takes=0.05):
             async with Client(_proxy_to(owner)) as client:
-                result = await client.call_tool("scrape", raise_on_error=False)
+                result = await client.call_tool("read_page", raise_on_error=False)
 
         assert len(calls) == 2, "the call was never run again"
         assert result.is_error is False
-        assert result.content[0].text == "scraped ok"
+        assert result.content[0].text == "read ok"
 
     async def test_a_slow_sign_in_is_still_replayed(self):
         """A login outlasting the inline budget, which is every human one.
@@ -580,7 +580,7 @@ class TestTheRepairRunsForReal:
 
         with self._profile_is_free(), self._a_login_that(takes=0.6):
             async with Client(_proxy_to(owner)) as client:
-                result = await client.call_tool("scrape", raise_on_error=False)
+                result = await client.call_tool("read_page", raise_on_error=False)
 
         assert len(calls) == 2, "a login slower than the budget was not waited out"
         assert result.is_error is False
@@ -593,7 +593,7 @@ class TestTheRepairRunsForReal:
 
         with self._profile_is_free(), self._a_login_that(takes=0.05, succeeds=False):
             async with Client(_proxy_to(owner)) as client:
-                result = await client.call_tool("scrape", raise_on_error=False)
+                result = await client.call_tool("read_page", raise_on_error=False)
 
         assert len(calls) == 1, "the call was replayed with no session to serve it"
         assert result.is_error is True
@@ -613,7 +613,7 @@ class TestTheRepairRunsForReal:
 
         with self._profile_is_free(), self._a_login_that(takes=5.0):
             async with Client(_proxy_to(owner, tool_timeout=0.4)) as client:
-                result = await client.call_tool("scrape", raise_on_error=False)
+                result = await client.call_tool("read_page", raise_on_error=False)
 
         assert len(calls) == 1
         assert result.is_error is True
@@ -656,7 +656,7 @@ class TestTheRepairRunsForReal:
             patch.object(daemon_auth, "_wait_for_the_sign_in", record),
         ):
             async with Client(_proxy_to(owner, tool_timeout=budget)) as client:
-                result = await client.call_tool("scrape", raise_on_error=False)
+                result = await client.call_tool("read_page", raise_on_error=False)
 
         assert asked_for, "the sign-in was never waited for"
         share = budget * 5 / 6
@@ -689,22 +689,22 @@ class TestTheRepairRunsForReal:
         exists, so the next call succeeds, and a bare transport error would say
         none of that.
 
-        Read-only, which is what makes giving up safe here: an abandoned scrape
+        Read-only, which is what makes giving up safe here: an abandoned read
         costs a wasted page load. The mutating case below must not do this.
         """
         owner = FastMCP("owner", mask_error_details=True)
         calls: list[int] = []
 
         @owner.tool(annotations={"readOnlyHint": True})
-        async def scrape() -> str:
+        async def read_page() -> str:
             calls.append(1)
             if len(calls) == 1:
                 raise_tool_error(
                     AuthMissingOnOwnerError("no session", nothing_ran_yet=True),
-                    "scrape",
+                    "read_page",
                 )
             await asyncio.sleep(30)  # a replay that outlives the call
-            return "scraped ok"
+            return "read ok"
 
         owner.add_middleware(OwnerAuthSignalMiddleware())
         with (
@@ -713,7 +713,7 @@ class TestTheRepairRunsForReal:
             patch("linkedin_mcp_server.daemon_auth._MINIMUM_REPLAY_SECONDS", 0.2),
         ):
             async with Client(_proxy_to(owner, tool_timeout=1.0)) as client:
-                result = await client.call_tool("scrape", raise_on_error=False)
+                result = await client.call_tool("read_page", raise_on_error=False)
 
         assert len(calls) == 2, "the replay never ran"
         # The owner's own words, not a timeout: the client is told what happened

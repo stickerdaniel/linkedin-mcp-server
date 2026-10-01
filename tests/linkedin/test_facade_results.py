@@ -50,13 +50,13 @@ class TestEveryNormalizedEntryPoint:
     @pytest.mark.parametrize(
         "method,args,kwargs",
         [
-            ("scrape_person", ("../../feed", {"main_profile"}), {}),
+            ("read_person", ("../../feed", {"main_profile"}), {}),
             ("connect_with_person", ("../../feed",), {}),
             ("get_sidebar_profiles", ("../../feed",), {}),
             ("send_message", ("../../feed", "hi"), {"confirm_send": False}),
-            ("scrape_company", ("../../feed", {"about"}), {}),
+            ("read_company", ("../../feed", {"about"}), {}),
             ("get_company_employees", ("../../feed",), {}),
-            ("scrape_job", ("../../feed",), {}),
+            ("read_job", ("../../feed",), {}),
             ("get_conversation", (), {"thread_id": "../../feed"}),
         ],
     )

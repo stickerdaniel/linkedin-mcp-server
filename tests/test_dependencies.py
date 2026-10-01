@@ -74,7 +74,7 @@ class TestHandleAuthError:
 
 
 class TestGetReadyExtractor:
-    async def test_ready_resumes_to_scrape_path(self):
+    async def test_ready_resumes_to_read_path(self):
         """When gating returns (login resolved in-budget), control falls through
         to get_or_create_browser + ensure_authenticated and returns an extractor.
         """
@@ -203,7 +203,7 @@ class TestGetReadyExtractor:
 
             mock_invalidate.assert_not_called()
 
-    async def test_mid_scrape_auth_error_triggers_relogin(self):
+    async def test_mid_read_auth_error_triggers_relogin(self):
         """AuthenticationError caught in tool wrapper invokes handle_auth_error."""
         from linkedin_mcp_server.tools.person import register_person_tools
 
@@ -221,7 +221,7 @@ class TestGetReadyExtractor:
         register_person_tools(mock_mcp)
 
         mock_extractor = AsyncMock()
-        mock_extractor.scrape_person = AsyncMock(
+        mock_extractor.read_person = AsyncMock(
             side_effect=AuthenticationError("Auth barrier detected")
         )
 

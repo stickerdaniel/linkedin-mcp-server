@@ -1,1 +1,1 @@
-"""Owner-local scraping tests."""
+"""Owner-local tests for the linkedin package."""

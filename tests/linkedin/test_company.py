@@ -1,4 +1,4 @@
-"""Tests for the company-page scraping owner."""
+"""Tests for the company-page workflow owner."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from linkedin_mcp_server.linkedin.capture import (
     CapturePlan,
     SectionCapture,
 )
-from linkedin_mcp_server.linkedin.company import CompanyScraper
+from linkedin_mcp_server.linkedin.company import CompanyReader
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.contracts import (
     RATE_LIMITED_SECTION_TEXT,
@@ -27,14 +27,14 @@ from linkedin_mcp_server.linkedin.contracts import (
 from linkedin_mcp_server.linkedin.fields import COMPANY_SECTIONS
 from linkedin_mcp_server.linkedin.link_metadata import Reference
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.session import NAV_DELAY, ScrapingSession
+from linkedin_mcp_server.linkedin.session import NAV_DELAY, PageSession
 
 
-def _scraper(page) -> CompanyScraper:
+def _reader(page) -> CompanyReader:
     """Wire the company owner the way the facade does."""
-    session = ScrapingSession(page)
+    session = PageSession(page)
     navigator = PageNavigator(session)
-    return CompanyScraper(
+    return CompanyReader(
         session,
         SectionCapture(session, navigator, PageContentReader(session)),
     )
@@ -49,14 +49,14 @@ def extracted(
     return ExtractedSection(text=text, references=references or [], error=error)
 
 
-class TestScrapeCompany:
+class TestReadCompany:
     async def test_a_pasted_company_link_reaches_the_canonical_company_url(
         self, mock_page
     ):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("company text"),
@@ -66,7 +66,7 @@ class TestScrapeCompany:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_company(
+            result = await reader.read_company(
                 "https://de.linkedin.com/company/testco/posts/", {"about"}
             )
 
@@ -84,22 +84,22 @@ class TestScrapeCompany:
         the loop, because the URL it builds is the same either way; this one
         only passes while the refusal happens first.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture, "capture", new_callable=AsyncMock
+            reader._capture, "capture", new_callable=AsyncMock
         ) as mock_extract:
             with pytest.raises(InvalidReferenceError):
-                await scraper.scrape_company("../../feed", {"about"})
+                await reader.read_company("../../feed", {"about"})
 
         mock_extract.assert_not_awaited()
         mock_page.goto.assert_not_awaited()
 
     async def test_company_baseline_always_included(self, mock_page):
         """Passing only posts still visits about page."""
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
@@ -109,7 +109,7 @@ class TestScrapeCompany:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_company("testcorp", {"posts"})
+            result = await reader.read_company("testcorp", {"posts"})
 
         urls = [call.args[0] for call in mock_extract.call_args_list]
         assert any("/about/" in u for u in urls)
@@ -125,14 +125,14 @@ class TestScrapeCompany:
         The test above asks for a second section, so dropping the mandatory
         union there only loses one of two sections; here it loses the walk.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted("about text"),
         ) as mock_extract:
-            result = await scraper.scrape_company("testcorp", set())
+            result = await reader.read_company("testcorp", set())
 
         urls = [call.args[0] for call in mock_extract.call_args_list]
         assert len(urls) == 1
@@ -140,10 +140,10 @@ class TestScrapeCompany:
         assert set(result["sections"]) == {"about"}
 
     async def test_about_only_visits_about(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("about text"),
@@ -153,7 +153,7 @@ class TestScrapeCompany:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_company("testcorp", {"about"})
+            result = await reader.read_company("testcorp", {"about"})
 
         urls = [call.args[0] for call in mock_extract.call_args_list]
         assert len(urls) == 1
@@ -161,10 +161,10 @@ class TestScrapeCompany:
         assert set(result["sections"]) == {"about"}
 
     async def test_all_sections_visit_correct_urls(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
@@ -174,9 +174,7 @@ class TestScrapeCompany:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_company(
-                "testcorp", {"about", "posts", "jobs"}
-            )
+            result = await reader.read_company("testcorp", {"about", "posts", "jobs"})
 
         urls = [call.args[0] for call in mock_extract.call_args_list]
         assert len(urls) == 3
@@ -204,11 +202,11 @@ class TestScrapeCompany:
             "beta": ("/beta/", False),
             "jobs": ("/jobs/", False),
         }
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(company_module, "COMPANY_SECTIONS", table),
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
@@ -218,7 +216,7 @@ class TestScrapeCompany:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_company("testcorp", set(table))
+            result = await reader.read_company("testcorp", set(table))
 
         assert [
             capture_call.args[1] for capture_call in mock_extract.call_args_list
@@ -242,17 +240,17 @@ class TestScrapeCompany:
             "about": ("/custom-about-overlay/", True),
             "custom": ("/custom-standard/", False),
         }
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(company_module, "COMPANY_SECTIONS", table),
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("standard text"),
             ) as mock_capture,
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 return_value=extracted("overlay text"),
@@ -262,7 +260,7 @@ class TestScrapeCompany:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_company("testcorp", set(table))
+            result = await reader.read_company("testcorp", set(table))
 
         mock_overlay.assert_awaited_once()
         assert mock_overlay.call_args.args[:2] == (
@@ -289,10 +287,10 @@ class TestScrapeCompany:
         length paces the walk wrongly against LinkedIn while every
         count-only assertion stays green.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
@@ -302,15 +300,15 @@ class TestScrapeCompany:
                 new_callable=AsyncMock,
             ) as mock_sleep,
         ):
-            await scraper.scrape_company("testcorp", {"about", "posts", "jobs"})
+            await reader.read_company("testcorp", {"about", "posts", "jobs"})
 
         assert mock_sleep.await_args_list == [call(NAV_DELAY), call(NAV_DELAY)]
 
     async def test_a_single_section_walk_never_paces(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("about text"),
@@ -320,17 +318,17 @@ class TestScrapeCompany:
                 new_callable=AsyncMock,
             ) as mock_sleep,
         ):
-            await scraper.scrape_company("testcorp", {"about"})
+            await reader.read_company("testcorp", {"about"})
 
         mock_sleep.assert_not_awaited()
 
     async def test_a_rate_limited_company_section_is_reported_and_stops_the_rest(
         self, mock_page
     ):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 side_effect=[
@@ -343,7 +341,7 @@ class TestScrapeCompany:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_company("testcorp", {"posts"})
+            result = await reader.read_company("testcorp", {"posts"})
 
         assert "about" not in result["sections"]
         assert result["section_errors"]["about"]["error_type"] == "rate_limit"
@@ -359,7 +357,7 @@ class TestScrapeCompany:
         before the one that failed, and the section carrying the only
         diagnostic is the one it never hears about.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         cb = MagicMock(spec=ProgressCallback)
         cb.on_start = AsyncMock()
         cb.on_progress = AsyncMock()
@@ -368,7 +366,7 @@ class TestScrapeCompany:
 
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted(RATE_LIMITED_SECTION_TEXT),
@@ -378,7 +376,7 @@ class TestScrapeCompany:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_company(
+            result = await reader.read_company(
                 "testcorp", {"about", "posts", "jobs"}, callbacks=cb
             )
 
@@ -388,7 +386,7 @@ class TestScrapeCompany:
         cb.on_complete.assert_awaited_once_with("company profile", result)
         cb.on_error.assert_not_awaited()
 
-    async def test_scrape_company_extracts_company_urn(self, mock_page):
+    async def test_read_company_extracts_company_urn(self, mock_page):
         """End-to-end: a canned-search anchor on the company about page
         produces a ``company_urn`` reference with the parent-company id.
 
@@ -396,7 +394,7 @@ class TestScrapeCompany:
         the real ``build_references`` pipeline runs against raw anchor
         data, mirroring what the JS crawler emits live.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         raw_root = {
             "source": "root",
             "text": "About SAP\nCompany overview",
@@ -440,7 +438,7 @@ class TestScrapeCompany:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_company("sap", {"about"})
+            result = await reader.read_company("sap", {"about"})
 
         urns = [
             ref for ref in result["references"]["about"] if ref["kind"] == "company_urn"
@@ -453,10 +451,10 @@ class TestScrapeCompany:
         assert "text" not in urns[0]
 
     async def test_a_clean_walk_omits_the_optional_keys(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("about text"),
@@ -466,7 +464,7 @@ class TestScrapeCompany:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_company("testcorp", {"about"})
+            result = await reader.read_company("testcorp", {"about"})
 
         assert result == {
             "url": "https://www.linkedin.com/company/testcorp/",
@@ -478,10 +476,10 @@ class TestScrapeCompany:
     ):
         failure = RuntimeError("boom")
         diagnostics = MagicMock(return_value={"issue_template_path": "/tmp/issue.md"})
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 side_effect=[failure, extracted("Posts text")],
@@ -492,7 +490,7 @@ class TestScrapeCompany:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await scraper.scrape_company("testcorp", {"posts"})
+            result = await reader.read_company("testcorp", {"posts"})
 
         # The walk continues past it, and the report names the workflow rather
         # than the collaborator the call happened to pass through.
@@ -503,7 +501,7 @@ class TestScrapeCompany:
         assert diagnostics.call_args_list == [
             call(
                 failure,
-                context="scrape_company",
+                context="read_company",
                 target_url="https://www.linkedin.com/company/testcorp/about/",
                 section_name="about",
             )
@@ -517,7 +515,7 @@ class TestScrapeCompany:
         into ``section_errors`` would report a rate limit or an expired
         session as one section's bad luck and keep navigating.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         cb = MagicMock(spec=ProgressCallback)
         cb.on_start = AsyncMock()
         cb.on_progress = AsyncMock()
@@ -527,7 +525,7 @@ class TestScrapeCompany:
 
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 side_effect=failure,
@@ -538,7 +536,7 @@ class TestScrapeCompany:
             ),
         ):
             with pytest.raises(AuthenticationError):
-                await scraper.scrape_company(
+                await reader.read_company(
                     "testcorp", {"about", "posts", "jobs"}, callbacks=cb
                 )
 
@@ -548,11 +546,11 @@ class TestScrapeCompany:
         cb.on_complete.assert_not_awaited()
 
 
-class TestScrapeCompanyCallbacks:
-    """Test that scrape_company invokes callbacks at each stage."""
+class TestReadCompanyCallbacks:
+    """Test that read_company invokes callbacks at each stage."""
 
-    async def test_scrape_company_calls_callbacks(self, mock_page):
-        scraper = _scraper(mock_page)
+    async def test_read_company_calls_callbacks(self, mock_page):
+        reader = _reader(mock_page)
         cb = MagicMock(spec=ProgressCallback)
         cb.on_start = AsyncMock()
         cb.on_progress = AsyncMock()
@@ -561,7 +559,7 @@ class TestScrapeCompanyCallbacks:
 
         with (
             patch.object(
-                scraper._capture,
+                reader._capture,
                 "capture",
                 new_callable=AsyncMock,
                 return_value=extracted("text"),
@@ -571,7 +569,7 @@ class TestScrapeCompanyCallbacks:
                 new_callable=AsyncMock,
             ),
         ):
-            await scraper.scrape_company(
+            await reader.read_company(
                 "testcorp", {"about", "posts", "jobs"}, callbacks=cb
             )
 
@@ -599,14 +597,14 @@ class TestGetCompanyEmployees:
     async def test_a_pasted_company_link_reaches_the_canonical_people_url(
         self, mock_page
     ):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted("employees"),
         ) as mock_extract:
-            result = await scraper.get_company_employees(
+            result = await reader.get_company_employees(
                 "https://de.linkedin.com/company/testco/about/"
             )
 
@@ -620,14 +618,14 @@ class TestGetCompanyEmployees:
         assert result["url"] == "https://www.linkedin.com/company/testco/people/"
 
     async def test_no_keywords_leaves_the_url_unqueried(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted("employees"),
         ) as mock_extract:
-            await scraper.get_company_employees("testcorp", None)
+            await reader.get_company_employees("testcorp", None)
 
         assert mock_extract.call_args.args[0] == (
             "https://www.linkedin.com/company/testcorp/people/"
@@ -640,14 +638,14 @@ class TestGetCompanyEmployees:
         an unencoded one turns the rest of the search term into a second
         parameter LinkedIn reads as a filter of its own.
         """
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted("employees"),
         ) as mock_extract:
-            result = await scraper.get_company_employees("testcorp", "R&D lead")
+            result = await reader.get_company_employees("testcorp", "R&D lead")
 
         expected = (
             "https://www.linkedin.com/company/testcorp/people/?keywords=R%26D+lead"
@@ -656,14 +654,14 @@ class TestGetCompanyEmployees:
         assert result["url"] == expected
 
     async def test_references_and_errors_are_omitted_when_empty(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted("employee text"),
         ):
-            result = await scraper.get_company_employees("testcorp")
+            result = await reader.get_company_employees("testcorp")
 
         assert result == {
             "url": "https://www.linkedin.com/company/testcorp/people/",
@@ -672,24 +670,24 @@ class TestGetCompanyEmployees:
 
     async def test_references_are_reported_under_the_section_name(self, mock_page):
         reference: Reference = {"kind": "person", "url": "/in/someone/"}
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted("employee text", [reference]),
         ):
-            result = await scraper.get_company_employees("testcorp")
+            result = await reader.get_company_employees("testcorp")
 
         assert result["references"] == {"employees": [reference]}
 
     async def test_a_traversal_identifier_is_refused_before_navigating(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture, "capture", new_callable=AsyncMock
+            reader._capture, "capture", new_callable=AsyncMock
         ) as mock_extract:
             with pytest.raises(InvalidReferenceError):
-                await scraper.get_company_employees("../../feed")
+                await reader.get_company_employees("../../feed")
 
         mock_extract.assert_not_awaited()
         mock_page.goto.assert_not_awaited()
@@ -697,14 +695,14 @@ class TestGetCompanyEmployees:
 
 class TestSearchCompanies:
     async def test_the_results_page_is_returned_under_the_search_url(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted("Fintech Inc"),
         ) as mock_extract:
-            result = await scraper.search_companies("fintech")
+            result = await reader.search_companies("fintech")
 
         url = mock_extract.call_args.args[0]
         assert "/search/results/companies/" in url
@@ -716,14 +714,14 @@ class TestSearchCompanies:
         }
 
     async def test_an_empty_result_omits_the_optional_keys(self, mock_page):
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted(""),
         ):
-            result = await scraper.search_companies("nothing matches this")
+            result = await reader.search_companies("nothing matches this")
 
         assert result["sections"] == {}
         assert "references" not in result
@@ -734,14 +732,14 @@ class TestSearchCompanies:
             "error_type": "navigation_error",
             "error_message": "timeout",
         }
-        scraper = _scraper(mock_page)
+        reader = _reader(mock_page)
         with patch.object(
-            scraper._capture,
+            reader._capture,
             "capture",
             new_callable=AsyncMock,
             return_value=extracted("", error=error),
         ):
-            result = await scraper.search_companies("fintech")
+            result = await reader.search_companies("fintech")
 
         assert result["sections"] == {}
         assert result["section_errors"] == {"search_results": error}
@@ -750,7 +748,7 @@ class TestSearchCompanies:
 def test_the_real_section_table_is_the_one_the_walk_orders_by():
     """The synthetic-table test above says nothing about the real sections.
 
-    Iteration order is what `scrape_company` reads out of this mapping, so a
+    Iteration order is what `read_company` reads out of this mapping, so a
     reordered literal is a behavior change and belongs in a diff that says so.
     """
     assert list(COMPANY_SECTIONS) == ["about", "posts", "jobs"]

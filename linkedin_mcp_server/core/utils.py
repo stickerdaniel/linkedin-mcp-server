@@ -1,4 +1,4 @@
-"""Utility functions for scraping operations."""
+"""Utility functions for page-reading operations."""
 
 import asyncio
 import logging

@@ -3,17 +3,17 @@
     "arguments": {
       "job_id": "123"
     },
-    "method": "scrape_job"
+    "method": "read_job"
   },
   "events": [
     {
-      "call": "scrape_job",
+      "call": "read_job",
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.add"
     },
     {
-      "call": "scrape_job",
+      "call": "read_job",
       "extra": {
         "target_url": "https://www.linkedin.com/jobs/view/123/",
         "wait_until": "domcontentloaded"
@@ -22,7 +22,7 @@
       "label": "extractor-before-goto"
     },
     {
-      "call": "scrape_job",
+      "call": "read_job",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/jobs/view/123/",
       "requested_url": "https://www.linkedin.com/jobs/view/123/",
@@ -30,13 +30,13 @@
       "wait_until": "domcontentloaded"
     },
     {
-      "call": "scrape_job",
+      "call": "read_job",
       "description": "goto https://www.linkedin.com/jobs/view/123/",
       "kind": "boundary.stabilize",
       "result": null
     },
     {
-      "call": "scrape_job",
+      "call": "read_job",
       "extra": {
         "target_url": "https://www.linkedin.com/jobs/view/123/",
         "wait_until": "domcontentloaded"
@@ -45,22 +45,22 @@
       "label": "extractor-after-goto"
     },
     {
-      "call": "scrape_job",
+      "call": "read_job",
       "kind": "boundary.auth_quick",
       "result": null
     },
     {
-      "call": "scrape_job",
+      "call": "read_job",
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
     {
-      "call": "scrape_job",
+      "call": "read_job",
       "kind": "boundary.rate_limit"
     },
     {
-      "call": "scrape_job",
+      "call": "read_job",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
@@ -68,13 +68,13 @@
       "timeout_ms": null
     },
     {
-      "call": "scrape_job",
+      "call": "read_job",
       "dismissed": false,
       "kind": "boundary.modal"
     },
     {
       "arg": null,
-      "call": "scrape_job",
+      "call": "read_job",
       "kind": "wait_for_function",
       "operation": "job_description_ready",
       "program_digest": "787d6bbc05c8",
@@ -82,7 +82,7 @@
     },
     {
       "actual_scrolls": 2,
-      "call": "scrape_job",
+      "call": "read_job",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
       "pause_time": 0.5
@@ -93,24 +93,21 @@
           "main"
         ]
       },
-      "call": "scrape_job",
+      "call": "read_job",
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5"
     }
   ],
   "result": {
-    "section_errors": {
-      "job_posting": {
-        "context": "extract_page",
-        "error_message": "synthetic capture failure",
-        "error_type": "RuntimeError"
-      }
+    "section_names": [
+      "job_posting"
+    ],
+    "sections": {
+      "job_posting": "About the job\nResult content"
     },
-    "section_names": [],
-    "sections": {},
     "url": "https://www.linkedin.com/jobs/view/123/"
   },
-  "scenario": "scrape_job__capture_error",
+  "scenario": "read_job__baseline",
   "schema_version": 1
 }

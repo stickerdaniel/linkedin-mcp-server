@@ -10,7 +10,7 @@ import re
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+from linkedin_mcp_server.core.exceptions import LinkedInOperationError
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.linkedin.capture import (
     CaptureMode,
@@ -30,7 +30,7 @@ from linkedin_mcp_server.linkedin.link_metadata import Reference
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
 from linkedin_mcp_server.linkedin.search_urls import build_people_search_url
-from linkedin_mcp_server.linkedin.session import NAV_DELAY, ScrapingSession
+from linkedin_mcp_server.linkedin.session import NAV_DELAY, PageSession
 from linkedin_mcp_server.linkedin.text import SIDEBAR_CHROME_EN
 
 if TYPE_CHECKING:
@@ -178,12 +178,12 @@ _SIDEBAR_EXPANDED_PROFILES_JS = """() => {
                 }"""
 
 
-class PersonScraper:
+class PersonReader:
     """Own every workflow whose subject is one LinkedIn member."""
 
     def __init__(
         self,
-        session: ScrapingSession,
+        session: PageSession,
         navigator: PageNavigator,
         capture: SectionCapture,
         profile_page: ProfilePageReader,
@@ -193,7 +193,7 @@ class PersonScraper:
         self._capture = capture
         self._profile_page = profile_page
 
-    async def scrape_person(
+    async def read_person(
         self,
         username: str,
         requested: set[str],
@@ -203,7 +203,7 @@ class PersonScraper:
         main_profile_already_loaded: bool = False,
         allow_self_alias: bool = False,
     ) -> dict[str, Any]:
-        """Scrape a person profile with configurable sections.
+        """Read a person profile with configurable sections.
 
         When ``main_profile_already_loaded`` is True and the bound page is on
         the exact profile root for ``username``, the ``main_profile`` section
@@ -304,13 +304,13 @@ class PersonScraper:
                         and not rate_limited
                     ):
                         profile_urn = await self._profile_page._extract_profile_urn()
-                except LinkedInScraperException:
+                except LinkedInOperationError:
                     raise
                 except Exception as e:
-                    logger.warning("Error scraping section %s: %s", section_name, e)
+                    logger.warning("Error reading section %s: %s", section_name, e)
                     section_errors[section_name] = build_issue_diagnostics(
                         e,
-                        context="scrape_person",
+                        context="read_person",
                         target_url=url,
                         section_name=section_name,
                     )
@@ -325,7 +325,7 @@ class PersonScraper:
 
                 if rate_limited:
                     break
-        except LinkedInScraperException as e:
+        except LinkedInOperationError as e:
             if callbacks:
                 await callbacks.on_error(e)
             raise
@@ -352,10 +352,10 @@ class PersonScraper:
         callbacks: ProgressCallback | None = None,
         max_scrolls: int | None = None,
     ) -> dict[str, Any]:
-        """Scrape the authenticated user's own LinkedIn profile.
+        """Read the authenticated user's own LinkedIn profile.
 
         Navigates to /in/me/ and resolves the redirect to obtain the real
-        username before scraping, so result["url"] reflects the actual profile
+        username before reading, so result["url"] reflects the actual profile
         URL rather than /in/me/.
 
         Returns:
@@ -367,7 +367,7 @@ class PersonScraper:
         username = match.group(1) if match else "me"
         logger.debug("get_my_profile resolved username=%r from %s", username, real_url)
 
-        return await self.scrape_person(
+        return await self.read_person(
             username,
             sections if sections is not None else {"main_profile"},
             callbacks=callbacks,
@@ -382,7 +382,7 @@ class PersonScraper:
     async def get_sidebar_profiles(self, username: str) -> dict[str, Any]:
         """Extract profile links from sidebar sections on a LinkedIn profile page.
 
-        Scrapes "More profiles for you", "Explore premium profiles", and
+        Reads "More profiles for you", "Explore premium profiles", and
         "People you may know" sidebar sections. Follows each "Show all" link to
         collect the full list; skips any section whose "Show all" URL contains or
         redirects to /premium.
@@ -421,7 +421,7 @@ class PersonScraper:
 
             try:
                 await self._navigator._navigate_to_page(show_all_url)
-            except LinkedInScraperException:
+            except LinkedInOperationError:
                 raise
             except Exception:
                 logger.debug(

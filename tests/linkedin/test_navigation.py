@@ -17,7 +17,7 @@ from linkedin_mcp_server.linkedin import session as session_module
 from linkedin_mcp_server.linkedin.capture import SectionCapture
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 from .support.navigation import navigate
 
 
@@ -35,7 +35,7 @@ class TestNavigationDiagnostics:
     async def test_goto_with_auth_checks_clicks_remember_me_and_retries(
         self, mock_page
     ):
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
 
         async def goto_side_effect(*args, **kwargs):
             if mock_page.goto.await_count == 1:
@@ -66,7 +66,7 @@ class TestNavigationDiagnostics:
     async def test_goto_with_auth_checks_unhooks_outer_listener_before_retry(
         self, mock_page
     ):
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
         listener_events: list[str] = []
 
         def record_on(event_name, callback):
@@ -104,7 +104,7 @@ class TestNavigationDiagnostics:
     async def test_goto_with_auth_checks_records_original_failure_before_retry(
         self, mock_page
     ):
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
         mock_page.goto = AsyncMock(
             side_effect=[
                 Exception("net::ERR_TOO_MANY_REDIRECTS"),
@@ -157,7 +157,7 @@ class TestNavigationDiagnostics:
         `framenavigated` is emitted, so for the main frame the two reads are
         the same value at dispatch time.
         """
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
         checkpoint = "https://www.linkedin.com/checkpoint/challenge/"
 
         async def goto_then_fail(*args, **kwargs):
@@ -193,7 +193,7 @@ class TestNavigationDiagnostics:
         assert logged.args[3] == [checkpoint]
 
     async def test_goto_with_auth_checks_logs_failure_context(self, mock_page):
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
         mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS"))
 
         with (
@@ -234,7 +234,7 @@ class TestNavigationListenerIdentity:
     """
 
     async def test_a_failed_navigation_leaves_no_recorder_behind(self, mock_page):
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
         mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS"))
 
         with (
@@ -267,7 +267,7 @@ class TestNavigationListenerIdentity:
         working would show up nowhere except in the removals outnumbering the
         registrations.
         """
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
 
         async def goto_side_effect(*args, **kwargs):
             if mock_page.goto.await_count == 1:
@@ -297,7 +297,7 @@ class TestNavigationListenerIdentity:
         assert mock_page.listeners["framenavigated"] == []
 
     async def test_a_retry_behind_a_barrier_removes_both_recorders(self, mock_page):
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
 
         with (
             patch(
@@ -320,7 +320,7 @@ class TestNavigationListenerIdentity:
         assert mock_page.listeners["framenavigated"] == []
 
     def test_the_watcher_removes_the_recorder_it_registered(self, mock_page):
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
 
         with navigator._watching_navigations():
             navigate(mock_page)
@@ -339,7 +339,7 @@ class TestRememberMeRetriesOnlyOnce:
     """
 
     async def test_a_prompt_behind_a_failing_navigation_retries_once(self, mock_page):
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
         mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS"))
 
         with (
@@ -364,7 +364,7 @@ class TestRememberMeRetriesOnlyOnce:
         assert mock_resolve.await_count == 1
 
     async def test_a_prompt_behind_a_standing_barrier_retries_once(self, mock_page):
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
 
         with (
             patch(
@@ -391,7 +391,7 @@ class TestWatchingNavigations:
     def test_records_main_frame_hops_without_deduplicating_and_cleans_up(
         self, mock_page
     ):
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
 
         with navigator._watching_navigations() as hops:
             navigate(mock_page)
@@ -403,7 +403,7 @@ class TestWatchingNavigations:
         assert mock_page.listeners["framenavigated"] == []
 
     def test_cleans_up_when_the_watched_block_raises(self, mock_page):
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
 
         with pytest.raises(RuntimeError, match="synthetic failure"):
             with navigator._watching_navigations():
@@ -449,7 +449,7 @@ class TestSettleNavigation:
         ordinary case this reading exists for into an unhandled exception,
         so the double is held to the real class.
         """
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
         mock_page.evaluate = AsyncMock(
             side_effect=PatchrightError(
                 "Page.evaluate: Execution context was destroyed, "
@@ -469,7 +469,7 @@ class TestSettleNavigation:
         build.
         """
         clock = self.Clock()
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
         hops: list[str] = []
 
         with (
@@ -493,7 +493,7 @@ class TestSettleNavigation:
         served by a reload was read as search results. The event says so.
         """
         clock = self.Clock()
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
         hops: list[str] = []
 
         with (
@@ -517,7 +517,7 @@ class TestSettleNavigation:
         checkpoint.
         """
         clock = self.Clock()
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
         hops: list[str] = []
 
         with (
@@ -545,7 +545,7 @@ class TestSettleNavigation:
         says nothing was replaced.
         """
         clock = self.Clock()
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
         origin = mock_page.time_origin
         navigate(mock_page, same_document=True)
         hops = ["https://www.linkedin.com/jobs/search/?currentJobId=1"]
@@ -572,7 +572,7 @@ class TestSettleNavigation:
         document, so the second hop is what ends it.
         """
         clock = self.Clock()
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
         origin = mock_page.time_origin
         navigate(mock_page, same_document=True)
         hops = ["https://www.linkedin.com/jobs/search/?currentJobId=1"]
@@ -592,8 +592,10 @@ class TestSettleNavigation:
 class TestProxyNavigationFailures:
     """A proxy outage during an ordinary tool call is reported as itself."""
 
-    async def test_proxy_error_is_raised_instead_of_a_scraping_failure(self, mock_page):
-        navigator = PageNavigator(ScrapingSession(mock_page))
+    async def test_proxy_error_is_raised_instead_of_a_page_read_failure(
+        self, mock_page
+    ):
+        navigator = PageNavigator(PageSession(mock_page))
         mock_page.goto = AsyncMock(
             side_effect=Exception("net::ERR_PROXY_CONNECTION_FAILED at …")
         )
@@ -606,7 +608,7 @@ class TestProxyNavigationFailures:
     async def test_proxy_error_is_converted_before_it_reaches_a_trace(self, mock_page):
         # The trace records the raw exception text, which for a proxy failure
         # can quote the proxy URL and put a password into trace.jsonl.
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
         mock_page.goto = AsyncMock(
             side_effect=Exception("net::ERR_TUNNEL_CONNECTION_FAILED")
         )
@@ -626,7 +628,7 @@ class TestProxyNavigationFailures:
         assert "extractor-navigation-error" not in recorded
 
     async def test_ordinary_navigation_failure_is_unaffected(self, mock_page):
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
         mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_ABORTED"))
 
         with (
@@ -664,7 +666,7 @@ class TestNavigationFailureLogRedaction:
         config.browser.proxy_password = "s3cr3t"
         monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
 
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
         # No proxy marker, so it is not converted and reaches the logger.
         mock_page.goto = AsyncMock(
             side_effect=Exception(
@@ -708,7 +710,7 @@ class TestNavigationFailureCrossesTheToolBoundaryClean:
         config.browser.proxy_password = "s3cr3t"
         monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
 
-        navigator = PageNavigator(ScrapingSession(mock_page))
+        navigator = PageNavigator(PageSession(mock_page))
         mock_page.goto = AsyncMock(
             side_effect=Exception(
                 "failed via http://acctzone9:s3cr3t@gate.example:7000"
@@ -734,7 +736,7 @@ class TestNavigationFailureCrossesTheToolBoundaryClean:
         assert excinfo.value.__cause__ is None
 
 
-class TestARestrictedAccountStopsTheScrape:
+class TestARestrictedAccountStopsTheRead:
     """LinkedIn's restriction page is neither content nor a login to redo."""
 
     @pytest.mark.parametrize(
@@ -752,7 +754,7 @@ class TestARestrictedAccountStopsTheScrape:
                 raise PatchrightError("net::ERR_ABORTED")
 
         mock_page.goto = AsyncMock(side_effect=land_on_the_restriction)
-        session = ScrapingSession(mock_page)
+        session = PageSession(mock_page)
         capture = SectionCapture(
             session, PageNavigator(session), PageContentReader(session)
         )

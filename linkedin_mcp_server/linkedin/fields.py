@@ -1,4 +1,4 @@
-"""Section config dicts controlling which LinkedIn pages are visited during scraping."""
+"""Section config dicts controlling which LinkedIn pages are visited during a read."""
 
 from dataclasses import dataclass
 

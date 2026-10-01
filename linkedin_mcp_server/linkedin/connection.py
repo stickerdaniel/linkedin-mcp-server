@@ -9,7 +9,7 @@ ARIA attributes it sets do not depend on UI language. Detection here uses:
   combined with attribute-presence checks on action buttons
   (``aria-label`` set vs. unset on ``<button>``s) → 1st-degree vs. follow-only
 
-Per ``AGENTS.md`` Scraping Rules, classification logic relies on URL
+Per ``AGENTS.md`` LinkedIn Page Rules, classification logic relies on URL
 patterns and attribute *presence* — never on the values of locale-dependent
 text labels like "Connect", "Follow", or "1st". Incoming-request detection
 is fully structural: the Accept/Ignore action row is fingerprinted by
@@ -84,7 +84,7 @@ class ActionSignals:
     (Accept, Ignore) preceding one unlabeled expander (More) — and the
     container holds no compose anchor, no invite anchor, and no labeled
     ``<a>``. All checks are attribute presence and structural counts per
-    the AGENTS.md Scraping Rules; no label values are read. Verified
+    the AGENTS.md LinkedIn Page Rules; no label values are read. Verified
     live 2026-06-11 against two German-locale incoming-request profiles.
     Computed independently of the compose-anchor action-root walk, which
     finds no top-card root on incoming profiles (they have no Message

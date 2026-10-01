@@ -8761,7 +8761,7 @@ class TestInlineLoginWait:
         initialize_bootstrap("managed")
 
         # No raise: ensure_tool_ready_or_raise returns normally so the caller
-        # falls through to the scrape path.
+        # falls through to the page-read path.
         result = await ensure_tool_ready_or_raise("get_person_profile")
         assert result is None
 
@@ -9319,7 +9319,7 @@ class TestAutoLogin:
             _make_auth_ready(isolate_profile_dir)
             return True
 
-        # current_headless() reports the operator's --no-headless scrape mode; the
+        # current_headless() reports the operator's --no-headless read mode; the
         # restore in finally must put exactly that value back.
         monkeypatch.setattr(
             "linkedin_mcp_server.bootstrap.close_browser", spy_close_browser

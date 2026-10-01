@@ -154,8 +154,8 @@ def truncate_linkedin_noise(text: str) -> str:
 # Messaging-page chrome around an opened conversation thread. innerText on
 # /messaging/thread/ pages carries no URL or attribute signal separating the
 # inbox sidebar from the thread, so the boundaries are matched on visible
-# strings — guarded by an explicit per-locale table (AGENTS.md → Scraping
-# Rules). BrowserManager forces the context locale to en-US (core/browser.py),
+# strings — guarded by an explicit per-locale table (AGENTS.md → LinkedIn
+# Page Rules). BrowserManager forces the context locale to en-US (core/browser.py),
 # so the "en" entry is the operative one; a locale without a table entry
 # passes through unstripped.
 @dataclass(frozen=True)
@@ -266,7 +266,7 @@ def strip_conversation_chrome(text: str, locale: str = "en") -> str:
 # the full list behind one. Neither carries a URL, an attribute or a structural
 # count separating it from any other heading or anchor in the same container,
 # so both are matched on visible strings — guarded by an explicit per-locale
-# table (AGENTS.md → Scraping Rules) exactly like the messaging chrome above.
+# table (AGENTS.md → LinkedIn Page Rules) exactly like the messaging chrome above.
 # This is the only place the strings are written down; `person.py` builds its
 # extraction program from this table rather than repeating them.
 @dataclass(frozen=True)

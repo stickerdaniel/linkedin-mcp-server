@@ -1,4 +1,4 @@
-"""Strict deterministic browser doubles for scraping policy traces."""
+"""Strict deterministic browser doubles for policy traces."""
 
 from __future__ import annotations
 

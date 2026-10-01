@@ -33,11 +33,11 @@ from linkedin_mcp_server.linkedin.extractor import (
     strip_conversation_chrome,
     strip_linkedin_noise,
 )
-from linkedin_mcp_server.linkedin.jobs import JobScraper
+from linkedin_mcp_server.linkedin.jobs import JobReader
 from linkedin_mcp_server.linkedin.message_sender import MessageSender
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.server import create_mcp_server
 
 from .policy_scenarios import COMPATIBILITY_METHODS, TOOL_FACADE_METHODS
@@ -48,13 +48,13 @@ TOOL_DELEGATES = {
     "connect_with_person": "connect_with_person",
     "get_company_employees": "get_company_employees",
     "get_company_posts": "extract_page",
-    "get_company_profile": "scrape_company",
+    "get_company_profile": "read_company",
     "get_conversation": "get_conversation",
     "get_feed": "extract_feed",
     "get_inbox": "get_inbox",
-    "get_job_details": "scrape_job",
+    "get_job_details": "read_job",
     "get_my_profile": "get_my_profile",
-    "get_person_profile": "scrape_person",
+    "get_person_profile": "read_person",
     "get_saved_jobs": "get_saved_jobs",
     "get_sidebar_profiles": "get_sidebar_profiles",
     "search_companies": "search_companies",
@@ -135,7 +135,7 @@ async def test_company_posts_delegate_matches_registered_tool_consumer():
         extract_page=AsyncMock(
             return_value=SimpleNamespace(text="posts", references=[], error=None)
         ),
-        scrape_company=AsyncMock(),
+        read_company=AsyncMock(),
     )
     context = SimpleNamespace(report_progress=AsyncMock())
 
@@ -152,13 +152,13 @@ async def test_company_posts_delegate_matches_registered_tool_consumer():
         section_name="posts",
         max_scrolls=None,
     )
-    extractor.scrape_company.assert_not_awaited()
+    extractor.read_company.assert_not_awaited()
 
 
-async def test_facade_scrape_person_forwards_its_keyword_only_arguments(mock_page):
+async def test_facade_read_person_forwards_its_keyword_only_arguments(mock_page):
     # No production caller passes either one to the facade any more: the
     # redirect path that drove `allow_self_alias` through it moved to the
-    # person owner, which calls its own `scrape_person`. Replacing both
+    # person owner, which calls its own `read_person`. Replacing both
     # forwards with `False` survived the whole suite, so the delegate is
     # pinned here, against the real owner rather than a mock of it.
     mock_page.url = "https://www.linkedin.com/in/me/"
@@ -179,7 +179,7 @@ async def test_facade_scrape_person_forwards_its_keyword_only_arguments(mock_pag
             return_value=section,
         ) as extract_page,
     ):
-        result = await extractor.scrape_person(
+        result = await extractor.read_person(
             "me",
             {"main_profile"},
             main_profile_already_loaded=True,
@@ -223,7 +223,7 @@ async def test_connection_profile_read_resolves_the_facade_delegate_late(mock_pa
             "sections": {"main_profile": "Target profile"},
         }
     )
-    extractor.scrape_person = replacement
+    extractor.read_person = replacement
     self_profile = ActionSignals(False, False, True, False, False, False)
 
     with patch.object(
@@ -258,7 +258,7 @@ async def test_profile_urn_read_resolves_the_sender_delegate_late(mock_page):
             ),
         ) as replacement,
     ):
-        result = await extractor.scrape_person("target", {"main_profile"})
+        result = await extractor.read_person("target", {"main_profile"})
 
     assert result["profile_urn"] == "ACoAReplacement"
     replacement.assert_awaited_once_with()
@@ -306,7 +306,7 @@ async def test_facade_search_jobs_forwards_every_filter_in_order(mock_page):
     expected = {"url": "https://www.linkedin.com/jobs/search/", "sections": {}}
 
     with patch.object(
-        JobScraper,
+        JobReader,
         "search_jobs",
         new_callable=AsyncMock,
         return_value=expected,
@@ -354,9 +354,9 @@ async def test_facade_get_conversation_forwards_its_username_and_index(mock_page
     ]
 
     with (
-        patch.object(ScrapingSession, "check_rate_limit", new_callable=AsyncMock),
-        patch.object(ScrapingSession, "dismiss_modal", new_callable=AsyncMock),
-        patch.object(ScrapingSession, "delay", new_callable=AsyncMock),
+        patch.object(PageSession, "check_rate_limit", new_callable=AsyncMock),
+        patch.object(PageSession, "dismiss_modal", new_callable=AsyncMock),
+        patch.object(PageSession, "delay", new_callable=AsyncMock),
         patch.object(
             PageNavigator, "_navigate_to_page", new_callable=AsyncMock
         ) as navigate,
@@ -397,8 +397,8 @@ async def test_facade_search_conversations_forwards_its_row_cap(mock_page):
     extractor = LinkedInExtractor(cast(Page, mock_page))
 
     with (
-        patch.object(ScrapingSession, "check_rate_limit", new_callable=AsyncMock),
-        patch.object(ScrapingSession, "dismiss_modal", new_callable=AsyncMock),
+        patch.object(PageSession, "check_rate_limit", new_callable=AsyncMock),
+        patch.object(PageSession, "dismiss_modal", new_callable=AsyncMock),
         patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
         patch.object(ConversationReader, "_wait_for_main_text", new_callable=AsyncMock),
         patch.object(
@@ -419,13 +419,13 @@ async def test_facade_search_conversations_forwards_its_row_cap(mock_page):
     refs.assert_awaited_once_with(limit=7, context="search_results")
 
 
-async def test_facade_scrape_person_keeps_refusing_the_self_alias_by_default(mock_page):
+async def test_facade_read_person_keeps_refusing_the_self_alias_by_default(mock_page):
     # The other half of the forward above: without the argument `me` is a
-    # reserved name, so the assertion that it scraped says something.
+    # reserved name, so the assertion that it read the profile says something.
     extractor = LinkedInExtractor(cast(Page, mock_page))
 
     with pytest.raises(InvalidReferenceError):
-        await extractor.scrape_person("me", {"main_profile"})
+        await extractor.read_person("me", {"main_profile"})
 
 
 async def test_facade_send_message_forwards_every_argument(mock_page):
@@ -464,9 +464,9 @@ async def test_facade_direct_thread_ignores_username_and_index_validation(mock_p
     extractor = LinkedInExtractor(cast(Page, mock_page))
 
     with (
-        patch.object(ScrapingSession, "check_rate_limit", new_callable=AsyncMock),
-        patch.object(ScrapingSession, "dismiss_modal", new_callable=AsyncMock),
-        patch.object(ScrapingSession, "delay", new_callable=AsyncMock),
+        patch.object(PageSession, "check_rate_limit", new_callable=AsyncMock),
+        patch.object(PageSession, "dismiss_modal", new_callable=AsyncMock),
+        patch.object(PageSession, "delay", new_callable=AsyncMock),
         patch.object(
             PageNavigator, "_navigate_to_page", new_callable=AsyncMock
         ) as navigate,
@@ -551,7 +551,7 @@ async def test_incoming_verification_resolves_classifier_at_call_time(
     # Rebind after facade/action construction. Both the initial decision and the
     # post-accept verification must resolve the canonical owner dynamically.
     extractor = LinkedInExtractor(cast(Page, mock_page))
-    extractor.scrape_person = AsyncMock(
+    extractor.read_person = AsyncMock(
         return_value={
             "url": "https://www.linkedin.com/in/target/",
             "sections": {"main_profile": "Target profile"},
@@ -592,7 +592,7 @@ async def test_submitted_invite_verification_resolves_classifier_at_call_time(
     # The fake navigator and submitter keep this entirely off LinkedIn while the
     # verification branch still performs both classifier calls.
     extractor = LinkedInExtractor(cast(Page, mock_page))
-    extractor.scrape_person = AsyncMock(
+    extractor.read_person = AsyncMock(
         return_value={
             "url": "https://www.linkedin.com/in/target/",
             "sections": {"main_profile": "Target profile"},

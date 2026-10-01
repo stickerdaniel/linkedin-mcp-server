@@ -18,7 +18,7 @@ import pytest
 
 from linkedin_mcp_server.core.exceptions import (
     InvalidReferenceError,
-    LinkedInScraperException,
+    LinkedInOperationError,
     RateLimitError,
 )
 from linkedin_mcp_server.linkedin.content import PageContentReader
@@ -33,7 +33,7 @@ from linkedin_mcp_server.linkedin.conversations import (
 from linkedin_mcp_server.linkedin.link_metadata import Reference
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 
 
 async def _no_message_target() -> SimpleNamespace:
@@ -48,7 +48,7 @@ async def _no_message_target() -> SimpleNamespace:
 
 def _reader(page: Any) -> ConversationReader:
     """Wire the conversation owner the way the facade does."""
-    session = ScrapingSession(page)
+    session = PageSession(page)
     return ConversationReader(
         session,
         PageNavigator(session),
@@ -67,10 +67,10 @@ def session_boundaries():
     """
     with (
         patch.object(
-            ScrapingSession, "check_rate_limit", new_callable=AsyncMock
+            PageSession, "check_rate_limit", new_callable=AsyncMock
         ) as rate_limit,
-        patch.object(ScrapingSession, "dismiss_modal", new_callable=AsyncMock) as modal,
-        patch.object(ScrapingSession, "delay", new_callable=AsyncMock) as delay,
+        patch.object(PageSession, "dismiss_modal", new_callable=AsyncMock) as modal,
+        patch.object(PageSession, "delay", new_callable=AsyncMock) as delay,
     ):
         yield SimpleNamespace(
             check_rate_limit=rate_limit, dismiss_modal=modal, delay=delay
@@ -591,7 +591,7 @@ class _Opened:
     navigations: list[str]
     scans: AsyncMock
     root: AsyncMock
-    error: LinkedInScraperException | None
+    error: LinkedInOperationError | None
 
 
 async def _open_by_username(
@@ -602,7 +602,7 @@ async def _open_by_username(
     nav = AsyncMock()
     scan_mock = AsyncMock(side_effect=scans)
     root = AsyncMock(return_value=_root("msg"))
-    error: LinkedInScraperException | None = None
+    error: LinkedInOperationError | None = None
     with (
         patch.object(PageNavigator, "_navigate_to_page", nav),
         patch.object(
@@ -618,7 +618,7 @@ async def _open_by_username(
     ):
         try:
             await reader.get_conversation(linkedin_username="jacki", index=index)
-        except LinkedInScraperException as exc:
+        except LinkedInOperationError as exc:
             error = exc
     return _Opened(
         navigations=[call.args[0] for call in nav.await_args_list],
@@ -860,7 +860,7 @@ class TestUsernameResolutionFailsClosed:
         ],
         ids=["navigation", "missing_target", "name_rejected"],
     )
-    async def test_a_refusal_is_the_base_scraper_error_not_a_bad_reference(
+    async def test_a_refusal_is_the_base_operation_error_not_a_bad_reference(
         self, mock_page, scan
     ):
         """A valid username the page could not verify keeps its diagnostics.
@@ -872,7 +872,7 @@ class TestUsernameResolutionFailsClosed:
         opened = await _open_by_username(mock_page, [scan])
 
         assert opened.error is not None
-        assert type(opened.error) is LinkedInScraperException
+        assert type(opened.error) is LinkedInOperationError
         assert not isinstance(opened.error, InvalidReferenceError)
 
 
@@ -886,7 +886,7 @@ class TestOpenConversationByUsername:
         reader = _reader(mock_page)
         nav_mock = AsyncMock()
         with patch.object(PageNavigator, "_navigate_to_page", nav_mock):
-            with pytest.raises(LinkedInScraperException, match="non-negative"):
+            with pytest.raises(LinkedInOperationError, match="non-negative"):
                 await reader._open_conversation_by_username("jacki", index=-1)
 
         nav_mock.assert_not_awaited()
@@ -901,7 +901,7 @@ class TestOpenConversationByUsername:
         identifier builds the same URL whether or not it was normalized, so it
         is the only input whose result differs. This case is the conversation
         half of the table in
-        ``tests/test_scraping.py::TestEveryNormalizedEntryPoint``, which the
+        ``tests/linkedin/test_facade_results.py::TestEveryNormalizedEntryPoint``, which the
         method left when the reader took it.
         """
         reader = _reader(mock_page)
@@ -928,7 +928,7 @@ class TestOpenConversationByUsername:
             patch.object(reader, "_resolve_conversation_thread_urls", resolve),
         ):
             with pytest.raises(
-                LinkedInScraperException, match="Could not resolve a display name"
+                LinkedInOperationError, match="Could not resolve a display name"
             ):
                 await reader._open_conversation_by_username("jacki")
 
@@ -1290,7 +1290,7 @@ class TestGetInbox:
         reader = _reader(mock_page)
         nav = AsyncMock()
         if failing == "navigate":
-            nav.side_effect = [None, LinkedInScraperException("navigation failed")]
+            nav.side_effect = [None, LinkedInOperationError("navigation failed")]
         else:
             session_boundaries.check_rate_limit.side_effect = [
                 None,
@@ -1311,7 +1311,7 @@ class TestGetInbox:
             ),
             patch.object(reader, "_extract_conversation_thread_refs", scan),
         ):
-            with pytest.raises(LinkedInScraperException):
+            with pytest.raises(LinkedInOperationError):
                 await reader.get_inbox(limit=10)
 
         assert [call.args[0] for call in nav.await_args_list] == [MESSAGING, COMPOSE]
@@ -1434,7 +1434,7 @@ class TestGetConversation:
         reader = _reader(mock_page)
         nav_mock = AsyncMock()
         with patch.object(PageNavigator, "_navigate_to_page", nav_mock):
-            with pytest.raises(LinkedInScraperException, match="at least one of"):
+            with pytest.raises(LinkedInOperationError, match="at least one of"):
                 await reader.get_conversation()
 
         nav_mock.assert_not_awaited()
@@ -1528,7 +1528,7 @@ class TestGetConversation:
                 ),
             ),
         ):
-            with pytest.raises(LinkedInScraperException, match="out of range"):
+            with pytest.raises(LinkedInOperationError, match="out of range"):
                 await reader.get_conversation(linkedin_username="jacki-old", index=5)
 
     async def test_by_username_no_threads_raises_could_not_find(self, mock_page):
@@ -1549,7 +1549,7 @@ class TestGetConversation:
             ),
         ):
             with pytest.raises(
-                LinkedInScraperException, match="Could not find a conversation"
+                LinkedInOperationError, match="Could not find a conversation"
             ):
                 await reader.get_conversation(linkedin_username="jacki-old")
 

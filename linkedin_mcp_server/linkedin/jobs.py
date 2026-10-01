@@ -10,7 +10,7 @@ import logging
 import time
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
-from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+from linkedin_mcp_server.core.exceptions import LinkedInOperationError
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.linkedin.capture import (
     CaptureMode,
@@ -53,7 +53,7 @@ from linkedin_mcp_server.linkedin.text import (
 logger = logging.getLogger(__name__)
 
 
-class JobScraper:
+class JobReader:
     """Own every workflow whose subject is a LinkedIn job posting or list.
 
     The pages themselves are read by `JobPageReader`, which is a service under
@@ -76,8 +76,8 @@ class JobScraper:
         self._pages = pages
         self._search_text = search_text
 
-    async def scrape_job(self, job_id: str) -> dict[str, Any]:
-        """Scrape a single job posting.
+    async def read_job(self, job_id: str) -> dict[str, Any]:
+        """Read a single job posting.
 
         Returns:
             {url, sections: {name: text}}
@@ -455,7 +455,7 @@ class JobScraper:
                             self._search_text.promoted_label
                         )
                     )
-                except LinkedInScraperException:
+                except LinkedInOperationError:
                     raise
                 except Exception as e:
                     logger.debug("Could not read promoted jobs: %s", e)
@@ -471,7 +471,7 @@ class JobScraper:
                 if page_refs:
                     page_references.extend(page_refs)
 
-            except LinkedInScraperException:
+            except LinkedInOperationError:
                 raise
             except Exception as e:
                 logger.warning("Error on search page %d: %s", page_num + 1, e)
@@ -671,7 +671,7 @@ class JobScraper:
                 if extracted.references:
                     page_references.extend(extracted.references)
 
-            except LinkedInScraperException:
+            except LinkedInOperationError:
                 raise
             except Exception as e:
                 logger.warning("Error on saved jobs page %d: %s", page_num + 1, e)

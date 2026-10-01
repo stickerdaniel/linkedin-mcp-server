@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 
 
 class MessageTarget(Protocol):
@@ -35,7 +35,7 @@ class ProfilePageReader:
 
     def __init__(
         self,
-        session: ScrapingSession,
+        session: PageSession,
         read_message_target: ReadMessageTarget,
     ):
         self._session = session

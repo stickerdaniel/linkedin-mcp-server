@@ -18,8 +18,8 @@ from linkedin_mcp_server.linkedin import contracts, text
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "linkedin_mcp_server"
-SCRAPING = PACKAGE / "linkedin"
-EXTRACTOR = SCRAPING / "extractor.py"
+LINKEDIN = PACKAGE / "linkedin"
+EXTRACTOR = LINKEDIN / "extractor.py"
 FACADE_PACKAGE_IMPORTERS = {
     Path("linkedin_mcp_server/dependencies.py"),
     Path("tests/linkedin/policy_scenarios.py"),
@@ -41,9 +41,9 @@ PUBLIC_SIGNATURES = {
     "get_page_text": "(self) -> 'str'",
     "get_saved_jobs": "(self, max_pages: 'int' = 3) -> 'dict[str, Any]'",
     "get_sidebar_profiles": "(self, username: 'str') -> 'dict[str, Any]'",
-    "scrape_company": "(self, company_name: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None) -> 'dict[str, Any]'",
-    "scrape_job": "(self, job_id: 'str') -> 'dict[str, Any]'",
-    "scrape_person": "(self, username: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None, max_scrolls: 'int | None' = None, *, main_profile_already_loaded: 'bool' = False, allow_self_alias: 'bool' = False) -> 'dict[str, Any]'",
+    "read_company": "(self, company_name: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None) -> 'dict[str, Any]'",
+    "read_job": "(self, job_id: 'str') -> 'dict[str, Any]'",
+    "read_person": "(self, username: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None, max_scrolls: 'int | None' = None, *, main_profile_already_loaded: 'bool' = False, allow_self_alias: 'bool' = False) -> 'dict[str, Any]'",
     "search_companies": "(self, keywords: 'str') -> 'dict[str, Any]'",
     "search_conversations": "(self, keywords: 'str', limit: 'int' = 20) -> 'dict[str, Any]'",
     "search_jobs": "(self, keywords: 'str', location: 'str | None' = None, max_pages: 'int' = 3, date_posted: 'str | None' = None, job_type: 'str | None' = None, experience_level: 'str | None' = None, work_type: 'str | None' = None, easy_apply: 'bool' = False, sort_by: 'str | None' = None, tool_timeout: 'float' = 180.0) -> 'dict[str, Any]'",
@@ -64,9 +64,9 @@ DELEGATES = {
     "get_page_text": ("_content", "get_page_text"),
     "get_saved_jobs": ("_jobs", "get_saved_jobs"),
     "get_sidebar_profiles": ("_person", "get_sidebar_profiles"),
-    "scrape_company": ("_company", "scrape_company"),
-    "scrape_job": ("_jobs", "scrape_job"),
-    "scrape_person": ("_person", "scrape_person"),
+    "read_company": ("_company", "read_company"),
+    "read_job": ("_jobs", "read_job"),
+    "read_person": ("_person", "read_person"),
     "search_companies": ("_company", "search_companies"),
     "search_conversations": ("_conversations", "search_conversations"),
     "search_jobs": ("_jobs", "search_jobs"),
@@ -87,9 +87,9 @@ DELEGATE_CALLS = {
     "get_page_text": "self._content.get_page_text()",
     "get_saved_jobs": "self._jobs.get_saved_jobs(max_pages)",
     "get_sidebar_profiles": "self._person.get_sidebar_profiles(username)",
-    "scrape_company": "self._company.scrape_company(company_name, requested, callbacks)",
-    "scrape_job": "self._jobs.scrape_job(job_id)",
-    "scrape_person": "self._person.scrape_person(username, requested, callbacks, max_scrolls, main_profile_already_loaded=main_profile_already_loaded, allow_self_alias=allow_self_alias)",
+    "read_company": "self._company.read_company(company_name, requested, callbacks)",
+    "read_job": "self._jobs.read_job(job_id)",
+    "read_person": "self._person.read_person(username, requested, callbacks, max_scrolls, main_profile_already_loaded=main_profile_already_loaded, allow_self_alias=allow_self_alias)",
     "search_companies": "self._company.search_companies(keywords)",
     "search_conversations": "self._conversations.search_conversations(keywords, limit)",
     "search_jobs": "self._jobs.search_jobs(keywords, location, max_pages, date_posted, job_type, experience_level, work_type, easy_apply, sort_by, tool_timeout)",
@@ -242,7 +242,7 @@ def _imports(path: Path, source: str) -> set[str]:
     return modules
 
 
-def _assert_scraping_dependencies(sources: dict[Path, str]) -> None:
+def _assert_package_dependencies(sources: dict[Path, str]) -> None:
     graph: dict[str, set[str]] = defaultdict(set)
     for path, source in sources.items():
         module = f"linkedin_mcp_server.linkedin.{path.stem}"
@@ -260,7 +260,7 @@ def _assert_scraping_dependencies(sources: dict[Path, str]) -> None:
     visited: set[str] = set()
 
     def visit(module: str) -> None:
-        assert module not in visiting, f"scraping import cycle through {module}"
+        assert module not in visiting, f"linkedin package import cycle through {module}"
         if module in visited:
             return
         visiting.add(module)
@@ -387,7 +387,7 @@ def _assert_no_obsolete_extractor_seams(sources: dict[Path, str]) -> None:
         if path not in FACADE_PACKAGE_IMPORTERS:
             imports = _facade_package_imports(path, tree)
             assert not imports, (
-                f"{path}:{imports[0].lineno}: unauthorized scraping facade import"
+                f"{path}:{imports[0].lineno}: unauthorized linkedin facade import"
             )
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -457,8 +457,8 @@ def test_package_export_and_permanent_aliases_keep_identity():
         assert getattr(module, name) is owner
 
 
-def test_scraping_dependencies_are_one_way_acyclic_and_layered():
-    _assert_scraping_dependencies(_sources(SCRAPING))
+def test_package_dependencies_are_one_way_acyclic_and_layered():
+    _assert_package_dependencies(_sources(LINKEDIN))
 
 
 def test_imports_canonicalize_absolute_and_relative_from_imports():
@@ -557,10 +557,10 @@ def test_facade_ast_guards_reject_representative_mutations(mutate, guard):
     ],
 )
 def test_dependency_guards_reject_cycles_layers_and_reverse_imports(path, addition):
-    sources = _sources(SCRAPING)
+    sources = _sources(LINKEDIN)
     sources[path] = addition + sources[path]
     with pytest.raises(AssertionError):
-        _assert_scraping_dependencies(sources)
+        _assert_package_dependencies(sources)
 
 
 @pytest.mark.parametrize(
@@ -591,7 +591,7 @@ def test_dependency_guards_reject_cycles_layers_and_reverse_imports(path, additi
         ),
         (
             Path("linkedin_mcp_server/server.py"),
-            "import linkedin_mcp_server.linkedin as scraping\n",
+            "import linkedin_mcp_server.linkedin as pages\n",
         ),
         (
             Path("linkedin_mcp_server/server.py"),
@@ -599,7 +599,7 @@ def test_dependency_guards_reject_cycles_layers_and_reverse_imports(path, additi
         ),
         (
             Path("linkedin_mcp_server/server.py"),
-            "from linkedin_mcp_server import linkedin as scraping_package\n",
+            "from linkedin_mcp_server import linkedin as linkedin_package\n",
         ),
         (
             Path("linkedin_mcp_server/server.py"),
@@ -629,9 +629,9 @@ def test_obsolete_extractor_seam_guard_rejects_mutations(path, addition):
     "source",
     [
         "import linkedin_mcp_server.linkedin\n",
-        "import linkedin_mcp_server.linkedin as scraping\n",
+        "import linkedin_mcp_server.linkedin as pages\n",
         "from linkedin_mcp_server import linkedin\n",
-        "from linkedin_mcp_server import linkedin as scraping_package\n",
+        "from linkedin_mcp_server import linkedin as linkedin_package\n",
         "from linkedin_mcp_server.linkedin import LinkedInExtractor\n",
         "from linkedin_mcp_server.linkedin import LinkedInExtractor as Facade\n",
         "from linkedin_mcp_server.linkedin import *\n",
@@ -643,15 +643,15 @@ def test_approved_facade_consumers_accept_equivalent_import_forms(source):
     )
 
 
-def test_non_facade_scraping_imports_and_unrelated_scopes_are_allowed():
+def test_non_facade_package_imports_and_unrelated_scopes_are_allowed():
     _assert_no_obsolete_extractor_seams(
         {
             Path("linkedin_mcp_server/tools/feed.py"): (
                 "from linkedin_mcp_server.linkedin import contracts, fields\n"
                 "from linkedin_mcp_server.linkedin.contracts import ExtractedSection\n"
                 "\n"
-                "def unrelated(scraping):\n"
-                "    return scraping.LinkedInExtractor\n"
+                "def unrelated(pages):\n"
+                "    return pages.LinkedInExtractor\n"
             )
         }
     )

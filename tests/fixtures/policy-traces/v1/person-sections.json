@@ -16,23 +16,23 @@
       ],
       "username": "ada-lovelace"
     },
-    "method": "scrape_person"
+    "method": "read_person"
   },
   "events": [
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "callback.start",
       "operation": "person profile",
       "url": "https://www.linkedin.com/in/ada-lovelace"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.add"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/",
         "wait_until": "domcontentloaded"
@@ -41,7 +41,7 @@
       "label": "extractor-before-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/",
@@ -49,13 +49,13 @@
       "wait_until": "domcontentloaded"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "description": "goto https://www.linkedin.com/in/ada-lovelace/",
       "kind": "boundary.stabilize",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/",
         "wait_until": "domcontentloaded"
@@ -64,22 +64,22 @@
       "label": "extractor-after-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.auth_quick",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.rate_limit"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
@@ -87,13 +87,13 @@
       "timeout_ms": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "dismissed": false,
       "kind": "boundary.modal"
     },
     {
       "actual_scrolls": 2,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
       "pause_time": 0.5
@@ -104,45 +104,45 @@
           "main"
         ]
       },
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5"
     },
     {
       "arg": null,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_function",
       "operation": "profile_message_target_ready",
       "program_digest": "d156e406f6bb",
       "timeout_ms": 1000
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "evaluate",
       "operation": "profile_message_target",
       "program_digest": "c7804bf22e53"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "callback.progress",
       "message": "Read main_profile (1/11)",
       "percent": 9
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 2.0
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-2",
       "event": "framenavigated",
       "kind": "listener.add"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/experience/",
         "wait_until": "domcontentloaded"
@@ -151,7 +151,7 @@
       "label": "extractor-before-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/details/experience/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/experience/",
@@ -159,13 +159,13 @@
       "wait_until": "domcontentloaded"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "description": "goto https://www.linkedin.com/in/ada-lovelace/details/experience/",
       "kind": "boundary.stabilize",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/experience/",
         "wait_until": "domcontentloaded"
@@ -174,22 +174,22 @@
       "label": "extractor-after-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.auth_quick",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-2",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.rate_limit"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
@@ -197,40 +197,40 @@
       "timeout_ms": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "dismissed": false,
       "kind": "boundary.modal"
     },
     {
       "arg": null,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
       "program_digest": "652e003606ba",
       "timeout_ms": 10000
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.create",
       "locator": "show_more",
       "parent": null,
       "selector": "main button"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
       "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
       "parent": "show_more"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.count",
       "locator": "show_more.filtered"
     },
     {
       "actual_scrolls": 2,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
       "pause_time": 0.5
@@ -241,31 +241,31 @@
           "main"
         ]
       },
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "callback.progress",
       "message": "Read experience (2/11)",
       "percent": 17
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 2.0
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-3",
       "event": "framenavigated",
       "kind": "listener.add"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/education/",
         "wait_until": "domcontentloaded"
@@ -274,7 +274,7 @@
       "label": "extractor-before-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/details/education/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/education/",
@@ -282,13 +282,13 @@
       "wait_until": "domcontentloaded"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "description": "goto https://www.linkedin.com/in/ada-lovelace/details/education/",
       "kind": "boundary.stabilize",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/education/",
         "wait_until": "domcontentloaded"
@@ -297,22 +297,22 @@
       "label": "extractor-after-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.auth_quick",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-3",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.rate_limit"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
@@ -320,40 +320,40 @@
       "timeout_ms": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "dismissed": false,
       "kind": "boundary.modal"
     },
     {
       "arg": null,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
       "program_digest": "652e003606ba",
       "timeout_ms": 10000
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.create",
       "locator": "show_more",
       "parent": null,
       "selector": "main button"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
       "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
       "parent": "show_more"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.count",
       "locator": "show_more.filtered"
     },
     {
       "actual_scrolls": 2,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
       "pause_time": 0.5
@@ -364,31 +364,31 @@
           "main"
         ]
       },
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "callback.progress",
       "message": "Read education (3/11)",
       "percent": 26
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 2.0
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-4",
       "event": "framenavigated",
       "kind": "listener.add"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/interests/",
         "wait_until": "domcontentloaded"
@@ -397,7 +397,7 @@
       "label": "extractor-before-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/details/interests/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/interests/",
@@ -405,13 +405,13 @@
       "wait_until": "domcontentloaded"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "description": "goto https://www.linkedin.com/in/ada-lovelace/details/interests/",
       "kind": "boundary.stabilize",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/interests/",
         "wait_until": "domcontentloaded"
@@ -420,22 +420,22 @@
       "label": "extractor-after-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.auth_quick",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-4",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.rate_limit"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
@@ -443,40 +443,40 @@
       "timeout_ms": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "dismissed": false,
       "kind": "boundary.modal"
     },
     {
       "arg": null,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
       "program_digest": "652e003606ba",
       "timeout_ms": 10000
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.create",
       "locator": "show_more",
       "parent": null,
       "selector": "main button"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
       "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
       "parent": "show_more"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.count",
       "locator": "show_more.filtered"
     },
     {
       "actual_scrolls": 2,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
       "pause_time": 0.5
@@ -487,31 +487,31 @@
           "main"
         ]
       },
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "callback.progress",
       "message": "Read interests (4/11)",
       "percent": 35
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 2.0
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-5",
       "event": "framenavigated",
       "kind": "listener.add"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/honors/",
         "wait_until": "domcontentloaded"
@@ -520,7 +520,7 @@
       "label": "extractor-before-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/details/honors/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/honors/",
@@ -528,13 +528,13 @@
       "wait_until": "domcontentloaded"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "description": "goto https://www.linkedin.com/in/ada-lovelace/details/honors/",
       "kind": "boundary.stabilize",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/honors/",
         "wait_until": "domcontentloaded"
@@ -543,22 +543,22 @@
       "label": "extractor-after-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.auth_quick",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-5",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.rate_limit"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
@@ -566,40 +566,40 @@
       "timeout_ms": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "dismissed": false,
       "kind": "boundary.modal"
     },
     {
       "arg": null,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
       "program_digest": "652e003606ba",
       "timeout_ms": 10000
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.create",
       "locator": "show_more",
       "parent": null,
       "selector": "main button"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
       "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
       "parent": "show_more"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.count",
       "locator": "show_more.filtered"
     },
     {
       "actual_scrolls": 2,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
       "pause_time": 0.5
@@ -610,31 +610,31 @@
           "main"
         ]
       },
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "callback.progress",
       "message": "Read honors (5/11)",
       "percent": 43
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 2.0
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-6",
       "event": "framenavigated",
       "kind": "listener.add"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/languages/",
         "wait_until": "domcontentloaded"
@@ -643,7 +643,7 @@
       "label": "extractor-before-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/details/languages/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/languages/",
@@ -651,13 +651,13 @@
       "wait_until": "domcontentloaded"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "description": "goto https://www.linkedin.com/in/ada-lovelace/details/languages/",
       "kind": "boundary.stabilize",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/languages/",
         "wait_until": "domcontentloaded"
@@ -666,22 +666,22 @@
       "label": "extractor-after-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.auth_quick",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-6",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.rate_limit"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
@@ -689,40 +689,40 @@
       "timeout_ms": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "dismissed": false,
       "kind": "boundary.modal"
     },
     {
       "arg": null,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
       "program_digest": "652e003606ba",
       "timeout_ms": 10000
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.create",
       "locator": "show_more",
       "parent": null,
       "selector": "main button"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
       "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
       "parent": "show_more"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.count",
       "locator": "show_more.filtered"
     },
     {
       "actual_scrolls": 2,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
       "pause_time": 0.5
@@ -733,31 +733,31 @@
           "main"
         ]
       },
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "callback.progress",
       "message": "Read languages (6/11)",
       "percent": 52
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 2.0
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-7",
       "event": "framenavigated",
       "kind": "listener.add"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/certifications/",
         "wait_until": "domcontentloaded"
@@ -766,7 +766,7 @@
       "label": "extractor-before-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/details/certifications/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/certifications/",
@@ -774,13 +774,13 @@
       "wait_until": "domcontentloaded"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "description": "goto https://www.linkedin.com/in/ada-lovelace/details/certifications/",
       "kind": "boundary.stabilize",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/certifications/",
         "wait_until": "domcontentloaded"
@@ -789,22 +789,22 @@
       "label": "extractor-after-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.auth_quick",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-7",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.rate_limit"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
@@ -812,40 +812,40 @@
       "timeout_ms": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "dismissed": false,
       "kind": "boundary.modal"
     },
     {
       "arg": null,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
       "program_digest": "652e003606ba",
       "timeout_ms": 10000
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.create",
       "locator": "show_more",
       "parent": null,
       "selector": "main button"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
       "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
       "parent": "show_more"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.count",
       "locator": "show_more.filtered"
     },
     {
       "actual_scrolls": 2,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
       "pause_time": 0.5
@@ -856,31 +856,31 @@
           "main"
         ]
       },
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "callback.progress",
       "message": "Read certifications (7/11)",
       "percent": 60
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 2.0
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-8",
       "event": "framenavigated",
       "kind": "listener.add"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/skills/",
         "wait_until": "domcontentloaded"
@@ -889,7 +889,7 @@
       "label": "extractor-before-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/details/skills/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/skills/",
@@ -897,13 +897,13 @@
       "wait_until": "domcontentloaded"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "description": "goto https://www.linkedin.com/in/ada-lovelace/details/skills/",
       "kind": "boundary.stabilize",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/skills/",
         "wait_until": "domcontentloaded"
@@ -912,22 +912,22 @@
       "label": "extractor-after-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.auth_quick",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-8",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.rate_limit"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
@@ -935,40 +935,40 @@
       "timeout_ms": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "dismissed": false,
       "kind": "boundary.modal"
     },
     {
       "arg": null,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
       "program_digest": "652e003606ba",
       "timeout_ms": 10000
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.create",
       "locator": "show_more",
       "parent": null,
       "selector": "main button"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
       "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
       "parent": "show_more"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.count",
       "locator": "show_more.filtered"
     },
     {
       "actual_scrolls": 2,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
       "pause_time": 0.5
@@ -979,31 +979,31 @@
           "main"
         ]
       },
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "callback.progress",
       "message": "Read skills (8/11)",
       "percent": 69
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 2.0
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-9",
       "event": "framenavigated",
       "kind": "listener.add"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/projects/",
         "wait_until": "domcontentloaded"
@@ -1012,7 +1012,7 @@
       "label": "extractor-before-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/details/projects/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/projects/",
@@ -1020,13 +1020,13 @@
       "wait_until": "domcontentloaded"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "description": "goto https://www.linkedin.com/in/ada-lovelace/details/projects/",
       "kind": "boundary.stabilize",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/details/projects/",
         "wait_until": "domcontentloaded"
@@ -1035,22 +1035,22 @@
       "label": "extractor-after-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.auth_quick",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-9",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.rate_limit"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
@@ -1058,40 +1058,40 @@
       "timeout_ms": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "dismissed": false,
       "kind": "boundary.modal"
     },
     {
       "arg": null,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_function",
       "operation": "profile_details_ready",
       "program_digest": "652e003606ba",
       "timeout_ms": 10000
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.create",
       "locator": "show_more",
       "parent": null,
       "selector": "main button"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.derive",
       "locator": "show_more.filtered",
       "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
       "parent": "show_more"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "locator.count",
       "locator": "show_more.filtered"
     },
     {
       "actual_scrolls": 2,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
       "pause_time": 0.5
@@ -1102,31 +1102,31 @@
           "main"
         ]
       },
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "callback.progress",
       "message": "Read projects (9/11)",
       "percent": 78
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 2.0
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-10",
       "event": "framenavigated",
       "kind": "listener.add"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/overlay/contact-info/",
         "wait_until": "domcontentloaded"
@@ -1135,7 +1135,7 @@
       "label": "extractor-before-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/overlay/contact-info/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/overlay/contact-info/",
@@ -1143,13 +1143,13 @@
       "wait_until": "domcontentloaded"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "description": "goto https://www.linkedin.com/in/ada-lovelace/overlay/contact-info/",
       "kind": "boundary.stabilize",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/overlay/contact-info/",
         "wait_until": "domcontentloaded"
@@ -1158,22 +1158,22 @@
       "label": "extractor-after-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.auth_quick",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-10",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.rate_limit"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_selector",
       "operation": "dialog",
       "selector": "dialog[open], .artdeco-modal__content",
@@ -1187,31 +1187,31 @@
           ".artdeco-modal__content"
         ]
       },
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "callback.progress",
       "message": "Read contact_info (10/11)",
       "percent": 86
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 2.0
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-11",
       "event": "framenavigated",
       "kind": "listener.add"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
         "wait_until": "domcontentloaded"
@@ -1220,7 +1220,7 @@
       "label": "extractor-before-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
       "requested_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
@@ -1228,13 +1228,13 @@
       "wait_until": "domcontentloaded"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "description": "goto https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
       "kind": "boundary.stabilize",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "extra": {
         "target_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
         "wait_until": "domcontentloaded"
@@ -1243,22 +1243,22 @@
       "label": "extractor-after-goto"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.auth_quick",
       "result": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "callback_id": "callback-11",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.rate_limit"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_selector",
       "operation": "main",
       "selector": "main",
@@ -1266,13 +1266,13 @@
       "timeout_ms": null
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "dismissed": false,
       "kind": "boundary.modal"
     },
     {
       "arg": null,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "wait_for_function",
       "operation": "main_text_200",
       "program_digest": "24943facf9de",
@@ -1280,7 +1280,7 @@
     },
     {
       "actual_scrolls": 2,
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 10,
       "pause_time": 1.0
@@ -1291,19 +1291,19 @@
           "main"
         ]
       },
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "evaluate",
       "operation": "root_content",
       "program_digest": "e8a0e21ac6f5"
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "callback.progress",
       "message": "Read posts (11/11)",
       "percent": 95
     },
     {
-      "call": "scrape_person",
+      "call": "read_person",
       "kind": "callback.complete",
       "operation": "person profile",
       "result_url": "https://www.linkedin.com/in/ada-lovelace/"
@@ -1415,6 +1415,6 @@
     },
     "url": "https://www.linkedin.com/in/ada-lovelace/"
   },
-  "scenario": "scrape_person__all_sections",
+  "scenario": "read_person__all_sections",
   "schema_version": 1
 }

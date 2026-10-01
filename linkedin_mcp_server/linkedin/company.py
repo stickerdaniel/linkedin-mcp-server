@@ -7,7 +7,7 @@ from urllib.parse import quote_plus
 
 import logging
 
-from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+from linkedin_mcp_server.core.exceptions import LinkedInOperationError
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.linkedin.capture import (
     CaptureMode,
@@ -25,7 +25,7 @@ from linkedin_mcp_server.linkedin.identifiers import (
 )
 from linkedin_mcp_server.linkedin.link_metadata import Reference
 from linkedin_mcp_server.linkedin.search_urls import build_company_search_url
-from linkedin_mcp_server.linkedin.session import NAV_DELAY, ScrapingSession
+from linkedin_mcp_server.linkedin.session import NAV_DELAY, PageSession
 
 if TYPE_CHECKING:
     from linkedin_mcp_server.callbacks import ProgressCallback
@@ -33,20 +33,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class CompanyScraper:
+class CompanyReader:
     """Own every workflow whose subject is a LinkedIn company page."""
 
-    def __init__(self, session: ScrapingSession, capture: SectionCapture):
+    def __init__(self, session: PageSession, capture: SectionCapture):
         self._session = session
         self._capture = capture
 
-    async def scrape_company(
+    async def read_company(
         self,
         company_name: str,
         requested: set[str],
         callbacks: ProgressCallback | None = None,
     ) -> dict[str, Any]:
-        """Scrape a company profile with configurable sections.
+        """Read a company profile with configurable sections.
 
         Returns:
             {url, sections: {name: text}}
@@ -97,13 +97,13 @@ class CompanyScraper:
                         rate_limited = True
                     elif extracted.error:
                         section_errors[section_name] = extracted.error
-                except LinkedInScraperException:
+                except LinkedInOperationError:
                     raise
                 except Exception as e:
-                    logger.warning("Error scraping section %s: %s", section_name, e)
+                    logger.warning("Error reading section %s: %s", section_name, e)
                     section_errors[section_name] = build_issue_diagnostics(
                         e,
-                        context="scrape_company",
+                        context="read_company",
                         target_url=url,
                         section_name=section_name,
                     )
@@ -118,7 +118,7 @@ class CompanyScraper:
 
                 if rate_limited:
                     break
-        except LinkedInScraperException as e:
+        except LinkedInOperationError as e:
             if callbacks:
                 await callbacks.on_error(e)
             raise

@@ -1,4 +1,4 @@
-"""Local evidence notes for scraper failures."""
+"""Local evidence notes for page-read failures."""
 
 from __future__ import annotations
 

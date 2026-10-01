@@ -1,4 +1,4 @@
-"""Public scraping facade and collaborator composition root."""
+"""Public page-reading facade and collaborator composition root."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from patchright.async_api import Page
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.linkedin.capture import SectionCapture
-from linkedin_mcp_server.linkedin.company import CompanyScraper
+from linkedin_mcp_server.linkedin.company import CompanyReader
 from linkedin_mcp_server.linkedin.connection_actions import ConnectionActions
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.contracts import (
@@ -17,15 +17,15 @@ from linkedin_mcp_server.linkedin.contracts import (
     rate_limited_section_error as rate_limited_section_error,
 )
 from linkedin_mcp_server.linkedin.conversations import ConversationReader
-from linkedin_mcp_server.linkedin.feed import FeedScraper
+from linkedin_mcp_server.linkedin.feed import FeedReader
 from linkedin_mcp_server.linkedin.job_pages import JobPageReader
-from linkedin_mcp_server.linkedin.jobs import JobScraper
+from linkedin_mcp_server.linkedin.jobs import JobReader
 from linkedin_mcp_server.linkedin.message_sender import MessageSender
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.person import PersonScraper
+from linkedin_mcp_server.linkedin.person import PersonReader
 from linkedin_mcp_server.linkedin.posts import PostSearch
 from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.linkedin.text import (
     strip_conversation_chrome as strip_conversation_chrome,
     strip_linkedin_noise as strip_linkedin_noise,
@@ -37,10 +37,10 @@ if TYPE_CHECKING:
 
 
 class LinkedInExtractor:
-    """Compose scraping owners and expose the stable tool-facing API."""
+    """Compose page workflow owners and expose the stable tool-facing API."""
 
     def __init__(self, page: Page):
-        session = ScrapingSession(page)
+        session = PageSession(page)
         navigator = PageNavigator(session)
         content = PageContentReader(session)
         capture = SectionCapture(session, navigator, content)
@@ -49,21 +49,21 @@ class LinkedInExtractor:
             session,
             lambda: message_sender._read_profile_message_target(),
         )
-        person = PersonScraper(session, navigator, capture, profile_page)
+        person = PersonReader(session, navigator, capture, profile_page)
 
         self._content = content
         self._capture = capture
-        self._feed = FeedScraper(session, navigator, content)
+        self._feed = FeedReader(session, navigator, content)
         self._message_sender = message_sender
         self._person = person
-        self._company = CompanyScraper(session, capture)
+        self._company = CompanyReader(session, capture)
         self._connection = ConnectionActions(
             session,
             navigator,
-            lambda username: self.scrape_person(username, {"main_profile"}),
+            lambda username: self.read_person(username, {"main_profile"}),
         )
         job_pages = JobPageReader(session, navigator, content)
-        self._jobs = JobScraper(navigator, capture, job_pages)
+        self._jobs = JobReader(navigator, capture, job_pages)
         self._posts = PostSearch(capture)
         self._conversations = ConversationReader(
             session, navigator, content, profile_page
@@ -82,7 +82,7 @@ class LinkedInExtractor:
         )
 
     async def extract_feed(self, num_posts: int = 10) -> ExtractedSection:
-        """Scrape the LinkedIn home feed, scrolling until enough posts load."""
+        """Read the LinkedIn home feed, scrolling until enough posts load."""
         return await self._feed.extract_feed(num_posts)
 
     async def extract_page(
@@ -94,7 +94,7 @@ class LinkedInExtractor:
         """Navigate, scroll to load lazy content, and extract innerText."""
         return await self._capture.extract_page(url, section_name, max_scrolls)
 
-    async def scrape_person(
+    async def read_person(
         self,
         username: str,
         requested: set[str],
@@ -104,8 +104,8 @@ class LinkedInExtractor:
         main_profile_already_loaded: bool = False,
         allow_self_alias: bool = False,
     ) -> dict[str, Any]:
-        """Scrape a person profile with configurable sections."""
-        return await self._person.scrape_person(
+        """Read a person profile with configurable sections."""
+        return await self._person.read_person(
             username,
             requested,
             callbacks,
@@ -120,7 +120,7 @@ class LinkedInExtractor:
         callbacks: ProgressCallback | None = None,
         max_scrolls: int | None = None,
     ) -> dict[str, Any]:
-        """Scrape the authenticated user's own LinkedIn profile."""
+        """Read the authenticated user's own LinkedIn profile."""
         return await self._person.get_my_profile(sections, callbacks, max_scrolls)
 
     async def connect_with_person(
@@ -136,14 +136,14 @@ class LinkedInExtractor:
         """Extract profile links from sidebar sections on a profile page."""
         return await self._person.get_sidebar_profiles(username)
 
-    async def scrape_company(
+    async def read_company(
         self,
         company_name: str,
         requested: set[str],
         callbacks: ProgressCallback | None = None,
     ) -> dict[str, Any]:
-        """Scrape a company profile with configurable sections."""
-        return await self._company.scrape_company(company_name, requested, callbacks)
+        """Read a company profile with configurable sections."""
+        return await self._company.read_company(company_name, requested, callbacks)
 
     async def get_company_employees(
         self,
@@ -153,9 +153,9 @@ class LinkedInExtractor:
         """List employees at a company from the people page."""
         return await self._company.get_company_employees(company_name, keywords)
 
-    async def scrape_job(self, job_id: str) -> dict[str, Any]:
-        """Scrape a single job posting."""
-        return await self._jobs.scrape_job(job_id)
+    async def read_job(self, job_id: str) -> dict[str, Any]:
+        """Read a single job posting."""
+        return await self._jobs.read_job(job_id)
 
     async def search_jobs(
         self,

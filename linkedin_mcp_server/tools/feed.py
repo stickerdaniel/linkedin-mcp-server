@@ -1,5 +1,5 @@
 """
-LinkedIn feed scraping tool.
+LinkedIn feed reading tool.
 
 Fetches posts from the authenticated user's LinkedIn home feed using
 innerText extraction. Scrolls until the requested number of post
@@ -65,7 +65,7 @@ def register_feed_tools(
         """
         try:
             extractor = await get_ready_extractor(ctx, tool_name="get_feed")
-            logger.info("Scraping feed (num_posts=%d)", num_posts)
+            logger.info("Reading feed (num_posts=%d)", num_posts)
 
             await ctx.report_progress(
                 progress=0, total=100, message="Reading the home feed"

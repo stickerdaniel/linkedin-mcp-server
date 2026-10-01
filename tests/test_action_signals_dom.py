@@ -11,7 +11,7 @@ no verb, and present-but-empty attributes. The structure is identical across
 all four, and each case
 asserts the *same* answer for all of them in one assertion that names the
 locales. A decision that differs between two of them is a decision that read
-a word, which the AGENTS.md Scraping Rules forbid; the opaque set is the
+a word, which the AGENTS.md LinkedIn Page Rules forbid; the opaque set is the
 control, because a label with no verb in it cannot be matched by one.
 
 Skipped automatically when chromium is not installed; run locally after
@@ -50,7 +50,7 @@ from linkedin_mcp_server.linkedin.connection_actions import (
     ConnectionActions,
 )
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 
 #: CI uses ``--dist loadgroup``. Keep every test that launches Chromium on one
 #: worker so browser startups cannot compete with the DOM cases' wall-clock
@@ -429,7 +429,7 @@ def _actions(page) -> ConnectionActions:
     async def unreachable(_username: str) -> dict[str, Any]:
         raise AssertionError("the DOM cases never read a profile")
 
-    session = ScrapingSession(cast(Page, page))
+    session = PageSession(cast(Page, page))
     return ConnectionActions(session, PageNavigator(session), unreachable)
 
 

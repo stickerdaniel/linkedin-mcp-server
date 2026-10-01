@@ -1,4 +1,4 @@
-"""Home-feed scraping with SDUI permalink capture."""
+"""Home-feed reading with SDUI permalink capture."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import anyio
 import anyio.lowlevel
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+from linkedin_mcp_server.core.exceptions import LinkedInOperationError
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.contracts import (
@@ -24,7 +24,7 @@ from linkedin_mcp_server.linkedin.feed_payload import (
     is_feed_payload_response,
 )
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.linkedin.text import (
     filter_linkedin_noise_lines,
     truncate_linkedin_noise,
@@ -33,12 +33,12 @@ from linkedin_mcp_server.linkedin.text import (
 logger = logging.getLogger(__name__)
 
 
-class FeedScraper:
-    """Scrape the home feed and the post permalinks its SDUI payloads carry."""
+class FeedReader:
+    """Read the home feed and the post permalinks its SDUI payloads carry."""
 
     def __init__(
         self,
-        session: ScrapingSession,
+        session: PageSession,
         navigator: PageNavigator,
         content: PageContentReader,
     ):
@@ -109,10 +109,10 @@ class FeedScraper:
         self,
         num_posts: int = 10,
     ) -> ExtractedSection:
-        """Scrape the LinkedIn home feed, scrolling until *num_posts* are loaded."""
+        """Read the LinkedIn home feed, scrolling until *num_posts* are loaded."""
         try:
             return await self._extract_feed_once(num_posts)
-        except LinkedInScraperException:
+        except LinkedInOperationError:
             raise
         except Exception as e:
             logger.warning("Failed to extract feed: %s", e)

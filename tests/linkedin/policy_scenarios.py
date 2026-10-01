@@ -88,21 +88,21 @@ class TraceCallbacks(ProgressCallback):
     def __init__(self, recorder: TraceRecorder):
         self.recorder = recorder
 
-    async def on_start(self, scraper_type: str, url: str) -> None:
-        self.recorder.record("callback.start", operation=scraper_type, url=url)
+    async def on_start(self, subject: str, url: str) -> None:
+        self.recorder.record("callback.start", operation=subject, url=url)
 
     async def on_progress(self, message: str, percent: int) -> None:
         self.recorder.record("callback.progress", message=message, percent=percent)
 
-    async def on_complete(self, scraper_type: str, result: Any) -> None:
+    async def on_complete(self, subject: str, result: Any) -> None:
         self.recorder.record(
-            "callback.complete", operation=scraper_type, result_url=result["url"]
+            "callback.complete", operation=subject, result_url=result["url"]
         )
 
 
 @contextmanager
 def _diagnostics_bindings(diagnostics: Any) -> Iterator[None]:
-    """Bind the issue-report boundary in each exercised scraping module.
+    """Bind the issue-report boundary in each exercised linkedin module.
 
     A separate context manager rather than more items in `boundaries`, which
     sat on exactly 20 and is the whole of CPython's static block budget inside
@@ -132,7 +132,7 @@ async def boundaries(
 ) -> AsyncIterator[None]:
     real_scroll_body = session_module.scroll_to_bottom
     real_scroll_sidebar = session_module.scroll_job_sidebar
-    real_drain = feed_module.FeedScraper._drain_listener_tasks
+    real_drain = feed_module.FeedReader._drain_listener_tasks
 
     async def trace(_page: Any, label: str, *, extra: Any = None) -> None:
         recorder.record("boundary.trace", label=label, extra=extra)
@@ -199,7 +199,7 @@ async def boundaries(
         # Every binding of each shared boundary, because the workflows that
         # reach it are split across the modules mid-relocation: generic
         # capture, the feed, conversation reader and message sender go through
-        # `ScrapingSession`, while the job pages import the helper into
+        # `PageSession`, while the job pages import the helper into
         # `job_pages`. Patching one side only lets the real helper loose on a
         # scripted page. The scrolls have no facade binding left at all — the job
         # reader held the last one — and neither has the modal close, whose
@@ -216,7 +216,7 @@ async def boundaries(
         # `staticmethod`, or the class attribute would bind `self` in front of
         # the pending list and the replacement would never match the call.
         patch.object(
-            feed_module.FeedScraper,
+            feed_module.FeedReader,
             "_drain_listener_tasks",
             staticmethod(drain),
         ),
@@ -278,7 +278,7 @@ async def _generic_capture_scenario(
 
 
 async def _person_sections_scenario() -> dict[str, Any]:
-    name = "scrape_person__all_sections"
+    name = "read_person__all_sections"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
     clock = FakeClock(recorder)
     page = _page(recorder)
@@ -310,14 +310,14 @@ async def _person_sections_scenario() -> dict[str, Any]:
     extractor = _extractor(page)
     callbacks = TraceCallbacks(recorder)
     async with boundaries(recorder, clock):
-        with recorder.context("scrape_person"):
-            result = await extractor.scrape_person(
+        with recorder.context("read_person"):
+            result = await extractor.read_person(
                 "ada-lovelace", set(PERSON_SECTIONS), callbacks=callbacks
             )
     page.assert_clean()
     return recorder.trace(
         {
-            "method": "scrape_person",
+            "method": "read_person",
             "arguments": {
                 "username": "ada-lovelace",
                 "requested": list(PERSON_SECTIONS),
@@ -328,7 +328,7 @@ async def _person_sections_scenario() -> dict[str, Any]:
 
 
 async def _company_sections_scenario() -> dict[str, Any]:
-    name = "scrape_company__all_sections"
+    name = "read_company__all_sections"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
     clock = FakeClock(recorder)
     page = _page(recorder).script(
@@ -338,14 +338,14 @@ async def _company_sections_scenario() -> dict[str, Any]:
     extractor = _extractor(page)
     callbacks = TraceCallbacks(recorder)
     async with boundaries(recorder, clock):
-        with recorder.context("scrape_company"):
-            result = await extractor.scrape_company(
+        with recorder.context("read_company"):
+            result = await extractor.read_company(
                 "analytical-engine", set(COMPANY_SECTIONS), callbacks=callbacks
             )
     page.assert_clean()
     return recorder.trace(
         {
-            "method": "scrape_company",
+            "method": "read_company",
             "arguments": {
                 "company_name": "analytical-engine",
                 "requested": list(COMPANY_SECTIONS),
@@ -841,9 +841,7 @@ async def _single_capture_facade_scenario(method: str) -> dict[str, Any]:
     clock = FakeClock(recorder)
     # A posting is only whole with its description heading; the other
     # facades accept any text.
-    text = (
-        "About the job\nResult content" if method == "scrape_job" else "Result content"
-    )
+    text = "About the job\nResult content" if method == "read_job" else "Result content"
     page = _page(recorder).script("evaluate:root_content", _root(text))
     extractor = _extractor(page)
     arguments: dict[str, Any]
@@ -852,9 +850,9 @@ async def _single_capture_facade_scenario(method: str) -> dict[str, Any]:
             if method == "get_company_employees":
                 arguments = {"company_name": "analytical-engine", "keywords": "math"}
                 result = await extractor.get_company_employees(**arguments)
-            elif method == "scrape_job":
+            elif method == "read_job":
                 arguments = {"job_id": "123"}
-                result = await extractor.scrape_job(**arguments)
+                result = await extractor.read_job(**arguments)
             elif method == "search_people":
                 arguments = {"keywords": "analyst", "network": ["F"]}
                 result = await extractor.search_people(**arguments)
@@ -874,7 +872,7 @@ async def _single_capture_facade_scenario(method: str) -> dict[str, Any]:
 
 
 async def _single_capture_error_scenario() -> dict[str, Any]:
-    recorder = TraceRecorder("scrape_job__capture_error", _COMMON_ALLOWED)
+    recorder = TraceRecorder("read_job__capture_error", _COMMON_ALLOWED)
     clock = FakeClock(recorder)
     page = _page(recorder).script(
         "evaluate:root_content", RuntimeError("synthetic capture failure")
@@ -882,28 +880,28 @@ async def _single_capture_error_scenario() -> dict[str, Any]:
     extractor = _extractor(page)
     arguments = {"job_id": "123"}
     async with boundaries(recorder, clock):
-        with recorder.context("scrape_job"):
-            result = await extractor.scrape_job(**arguments)
+        with recorder.context("read_job"):
+            result = await extractor.read_job(**arguments)
     page.assert_clean()
     return recorder.trace(
-        {"method": "scrape_job", "arguments": arguments},
+        {"method": "read_job", "arguments": arguments},
         _complete_mapping_result(result, section_names=list(result["sections"])),
     )
 
 
 async def _description_missing_scenario() -> dict[str, Any]:
-    recorder = TraceRecorder("scrape_job__description_missing", _COMMON_ALLOWED)
+    recorder = TraceRecorder("read_job__description_missing", _COMMON_ALLOWED)
     clock = FakeClock(recorder)
     # The header and company details rendered, the description panel did not.
     page = _page(recorder).script("evaluate:root_content", _root("Result content"))
     extractor = _extractor(page)
     arguments = {"job_id": "123"}
     async with boundaries(recorder, clock):
-        with recorder.context("scrape_job"):
-            result = await extractor.scrape_job(**arguments)
+        with recorder.context("read_job"):
+            result = await extractor.read_job(**arguments)
     page.assert_clean()
     return recorder.trace(
-        {"method": "scrape_job", "arguments": arguments},
+        {"method": "read_job", "arguments": arguments},
         _complete_mapping_result(result, section_names=list(result["sections"])),
     )
 
@@ -1087,9 +1085,9 @@ TOOL_FACADE_METHODS = {
     "get_my_profile",
     "get_saved_jobs",
     "get_sidebar_profiles",
-    "scrape_company",
-    "scrape_job",
-    "scrape_person",
+    "read_company",
+    "read_job",
+    "read_person",
     "search_companies",
     "search_conversations",
     "search_jobs",
@@ -1161,9 +1159,9 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         "company-employees.json": await _single_capture_facade_scenario(
             "get_company_employees"
         ),
-        "scrape-job.json": await _single_capture_facade_scenario("scrape_job"),
-        "scrape-job-error.json": await _single_capture_error_scenario(),
-        "scrape-job-description-missing.json": await _description_missing_scenario(),
+        "read-job.json": await _single_capture_facade_scenario("read_job"),
+        "read-job-error.json": await _single_capture_error_scenario(),
+        "read-job-description-missing.json": await _description_missing_scenario(),
         "search-people.json": await _single_capture_facade_scenario("search_people"),
         "search-companies.json": await _single_capture_facade_scenario(
             "search_companies"

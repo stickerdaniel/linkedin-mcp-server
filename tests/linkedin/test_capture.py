@@ -29,7 +29,7 @@ from linkedin_mcp_server.linkedin.contracts import (
     ExtractedSection,
 )
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.linkedin.text import (
     JOB_POSTING_EN_US,
     DetailCaptureTextTable,
@@ -39,7 +39,7 @@ from linkedin_mcp_server.linkedin.text import (
 
 def _capture(page) -> SectionCapture:
     """Wire the capture owner the way the facade does."""
-    session = ScrapingSession(page)
+    session = PageSession(page)
     return SectionCapture(session, PageNavigator(session), PageContentReader(session))
 
 
@@ -478,7 +478,7 @@ class TestActivityFeedExtraction:
             readiness_blocking_prefixes=("Mutated placeholder",),
             expansion_button_pattern=re.compile(r"^Expand entries$"),
         )
-        session = ScrapingSession(mock_page)
+        session = PageSession(mock_page)
         capture = SectionCapture(
             session,
             PageNavigator(session),
@@ -563,7 +563,7 @@ class TestActivityFeedExtraction:
             return_value={"source": "root", "text": "Posting", "references": []}
         )
         mock_page.wait_for_function = AsyncMock()
-        session = ScrapingSession(mock_page)
+        session = PageSession(mock_page)
         capture = SectionCapture(
             session,
             PageNavigator(session),

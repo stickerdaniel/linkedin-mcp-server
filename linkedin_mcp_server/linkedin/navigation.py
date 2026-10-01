@@ -22,7 +22,7 @@ from linkedin_mcp_server.core.proxy_errors import (
 )
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ WaitUntil = Literal["commit", "domcontentloaded", "load", "networkidle"]
 
 
 class PageNavigator:
-    """Own the complete lifecycle around navigation on one scraping page."""
+    """Own the complete lifecycle around navigation on one browser page."""
 
     # How long to let `page.url` catch up with a navigation the sidebar scroll
     # suppressed. The lag itself measured 6ms across ten runs, min and max alike;
@@ -60,7 +60,7 @@ class PageNavigator:
     # its own navigation, so a page judged on arrival is judged empty.
     _DOCUMENT_READY_TIMEOUT = 5.0
 
-    def __init__(self, session: ScrapingSession):
+    def __init__(self, session: PageSession):
         self._session = session
 
     @staticmethod

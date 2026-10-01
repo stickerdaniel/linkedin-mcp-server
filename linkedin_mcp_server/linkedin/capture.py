@@ -15,7 +15,7 @@ import anyio
 import anyio.lowlevel
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+from linkedin_mcp_server.core.exceptions import LinkedInOperationError
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.contracts import (
@@ -29,7 +29,7 @@ from linkedin_mcp_server.linkedin.feed_payload import (
 )
 from linkedin_mcp_server.linkedin.link_metadata import build_references
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.linkedin.text import (
     DETAIL_CAPTURE_EN_US,
     JOB_POSTING_EN_US,
@@ -97,7 +97,7 @@ class _PermalinkResponseListener:
 
     LinkedIn renders no permalink anchor per post on the content-search tab,
     so the permalinks are read from the JSON/document responses the way the
-    feed scraper reads its SDUI payloads. The response listener must be
+    feed reader reads its SDUI payloads. The response listener must be
     installed before navigation: the initial document response already
     carries the first batch of permalinks.
     """
@@ -208,7 +208,7 @@ class SectionCapture:
 
     def __init__(
         self,
-        session: ScrapingSession,
+        session: PageSession,
         navigator: PageNavigator,
         content: PageContentReader,
         detail_text: DetailCaptureTextTable = DETAIL_CAPTURE_EN_US,
@@ -277,7 +277,7 @@ class SectionCapture:
                     listener.install()
                 return await self._capture_once(url, section_name, plan, listener)
 
-            except LinkedInScraperException:
+            except LinkedInOperationError:
                 raise
             except OverlayRootNotFoundError as e:
                 logger.warning("Failed to extract overlay %s: %s", url, e)

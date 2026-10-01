@@ -27,7 +27,7 @@ from linkedin_mcp_server.linkedin.capture import (
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.contracts import RATE_LIMITED_SECTION_TEXT
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.session import ScrapingSession
+from linkedin_mcp_server.linkedin.session import PageSession
 
 #: Keep every test that launches Chromium on one worker; see
 #: ``test_root_content_dom.py``.
@@ -91,7 +91,7 @@ async def load(page: Any, body: str) -> SectionCapture:
 
     await page.route("**/*", handle)
     await page.goto(OVERLAY_URL)
-    session = ScrapingSession(page)
+    session = PageSession(page)
     return SectionCapture(session, PageNavigator(session), PageContentReader(session))
 
 
