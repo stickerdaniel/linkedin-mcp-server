@@ -1568,6 +1568,23 @@ def test_a_retirement_followed_by_an_explicit_failure_passes_as_its_own_branch()
         assert semantics(_retirement(daemon=daemon))["call"] == NO_SILENT_CUT
 
 
+def test_a_cut_lane_needs_its_second_page_held_across_the_drains_end():
+    """The drain ran out at 34.1 s. A read that merely stalled between pages,
+    or whose second hold let go before then, held nothing past the drain."""
+    record = _turnover(ROW_CUT)
+    assert _problems(record, True) == []
+    second = person_path(USERNAMES[ROW_CUT], "experience")
+    record["gates"] = [g for g in record["gates"] if g["path"] != second]
+    problems = _problems(record, True)
+    assert any("never entered its gate" in p for p in problems), problems
+    assert all(p.startswith(INVALID) for p in problems), problems
+    record = _turnover(ROW_CUT)
+    gate = next(g for g in record["gates"] if g["path"] == second)
+    gate["released_monotonic_ns"] = 30_000 * MS
+    problems = _problems(record, True)
+    assert any("did not span the end of the drain" in p for p in problems), problems
+
+
 def test_the_new_work_may_fail_explicitly_but_never_silently():
     record = _turnover(ROW_REFUSED)
     record["calls"][2].update(is_error=True, marked_sections=[])

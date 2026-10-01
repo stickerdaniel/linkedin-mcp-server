@@ -1418,9 +1418,29 @@ def _turnover_invalid(
             f"{gate.get('terminal')!r} by {gate.get('released_by')!r}"
         )
     if case.past_drain:
-        for second_gate in _gates(record, person_path(username, "experience")):
-            if second_gate.get("terminal") == DEADLINE:
-                found.append(f"{INVALID}the second hold ran out its deadline")
+        # Work held past the drain is what this lane exists for: the second
+        # hold must be entered before the drain ran out and still be held
+        # when it did, or the call merely stalled between pages.
+        second_gates = _gates(record, person_path(username, "experience"))
+        second = second_gates[0] if len(second_gates) == 1 else {}
+        held_from = _ns(second.get("entered_monotonic_ns"))
+        held_until = _ns(second.get("released_monotonic_ns"))
+        drained = (
+            answered + int(TURNOVER_DRAIN_SECONDS * 1e9)
+            if answered is not None
+            else None
+        )
+        if second.get("terminal") == DEADLINE:
+            found.append(f"{INVALID}the second hold ran out its deadline")
+        if held_from is None:
+            found.append(
+                f"{INVALID}the second held page never entered its gate: nothing "
+                f"is shown held past the drain"
+            )
+        elif drained is not None and (
+            held_from > drained or (held_until is not None and held_until < drained)
+        ):
+            found.append(f"{INVALID}the second hold did not span the end of the drain")
     ended = _ns(first.get("ended_monotonic_ns"))
     if answered is not None and ended is not None:
         inside = (ended - answered) / 1e9 < TURNOVER_DRAIN_SECONDS
