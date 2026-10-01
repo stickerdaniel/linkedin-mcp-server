@@ -966,7 +966,15 @@ def _loss_invalid(record: Mapping[str, Any], case: LossCase) -> list[str]:
                     f"the release was asked for {late:.1f}s after its declared "
                     f"time{past}"
                 )
-            if cleanup is None or cleanup - requested < CONTINUATION_SECONDS * 1e9:
+            # The watch the script recorded finishing, not the later cleanup:
+            # time spent elsewhere before cleanup is no watch.
+            watched = _ns(record.get("watched_until_ns"))
+            if (
+                watched is None
+                or watched - requested < CONTINUATION_SECONDS * 1e9
+                or cleanup is None
+                or cleanup < watched
+            ):
                 found.append(
                     f"the origin was watched for less than {CONTINUATION_SECONDS}s "
                     f"after the release"
@@ -1095,10 +1103,13 @@ def _hot_reuse_findings(record: Mapping[str, Any]) -> list[str]:
     if began is not None and lost is not None:
         after = (began - lost) / 1e9
         if after > HOT_REUSE_WINDOW_SECONDS:
+            # The row's own waits (the lost calls, the frontend's exit, the
+            # watch) come first, and each has its own verdict; a late fresh
+            # read leaves hot reuse untested, which is no finding.
             found.append(
-                f"the fresh read began {after:.1f}s after the loss, outside the "
-                f"declared {HOT_REUSE_WINDOW_SECONDS}s window: hot reuse is not "
-                f"shown"
+                f"{INVALID}the fresh read began {after:.1f}s after the loss, "
+                f"outside the declared {HOT_REUSE_WINDOW_SECONDS}s window: hot "
+                f"reuse is not shown"
             )
     cause = record.get("cause")
     if cause not in (CAUSE_EXPIRY, CAUSE_UNOBSERVED):

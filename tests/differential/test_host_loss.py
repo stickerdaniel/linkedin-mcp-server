@@ -566,6 +566,23 @@ _CONTROLS = [
         id="watched-too-briefly",
     ),
     pytest.param(
+        # Cleanup came late, but the script never recorded its watch ending.
+        _ROWS,
+        None,
+        lambda r: r.pop("watched_until_ns"),
+        f"watched for less than {CONTINUATION_SECONDS}s after the release",
+        True,
+        id="watch-end-unrecorded",
+    ),
+    pytest.param(
+        _ROWS,
+        None,
+        lambda r: r.update(watched_until_ns=r["watched_until_ns"] - 5_000 * MS),
+        f"watched for less than {CONTINUATION_SECONDS}s after the release",
+        True,
+        id="watch-ended-early",
+    ),
+    pytest.param(
         _ROWS,
         None,
         lambda r: r["server_exit"].update(seen_ns=4_500 * MS),
@@ -701,7 +718,7 @@ _CONTROLS = [
         ),
         f"outside the declared {HOT_REUSE_WINDOW_SECONDS}s window: hot reuse is "
         f"not shown",
-        False,
+        True,
         id="fresh-read-outside-the-window",
     ),
     pytest.param(
@@ -1107,6 +1124,7 @@ def test_the_repeat_compares_classifications_and_refuses_an_invalid_record():
         "released_monotonic_ns",
     ):
         repeat["gates"][0][name] += 7 * MS
+    repeat["watched_until_ns"] += 7 * MS
     repeat["fresh"]["call"]["began_monotonic_ns"] += 900 * MS
     # The cause is a race the contract allows either way, not a classification.
     repeat["cause"] = CAUSE_EXPIRY
