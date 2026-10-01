@@ -81,8 +81,11 @@ from differential.call_loss import (
     GATE_END_SECONDS,
     INVALID,
     PERSON_TOOL,
+    _browsers_of,
     _entered_or_ended,
+    _members,
     _phase,
+    _read_nothing,
     _read_of,
     _release_at,
     _sleep_until,
@@ -874,62 +877,6 @@ def _other_launches(
     gate_launches = owner_launches(gates, windows=windows)
     others += [["release gate", *launch] for launch in gate_launches[len(launches) :]]
     return others
-
-
-def _members(entry: Sequence[Any], record: Mapping[str, Any]) -> list[Sequence[Any]]:
-    """Every recorded lifetime of the launch *entry* names, an owner launch
-    ``[pid, start]`` or ``["release gate", pid, start]``: the launch itself
-    and, on Windows, the interpreter its venv launcher started."""
-    if not entry:
-        return []
-    if entry[0] == "release gate":
-        lifetimes, launch = _sequence(record.get("gate_processes")), entry[1:]
-    elif type(entry[0]) is int:
-        lifetimes, launch = _sequence(record.get("owner_processes")), entry
-    else:
-        return []
-    return [
-        _sequence(p)
-        for p in lifetimes
-        if same_lifetime(_sequence(p)[:2], launch[:2])
-        or _of_launch(_sequence(p)[:2], launch, lifetimes)
-    ]
-
-
-def _browsers_of(
-    members: Sequence[Sequence[Any]], record: Mapping[str, Any]
-) -> list[Sequence[Any]] | None:
-    """The browser roots (``harness.browser_lineage``) one of *members*
-    launched, or None when the roots were not recorded or one of them names
-    no launcher, so whose it was cannot be said."""
-    roots = record.get("browser_roots")
-    if not isinstance(roots, list):
-        return None
-    found = []
-    for root in map(_sequence, roots):
-        if len(root) < 5 or root[3] is None or root[4] is None:
-            return None
-        if any(same_lifetime([root[3], root[4]], member[:2]) for member in members):
-            found.append(root)
-    return found
-
-
-def _read_nothing(entry: Sequence[Any], record: Mapping[str, Any]) -> bool:
-    """Whether the launch *entry* names is shown to have read nothing: every
-    process of it seen gone, and no browser launched by any of them. A launch
-    that read a page had a browser of its own, so this holds whether or not
-    it ever took the lock; how its process timing fell says nothing either
-    way, since an owner releases the lock before it exits. An unrecorded or
-    unattributable browser leaves it not shown."""
-    members = _members(entry, record)
-    if not members or not all(
-        len(member) > 4 and member[4] is not None for member in members
-    ):
-        return False
-    if entry[0] == "release gate":
-        # A gate runs no browser; the owner it started is a launch of its own.
-        return True
-    return _browsers_of(members, record) == []
 
 
 def _started(entry: Sequence[Any]) -> float | None:

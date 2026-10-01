@@ -1052,6 +1052,26 @@ def test_windows_counts_a_venv_launcher_and_its_gate_as_the_owners_one_start():
     assert any("recorded apart as a successor" in p for p in problems), problems
 
 
+def test_an_election_candidate_that_read_nothing_is_no_successor():
+    """Measured on windows-latest: the warm-up's first owner launch, through
+    its own release gate, exited without a browser and a second launch became
+    the owner. That candidate read nothing; one that ran a browser could have,
+    and is a successor."""
+    record = _valid(ROW_H_R5)
+    candidate = _owner_lifetime(4956, 990.0)
+    candidate[4] = 994.3
+    gate = _owner_lifetime(8428, 989.5, digest="gate")
+    gate[4] = 994.3
+    record["owner_processes"].append(candidate)
+    record["gate_processes"] = [gate, _owner_lifetime(772, 994.5, digest="gate2")]
+    record["gate_processes"][1][4] = 1100.0
+    record["browser_roots"] = [[7676, 1000.6, None, _OWNER_PID, _OWNER_START]]
+    assert loss_problems(record, daemon=True) == []
+    record["browser_roots"].append([7600, 990.5, 994.0, 4956, 990.0])
+    problems = loss_problems(record, daemon=True)
+    assert any("recorded apart as a successor" in p for p in problems), problems
+
+
 def test_an_identified_owner_the_row_never_launched_is_no_hot_reuse():
     record = _valid(ROW_H_R4_EOF)
     record["owner_processes"] = []
