@@ -792,7 +792,63 @@ def _owner_kept(record: Mapping[str, Any]) -> bool:
             and seen.get("instance_id") == identified[2]
         ):
             return False
-    return _other_launches(record, identified[:2]) == []
+    return _unexcused_launches(record, identified[:2]) == []
+
+
+def _members(entry: Sequence[Any], record: Mapping[str, Any]) -> list[Sequence[Any]]:
+    """Every recorded lifetime of the launch *entry* names, an owner launch
+    ``[pid, start]`` or ``["release gate", pid, start]``: the launch itself
+    and, on Windows, the interpreter its venv launcher started."""
+    if not entry:
+        return []
+    if entry[0] == "release gate":
+        lifetimes, launch = _sequence(record.get("gate_processes")), entry[1:]
+    elif type(entry[0]) is int:
+        lifetimes, launch = _sequence(record.get("owner_processes")), entry
+    else:
+        return []
+    return [
+        _sequence(p)
+        for p in lifetimes
+        if same_lifetime(_sequence(p)[:2], launch[:2])
+        or _of_launch(_sequence(p)[:2], launch, lifetimes)
+    ]
+
+
+def _browsers_of(
+    members: Sequence[Sequence[Any]], record: Mapping[str, Any]
+) -> list[Sequence[Any]] | None:
+    """The browser roots (``harness.browser_lineage``) one of *members*
+    launched, or None when the roots were not recorded or one of them names
+    no launcher, so whose it was cannot be said."""
+    roots = record.get("browser_roots")
+    if not isinstance(roots, list):
+        return None
+    found = []
+    for root in map(_sequence, roots):
+        if len(root) < 5 or root[3] is None or root[4] is None:
+            return None
+        if any(same_lifetime([root[3], root[4]], member[:2]) for member in members):
+            found.append(root)
+    return found
+
+
+def _read_nothing(entry: Sequence[Any], record: Mapping[str, Any]) -> bool:
+    """Whether the launch *entry* names is shown to have read nothing: every
+    process of it seen gone, and no browser launched by any of them. A launch
+    that read a page had a browser of its own, so this holds whether or not
+    it ever took the lock; how its process timing fell says nothing either
+    way, since an owner releases the lock before it exits. An unrecorded or
+    unattributable browser leaves it not shown."""
+    members = _members(entry, record)
+    if not members or not all(
+        len(member) > 4 and member[4] is not None for member in members
+    ):
+        return False
+    if entry[0] == "release gate":
+        # A gate runs no browser; the owner it started is a launch of its own.
+        return True
+    return _browsers_of(members, record) == []
 
 
 def _other_launches(record: Mapping[str, Any], owner: Sequence[Any]) -> list | None:
@@ -818,6 +874,16 @@ def _other_launches(record: Mapping[str, Any], owner: Sequence[Any]) -> list | N
     if len(gate_launches) > 1:
         others += [["release gate", *launch] for launch in gate_launches[1:]]
     return others
+
+
+def _unexcused_launches(record: Mapping[str, Any], owner: Sequence[Any]) -> list | None:
+    """``_other_launches`` without those shown to have read nothing
+    (``_read_nothing``): an election candidate that lost the lock, before or
+    after the owner the row identified, is the election doing its job."""
+    others = _other_launches(record, owner)
+    if others is None:
+        return None
+    return [entry for entry in others if not _read_nothing(entry, record)]
 
 
 def loss_reading(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -1089,7 +1155,7 @@ def _hot_reuse_findings(record: Mapping[str, Any]) -> list[str]:
                 f"instance {seen.get('instance_id')!r}, not the identified "
                 f"{list(identified)}; hot reuse of the same owner is not shown"
             )
-    successors = _other_launches(record, identified[:2])
+    successors = _unexcused_launches(record, identified[:2])
     if successors is None:
         found.append("the row's owner and release gate lifetimes were not recorded")
     elif successors:

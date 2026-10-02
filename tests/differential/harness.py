@@ -77,7 +77,10 @@ are. **Row H-CAL** (``call_loss``) is the first such row: an unfaulted person
 read through a held, then released, section page. **Rows H-R4 and H-R5**
 lose that read once its held page entered, each by a termination of its own
 (``RowLifecycle.termination``), through ``LossSeams``; a host killed whole
-is a process of its own (``StubHost``).
+is a process of its own (``StubHost``). **Row H-R13** and the **turnover
+lanes** (``retirement_race``) race the read against the owner's retirement,
+idle or asked for, through ``RaceSeams``; a row whose call a successor may
+serve settles that successor in the identified owner's place.
 """
 
 from __future__ import annotations
@@ -122,7 +125,13 @@ from mcp import ClientSession
 from mcp.shared.message import SessionMessage
 from typing_extensions import Unpack
 
-from differential import call_loss, host_comparison, lease_probe, r7_fault
+from differential import (
+    call_loss,
+    host_comparison,
+    lease_probe,
+    r7_fault,
+    retirement_race,
+)
 from differential.baseline import (
     BaselineRefused,
     Runtime,
@@ -2809,6 +2818,73 @@ def owner_gates(observed: Iterable[dict[str, Any]], gates: Sequence[Path]) -> li
     )
 
 
+def browser_lineage(observed: Iterable[dict[str, Any]]) -> list[list[Any]]:
+    """Every browser root the watcher saw this row's actors start, with the
+    process that launched it: ``[pid, start, gone, owner pid, owner start]``.
+
+    A root is a browser process whose parent is not itself a browser (the
+    watcher's own tree rule, ``watcher.browser_roots``); its parent is the
+    driver, and the driver's parent the process that drove it, which in a
+    daemon row is an owner. A parent is the latest lifetime of that pid
+    started no later than its child, with no tolerance: a child is never born
+    before its parent, on any clock the watcher reads. *gone* is when the
+    watcher saw the root exit, or None; the launcher's fields are None where
+    the watcher never saw that ancestor. A launch that read a page had a
+    browser of its own, so this names which launch could have read what,
+    whatever its process timing.
+
+    A lifetime is a browser if any record of it says so: a child sampled
+    between fork and exec is first seen with its parent's command line and
+    only later as the browser it became. Its parent is the one its first
+    record names, before any reparenting.
+    """
+    first: dict[tuple[int, float], dict[str, Any]] = {}
+    browsers: set[tuple[int, float]] = set()
+    gone: dict[tuple[int, float], float] = {}
+    for record in observed:
+        pid, start = record.get("pid"), record.get("start_identity")
+        if type(pid) is not int or not isinstance(start, (int, float)):
+            continue
+        key = (pid, float(start))
+        if record.get("kind") not in (
+            "process.start",
+            "process.update",
+            "process.exit",
+        ):
+            continue
+        first.setdefault(key, record)
+        if record.get("actor") == "browser":
+            browsers.add(key)
+        if record.get("kind") == "process.exit" and isinstance(
+            record.get("t"), (int, float)
+        ):
+            gone.setdefault(key, float(record["t"]))
+
+    def parent_of(
+        child: tuple[int, float],
+    ) -> tuple[int, float] | None:
+        ppid = first[child].get("ppid")
+        found = [key for key in first if key[0] == ppid and key[1] <= child[1]]
+        return max(found, key=lambda key: key[1]) if found else None
+
+    roots = []
+    for key in sorted(browsers, key=lambda key: key[1]):
+        parent = parent_of(key)
+        if parent is not None and parent in browsers:
+            continue
+        launcher = parent_of(parent) if parent is not None else None
+        roots.append(
+            [
+                key[0],
+                key[1],
+                gone.get(key),
+                launcher[0] if launcher is not None else None,
+                launcher[1] if launcher is not None else None,
+            ]
+        )
+    return roots
+
+
 def launch_lifetimes(
     observed: Iterable[dict[str, Any]],
     gates: Sequence[Path],
@@ -4679,6 +4755,124 @@ def observe_owner(
     return seen
 
 
+def observe_roots(
+    label: str,
+    account: ActorAccount,
+    *,
+    browser_exe: str | None = None,
+    browser_dir: str | Path | None = None,
+    process_iter: Callable[..., Iterable[Any]] | None = None,
+) -> dict[str, Any]:
+    """The browser roots on the row's profile now, each ``[pid, start]``, by
+    the watcher's own predicate (``host_comparison.census_roots``); None
+    when the census could not say. Stamped on both clocks as it began, and
+    on the monotonic clock as its census was done (``done_ns``): a reading
+    lies between the two, never at the first alone."""
+    point: dict[str, Any] = {
+        "label": label,
+        "seen": time.time(),
+        "seen_ns": time.monotonic_ns(),
+    }
+    census = profile_census(
+        account,
+        browser_exe=browser_exe,
+        browser_dir=browser_dir,
+        process_iter=process_iter,
+    )
+    found = {
+        "entries": [census_entry(process) for process in census.processes],
+        "unresolved": list(census.unresolved),
+    }
+    point["done_ns"] = time.monotonic_ns()
+    roots = host_comparison.census_roots(found, account.browser_key)
+    point["roots"] = [list(root) for root in roots] if roots is not None else None
+    point["unresolved"] = list(census.unresolved)
+    return point
+
+
+def descriptor_written(account: ActorAccount) -> dict[str, Any]:
+    """When the row's descriptor was last written, by the wall clock.
+
+    Only looked at, as ``find_the_owner`` looks: the file's own time, which
+    an owner sets as it prepares its publication, so no later than the
+    publication itself.
+    """
+    path = daemon_descriptor.descriptor_path(account.auth_root)
+    try:
+        return {"written": path.stat().st_mtime}
+    except FileNotFoundError:
+        return {"written": None}
+    except OSError as exc:
+        return {"written": None, "error": f"{type(exc).__name__}: {exc}"}
+
+
+#: The bound on the stand-down request, as the product's own sender keeps one.
+_STAND_DOWN_REQUEST_SECONDS = 10.0
+
+
+def ask_to_stand_down(
+    account: ActorAccount, identified: OwnerIdentity | None
+) -> dict[str, Any]:
+    """Ask the identified owner to stand down, as a newer build does.
+
+    The product's own request (``daemon_election._ask_to_stand_down``): a POST
+    with no body to ``daemon_owner.STAND_DOWN_PATH``, with the bearer token
+    read from the row's own auth root, through the owner's loopback client.
+    Sent only when the descriptor still names the owner the row identified,
+    so the request cannot reach another. The token goes into no record; the
+    answer's status and its ``standing_down`` flag do.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    from linkedin_mcp_server import daemon_owner
+
+    found: dict[str, Any] = {
+        "addressed": False,
+        "sent_ns": None,
+        "answered_ns": None,
+        "status": None,
+        "standing_down": None,
+        "error": None,
+    }
+    try:
+        published = daemon_descriptor.read(account.auth_root)
+        if (
+            identified is None
+            or published is None
+            or published.pid != identified.pid
+            or published.instance_id != identified.instance_id
+        ):
+            found["error"] = "the descriptor does not name the owner the row identified"
+            return found
+        published.check_endpoint_is_local()
+        parts = urlsplit(published.url)
+        url = urlunsplit(
+            (parts.scheme, parts.netloc, daemon_owner.STAND_DOWN_PATH, "", "")
+        )
+        found["addressed"] = True
+        with daemon_owner.direct_http_client(
+            timeout=_STAND_DOWN_REQUEST_SECONDS
+        ) as client:
+            headers = {
+                "Authorization": "Bearer "
+                + daemon_descriptor.read_token(account.auth_root, published)
+            }
+            found["sent_ns"] = time.monotonic_ns()
+            response = client.post(url, headers=headers)
+            found["answered_ns"] = time.monotonic_ns()
+    except Exception as exc:  # noqa: BLE001 - the request's own evidence
+        found["error"] = type(exc).__name__
+        return found
+    found["status"] = response.status_code
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        found["standing_down"] = body.get("standing_down")
+    return found
+
+
 def compare_repeat(first: RowVector, second: RowVector) -> list[str]:
     """K0: every field of two runs of the same experiment must agree."""
     one, two = asdict(first), asdict(second)
@@ -5106,7 +5300,9 @@ class RowContext:
 
     A row that loses its host mid-call (``RowLifecycle.termination``) also
     gets ``loss``: the one way it may end the host's server, and the passive
-    readings it takes afterwards.
+    readings it takes afterwards. A row that races the owner's retirement
+    (``RowLifecycle.race``) gets ``race``: its readings, and on a turnover
+    lane the stand-down.
     """
 
     row: str
@@ -5131,6 +5327,8 @@ class RowContext:
     _gates: list[Gate]
     #: Only on a row that loses its host (``LossSeams``).
     loss: LossSeams | None = None
+    #: Only on a row that races the owner's retirement (``RaceSeams``).
+    race: RaceSeams | None = None
 
     def emit(self, actor: str, kind: str, **fields: Any) -> None:
         self._emit(actor, kind, **fields)
@@ -5204,6 +5402,38 @@ class RowContext:
 
 
 @dataclass(frozen=True)
+class RaceSeams:
+    """What a row racing the owner's retirement may read (``RowContext.race``).
+
+    Readings, and one action on a row declared to take it
+    (``RowLifecycle.stands_down``): ``stand_down``, the product's own
+    bodyless stand-down request to the owner the row identified, with the
+    token read from the row's own auth root and kept out of every record.
+    Nothing here signals or ends anything. Every reading waits and sends
+    nothing, and the ones taken at a moment stamp it (``seen_ns``); none
+    raises.
+    """
+
+    #: Which owner the descriptor names now, and whether the identified one
+    #: is alive (``LossSeams.owner_reading``).
+    owner_reading: Callable[[str], Awaitable[dict[str, Any]]]
+    #: The row's own daemon log, as written so far; every owner's.
+    owner_log: Callable[[], list[str]]
+    #: Whether the identified owner is seen gone within the seconds given.
+    owner_exit: Callable[[float], Awaitable[dict[str, Any]]]
+    #: The host's server's or frontend's stderr so far, every line in order.
+    host_output: Callable[[], list[str]]
+    #: The browser roots on the row's profile now (``observe_roots``).
+    roots: Callable[[str], Awaitable[dict[str, Any]]]
+    #: The profile's browser waited for (``wait_for_no_browser``).
+    browser_gone: Callable[[float], Awaitable[dict[str, Any]]]
+    #: When the row's descriptor was written, by the wall clock, or None.
+    published: Callable[[], dict[str, Any]]
+    #: Ask the identified owner to stand down (``ask_to_stand_down``).
+    stand_down: Callable[[], Awaitable[dict[str, Any]]] | None = None
+
+
+@dataclass(frozen=True)
 class RowLifecycle:
     """How one row runs, declared before it may (``ROWS``)."""
 
@@ -5225,6 +5455,14 @@ class RowLifecycle:
     script: Callable[[RowContext], Awaitable[None]] | None = None
     #: What the record says of K2, for a row without a K2 column.
     k2: Mapping[str, Any] | None = None
+    #: The script races the owner's retirement and gets ``RaceSeams``.
+    race: bool = False
+    #: The script may ask the identified owner to stand down
+    #: (``RaceSeams.stand_down``).
+    stands_down: bool = False
+    #: The row may end on an owner that replaced the identified one, which the
+    #: row then waits for and settles in its place.
+    successor: bool = False
 
 
 ROW_H_CAL = call_loss.ROW_H_CAL
@@ -5264,6 +5502,35 @@ ROWS: dict[str, RowLifecycle] = {
         )
         for row, case in call_loss.LOSS_CASES.items()
     },
+    # H-R13: a read racing the owner's idle exit, with an idle timeout of its
+    # own; when retirement wins, the call is served by a successor.
+    **{
+        row: RowLifecycle(
+            idle_timeout=retirement_race.IDLE_RACE_TIMEOUT_SECONDS,
+            recorded=True,
+            scenarios=False,
+            script=retirement_race.idle_script,
+            k2=retirement_race.K2_NOT_APPLICABLE,
+            race=True,
+            successor=row == retirement_race.ROW_RETIREMENT,
+        )
+        for row in retirement_race.IDLE_ROWS
+    },
+    # The owner turned over under a held read, in the calibration's
+    # configuration; daemon only.
+    **{
+        row: RowLifecycle(
+            idle_timeout=retirement_race.TURNOVER_IDLE_TIMEOUT_SECONDS,
+            recorded=True,
+            scenarios=False,
+            script=retirement_race.turnover_script,
+            k2=retirement_race.K2_NOT_APPLICABLE,
+            race=True,
+            stands_down=True,
+            successor=case.successor,
+        )
+        for row, case in retirement_race.TURNOVER_CASES.items()
+    },
 }
 
 #: The verdict over each recorded row's raw record, appended after
@@ -5273,6 +5540,10 @@ ROW_VERDICTS: dict[str, RowVerdict] = {
     ROW_H_R3: host_comparison.problems_for,
     ROW_H_CAL: call_loss.calibration_problems,
     **{row: call_loss.loss_problems for row in call_loss.LOSS_CASES},
+    **{row: retirement_race.idle_problems for row in retirement_race.IDLE_ROWS},
+    **{
+        row: retirement_race.turnover_problems for row in retirement_race.TURNOVER_CASES
+    },
 }
 
 
@@ -5309,6 +5580,14 @@ def lifecycle_problems(row: str, lifecycle: RowLifecycle) -> list[str]:
             problems.append("a loss with no script to make it")
         if lifecycle.scenarios:
             problems.append("a loss that combines with other scenarios")
+    if lifecycle.race or lifecycle.stands_down:
+        # The race and the stand-down are the script's to make and observe.
+        if lifecycle.script is None:
+            problems.append("a race with no script to run it")
+        if lifecycle.scenarios:
+            problems.append("a race that combines with other scenarios")
+    if lifecycle.stands_down and not lifecycle.race:
+        problems.append("a stand-down with no race seams to send it")
     return problems
 
 
@@ -5834,6 +6113,8 @@ async def measure_host_quit_row(
     )
     #: Every gate the row's script armed; the teardown releases each one.
     armed_gates: list[Gate] = []
+    #: The row's host's server or frontend stderr, every line as it came.
+    host_lines: list[str] = []
     #: H-R3: the actor the checkpoints read, as its handle, pid and start.
     r3_actor: list[tuple[Any, int, float]] = []
     #: H-R2: host B's read, when host B was seen to start, and the hold on
@@ -7119,10 +7400,93 @@ async def measure_host_quit_row(
             return []
         return path.read_text(errors="replace").splitlines()
 
+    async def race_owner_exit(seconds: float) -> dict[str, Any]:
+        """``RaceSeams.owner_exit``: the identified owner's own handle,
+        polled on the loop, so it can run beside the row's calls."""
+        process = identified.process if identified is not None else None
+        how = "no owner"
+        if process is not None:
+            deadline = time.monotonic() + seconds
+            while True:
+                alive = is_alive(process)
+                if alive is False:
+                    how = "exited"
+                    break
+                if time.monotonic() >= deadline:
+                    how = "still running" if alive else "unknown"
+                    break
+                await asyncio.sleep(0.05)
+        return {"how": how, "seen_ns": time.monotonic_ns(), "seen": time.time()}
+
+    async def race_roots(label: str) -> dict[str, Any]:
+        """``RaceSeams.roots``: on a thread the row owns."""
+        try:
+            return await run_owned(
+                f"roots: {label}",
+                observe_roots,
+                label,
+                account,
+                browser_exe=browser_exe,
+                browser_dir=browsers,
+                seconds=_CHECKPOINT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 - the reading's own evidence
+            return {
+                "label": label,
+                "roots": None,
+                "seen": time.time(),
+                "seen_ns": time.monotonic_ns(),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    async def race_browser_gone(seconds: float) -> dict[str, Any]:
+        """``RaceSeams.browser_gone``: waited for, on a thread the row owns."""
+        found: dict[str, Any] = {}
+        try:
+            found["remaining"] = await run_owned(
+                "the browser after its close",
+                wait_for_no_browser,
+                account,
+                seconds,
+                seconds=seconds + 30.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - the reading's own evidence
+            found["error"] = f"{type(exc).__name__}: {exc}"
+        found["seen_ns"] = time.monotonic_ns()
+        return found
+
+    async def race_stand_down() -> dict[str, Any]:
+        """``RaceSeams.stand_down``: the request, on a thread the row owns."""
+        try:
+            found = await run_owned(
+                "ask the owner to stand down",
+                ask_to_stand_down,
+                account,
+                identified,
+                seconds=_STAND_DOWN_REQUEST_SECONDS + 20.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - the request's own evidence
+            found = {"addressed": False, "error": type(exc).__name__}
+        return found
+
+    def race_seams() -> RaceSeams:
+        """``RowContext.race``: the stand-down only on a row declared to send it."""
+        return RaceSeams(
+            owner_reading=loss_owner_reading,
+            owner_log=loss_owner_log,
+            owner_exit=race_owner_exit,
+            host_output=lambda: list(host_lines),
+            roots=race_roots,
+            browser_gone=race_browser_gone,
+            published=lambda: descriptor_written(account),
+            stand_down=race_stand_down if lifecycle.stands_down else None,
+        )
+
     async def declared_script(call: ToolCall, transport: LiveHost) -> None:
         """The row's own script, on the context it is allowed."""
         assert lifecycle.script is not None and row_record is not None
         live.append(transport)
+        race = race_seams() if lifecycle.race else None
         seams = (
             LossSeams(
                 prepare=prepare_loss,
@@ -7152,6 +7516,7 @@ async def measure_host_quit_row(
                 _emit=emit,
                 _gates=armed_gates,
                 loss=seams,
+                race=race,
             )
         )
 
@@ -7193,17 +7558,22 @@ async def measure_host_quit_row(
             if lifecycle.termination == call_loss.HOST_KILLED
             else run_host_session
         )
-        host = await host_session(
-            command,
-            env=env,
-            cwd=work_dir,
-            on_stderr=lambda line: emit(
+
+        def host_stderr(line: str) -> None:
+            host_lines.append(line)
+            emit(
                 "frontend",
                 "user.output",
                 stream="stderr",
                 line=line,
                 **({"host": "A"} if second_host else {}),
-            ),
+            )
+
+        host = await host_session(
+            command,
+            env=env,
+            cwd=work_dir,
+            on_stderr=host_stderr,
             after_call=after_call,
             started=lambda pid: server.update(pid=pid),
             tool=lifecycle.initial.tool,
@@ -7260,13 +7630,14 @@ async def measure_host_quit_row(
             held = r7_defer.take()
             if held is not None:
                 raise held
-        if (kill_actor or shim is not None) and daemon:
+        if (kill_actor or shim is not None or lifecycle.successor) and daemon:
             # The owner the frontend recovered to is the one that now has to
             # leave through its idle exit and be cleaned up. If nothing else
-            # was published since, the killed owner's own handle stays, so
-            # cleanup settles it as gone rather than meeting its descriptor as
-            # one it never identified. A different owner that could not be
-            # identified keeps its own record: that is the row's finding.
+            # was published since, the killed (or retired) owner's own handle
+            # stays, so cleanup settles it as gone rather than meeting its
+            # descriptor as one it never identified. A different owner that
+            # could not be identified keeps its own record: that is the row's
+            # finding.
             killed_owner, killed_record = identified, dict(owner)
             owner.clear()
             identified = None
@@ -7286,7 +7657,9 @@ async def measure_host_quit_row(
                 identified = killed_owner
                 owner.clear()
                 owner.update(killed_record)
-            owner["replaced_after_kill"] = replaced
+            owner[
+                "replaced_after_kill" if kill_actor or shim is not None else "replaced"
+            ] = replaced
             if shim is not None:
                 owner["successor"] = dict(successor)
         if host.tool is not None:
@@ -7798,6 +8171,7 @@ async def measure_host_quit_row(
         )
         row_record["owner_processes"] = owners
         row_record["gate_processes"] = gates
+        row_record["browser_roots"] = browser_lineage(observed_events)
     if comparison is not None:
         # Selected by the row, so its record is required: a missing window, a
         # failed hook or script fails here however healthy the vector is.
