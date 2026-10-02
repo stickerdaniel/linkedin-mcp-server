@@ -135,6 +135,16 @@ if mode == "helper-now":
         stdin=subprocess.DEVNULL,
     )
     sys.exit(0)
+if mode == "unreadable-now":
+    # The same, but a helper whose environment cannot show the marker, as
+    # macOS hides one of its own restricted binaries': here cleared.
+    import subprocess
+    subprocess.Popen(
+        ["/usr/bin/env", "-i", sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
+    sys.exit(0)
 if mode == "daemonize":
     # A helper that detaches by double fork and a new session, while the
     # command itself stays a while: never its descendant by ancestry.
@@ -277,14 +287,17 @@ async def test_a_command_is_not_settled_while_a_helper_it_started_runs(tmp_path)
     [
         "helper-now",
         pytest.param("daemonize", marks=posix),
+        pytest.param("unreadable-now", marks=posix),
     ],
 )
 async def test_a_helper_no_ancestry_names_is_still_the_commands_to_settle(
     tmp_path, mode
 ):
-    """One started as the command exits, or detached by double fork into a
-    session of its own: no poll sees it as a child, but it carries the
-    command's marker, so the command is not settled and the teardown ends it."""
+    """One started as the command exits, detached by double fork into a
+    session of its own, or started as the command exits with no marker to
+    read: no poll sees it as a child, but it carries the command's marker or
+    stays in its process group, so the command is not settled and the
+    teardown ends it."""
     command = _driver(tmp_path, mode, terminal=False)
     try:
         await command.wait(30)

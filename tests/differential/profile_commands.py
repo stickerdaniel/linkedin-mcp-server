@@ -325,8 +325,9 @@ class TerminalCommand:
     a fresh pseudo-terminal, which the parent closes once the child holds
     it; the parent reads the master side. On pipes, stdin is a pipe and
     stdout and stderr one more. A thread of its own reads until the output
-    ends; nothing is ever written but an answer the row gives. The command
-    stays in the harness's process group, as a host's server does, and is
+    ends; nothing is ever written but an answer the row gives. On POSIX the
+    command leads a process group of its own, as a shell's job does, which
+    names what it starts apart from its environment (``_marked``). It is
     signalled only by ``interrupt`` (the row's own Ctrl-C) and ``end`` (the
     teardown's, after which nothing about it counts as settled by itself).
     """
@@ -376,6 +377,10 @@ class TerminalCommand:
         #: its exit and its output (a browser it launched, a helper with its
         #: own output) and must be settled too.
         self.descendants: dict[tuple[int, float], Any] = {}
+        #: The command's process group on POSIX, its own pid; None on Windows.
+        #: Read only while a member was seen at every scan: an empty group
+        #: frees its number for reuse, so it is never read again.
+        self.group: int | None = None
 
     def _collect(self) -> None:
         """Record the command's descendants now. Only while it is alive: once
@@ -396,26 +401,45 @@ class TerminalCommand:
                 continue
 
     def _marked(self) -> None:
-        """Record every process now carrying this command's marker. A process
-        inherits its parent's environment however it detaches, double fork
-        and new session included, so this finds what ancestry cannot: a
-        helper started just before the command exits, or one that left the
-        tree. A process another user owns cannot carry it and is skipped; one
-        that cleared its own environment escapes, which the docstring of
-        ``COMMAND_MARKER_ENV`` states."""
+        """Record every process now in the command's process group or
+        carrying its marker: what ancestry cannot find, a helper started just
+        before the command exits or one that left the tree.
+
+        Each covers what the other cannot read. A process inherits the
+        marker however it detaches, double fork and new session included,
+        but an environment is not always readable from outside: macOS hands
+        back an empty one for its own restricted binaries (``/bin/sleep``,
+        ``/usr/bin/security``), and Linux refuses it for a non-dumpable
+        process. The group is read from the kernel for any process, and is
+        left only by one that starts a group or session of its own. A helper
+        that does both, an unreadable binary that leaves the group, escapes;
+        no command here starts one."""
         import psutil
 
         own = os.getpid()
+        member = False
         for process in psutil.process_iter():
             if process.pid == own:
                 continue
             try:
-                if process.environ().get(COMMAND_MARKER_ENV) != self.marker:
+                grouped = (
+                    self.group is not None and os.getpgid(process.pid) == self.group
+                )
+            except OSError:
+                grouped = False
+            member = member or grouped
+            try:
+                if (
+                    not grouped
+                    and process.environ().get(COMMAND_MARKER_ENV) != self.marker
+                ):
                     continue
                 key = (process.pid, process.create_time())
             except (psutil.Error, OSError):
                 continue
             self.descendants.setdefault(key, process)
+        if not member:
+            self.group = None
 
     def _alive_descendants(self) -> list[tuple[int, float]]:
         """The descendants recorded or now marked, still running as the same
@@ -454,6 +478,7 @@ class TerminalCommand:
                     env=self.env,
                     cwd=self.cwd,
                     close_fds=True,
+                    process_group=0,
                 )
             except BaseException:
                 os.close(master)
@@ -471,12 +496,15 @@ class TerminalCommand:
                     stderr=subprocess.STDOUT,
                     env=self.env,
                     cwd=self.cwd,
+                    process_group=None if os.name == "nt" else 0,
                 )
             except BaseException:
                 self.started_ns = None
                 raise
             assert self.process.stdout is not None
             self._fd = self.process.stdout.fileno()
+        if os.name != "nt" and self.process is not None:
+            self.group = self.process.pid
         self._reader = threading.Thread(
             target=self._read, name=f"profile command {self.label}", daemon=True
         )
