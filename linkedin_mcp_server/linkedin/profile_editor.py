@@ -41,6 +41,8 @@ _FIELD_TIMEOUT_MS = 10_000
 _SETTLE_MS = 500
 _SETTLE_READS = 8
 _VIEW_SETTLE_MS = 2_500
+_MAX_VIEW_SCROLLS = 8
+_SCROLL_SETTLE_MS = 1_500
 _OPTION_TIMEOUT_MS = 6_000
 _DATE_RANGE = re.compile(r"\b(19|20)\d{2}\b")
 
@@ -362,12 +364,25 @@ class ProfileEditor:
         found: dict[str, str] = {}
 
         async def collect() -> None:
-            items = await self._page.evaluate(
-                sel.LIST_ITEMS_JS, sel.SKILL_EDIT_HREF.pattern
-            )
-            for item in items:
-                if item["lines"] and item["id"] not in found:
-                    found[item["id"]] = item["lines"][0]
+            # Each view also loads more as it scrolls: read, scroll, and stop
+            # once a scroll brings nothing new.
+            for attempt in range(_MAX_VIEW_SCROLLS):
+                before = len(found)
+                items = await self._page.evaluate(
+                    sel.LIST_ITEMS_JS, sel.SKILL_EDIT_HREF.pattern
+                )
+                for item in items:
+                    if item["lines"] and item["id"] not in found:
+                        found[item["id"]] = item["lines"][0]
+                if len(found) == before and attempt > 0:
+                    break
+                # The list scrolls inside its own container, not the window:
+                # bringing the last loaded item into view scrolls whichever
+                # container holds it, which loads the next batch.
+                await self._page.evaluate(
+                    sel.SCROLL_LAST_ITEM_JS, sel.SKILL_EDIT_HREF.pattern
+                )
+                await self._page.wait_for_timeout(_SCROLL_SETTLE_MS)
 
         await collect()
         filters = self._page.locator(sel.SKILL_FILTER_BUTTONS)

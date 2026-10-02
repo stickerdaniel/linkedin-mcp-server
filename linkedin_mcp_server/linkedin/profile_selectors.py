@@ -205,3 +205,14 @@ LIST_ITEMS_JS = r"""
 # category buttons are the siblings of the one marked aria-current, found by
 # structure rather than by their (localized) names.
 SKILL_FILTER_BUTTONS = "main ul:has(> li > button[aria-current]) > li > button"
+
+# Runs in the page: bring the last entity edit link into view, so the list's own
+# scroll container (not the window) moves and loads its next batch.
+SCROLL_LAST_ITEM_JS = r"""
+(pattern) => {
+  const re = new RegExp(pattern);
+  const links = [...document.querySelectorAll('main a[href]')].filter((a) => re.test(a.getAttribute('href')));
+  if (links.length) links[links.length - 1].scrollIntoView({block: 'end'});
+  return links.length;
+}
+"""
