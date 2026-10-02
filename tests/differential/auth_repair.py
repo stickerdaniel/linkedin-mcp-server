@@ -31,12 +31,17 @@ latch is asked (``sequential_tool_middleware`` ahead of the tool's readiness
 gate), and the login holds the profile until it is done, so the second read
 waits at the owner for up to ``BROWSER_WAIT`` and meets no marker; a marker
 of its own (the latch) is the branch the models cover. The row releases the
-completion once the second read is shown in flight (``SECOND_SENT_SECONDS``),
-which keeps the login inside ``LOGIN_TIMEOUT`` and the second read inside
-``BROWSER_WAIT``; a second read that the owner gave up on before the login
-let go of the profile is that ordering missed, invalid evidence. Nothing
-reads on the stale generation, one fresh session is issued, and both reads
-end on it. **Failed login**
+completion once the owner's own progress for that wait reaches the second
+host (``PROFILE_WAIT_PROGRESS``, ``SECOND_WAITING_SECONDS``), which keeps
+the login inside ``LOGIN_TIMEOUT`` and the second read inside
+``BROWSER_WAIT``; without that report the cell is invalid, whatever the
+frontend said. A second read the owner gave up on after its whole wait,
+while the login's page still asked, is that ordering missed, invalid
+evidence; one it gave up on sooner is a finding. Nothing reads on the stale
+generation, one fresh session is issued, and both reads end on it. A
+release after the login's last ask is the row's only when the login asked
+for its whole budget; a login that stopped sooner failed on its own, a
+finding. **Failed login**
 (``ROW_FAILED``): the completion is never released; no replay, the login
 settles failed inside its own budget, and the session's fate is read without
 anything that could sign in again (``must-not-repair``: the origin's own
@@ -134,10 +139,14 @@ from differential.session import (
     ORIGIN_REJECTED,
     REPLACED_AFTER_AUTHORIZATION,
 )
-from differential.synthetic_origin import ALLOWED_HOSTS, COMPLETED_BY_ROW
+from differential.synthetic_origin import (
+    ALLOWED_HOSTS,
+    COMPLETED_BY_ROW,
+    LOGIN_POLL_INTERVAL_SECONDS,
+    LOGIN_POLL_TIMEOUT_SECONDS,
+)
 from linkedin_mcp_server.config.loaders import EnvironmentKeys
 from linkedin_mcp_server.config.schema import DEFAULT_BROWSER_WAIT_SECONDS
-from linkedin_mcp_server.daemon_liveness import HEARTBEAT_PATH
 
 if TYPE_CHECKING:
     from differential.harness import AuthSeams, RowContext
@@ -193,6 +202,17 @@ LOGIN_SETTLE_SECONDS = 60.0
 #: frontend's read waits this long at the owner while the login holds the
 #: profile, which it does until about 18 s after its wall (``ROW_SECOND``).
 BROWSER_WAIT_SECONDS = DEFAULT_BROWSER_WAIT_SECONDS
+#: How far the second host's clock can misplace the owner's wait for the
+#: profile against the owner's own: its start is heard when the owner's
+#: report reaches the host's handler and its end when the answer reaches the
+#: host, each the same loopback path through the frontend, so only the
+#: difference of two such hops is in it.
+PROFILE_WAIT_TOLERANCE_SECONDS = 1.0
+#: The longest the wall's page leaves between two asks the origin records:
+#: one ask aborted unanswered, then the pause before the next. A login that
+#: waited out its whole ``LOGIN_TIMEOUT`` asked for at least that budget less
+#: this, since its wait starts no sooner than the page's first ask.
+LOGIN_ASK_GAP_SECONDS = LOGIN_POLL_TIMEOUT_SECONDS + LOGIN_POLL_INTERVAL_SECONDS
 
 #: The cell's environment, over the row's: the same in every column. The
 #: automatic import is off, so no real browser profile or keystore is ever
@@ -219,15 +239,15 @@ CLOSE_SECONDS = 60.0
 #: From the cold read to the login's first ask: a cold browser start and its
 #: validation, the owner's answer, and a headed login browser's start.
 LOGIN_START_SECONDS = 120.0
-#: From the second host's start to its read shown in flight
-#: (``_second_in_flight``): a frontend's start, measured at 1 to 4 s, and
-#: one heartbeat cadence. The login looks for the session only once its
-#: manual wait starts, about 15 s after its wall, and lets go of the profile
-#: about 3 s after it finds one. Released by this bound's end, about 15 s
-#: after the wall, it lets go by about 18.5 s after the wall: inside
-#: ``LOGIN_TIMEOUT``, and inside the second read's ``BROWSER_WAIT``, which
-#: runs from that read's dispatch, after the wall.
-SECOND_SENT_SECONDS = 15.0
+#: From the second host's start to the owner saying the second read waits
+#: for the profile (``_second_waiting``): a frontend's start, measured at 1
+#: to 4 s, its tool lookup and the call reaching the owner. The login looks
+#: for the session only once its manual wait starts, about 15 s after its
+#: wall, and lets go of the profile about 3 s after it finds one. Released by
+#: this bound's end, about 15 s after the wall, it lets go by about 18.5 s
+#: after the wall: inside ``LOGIN_TIMEOUT``, and inside the second read's
+#: ``BROWSER_WAIT``, which starts with that report, after the wall.
+SECOND_WAITING_SECONDS = 15.0
 #: From the release to the session issued, the generation written and the
 #: login browser gone: the product's own 15 s, its export and its close.
 COMPLETION_SECONDS = 90.0
@@ -262,6 +282,12 @@ PEER_LINE = "Another client already signed in"
 #: ``sequential_tool_middleware``: a server's wait for a profile another
 #: process holds ran out, and it answered that the browser is busy.
 PROFILE_WAIT_LINE = "gave up waiting for the shared browser"
+#: ``sequential_tool_middleware``: the progress a server reports for a call
+#: that is about to wait for a profile another process holds, sent right
+#: before that wait starts and relayed by a frontend to the host that called.
+#: It is the owner's own word that the call got past the frontend's tool
+#: lookup and session to the profile, which no line of the frontend's is.
+PROFILE_WAIT_PROGRESS = "waiting for it to hand over"
 #: ``core.browser``: a browser launch that failed.
 START_FAILED_LINE = "Failed to start browser"
 #: ``drivers.browser``: a server refusing to launch because a close of its
@@ -321,18 +347,32 @@ def _count(lines: Sequence[str], text: str) -> int:
     return sum(1 for line in lines if text in line)
 
 
-def _second_in_flight(seams: AuthSeams, second: asyncio.Future[Any]) -> bool:
-    """Whether the second host's read is at the owner and not over: its
-    frontend beat for it twice. The first beat is the preflight, and only a
-    validated answer dispatches the call; the next follows one cadence later
-    and only while that call runs (``daemon_proxy``). The owner's own wait
-    for the profile is logged at debug only, so its start is not observed."""
-    return not second.done() and _count(seams.second_output(), HEARTBEAT_PATH) >= 2
+def profile_wait_started(progress: Sequence[Any]) -> int | None:
+    """When the host first heard the owner say its read waits for the
+    profile (``PROFILE_WAIT_PROGRESS``), or ``None``."""
+    for item in progress:
+        heard = _mapping(item)
+        if PROFILE_WAIT_PROGRESS in str(heard.get("message") or ""):
+            return _ns(heard.get("seen_ns"))
+    return None
+
+
+def _second_waiting(seams: AuthSeams, second: asyncio.Future[Any]) -> bool:
+    """Whether the second host's read waits at the owner for the profile the
+    login holds, and is not over: the owner's own report of that wait reached
+    the second host. Nothing the frontend says can show it, its heartbeats
+    least of all: they start before its fresh tool lookup and session, so
+    they beat on while the call has not reached the owner at all."""
+    return (
+        not second.done() and profile_wait_started(seams.second_progress()) is not None
+    )
 
 
 def _login_over(seams: AuthSeams) -> bool:
     """Whether the first frontend says its login ended, either way: it waits
-    for the login task, which lets go of the profile before it ends."""
+    for the login task, which lets go of the profile before it ends. Seen by
+    a poll, so the time it is seen bounds the profile's release from above
+    only."""
     flags = _flags(seams.host_output())
     return bool(flags["signed_in"] or flags["not_replayed"])
 
@@ -446,18 +486,21 @@ async def repair_script(ctx: RowContext) -> None:
             )
         if ctx.row == ROW_SECOND and asked is not None:
             pending = second = asyncio.ensure_future(seams.second_host())
-            # Released once the second read is shown at the owner, so the
-            # record proves it was there while the login held the profile.
-            # Released after the bound anyway, so the login still ends inside
-            # its own budget; the verdict then reads the cell invalid.
-            sent = await _until(
-                lambda: _second_in_flight(seams, pending), SECOND_SENT_SECONDS
+            # Released once the owner says the second read waits for the
+            # profile, so the record proves it was there while the login held
+            # it. Released after the bound anyway, so the login still ends
+            # inside its own budget; the verdict then reads the cell invalid
+            # from the second host's own progress, which it keeps.
+            await _until(
+                lambda: _second_waiting(seams, pending), SECOND_WAITING_SECONDS
             )
-            record["second_sent_ns"] = time.monotonic_ns() if sent else None
         if case.release and asked is not None:
             record["release"] = seams.release()
             _phase(ctx, "released", _ns(record["release"].get("released_ns")))
         if second is not None:
+            # When the first frontend is seen saying its login ended: the
+            # latest the login can have let go of the profile. It still held
+            # it at its page's last ask, which the origin records.
             over = await _until(lambda: _login_over(seams), COMPLETION_SECONDS)
             record["login_over_ns"] = time.monotonic_ns() if over else None
         await asyncio.wait({read}, timeout=READ_SECONDS)
@@ -729,17 +772,50 @@ def _authorized(record: Mapping[str, Any], kind: str, *, by: int | None) -> list
     return []
 
 
-RELEASED_LATE = f"{INVALID}the completion was released after the login stopped asking"
+RELEASED_LATE = (
+    f"{INVALID}the completion was released after the login had asked for its "
+    f"whole budget"
+)
+
+
+def late_release(record: Mapping[str, Any]) -> str | None:
+    """How a release after the login's last ask reads, or ``None`` when the
+    login still asked after it.
+
+    The login's last ask is the origin's: its page asked, so its browser was
+    open. A login that asked for its whole ``LOGIN_TIMEOUT``, less the longest
+    gap between two asks (``LOGIN_ASK_GAP_SECONDS``), ran out waiting for the
+    row: the row's ordering and never the product's (``RELEASED_LATE``), so
+    nothing that follows from a release is judged. One that stopped sooner
+    gave up on its own before anything was released: the product's, a
+    finding, judged with everything that follows from it.
+    """
+    login = _login(record)
+    released = _ns(login.get("released_ns"))
+    first = _ns(login.get("first_poll_ns"))
+    last = _ns(login.get("last_poll_ns"))
+    if released is None or last is None or last >= released:
+        return None
+    if first is None:
+        return (
+            f"{INVALID}the completion was released after the login's last ask, "
+            f"and when it began to ask is not recorded"
+        )
+    asked = (last - first) / 1e9
+    if asked >= LOGIN_TIMEOUT_SECONDS - LOGIN_ASK_GAP_SECONDS:
+        return RELEASED_LATE
+    return (
+        f"the login stopped asking for its completion {asked:.1f}s after its "
+        f"first ask, before its LOGIN_TIMEOUT of {LOGIN_TIMEOUT_SECONDS:g}s and "
+        f"before the release"
+    )
 
 
 def _released_late(record: Mapping[str, Any]) -> bool:
-    """Whether the row released the completion only after the login's last
-    ask: nothing could be issued after it, the row's ordering and never the
-    product's, so nothing that follows from a release is judged."""
-    login = _login(record)
-    released = _ns(login.get("released_ns"))
-    last = _ns(login.get("last_poll_ns"))
-    return released is not None and last is not None and last < released
+    """Whether the release came after the login's last ask in a way that is
+    the row's, or not shown to be the product's: nothing after it is
+    judged."""
+    return (late_release(record) or "").startswith(INVALID)
 
 
 def _one_issue(record: Mapping[str, Any]) -> list[str]:
@@ -753,8 +829,11 @@ def _one_issue(record: Mapping[str, Any]) -> list[str]:
         return [f"{INVALID}the row did not release the completion"]
     if asked is None or released < asked:
         found.append(f"{INVALID}the completion was released before the login asked")
-    if _released_late(record):
-        return [*found, RELEASED_LATE]
+    late = late_release(record)
+    if late is not None:
+        found.append(late)
+        if _released_late(record):
+            return found
     issued = _issued(record)
     if not issued:
         found.append("no fresh session was issued after the release")
@@ -962,42 +1041,83 @@ def second_met(record: Mapping[str, Any]) -> str:
     return MET_MARKER if any(lines.get(end) for end in ends) else MET_PROFILE
 
 
-def _profile_wait_ran_out(record: Mapping[str, Any], call: Mapping[str, Any]) -> bool:
-    """Whether the owner gave up on the second read's wait for the profile
-    before the first frontend's login let go of it: the release missed one
-    of the two budgets with the product's own values."""
+def second_failure(record: Mapping[str, Any], call: Mapping[str, Any]) -> str:
+    """Why the second host's read did not end on the fresh session.
+
+    The owner's busy answer is the row's only once the owner is shown to
+    have waited its whole ``BROWSER_WAIT`` while the login still held the
+    profile: the wait's start heard (``profile_wait_started``), the answer
+    at least that budget later less ``PROFILE_WAIT_TOLERANCE_SECONDS``, and
+    the answer in by the login's last ask, when the login's browser was
+    still open. Then the release missed one of the two budgets, invalid
+    evidence. A shorter wait is the owner refusing early, and an answer that
+    came after the first frontend said its login was over is the owner not
+    taking a free profile: findings both. A full wait that ended between
+    those two is not shown either way, invalid with its own reason. Without
+    the wait's start nothing shows the budget expired, so the failed read
+    stands as one."""
+    failed = (
+        f"the second host's read did not end on the new generation: outcome "
+        f"{call.get('outcome')!r}, error {call.get('is_error')!r}"
+    )
     ran_out = record.get("profile_waits_ran_out")
+    start = profile_wait_started(
+        _sequence(_mapping(record.get("second")).get("progress"))
+    )
+    began = _ns(call.get("began_monotonic_ns"))
     ended = _ns(call.get("ended_monotonic_ns"))
+    if not isinstance(ran_out, int) or ran_out < 1:
+        return failed
+    if start is None or began is None or ended is None:
+        return failed
+    waited = (ended - start) / 1e9
+    if waited < BROWSER_WAIT_SECONDS - PROFILE_WAIT_TOLERANCE_SECONDS:
+        return (
+            f"the owner gave up on the second read's wait for the profile after "
+            f"{waited:.1f}s, before its BROWSER_WAIT of {BROWSER_WAIT_SECONDS:g}s"
+        )
+    held = _ns(_login(record).get("last_poll_ns"))
+    if held is not None and ended <= held:
+        return (
+            f"{INVALID}the owner gave up on the second read's wait for the profile "
+            f"({BROWSER_WAIT_SECONDS:g}s) while the login still held it: the "
+            f"release missed one of the two budgets"
+        )
+    # The wait began no sooner than the call was sent, so the owner gave up
+    # no sooner than this.
+    gave_up = began + int((waited - PROFILE_WAIT_TOLERANCE_SECONDS) * 1e9)
     over = _ns(record.get("login_over_ns"))
+    if over is not None and gave_up > over:
+        return failed
     return (
-        isinstance(ran_out, int)
-        and ran_out > 0
-        and ended is not None
-        and (over is None or ended < over)
+        f"{INVALID}the owner gave up on the second read's wait for the profile "
+        f"({BROWSER_WAIT_SECONDS:g}s), and whether the login still held it then "
+        f"is not shown"
     )
 
 
 def _second(record: Mapping[str, Any]) -> list[str]:
-    """The second host's read was at the owner before the release, and ended
-    on the fresh session; a frontend a marker reached ran it again once."""
+    """The owner said the second host's read waited for the profile before
+    the release, and the read ended on the fresh session; a frontend a
+    marker reached ran it again once."""
     second = _mapping(record.get("second"))
     found: list[str] = []
-    sent = _ns(record.get("second_sent_ns"))
     released = _ns(_login(record).get("released_ns"))
     if not second.get("made"):
         return [f"{INVALID}the second host never ran: {second.get('why')!r}"]
     call = _mapping(second.get("call"))
     began = _ns(call.get("began_monotonic_ns"))
+    waiting = profile_wait_started(_sequence(second.get("progress")))
     if (
-        sent is None
+        waiting is None
         or released is None
         or began is None
-        or sent > released
-        or began > released
+        or waiting < began
+        or waiting > released
     ):
         found.append(
-            f"{INVALID}the second host's read was not shown at the owner before "
-            f"the release"
+            f"{INVALID}the owner did not say the second host's read waited for "
+            f"the profile before the release"
         )
     if second.get("forwarded") is not True:
         found.append("the second host's call was not forwarded to the owner")
@@ -1008,17 +1128,7 @@ def _second(record: Mapping[str, Any]) -> list[str]:
             f"again exactly once: {lines.get('replayed')!r}"
         )
     if not _read_the_post(call):
-        if _profile_wait_ran_out(record, call):
-            found.append(
-                f"{INVALID}the owner gave up on the second read's wait for the "
-                f"profile ({BROWSER_WAIT_SECONDS:g}s) before the login let go of "
-                f"it: the release missed one of the two budgets"
-            )
-        else:
-            found.append(
-                f"the second host's read did not end on the new generation: "
-                f"outcome {call.get('outcome')!r}, error {call.get('is_error')!r}"
-            )
+        found.append(second_failure(record, call))
     elif (_ns(call.get("ended_monotonic_ns")) or 0) < (released or 0):
         found.append(f"{INVALID}the second host's read ended before the release")
     if second.get("quit_problems"):

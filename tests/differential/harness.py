@@ -1368,6 +1368,21 @@ class HostSession:
 #: A row's scripted phase: it is handed a function that calls one tool through
 #: the host's own client and returns the call's summary.
 ToolCall = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
+#: What the host's client is told of a call's progress: the value, the total
+#: and the message (FastMCP's ``ProgressHandler``).
+ProgressReport = Callable[[float, float | None, str | None], Awaitable[None]]
+
+
+def progress_recorder(into: list[dict[str, Any]]) -> ProgressReport:
+    """A progress handler for a host's client that keeps each message with
+    when the host heard it, on the harness's monotonic clock. Passive: the
+    client sends a progress token with every call whether or not one is
+    given (its default handler only logs), so the wire is the same."""
+
+    async def heard(progress: float, total: float | None, message: str | None) -> None:
+        into.append({"message": message, "seen_ns": time.monotonic_ns()})
+
+    return heard
 
 
 async def run_host_session(
@@ -1386,6 +1401,7 @@ async def run_host_session(
     on_process: Callable[[Any], None] | None = None,
     row_script: TransportScript | None = None,
     before_stop: Callable[[], Awaitable[None]] | None = None,
+    on_progress: ProgressReport | None = None,
 ) -> HostSession:
     """Initialize, call the read tool once, then quit the way a host does.
 
@@ -1401,7 +1417,8 @@ async def run_host_session(
     process object the moment it is spawned. *row_script* is a declared row's
     scripted phase, run where *script* would be, with the live transport as
     well; the two are one or the other. *before_stop* is the transport's
-    hook of that name.
+    hook of that name. *on_progress* is the client's progress handler
+    (``progress_recorder``); without it the client keeps its default.
     """
     if script is not None and row_script is not None:
         raise ValueError("a host session runs one scripted phase, not two")
@@ -1424,7 +1441,12 @@ async def run_host_session(
     # The initialize handshake, as a host sends it. FastMCP 4's default probes
     # server/discover first and settles on the 2026-07-28 era with a FastMCP 4
     # server, a different path from the one every row so far measured.
-    client = Client(transport, init_timeout=_INIT_SECONDS, mode="legacy")
+    client = Client(
+        transport,
+        init_timeout=_INIT_SECONDS,
+        mode="legacy",
+        progress_handler=on_progress,
+    )
     try:
         async with client:
             if started is not None and transport.pid is not None:
@@ -5708,8 +5730,9 @@ class AuthSeams:
     #: A second host with the row's own command and environment, one read of
     #: the feed and a normal quit, its lines its own (``LossSeams.fresh_read``).
     second_host: Callable[[], Awaitable[dict[str, Any]]]
-    #: The latest second host's frontend stderr so far, while it runs.
-    second_output: Callable[[], list[str]]
+    #: The progress the latest second host's client heard for its read so
+    #: far, while it runs (``progress_recorder``).
+    second_progress: Callable[[], list[dict[str, Any]]]
     #: Which owner the descriptor names now (``LossSeams.owner_reading``).
     owner_reading: Callable[[str], Awaitable[dict[str, Any]]]
     #: The row's own daemon log, as written so far; every owner's.
@@ -8142,8 +8165,8 @@ async def measure_host_quit_row(
     authorizations: list[Authorization] = []
     #: The second hosts the row ran; each server held until it is gone.
     second_hosts: list[HostSession] = []
-    #: Each second host's stderr as it arrives, the latest last.
-    second_lines: list[list[str]] = []
+    #: Each second host's progress as its client hears it, the latest last.
+    second_progress: list[list[dict[str, Any]]] = []
 
     def auth_snapshot(label: str) -> dict[str, Any]:
         """``AuthSeams.snapshot``: the artefacts alone, stamped when read."""
@@ -8209,8 +8232,8 @@ async def measure_host_quit_row(
         directory = work_dir / f"second-{len(second_hosts) + 1}"
         directory.mkdir(exist_ok=True)
         held: list[Retained] = []
-        lines: list[str] = []
-        second_lines.append(lines)
+        progress: list[dict[str, Any]] = []
+        second_progress.append(progress)
 
         def hold(process: Any) -> None:
             held.append(
@@ -8221,12 +8244,16 @@ async def measure_host_quit_row(
             )
 
         def heard(line: str) -> None:
-            lines.append(line)
             emit("frontend", "user.output", stream="stderr", host="second", line=line)
 
         launched_ns = time.monotonic_ns()
         second = await run_host_session(
-            command, env=env, cwd=directory, on_stderr=heard, on_process=hold
+            command,
+            env=env,
+            cwd=directory,
+            on_stderr=heard,
+            on_process=hold,
+            on_progress=progress_recorder(progress),
         )
         second_hosts.append(second)
         if held and held[0].check(0.0):
@@ -8241,6 +8268,7 @@ async def measure_host_quit_row(
             "forwarded": any(_FORWARDING_LINE in line for line in second.stderr),
             "quit_problems": host_failures(second),
             "lines": auth_repair._flags(second.stderr),
+            "progress": list(progress),
             "retained": bool(held) and retained(held[0]),
         }
 
@@ -8253,7 +8281,9 @@ async def measure_host_quit_row(
             snapshot=auth_snapshot,
             browser_gone=race_browser_gone,
             second_host=auth_second_host,
-            second_output=lambda: list(second_lines[-1]) if second_lines else [],
+            second_progress=lambda: (
+                list(second_progress[-1]) if second_progress else []
+            ),
             owner_reading=loss_owner_reading,
             owner_log=loss_owner_log,
             host_output=lambda: list(host_lines),
