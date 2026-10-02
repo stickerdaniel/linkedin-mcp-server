@@ -848,7 +848,7 @@ def _seconds(value: object) -> float:
 
 def _largest_gap_cause(largest: dict[str, Any], priority: object) -> str:
     """Name the largest part of the gap the watcher broke down, and the
-    largest timed operation of the sample that closed it."""
+    slowest process read of the sample that closed it."""
     outside = largest.get("outside_sampling") or {}
     inside = largest.get("in_sample") or {}
     sample = largest.get("sample") or {}
@@ -871,16 +871,24 @@ def _largest_gap_cause(largest: dict[str, Any], priority: object) -> str:
         (_seconds(phases.get(phase)), f"{name} in the sample", "")
         for phase, name in _GAP_PHASE_NAMES.items()
     ]
-    parts += [
-        (
-            _seconds(stats.get("seconds")),
-            f"{kind} reads in the sample",
-            f", over {stats.get('count')} reads, the longest "
-            f"{_seconds(stats.get('max_seconds')):.4f}s of pid {stats.get('max_pid')}",
-        )
+    # Reads compete as one phase, whatever kinds they were split across; the
+    # kind that took most of them explains it.
+    kinds = [
+        (_seconds(stats.get("seconds")), kind, stats)
         for kind, stats in (sample.get("read_kinds") or {}).items()
         if isinstance(stats, dict)
     ]
+    reads_detail = ""
+    if kinds:
+        kind_seconds, kind, stats = max(kinds, key=lambda entry: entry[0])
+        reads_detail = (
+            f", most of it {kind} reads: {kind_seconds:.4f}s over "
+            f"{stats.get('count')} reads, the longest "
+            f"{_seconds(stats.get('max_seconds')):.4f}s of pid {stats.get('max_pid')}"
+        )
+    parts.append(
+        (_seconds(phases.get("reads")), "process reads in the sample", reads_detail)
+    )
     parts.append(
         (_seconds(inside.get("unaccounted")), "untimed time in the sample", "")
     )
@@ -899,7 +907,7 @@ def _largest_gap_cause(largest: dict[str, Any], priority: object) -> str:
         f"largest part was {name} at {seconds:.4f}s{detail}; the watcher used "
         f"{_seconds(outside.get('cpu_seconds')):.4f}s of CPU outside sampling "
         f"and {_seconds(sample.get('cpu_seconds')):.4f}s in the sample; the "
-        f"largest timed operation in that sample was {operation}"
+        f"slowest process read in that sample was {operation}"
     )
 
 
@@ -941,7 +949,7 @@ def _gap_cause(summary: dict[str, Any]) -> str:
     ]
     return (
         f"this summary has no breakdown of the sample that closed it; the "
-        f"largest timed operation of each of the run's slowest samples was "
+        f"slowest process read of each of the run's slowest samples was "
         f"{largest_timed or 'not recorded'}"
     )
 

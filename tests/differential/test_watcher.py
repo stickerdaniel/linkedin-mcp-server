@@ -1835,8 +1835,8 @@ def _largest_part(failure: str) -> tuple[str, float]:
     [
         ("last_pid", "reading the kernel's last pid in the sample"),
         ("enumeration", "enumerating pids in the sample"),
-        ("cmdline", "cmdline reads in the sample"),
-        ("pgid", "pgid reads in the sample"),
+        ("cmdline", "process reads in the sample"),
+        ("pgid", "process reads in the sample"),
         ("canonicalization", "canonicalizing paths in the sample"),
         ("bookkeeping", "classification and bookkeeping in the sample"),
         ("tracker", "turning the previous sample into events outside sampling"),
@@ -1854,14 +1854,25 @@ def test_a_gap_names_the_phase_its_time_went_to(monkeypatch, site, named):
     name, seconds = _largest_part(failure)
     assert name == named, failure
     assert seconds == pytest.approx(_STALL, abs=0.01)
-    if name.endswith("reads in the sample"):
+    if name == "process reads in the sample":
+        assert f"most of it {site} reads" in failure
         assert f"the longest {_STALL:.4f}s of pid 70" in failure
     assert "outside sampling" in failure
-    assert "largest timed operation in that sample was" in failure
+    assert "slowest process read in that sample was" in failure
     assert "waited" not in failure
     # The phases of the sample that closed it add up to its duration.
     sample = summary["largest_gap"]["sample"]
     assert sum(sample["phases"].values()) == pytest.approx(sample["seconds"])
+
+
+def test_reads_split_across_kinds_compete_as_one_phase(monkeypatch):
+    """0.8s of reads split between two kinds outweigh 0.6s of bookkeeping."""
+    summary, _ = _timed_run(
+        monkeypatch, {4: {"cmdline": 0.4, "pgid": 0.4, "bookkeeping": 0.6}}
+    )
+    name, seconds = _largest_part(_gap_failure(summary))
+    assert name == "process reads in the sample"
+    assert seconds == pytest.approx(0.8, abs=0.01)
 
 
 def test_a_late_wakeup_says_how_long_the_sleep_asked_for(monkeypatch):
@@ -1894,7 +1905,7 @@ def test_a_gap_names_the_sample_that_closed_it_not_the_runs_slowest(monkeypatch)
     assert seconds == pytest.approx(0.6)
     assert "0.5500s of it passed between two samples, outside sampling" in failure
     assert "0.6000s in the sample that closed it" in failure
-    assert "0.6000s in the sample; the largest timed operation" in failure
+    assert "0.6000s in the sample; the slowest process read" in failure
     assert "0.9000" not in failure
 
 
