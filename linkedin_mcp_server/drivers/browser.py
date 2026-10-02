@@ -1,5 +1,5 @@
 """
-Patchright browser management for LinkedIn scraping.
+Patchright browser management for reading LinkedIn.
 
 Provides async browser lifecycle management using BrowserManager with persistent
 context. Implements a singleton pattern for browser reuse across tool calls with
@@ -950,7 +950,7 @@ async def validate_session() -> bool:
     """
     Check whether startup authentication has already succeeded for this browser.
 
-    Mid-session expiry is detected during real LinkedIn navigations and scraper
+    Mid-session expiry is detected during real LinkedIn navigations and page-read
     auth checks rather than via a fresh login probe on every tool call.
 
     Returns:

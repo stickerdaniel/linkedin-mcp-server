@@ -448,7 +448,7 @@ class BrowserManager:
                 # nothing to a child that already read it. A driver that keeps
                 # promoting `other` targets would put a component extension's
                 # page into `context.pages`, and the code below takes the first
-                # one as the page to authenticate and scrape with.
+                # one as the page to authenticate and read with.
                 # Bounded, and a failure aborts the fallback. Starting another
                 # Chromium while the first driver may still own this profile is
                 # concurrent access, so only a confirmed driver stop may proceed.
