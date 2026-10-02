@@ -75,6 +75,12 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year <a href="https:
 | `get_job_details` | Read the details of a LinkedIn job posting by its job ID. |
 | `get_feed` | Read recent home-feed posts, with links in `references`. |
 | `search_posts` | Search posts by keyword with optional recency filters; `references` contains unordered candidate post links. |
+| `get_my_editable_profile` | Read your own headline, about, experiences (with stable ids), skills and limits as structured fields. |
+| `get_my_experience` / `get_my_skills` | Read your experience entries or skills for editing. |
+| `propose_profile_changes` | Create a previewable change set for your own profile. Does not modify LinkedIn. |
+| `preview_profile_changes` | Show exact before/after values and detect edits made since the proposal. |
+| `apply_profile_changes` | Apply an approved change set and verify each field. Needs `confirm=true` and `MCP_LINKEDIN_WRITE_ENABLED=true`. See [Editing your own profile](#editing-your-own-profile). |
+| `discard_profile_changes` | Discard a pending change set. |
 | `close_session` | Close the active browser session and release its resources. |
 
 <br/>
@@ -713,6 +719,184 @@ With a paid provider, use a sticky residential session that holds one address (n
 
 <br/>
 <br/>
+
+## Editing your own profile
+
+The server can read your own profile as structured fields and, only after you
+approve an exact diff, write changes to it. It edits **your own profile only**,
+and only the fields listed below. It is for occasional, human-directed profile
+maintenance: there is no bulk mode, nothing retries a failed write, and every
+write is paced.
+
+> [!WARNING]
+> Writing to LinkedIn through browser automation is outside LinkedIn's terms of
+> use, even on your own account. Keep edits occasional and human-directed.
+
+### Setup
+
+Install and sign in as for any other tool (see [Setup with uvx](#setup-with-uvx-recommended)
+or [Setup from Source](#setup-from-source-develop--contribute)). The profile tools reuse the
+same persistent browser profile, so no extra login is needed.
+
+### Authentication
+
+- No username, password or MFA code is ever passed through MCP or stored.
+- With no valid session, the first tool call opens LinkedIn in a browser window;
+  sign in there by hand. The session is kept in the server's normal profile
+  directory (`~/.linkedin-mcp/profile`).
+- If LinkedIn shows a security checkpoint, CAPTCHA or restriction, the tool
+  returns `AUTHENTICATION_REQUIRED` and stops. Clear it on linkedin.com yourself;
+  nothing is bypassed or retried.
+
+### MCP configuration
+
+Writes are **disabled by default**. Reading, proposing and previewing work
+without the flag; applying needs it. Claude Code:
+
+```bash
+claude mcp add linkedin --env MCP_LINKEDIN_WRITE_ENABLED=true -- uvx mcp-server-linkedin@latest
+```
+
+Claude Desktop / any `mcpServers` client:
+
+```json
+{
+  "mcpServers": {
+    "linkedin": {
+      "command": "uvx",
+      "args": ["mcp-server-linkedin@latest"],
+      "env": {
+        "MCP_LINKEDIN_WRITE_ENABLED": "true",
+        "LINKEDIN_PROFILE_EDITS_DIR": "~/.linkedin-mcp/profile-edits"
+      }
+    }
+  }
+}
+```
+
+Leave `MCP_LINKEDIN_WRITE_ENABLED` unset (or `false`) to make the server
+read-only for profiles. `LINKEDIN_PROFILE_EDITS_DIR` is optional.
+
+### Read tools
+
+| Tool | Returns |
+|------|---------|
+| `get_my_editable_profile` | name, headline, location, about, experiences (each with an `id` taken from LinkedIn's own position id), skills in order, and the character limits LinkedIn's forms enforce |
+| `get_my_experience` | all positions; or, with `experienceId`, that position's exact title and full description |
+| `get_my_skills` | skills with their position |
+
+`get_my_profile` (raw section text) is unchanged.
+
+### Profile change workflow
+
+```
+get_my_editable_profile
+        ↓
+propose_profile_changes      → change set + diff      (LinkedIn untouched)
+        ↓
+preview_profile_changes      → re-checks the profile  (LinkedIn untouched)
+        ↓
+   you approve
+        ↓
+apply_profile_changes(changeSetId, confirm=true)     (writes, then re-reads and verifies)
+```
+
+Example `propose_profile_changes` input:
+
+```json
+{
+  "changes": {
+    "headline": "Senior Product Engineer | React, TypeScript, Node.js | AI Products",
+    "about": "…",
+    "experiences": [
+      {"experienceId": "2183776", "description": "…"},
+      {"match": {"company": "Liftango", "startDate": "2019"}, "title": "Lead Engineer"}
+    ],
+    "skills": {"add": ["TypeScript", "Node.js"], "remove": ["jQuery"]}
+  }
+}
+```
+
+The response is a change set with a `diff` such as:
+
+```
+HEADLINE
+before: Senior Software Developer
+after:  Senior Product Engineer | React, TypeScript, Node.js | AI Products
+
+SKILLS
++ TypeScript
++ Node.js
+- jQuery
+```
+
+Nothing changes until `apply_profile_changes` is called with `confirm: true`.
+Each field is then written one at a time and re-read from LinkedIn; a field is
+`verified: true` only when the saved value is observed.
+
+**Supported:** headline, About, title and description of an existing experience,
+adding and removing skills. **Not supported (returns `UNSUPPORTED_FIELD`):**
+location, employment type, dates, education, featured, creating or deleting
+positions, reordering skills.
+
+### Safety
+
+- **Two independent gates.** `MCP_LINKEDIN_WRITE_ENABLED=true` on the server *and*
+  `confirm: true` on the call. Neither implies the other.
+- **No automatic edits.** An agent can propose from "improve my profile"; only a
+  separate, confirmed `apply_profile_changes` writes.
+- **Applied once.** A change set moves `PENDING_APPROVAL → APPLYING → APPLIED /
+  PARTIAL_FAILURE / FAILED`, or to `DISCARDED` / `STALE`, and never back.
+- **Never overwrites a manual edit.** The proposal records a fingerprint of every
+  value it changes. Preview and apply re-read them, and the editor checks the
+  visible value again before typing; any difference returns `STALE_CHANGE_SET`.
+- **Never guesses a target.** Experiences are addressed by LinkedIn's position id;
+  a `match` that fits more than one returns `AMBIGUOUS_EXPERIENCE` with candidates.
+- **Never truncates.** Over-long text returns `VALIDATION_ERROR` with
+  `proposedLength`, `allowedLength` and `overflow`. Limits are read from the form.
+- **Skills** match case-insensitively but are added only on an exact LinkedIn
+  typeahead match, keeping LinkedIn's display name (`reactjs` → `ReactJS`).
+- **Partial failures stop.** The first failure stops the run; earlier fields stay
+  applied and are reported, later ones are `NOT_ATTEMPTED`. Nothing is rolled
+  back automatically.
+- **Local records, no secrets.** Under `LINKEDIN_PROFILE_EDITS_DIR`
+  (default `~/.linkedin-mcp/profile-edits`): `change-sets/<id>.json`,
+  `profile-history/<time>_<id>.json` (the old values, written before any change,
+  for a manual rollback) and `audit.jsonl`. None of them contain cookies,
+  tokens, headers or browser storage. `data/` and `profile-edits/` are git-ignored.
+- **LinkedIn's UI changes.** Locators live in
+  `linkedin_mcp_server/linkedin/profile_selectors.py`. When LinkedIn changes a
+  form, the tool returns `SELECTOR_NOT_FOUND` with a list of the dialog's controls
+  instead of clicking anything else.
+
+### Manual test against your own profile
+
+1. Start read-only: run the server without `MCP_LINKEDIN_WRITE_ENABLED`, call
+   `get_my_editable_profile`, and check every field against linkedin.com.
+2. `propose_profile_changes` with a small headline change, then
+   `preview_profile_changes`. Confirm linkedin.com is unchanged.
+3. `apply_profile_changes` without `confirm` → `CONFIRMATION_REQUIRED`; with
+   `confirm: true` → `WRITES_DISABLED`.
+4. Restart with `MCP_LINKEDIN_WRITE_ENABLED=true`, apply, and check the result
+   reports `verified: true` and linkedin.com shows the new headline.
+5. Apply the same change set again → `CHANGE_SET_NOT_PENDING`.
+6. Propose another change, edit the headline by hand on linkedin.com, then apply
+   → `STALE_CHANGE_SET`, and your manual edit is untouched.
+7. Restore your original headline from `profile-history/` with one more change set.
+
+Use `--no-headless` while testing to watch each step.
+
+### Troubleshooting
+
+| Result | What to do |
+|--------|------------|
+| `AUTHENTICATION_REQUIRED` | Sign in or clear the checkpoint on linkedin.com in your own browser, then retry. |
+| `SELECTOR_NOT_FOUND` | LinkedIn's form changed or your account uses a non-English UI. The `details.dialog.controls` list shows what the form contains; update `profile_selectors.py` (add a `LABELS` locale for other languages). |
+| `STALE_CHANGE_SET` | The profile changed since the proposal. Read it again and propose afresh. |
+| `WRITES_DISABLED` | Restart the server with `MCP_LINKEDIN_WRITE_ENABLED=true`. |
+| `VERIFICATION_FAILED` | LinkedIn stored something other than what was approved (shown as `observed`). Check the field on linkedin.com. |
+| `PARTIAL_FAILURE` | See `results`: verified fields are live; propose a new change set for the rest. |
+
 
 ## Setup from Source (Develop & Contribute)
 
