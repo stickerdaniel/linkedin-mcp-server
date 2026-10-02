@@ -941,18 +941,13 @@ def _owner_reading(
     ]
 
 
-def _launch_start(entry: Sequence[Any]) -> float | None:
-    """When a launch ``_other_launches`` names started, on the wall clock."""
-    at = entry[2] if entry and isinstance(entry[0], str) else entry[1]
-    return float(at) if isinstance(at, (int, float)) else None
-
-
-def _owner_through_b(
-    record: Mapping[str, Any], identified: Sequence[Any], a2_sent: float | None
-) -> list[str]:
-    """What B did to the owner A elected, settled before A2 was sent and so
-    judged whatever A2 later met: the same lifetime and instance before and
-    after B, no stand-down while B ran, and no owner launched before A2."""
+def _owner_through_b(record: Mapping[str, Any], identified: Sequence[Any]) -> list[str]:
+    """What B did to the owner A elected, settled by the readings taken
+    around B and the log read after it: the same lifetime and instance
+    before and after B, and no stand-down while B ran. Judged whatever A2
+    later met, or whether it was sent at all. Owner launches are not judged
+    here: a launch's start time cannot place it before A2's send (Linux
+    reports process starts hundreds of milliseconds early)."""
     found = _owner_reading(record, identified, "owner_before_b")
     found += _owner_reading(record, identified, "owner_after_b")
     lines = _mapping(record.get("owner_lines_after_b"))
@@ -965,36 +960,22 @@ def _owner_through_b(
         )
     elif lines.get("stood_down"):
         found.append("the owner stood down while B ran")
+    return found
+
+
+def _owner_kept_through_a2(
+    record: Mapping[str, Any], identified: Sequence[Any]
+) -> list[str]:
+    """The owner A elected still the one after A2, and no other owner
+    launched in the row: neither B nor anything after it replaced it."""
+    found = _owner_reading(record, identified, "owner_after_a2")
     others = _other_launches(record, identified[:2])
     if others is None:
         found.append(
             f"{INVALID}the row's owner and release-gate lifetimes were not recorded"
         )
-    else:
-        early = [
-            entry
-            for entry in others
-            if a2_sent is None or (_launch_start(entry) or a2_sent) < a2_sent
-        ]
-        if early:
-            found.append(f"another owner was launched before A2 was sent: {early}")
-    return found
-
-
-def _owner_kept_through_a2(
-    record: Mapping[str, Any], identified: Sequence[Any], a2_sent: float | None
-) -> list[str]:
-    """The owner A elected still the one after A2, and no owner launched from
-    A2 on: B left nothing that replaced it later."""
-    found = _owner_reading(record, identified, "owner_after_a2")
-    others = _other_launches(record, identified[:2]) or []
-    late = [
-        entry
-        for entry in others
-        if a2_sent is not None and (_launch_start(entry) or a2_sent) >= a2_sent
-    ]
-    if late:
-        found.append(f"another owner was launched beside the one A elected: {late}")
+    elif others:
+        found.append(f"another owner was launched beside the one A elected: {others}")
     return found
 
 
@@ -1031,6 +1012,11 @@ def rival_problems(record: Mapping[str, Any] | None, *, daemon: bool) -> list[st
         problems.append(f"{INVALID}A read {len(reads)} profiles, not the one A2")
     a2 = reads[0] if len(reads) == 1 else None
     problems += _order(record, a1, a2)
+    identified = _identified(record) if daemon else None
+    if identified is not None and "owner_after_b" in record:
+        # B observed: what it did to the owner is settled before A2, and is
+        # judged whatever A2 met, or whether it was sent at all.
+        problems += _owner_through_b(record, identified)
     if a2 is None:
         return [*problems, f"{INVALID}A2 was never sent"]
     rival = _mapping(record.get("rival"))
@@ -1044,12 +1030,6 @@ def rival_problems(record: Mapping[str, Any] | None, *, daemon: bool) -> list[st
         read="B's read",
         whose="B's own server",
     )
-    identified = _identified(record) if daemon else None
-    a2_sent = _number(a2.get("began"))
-    if identified is not None:
-        # What B did is settled before A2 was sent; whatever A2 then met,
-        # the guards below leave it judged.
-        problems += _owner_through_b(record, identified, a2_sent)
     if daemon and _near_idle(a1, _ns(a2.get("began_monotonic_ns"))):
         # Whatever A2 met, the owner may have retired on its own first.
         return [*problems, f"{INVALID}{NEAR_IDLE}"]
@@ -1067,7 +1047,7 @@ def rival_problems(record: Mapping[str, Any] | None, *, daemon: bool) -> list[st
         assert identified is not None
         reader = _members(list(identified[:2]), record)
         whose = "the owner A1 reached"
-        problems += _owner_kept_through_a2(record, identified, a2_sent)
+        problems += _owner_kept_through_a2(record, identified)
     else:
         reader = server_members(record, _mapping(record.get("host_a")).get("pid"))
         whose = "A's own server"
