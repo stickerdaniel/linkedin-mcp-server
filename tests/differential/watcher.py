@@ -38,8 +38,11 @@ read again on every sample, as anywhere else.
 **What a lifetime is cannot change, so it is asked once.** Its owning user is
 read once per pid and create time, and a lifetime a full read found gone
 (``NoSuchProcess``) is not read again, however long its pid stays listed.
-Every read is timed: the summary names the slowest, and every sample of at
-least ``SLOW_SAMPLE_SECONDS`` with the read it waited on longest.
+Every read is timed, and each sample's time is charged to its phases
+(``SAMPLE_PHASES``). The summary names the slowest read, keeps every sample of
+at least ``SLOW_SAMPLE_SECONDS`` with its phases, and keeps the largest gap
+between two samples with what the time outside sampling went to
+(``BETWEEN_STEPS``) and the phases of the sample that closed it.
 
 **When each sample was taken is part of the evidence.** The summary's
 ``sample_log`` gives every sample's start, its end (the time its events
@@ -146,7 +149,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import psutil
 
@@ -176,10 +179,23 @@ NO_EXEC = os.name == "nt"
 #: passed on to the interpreter it starts.
 SCHEDULING_CLASS: int | None = getattr(psutil, "HIGH_PRIORITY_CLASS", None)
 
-#: A sample at least this long is recorded with its slowest single read, so a
-#: stall names the call and the process it waited on. A quarter of the gap
-#: budget the rows accept (``harness.MAX_WATCHER_GAP_SECONDS``).
+#: A sample at least this long is recorded with its phases and its largest
+#: timed read. A quarter of the gap budget the rows accept
+#: (``harness.MAX_WATCHER_GAP_SECONDS``).
 SLOW_SAMPLE_SECONDS = 0.25
+#: What a sample's time is charged to. Every instant of a sample belongs to
+#: the phase current then, so the phases add up to the sample's duration:
+#: ``last_pid`` and ``enumeration`` open it, ``reads`` is every timed read of
+#: one process (by kind in ``read_kinds``), ``canonicalization`` every path
+#: resolved to name a profile or compare an executable, and ``bookkeeping``
+#: everything else: the loop around the reads, classification and judgement.
+SAMPLE_PHASES = ("last_pid", "enumeration", "reads", "canonicalization", "bookkeeping")
+#: What the time between one sample's end and the next one's start is
+#: charged to, in the order it passes: turning the sample into events,
+#: serializing and writing them, the flush, the sleep asked for, how much
+#: later than asked it returned, and the stop-file check. Whatever none of
+#: them took is the record's ``unaccounted``.
+BETWEEN_STEPS = ("tracker", "write", "flush", "sleep", "wakeup_delay", "stop_check")
 #: At most this many slow samples are kept, the first ones.
 _SLOW_SAMPLES_KEPT = 100
 #: At most this many failed group reads are kept, the first ones.
@@ -631,8 +647,9 @@ class Sampler:
     Windows's by default and set in tests to model either platform. *pgid_of*
     reads a process's group, ``os.getpgid`` by default. *read_markers* says
     whether browser markers are read (``READ_MARKERS``). *timer* times each
-    read, ``time.perf_counter`` by default. *last_pid_of* reads the kernel's
-    last allocated pid as each sample begins (``read_last_pid``).
+    read and phase, ``time.perf_counter`` by default, and *cpu* is the
+    process's CPU time (``time.process_time``). *last_pid_of* reads the
+    kernel's last allocated pid as each sample begins (``read_last_pid``).
     """
 
     def __init__(
@@ -652,9 +669,11 @@ class Sampler:
         read_markers: bool = READ_MARKERS,
         timer: Callable[[], float] = time.perf_counter,
         last_pid_of: Callable[[], int | None] = read_last_pid,
+        cpu: Callable[[], float] = time.process_time,
     ) -> None:
         self.root_pid = root_pid
         self._timer = timer
+        self._cpu = cpu
         self._last_pid = last_pid_of
         #: When the sample in progress began, and the kernel's last pid then.
         self.began_at: float | None = None
@@ -705,6 +724,16 @@ class Sampler:
         #: Every sample of at least ``SLOW_SAMPLE_SECONDS``, up to a bound.
         self.slow_samples: list[dict[str, Any]] = []
         self.slow_sample_count = 0
+        #: The phase the sample in progress is in, since when, and what each
+        #: phase, read kind and canonicalization has taken so far.
+        self._phase = "bookkeeping"
+        self._phase_mark = 0.0
+        self._phase_seconds = dict.fromkeys(SAMPLE_PHASES, 0.0)
+        self._read_kinds: dict[str, dict[str, Any]] = {}
+        self._canonicalizations = 0
+        self._canonical_max = 0.0
+        #: The last sample's phases and largest timed read (``_record_cost``).
+        self.breakdown: dict[str, Any] | None = None
         #: Every group read that failed for a process still there.
         self.group_read_failures: list[dict[str, Any]] = []
         self.group_read_failure_count = 0
@@ -740,7 +769,44 @@ class Sampler:
         }
 
     def possible_browser(self, exe: str | None) -> bool:
-        return possible_browser(exe, self.browser_exe, self.browser_dir)
+        return self._canonical(
+            lambda: possible_browser(exe, self.browser_exe, self.browser_dir)
+        )
+
+    def _enter(self, phase: str) -> tuple[str, float]:
+        """Charge the time since the last switch to the current phase, then
+        switch to *phase*; return the phase left and when."""
+        now = self._timer()
+        self._phase_seconds[self._phase] += now - self._phase_mark
+        self._phase_mark = now
+        previous, self._phase = self._phase, phase
+        return previous, now
+
+    def _leave(self, previous: str, entered: float) -> float:
+        """Charge the time since the last switch to the current phase, then
+        switch back to *previous*; return the seconds since *entered*."""
+        now = self._timer()
+        self._phase_seconds[self._phase] += now - self._phase_mark
+        self._phase_mark = now
+        self._phase = previous
+        return now - entered
+
+    def _in_phase(self, phase: str, call: Callable[[], Any]) -> Any:
+        previous, entered = self._enter(phase)
+        try:
+            return call()
+        finally:
+            self._leave(previous, entered)
+
+    def _canonical(self, call: Callable[[], Any]) -> Any:
+        """Run a call that resolves paths, charged to ``canonicalization``."""
+        previous, entered = self._enter("canonicalization")
+        try:
+            return call()
+        finally:
+            seconds = self._leave(previous, entered)
+            self._canonicalizations += 1
+            self._canonical_max = max(self._canonical_max, seconds)
 
     def _group(self, pid: int, start: float) -> tuple[int | None, str | None]:
         """The process's group now, or None and why not: ``GONE``, or unread.
@@ -766,12 +832,20 @@ class Sampler:
             return None, error
 
     def _timed(self, kind: str, pid: int, call: Callable[[], Any]) -> Any:
-        """Run one read, keeping the sample's slowest with its kind and pid."""
-        began = self._timer()
+        """Run one read, charged to ``reads`` and counted by *kind*, keeping
+        the sample's slowest with its kind and pid."""
+        previous, began = self._enter("reads")
         try:
             return call()
         finally:
-            seconds = self._timer() - began
+            seconds = self._leave(previous, began)
+            stats = self._read_kinds.setdefault(
+                kind, {"count": 0, "seconds": 0.0, "max_seconds": 0.0, "max_pid": pid}
+            )
+            stats["count"] += 1
+            stats["seconds"] += seconds
+            if seconds > stats["max_seconds"]:
+                stats["max_seconds"], stats["max_pid"] = seconds, pid
             if self._slowest is None or seconds > self._slowest["seconds"]:
                 self._slowest = {"kind": kind, "pid": pid, "seconds": seconds}
 
@@ -845,8 +919,16 @@ class Sampler:
 
     def sample(self) -> dict[int, ProcessRecord]:
         began = self._timer()
+        cpu = {"began": self._cpu()}
+        self._phase, self._phase_mark = "bookkeeping", began
+        self._phase_seconds = dict.fromkeys(SAMPLE_PHASES, 0.0)
+        self._read_kinds = {}
+        self._canonicalizations, self._canonical_max = 0, 0.0
         self.began_at = self._clock()
-        self.last_pid_at_begin = self._last_pid()
+        self.last_pid_at_begin = self._in_phase("last_pid", self._last_pid)
+        cpu["last_pid"] = self._cpu()
+        pids = self._in_phase("enumeration", lambda: list(self._pids()))
+        cpu["enumeration"] = self._cpu()
         self._slowest = None
         first = self._baseline is None
         sample: dict[int, ProcessRecord] = {}
@@ -857,7 +939,7 @@ class Sampler:
         retaining: dict[int, tuple[ProcessRecord, list[str]]] = {}
         # pid -> the process whose create time this sample read.
         identified: dict[int, Any] = {}
-        for pid in self._pids():
+        for pid in pids:
             known = self._known.get(pid)
             # When opening or identifying fails, whatever runs at the pid now is
             # unverified: the failure is keyed without a create time, and no
@@ -955,17 +1037,20 @@ class Sampler:
                 if known is not None and known.cmdline == cmdline
                 else None
             )
-            sample[pid] = record(
-                pid,
-                -1 if ppid is None else ppid,
-                start,
-                exe,
-                cmdline,
-                in_row=known is not None and known.in_row,
-                launcher=launcher,
-                pgid=group,
-                pgid_error=error,
-                browser_marker=known.browser_marker if known is not None else None,
+            # Canonicalizes the profile its arguments name, if any.
+            sample[pid] = self._canonical(
+                lambda: record(
+                    pid,
+                    -1 if ppid is None else ppid,
+                    start,
+                    exe,
+                    cmdline,
+                    in_row=known is not None and known.in_row,
+                    launcher=launcher,
+                    pgid=group,
+                    pgid_error=error,
+                    browser_marker=known.browser_marker if known is not None else None,
+                )
             )
             if failed and self._keeps_its_root(known, failed, exe):
                 # Decided once the sample is complete: whether it parents
@@ -982,6 +1067,7 @@ class Sampler:
                     process,
                     parent_read,
                 )
+        cpu["per_process"] = self._cpu()
         # Already counted as its profile's browser root: the record keeps that
         # reading, with the profile it named rather than one the old arguments
         # resolve to now, and the failure is kept as an audit note. Not for a
@@ -1038,38 +1124,73 @@ class Sampler:
         self._track(sample, verdicts)
         self._resolve_by_user(sample, identified)
         self._known = sample
-        self._record_cost(sample, self._timer() - began)
+        # The rest of the sample is the bookkeeping it is in; the phases now
+        # add up to its duration.
+        self._enter("bookkeeping")
+        ended = self._phase_mark
+        cpu["classification"] = self._cpu()
+        self._record_cost(sample, ended - began, cpu)
         return sample
 
-    def _record_cost(self, sample: dict[int, ProcessRecord], seconds: float) -> None:
-        """Keep the slowest read, and every slow sample with its slowest read."""
+    def _record_cost(
+        self, sample: dict[int, ProcessRecord], seconds: float, cpu: dict[str, float]
+    ) -> None:
+        """Keep the slowest read, this sample's breakdown, and every slow
+        sample's.
+
+        ``cpu`` holds the process's CPU time where the sample began and
+        after each of its stretches, which run in order: its last-pid read,
+        the enumeration, the loop over every process (reads, the
+        canonicalization of each record and the loop's own bookkeeping), and
+        the classification and judgement after it.
+        """
+        now = self._clock()
         slowest = self._slowest
-        if slowest is None:
-            return
-        known = sample.get(slowest["pid"])
-        slowest = dict(
-            slowest,
-            seconds=round(slowest["seconds"], 4),
-            exe=known.exe if known is not None else None,
-            t=self._clock(),
-        )
-        if (
-            self.slowest_read is None
-            or slowest["seconds"] > self.slowest_read["seconds"]
-        ):
-            self.slowest_read = slowest
+        if slowest is not None:
+            known = sample.get(slowest["pid"])
+            slowest = dict(
+                slowest,
+                seconds=round(slowest["seconds"], 4),
+                exe=known.exe if known is not None else None,
+                t=now,
+            )
+            if (
+                self.slowest_read is None
+                or slowest["seconds"] > self.slowest_read["seconds"]
+            ):
+                self.slowest_read = slowest
+        marks = list(cpu.values())
+        self.breakdown = {
+            "t": now,
+            "seconds": round(seconds, 4),
+            "reads": self.reads_per_sample[-1],
+            "slowest": slowest,
+            "phases": {
+                phase: round(spent, 4) for phase, spent in self._phase_seconds.items()
+            },
+            "read_kinds": {
+                kind: dict(
+                    stats,
+                    seconds=round(stats["seconds"], 4),
+                    max_seconds=round(stats["max_seconds"], 4),
+                )
+                for kind, stats in sorted(self._read_kinds.items())
+            },
+            "canonicalization": {
+                "count": self._canonicalizations,
+                "max_seconds": round(self._canonical_max, 4),
+            },
+            "cpu_seconds": round(marks[-1] - marks[0], 4),
+            "cpu": {
+                stretch: round(mark - before, 4)
+                for (stretch, mark), before in zip(list(cpu.items())[1:], marks)
+            },
+        }
         if seconds < SLOW_SAMPLE_SECONDS:
             return
         self.slow_sample_count += 1
         if len(self.slow_samples) < _SLOW_SAMPLES_KEPT:
-            self.slow_samples.append(
-                {
-                    "t": slowest["t"],
-                    "seconds": round(seconds, 4),
-                    "reads": self.reads_per_sample[-1],
-                    "slowest": slowest,
-                }
-            )
+            self.slow_samples.append(self.breakdown)
 
     @staticmethod
     def _keeps_its_root(
@@ -1455,6 +1576,183 @@ def run_ahead() -> dict[str, Any]:
     return fields
 
 
+def write_event(
+    out: IO[str],
+    base: Mapping[str, Any],
+    actor: str,
+    kind: str,
+    fields: Mapping[str, Any],
+    t: float,
+) -> None:
+    out.write(
+        json.dumps(
+            {"t": t, **base, "actor": actor, "kind": kind, **fields}, sort_keys=True
+        )
+        + "\n"
+    )
+
+
+def observe(
+    sampler: Sampler,
+    tracker: Tracker,
+    out: IO[str],
+    stop_requested: Callable[[], bool],
+    *,
+    base: Mapping[str, Any],
+    interval: float,
+    deadline: float,
+    timer: Callable[[], float] = time.perf_counter,
+    monotonic: Callable[[], float] = time.monotonic,
+    wall: Callable[[], float] = time.time,
+    sleep: Callable[[float], None] = time.sleep,
+    cpu: Callable[[], float] = time.process_time,
+) -> dict[str, Any]:
+    """Sample until *stop_requested* or *deadline*; return the loop's summary.
+
+    Besides the largest gap between two samples it keeps that gap's
+    breakdown (``largest_gap``): the wall time outside sampling, from one
+    sample's end to the next one's start, with what it went to
+    (``BETWEEN_STEPS``), and the wall time in the sample that closed it, with
+    that sample's phases (``Sampler.breakdown``). Each part's ``unaccounted``
+    is what none of its steps or phases took, so a stall that falls between
+    them, or a stepped wall clock, shows there rather than in a step.
+    """
+    began = monotonic()
+    observation_start: float | None = None
+    last_sample: float | None = None
+    max_gap = 0.0
+    largest_gap: dict[str, Any] | None = None
+    #: Wall time of each ``sampler.sample()``, the watcher's own cost.
+    durations: list[float] = []
+    #: ``[began, ended, kernel's last pid as it began]`` for every sample;
+    #: ``ended`` is the time every event of that sample carries.
+    sample_log: list[list[Any]] = []
+    stopped_by = "deadline"
+    #: What the time since the last sample ended went to (``BETWEEN_STEPS``),
+    #: and the process's CPU time when it began.
+    between: dict[str, float] = {}
+    between_cpu = cpu()
+    sleep_requested = 0.0
+
+    def step(name: str, call: Callable[[], Any]) -> Any:
+        began_step = timer()
+        try:
+            return call()
+        finally:
+            between[name] = between.get(name, 0.0) + timer() - began_step
+
+    def take_sample() -> None:
+        nonlocal observation_start, last_sample, max_gap, largest_gap, between_cpu
+        cpu_outside = cpu() - between_cpu
+        began_sample = monotonic()
+        sample = sampler.sample()
+        durations.append(monotonic() - began_sample)
+        now = wall()
+        if last_sample is not None:
+            gap = now - last_sample
+            # The gap and the sample that closed it, never the run's slowest
+            # sample, which can sit anywhere.
+            if largest_gap is None or gap > max_gap:
+                largest_gap = _gap_record(
+                    gap,
+                    now,
+                    last_sample,
+                    sampler,
+                    between,
+                    sleep_requested,
+                    cpu_outside,
+                )
+            max_gap = max(max_gap, gap)
+        last_sample = now
+        sample_log.append([sampler.began_at, now, sampler.last_pid_at_begin])
+        between.clear()
+        between_cpu = cpu()
+        events = step("tracker", lambda: tracker.observe(sample, now))
+
+        def write_all() -> None:
+            nonlocal observation_start
+            for actor, kind, fields in events:
+                write_event(out, base, actor, kind, fields, now)
+            if observation_start is None:
+                observation_start = now
+                # The baseline is taken. The harness waits for this line before
+                # it starts an actor, so no actor is mistaken for background.
+                write_event(
+                    out,
+                    base,
+                    "watcher",
+                    "watcher.ready",
+                    {
+                        "pid": os.getpid(),
+                        "baseline_processes": len(sample),
+                        "baseline_pgids": sampler.baseline_pgids,
+                    },
+                    now,
+                )
+
+        step("write", write_all)
+        step("flush", out.flush)
+
+    while monotonic() - began < deadline:
+        if step("stop_check", stop_requested):
+            stopped_by = "stop file"
+            # One more sample after the request, so the observation
+            # provably ends after whatever the harness waited for.
+            take_sample()
+            break
+        tick = monotonic()
+        take_sample()
+        elapsed = monotonic() - tick
+        sleep_requested = max(0.0, interval - elapsed)
+        slept_from = timer()
+        sleep(sleep_requested)
+        slept = timer() - slept_from
+        between["sleep"] = min(slept, sleep_requested)
+        between["wakeup_delay"] = max(0.0, slept - sleep_requested)
+
+    return {
+        "observation_start": observation_start,
+        "observation_end": last_sample,
+        "max_gap_seconds": round(max_gap, 4),
+        "largest_gap": largest_gap,
+        **duration_stats(durations),
+        "sample_log": sample_log,
+        "stopped_by": stopped_by,
+    }
+
+
+def _gap_record(
+    gap: float,
+    now: float,
+    last_sample: float,
+    sampler: Sampler,
+    between: Mapping[str, float],
+    sleep_requested: float,
+    cpu_outside: float,
+) -> dict[str, Any]:
+    """The breakdown of a gap that ended at *now*, by the sample closing it."""
+    breakdown = sampler.breakdown or {}
+    began = sampler.began_at if sampler.began_at is not None else now
+    outside, inside = began - last_sample, now - began
+    phases = breakdown.get("phases") or {}
+    return {
+        "seconds": round(gap, 4),
+        "t": now,
+        "outside_sampling": {
+            "seconds": round(outside, 4),
+            "steps": {name: round(between.get(name, 0.0), 4) for name in BETWEEN_STEPS},
+            "sleep_requested": round(sleep_requested, 4),
+            "unaccounted": round(outside - sum(between.values()), 4),
+            "cpu_seconds": round(cpu_outside, 4),
+        },
+        "in_sample": {
+            "seconds": round(inside, 4),
+            "unaccounted": round(inside - sum(phases.values()), 4),
+        },
+        "sample": breakdown,
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True, type=Path)
@@ -1490,68 +1788,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         browser_exe=args.browser_exe,
         browser_dir=args.browser_dir,
     )
-    began = time.monotonic()
-    observation_start: float | None = None
-    last_sample: float | None = None
-    max_gap = 0.0
-    #: Wall time of each ``sampler.sample()``, the watcher's own cost.
-    durations: list[float] = []
-    #: ``[began, ended, kernel's last pid as it began]`` for every sample;
-    #: ``ended`` is the time every event of that sample carries.
-    sample_log: list[list[Any]] = []
-    stopped_by = "deadline"
     with args.out.open("a", encoding="utf-8") as out:
-
-        def write(actor: str, kind: str, fields: dict[str, Any], t: float) -> None:
-            out.write(
-                json.dumps(
-                    {"t": t, **base, "actor": actor, "kind": kind, **fields},
-                    sort_keys=True,
-                )
-                + "\n"
-            )
-
-        def take_sample() -> None:
-            nonlocal observation_start, last_sample, max_gap
-            began_sample = time.monotonic()
-            sample = sampler.sample()
-            durations.append(time.monotonic() - began_sample)
-            now = time.time()
-            if last_sample is not None:
-                max_gap = max(max_gap, now - last_sample)
-            last_sample = now
-            sample_log.append([sampler.began_at, now, sampler.last_pid_at_begin])
-            for actor, kind, fields in tracker.observe(sample, now):
-                write(actor, kind, fields, now)
-            if observation_start is None:
-                observation_start = now
-                # The baseline is taken. The harness waits for this line before
-                # it starts an actor, so no actor is mistaken for background.
-                write(
-                    "watcher",
-                    "watcher.ready",
-                    {
-                        "pid": os.getpid(),
-                        "baseline_processes": len(sample),
-                        "baseline_pgids": sampler.baseline_pgids,
-                    },
-                    now,
-                )
-            out.flush()
-
-        while time.monotonic() - began < args.deadline:
-            if args.stop.exists():
-                stopped_by = "stop file"
-                # One more sample after the request, so the observation
-                # provably ends after whatever the harness waited for.
-                take_sample()
-                break
-            tick = time.monotonic()
-            take_sample()
-            elapsed = time.monotonic() - tick
-            time.sleep(max(0.0, args.interval - elapsed))
-
-        write(
+        loop = observe(
+            sampler,
+            tracker,
+            out,
+            args.stop.exists,
+            base=base,
+            interval=args.interval,
+            deadline=args.deadline,
+        )
+        write_event(
+            out,
+            base,
             "watcher",
             "watcher.summary",
             {
@@ -1559,20 +1808,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "root_pid": args.root_pid,
                 "samples": tracker.samples,
                 "interval_seconds": args.interval,
-                "observation_start": observation_start,
-                "observation_end": last_sample,
-                "max_gap_seconds": round(max_gap, 4),
                 **scheduling,
-                **duration_stats(durations),
+                **loop,
                 **sampler.stats(),
-                "sample_log": sample_log,
                 "browser_exe": args.browser_exe,
                 "browser_dir": args.browser_dir,
                 "read_failures": sampler.read_failures,
                 "relevant_read_failures": sampler.relevant_read_failures,
                 "max_roots": tracker.max_roots,
                 "violations": tracker.violations,
-                "stopped_by": stopped_by,
             },
             time.time(),
         )

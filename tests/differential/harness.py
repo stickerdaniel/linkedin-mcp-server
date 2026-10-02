@@ -823,13 +823,98 @@ class Watcher:
         return summaries[-1] if summaries else None
 
 
+#: How a gap diagnostic names each part the watcher timed: the steps outside
+#: sampling (``watcher.BETWEEN_STEPS``) and the phases of the sample that
+#: closed the gap (``watcher.SAMPLE_PHASES``), with read kinds named apart.
+_GAP_STEP_NAMES = {
+    "tracker": "turning the previous sample into events",
+    "write": "serializing and writing events",
+    "flush": "flushing the event file",
+    "sleep": "the sleep asked for",
+    "wakeup_delay": "waking late from sleep",
+    "stop_check": "the stop-file check",
+}
+_GAP_PHASE_NAMES = {
+    "last_pid": "reading the kernel's last pid",
+    "enumeration": "enumerating pids",
+    "canonicalization": "canonicalizing paths",
+    "bookkeeping": "classification and bookkeeping",
+}
+
+
+def _seconds(value: object) -> float:
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _largest_gap_cause(largest: dict[str, Any], priority: object) -> str:
+    """Name the largest part of the gap the watcher broke down, and the
+    largest timed operation of the sample that closed it."""
+    outside = largest.get("outside_sampling") or {}
+    inside = largest.get("in_sample") or {}
+    sample = largest.get("sample") or {}
+    steps = outside.get("steps") or {}
+    asked = f", after asking for {_seconds(outside.get('sleep_requested')):.4f}s"
+    # (seconds, name, what else the record says about it)
+    parts: list[tuple[float, str, str]] = [
+        (
+            _seconds(steps.get(step)),
+            f"{name} outside sampling",
+            asked if step == "wakeup_delay" else "",
+        )
+        for step, name in _GAP_STEP_NAMES.items()
+    ]
+    parts.append(
+        (_seconds(outside.get("unaccounted")), "untimed time outside sampling", "")
+    )
+    phases = sample.get("phases") or {}
+    parts += [
+        (_seconds(phases.get(phase)), f"{name} in the sample", "")
+        for phase, name in _GAP_PHASE_NAMES.items()
+    ]
+    parts += [
+        (
+            _seconds(stats.get("seconds")),
+            f"{kind} reads in the sample",
+            f", over {stats.get('count')} reads, the longest "
+            f"{_seconds(stats.get('max_seconds')):.4f}s of pid {stats.get('max_pid')}",
+        )
+        for kind, stats in (sample.get("read_kinds") or {}).items()
+        if isinstance(stats, dict)
+    ]
+    parts.append(
+        (_seconds(inside.get("unaccounted")), "untimed time in the sample", "")
+    )
+    seconds, name, detail = max(parts, key=lambda part: part[0])
+    slowest = sample.get("slowest")
+    operation = (
+        f"{slowest.get('kind')} of pid {slowest.get('pid')} ({slowest.get('exe')}) "
+        f"at {_seconds(slowest.get('seconds')):.4f}s"
+        if isinstance(slowest, dict)
+        else "none"
+    )
+    return (
+        f"{_seconds(outside.get('seconds')):.4f}s of it passed between two "
+        f"samples, outside sampling, and {_seconds(inside.get('seconds')):.4f}s "
+        f"in the sample that closed it (watcher priority {priority!r}); its "
+        f"largest part was {name} at {seconds:.4f}s{detail}; the watcher used "
+        f"{_seconds(outside.get('cpu_seconds')):.4f}s of CPU outside sampling "
+        f"and {_seconds(sample.get('cpu_seconds')):.4f}s in the sample; the "
+        f"largest timed operation in that sample was {operation}"
+    )
+
+
 def _gap_cause(summary: dict[str, Any]) -> str:
     """Where the largest gap went, so the failure names its cause.
 
-    A gap spent mostly waiting to run between two samples leads with that wait
-    and the sample's own share: the slowest sample of the run can be the
-    baseline, which no gap is measured across.
+    From the watcher's breakdown of that gap (``largest_gap``) when the
+    summary has one. A summary written before it had one is split by its
+    ``sample_log`` into the time outside sampling and the sample that closed
+    the gap; its slow samples are the run's slowest, which need not include
+    that one, and are named as such.
     """
+    largest = summary.get("largest_gap")
+    if isinstance(largest, dict):
+        return _largest_gap_cause(largest, summary.get("priority"))
     widest: tuple[float, float] | None = None
     log = summary.get("sample_log") or []
     for previous, current in zip(log, log[1:]):
@@ -840,20 +925,25 @@ def _gap_cause(summary: dict[str, Any]) -> str:
             widest = (now - ended, began - ended)
     if widest is not None and widest[1] > widest[0] - widest[1]:
         return (
-            f"{widest[1]:.4f}s of it passed between two samples, while the "
-            f"watcher waited to run (priority {summary.get('priority')!r}), "
-            f"and {widest[0] - widest[1]:.4f}s in the sample that closed it"
+            f"{widest[1]:.4f}s of it passed between two samples, outside "
+            f"sampling, and {widest[0] - widest[1]:.4f}s in the sample that "
+            f"closed it (watcher priority {summary.get('priority')!r}); this "
+            f"summary has no breakdown of either"
         )
     slow = sorted(
         summary.get("slow_samples") or [],
         key=lambda entry: entry.get("seconds") or 0,
         reverse=True,
     )
-    waited_on = [
+    largest_timed = [
         {"sample_seconds": entry.get("seconds"), **(entry.get("slowest") or {})}
         for entry in slow[:3]
     ]
-    return f"its slowest samples waited on {waited_on or 'nothing it recorded'}"
+    return (
+        f"this summary has no breakdown of the sample that closed it; the "
+        f"largest timed operation of each of the run's slowest samples was "
+        f"{largest_timed or 'not recorded'}"
+    )
 
 
 def watcher_failures(

@@ -15,7 +15,9 @@ On macOS the non-browser case is exercised with the real setuid ``/bin/ps``.
 
 from __future__ import annotations
 
+import io
 import os
+import re
 import subprocess
 import sys
 import time
@@ -26,10 +28,12 @@ import pytest
 
 import psutil
 
-from differential import harness
+from differential import harness, watcher
 from differential.events import EventLog, read_jsonl
 from differential.harness import watcher_failures
 from differential.watcher import (
+    BETWEEN_STEPS,
+    SAMPLE_PHASES,
     ProcessRecord,
     Sampler,
     Tracker,
@@ -374,6 +378,11 @@ def test_a_watcher_stopped_on_request_after_the_actors_is_healthy(tmp_path):
     assert all(r["t"] in ends for r in records if r["kind"].startswith("process."))
     (ready,) = [r for r in records if r["kind"] == "watcher.ready"]
     assert ready["baseline_pgids"] or os.name == "nt"
+    # The largest gap comes with what it went to, on either side of a sample.
+    largest = summary["largest_gap"]
+    assert largest["seconds"] == summary["max_gap_seconds"]
+    assert set(largest["outside_sampling"]["steps"]) == set(BETWEEN_STEPS)
+    assert set(largest["sample"]["phases"]) == set(SAMPLE_PHASES)
     if sys.platform.startswith("linux"):
         assert all(isinstance(last, int) for _, _, last in log)
 
@@ -440,14 +449,20 @@ def _sampler(
     user_of=_user_of,
     timer=time.perf_counter,
     last_pid_of=lambda: None,
+    pids=None,
+    clock=time.time,
+    cpu=time.process_time,
+    pgid_of=None,
 ):
     return Sampler(
         root,
         own_pid=999,
-        pids=lambda: list(table),
+        pids=pids or (lambda: list(table)),
         open_process=lambda pid: _FakeProcess(table, pid),
         user_of=user_of,
         timer=timer,
+        clock=clock,
+        cpu=cpu,
         last_pid_of=last_pid_of,
         user=HARNESS,
         browser_exe=browser_exe,
@@ -456,9 +471,8 @@ def _sampler(
         # every host the suite runs on.
         no_exec=no_exec,
         # The modelled group, never the real one of a real pid.
-        pgid_of=lambda pid: _field(
-            {"pgid": (table.get(pid) or {}).get("pgid")}, "pgid"
-        ),
+        pgid_of=pgid_of
+        or (lambda pid: _field({"pgid": (table.get(pid) or {}).get("pgid")}, "pgid")),
         # Markers are read wherever a guardian drains by them: POSIX.
         read_markers=not no_exec,
     )
@@ -1589,7 +1603,7 @@ def test_a_lifetimes_user_is_read_once():
     assert sampler.relevant_read_failures
 
 
-def test_a_slow_sample_names_the_read_it_waited_on():
+def test_a_slow_sample_names_its_largest_timed_read():
     clock = {"now": 0.0}
     table = _baseline_table()
     sampler = _sampler(table, root=10, timer=lambda: clock["now"])
@@ -1612,7 +1626,8 @@ def test_a_slow_sample_names_the_read_it_waited_on():
     assert stats["slowest_read"]["kind"] == "cmdline"
 
 
-def test_a_gap_over_budget_names_what_the_slowest_samples_waited_on():
+def test_a_summary_without_a_gap_breakdown_names_the_slowest_samples():
+    # Written before the watcher kept ``largest_gap``.
     slow = {
         "seconds": 1.3,
         "reads": 55,
@@ -1633,9 +1648,10 @@ def test_a_gap_over_budget_names_what_the_slowest_samples_waited_on():
     )
     (failure,) = failures
     assert "1.38s" in failure and "'cmdline'" in failure and "x.exe" in failure
+    assert "the run's slowest samples" in failure
 
 
-def test_a_gap_spent_waiting_to_run_names_no_read():
+def test_a_summary_without_a_gap_breakdown_names_time_outside_sampling():
     # Run 36327966208, K0 on windows-latest: the only slow sample was the
     # baseline, which no gap is measured across, and the widest gap was the
     # watcher not running between two samples of 4ms.
@@ -1672,6 +1688,214 @@ def test_a_gap_spent_waiting_to_run_names_no_read():
     assert "0.0042s in the sample that closed it" in failure
     assert "NORMAL_PRIORITY_CLASS" in failure
     assert "svchost" not in failure
+
+
+# --- What a gap went to -----------------------------------------------------------
+
+#: The modelled stall: over the gap budget on its own.
+_STALL = 1.2
+_INTERVAL = 0.05
+
+
+class _EventFile(io.StringIO):
+    """The event file, whose next write or flush can take the clock forward."""
+
+    def __init__(self, clock: dict[str, float], armed: dict[str, float]) -> None:
+        super().__init__()
+        self._clock, self._armed = clock, armed
+
+    def write(self, text: str) -> int:
+        self._clock["now"] += self._armed.pop("write", 0.0)
+        return super().write(text)
+
+    def flush(self) -> None:
+        self._clock["now"] += self._armed.pop("flush", 0.0)
+        super().flush()
+
+
+def _timed_run(
+    monkeypatch, stalls: dict[int, dict[str, float]], *, samples: int = 8
+) -> tuple[dict[str, Any], Sampler]:
+    """Run the watcher's loop on a modelled table and clock, where sample *n*
+    begins by arming ``stalls[n]``: each named site takes the clock forward by
+    its seconds the next time it runs. Return the summary the harness judges.
+    """
+    clock = {"now": 100.0, "cpu": 0.0}
+    armed: dict[str, float] = {}
+    table: dict[int, dict[str, Any]] = {
+        **_row_actor_table(),
+        80: {"start": 6.5, "ppid": 10, "exe": BROWSER_EXE, "cmdline": _chrome(PROFILE)},
+    }
+    began = {"n": 0}
+
+    def stall(site: str) -> None:
+        seconds = armed.pop(site, 0.0)
+        clock["now"] += seconds
+        if site == "bookkeeping":
+            # Computing, not waiting: the CPU time moves with it.
+            clock["cpu"] += seconds
+
+    def last_pid() -> None:
+        began["n"] += 1
+        armed.update(stalls.get(began["n"], {}))
+        # A process that starts in every sample, so every sample has events.
+        table[100 + began["n"]] = {"start": 7.0, "ppid": 10, "cmdline": ["helper"]}
+        table[70]["cmdline_seconds"] = armed.pop("cmdline", 0.0)
+        stall("last_pid")
+
+    def pids() -> list[int]:
+        stall("enumeration")
+        return list(table)
+
+    def pgid(pid: int) -> int:
+        if pid == 70:
+            stall("pgid")
+        return pid
+
+    canonical = watcher.canonical_user_data_dir
+
+    def slow_canonical(value: str) -> str:
+        stall("canonicalization")
+        return canonical(value)
+
+    # The last bookkeeping of a sample, after its last read.
+    track = Sampler._track
+
+    def slow_track(self, sample, verdicts) -> None:
+        stall("bookkeeping")
+        track(self, sample, verdicts)
+
+    monkeypatch.setattr(watcher, "canonical_user_data_dir", slow_canonical)
+    monkeypatch.setattr(Sampler, "_track", slow_track)
+    table[70]["clock"] = clock
+
+    def now() -> float:
+        return clock["now"]
+
+    sampler = _sampler(
+        table,
+        root=10,
+        timer=now,
+        clock=now,
+        cpu=lambda: clock["cpu"],
+        last_pid_of=last_pid,
+        pids=pids,
+        pgid_of=pgid,
+    )
+    tracker = Tracker()
+    observe_ = tracker.observe
+
+    def slow_observe(sample, t):
+        stall("tracker")
+        return observe_(sample, t)
+
+    monkeypatch.setattr(tracker, "observe", slow_observe)
+
+    def stop_requested() -> bool:
+        stall("stop_check")
+        return began["n"] >= samples
+
+    def sleep(seconds: float) -> None:
+        clock["now"] += seconds + armed.pop("wakeup_delay", 0.0)
+
+    loop = watcher.observe(
+        sampler,
+        tracker,
+        _EventFile(clock, armed),
+        stop_requested,
+        base={},
+        interval=_INTERVAL,
+        deadline=1000.0,
+        timer=now,
+        monotonic=now,
+        wall=now,
+        sleep=sleep,
+        cpu=lambda: clock["cpu"],
+    )
+    return {**loop, **sampler.stats(), "priority": "HIGH_PRIORITY_CLASS"}, sampler
+
+
+def _gap_failure(summary: dict[str, Any]) -> str:
+    (failure,) = watcher_failures(
+        summary,
+        actors_began=summary["observation_start"],
+        actors_ended=summary["observation_end"],
+    )
+    return failure
+
+
+def _largest_part(failure: str) -> tuple[str, float]:
+    found = re.search(r"largest part was (.+?) at ([0-9.]+)s[;,]", failure)
+    assert found, failure
+    return found[1], float(found[2])
+
+
+@pytest.mark.parametrize(
+    ("site", "named"),
+    [
+        ("last_pid", "reading the kernel's last pid in the sample"),
+        ("enumeration", "enumerating pids in the sample"),
+        ("cmdline", "cmdline reads in the sample"),
+        ("pgid", "pgid reads in the sample"),
+        ("canonicalization", "canonicalizing paths in the sample"),
+        ("bookkeeping", "classification and bookkeeping in the sample"),
+        ("tracker", "turning the previous sample into events outside sampling"),
+        ("write", "serializing and writing events outside sampling"),
+        ("flush", "flushing the event file outside sampling"),
+        ("wakeup_delay", "waking late from sleep outside sampling"),
+        ("stop_check", "the stop-file check outside sampling"),
+    ],
+)
+def test_a_gap_names_the_phase_its_time_went_to(monkeypatch, site, named):
+    summary, _ = _timed_run(monkeypatch, {4: {site: _STALL}})
+    # The sleep after a sample shrinks by whatever the sample's own loop took.
+    assert _STALL <= summary["max_gap_seconds"] <= _STALL + _INTERVAL
+    failure = _gap_failure(summary)
+    name, seconds = _largest_part(failure)
+    assert name == named, failure
+    assert seconds == pytest.approx(_STALL, abs=0.01)
+    if name.endswith("reads in the sample"):
+        assert f"the longest {_STALL:.4f}s of pid 70" in failure
+    assert "outside sampling" in failure
+    assert "largest timed operation in that sample was" in failure
+    assert "waited" not in failure
+    # The phases of the sample that closed it add up to its duration.
+    sample = summary["largest_gap"]["sample"]
+    assert sum(sample["phases"].values()) == pytest.approx(sample["seconds"])
+
+
+def test_a_late_wakeup_says_how_long_the_sleep_asked_for(monkeypatch):
+    summary, _ = _timed_run(monkeypatch, {4: {"wakeup_delay": _STALL}})
+    assert f"after asking for {_INTERVAL:.4f}s" in _gap_failure(summary)
+
+
+def test_a_gap_names_the_sample_that_closed_it_not_the_runs_slowest(monkeypatch):
+    summary, sampler = _timed_run(
+        monkeypatch,
+        {
+            # The run's slowest sample, closing a gap under the budget.
+            3: {"cmdline": 0.9},
+            # The largest gap: a late wakeup, then a sample spent computing.
+            5: {"wakeup_delay": 0.5},
+            6: {"bookkeeping": 0.6},
+        },
+    )
+    (slowest, *_) = sorted(
+        sampler.slow_samples, key=lambda entry: entry["seconds"], reverse=True
+    )
+    assert (slowest["slowest"]["kind"], slowest["seconds"]) == ("cmdline", 0.9)
+    largest = summary["largest_gap"]
+    assert largest["seconds"] == pytest.approx(0.05 + 0.5 + 0.6)
+    # The sample that ended the gap: the sixth sample's end.
+    assert largest["t"] == summary["sample_log"][5][1]
+    failure = _gap_failure(summary)
+    name, seconds = _largest_part(failure)
+    assert name == "classification and bookkeeping in the sample"
+    assert seconds == pytest.approx(0.6)
+    assert "0.5500s of it passed between two samples, outside sampling" in failure
+    assert "0.6000s in the sample that closed it" in failure
+    assert "0.6000s in the sample; the largest timed operation" in failure
+    assert "0.9000" not in failure
 
 
 # --- What O2 reads from the samples ----------------------------------------------
