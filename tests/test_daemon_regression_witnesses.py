@@ -212,7 +212,7 @@ async def test_an_owner_exiting_after_an_unconfirmed_close_sends_no_signal(
 
         monkeypatch.setattr(process_tree, "_IS_WINDOWS", True)
         monkeypatch.setattr(process_tree, "_adopted_windows_job", 123)
-        monkeypatch.setattr(process_tree, "_adopted_windows_gate", None)
+        monkeypatch.setattr(process_tree, "_adopted_windows_infrastructure", {})
         monkeypatch.setattr(
             process_tree, "_windows_modules", lambda: (Api(), Con(), Job(), object())
         )
@@ -307,7 +307,7 @@ def test_an_unanswered_job_membership_never_terminates_or_proves_the_drain(
 
     monkeypatch.setattr(process_tree, "_IS_WINDOWS", True)
     monkeypatch.setattr(process_tree, "_adopted_windows_job", 123)
-    monkeypatch.setattr(process_tree, "_adopted_windows_gate", None)
+    monkeypatch.setattr(process_tree, "_adopted_windows_infrastructure", {})
     monkeypatch.setattr(
         process_tree,
         "_live_windows_jobs",
