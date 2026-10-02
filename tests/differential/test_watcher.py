@@ -32,8 +32,6 @@ from differential import harness, watcher
 from differential.events import EventLog, read_jsonl
 from differential.harness import watcher_failures
 from differential.watcher import (
-    BETWEEN_STEPS,
-    SAMPLE_PHASES,
     ProcessRecord,
     Sampler,
     Tracker,
@@ -381,8 +379,23 @@ def test_a_watcher_stopped_on_request_after_the_actors_is_healthy(tmp_path):
     # The largest gap comes with what it went to, on either side of a sample.
     largest = summary["largest_gap"]
     assert largest["seconds"] == summary["max_gap_seconds"]
-    assert set(largest["outside_sampling"]["steps"]) == set(BETWEEN_STEPS)
-    assert set(largest["sample"]["phases"]) == set(SAMPLE_PHASES)
+    # Named here, not from the watcher's own lists: a phase or step dropped
+    # from both the record and its list must still fail.
+    assert set(largest["outside_sampling"]["steps"]) == {
+        "tracker",
+        "write",
+        "flush",
+        "sleep",
+        "wakeup_delay",
+        "stop_check",
+    }
+    assert set(largest["sample"]["phases"]) == {
+        "last_pid",
+        "enumeration",
+        "reads",
+        "canonicalization",
+        "bookkeeping",
+    }
     if sys.platform.startswith("linux"):
         assert all(isinstance(last, int) for _, _, last in log)
 
