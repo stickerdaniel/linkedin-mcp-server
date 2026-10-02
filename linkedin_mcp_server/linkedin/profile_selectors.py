@@ -81,7 +81,9 @@ SKILL_EDIT_HREF = re.compile(r"/details/skills/edit/forms/(\d+)")
 
 # A maximum stated in a field's accessible label ("maximum 2,000 characters").
 # Only the digits are read, so it does not depend on the language.
-STATED_MAX = re.compile(r"(\d{1,2}[,.  ]?\d{3}|\d{2,4})")
+# Thousands separators include the no-break spaces some locales use, written as
+# escapes so the source holds no invisible characters.
+STATED_MAX = re.compile(r"(\d{1,2}[,.\u00a0\u202f]?\d{3}|\d{2,4})")
 
 RICH_TEXT = '[role="textbox"][contenteditable="true"]'
 

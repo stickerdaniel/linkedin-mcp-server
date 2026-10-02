@@ -154,7 +154,10 @@ class TestSkills:
             )
 
     def test_skill_key_ignores_case_width_and_spacing(self):
-        assert skill_key("Ｎode.js") == skill_key("node.js") == skill_key("  NODE.JS ")
+        # A full-width "N" (U+FF2E), written as an escape so the source stays plain ASCII.
+        assert (
+            skill_key("\uff2eode.js") == skill_key("node.js") == skill_key("  NODE.JS ")
+        )
 
 
 class TestFingerprintAndStale:
