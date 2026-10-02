@@ -62,6 +62,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -130,6 +131,13 @@ INELIGIBLE_IDLE_TIMEOUT_SECONDS = CALIBRATION_IDLE_TIMEOUT_SECONDS
 #: with room for the slowest runner; an owner that idled out before A2 is
 #: invalid evidence, never a finding.
 RIVAL_IDLE_TIMEOUT_SECONDS = 120.0
+#: How far before the owner's earliest possible idle deadline A2 must be sent.
+#: The owner's idle clock cannot start before A1 was sent, so it cannot run
+#: out before ``A1 sent + RIVAL_IDLE_TIMEOUT_SECONDS``; an A2 sent later than
+#: this margin before that moment may meet an owner that retired on its own,
+#: which is invalid evidence, never a finding. The margin covers A2's way to
+#: the owner.
+RIVAL_IDLE_MARGIN_SECONDS = 15.0
 
 K2_NOT_APPLICABLE = {
     "status": "not applicable",
@@ -433,6 +441,9 @@ async def rival_script(ctx: RowContext) -> None:
         problems.append(
             f"{INVALID}B's browser was not shown gone before A2, so A2 was not sent"
         )
+        return
+    if ctx.daemon and _owner_near_idle(record["owner_identified"], time.time()):
+        problems.append(f"{INVALID}{NEAR_IDLE}, so A2 was not sent")
         return
     _phase(ctx, "A2")
     await _called(ctx, PERSON_TOOL, _read_of(A2_USERNAME))
@@ -881,6 +892,35 @@ def _order(
     return found
 
 
+NEAR_IDLE = (
+    f"A2 was due within {RIVAL_IDLE_MARGIN_SECONDS:g}s of the earliest moment "
+    f"the owner could idle out"
+)
+
+
+def _near_idle(a1: Mapping[str, Any], at_ns: int | None) -> bool:
+    """Whether A2 at *at_ns* is too close to the owner's earliest possible
+    idle deadline for its answer to say anything about B (unknown counts as
+    too close)."""
+    began = _ns(a1.get("began_monotonic_ns"))
+    if began is None or at_ns is None:
+        return True
+    deadline = began + int(
+        (RIVAL_IDLE_TIMEOUT_SECONDS - RIVAL_IDLE_MARGIN_SECONDS) * 1e9
+    )
+    return at_ns >= deadline
+
+
+def _owner_near_idle(identified: Sequence[Any], now: float) -> bool:
+    """The script's check before sending A2, on the wall clock: the owner's
+    idle clock cannot start before the owner did, so its start time bounds
+    the deadline from below as A1's send does (``_near_idle``), only earlier."""
+    started = identified[1] if len(identified) > 1 else None
+    if not isinstance(started, (int, float)):
+        return True
+    return now >= started + RIVAL_IDLE_TIMEOUT_SECONDS - RIVAL_IDLE_MARGIN_SECONDS
+
+
 def _owner_kept(record: Mapping[str, Any], identified: Sequence[Any]) -> list[str]:
     """The owner A elected, alive and the same lifetime and instance before
     B, after B and after A2, and no other owner launched: B neither turned
@@ -953,8 +993,6 @@ def rival_problems(record: Mapping[str, Any] | None, *, daemon: bool) -> list[st
     problems += _order(record, a1, a2)
     if a2 is None:
         return [*problems, f"{INVALID}A2 was never sent"]
-    if not _read_ok(a2):
-        problems.append("A2 did not return its profile")
     rival = _mapping(record.get("rival"))
     b_members = server_members(
         record, rival.get("pid"), launched=_number(rival.get("launched"))
@@ -966,6 +1004,11 @@ def rival_problems(record: Mapping[str, Any] | None, *, daemon: bool) -> list[st
         read="B's read",
         whose="B's own server",
     )
+    if daemon and _near_idle(a1, _ns(a2.get("began_monotonic_ns"))):
+        # Whatever A2 met, the owner may have retired on its own first.
+        return [*problems, f"{INVALID}{NEAR_IDLE}"]
+    if not _read_ok(a2):
+        problems.append("A2 did not return its profile")
     if daemon:
         identified = _identified(record)
         assert identified is not None
@@ -1099,11 +1142,14 @@ def _missing_ancestors(path: Path) -> list[Path]:
 @dataclass
 class PlantedFile:
     """One provider file the cell wrote, and the directories it created for
-    it. Removed exactly: the file only while it still holds what was
-    written, then each directory only while it is empty."""
+    it. Removed exactly: the file only while it is still the one written
+    (the same device and inode, not a link) and holds what was written, then
+    each directory only while it is empty."""
 
     path: Path
     sha256: str
+    #: ``(st_dev, st_ino)`` of the file as created.
+    identity: tuple[int, int]
     created: tuple[Path, ...] = ()
     removed: bool = False
 
@@ -1112,10 +1158,18 @@ class PlantedFile:
             return []
         problems: list[str] = []
         try:
+            found = os.lstat(self.path)
             content = self.path.read_bytes()
         except FileNotFoundError:
             problems.append(f"the planted {self.path.name} was gone before its removal")
         else:
+            if (found.st_dev, found.st_ino) != self.identity or os.path.islink(
+                self.path
+            ):
+                return [
+                    f"the planted {self.path} was replaced by another file; it and "
+                    f"its directories were left as they are"
+                ]
             if _sha256(content) != self.sha256:
                 return [
                     f"the planted {self.path} no longer holds what was written; "
@@ -1199,12 +1253,15 @@ def plant_file(path: Path, content: bytes, *, locations: Sequence[Path]) -> Plan
     try:
         with open(path, "xb") as handle:
             handle.write(content)
+            stat = os.fstat(handle.fileno())
     except BaseException:
         for directory in reversed(created):
             with contextlib.suppress(OSError):
                 directory.rmdir()
         raise
-    return PlantedFile(path, _sha256(content), tuple(created))
+    return PlantedFile(
+        path, _sha256(content), (stat.st_dev, stat.st_ino), tuple(created)
+    )
 
 
 def plant_tree(root: Path) -> PlantedTree:
@@ -1259,3 +1316,21 @@ def plant_for(kind: str, *, auth_root: Path, state_root: Path) -> Planted:
 #: Every R12 branch and R14 path left to its models; the accounting counts
 #: them from ``model_coverage``.
 MODEL_COVERAGE = model_coverage.ELIGIBILITY_MODEL_COVERAGE
+
+#: The H-R14 lane no cell and no test reaches, kept open.
+RIVAL_RETRY_OPEN = (
+    "a configuration mismatch met only on a retry or settlement lookup is not "
+    "observed: the same _live_lookup decides every lookup, but no test "
+    "publishes the rival only after the first, so the first-look models "
+    "beside it (RIVAL_RETRY_REFERENCES) are references and the lane stays open"
+)
+#: The first-look models beside the open lane: references, never counted as
+#: its coverage (``RIVAL_RETRY_OPEN``).
+RIVAL_RETRY_REFERENCES: tuple[str, ...] = (
+    "tests/test_daemon_election.py::TestAnOwnerThisBuildMayOnlyControl"
+    "::test_a_live_owner_of_this_build_with_another_configuration_is_left_alone",
+    "tests/test_daemon_election.py::TestAnOwnerThisBuildMayOnlyControl"
+    "::test_a_silent_owner_of_this_build_with_another_configuration_is_left_alone",
+    "tests/test_daemon_election.py::TestAnOwnerThisBuildMayOnlyControl"
+    "::test_a_dead_owner_of_another_configuration_is_leftovers",
+)

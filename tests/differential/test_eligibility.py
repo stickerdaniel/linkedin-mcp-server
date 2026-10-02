@@ -19,6 +19,7 @@ mapping** names tests that exist.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import dataclasses
 import json
@@ -50,6 +51,8 @@ from differential.eligibility_rows import (
     MODEL_COVERAGE,
     NO_OWNER_LINE,
     RIVAL_ENVIRONMENT,
+    NEAR_IDLE,
+    RIVAL_IDLE_MARGIN_SECONDS,
     RIVAL_IDLE_TIMEOUT_SECONDS,
     RIVAL_OVERRIDES,
     ROW_CONTAINER,
@@ -391,6 +394,19 @@ def test_a_plant_that_changed_is_left_in_place_and_reported(tmp_path):
     assert target.read_bytes() == b'{"personal": {"path": "/somebody"}}'
 
 
+def test_a_plant_replaced_by_the_same_bytes_is_left_in_place_and_reported(tmp_path):
+    target = tmp_path / ".dropbox" / "info.json"
+    planted = plant_file(target, b"{}", locations=[target])
+    replacement = tmp_path / ".dropbox" / "info.json.new"
+    replacement.write_bytes(b"{}")
+    os.replace(replacement, target)
+
+    problems = planted.remove()
+
+    assert problems and "replaced by another file" in problems[0]
+    assert target.read_bytes() == b"{}"
+
+
 def test_a_plant_outside_the_product_s_locations_is_refused(tmp_path):
     with pytest.raises(ValueError):
         plant_file(tmp_path / "info.json", b"{}", locations=[tmp_path / "x.json"])
@@ -540,6 +556,29 @@ async def test_an_http_server_that_ignores_its_interrupt_is_killed_and_fails(
     assert session.killed_by_harness is True
     assert "the harness had to kill the server" in host_failures(session)
     assert eligibility_rows.http_host_problems(harness.host_summary(session))
+
+
+@posix_only
+async def test_an_http_server_whose_registration_fails_is_not_left_running(
+    tmp_path,
+):
+    spawned: list[Any] = []
+
+    def register(process: Any) -> None:
+        spawned.append(process)
+        raise RuntimeError("registration failed")
+
+    try:
+        with contextlib.suppress(RuntimeError):
+            session, _ = await _http_session(tmp_path, "normal", on_process=register)
+            assert session.error is not None
+        [process] = spawned
+        assert process.returncode is not None
+    finally:
+        for process in spawned:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
 
 
 @posix_only
@@ -1425,6 +1464,36 @@ def test_missing_rival_evidence_is_invalid_and_never_a_finding(change, invalid):
     assert any(problem.startswith(INVALID + invalid) for problem in problems), problems
 
 
+def _a2_at(began: float, *, daemon: bool = True) -> dict[str, Any]:
+    """A rival record whose A2 was sent at *began*, A1 at ``NOW + 1``, and
+    whose owner was gone after A2."""
+    record = _rival(daemon=daemon)
+    record["calls"][1] = _person_call(began, began + 5.0)
+    record["requests"] = [
+        *[r for r in record["requests"] if A2_USERNAME not in r["path"]],
+        *_pages(A2_USERNAME, began + 1.0),
+    ]
+    if daemon:
+        record["owner_after_a2"] = {**_owner_seen(), "alive": False}
+    return record
+
+
+def test_an_a2_sent_near_the_owner_s_idle_deadline_is_invalid_and_never_a_finding():
+    """A1 sent at NOW + 1: the owner cannot idle out before NOW + 1 + the
+    timeout, so an A2 inside the margin before that says nothing of B."""
+    due = 1.0 + RIVAL_IDLE_TIMEOUT_SECONDS - RIVAL_IDLE_MARGIN_SECONDS
+    late = rival_problems(_a2_at(NOW + due), daemon=True)
+    assert late == [f"{INVALID}{NEAR_IDLE}"]
+    early = rival_problems(_a2_at(NOW + due - 1.0), daemon=True)
+    assert any("the owner A reads through is not" in p for p in _findings(early))
+    assert NEAR_IDLE not in " ".join(early)
+
+
+def test_the_frozen_direct_rival_has_no_idle_deadline():
+    due = 1.0 + RIVAL_IDLE_TIMEOUT_SECONDS
+    assert rival_problems(_a2_at(NOW + due, daemon=False), daemon=False) == []
+
+
 @pytest.mark.parametrize(
     ("change", "invalid"),
     [
@@ -1971,10 +2040,16 @@ class _ModelledRival:
         )
 
 
+def _wall_clock(monkeypatch: pytest.MonkeyPatch, now: float) -> None:
+    """What the rival script reads as the time."""
+    monkeypatch.setattr(eligibility_rows, "time", SimpleNamespace(time=lambda: now))
+
+
 async def test_the_rival_script_reads_the_owner_around_b_and_settles_before_a2(
     tmp_path, monkeypatch
 ):
     _temporary_home(monkeypatch, tmp_path / "home")
+    _wall_clock(monkeypatch, OWNER[1] + 10.0)
     modelled = _ModelledRival(tmp_path)
     await rival_script(modelled.ctx)
 
@@ -2014,16 +2089,34 @@ async def test_the_rival_script_reads_the_owner_around_b_and_settles_before_a2(
             ["owner before B", f"rival {PERSON_TOOL} {B_USERNAME}"],
             id="no rival",
         ),
+        pytest.param(
+            "near idle",
+            f"{NEAR_IDLE}, so A2 was not sent",
+            [
+                "owner before B",
+                f"rival {PERSON_TOOL} {B_USERNAME}",
+                "owner after B",
+                "settlement",
+            ],
+            id="the owner's idle deadline close",
+        ),
     ],
 )
 async def test_the_rival_script_sends_no_a2_on_evidence_it_cannot_stand_on(
     tmp_path, monkeypatch, change, invalid, steps
 ):
     _temporary_home(monkeypatch, tmp_path / "home")
+    _wall_clock(
+        monkeypatch,
+        OWNER[1]
+        + RIVAL_IDLE_TIMEOUT_SECONDS
+        - RIVAL_IDLE_MARGIN_SECONDS
+        + (0.0 if change == "near idle" else -1.0),
+    )
     modelled = _ModelledRival(tmp_path)
     if change == "unsettled":
         modelled.settled = False
-    else:
+    elif change == "no rival":
         modelled.rival_answer = None
     await rival_script(modelled.ctx)
 
@@ -2048,9 +2141,13 @@ def test_each_branch_left_to_the_models_names_tests_that_exist(branch):
         assert name in _functions(root / path), node
 
 
-def test_the_retry_and_settlement_lane_is_labelled_as_first_look_models():
-    [branch] = [name for name in MODEL_COVERAGE if "retry or settlement" in name]
-    assert "first-look models" in branch
+def test_the_retry_and_settlement_lane_is_open_and_its_references_never_count():
+    root = Path(__file__).resolve().parents[2]
+    assert "stays open" in eligibility_rows.RIVAL_RETRY_OPEN
+    assert not any("retry or settlement" in name for name in MODEL_COVERAGE)
+    for node in eligibility_rows.RIVAL_RETRY_REFERENCES:
+        path, _, name = node.partition("::")
+        assert name in _functions(root / path), node
 
 
 def test_the_cells_skip_only_where_they_cannot_run():

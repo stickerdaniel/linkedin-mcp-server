@@ -2224,7 +2224,14 @@ class HttpHost:
         self.process = process
         self.pid = process.pid
         if self.on_process is not None:
-            self.on_process(process)
+            try:
+                self.on_process(process)
+            except BaseException:
+                # Not yet inside the stop below: a server whose registration
+                # failed is stopped here, never left running.
+                with anyio.CancelScope(shield=True):
+                    await self._stop(process)
+                raise
         # Raised once the output is read and the server stopped, as itself
         # rather than inside the task group's exception group.
         refused: HttpHostRefused | None = None

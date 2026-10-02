@@ -173,7 +173,7 @@ ELIGIBILITY_MODEL_COVERAGE: dict[str, tuple[str, tuple[str, ...]]] = {
             "::test_mac_provider_folders_are_synced",
         ),
     ),
-    "disabled: no election and nothing looked up": (
+    "disabled: no election sought": (
         "H-R12-disabled-env",
         (
             "tests/test_cli_main.py::TestForwardingToASharedOwner"
@@ -227,21 +227,6 @@ ELIGIBILITY_MODEL_COVERAGE: dict[str, tuple[str, tuple[str, ...]]] = {
         (
             "tests/test_daemon_election.py::TestAnOwnerThisBuildMayOnlyControl"
             "::test_another_builds_configuration_is_not_probed",
-        ),
-    ),
-    (
-        "a mismatch met on a retry or settlement lookup (first-look models: the "
-        "same _live_lookup decides every lookup, and no test publishes the rival "
-        "only after the first)"
-    ): (
-        "H-R14",
-        (
-            "tests/test_daemon_election.py::TestAnOwnerThisBuildMayOnlyControl"
-            "::test_a_live_owner_of_this_build_with_another_configuration_is_left_alone",
-            "tests/test_daemon_election.py::TestAnOwnerThisBuildMayOnlyControl"
-            "::test_a_silent_owner_of_this_build_with_another_configuration_is_left_alone",
-            "tests/test_daemon_election.py::TestAnOwnerThisBuildMayOnlyControl"
-            "::test_a_dead_owner_of_another_configuration_is_leftovers",
         ),
     ),
     "a configuration mismatch is read, and its pair is control only": (
