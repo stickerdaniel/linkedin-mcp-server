@@ -5708,6 +5708,8 @@ class AuthSeams:
     #: A second host with the row's own command and environment, one read of
     #: the feed and a normal quit, its lines its own (``LossSeams.fresh_read``).
     second_host: Callable[[], Awaitable[dict[str, Any]]]
+    #: The latest second host's frontend stderr so far, while it runs.
+    second_output: Callable[[], list[str]]
     #: Which owner the descriptor names now (``LossSeams.owner_reading``).
     owner_reading: Callable[[str], Awaitable[dict[str, Any]]]
     #: The row's own daemon log, as written so far; every owner's.
@@ -8140,6 +8142,8 @@ async def measure_host_quit_row(
     authorizations: list[Authorization] = []
     #: The second hosts the row ran; each server held until it is gone.
     second_hosts: list[HostSession] = []
+    #: Each second host's stderr as it arrives, the latest last.
+    second_lines: list[list[str]] = []
 
     def auth_snapshot(label: str) -> dict[str, Any]:
         """``AuthSeams.snapshot``: the artefacts alone, stamped when read."""
@@ -8205,6 +8209,8 @@ async def measure_host_quit_row(
         directory = work_dir / f"second-{len(second_hosts) + 1}"
         directory.mkdir(exist_ok=True)
         held: list[Retained] = []
+        lines: list[str] = []
+        second_lines.append(lines)
 
         def hold(process: Any) -> None:
             held.append(
@@ -8214,15 +8220,13 @@ async def measure_host_quit_row(
                 )
             )
 
+        def heard(line: str) -> None:
+            lines.append(line)
+            emit("frontend", "user.output", stream="stderr", host="second", line=line)
+
         launched_ns = time.monotonic_ns()
         second = await run_host_session(
-            command,
-            env=env,
-            cwd=directory,
-            on_stderr=lambda line: emit(
-                "frontend", "user.output", stream="stderr", host="second", line=line
-            ),
-            on_process=hold,
+            command, env=env, cwd=directory, on_stderr=heard, on_process=hold
         )
         second_hosts.append(second)
         if held and held[0].check(0.0):
@@ -8249,6 +8253,7 @@ async def measure_host_quit_row(
             snapshot=auth_snapshot,
             browser_gone=race_browser_gone,
             second_host=auth_second_host,
+            second_output=lambda: list(second_lines[-1]) if second_lines else [],
             owner_reading=loss_owner_reading,
             owner_log=loss_owner_log,
             host_output=lambda: list(host_lines),

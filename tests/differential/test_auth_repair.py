@@ -54,6 +54,7 @@ from differential.auth_repair import (
     ROW_FAILED,
     ROW_LOGIN,
     ROW_SECOND,
+    START_FAILED_LINE,
     WAITING,
     comparison_refusals,
     invalid_evidence,
@@ -136,6 +137,7 @@ from differential.test_row_judgement import _healthy
 from linkedin_mcp_server.common_utils import secure_write_text
 from linkedin_mcp_server.core.auth import _LOGIN_TITLE_PATTERNS, _is_auth_blocker_url
 from linkedin_mcp_server.daemon_auth import MARKER_KEY
+from linkedin_mcp_server.daemon_liveness import HEARTBEAT_PATH
 from linkedin_mcp_server.session_state import (
     QUARANTINE_PREFIX,
     portable_cookie_path,
@@ -174,7 +176,7 @@ def _short_waits(monkeypatch):
     for name, seconds in (
         ("CLOSE_SECONDS", 5.0),
         ("LOGIN_START_SECONDS", 10.0),
-        ("SECOND_MARK_SECONDS", 10.0),
+        ("SECOND_SENT_SECONDS", 10.0),
         ("COMPLETION_SECONDS", 10.0),
         ("READ_SECONDS", 30.0),
         ("SECOND_SECONDS", 30.0),
@@ -796,20 +798,26 @@ def _repair(row: str = ROW_COLD, *, daemon: bool = True) -> dict:
                 "peer": 0,
             }
     record["read_open"] = False
+    record["start_failures"] = 0
     if daemon:
-        marks = 2 if row == ROW_SECOND else 1
-        record["marked"] = [{"reason": "stale", "replayable": True}] * marks
-        record["marks"] = marks
+        record["marked"] = [{"reason": "stale", "replayable": True}]
+        record["marks"] = 1
+        record["profile_waits_ran_out"] = 0
         record["owner_after"] = _owner(9_500)
     if row == ROW_SECOND:
-        record["second_marked_ns"] = 2_400 * MS
+        # Sent at 2 s and shown at the owner at 2.4 s, before the release; the
+        # login over at 6.5 s, the second read ending on the fresh session at
+        # 9.5 s. It met no marker: its call waited at the owner for the
+        # profile the login held.
+        record["second_sent_ns"] = 2_400 * MS
+        record["login_over_ns"] = 6_500 * MS
         record["second"] = {
             "made": True,
             "launched_ns": 1_800 * MS,
             "call": _feed(2_000, 9_500),
             "forwarded": True,
             "quit_problems": [],
-            "lines": {"replayed": 1, "not_replayed": 0, "signed_in": 1, "peer": 1},
+            "lines": {"replayed": 0, "not_replayed": 0, "signed_in": 0, "peer": 0},
             "retained": False,
         }
     return record
@@ -1047,6 +1055,16 @@ _INVALID = [
         id="released-early",
     ),
     pytest.param(
+        # Released only after the login had given up: nothing could be issued.
+        lambda r: (
+            r["login"].update(released_ns=4_000 * MS, last_poll_ns=3_500 * MS),
+            r["login"].update(issued=[]),
+            r["completion"].update(generation_seen_ns=None),
+        ),
+        "the completion was released after the login stopped asking",
+        id="released-late",
+    ),
+    pytest.param(
         lambda r: r["authorization"].update(at_ns=1_400 * MS),
         "the origin-rejected authorization was not recorded first",
         id="authorized-late",
@@ -1092,10 +1110,16 @@ def test_direct_must_answer_the_cold_read_with_a_started_login_and_then_read():
     ("change", "problem"),
     [
         pytest.param(
-            lambda r: r.update(second_marked_ns=None),
-            f"{INVALID}the second frontend was not shown to meet the repair before "
+            lambda r: r.update(second_sent_ns=None),
+            f"{INVALID}the second host's read was not shown at the owner before "
             f"the release",
             id="not-during-the-repair",
+        ),
+        pytest.param(
+            lambda r: r.update(second_sent_ns=2_600 * MS),
+            f"{INVALID}the second host's read was not shown at the owner before "
+            f"the release",
+            id="shown-after-the-release",
         ),
         pytest.param(
             lambda r: r["second"]["call"].update(is_error=True, read_the_post=False),
@@ -1108,6 +1132,28 @@ def test_direct_must_answer_the_cold_read_with_a_started_login_and_then_read():
             "the second host's call was not forwarded to the owner",
             id="second-not-forwarded",
         ),
+        pytest.param(
+            # A marker reached it, and it repaired, but never read again.
+            lambda r: (
+                r["second"]["lines"].update(signed_in=1),
+                r.update(marks=2, marked=r["marked"] * 2),
+            ),
+            "the second frontend repaired on a marker but did not run its read "
+            "again exactly once: 0",
+            id="marker-without-a-replay",
+        ),
+        pytest.param(
+            # It replayed on a marker the owner's log never shows it gave.
+            lambda r: r["second"]["lines"].update(signed_in=1, replayed=1),
+            "the owner marked 1 failure(s), not 2",
+            id="replayed-without-its-marker",
+        ),
+        pytest.param(
+            # Its call waited for the profile, yet the owner marked it too.
+            lambda r: r.update(marks=2, marked=r["marked"] * 2),
+            "the owner marked 2 failure(s), not 1",
+            id="marked-without-a-repair",
+        ),
     ],
 )
 def test_the_second_frontend_holds_each_of_its_observations(change, problem):
@@ -1115,6 +1161,141 @@ def test_the_second_frontend_holds_each_of_its_observations(change, problem):
     change(record)
 
     assert problem in repair_problems(record, daemon=True)
+
+
+def test_a_second_frontend_a_marker_reached_ends_on_the_one_fresh_session():
+    """The latch's branch, which the models cover, still reads valid when a
+    run reaches it: the owner marked both reads, and the second frontend
+    repaired and ran its read again once."""
+    record = _repair(ROW_SECOND)
+    record["second"]["lines"].update(signed_in=1, replayed=1, peer=1)
+    record.update(marks=2, marked=record["marked"] * 2)
+
+    assert repair_problems(record, daemon=True) == []
+    assert semantics(record)["second_met"] == auth_repair.MET_MARKER
+    assert semantics(_repair(ROW_SECOND))["second_met"] == auth_repair.MET_PROFILE
+    assert semantic_differences(_repair(ROW_SECOND), record) == [
+        "marks: 1 then 2",
+        f"second_met: {auth_repair.MET_PROFILE!r} then {auth_repair.MET_MARKER!r}",
+    ]
+
+
+def _second_ran_out(record: dict, *, ended: int, over: int | None) -> dict:
+    """The owner gave up on the second read's wait for the profile, the read
+    ending at *ended* ms with the busy answer; the login over at *over*."""
+    record["second"]["call"].update(
+        is_error=True, read_the_post=False, ended_monotonic_ns=ended * MS
+    )
+    record["profile_waits_ran_out"] = 1
+    record["login_over_ns"] = over * MS if over is not None else None
+    return record
+
+
+@pytest.mark.parametrize(
+    "over", [pytest.param(6_500, id="login-over-later"), pytest.param(None, id="never")]
+)
+def test_a_second_read_the_owner_gave_up_on_before_the_login_was_over_is_invalid(
+    over,
+):
+    record = _second_ran_out(_repair(ROW_SECOND), ended=5_000, over=over)
+    problems = repair_problems(record, daemon=True)
+
+    assert invalid_evidence(problems) == [
+        f"{INVALID}the owner gave up on the second read's wait for the profile "
+        f"(25s) before the login let go of it: the release missed one of the two "
+        f"budgets"
+    ]
+    assert _findings(problems) == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        # The owner's wait ran out after the login had let go of the profile.
+        pytest.param(lambda r: _second_ran_out(r, ended=7_000, over=6_500), id="after"),
+        # The read failed, and the owner never gave up on a wait.
+        pytest.param(
+            lambda r: _second_ran_out(r, ended=5_000, over=6_500).update(
+                profile_waits_ran_out=0
+            ),
+            id="no-wait-ran-out",
+        ),
+    ],
+)
+def test_a_second_read_that_fails_otherwise_is_a_finding(change):
+    record = _repair(ROW_SECOND)
+    change(record)
+    problems = repair_problems(record, daemon=True)
+
+    assert _findings(problems) == [
+        "the second host's read did not end on the new generation: outcome "
+        "'returned', error True"
+    ]
+    assert invalid_evidence(problems) == []
+
+
+def test_direct_refusing_its_read_again_over_its_own_unconfirmed_close_is_valid():
+    """K1 is the frozen baseline: a read again it refuses because its own
+    login browser's close was never confirmed is its answer, not the row's
+    problem, and K3 is then compared to it."""
+    record = _repair(daemon=False)
+    record["calls"][3].update(is_error=True, read_the_post=False)
+    # The frozen baseline's own line on macOS, as its log wrote it.
+    record["host_lines"] = auth_repair._flags(
+        [
+            '{"level": "ERROR", "logger": "linkedin_mcp_server.error_handler", '
+            '"message": "Shared browser busy in get_feed: A previous browser on '
+            "this profile did not shut down cleanly and may still be running. "
+            'Restart the server to recover."}'
+        ]
+    )
+
+    assert repair_problems(record, daemon=False) == []
+    assert auth_repair.direct_read_again(record) == "left open"
+    assert auth_repair.direct_read_again(_repair(daemon=False)) == "read"
+    assert comparison_refusals(record, _repair()) == []
+    # Without Direct's own refusal, a failed read again is still a finding.
+    record["host_lines"]["left_open"] = 0
+    assert _findings(repair_problems(record, daemon=False)) == [
+        "the read after the completed login did not return the post"
+    ]
+
+
+def _start_failed(record: dict, *, failures: int) -> dict:
+    """The cold read answered by its server at once, nothing after the
+    rejection reaching the origin, and *failures* failed starts in its log."""
+    rejected = record["rejection"]["monotonic_ns"]
+    record["requests"] = [
+        r for r in record["requests"] if r["monotonic_ns"] <= rejected
+    ]
+    # Every read after the warm-up one goes, the cold read answered at once.
+    cold = [c for c in record["calls"] if c["tool"] == harness.READ_TOOL][1]
+    del record["calls"][record["calls"].index(cold) :]
+    record["calls"].append(
+        _call(harness.READ_TOOL, 1_400, 1_500, is_error=True, read_the_post=False)
+    )
+    record["login"].update(walls=[], redirects=[], first_poll_ns=None)
+    record["start_failures"] = failures
+    return record
+
+
+@pytest.mark.parametrize("daemon", [True, False])
+def test_a_cold_read_whose_browser_never_started_is_a_finding(daemon):
+    problems = repair_problems(
+        _start_failed(_repair(daemon=daemon), failures=1), daemon=daemon
+    )
+
+    assert problems == [
+        "the cold read failed before any browser reached the origin: the server's "
+        "browser did not start (1 failed start(s))"
+    ]
+
+
+def test_a_cold_read_that_reached_nothing_for_no_stated_reason_stays_invalid():
+    problems = repair_problems(_start_failed(_repair(), failures=0), daemon=True)
+
+    assert f"{INVALID}the stale session never met the wall" in problems
+    assert not any("did not start" in problem for problem in problems)
 
 
 @pytest.mark.parametrize(
@@ -1742,6 +1923,8 @@ class _DaemonRepair:
         wait: float = 30.0,
         budget: float = 10.0,
         reopen: bool = False,
+        beats: bool = True,
+        start_fails: bool = False,
     ) -> None:
         self.row = row
         self.daemon = True
@@ -1751,9 +1934,16 @@ class _DaemonRepair:
         self.cookie = staged.li_at
         served.accept_session(staged.li_at)
         self.wait, self.budget, self.reopen = wait, budget, reopen
+        #: The second frontend says it is waiting with heartbeats, as the
+        #: product's does; without them nothing shows its read at the owner.
+        self.beats = beats
+        #: After the close, the owner's browser does not start again.
+        self.start_fails = start_fails
+        self.closed = False
         self.login: _Login | None = None
         self.owner_lines: list[str] = []
         self.host_lines: list[str] = []
+        self.second_lines: list[str] = []
         self.calls: list[dict[str, Any]] = []
         self.record: dict[str, Any] = {
             "row": row,
@@ -1768,6 +1958,7 @@ class _DaemonRepair:
             snapshot=self._snapshot,
             browser_gone=self._browser_gone,
             second_host=self._second_host,
+            second_output=lambda: list(self.second_lines),
             owner_reading=self._owner_reading,
             owner_log=lambda: list(self.owner_lines),
             host_output=lambda: list(self.host_lines),
@@ -1831,6 +2022,15 @@ class _DaemonRepair:
         the frontend signs in and waits, and runs the read again once."""
         began = time.monotonic_ns()
         if name == CLOSE_TOOL:
+            self.closed = True
+            record = _record(name, began, post=False)
+        elif self.closed and self.start_fails:
+            # The owner's next browser never starts, so nothing reaches the
+            # origin, and its log says why.
+            self.owner_lines.append(
+                f"ERROR Network error in get_feed: {START_FAILED_LINE}: Connection "
+                f"closed while reading from the driver"
+            )
             record = _record(name, began, post=False)
         elif await self._feed(self.cookie) == 200:
             record = _record(name, began, post=True)
@@ -1852,16 +2052,22 @@ class _DaemonRepair:
         return record
 
     async def _second_host(self) -> dict[str, Any]:
-        """A second frontend: its call meets the owner's latch, and once the
-        first sign-in finished, it reads with that session."""
+        """A second frontend, as the product's meets the repair: its call
+        waits at the owner for the profile the first frontend's login holds,
+        its frontend beating for it, and once that login let go, it reads
+        with the session the login left."""
         launched = time.monotonic_ns()
+        began = time.monotonic_ns()
         if self.reopen:
             # The owner opening a browser on the stale generation.
             await self._feed(self.staged.li_at)
-        self._mark()
         assert self.login is not None
-        await asyncio.to_thread(self.login.thread.join, self.wait)
-        began = time.monotonic_ns()
+        while self.login.thread.is_alive():
+            if self.beats:
+                self.second_lines.append(
+                    f'INFO HTTP Request: POST http://[::1]:1{HEARTBEAT_PATH} "200 OK"'
+                )
+            await asyncio.sleep(0.05)
         post = await self._feed(self.cookie) == 200
         return {
             "made": True,
@@ -1869,6 +2075,7 @@ class _DaemonRepair:
             "call": _record(harness.READ_TOOL, began, post=post),
             "forwarded": True,
             "quit_problems": [],
+            "lines": auth_repair._flags(self.second_lines),
         }
 
     def finish_record(self) -> dict[str, Any]:
@@ -1924,7 +2131,7 @@ async def test_the_owner_s_marker_is_repaired_and_replayed_once(
     assert repair_reading(record)["at_read_end"] == COMPLETED
 
 
-async def test_a_second_frontend_meets_the_latch_and_ends_on_the_one_fresh_session(
+async def test_a_second_frontend_waits_out_the_login_and_ends_on_its_session(
     on_disk,
     served,
     ca,
@@ -1932,8 +2139,47 @@ async def test_a_second_frontend_meets_the_latch_and_ends_on_the_one_fresh_sessi
     record = await _daemon_row(ROW_SECOND, on_disk, served, ca)
 
     assert repair_problems(record, daemon=True) == []
-    assert record["marks"] == 2 and len(record["login"]["issued"]) == 1
+    assert record["marks"] == 1 and len(record["login"]["issued"]) == 1
+    # Released only once the second read was shown at the owner, and the
+    # first frontend's login seen over after it.
+    assert record["second_sent_ns"] <= record["login"]["released_ns"]
+    assert record["login_over_ns"] >= record["login"]["released_ns"]
     assert semantics(record)["second"] is True
+    assert semantics(record)["second_met"] == auth_repair.MET_PROFILE
+
+
+@pytest.mark.parametrize("row", [ROW_COLD, ROW_SECOND])
+async def test_an_owner_whose_browser_never_starts_again_fails_the_row(
+    row, on_disk, served, ca, monkeypatch
+):
+    """Nothing reaches the origin, so no login ever asks; the owner's log
+    says its browser did not start, which makes it the row's finding and
+    never the missing evidence it would otherwise read as."""
+    monkeypatch.setattr(auth_repair, "LOGIN_START_SECONDS", 0.5)
+    record = await _daemon_row(row, on_disk, served, ca, start_fails=True)
+
+    assert repair_problems(record, daemon=True) == [
+        "the cold read failed before any browser reached the origin: the server's "
+        "browser did not start (1 failed start(s))"
+    ]
+
+
+async def test_a_second_read_never_shown_at_the_owner_leaves_the_cell_invalid(
+    on_disk, served, ca, monkeypatch
+):
+    monkeypatch.setattr(auth_repair, "SECOND_SENT_SECONDS", 0.5)
+    record = await _daemon_row(ROW_SECOND, on_disk, served, ca, beats=False)
+    problems = repair_problems(record, daemon=True)
+
+    # Released anyway, so the login still ends inside its own budget, but
+    # only once the whole bound had passed without the read shown there.
+    released = record["login"]["released_ns"]
+    assert released is not None
+    assert released - record["first_ask_ns"] >= 0.5e9
+    assert invalid_evidence(problems) == [
+        f"{INVALID}the second host's read was not shown at the owner before the release"
+    ]
+    assert _findings(problems) == []
 
 
 async def test_an_owner_reopening_on_the_stale_generation_fails_the_second_frontend(

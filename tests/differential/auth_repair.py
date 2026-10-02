@@ -22,10 +22,21 @@ marks the failure replayable, the frontend signs in, the row releases the
 completion once the login asks for it, and the frontend runs the read again
 once: the host's one call returns the post. K1 frozen: Direct detects, starts
 its own login and answers that a login started; once the login completed the
-host calls again and reads. **Second frontend** (``ROW_SECOND``, daemon
-only): a second host calls while the first frontend's login waits; the owner
-answers both from its latch and opens no browser on the stale generation, one
-fresh session is issued, and both reads end on it. **Failed login**
+host calls again and reads. Where Direct then refuses that read over a login
+browser whose close it never confirmed (its own ``LEFT_OPEN_LINE``), that is
+the baseline's answer and recorded as such, not a problem of the row.
+**Second frontend** (``ROW_SECOND``, daemon only): a second host calls while
+the first frontend's login waits. The owner takes the profile before its
+latch is asked (``sequential_tool_middleware`` ahead of the tool's readiness
+gate), and the login holds the profile until it is done, so the second read
+waits at the owner for up to ``BROWSER_WAIT`` and meets no marker; a marker
+of its own (the latch) is the branch the models cover. The row releases the
+completion once the second read is shown in flight (``SECOND_SENT_SECONDS``),
+which keeps the login inside ``LOGIN_TIMEOUT`` and the second read inside
+``BROWSER_WAIT``; a second read that the owner gave up on before the login
+let go of the profile is that ordering missed, invalid evidence. Nothing
+reads on the stale generation, one fresh session is issued, and both reads
+end on it. **Failed login**
 (``ROW_FAILED``): the completion is never released; no replay, the login
 settles failed inside its own budget, and the session's fate is read without
 anything that could sign in again (``must-not-repair``: the origin's own
@@ -46,9 +57,13 @@ session issued with nobody authorizing it, or a fresh session destroyed by a
 second repair fails, whatever a later sign-in achieved.
 
 **The login is headed.** On Linux it opens on the job's display; macOS and
-Windows open it in the runner's own desktop session, which no row before
-these measured. A login that never opens its wall leaves the cell invalid
-(``the login never asked for its completion``), never a finding.
+Windows open it in the runner's own desktop session, where the frozen
+baseline's login served its wall and completed on every leg. A login that
+never opens its wall leaves the cell invalid (``the login never asked for its
+completion``), never a finding. A cold read that its own server answered
+without any request after the rejection, its log saying the browser did not
+start (``START_FAILED_LINE``), is the opposite: the product failed the
+scenario before a login could be asked for, a finding.
 
 **Lanes left to models.** A lost marker response needs the frontend's owner
 hop routed through a relay; ``owner_hop_relay`` proves such a relay's
@@ -121,6 +136,8 @@ from differential.session import (
 )
 from differential.synthetic_origin import ALLOWED_HOSTS, COMPLETED_BY_ROW
 from linkedin_mcp_server.config.loaders import EnvironmentKeys
+from linkedin_mcp_server.config.schema import DEFAULT_BROWSER_WAIT_SECONDS
+from linkedin_mcp_server.daemon_liveness import HEARTBEAT_PATH
 
 if TYPE_CHECKING:
     from differential.harness import AuthSeams, RowContext
@@ -170,6 +187,12 @@ LOGIN_INLINE_WAIT_SECONDS = 10.0
 #: How long after its own budget a failed login may take to be gone: its
 #: browser closed and its asks ended. Passive: the row only waits.
 LOGIN_SETTLE_SECONDS = 60.0
+#: How long a server waits for a profile another process holds before it
+#: answers that the browser is busy (``BROWSER_WAIT``): the product's own
+#: default, pinned so the record says it, never stretched. The second
+#: frontend's read waits this long at the owner while the login holds the
+#: profile, which it does until about 18 s after its wall (``ROW_SECOND``).
+BROWSER_WAIT_SECONDS = DEFAULT_BROWSER_WAIT_SECONDS
 
 #: The cell's environment, over the row's: the same in every column. The
 #: automatic import is off, so no real browser profile or keystore is ever
@@ -178,6 +201,7 @@ ENVIRONMENT = {
     EnvironmentKeys.LOGIN_TIMEOUT: f"{LOGIN_TIMEOUT_SECONDS:g}",
     EnvironmentKeys.TOOL_TIMEOUT: f"{TOOL_TIMEOUT_SECONDS:g}",
     EnvironmentKeys.LOGIN_INLINE_WAIT: f"{LOGIN_INLINE_WAIT_SECONDS:g}",
+    EnvironmentKeys.BROWSER_WAIT: f"{BROWSER_WAIT_SECONDS:g}",
     EnvironmentKeys.AUTO_IMPORT_FROM_BROWSER: "false",
 }
 #: What the record says of the bounds, read back by the verdict.
@@ -186,6 +210,7 @@ BOUNDS = {
     "tool_timeout_seconds": TOOL_TIMEOUT_SECONDS,
     "login_inline_wait_seconds": LOGIN_INLINE_WAIT_SECONDS,
     "login_settle_seconds": LOGIN_SETTLE_SECONDS,
+    "browser_wait_seconds": BROWSER_WAIT_SECONDS,
 }
 
 #: The row's waits, each from its own start.
@@ -194,8 +219,15 @@ CLOSE_SECONDS = 60.0
 #: From the cold read to the login's first ask: a cold browser start and its
 #: validation, the owner's answer, and a headed login browser's start.
 LOGIN_START_SECONDS = 120.0
-#: From the second host's start to the owner answering it from its latch.
-SECOND_MARK_SECONDS = 90.0
+#: From the second host's start to its read shown in flight
+#: (``_second_in_flight``): a frontend's start, measured at 1 to 4 s, and
+#: one heartbeat cadence. The login looks for the session only once its
+#: manual wait starts, about 15 s after its wall, and lets go of the profile
+#: about 3 s after it finds one. Released by this bound's end, about 15 s
+#: after the wall, it lets go by about 18.5 s after the wall: inside
+#: ``LOGIN_TIMEOUT``, and inside the second read's ``BROWSER_WAIT``, which
+#: runs from that read's dispatch, after the wall.
+SECOND_SENT_SECONDS = 15.0
 #: From the release to the session issued, the generation written and the
 #: login browser gone: the product's own 15 s, its export and its close.
 COMPLETION_SECONDS = 90.0
@@ -227,6 +259,20 @@ NOT_REPLAYED_LINES = (
 )
 SIGNED_IN_LINE = "The sign-in finished"
 PEER_LINE = "Another client already signed in"
+#: ``sequential_tool_middleware``: a server's wait for a profile another
+#: process holds ran out, and it answered that the browser is busy.
+PROFILE_WAIT_LINE = "gave up waiting for the shared browser"
+#: ``core.browser``: a browser launch that failed.
+START_FAILED_LINE = "Failed to start browser"
+#: ``drivers.browser``: a server refusing to launch because a close of its
+#: own was never confirmed, until it is restarted.
+LEFT_OPEN_LINE = "A previous browser on this profile did not shut down cleanly"
+
+#: How the second frontend met the repair, read from its own lines. Its call
+#: waited at the owner for the profile the login held, and it repaired
+#: nothing; or a marker reached it, and it repaired and ran its read again.
+MET_PROFILE = "profile"
+MET_MARKER = "marker"
 
 #: Ends of the cold read's login, at the moment the read ended.
 COMPLETED = "completed"
@@ -271,8 +317,24 @@ async def _until(check: Callable[[], Any], seconds: float) -> Any:
         await asyncio.sleep(POLL_SECONDS)
 
 
-def _marks(seams: AuthSeams) -> int:
-    return sum(1 for line in seams.owner_log() if MARKED_LINE in line)
+def _count(lines: Sequence[str], text: str) -> int:
+    return sum(1 for line in lines if text in line)
+
+
+def _second_in_flight(seams: AuthSeams, second: asyncio.Future[Any]) -> bool:
+    """Whether the second host's read is at the owner and not over: its
+    frontend beat for it twice. The first beat is the preflight, and only a
+    validated answer dispatches the call; the next follows one cadence later
+    and only while that call runs (``daemon_proxy``). The owner's own wait
+    for the profile is logged at debug only, so its start is not observed."""
+    return not second.done() and _count(seams.second_output(), HEARTBEAT_PATH) >= 2
+
+
+def _login_over(seams: AuthSeams) -> bool:
+    """Whether the first frontend says its login ended, either way: it waits
+    for the login task, which lets go of the profile before it ends."""
+    flags = _flags(seams.host_output())
+    return bool(flags["signed_in"] or flags["not_replayed"])
 
 
 def marked(lines: Sequence[str]) -> list[dict[str, Any]]:
@@ -294,7 +356,8 @@ def marked(lines: Sequence[str]) -> list[dict[str, Any]]:
 
 
 def _flags(lines: Sequence[str]) -> dict[str, int]:
-    """How often the frontend or Direct server said each of its repair ends."""
+    """How often the frontend or Direct server said each of its repair ends,
+    and that it refused a launch over a close it never confirmed."""
     return {
         "replayed": sum(1 for line in lines if REPLAY_LINE in line),
         "not_replayed": sum(
@@ -302,6 +365,7 @@ def _flags(lines: Sequence[str]) -> dict[str, int]:
         ),
         "signed_in": sum(1 for line in lines if SIGNED_IN_LINE in line),
         "peer": sum(1 for line in lines if PEER_LINE in line),
+        "left_open": sum(1 for line in lines if LEFT_OPEN_LINE in line),
     }
 
 
@@ -371,20 +435,31 @@ async def repair_script(ctx: RowContext) -> None:
     try:
         asked = await _first_ask(seams, LOGIN_START_SECONDS)
         record["first_ask_ns"] = asked
-        if asked is None:
+        if asked is not None:
+            _phase(ctx, "login waiting", asked)
+        elif not (read.done() and _start_failures(ctx, seams)):
+            # A read its server already failed because its browser did not
+            # start is the verdict's finding, not missing evidence.
             problems.append(
                 f"{INVALID}the login never asked for its completion within "
                 f"{LOGIN_START_SECONDS}s of the cold read"
             )
-        else:
-            _phase(ctx, "login waiting", asked)
         if ctx.row == ROW_SECOND and asked is not None:
-            second = asyncio.ensure_future(seams.second_host())
-            met = await _until(lambda: _marks(seams) >= 2, SECOND_MARK_SECONDS)
-            record["second_marked_ns"] = time.monotonic_ns() if met else None
+            pending = second = asyncio.ensure_future(seams.second_host())
+            # Released once the second read is shown at the owner, so the
+            # record proves it was there while the login held the profile.
+            # Released after the bound anyway, so the login still ends inside
+            # its own budget; the verdict then reads the cell invalid.
+            sent = await _until(
+                lambda: _second_in_flight(seams, pending), SECOND_SENT_SECONDS
+            )
+            record["second_sent_ns"] = time.monotonic_ns() if sent else None
         if case.release and asked is not None:
             record["release"] = seams.release()
             _phase(ctx, "released", _ns(record["release"].get("released_ns")))
+        if second is not None:
+            over = await _until(lambda: _login_over(seams), COMPLETION_SECONDS)
+            record["login_over_ns"] = time.monotonic_ns() if over else None
         await asyncio.wait({read}, timeout=READ_SECONDS)
         record["read_open"] = not read.done()
         record["read_ended_login"] = seams.login()
@@ -412,12 +487,23 @@ async def repair_script(ctx: RowContext) -> None:
             await asyncio.wait({second}, timeout=SECOND_SECONDS)
             record["second"] = second.result() if second.done() else None
         record["host_lines"] = _flags(seams.host_output())
+        record["start_failures"] = _start_failures(ctx, seams)
         if ctx.daemon:
             record["marked"] = marked(seams.owner_log())
             record["marks"] = len(record["marked"])
+            record["profile_waits_ran_out"] = _count(
+                seams.owner_log(), PROFILE_WAIT_LINE
+            )
             record["owner_after"] = await seams.owner_reading("after the repair")
     finally:
         await _settle_tasks([read, second])
+
+
+def _start_failures(ctx: RowContext, seams: AuthSeams) -> int:
+    """How often the server that reads said its browser did not start: the
+    owner in daemon mode, the host's own server in Direct."""
+    lines = seams.owner_log() if ctx.daemon else seams.host_output()
+    return _count(lines, START_FAILED_LINE)
 
 
 async def login_script(ctx: RowContext) -> None:
@@ -643,6 +729,19 @@ def _authorized(record: Mapping[str, Any], kind: str, *, by: int | None) -> list
     return []
 
 
+RELEASED_LATE = f"{INVALID}the completion was released after the login stopped asking"
+
+
+def _released_late(record: Mapping[str, Any]) -> bool:
+    """Whether the row released the completion only after the login's last
+    ask: nothing could be issued after it, the row's ordering and never the
+    product's, so nothing that follows from a release is judged."""
+    login = _login(record)
+    released = _ns(login.get("released_ns"))
+    last = _ns(login.get("last_poll_ns"))
+    return released is not None and last is not None and last < released
+
+
 def _one_issue(record: Mapping[str, Any]) -> list[str]:
     """One fresh session, issued after the row's release, which came after
     the login's first ask."""
@@ -654,6 +753,8 @@ def _one_issue(record: Mapping[str, Any]) -> list[str]:
         return [f"{INVALID}the row did not release the completion"]
     if asked is None or released < asked:
         found.append(f"{INVALID}the completion was released before the login asked")
+    if _released_late(record):
+        return [*found, RELEASED_LATE]
     issued = _issued(record)
     if not issued:
         found.append("no fresh session was issued after the release")
@@ -715,6 +816,28 @@ def _repair_setup(
     if not reads:
         return (
             [*found, f"{INVALID}no read was sent after the rejection"],
+            None,
+            rejected,
+        )
+    failures = record.get("start_failures")
+    reached = [
+        r for r in _requests(record) if (_ns(r.get("monotonic_ns")) or 0) > rejected
+    ]
+    if (
+        not reached
+        and isinstance(failures, int)
+        and failures > 0
+        and reads[0].get("outcome") == "returned"
+        and reads[0].get("is_error") is True
+    ):
+        # Nothing reached the origin, so no wall and no login, and the
+        # server says why: a finding, never the missing evidence it reads as.
+        return (
+            [
+                *found,
+                f"the cold read failed before any browser reached the origin: the "
+                f"server's browser did not start ({failures} failed start(s))",
+            ],
             None,
             rejected,
         )
@@ -783,7 +906,8 @@ def _replayed(
 
 def _restarted(record: Mapping[str, Any], read: Mapping[str, Any]) -> list[str]:
     """K1: Direct answered that a login started; the host's next read after
-    the login completed returned the post."""
+    the login completed returned the post, or Direct refused it over its own
+    login browser's unconfirmed close (``direct_read_again``)."""
     found: list[str] = []
     if _read_the_post(read) or read.get("outcome") != "returned":
         found.append(
@@ -796,35 +920,105 @@ def _restarted(record: Mapping[str, Any], read: Mapping[str, Any]) -> list[str]:
     seen = _ns(completion.get("generation_seen_ns"))
     if again is None:
         found.append(f"{INVALID}the host did not read again after the login")
-    elif not _read_the_post(again):
-        found.append("the read after the completed login did not return the post")
     elif seen is None or (_ns(again.get("began_monotonic_ns")) or 0) < seen:
         found.append(f"{INVALID}the read again was sent before the login completed")
+    elif direct_read_again(record) is None:
+        found.append("the read after the completed login did not return the post")
     return found
 
 
+def direct_read_again(record: Mapping[str, Any]) -> str | None:
+    """K1: how Direct answered the host's read after its login completed:
+    ``read`` with the post, ``left open`` when it refused to launch because
+    its own login browser's close was never confirmed (``LEFT_OPEN_LINE``),
+    which it keeps refusing until a restart, or ``None`` for anything else.
+
+    ``left open`` is the baseline's own answer, so it leaves K1 valid and is
+    never held against the daemon: measured on macOS, where the frozen
+    baseline's login exported the new session and wrote its generation, its
+    browser was then shown gone, and the read sent after both was refused in
+    under 0.1 s."""
+    reads = [c for c in _calls(record) if c.get("tool") == WARM_TOOL]
+    again = reads[2] if len(reads) == 3 else {}
+    if _read_the_post(again):
+        return "read"
+    left_open = _mapping(record.get("host_lines")).get("left_open")
+    if (
+        again.get("outcome") == "returned"
+        and again.get("is_error") is True
+        and isinstance(left_open, int)
+        and left_open > 0
+    ):
+        return "left open"
+    return None
+
+
+def second_met(record: Mapping[str, Any]) -> str:
+    """How the second frontend met the repair, by its own lines: a repair
+    end of its own means a marker reached it (``MET_MARKER``); none, that
+    its call waited at the owner for the profile (``MET_PROFILE``)."""
+    lines = _mapping(_mapping(record.get("second")).get("lines"))
+    ends = ("replayed", "not_replayed", "signed_in", "peer")
+    return MET_MARKER if any(lines.get(end) for end in ends) else MET_PROFILE
+
+
+def _profile_wait_ran_out(record: Mapping[str, Any], call: Mapping[str, Any]) -> bool:
+    """Whether the owner gave up on the second read's wait for the profile
+    before the first frontend's login let go of it: the release missed one
+    of the two budgets with the product's own values."""
+    ran_out = record.get("profile_waits_ran_out")
+    ended = _ns(call.get("ended_monotonic_ns"))
+    over = _ns(record.get("login_over_ns"))
+    return (
+        isinstance(ran_out, int)
+        and ran_out > 0
+        and ended is not None
+        and (over is None or ended < over)
+    )
+
+
 def _second(record: Mapping[str, Any]) -> list[str]:
-    """The second frontend met the repair while the login waited, and its
-    read ended on the fresh session."""
+    """The second host's read was at the owner before the release, and ended
+    on the fresh session; a frontend a marker reached ran it again once."""
     second = _mapping(record.get("second"))
     found: list[str] = []
-    marked = _ns(record.get("second_marked_ns"))
+    sent = _ns(record.get("second_sent_ns"))
     released = _ns(_login(record).get("released_ns"))
     if not second.get("made"):
         return [f"{INVALID}the second host never ran: {second.get('why')!r}"]
-    if marked is None or released is None or marked > released:
+    call = _mapping(second.get("call"))
+    began = _ns(call.get("began_monotonic_ns"))
+    if (
+        sent is None
+        or released is None
+        or began is None
+        or sent > released
+        or began > released
+    ):
         found.append(
-            f"{INVALID}the second frontend was not shown to meet the repair before "
+            f"{INVALID}the second host's read was not shown at the owner before "
             f"the release"
         )
     if second.get("forwarded") is not True:
         found.append("the second host's call was not forwarded to the owner")
-    call = _mapping(second.get("call"))
-    if not _read_the_post(call):
+    lines = _mapping(second.get("lines"))
+    if second_met(record) == MET_MARKER and lines.get("replayed") != 1:
         found.append(
-            f"the second host's read did not end on the new generation: outcome "
-            f"{call.get('outcome')!r}, error {call.get('is_error')!r}"
+            f"the second frontend repaired on a marker but did not run its read "
+            f"again exactly once: {lines.get('replayed')!r}"
         )
+    if not _read_the_post(call):
+        if _profile_wait_ran_out(record, call):
+            found.append(
+                f"{INVALID}the owner gave up on the second read's wait for the "
+                f"profile ({BROWSER_WAIT_SECONDS:g}s) before the login let go of "
+                f"it: the release missed one of the two budgets"
+            )
+        else:
+            found.append(
+                f"the second host's read did not end on the new generation: "
+                f"outcome {call.get('outcome')!r}, error {call.get('is_error')!r}"
+            )
     elif (_ns(call.get("ended_monotonic_ns")) or 0) < (released or 0):
         found.append(f"{INVALID}the second host's read ended before the release")
     if second.get("quit_problems"):
@@ -892,9 +1086,13 @@ def repair_problems(record: Mapping[str, Any] | None, *, daemon: bool) -> list[s
     if row == ROW_FAILED:
         return problems + _failed(record, read, daemon=daemon)
     problems += _one_issue(record)
+    if _released_late(record):
+        return problems
     problems += _completed(record, daemon=daemon)
     if daemon:
-        problems += _replayed(record, read, 2 if row == ROW_SECOND else 1)
+        # The owner marks the second read too only where it reached the latch.
+        marker = row == ROW_SECOND and second_met(record) == MET_MARKER
+        problems += _replayed(record, read, 2 if marker else 1)
         identified = _identified(record)
         if identified is None or _launches(record, identified) != ([], []):
             problems.append("the row launched another owner beside the identified one")
@@ -1042,6 +1240,7 @@ def semantics(record: Mapping[str, Any]) -> dict[str, Any]:
         found["second"] = _read_the_post(
             _mapping(_mapping(record.get("second")).get("call"))
         )
+        found["second_met"] = second_met(record)
     return found
 
 
