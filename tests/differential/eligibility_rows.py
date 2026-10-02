@@ -1318,6 +1318,14 @@ def cloud_storage_root(home: Path, name: str) -> Path:
     return home / "Library" / "CloudStorage" / name
 
 
+def cloud_storage_profile(root: Path) -> Path:
+    """The profile the cloud cell points at, under a planted *root*. Its auth
+    root (the profile's parent) does not exist yet, as in every other cell:
+    the product creates and claims it, and refuses one that already exists
+    unclaimed (``profile_claim``)."""
+    return root / "auth" / "profile"
+
+
 @dataclass(frozen=True)
 class Planted:
     """What a cell planted for its whole run, removed by ``remove``."""

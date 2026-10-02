@@ -67,6 +67,7 @@ from differential.eligibility_rows import (
     STREAMABLE_HTTP,
     Planted,
     ProviderConfigExists,
+    cloud_storage_profile,
     cloud_storage_root,
     comparison_refusals,
     decision_lines,
@@ -184,7 +185,7 @@ def _plant_in(row: str, home: Path, profile_dir: Path) -> tuple[Planted, Path]:
     if case.plant == CLOUD_STORAGE:
         root = cloud_storage_root(home, "cell")
         planted = Planted(CLOUD_STORAGE, (plant_tree(root),))
-        return planted, root / "profile"
+        return planted, cloud_storage_profile(root)
     assert case.plant is not None
     planted = plant_for(
         case.plant,
@@ -411,6 +412,27 @@ def test_a_plant_outside_the_product_s_locations_is_refused(tmp_path):
     with pytest.raises(ValueError):
         plant_file(tmp_path / "info.json", b"{}", locations=[tmp_path / "x.json"])
     assert not (tmp_path / "info.json").exists()
+
+
+def test_the_cloud_cell_s_auth_root_is_left_for_the_product_to_claim(tmp_path):
+    """Measured on macOS CI: a profile whose auth root the cell had created
+    was refused as unclaimed before anything ran."""
+    from linkedin_mcp_server.profile_claim import ensure_profile_claim
+
+    home = tmp_path / "home"
+    (home / "Library").mkdir(parents=True)
+    root = cloud_storage_root(home, "cell")
+    planted = plant_tree(root)
+    try:
+        profile = cloud_storage_profile(root)
+        assert not profile.parent.exists()
+        ensure_profile_claim(profile)
+        assert profile.parent.is_dir()
+    finally:
+        import shutil
+
+        shutil.rmtree(root / "auth", ignore_errors=True)
+        assert planted.remove() == []
 
 
 def test_a_planted_tree_refuses_an_existing_root_and_is_removed_exactly(tmp_path):

@@ -57,6 +57,7 @@ from differential.eligibility_rows import (
     ROW_SYNCED,
     ROW_UNKNOWN,
     Planted,
+    cloud_storage_profile,
     cloud_storage_root,
     comparison_refusals,
     plant_for,
@@ -190,7 +191,7 @@ def planted(row: str, profile: Path, monkeypatch: pytest.MonkeyPatch) -> Iterato
             Path.home(), f"linkedin-mcp-differential-{uuid.uuid4().hex[:12]}"
         )
         made = Planted(CLOUD_STORAGE, (plant_tree(root),))
-        profile = root / "profile"
+        profile = cloud_storage_profile(root)
         _point_at(profile, monkeypatch)
     else:
         made = plant_for(
