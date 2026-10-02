@@ -84,7 +84,13 @@ serve settles that successor in the identified owner's place. **Rows H-R8 and
 H-R9** (``owner_loss``) lose the owner before a call and after the dispatch of
 a mutating one, through ``OwnerLossSeams``: killed or stopped through the
 handle the row tied it by, or its old address answered by a declared
-responder; a stopped owner is resumed on every path.
+responder; a stopped owner is resumed on every path. **Rows H-R10a, H-R10b
+and H-R15** (``profile_commands``) run the profile commands themselves, the
+row's own command line with ``--logout``, ``--login``,
+``--import-from-browser`` or ``--status``, on a pseudo-terminal or on pipes,
+through ``CommandSeams``: a command not shown exited with its output ended
+once the row is done with it is retained, and one the script leaves running
+is ended by the teardown and recorded as a harness failure.
 """
 
 from __future__ import annotations
@@ -134,6 +140,7 @@ from differential import (
     host_comparison,
     lease_probe,
     owner_loss,
+    profile_commands,
     r7_fault,
     retirement_race,
 )
@@ -175,6 +182,7 @@ from differential.job_query_model import (
 )
 from differential.session import (
     CALLER,
+    CLEARED_BY_USER,
     EXPECTABLE,
     LOGOUT,
     PRESERVATION,
@@ -1437,7 +1445,8 @@ async def run_host_session(
                 except Exception as exc:  # noqa: BLE001 - the script's own evidence
                     session.script_error = f"{type(exc).__name__}: {exc}"
             # A host the row lost is not quit: its server already had its end.
-            if transport.lost is None:
+            # Nor one the row's script quit itself.
+            if transport.lost is None and not transport.quit_done:
                 await transport.host_quit()
     except Exception as exc:  # noqa: BLE001 - reported as the row's evidence
         detail = f"{type(exc).__name__}: {exc}"
@@ -4994,6 +5003,10 @@ class PostQuit:
     failures: list[str] = field(default_factory=list)
     user_lines: list[str] = field(default_factory=list)
     feed_requests: int = 0
+    #: The row's preservation policy, when that policy is why no session ran
+    #: (``preservation_policy_refusals``): declared, so not a failure, and
+    #: never an observation either.
+    withheld: str | None = None
 
 
 @dataclass
@@ -5353,7 +5366,11 @@ class RowContext:
     (``RowLifecycle.race``) gets ``race``: its readings, and on a turnover
     lane the stand-down. A row that loses the owner
     (``RowLifecycle.owner_loss``) gets ``owner_loss``: the kill, the stop and
-    the declared responder, and its readings.
+    the declared responder, and its readings. A row that runs profile
+    commands (``RowLifecycle.commands``) gets ``commands``.
+
+    A row may quit its host itself (``transport.host_quit``) and go on
+    observing; the session then quits it no second time.
     """
 
     row: str
@@ -5382,6 +5399,8 @@ class RowContext:
     race: RaceSeams | None = None
     #: Only on a row that loses the owner (``OwnerLossSeams``).
     owner_loss: OwnerLossSeams | None = None
+    #: Only on a row that runs profile commands (``CommandSeams``).
+    commands: CommandSeams | None = None
 
     def emit(self, actor: str, kind: str, **fields: Any) -> None:
         self._emit(actor, kind, **fields)
@@ -5530,6 +5549,46 @@ class OwnerLossSeams:
 
 
 @dataclass(frozen=True)
+class CommandSeams:
+    """What a row that runs profile commands may do (``RowContext.commands``).
+
+    One action: ``start``, the row's own command line with the arguments
+    given, in the row's own environment, as a child on a pseudo-terminal or
+    on pipes (``profile_commands.TerminalCommand``). The row measures beside
+    a running command (a checkpoint while it waits at a prompt), so it is
+    not retained while it runs; one ``finish`` cannot show exited with its
+    output ended is retained from then on, which refuses every later
+    measurement until it is. One the script leaves running is ended by the
+    row's teardown, which records it as a harness failure and never as a
+    settlement. Every reading waits and sends nothing, stamps itself on the
+    monotonic clock (``seen_ns``), and none raises.
+    """
+
+    #: Start the row's command line with *args*: ``terminal`` on a
+    #: pseudo-terminal, else on pipes; ``overrides`` over the row's
+    #: environment, recorded by name only.
+    start: Callable[..., Awaitable[profile_commands.TerminalCommand]]
+    #: Wait up to the seconds given for a started command to exit and its
+    #: output to end; its record, however it went.
+    finish: Callable[
+        [profile_commands.TerminalCommand, float], Awaitable[dict[str, Any]]
+    ]
+    #: What the profile shows by itself (``LossSeams.settlement``).
+    settlement: Callable[[], Awaitable[dict[str, Any]]]
+    #: Which owner the descriptor names now, and whether the identified one
+    #: is alive (``LossSeams.owner_reading``).
+    owner_reading: Callable[[str], Awaitable[dict[str, Any]]]
+    #: The row's own daemon log, as written so far; every owner's.
+    owner_log: Callable[[], list[str]]
+    #: Whether the identified owner is seen gone within the seconds given.
+    owner_exit: Callable[[float], Awaitable[dict[str, Any]]]
+    #: The browser roots on the row's profile now (``observe_roots``).
+    roots: Callable[[str], Awaitable[dict[str, Any]]]
+    #: A directory of the row's own, for what its commands need on disk.
+    scratch: Path
+
+
+@dataclass(frozen=True)
 class RowLifecycle:
     """How one row runs, declared before it may (``ROWS``)."""
 
@@ -5564,6 +5623,12 @@ class RowLifecycle:
     #: The script's ``prepare`` attaches the signal oracle, which the row is
     #: then held to on Linux, as H-R6 is.
     traced: bool = False
+    #: The script runs profile commands and gets ``CommandSeams``.
+    commands: bool = False
+    #: The R17 outcome the row declares it expects, one of ``EXPECTABLE``:
+    #: what ``judge_row`` holds the session to. The authorization a clear
+    #: needs is never declared here; the script records it as confirmed.
+    expect_session: str = RETAINED
 
 
 ROW_H_CAL = call_loss.ROW_H_CAL
@@ -5659,6 +5724,27 @@ ROWS: dict[str, RowLifecycle] = {
         owner_loss=True,
         traced=True,
     ),
+    # H-R10a, H-R10b and H-R15: profile commands beside a live owner or
+    # Direct server, in the calibration's configuration. A confirmed logout
+    # is expected to leave the session cleared, and nothing that could sign
+    # in again may run after it.
+    **{
+        row: RowLifecycle(
+            idle_timeout=profile_commands.COMMAND_IDLE_TIMEOUT_SECONDS,
+            recorded=True,
+            scenarios=False,
+            script=case.script,
+            k2=profile_commands.K2_NOT_APPLICABLE,
+            commands=True,
+            expect_session=case.expect_session,
+            preservation=(
+                MUST_REMAIN_CLEARED
+                if case.expect_session == CLEARED_BY_USER
+                else ORDINARY
+            ),
+        )
+        for row, case in profile_commands.CASES.items()
+    },
 }
 
 #: The verdict over each recorded row's raw record, appended after
@@ -5674,6 +5760,7 @@ ROW_VERDICTS: dict[str, RowVerdict] = {
     },
     **{row: owner_loss.h_r8_problems for row in owner_loss.H_R8_CASES},
     owner_loss.ROW_H_R9: owner_loss.h_r9_problems,
+    **{row: profile_commands.problems_for for row in profile_commands.CASES},
 }
 
 
@@ -5726,6 +5813,21 @@ def lifecycle_problems(row: str, lifecycle: RowLifecycle) -> list[str]:
             problems.append("an owner loss that combines with other scenarios")
     if lifecycle.traced and not lifecycle.owner_loss:
         problems.append("a trace with no owner-loss seams to attach it")
+    if lifecycle.commands:
+        # The commands are the script's to run and observe.
+        if lifecycle.script is None:
+            problems.append("profile commands with no script to run them")
+        if lifecycle.scenarios:
+            problems.append("profile commands that combine with other scenarios")
+    if lifecycle.expect_session not in EXPECTABLE:
+        problems.append(f"an expected session of {lifecycle.expect_session!r}")
+    elif (
+        lifecycle.expect_session == CLEARED_BY_USER
+        and lifecycle.preservation != MUST_REMAIN_CLEARED
+    ):
+        problems.append(
+            "a cleared session left to a preservation session that can repair it"
+        )
     return problems
 
 
@@ -5762,8 +5864,10 @@ def preservation_policy_refusals(policy: str) -> list[str]:
 
     That session is a Direct host whose read signs in again when it finds the
     session gone, so it can repair exactly what a clearing or failed-login
-    row is judged on. Such a row's preservation is refused until it has a
-    session that observes without repairing.
+    row is judged on. Such a row's session is withheld, by its own
+    declaration and so not as a failure (``PostQuit.withheld``): R17 reads a
+    clear or a loss from the artefacts alone, and a session still in place
+    with no observation of it reads as uncertain, which no row expects.
     """
     if policy == ORDINARY:
         return []
@@ -7747,6 +7851,110 @@ async def measure_host_quit_row(
             resume=owner_resume if stoppable else None,
         )
 
+    #: Every profile command the row started; the hold on each that could not
+    #: be shown settled when the row was done with it, which refuses every
+    #: later measurement until it is; and the ones whose output was logged.
+    #: A command is not held while it runs: the row measures beside it, a
+    #: checkpoint while it waits at a prompt among them.
+    commands_started: list[profile_commands.TerminalCommand] = []
+    command_holds: dict[int, Retained] = {}
+    commands_logged: set[int] = set()
+
+    async def command_start(
+        args: Sequence[str],
+        *,
+        terminal: bool,
+        label: str,
+        overrides: Mapping[str, str] | None = None,
+    ) -> profile_commands.TerminalCommand:
+        """``CommandSeams.start``: the row's command line and environment,
+        with *overrides* over it."""
+        directory = work_dir / "commands" / f"{len(commands_started) + 1}-{label}"
+        directory.mkdir(parents=True, exist_ok=True)
+        started = profile_commands.TerminalCommand(
+            [*command, *args],
+            args=args,
+            env={**env, **profile_commands.COMMAND_ENV, **(overrides or {})},
+            overridden=sorted(overrides or {}),
+            cwd=directory,
+            terminal=terminal,
+            label=label,
+        )
+        commands_started.append(started)
+        started.start()
+        emit(
+            "harness",
+            "phase",
+            name=f"command started: {label}",
+            monotonic_ns=started.started_ns or time.monotonic_ns(),
+        )
+        return started
+
+    def command_done(started: profile_commands.TerminalCommand) -> None:
+        """The row is done with *started*: log what it printed, once, and
+        hold it until it is shown settled if it is not now."""
+        if id(started) not in commands_logged:
+            commands_logged.add(id(started))
+            for _, line in started.lines():
+                emit(
+                    "cli",
+                    "user.output",
+                    stream="terminal" if started.terminal else "pipe",
+                    command=started.label,
+                    line=line,
+                )
+        if not started.settled(0.0) and id(started) not in command_holds:
+            command_holds[id(started)] = retain(
+                f"the profile command {started.label}", started.settled
+            )
+
+    async def command_finish(
+        started: profile_commands.TerminalCommand, seconds: float
+    ) -> dict[str, Any]:
+        """``CommandSeams.finish``: its exit and the end of its output.
+        Waiting on the row's own command is no measurement, so it is not
+        gated on what else the row could not settle."""
+        await started.wait(seconds)
+        if started.returncode is not None:
+            await run_owned(
+                f"the output of {started.label}",
+                started.settled,
+                profile_commands.OUTPUT_END_SECONDS,
+                seconds=profile_commands.OUTPUT_END_SECONDS + 5.0,
+                gated=False,
+            )
+        command_done(started)
+        return started.record()
+
+    def end_commands(where: str) -> None:
+        """End every command the script left running: a harness failure, and
+        recorded as one, never a settlement."""
+        for started in commands_started:
+            if started.started_ns is not None and not started.settled(0.0):
+                # Running, or exited with a descendant it started still alive.
+                started.end()
+                teardown.append(
+                    f"the row left the profile command {started.label} running; "
+                    f"the harness ended it {where}"
+                )
+                if row_record is not None:
+                    row_record.setdefault("left_running", []).append(started.label)
+            command_done(started)
+
+    def command_seams() -> CommandSeams:
+        scratch = work_dir / "scratch"
+        scratch.mkdir(parents=True, exist_ok=True)
+        return CommandSeams(
+            start=command_start,
+            finish=command_finish,
+            settlement=loss_settlement,
+            owner_reading=loss_owner_reading,
+            owner_log=loss_owner_log,
+            owner_exit=race_owner_exit,
+            roots=race_roots,
+            scratch=scratch,
+        )
+
     async def declared_script(call: ToolCall, transport: LiveHost) -> None:
         """The row's own script, on the context it is allowed."""
         assert lifecycle.script is not None and row_record is not None
@@ -7783,6 +7991,7 @@ async def measure_host_quit_row(
                 loss=seams,
                 race=race,
                 owner_loss=owner_loss_seams() if lifecycle.owner_loss else None,
+                commands=command_seams() if lifecycle.commands else None,
             )
         )
 
@@ -7859,8 +8068,10 @@ async def measure_host_quit_row(
             after_exit=first_post_exit if comparing else None,
             **({"row_script": declared_script} if lifecycle.script is not None else {}),
         )
-        # Before the owner's exit is waited for: a stopped owner never leaves.
+        # Before the owner's exit is waited for: a stopped owner never leaves,
+        # and a profile command still running could keep one from it.
         restore_stopped("after the host quit")
+        end_commands("after the host quit")
         result.host = host
         if row_record is not None:
             # Every call the host made, each as it ended, without its text.
@@ -8034,6 +8245,7 @@ async def measure_host_quit_row(
         # An owner left stopped is resumed, and a responder stopped, on every
         # path, whatever the row did or did not do.
         restore_stopped("in the teardown")
+        end_commands("in the teardown")
         for responder in responders:
             try:
                 responder.stop()
@@ -8362,8 +8574,9 @@ async def measure_host_quit_row(
         # asking about the profile: nothing is launched on it.
         refusals += [f"{row}: {p}" for p in settlement_problems()]
     # A row whose finding is a cleared or failed session launches nothing
-    # that could repair it (``preservation_policy_refusals``).
-    refusals += preservation_policy_refusals(lifecycle.preservation)
+    # that could repair it (``preservation_policy_refusals``): by its own
+    # declaration, so not a failure, once nothing else refused it.
+    withheld = preservation_policy_refusals(lifecycle.preservation)
     post_quit: PostQuit | None
     if refusals:
         # Nothing is launched. The session's fate after the row is unknown, and
@@ -8371,6 +8584,8 @@ async def measure_host_quit_row(
         post_quit = PostQuit(
             valid=None, failures=[f"post-quit not run: {r}" for r in refusals]
         )
+    elif withheld:
+        post_quit = PostQuit(valid=None, withheld=lifecycle.preservation)
     else:
         post_quit = await observe_preservation(
             account,
@@ -8391,9 +8606,22 @@ async def measure_host_quit_row(
         session_valid=post_quit.valid,
         feed_requests=post_quit.feed_requests,
         failures=post_quit.failures,
+        withheld=post_quit.withheld,
     )
     result.post_quit = post_quit
     result.owner = owner or None
+    # Only a confirmation the script recorded, and only one this harness
+    # knows: anything else authorizes nothing and is the row's problem.
+    authorized: str | None = None
+    if lifecycle.commands and row_record is not None:
+        claimed = row_record.get("authorized")
+        if claimed == LOGOUT:
+            authorized = LOGOUT
+        elif claimed is not None:
+            row_record["observation_problems"].append(
+                f"the row recorded an authorization the harness does not know: "
+                f"{claimed!r}"
+            )
 
     result.vector, result.failures = judge_row(
         Observations(
@@ -8420,6 +8648,8 @@ async def measure_host_quit_row(
             idle_timeout=idle_timeout,
             initial=lifecycle.initial,
             termination=lifecycle.termination,
+            expect_session=lifecycle.expect_session,
+            authorized=authorized,
         )
     )
     if row_record is not None:

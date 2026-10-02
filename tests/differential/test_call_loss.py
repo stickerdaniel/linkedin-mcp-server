@@ -1097,8 +1097,13 @@ async def test_a_row_that_must_not_repair_launches_no_preservation(
     result = await calibration.run()
 
     calibration.preservation.assert_not_awaited()
-    refused = f"post-quit not run: the row's preservation policy is {MUST_NOT_REPAIR}"
-    assert any(f.startswith(refused) for f in result.failures), result.failures
+    # Withheld by the row's own declaration, which is no failure in itself;
+    # a session still in place that nobody observed is uncertain, and that is
+    # what fails a row expecting it retained.
+    assert result.post_quit is not None
+    assert result.post_quit.withheld == MUST_NOT_REPAIR
+    assert not any("post-quit not run" in f for f in result.failures)
+    assert "O4: the session was uncertain, not retained" in result.failures
 
 
 async def test_an_idle_timeout_given_to_the_row_is_the_one_every_use_reads(
