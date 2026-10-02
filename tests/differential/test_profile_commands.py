@@ -262,6 +262,25 @@ async def test_a_command_left_running_is_ended_by_the_teardown_and_says_so(
     assert record["ended_by_harness"] is True and record["returncode"] is not None
 
 
+async def test_a_command_the_teardown_ended_is_settled_once_it_returns(
+    tmp_path, monkeypatch
+):
+    """The teardown's own next check comes right after it: a reader thread
+    slow to see the end of the output (a loaded runner) must not leave the
+    ended command reading as still running."""
+    read = TerminalCommand._read
+
+    def slow_reader(self: TerminalCommand) -> None:
+        read(self)
+        time.sleep(0.5)
+
+    monkeypatch.setattr(TerminalCommand, "_read", slow_reader)
+    command = _driver(tmp_path, "wait", terminal=False)
+    assert await command.expect("waiting", 30) is not None
+    command.end()
+    assert command.settled(0.0) is True
+
+
 async def test_a_command_is_not_settled_while_a_helper_it_started_runs(tmp_path):
     """The command exits and its output ends, but the helper it started with
     output of its own still runs: not settled, and the teardown ends that
@@ -1363,10 +1382,11 @@ if sys.stdin.isatty() and sys.stdout.isatty():
     print("%(banner)s0.0.0 🔗", flush=True)
 profile = Path(os.environ["USER_DATA_DIR"])
 if mode == "linger":
-    # A child that keeps the command's output open past its exit, for 30s.
+    # A child that keeps the command's output open past its exit, for longer
+    # than the row lasts even on a slow runner; the test ends it by its pid.
     import subprocess
 
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
     Path(__file__).with_name("linger.pid").write_text(str(child.pid))
     sys.exit(0)
 if args == ["--logout"]:

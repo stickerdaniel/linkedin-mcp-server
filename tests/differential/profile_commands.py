@@ -192,6 +192,10 @@ COMMAND_MARKER_ENV = "LINKEDIN_MCP_DIFFERENTIAL_COMMAND_MARKER"
 #: group that the last scan missed. One started between a scan's snapshot
 #: and its reading is found by the next scan, milliseconds later.
 RESCAN_SECONDS = 2.0
+#: How long the teardown waits for the output of a command it ended to
+#: end. One kept open by a process nobody could end stays open, and the
+#: command stays unsettled.
+END_OUTPUT_SECONDS = 2.0
 
 LOGOUT_ARGS = ("--logout",)
 LOGIN_ARGS = ("--login",)
@@ -688,8 +692,17 @@ class TerminalCommand:
     def end(self) -> None:
         """The teardown's: kill a command still running, and every descendant
         it was seen to start that still runs as the same lifetime, and wait
-        for them. Only processes it recorded, each checked against its
-        creation time first; never a process group."""
+        for them and, bounded, for the output they held open. Only processes
+        it recorded, each checked against its creation time first; never a
+        process group."""
+        self._end_processes()
+        if self._reader is not None:
+            # A killed command's output ends within milliseconds, but its
+            # reader thread still has to run to see it; under load a check
+            # right after the kill would read the command as still running.
+            self._reader.join(END_OUTPUT_SECONDS)
+
+    def _end_processes(self) -> None:
         if self.process is not None and self.process.poll() is None:
             self.ended_by_harness = True
             self._collect()
