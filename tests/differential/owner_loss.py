@@ -750,11 +750,12 @@ def _launches(
     # An election candidate the backoff started while the identified owner
     # held the lock, stopped or not, that is shown to have read nothing: gone,
     # and no browser of its own (``retirement_race._read_nothing``).
-    others = [
+    excused = [
         entry
         for entry in others
-        if not (type(entry[0]) is int and _read_nothing(entry, record))
+        if type(entry[0]) is int and _read_nothing(entry, record)
     ]
+    others = [entry for entry in others if not any(entry is e for e in excused)]
     owners = [list(entry) for entry in others if type(entry[0]) is int]
     gates = [list(entry) for entry in others if entry[0] == "release gate"]
     # The identified owner not among the row's launches at all.
@@ -763,7 +764,9 @@ def _launches(
         for entry in others
         if type(entry[0]) is str and entry[0] != "release gate"
     ]
-    return owners, [*strays, *gates[len(owners) :]]
+    # Every launch brings its gate, an excused candidate's too: measured on
+    # Windows, a candidate gone 1.6 s after its start left its gate behind.
+    return owners, [*strays, *gates[len(owners) + len(excused) :]]
 
 
 def _successor_problems(

@@ -1351,6 +1351,16 @@ def test_candidates_that_read_nothing_are_no_replacement():
         candidate[4] = start + 1.3
         record["owner_processes"].append(candidate)
     assert owner_loss.problems_for(record, daemon=True) == []
+    # Each launch started through its own release gate, the stopped owner's
+    # and each candidate's: measured on Windows, a candidate gone 1.6 s after
+    # its start left its gate behind it.
+    for pid, start in ((4610, 999.4), (4611, 1004.9), (4612, 1015.9)):
+        record["gate_processes"].append(_lifetime(pid, start, digest=f"gate-{pid}"))
+    assert owner_loss.problems_for(record, daemon=True) == []
+    record["gate_processes"].append(_lifetime(4613, 1017.0, digest="gate-4613"))
+    problems = owner_loss.problems_for(record, daemon=True)
+    assert any("the stopped owner is not shown kept" in p for p in problems), problems
+    record["gate_processes"] = []
     record["browser_roots"].append([7200, 1005.5, 1006.0, 4601, 1005.0])
     problems = owner_loss.problems_for(record, daemon=True)
     assert any("the stopped owner is not shown kept" in p for p in problems), problems
