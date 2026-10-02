@@ -44,6 +44,7 @@ const S = Object.assign({
   about: 'I build web applications.\\n\\nMostly React.',
   title103: 'Lead Developer', desc103: '', notify: false,
   skills: ['jQuery', 'Python'], failSave: false, noHeadlineField: false,
+  fillDelay: 150, endless: false,
 }, JSON.parse(localStorage.getItem('S') || '{}'));
 const save = () => localStorage.setItem('S', JSON.stringify(S));
 const closeAll = () => document.querySelectorAll('dialog[open]').forEach((d) => d.close());
@@ -87,7 +88,7 @@ INTRO = form(
     if (!S.noHeadlineField) document.getElementById('hl').outerHTML =
       '<div role="textbox" contenteditable="true"></div>';
     const hb = document.querySelector('[role=textbox]');
-    if (hb) setTimeout(() => { hb.innerText = S.headline; }, 150);  // fills after mounting
+    if (hb) setTimeout(() => { hb.innerText = S.headline; }, S.fillDelay);  // fills after mounting
     document.getElementById('cr').value = S.country;
     """,
 )
@@ -142,14 +143,27 @@ SKILLS_LIST = page_html(
     };
     for (const b of document.querySelectorAll('#filters button')) b.addEventListener('click', () => show(b.dataset.v));
     show('all');
+    if (S.endless) {
+      // A view that never stops loading: every scroll appends another batch.
+      let n = 0;
+      const more = () => {
+        const html = Array.from({length: 5}, () => { n += 1;
+          return `<div style="height:400px"><div>Skill ${n}</div><a href="/in/jane/details/skills/edit/forms/${5000 + n}/" aria-label="Edit"><span>Edit</span></a></div>`; }).join('');
+        document.getElementById('skills').insertAdjacentHTML('beforeend', html);
+      };
+      more();
+      window.addEventListener('scroll', more);
+    }
     """,
 )
 NEW_SKILL = form(
     "Add skill",
+    '<input type="checkbox" role="switch" id="notify">'
     '<input aria-label="Skill*" placeholder="Skill (ex: Project Management)" id="sk">'
     '<div role="listbox" id="lb"></div><input type="checkbox" aria-label="Senior Developer at IPG">',
     "S.skills.push(document.getElementById('sk').value);",
     """
+    document.getElementById('notify').checked = S.notify;
     const CAT = ['ReactJS', 'React Native', 'TypeScript', 'Node.js'];
     const box = document.getElementById('sk');
     box.addEventListener('input', () => {
@@ -309,6 +323,37 @@ class TestReads:
             ("Python", 2, "1001"),
             ("React.js", 3, "1900"),
         ], "skills only a category view shows are included, each once"
+
+
+class TestReviewFindings:
+    """Regression tests for the findings in the first review of this feature."""
+
+    async def test_a_slow_editor_is_not_read_as_empty(self, page):
+        await set_state(page, fillDelay=2500)
+        assert (await editor(page).read_headline()).value == "Senior Software Developer"
+
+    async def test_an_empty_field_is_still_read_as_empty(self, page):
+        form = await editor(page).read_experience("103")
+        assert form.description.value.strip() == ""
+
+    async def test_a_skills_view_that_never_ends_is_an_incomplete_read(self, page):
+        await set_state(page, endless=True)
+        with pytest.raises(ProfileEditError) as e:
+            await editor(page).list_skills()
+        assert e.value.code is ProfileEditErrorCode.INCOMPLETE_READ
+
+    async def test_adding_a_skill_never_notifies_the_network(self, page):
+        await set_state(page, notify=True)
+        with pytest.raises(ProfileEditError) as e:
+            await editor(page).add_skill("reactjs")
+        assert e.value.code is ProfileEditErrorCode.VALIDATION_ERROR
+        assert (await stored(page)).get("skills", ["jQuery", "Python"]) == [
+            "jQuery",
+            "Python",
+        ]
+
+    async def test_the_account_is_the_signed_in_profile(self, page):
+        assert await editor(page).account() == f"{BASE}/in/jane/"
 
 
 class TestWrites:

@@ -28,6 +28,8 @@ class ProfileEditErrorCode(StrEnum):
     VERIFICATION_FAILED = "VERIFICATION_FAILED"
     PARTIAL_FAILURE = "PARTIAL_FAILURE"
     UNSUPPORTED_FIELD = "UNSUPPORTED_FIELD"
+    ACCOUNT_MISMATCH = "ACCOUNT_MISMATCH"
+    INCOMPLETE_READ = "INCOMPLETE_READ"
 
 
 _EXPLANATIONS: dict[ProfileEditErrorCode, str] = {
@@ -47,6 +49,8 @@ _EXPLANATIONS: dict[ProfileEditErrorCode, str] = {
     ProfileEditErrorCode.VERIFICATION_FAILED: "The save was submitted but the re-read value on LinkedIn does not match what was approved.",
     ProfileEditErrorCode.PARTIAL_FAILURE: "Some changes were applied and verified; the rest were not. See results for each field.",
     ProfileEditErrorCode.UNSUPPORTED_FIELD: "That field cannot be edited by this server.",
+    ProfileEditErrorCode.ACCOUNT_MISMATCH: "This change set was proposed for a different LinkedIn account than the one signed in now. Nothing was written; propose again from this account.",
+    ProfileEditErrorCode.INCOMPLETE_READ: "LinkedIn kept loading more items than this server reads in one pass, so the list may be incomplete. Nothing was decided from it.",
 }
 
 

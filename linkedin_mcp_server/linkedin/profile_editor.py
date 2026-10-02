@@ -40,6 +40,7 @@ _SAVE_TIMEOUT_MS = 15_000
 _FIELD_TIMEOUT_MS = 10_000
 _SETTLE_MS = 500
 _SETTLE_READS = 8
+_EMPTY_SETTLE_MS = 4_000
 _VIEW_SETTLE_MS = 2_500
 _MAX_VIEW_SCROLLS = 8
 _SCROLL_SETTLE_MS = 1_500
@@ -170,6 +171,14 @@ class ProfileEditor:
                 if again == value:
                     break
                 value = again
+            # Two empty reads agree before a slow editor has filled in, so an
+            # empty value is accepted only once it has stayed empty for
+            # _EMPTY_SETTLE_MS; a real value usually arrives well before that.
+            waited = 0
+            while not value.strip() and waited < _EMPTY_SETTLE_MS:
+                await self._page.wait_for_timeout(_SETTLE_MS)
+                waited += _SETTLE_MS
+                value = await loc.inner_text()
         return TextField(value=value, max_length=await self._limit(loc))
 
     async def _limit(self, loc: Locator) -> int | None:
@@ -288,6 +297,10 @@ class ProfileEditor:
         await self._session.check_rate_limit()
 
     # ── reads ───────────────────────────────────────────────────────────────
+    async def account(self) -> str:
+        """The signed-in member's profile URL, resolved from /in/me/ per call."""
+        return sel.profile_url(await self._vanity_name())
+
     async def read_identity(self) -> tuple[str, str | None, str | None]:
         vanity = await self._vanity_name()
         name = None
@@ -383,6 +396,15 @@ class ProfileEditor:
                     sel.SCROLL_LAST_ITEM_JS, sel.SKILL_EDIT_HREF.pattern
                 )
                 await self._page.wait_for_timeout(_SCROLL_SETTLE_MS)
+            else:
+                # Every scroll up to the cap still brought new skills, so the
+                # view may hold more. A partial list must never be used to
+                # decide what is a duplicate or to verify an edit.
+                raise ProfileEditError(
+                    ProfileEditErrorCode.INCOMPLETE_READ,
+                    skillsRead=len(found),
+                    scrolls=_MAX_VIEW_SCROLLS,
+                )
 
         await collect()
         filters = self._page.locator(sel.SKILL_FILTER_BUTTONS)
@@ -459,6 +481,7 @@ class ProfileEditor:
             offered.append(text)
             if skill_key(text) == skill_key(name):
                 await options.nth(i).click()
+                await self._refuse_if_notifying("skill")
                 await self._save("skill", url)
                 return text
         raise ProfileEditError(
@@ -488,6 +511,7 @@ class ProfileEditor:
                 expected=skill.name,
                 actual=heading,
             )
+        await self._refuse_if_notifying("skill")
         delete = await self._button("delete_skill")
         if delete is None:
             raise await self._not_found(

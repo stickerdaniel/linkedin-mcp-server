@@ -145,3 +145,30 @@ async def test_a_security_checkpoint_is_reported_not_worked_around(mcp):
     with patch(READY, AsyncMock(return_value=ed)):
         out = await call(mcp, "get_my_editable_profile", {})
     assert out["error"] == "AUTHENTICATION_REQUIRED"
+
+
+async def test_nested_unsupported_fields_are_named_too(mcp):
+    ready = AsyncMock(side_effect=AssertionError("browser acquired"))
+    with patch(READY, ready):
+        out = await call(
+            mcp,
+            "propose_profile_changes",
+            {
+                "changes": {
+                    "experiences": [
+                        {
+                            "experienceId": "1",
+                            "location": "London",
+                            "match": {"endDate": "2020"},
+                        }
+                    ],
+                    "skills": {"add": ["Go"], "reorder": ["Go"]},
+                }
+            },
+        )
+    assert out["error"] == "UNSUPPORTED_FIELD"
+    assert out["details"]["fields"] == [
+        "experiences[0].location",
+        "experiences[0].match.endDate",
+        "skills.reorder",
+    ]

@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
 
 import logging
+import re
 
 from linkedin_mcp_server.core.exceptions import (
     AccountRestrictedError,
@@ -53,6 +54,7 @@ class ProfileEditorPort(Protocol):
     """What the service needs from LinkedIn. Implemented by linkedin.profile_editor."""
 
     async def read_identity(self) -> tuple[str, str | None, str | None]: ...
+    async def account(self) -> str: ...
     async def read_headline(self) -> TextField: ...
     async def read_location(self) -> str | None: ...
     async def read_about(self) -> TextField: ...
@@ -108,6 +110,14 @@ def _casefold(v: str | None) -> str:
     return " ".join((v or "").casefold().split())
 
 
+_RANGE_SEPARATOR = re.compile(r"\s+[-\u2013\u2014]\s+")
+
+
+def _range_start(date_range: str | None) -> str:
+    """The start of a displayed range such as "May 2022 - Jul 2023 · 1 yr"."""
+    return _RANGE_SEPARATOR.split(date_range or "", maxsplit=1)[0]
+
+
 def resolve_experience(
     ref: ExperienceEdit, listed: Sequence[ExperienceSummary]
 ) -> ExperienceSummary:
@@ -140,7 +150,7 @@ def resolve_experience(
             )
             and (
                 not ref.start_date
-                or _casefold(ref.start_date) in _casefold(e.date_range)
+                or _casefold(ref.start_date) in _casefold(_range_start(e.date_range))
             )
         ]
         if not found:
@@ -319,6 +329,7 @@ class ProfileEditService:
             current_skills,
             now=self._clock(),
         )
+        cs.account = await self._editor.account()
         self._store.save(cs)
         self._store.audit(
             at=self._clock(),
@@ -335,6 +346,7 @@ class ProfileEditService:
         if cs.status is not ChangeSetStatus.PENDING_APPROVAL:
             out["applicable"] = False
             return out
+        await self._check_account(cs)
         stale = stale_fields(cs, await self._current_values(cs))
         if stale:
             cs.transition(ChangeSetStatus.STALE, self._clock())
@@ -366,7 +378,10 @@ class ProfileEditService:
             changeSetId=cs.id,
             status=str(cs.status),
         )
-        return {"changeSetId": cs.id, "status": str(cs.status)}
+        out: dict[str, Any] = {"changeSetId": cs.id, "status": str(cs.status)}
+        if cs.results:
+            out["results"] = cs.results
+        return out
 
     # ── APPLY ───────────────────────────────────────────────────────────────
     def precheck_apply(self, change_set_id: str, *, confirm: bool) -> ChangeSet:
@@ -405,6 +420,7 @@ class ProfileEditService:
 
     async def apply(self, change_set_id: str, *, confirm: bool) -> dict[str, Any]:
         cs = self.precheck_apply(change_set_id, confirm=confirm)
+        await self._check_account(cs)
         try:
             current = await self._current_values(cs)
         except (RateLimitError, AccountRestrictedError) as e:
@@ -438,72 +454,67 @@ class ProfileEditService:
 
         results: list[dict[str, Any]] = []
         stop: ProfileEditError | None = None
-        skills = (
-            {skill_key(s.name): s for s in await self._editor.list_skills()}
-            if any(c.section == "skills" for c in cs.changes)
-            else {}
-        )
-        for i, change in enumerate(cs.changes):
-            if stop is not None:
-                results.append(
-                    {"field": change.key, "status": "NOT_ATTEMPTED", "verified": False}
-                )
-                continue
-            if i:
-                await self._editor.pause(self._pacing)
-            try:
-                results.append(await self._apply_one(change, skills))
-            except ProfileEditError as e:
-                stop = e
-                results.append(
-                    {
-                        "field": change.key,
-                        "status": "FAILED",
-                        "verified": False,
-                        "error": str(e.code),
-                        "message": e.message,
-                        **({"details": e.details} if e.details else {}),
-                    }
-                )
-            except (AuthenticationError, RateLimitError, AccountRestrictedError) as e:
-                stop = ProfileEditError(
-                    ProfileEditErrorCode.AUTHENTICATION_REQUIRED,
-                    detail=type(e).__name__,
-                )
-                results.append(
-                    {
-                        "field": change.key,
-                        "status": "FAILED",
-                        "verified": False,
-                        "error": str(stop.code),
-                        "message": stop.message,
-                    }
-                )
-            except Exception as e:  # recorded, never retried
-                logger.exception("Unexpected failure applying %s", change.key)
-                stop = ProfileEditError(
-                    ProfileEditErrorCode.LINKEDIN_SAVE_FAILED,
-                    f"Unexpected {type(e).__name__} while applying {change.label}.",
-                )
+        in_flight: FieldChange | None = None
+        try:
+            skills = (
+                {skill_key(s.name): s for s in await self._editor.list_skills()}
+                if any(c.section == "skills" for c in cs.changes)
+                else {}
+            )
+            for i, change in enumerate(cs.changes):
+                if stop is not None:
+                    results.append(
+                        {
+                            "field": change.key,
+                            "status": "NOT_ATTEMPTED",
+                            "verified": False,
+                        }
+                    )
+                    continue
+                if i:
+                    await self._editor.pause(self._pacing)
+                in_flight = change
+                results.append(await self._attempt(change, skills))
+                in_flight = None
+                if not results[-1]["verified"]:
+                    stop = ProfileEditError(ProfileEditErrorCode(results[-1]["error"]))
+                # Saved after every field, so a process that dies mid-apply
+                # still leaves a record of what is already live.
+                cs.results = list(results)
+                self._store.save(cs)
+                self._audit_field(cs, change, results[-1])
+        except BaseException:
+            # Cancelled or timed out mid-apply. The field being written may or
+            # may not have saved on LinkedIn; say so rather than guess, and
+            # close the record so it is not left at APPLYING.
+            attempted = {r["field"] for r in results}
+            for change in cs.changes:
+                if change.key in attempted:
+                    continue
+                unknown = in_flight is not None and change.key == in_flight.key
                 results.append(
                     {
                         "field": change.key,
-                        "status": "FAILED",
+                        "status": "OUTCOME_UNKNOWN" if unknown else "NOT_ATTEMPTED",
                         "verified": False,
-                        "error": str(stop.code),
-                        "message": stop.message,
                     }
                 )
+            cs.results = results
+            cs.transition(
+                ChangeSetStatus.PARTIAL_FAILURE
+                if any(r["verified"] for r in results)
+                else ChangeSetStatus.FAILED,
+                self._clock(),
+            )
+            self._store.save(cs)
             self._store.audit(
                 at=self._clock(),
                 tool="apply_profile_changes",
                 changeSetId=cs.id,
-                section=change.section,
-                field=change.key,
-                result=results[-1]["status"],
-                verified=results[-1]["verified"],
-                **({"error": results[-1]["error"]} if "error" in results[-1] else {}),
+                status=str(cs.status),
+                error="INTERRUPTED",
             )
+            raise
 
         done = [r for r in results if r["verified"]]
         if stop is None:
@@ -542,6 +553,67 @@ class ProfileEditService:
                 "propose a new change set for anything still to do."
             )
         return out
+
+    async def _attempt(
+        self, change: FieldChange, skills: dict[str, Skill]
+    ) -> dict[str, Any]:
+        """Apply one field; turn every expected failure into a result row."""
+        try:
+            return await self._apply_one(change, skills)
+        except ProfileEditError as e:
+            return {
+                "field": change.key,
+                "status": "FAILED",
+                "verified": False,
+                "error": str(e.code),
+                "message": e.message,
+                **({"details": e.details} if e.details else {}),
+            }
+        except (AuthenticationError, RateLimitError, AccountRestrictedError) as e:
+            err = ProfileEditError(
+                ProfileEditErrorCode.AUTHENTICATION_REQUIRED, detail=type(e).__name__
+            )
+            return {
+                "field": change.key,
+                "status": "FAILED",
+                "verified": False,
+                "error": str(err.code),
+                "message": err.message,
+            }
+        except Exception as e:  # recorded, never retried
+            logger.exception("Unexpected failure applying %s", change.key)
+            return {
+                "field": change.key,
+                "status": "FAILED",
+                "verified": False,
+                "error": str(ProfileEditErrorCode.LINKEDIN_SAVE_FAILED),
+                "message": f"Unexpected {type(e).__name__} while applying {change.label}.",
+            }
+
+    def _audit_field(
+        self, cs: ChangeSet, change: FieldChange, result: dict[str, Any]
+    ) -> None:
+        self._store.audit(
+            at=self._clock(),
+            tool="apply_profile_changes",
+            changeSetId=cs.id,
+            section=change.section,
+            field=change.key,
+            result=result["status"],
+            verified=result["verified"],
+            **({"error": result["error"]} if "error" in result else {}),
+        )
+
+    async def _check_account(self, cs: ChangeSet) -> None:
+        """Refuse a change set planned against a different LinkedIn account."""
+        current = await self._editor.account()
+        if cs.account is None or cs.account != current:
+            raise ProfileEditError(
+                ProfileEditErrorCode.ACCOUNT_MISMATCH,
+                changeSetId=cs.id,
+                proposedFor=cs.account,
+                signedIn=current,
+            )
 
     async def _apply_one(
         self, change: FieldChange, skills: dict[str, Skill]

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
 import pytest
 
 from linkedin_mcp_server.core.exceptions import RateLimitError
+from linkedin_mcp_server.profile_edit.changeset import ChangeSetStatus
 from linkedin_mcp_server.profile_edit.errors import (
     ProfileEditError,
     ProfileEditErrorCode,
@@ -18,7 +20,7 @@ from linkedin_mcp_server.profile_edit.service import (
     Proposal,
 )
 from linkedin_mcp_server.profile_edit.store import AUDIT_KEYS, ProfileEditStore
-from profile_edit_fakes import FakeEditor, similar_positions
+from profile_edit_fakes import FakeEditor, FakePosition, similar_positions
 
 NEW_HEADLINE = "Senior Product Engineer | React, TypeScript, Node.js | AI Products"
 NEW_ABOUT = (
@@ -444,3 +446,127 @@ class TestAudit:
     def test_the_audit_log_refuses_keys_outside_its_allow_list(self, store):
         with pytest.raises(ValueError):
             store.audit(at="now", cookie="li_at=secret")
+
+
+class TestReviewFindings:
+    """Regression tests for the findings in the first review of this feature."""
+
+    async def test_a_change_set_applies_only_to_the_account_that_proposed_it(
+        self, store
+    ):
+        ed = FakeEditor()
+        s = service(ed, store)
+        cs = await s.propose(Proposal(headline=NEW_HEADLINE))
+        ed.account_url = "https://www.linkedin.com/in/someone-else/"
+        with pytest.raises(ProfileEditError) as e:
+            await s.preview(cs["changeSetId"])
+        assert e.value.code is ProfileEditErrorCode.ACCOUNT_MISMATCH
+        with pytest.raises(ProfileEditError) as e:
+            await s.apply(cs["changeSetId"], confirm=True)
+        assert e.value.code is ProfileEditErrorCode.ACCOUNT_MISMATCH
+        assert e.value.details["proposedFor"] == "https://www.linkedin.com/in/jane/"
+        assert ed.writes == []
+        assert store.load(cs["changeSetId"]).status == "PENDING_APPROVAL", (
+            "the proposer can still apply it after signing back in"
+        )
+
+    async def test_a_change_set_with_no_recorded_account_is_refused(self, store):
+        ed = FakeEditor()
+        s = service(ed, store)
+        cs = await s.propose(Proposal(headline=NEW_HEADLINE))
+        record = store.load(cs["changeSetId"])
+        record.account = None
+        store.save(record)
+        assert (
+            await code_of(s.apply(cs["changeSetId"], confirm=True))
+            is ProfileEditErrorCode.ACCOUNT_MISMATCH
+        )
+
+    async def test_an_interrupted_apply_is_closed_with_what_is_already_live(
+        self, store
+    ):
+        ed = FakeEditor(skills=["React"])
+        s = service(ed, store)
+        cs = await s.propose(
+            Proposal(headline=NEW_HEADLINE, about=NEW_ABOUT, skills_add=["Python"])
+        )
+        ed.fail["write_about"] = asyncio.CancelledError()
+        with pytest.raises(asyncio.CancelledError):
+            await s.apply(cs["changeSetId"], confirm=True)
+        record = store.load(cs["changeSetId"])
+        assert record.status == "PARTIAL_FAILURE"
+        assert [(r["field"], r["status"]) for r in record.results] == [
+            ("headline", "UPDATED"),
+            ("about", "OUTCOME_UNKNOWN"),
+            ("skills/add/python", "NOT_ATTEMPTED"),
+        ]
+        assert record.results[0]["verified"] is True
+        assert (
+            await code_of(s.apply(cs["changeSetId"], confirm=True))
+            is ProfileEditErrorCode.CHANGE_SET_NOT_PENDING
+        )
+
+    async def test_progress_is_saved_after_every_field(self, store):
+        ed = FakeEditor()
+        s = service(ed, store)
+        cs = await s.propose(Proposal(headline=NEW_HEADLINE, about=NEW_ABOUT))
+        seen: list[list[str]] = []
+        original_save = store.save
+
+        def spy(record):
+            seen.append([r["status"] for r in record.results])
+            original_save(record)
+
+        store.save = spy  # type: ignore[method-assign]
+        await s.apply(cs["changeSetId"], confirm=True)
+        assert ["UPDATED"] in seen, (
+            "the first field is on disk before the second is attempted"
+        )
+
+    async def test_a_record_left_applying_by_a_dead_process_can_be_discarded(
+        self, store
+    ):
+        ed = FakeEditor()
+        s = service(ed, store)
+        cs = await s.propose(Proposal(headline=NEW_HEADLINE))
+        record = store.load(cs["changeSetId"])
+        record.transition(ChangeSetStatus.APPLYING, "2026-10-03T00:00:00+00:00")
+        record.results = [{"field": "headline", "status": "UPDATED", "verified": True}]
+        store.save(record)
+        out = s.discard(cs["changeSetId"])
+        assert out["status"] == "DISCARDED"
+        assert out["results"] == [
+            {"field": "headline", "status": "UPDATED", "verified": True}
+        ]
+
+    async def test_a_start_date_never_matches_an_end_date(self, store):
+        ed = FakeEditor(
+            positions=[
+                FakePosition(
+                    "201", "Developer", "Acme", "May 2022 - Jul 2023 · 1 yr 3 mos"
+                ),
+                FakePosition(
+                    "202", "Developer", "Acme", "Jan 2021 - Apr 2022 · 1 yr 4 mos"
+                ),
+                FakePosition("203", "Developer", "Acme", "2019 \u2013 2021"),
+            ]
+        )
+        s = service(ed, store)
+        out = await s.propose(
+            Proposal(
+                experiences=[
+                    ExperienceEdit(company="Acme", start_date="2022", description="x")
+                ]
+            )
+        )
+        assert out["changes"][0]["field"] == "experience/201/description"
+        out = await s.propose(
+            Proposal(
+                experiences=[
+                    ExperienceEdit(company="Acme", start_date="2019", description="y")
+                ]
+            )
+        )
+        assert out["changes"][0]["field"] == "experience/203/description", (
+            "en-dash ranges too"
+        )

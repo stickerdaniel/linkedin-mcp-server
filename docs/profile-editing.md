@@ -64,23 +64,37 @@ READ ──► PROPOSE ──► PREVIEW ──► APPLY (you approve) ──►
    every value it will change. Preview and apply read them again, and the editor
    checks the visible value once more before typing. If anything changed, you
    get `STALE_CHANGE_SET` and nothing is written.
-4. **No guessing.** Experiences are addressed by LinkedIn's own position id.
+4. **Bound to one account.** A change set records the profile it was planned
+   for. If a different LinkedIn account is signed in later, preview and apply
+   return `ACCOUNT_MISMATCH` and write nothing.
+5. **No guessing.** Experiences are addressed by LinkedIn's own position id.
    A description such as "the IPG role" that fits more than one entry returns
-   `AMBIGUOUS_EXPERIENCE` with the candidates.
-5. **No truncation.** Text over a limit is refused with its length, the limit
+   `AMBIGUOUS_EXPERIENCE` with the candidates. A `startDate` is matched against
+   the start of each position's date range only.
+6. **No truncation.** Text over a limit is refused with its length, the limit
    and the overflow. Limits are read from LinkedIn's form where it states them
    (the description field says "maximum 2,000 characters").
-6. **Exact skills only.** A skill is added only when LinkedIn's own suggestion
+7. **Exact skills only.** A skill is added only when LinkedIn's own suggestion
    list contains that exact name; its spelling is kept (`reactjs` → `React.js`).
-   Skills already on the profile are recognised and not added twice.
-7. **No broadcasts.** If a form's "notify your network" switch is on, the save
-   is refused rather than announcing your edit.
-8. **Success means observed.** A field is reported `verified: true` only after
+   Skills already on the profile are recognised and not added twice. If a
+   skills list keeps loading past the reader's limit, the result is
+   `INCOMPLETE_READ`, never a partial list.
+8. **No broadcasts.** If a form's "notify your network" switch is on, for a
+   text edit or a skill, the save is refused rather than announcing your edit.
+9. **Success means observed.** A field is reported `verified: true` only after
    the saved value is read back from LinkedIn. Clicking Save is not success.
-9. **Stop on the first problem.** Earlier fields stay applied and are reported,
+   A rich-text field that reads empty is trusted only after it stays empty for
+   several seconds, so a slow editor is never mistaken for an empty field.
+10. **Stop on the first problem.** Earlier fields stay applied and are reported,
    later ones are `NOT_ATTEMPTED`. Nothing is retried and nothing is rolled
    back automatically.
-10. **Paced.** Writes are three seconds apart. There is no bulk mode.
+11. **Interruptions are recorded.** Progress is saved after every field. If an
+   apply is cancelled or times out, the change set is closed with what is
+   already live, and the field that was being written is marked
+   `OUTCOME_UNKNOWN`: check it on linkedin.com. A record left mid-apply by a
+   crashed process can be closed with `discard_profile_changes`, which returns
+   its per-field results.
+12. **Paced.** Writes are three seconds apart. There is no bulk mode.
 
 ## Setup
 
@@ -202,11 +216,17 @@ SKILLS
 | `VALIDATION_ERROR` | Too long, an empty headline, a newline in a single-line field, or the notify switch is on. | Fix the value (`details` says which and by how much). |
 | `AMBIGUOUS_EXPERIENCE` | A match fits several positions. | Pick one of the listed `experienceId`s. |
 | `EXPERIENCE_NOT_FOUND` / `SKILL_NOT_FOUND` | No such position or skill; for skills, `offered` lists LinkedIn's suggestions. | Use an id or an offered name. |
-| `UNSUPPORTED_FIELD` | A field this server doesn't edit. | Edit it on linkedin.com. |
+| `UNSUPPORTED_FIELD` | A field this server doesn't edit, at any level of the request (`details.fields` names each one, e.g. `experiences[0].location`). | Edit it on linkedin.com. |
+| `ACCOUNT_MISMATCH` | The change set was proposed for a different LinkedIn account than the one signed in now. | Sign back in to that account, or propose again from this one. |
+| `INCOMPLETE_READ` | A list (such as skills) kept loading past the reader's limit, so it may be incomplete. | Retry; if it persists, the limit in `profile_editor.py` needs raising. |
 | `SELECTOR_NOT_FOUND` | LinkedIn's page has changed. `details.dialog` lists the form's controls. | Update `profile_selectors.py` (see below). |
 | `LINKEDIN_SAVE_FAILED` | LinkedIn refused the save; `formErrors` holds its message. | Read the message; propose again if needed. |
 | `VERIFICATION_FAILED` | The re-read value differs from the approved one (`observed`). | Check the field on linkedin.com. |
 | `PARTIAL_FAILURE` | Some fields applied and verified, then one failed. | Verified fields are live; propose a new change set for the rest. |
+
+Per-field `status` values in apply results: `UPDATED`, `ADDED`, `REMOVED`
+(all `verified: true`), `FAILED`, `NOT_ATTEMPTED`, and `OUTCOME_UNKNOWN` (the
+apply was interrupted while this field was being written).
 
 ## Local records
 

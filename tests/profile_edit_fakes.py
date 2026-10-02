@@ -42,10 +42,12 @@ class FakeEditor:
     catalogue: set[str] = field(
         default_factory=lambda: {"ReactJS", "TypeScript", "Node.js", "Python"}
     )
-    fail: dict[str, ProfileEditError | Exception] = field(default_factory=dict)
+    fail: dict[str, BaseException] = field(default_factory=dict)
     # Saves that LinkedIn "accepts" but stores differently (verification must catch it).
     mangle: dict[str, str] = field(default_factory=dict)
     writes: list[str] = field(default_factory=list)
+    # The signed-in account; change it to model a different login.
+    account_url: str = "https://www.linkedin.com/in/jane/"
     pauses: list[float] = field(default_factory=list)
 
     def _maybe_fail(self, op: str) -> None:
@@ -61,6 +63,9 @@ class FakeEditor:
         )
 
     # reads
+    async def account(self) -> str:
+        return self.account_url
+
     async def read_identity(self) -> tuple[str, str | None, str | None]:
         self._maybe_fail("read_identity")
         return "https://www.linkedin.com/in/jane/", "Jane Doe", None

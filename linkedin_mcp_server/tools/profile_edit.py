@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 class ExperienceMatch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
     company: str | None = None
     title: str | None = None
     startDate: str | None = Field(
@@ -53,7 +53,7 @@ class ExperienceMatch(BaseModel):
 
 
 class ExperienceChange(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
     experienceId: str | None = Field(
         default=None, description="id from get_my_experience. Preferred over match."
     )
@@ -70,7 +70,7 @@ class ExperienceChange(BaseModel):
 
 
 class SkillChanges(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
     add: list[str] = Field(default_factory=list, max_length=20)
     remove: list[str] = Field(default_factory=list, max_length=20)
 
@@ -84,6 +84,20 @@ class ProfileChanges(BaseModel):
     about: str | None = None
     experiences: list[ExperienceChange] = Field(default_factory=list, max_length=20)
     skills: SkillChanges | None = None
+
+
+def _unsupported_fields(changes: ProfileChanges) -> list[str]:
+    """Every key the server cannot act on, with its path, at any depth."""
+    found = [str(k) for k in changes.model_extra or {}]
+    for i, exp in enumerate(changes.experiences):
+        found += [f"experiences[{i}].{k}" for k in exp.model_extra or {}]
+        if exp.match is not None:
+            found += [
+                f"experiences[{i}].match.{k}" for k in exp.match.model_extra or {}
+            ]
+    if changes.skills is not None:
+        found += [f"skills.{k}" for k in changes.skills.model_extra or {}]
+    return sorted(found)
 
 
 def _service(editor: Any | None) -> ProfileEditService:
@@ -213,7 +227,7 @@ def register_profile_edit_tools(
             changes: headline, about, experiences [{experienceId | match, title,
                 description}], skills {add, remove}
         """
-        extra = sorted((changes.model_extra or {}).keys())
+        extra = _unsupported_fields(changes)
         if extra:
             return ProfileEditError(
                 ProfileEditErrorCode.UNSUPPORTED_FIELD,

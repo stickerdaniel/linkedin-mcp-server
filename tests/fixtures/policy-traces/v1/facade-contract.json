@@ -600,7 +600,7 @@
                 },
                 "experiences": {
                   "items": {
-                    "additionalProperties": false,
+                    "additionalProperties": true,
                     "properties": {
                       "description": {
                         "anyOf": [
@@ -629,7 +629,7 @@
                       "match": {
                         "anyOf": [
                           {
-                            "additionalProperties": false,
+                            "additionalProperties": true,
                             "properties": {
                               "company": {
                                 "anyOf": [
@@ -707,7 +707,7 @@
                 "skills": {
                   "anyOf": [
                     {
-                      "additionalProperties": false,
+                      "additionalProperties": true,
                       "properties": {
                         "add": {
                           "items": {

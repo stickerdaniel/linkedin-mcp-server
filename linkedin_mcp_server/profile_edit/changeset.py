@@ -46,6 +46,9 @@ _TRANSITIONS: dict[ChangeSetStatus, frozenset[ChangeSetStatus]] = {
     ),
     ChangeSetStatus.APPLYING: frozenset(
         {
+            # A record left at APPLYING by a process that died mid-apply can be
+            # closed by discarding it; its per-field results are kept.
+            ChangeSetStatus.DISCARDED,
             ChangeSetStatus.APPLIED,
             ChangeSetStatus.PARTIAL_FAILURE,
             ChangeSetStatus.FAILED,
@@ -145,6 +148,8 @@ class ChangeSet:
     results: list[dict[str, Any]] = field(default_factory=list)
     history: list[dict[str, str]] = field(default_factory=list)
     snapshot_path: str | None = None
+    # The profile URL of the account the change set was planned against.
+    account: str | None = None
 
     def transition(self, to: ChangeSetStatus, at: str) -> None:
         if to not in _TRANSITIONS[self.status]:
@@ -170,6 +175,7 @@ class ChangeSet:
             "results": self.results,
             "history": self.history,
             "snapshotPath": self.snapshot_path,
+            "account": self.account,
         }
 
     @classmethod
@@ -186,6 +192,7 @@ class ChangeSet:
             results=list(d.get("results", [])),
             history=list(d.get("history", [])),
             snapshot_path=d.get("snapshotPath"),
+            account=d.get("account"),
         )
 
 
