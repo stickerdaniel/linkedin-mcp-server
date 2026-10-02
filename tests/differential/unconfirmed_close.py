@@ -37,6 +37,7 @@ A cleanup holds every cancellation until it has run whole (``Deferral``).
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import hashlib
 import json
@@ -1314,7 +1315,9 @@ def _alias_problems(text: str) -> list[str]:
 #: The close path whose one-drain serialization the browser-free controls run
 #: on this checkout's own bodies (``test_r7_fault``): the core and driver
 #: close, the lease and the role. Those controls speak for a runtime only
-#: while its copies are these, byte for byte.
+#: while its copies are these in code, comments and docstrings aside: the
+#: controls run the bodies, and text that never executes cannot change what
+#: they prove (``close_path_code``).
 CLOSE_PATH = (
     "linkedin_mcp_server/core/browser.py",
     "linkedin_mcp_server/drivers/browser.py",
@@ -1346,7 +1349,11 @@ def alias_model(
             for path in CLOSE_PATH:
                 if path not in files or path not in reference:
                     problems.append(f"{revision}: {path} was not read")
-                elif files[path] != reference[path]:
+                    continue
+                code = close_path_code(files[path])
+                if code is None:
+                    problems.append(f"{revision}: {path} does not parse")
+                elif code != close_path_code(reference[path]):
                     problems.append(
                         f"{revision}: {path} differs from the candidate's, whose "
                         f"close the serialization controls ran"
@@ -1355,6 +1362,34 @@ def alias_model(
         sha256={name: source_sha256(text) for name, text in sources.items()},
         problems=tuple(problems),
     )
+
+
+def close_path_code(text: str) -> str | None:
+    """*text* as the code it runs, or None when it does not parse.
+
+    The syntax tree without positions and without docstrings; comments never
+    reach it. A body left empty keeps a ``pass``. None compares unequal to any
+    tree, so a copy that does not parse never matches one that does.
+
+    Parsed from bytes, as the importer reads a file: a ``coding`` comment then
+    decodes the copy as it would run, and a line it turns into code counts.
+    """
+    try:
+        tree = ast.parse(text.encode("utf-8"))
+    except (SyntaxError, ValueError):
+        return None
+    scopes = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+    for node in ast.walk(tree):
+        if not isinstance(node, scopes) or not node.body:
+            continue
+        first = node.body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            node.body = node.body[1:] or [ast.Pass()]
+    return ast.dump(tree, include_attributes=False)
 
 
 def source_sha256(text: str) -> str:
