@@ -38,7 +38,9 @@ read again on every sample, as anywhere else.
 **What a lifetime is cannot change, so it is asked once.** Its owning user is
 read once per pid and create time, and a lifetime a full read found gone
 (``NoSuchProcess``) is not read again, however long its pid stays listed.
-Every read is timed, and each sample's time is charged to its phases
+The paths it names, its executable and its profile, are resolved once per
+lifetime and spelling, and forgotten when the lifetime ends
+(``Sampler._resolve``). Every read is timed, and each sample's time is charged to its phases
 (``SAMPLE_PHASES``). The summary names the slowest read, keeps every sample of
 at least ``SLOW_SAMPLE_SECONDS`` with its phases, and keeps the largest gap
 between two samples with what the time outside sampling went to
@@ -187,7 +189,8 @@ SLOW_SAMPLE_SECONDS = 0.25
 #: the phase current then, so the phases add up to the sample's duration:
 #: ``last_pid`` and ``enumeration`` open it, ``reads`` is every timed read of
 #: one process (by kind in ``read_kinds``), ``canonicalization`` every path
-#: resolved to name a profile or compare an executable, and ``bookkeeping``
+#: resolved to name a profile or compare an executable (a lifetime's own paths
+#: once, ``Sampler._resolve``), and ``bookkeeping``
 #: everything else: the loop around the reads, classification and judgement.
 SAMPLE_PHASES = ("last_pid", "enumeration", "reads", "canonicalization", "bookkeeping")
 #: What the time between one sample's end and the next one's start is
@@ -212,6 +215,12 @@ BROWSER_MARKER_ENV = "LINKEDIN_MCP_BROWSER_PROCESS_MARKER"
 READ_MARKERS = os.name != "nt"
 
 
+def _real(path: str) -> str:
+    """One spelling per path. On Windows ``realpath`` opens the file, and can
+    wait as long as the filesystem keeps it waiting."""
+    return os.path.normcase(os.path.realpath(path))
+
+
 def canonical_user_data_dir(value: str) -> str:
     """One spelling per profile directory, so two routes to it count as one.
 
@@ -219,14 +228,17 @@ def canonical_user_data_dir(value: str) -> str:
     ``/var`` and ``/private/var``, and ``normcase`` for Windows.
     """
     value = value.strip().strip('"').strip("'")
-    return os.path.normcase(os.path.realpath(value))
+    return _real(value)
 
 
-def user_data_dir(cmdline: Sequence[str]) -> str | None:
+def user_data_dir(
+    cmdline: Sequence[str], canonical: Callable[[str], str] | None = None
+) -> str | None:
     """The profile a browser *root* runs on, or None for anything else.
 
     None for a Chromium child (``--type=``), which belongs to its parent's
-    tree, and for anything without the flag.
+    tree, and for anything without the flag. *canonical* spells the flag's
+    value, ``canonical_user_data_dir`` by default.
     """
     found: str | None = None
     for argument in cmdline:
@@ -234,7 +246,9 @@ def user_data_dir(cmdline: Sequence[str]) -> str | None:
             return None
         if argument.startswith(USER_DATA_DIR_FLAG):
             found = argument[len(USER_DATA_DIR_FLAG) :]
-    return None if not found else canonical_user_data_dir(found)
+    if not found:
+        return None
+    return (canonical or canonical_user_data_dir)(found)
 
 
 @dataclass(frozen=True)
@@ -307,6 +321,7 @@ def record(
     pgid: int | None = None,
     browser_marker: str | None = None,
     pgid_error: str | None = None,
+    canonical: Callable[[str], str] | None = None,
 ) -> ProcessRecord:
     cmdline = tuple(cmdline)
     return ProcessRecord(
@@ -315,7 +330,7 @@ def record(
         start,
         exe,
         cmdline,
-        user_data_dir(cmdline),
+        user_data_dir(cmdline, canonical),
         in_row,
         launcher,
         pgid,
@@ -577,10 +592,6 @@ class Tracker:
 _UNREADABLE = (psutil.AccessDenied, OSError)
 
 
-def _real(path: str) -> str:
-    return os.path.normcase(os.path.realpath(path))
-
-
 def possible_browser(
     exe: str | None, browser_exe: str | None, browser_dir: str | None
 ) -> bool:
@@ -589,11 +600,19 @@ def possible_browser(
         return True
     if browser_exe is None and browser_dir is None:
         return True
-    real = _real(exe)
-    if browser_exe is not None and real == _real(browser_exe):
+    return _runs_browser(
+        _real(exe),
+        None if browser_exe is None else _real(browser_exe),
+        None if browser_dir is None else _real(browser_dir),
+    )
+
+
+def _runs_browser(real: str, browser_exe: str | None, directory: str | None) -> bool:
+    """Whether a resolved executable is the resolved browser or lies under the
+    resolved browsers directory."""
+    if browser_exe is not None and real == browser_exe:
         return True
-    if browser_dir is not None:
-        directory = _real(browser_dir)
+    if directory is not None:
         try:
             if os.path.commonpath([real, directory]) == directory:
                 return True
@@ -718,6 +737,10 @@ class Sampler:
         self.vanished = 0
         #: Each lifetime's owning user, once read: a process cannot change it.
         self._users: dict[tuple[int, float], object] = {}
+        #: Each live lifetime's resolved paths by kind (``_resolve``).
+        self._resolved: dict[tuple[int, float], dict[str, tuple[str, str]]] = {}
+        #: *browser_exe* and *browser_dir* resolved, once per run.
+        self._browser_paths: tuple[str | None, str | None] | None = None
         #: The slowest single read of the sample in progress, and of the run.
         self._slowest: dict[str, Any] | None = None
         self.slowest_read: dict[str, Any] | None = None
@@ -768,10 +791,53 @@ class Sampler:
             "group_read_failures": self.group_read_failures,
         }
 
-    def possible_browser(self, exe: str | None) -> bool:
-        return self._canonical(
-            lambda: possible_browser(exe, self.browser_exe, self.browser_dir)
+    def possible_browser(
+        self, exe: str | None, lifetime: tuple[int, float] | None = None
+    ) -> bool:
+        """``possible_browser`` for the process *lifetime*, which ran *exe*
+        when this sample read it; None when its create time was not read."""
+        if not exe:
+            return True
+        if self.browser_exe is None and self.browser_dir is None:
+            return True
+        if self._browser_paths is None:
+            # Once per run: the harness names them before the row starts and
+            # never relinks them during it.
+            def once(path: str | None) -> str | None:
+                return None if path is None else self._resolve(None, "", path, _real)
+
+            self._browser_paths = (once(self.browser_exe), once(self.browser_dir))
+        return _runs_browser(
+            self._resolve(lifetime, "exe", exe, _real), *self._browser_paths
         )
+
+    def _resolve(
+        self,
+        lifetime: tuple[int, float] | None,
+        kind: str,
+        path: str,
+        resolve: Callable[[str], str],
+    ) -> str:
+        """*path* resolved, charged to ``canonicalization`` only when it is.
+
+        Reused only for the same *lifetime*, *kind* and spelling, and only
+        while that lifetime lives: an entry goes when its lifetime leaves the
+        sample (``sample``), and a recycled pid is a new create time and is
+        resolved anew. So reuse cannot merge two profiles. A profile's
+        spelling is resolved when its root is first seen, and the harness
+        creates and owns these directories and never relinks them during a
+        row, so asking again in the same lifetime would get the same answer.
+        A POSIX process that execs into another executable or another
+        profile changes the spelling and is resolved again. Without a
+        lifetime, nothing is kept.
+        """
+        held = self._resolved.get(lifetime, {}) if lifetime is not None else {}
+        if kind in held and held[kind][0] == path:
+            return held[kind][1]
+        resolved = self._canonical(lambda: resolve(path))
+        if lifetime is not None:
+            self._resolved.setdefault(lifetime, {})[kind] = (path, resolved)
+        return resolved
 
     def _enter(self, phase: str) -> tuple[str, float]:
         """Charge the time since the last switch to the current phase, then
@@ -1037,20 +1103,23 @@ class Sampler:
                 if known is not None and known.cmdline == cmdline
                 else None
             )
-            # Canonicalizes the profile its arguments name, if any.
-            sample[pid] = self._canonical(
-                lambda: record(
-                    pid,
-                    -1 if ppid is None else ppid,
-                    start,
-                    exe,
-                    cmdline,
-                    in_row=known is not None and known.in_row,
-                    launcher=launcher,
-                    pgid=group,
-                    pgid_error=error,
-                    browser_marker=known.browser_marker if known is not None else None,
-                )
+            # The profile its arguments name, if any, is resolved once for
+            # this lifetime and spelling (``_resolve``).
+            lifetime = (pid, start)
+            sample[pid] = record(
+                pid,
+                -1 if ppid is None else ppid,
+                start,
+                exe,
+                cmdline,
+                in_row=known is not None and known.in_row,
+                launcher=launcher,
+                pgid=group,
+                pgid_error=error,
+                browser_marker=known.browser_marker if known is not None else None,
+                canonical=lambda value: self._resolve(
+                    lifetime, "profile", value, canonical_user_data_dir
+                ),
             )
             if failed and self._keeps_its_root(known, failed, exe):
                 # Decided once the sample is complete: whether it parents
@@ -1123,6 +1192,11 @@ class Sampler:
         self._carried = 0
         self._track(sample, verdicts)
         self._resolve_by_user(sample, identified)
+        # A lifetime this sample does not hold has ended: its paths go with
+        # it, so nothing resolved for it can answer for a later process.
+        live = {process.identity for process in sample.values()}
+        for lifetime in [held for held in self._resolved if held not in live]:
+            del self._resolved[lifetime]
         self._known = sample
         # The rest of the sample is the bookkeeping it is in; the phases now
         # add up to its duration.
@@ -1294,7 +1368,9 @@ class Sampler:
                 continue
             if pid == self.own_pid or process.identity in (self._baseline or ()):
                 continue
-            if not process.exe or not self.possible_browser(process.exe):
+            if not process.exe or not self.possible_browser(
+                process.exe, process.identity
+            ):
                 continue
             try:
                 marker = self._timed(
@@ -1374,7 +1450,7 @@ class Sampler:
                 fields = {failure.split(":", 1)[0] for failure in failures[pid][1]}
                 if fields & {"open", "identity", "exe", "cmdline"}:
                     continue
-            if not process.exe or self.possible_browser(process.exe):
+            if not process.exe or self.possible_browser(process.exe, process.identity):
                 continue
             if process.profile is not None or any(
                 argument.startswith(USER_DATA_DIR_FLAG) for argument in process.cmdline
@@ -1437,7 +1513,7 @@ class Sampler:
             elif (
                 self.no_exec
                 and exe_read
-                and not self.possible_browser(exe)
+                and not self.possible_browser(exe, lifetime)
                 and not in_row
                 and parent_read
                 and lifetime is not None
@@ -1464,7 +1540,7 @@ class Sampler:
                         "resolution": "settled by its image",
                     }
                 )
-            elif exe_read and not self.possible_browser(exe):
+            elif exe_read and not self.possible_browser(exe, lifetime):
                 # Not a browser, whatever its arguments. Kept as evidence when
                 # it belongs to the row or its ancestry could not be read.
                 verdict = _EVIDENCE if (in_row or not parent_read) else _UNRELATED

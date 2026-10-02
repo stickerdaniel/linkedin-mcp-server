@@ -1740,6 +1740,14 @@ def _timed_run(
         armed.update(stalls.get(began["n"], {}))
         # A process that starts in every sample, so every sample has events.
         table[100 + began["n"]] = {"start": 7.0, "ppid": 10, "cmdline": ["helper"]}
+        if "canonicalization" in armed:
+            # A profile is resolved when its root is first seen, not again.
+            table[90] = {
+                "start": 7.0,
+                "ppid": 10,
+                "exe": BROWSER_EXE,
+                "cmdline": _chrome(f"{PROFILE}-late"),
+            }
         table[70]["cmdline_seconds"] = armed.pop("cmdline", 0.0)
         stall("last_pid")
 
@@ -1907,6 +1915,189 @@ def test_a_gap_names_the_sample_that_closed_it_not_the_runs_slowest(monkeypatch)
     assert "0.6000s in the sample that closed it" in failure
     assert "0.6000s in the sample; the slowest process read" in failure
     assert "0.9000" not in failure
+
+
+# --- A lifetime's paths are resolved once ------------------------------------------
+
+#: What one modelled path resolution takes: on Windows, ``realpath`` opens the
+#: file, and has waited over a second for a busy filesystem.
+_RESOLVE = 0.3
+PYTHON_EXE = "/usr/bin/python3"
+
+
+def _modelled_paths(monkeypatch, clock: dict[str, float], links: dict[str, str]):
+    """Replace path resolution with a slow model of a filesystem whose
+    symlinks are *links*; return the paths resolved, one list per sample."""
+    resolved: list[list[str]] = []
+
+    def slow_real(path: str) -> str:
+        clock["now"] += _RESOLVE
+        resolved[-1].append(path)
+        return links.get(path, path)
+
+    monkeypatch.setattr(watcher, "_real", slow_real)
+    return resolved
+
+
+def _modelled_sampler(table, clock: dict[str, float], no_exec: bool) -> Sampler:
+    return _sampler(table, root=10, no_exec=no_exec, timer=lambda: clock["now"])
+
+
+@pytest.mark.parametrize("no_exec", [True, False], ids=["windows", "posix"])
+def test_a_lifetimes_paths_are_resolved_when_first_seen_not_every_sample(
+    monkeypatch, no_exec
+):
+    clock = {"now": 0.0}
+    resolved = _modelled_paths(monkeypatch, clock, {})
+    table = _baseline_table()
+    sampler = _modelled_sampler(table, clock, no_exec)
+    breakdowns: list[dict[str, Any]] = []
+    for n in range(1, 7):
+        if n == 2:
+            table[80] = {
+                "start": 6.5,
+                "ppid": 10,
+                "exe": BROWSER_EXE,
+                "cmdline": _chrome(PROFILE),
+            }
+        if n >= 2:
+            # A new process in every sample, which is not a browser.
+            table[100 + n] = {"start": 7.0, "ppid": 10, "cmdline": ["helper"]}
+        resolved.append([])
+        sampler.sample()
+        assert sampler.breakdown is not None
+        breakdowns.append(sampler.breakdown)
+    if no_exec:
+        # The first sample settles pid 1 by its image, which compares it with
+        # the browser's paths; nothing new after that is compared.
+        expected = [
+            [BROWSER_DIR, BROWSER_EXE, PYTHON_EXE],
+            [PROFILE],
+            *[[]] * 4,
+        ]
+    else:
+        # The browser's own paths once in the run, then every new lifetime's
+        # executable once, when its marker is read.
+        expected = [
+            [],
+            [BROWSER_DIR, BROWSER_EXE, BROWSER_EXE, PROFILE, PYTHON_EXE],
+            *[[PYTHON_EXE]] * 4,
+        ]
+    assert [sorted(paths) for paths in resolved] == expected
+    # Each resolution is charged to the sample that made it, and only it.
+    for paths, breakdown in zip(resolved, breakdowns):
+        assert breakdown["canonicalization"]["count"] == len(paths)
+        assert breakdown["phases"]["canonicalization"] == pytest.approx(
+            _RESOLVE * len(paths)
+        )
+
+
+def _link_table() -> dict[int, dict[str, Any]]:
+    return {
+        **_baseline_table(),
+        80: {
+            "start": 6.5,
+            "ppid": 10,
+            "exe": BROWSER_EXE,
+            "cmdline": _chrome("/tmp/route"),
+        },
+    }
+
+
+@pytest.mark.parametrize("no_exec", [True, False], ids=["windows", "posix"])
+def test_a_recycled_pid_has_its_profile_resolved_again(monkeypatch, no_exec):
+    clock = {"now": 0.0}
+    links = {"/tmp/route": "/real/first"}
+    resolved = _modelled_paths(monkeypatch, clock, links)
+    table = _link_table()
+    sampler = _modelled_sampler(table, clock, no_exec)
+    resolved.append([])
+    assert sampler.sample()[80].profile == "/real/first"
+    # Another process at the same pid, on a path that now leads elsewhere.
+    table[80]["start"] = 6.6
+    links["/tmp/route"] = "/real/second"
+    resolved.append([])
+    assert sampler.sample()[80].profile == "/real/second"
+    assert "/tmp/route" in resolved[1]
+
+
+@pytest.mark.parametrize("no_exec", [True, False], ids=["windows", "posix"])
+def test_a_lifetime_that_left_a_sample_is_resolved_again(monkeypatch, no_exec):
+    # Linux reads a create time in clock ticks, so a recycled pid can show
+    # the one its predecessor had. A sample that saw the pid gone has ended
+    # that lifetime, and what was resolved for it goes with it.
+    clock = {"now": 0.0}
+    links = {"/tmp/route": "/real/first"}
+    resolved = _modelled_paths(monkeypatch, clock, links)
+    table = _link_table()
+    sampler, tracker = _modelled_sampler(table, clock, no_exec), Tracker()
+    resolved.append([])
+    _observe(sampler, tracker, 0.0)
+    entry = table.pop(80)
+    resolved.append([])
+    _observe(sampler, tracker, 1.0)
+    table[80] = entry
+    links["/tmp/route"] = "/real/second"
+    resolved.append([])
+    sample = sampler.sample()
+    events = tracker.observe(sample, 2.0)
+    assert [e[1] for e in events if e[2].get("pid") == 80] == ["process.start"]
+    assert sample[80].profile == "/real/second"
+    assert "/tmp/route" in resolved[2]
+
+
+def test_a_lifetime_that_execs_onto_another_profile_is_resolved_again():
+    # POSIX: the same pid and create time, a new command line.
+    table = _link_table()
+    sampler, tracker = _sampler(table, root=10), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[80]["cmdline"] = _chrome("/tmp/other-profile")
+    _observe(sampler, tracker, 1.0)
+    assert tracker.max_roots == {
+        canonical_user_data_dir("/tmp/route"): 1,
+        canonical_user_data_dir("/tmp/other-profile"): 1,
+    }
+
+
+def _symlinked_profile(tmp_path: Path) -> tuple[str, str]:
+    """One profile directory and a second route to it, as macOS reaches its
+    temporary directory through ``/var`` and ``/private/var``."""
+    real = tmp_path / "real"
+    (real / "profile").mkdir(parents=True)
+    route = tmp_path / "route"
+    try:
+        route.symlink_to(real, target_is_directory=True)
+    except OSError as exc:  # Windows without the symlink privilege
+        pytest.skip(f"cannot create a symlink here: {exc}")
+    return str(real / "profile"), str(route / "profile")
+
+
+@pytest.mark.parametrize("no_exec", [True, False], ids=["windows", "posix"])
+@pytest.mark.parametrize("second_route", [False, True], ids=["same", "symlink"])
+def test_a_second_root_on_a_resolved_profile_is_still_a_violation(
+    tmp_path, no_exec, second_route
+):
+    profile, route = _symlinked_profile(tmp_path)
+    table = {
+        **_baseline_table(),
+        80: {"start": 6.5, "ppid": 10, "exe": BROWSER_EXE, "cmdline": _chrome(profile)},
+    }
+    sampler, tracker = _sampler(table, root=10, no_exec=no_exec), Tracker()
+    _observe(sampler, tracker, 0.0)
+    # The first root's profile is resolved by now; the second comes later.
+    table[81] = {
+        "start": 6.6,
+        "ppid": 10,
+        "exe": BROWSER_EXE,
+        "cmdline": _chrome(route if second_route else profile),
+    }
+    for t in (1.0, 2.0, 3.0):
+        _observe(sampler, tracker, t)
+    key = canonical_user_data_dir(profile)
+    assert tracker.max_roots == {key: 2}
+    assert tracker.violations == [
+        {"t": t, "profile": key, "pids": [80, 81]} for t in (1.0, 2.0, 3.0)
+    ]
 
 
 # --- What O2 reads from the samples ----------------------------------------------
