@@ -310,6 +310,30 @@ async def test_a_helper_no_ancestry_names_is_still_the_commands_to_settle(
     assert command.record()["descendants_alive"] == []
 
 
+@posix
+async def test_a_group_member_no_scan_finds_still_keeps_the_command_unsettled(
+    tmp_path, monkeypatch
+):
+    """A member can start another and exit between a scan's snapshot and
+    its reading of each process, so no scan sees either. Modelled by scans
+    that see nothing: the kernel still knows the group is occupied, so the
+    command is not settled, and once a scan sees the helper again the
+    teardown ends it."""
+    command = _driver(tmp_path, "unreadable-now", terminal=False)
+    try:
+        await command.wait(30)
+        assert command.returncode == 0
+        with monkeypatch.context() as blind:
+            blind.setattr(psutil, "process_iter", lambda *a, **k: iter(()))
+            assert command.settled(0.5) is False
+            assert command.record()["descendants_alive"] == []
+            assert command.record()["group_occupied"] is True
+    finally:
+        command.end()
+    assert command.settled(10) is True
+    assert command.record()["group_occupied"] is False
+
+
 async def test_a_prompt_that_never_comes_is_given_up_once_the_command_is_gone(
     tmp_path,
 ):

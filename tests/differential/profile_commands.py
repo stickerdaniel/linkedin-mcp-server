@@ -187,6 +187,10 @@ COMMAND_ENV = {"PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
 #: became of their ancestry; only a process that clears its own environment
 #: escapes, and no command here starts one.
 COMMAND_MARKER_ENV = "LINKEDIN_MCP_DIFFERENTIAL_COMMAND_MARKER"
+#: How long the teardown keeps scanning for a member of a command's process
+#: group that the last scan missed. One started between a scan's snapshot
+#: and its reading is found by the next scan, milliseconds later.
+RESCAN_SECONDS = 2.0
 
 LOGOUT_ARGS = ("--logout",)
 LOGIN_ARGS = ("--login",)
@@ -377,9 +381,9 @@ class TerminalCommand:
         #: its exit and its output (a browser it launched, a helper with its
         #: own output) and must be settled too.
         self.descendants: dict[tuple[int, float], Any] = {}
-        #: The command's process group on POSIX, its own pid; None on Windows.
-        #: Read only while a member was seen at every scan: an empty group
-        #: frees its number for reuse, so it is never read again.
+        #: The command's process group on POSIX, its own pid; None on Windows,
+        #: and None once the kernel said the group is empty (``_group_empty``):
+        #: an empty group frees its number for reuse, so it is never read again.
         self.group: int | None = None
 
     def _collect(self) -> None:
@@ -417,7 +421,6 @@ class TerminalCommand:
         import psutil
 
         own = os.getpid()
-        member = False
         for process in psutil.process_iter():
             if process.pid == own:
                 continue
@@ -427,7 +430,6 @@ class TerminalCommand:
                 )
             except OSError:
                 grouped = False
-            member = member or grouped
             try:
                 if (
                     not grouped
@@ -438,8 +440,25 @@ class TerminalCommand:
             except (psutil.Error, OSError):
                 continue
             self.descendants.setdefault(key, process)
-        if not member:
+
+    def _group_empty(self) -> bool:
+        """Whether the command's process group has no member left, asked of
+        the kernel in one step. A scan of the process table cannot answer
+        this: a member may start another and exit between the scan's
+        snapshot and its reading of each process, so neither is seen while
+        the group is still occupied. Only an empty group retires it, and a
+        group with a member no scan found is not settled."""
+        if self.group is None:
+            return True
+        try:
+            os.killpg(self.group, 0)
+        except ProcessLookupError:
             self.group = None
+            return True
+        except PermissionError:
+            # A member exists that this user may not signal.
+            return False
+        return False
 
     def _alive_descendants(self) -> list[tuple[int, float]]:
         """The descendants recorded or now marked, still running as the same
@@ -652,12 +671,18 @@ class TerminalCommand:
             self._poll()
         if self.returncode is None:
             return False
+        # One bound for both waits, so a caller's own bound holds.
+        deadline = time.monotonic() + grace
         if self._reader is not None:
             self._reader.join(grace)
-        deadline = time.monotonic() + grace
-        while self._alive_descendants() and time.monotonic() < deadline:
+        while self._occupied() and time.monotonic() < deadline:
             time.sleep(0.05)
-        return not self._reading() and not self._alive_descendants()
+        return not self._reading() and not self._occupied()
+
+    def _occupied(self) -> bool:
+        """Whether any descendant still runs, found or only known to be in
+        the group."""
+        return bool(self._alive_descendants()) or not self._group_empty()
 
     def end(self) -> None:
         """The teardown's: kill a command still running, and every descendant
@@ -673,18 +698,32 @@ class TerminalCommand:
             except (OSError, subprocess.TimeoutExpired) as exc:
                 self.error = f"{type(exc).__name__}: {exc}"
             self._poll()
-        left = self._alive_descendants()
-        if not left:
-            return
-        self.ended_by_harness = True
-        for key in left:
-            process = self.descendants[key]
-            try:
-                if process.create_time() == key[1]:
-                    process.kill()
-                    process.wait(timeout=10)
-            except Exception as exc:  # noqa: BLE001 - recorded; the next goes on
-                self.error = f"{type(exc).__name__}: {exc}"
+        # Until the group is empty too: a member one scan missed is found by
+        # the next, and only a found one is ever signalled. Bounded, since a
+        # member no scan can see is never found; the command then stays
+        # unsettled and says so.
+        deadline = time.monotonic() + RESCAN_SECONDS
+        while True:
+            left = self._alive_descendants()
+            if not left and self._group_empty():
+                return
+            if time.monotonic() >= deadline:
+                self.error = (
+                    f"descendants left after the teardown: {left}; process group "
+                    f"{self.group} {'empty' if self._group_empty() else 'occupied'}"
+                )
+                return
+            self.ended_by_harness = self.ended_by_harness or bool(left)
+            for key in left:
+                process = self.descendants[key]
+                try:
+                    if process.create_time() == key[1]:
+                        process.kill()
+                        process.wait(timeout=10)
+                except Exception as exc:  # noqa: BLE001 - recorded; the next goes on
+                    self.error = f"{type(exc).__name__}: {exc}"
+            if not left:
+                time.sleep(0.05)
 
     def lines(self) -> list[tuple[int, str]]:
         """Each line of the transcript with when its end arrived; an
@@ -719,6 +758,7 @@ class TerminalCommand:
             "output_ended": self.process is not None and not self._reading(),
             "descendants": [list(key) for key in self.descendants],
             "descendants_alive": [list(key) for key in self._alive_descendants()],
+            "group_occupied": not self._group_empty(),
             "error": self.error,
             "expected": [dict(item) for item in self.expected],
             "answers": [dict(item) for item in self.answers],
