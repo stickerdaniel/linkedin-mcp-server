@@ -1382,11 +1382,10 @@ if sys.stdin.isatty() and sys.stdout.isatty():
     print("%(banner)s0.0.0 🔗", flush=True)
 profile = Path(os.environ["USER_DATA_DIR"])
 if mode == "linger":
-    # A child that keeps the command's output open past its exit, for longer
-    # than the row lasts even on a slow runner; the test ends it by its pid.
+    # A child that keeps the command's output open past its exit, for 30s.
     import subprocess
 
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     Path(__file__).with_name("linger.pid").write_text(str(child.pid))
     sys.exit(0)
 if args == ["--logout"]:
@@ -1568,6 +1567,11 @@ async def test_a_command_whose_output_outlives_it_is_held_and_refuses_the_next_s
         ROW_LOGOUT,
         dataclasses.replace(harness.ROWS[ROW_LOGOUT], script=finishes_it),
     )
+    # The holder is one nothing can find: the scene already hides it from
+    # every scan of the process table, and a poll that caught it as the
+    # command's child before the command exited would let the teardown end it.
+    # Only the kernel's group check and the open output still see it.
+    monkeypatch.setattr(profile_commands.TerminalCommand, "_collect", lambda self: None)
     scene.mode("linger")
     try:
         result = await scene.run_row(ROW_LOGOUT)
