@@ -96,7 +96,14 @@ through ``AuthSeams``: the harness records each authorization with the
 session read right after it, the teardown closes the sign-in so nothing
 issues a session after the row, and R17's replacement lineage
 (``session.replacement_lineage``) is judged beside the original generation's
-outcome, never in its place.
+outcome, never in its place. **The H-R12 remainder and H-R14**
+(``eligibility_rows``) declare what they run with
+(``RowLifecycle.environment``, ``runtime_environment``, ``arguments``,
+``transport``): a configuration declared ineligible is held to Direct in
+every column, an HTTP row's host is ``HttpHost``, and a rival row's script
+starts its second host through ``CoordinationSeams.rival``. Every recorded
+row keeps its server lifetimes (``frontend_lifetimes``), which tie a browser
+to the host whose server launched it.
 """
 
 from __future__ import annotations
@@ -108,6 +115,8 @@ import json
 import math
 import os
 import shutil
+import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -118,6 +127,7 @@ from collections.abc import (
     Awaitable,
     Callable,
     Iterable,
+    Iterator,
     Mapping,
     Sequence,
 )
@@ -132,6 +142,7 @@ import mcp.types as mcp_types
 import psutil
 from anyio.streams.text import TextReceiveStream
 from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.client.transports.base import (
     ClientTransport,
     SessionKwargs,
@@ -144,6 +155,7 @@ from typing_extensions import Unpack
 from differential import (
     auth_repair,
     call_loss,
+    eligibility_rows,
     host_comparison,
     lease_probe,
     owner_loss,
@@ -289,6 +301,7 @@ from differential.unconfirmed_close import POST_SETTLEMENT as R7_POST_SETTLEMENT
 from differential.watcher import (
     LAUNCHER_ENV,
     OWNER_MODULE,
+    SERVER_MODULE,
     USER_DATA_DIR_FLAG,
     another_user,
     canonical_user_data_dir,
@@ -377,6 +390,14 @@ FEED_READ = InitialCall(READ_TOOL, READ_TOOL_ARGUMENTS)
 #: the hook runs on.
 NORMAL_EOF = "normal"
 TERMINATIONS = frozenset({NORMAL_EOF, *call_loss.LOSS_TERMINATIONS})
+
+#: How a row's host reaches its server. ``stdio``: the harness's host stub,
+#: whose quit is stdin EOF. ``streamable-http``: the server on a loopback
+#: port of its own, reached by FastMCP's HTTP client (``HttpHost``); it
+#: reads no EOF, and its quit is the operator's interrupt.
+STDIO = eligibility_rows.STDIO
+STREAMABLE_HTTP = eligibility_rows.STREAMABLE_HTTP
+TRANSPORTS = frozenset({STDIO, STREAMABLE_HTTP})
 
 #: What the session after the row may do. ``ordinary``: the post-quit Direct
 #: session (``observe_preservation``), which can repair what it finds, since
@@ -634,6 +655,27 @@ def actor_environment(
     if chrome_path is not None:
         env[EnvironmentKeys.CHROME_PATH] = chrome_path
     return env
+
+
+@contextlib.contextmanager
+def process_environment(settings: Mapping[str, str]) -> Iterator[None]:
+    """*settings* over this process's own environment for the block, then
+    exactly what was there before, an absent name absent again.
+
+    For the candidate's in-process staging, which decides the runtime it
+    stages for from the environment (``session_state.get_runtime_id``) as
+    the actors decide theirs.
+    """
+    before = {name: os.environ.get(name) for name in settings}
+    os.environ.update(settings)
+    try:
+        yield
+    finally:
+        for name, value in before.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def server_command() -> list[str]:
@@ -1505,6 +1547,14 @@ class HostSession:
     lost_monotonic_ns: int | None = None
     loss_error: str | None = None
     stopped_monotonic_ns: int | None = None
+    #: How the host reached its server (``TRANSPORTS``). A streamable-HTTP
+    #: server reads no EOF: its quit is the interrupt ``HttpHost`` sends, and
+    #: whether that was delivered, how it failed and when it was sent stand
+    #: where a stdio host's stdin close and EOF do.
+    transport: str = STDIO
+    interrupted: bool | None = None
+    interrupt_error: str | None = None
+    interrupt_monotonic_ns: int | None = None
 
 
 #: A row's scripted phase: it is handed a function that calls one tool through
@@ -1974,9 +2024,343 @@ class StubHost:
             await asyncio.to_thread(exit_state, handle, _STUB_EXIT_SECONDS)
 
 
+# --- A host on streamable HTTP ---------------------------------------------------
+
+#: The endpoint path both runtimes default to, named explicitly all the same.
+HTTP_PATH = "/mcp"
+_HTTP_POLL_SECONDS = 0.1
+
+
+def free_loopback_port() -> int:
+    """A loopback port nothing listens on now, for one HTTP server to bind.
+
+    Let go before the server binds it, so another process could take it in
+    between; the server then fails to start, which the row records as its
+    host failing, never as a finding.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def http_arguments(port: int) -> list[str]:
+    """What binds a server to *port* on loopback as a streamable-HTTP server,
+    in the options both runtimes accept."""
+    return [
+        "--transport",
+        STREAMABLE_HTTP,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--path",
+        HTTP_PATH,
+    ]
+
+
+class HttpHostRefused(RuntimeError):
+    """A streamable-HTTP host cannot run here, or its server never listened."""
+
+
+class HttpHost:
+    """A streamable-HTTP server and the one client a row talks to it with.
+
+    The server is the harness's child in its process group, as a stdio
+    server is, started with the row's command and the arguments that bind it
+    to a loopback port of its own (``http_arguments``). Its stdin is the null
+    device, since nothing reads it, and both its output streams are read line
+    by line, as an operator's console shows them. The client is FastMCP's own
+    over that port, connected once the port accepts.
+
+    Such a server has no host whose EOF ends it. ``host_quit`` is called once
+    the client has left, and sends the interrupt an operator's Ctrl-C does
+    (SIGINT, through the server's own process object), then waits for the
+    exit as a stdio host waits after EOF. Windows delivers that interrupt to
+    a child only through a console process group of its own, a topology no
+    other row runs, so an HTTP row is POSIX only and ``run_http_host_session``
+    refuses on Windows. A server still running when the host leaves is
+    killed by the corrective stop, recorded as ``killed_by_harness``.
+    """
+
+    def __init__(
+        self,
+        command: Sequence[str],
+        *,
+        env: dict[str, str],
+        cwd: Path,
+        on_stderr: Callable[[str], None],
+        on_process: Callable[[Any], None] | None = None,
+        after_exit: Callable[[], Awaitable[None]] | None = None,
+        port: int | None = None,
+    ) -> None:
+        self.port = port if port is not None else free_loopback_port()
+        self.command = [*command, *http_arguments(self.port)]
+        self.env = env
+        self.cwd = cwd
+        self.on_stderr = on_stderr
+        self.on_process = on_process
+        self.after_exit = after_exit
+        self.process: anyio.abc.Process | None = None
+        self.pid: int | None = None
+        self.quit_done = False
+        self.alive_before_quit: bool | None = None
+        self.interrupted: bool | None = None
+        self.interrupt_error: str | None = None
+        self.interrupt_monotonic_ns: int | None = None
+        self.exited_on_quit: bool | None = None
+        self.quit_seconds: float | None = None
+        self.exit_seen_monotonic_ns: int | None = None
+        self.after_exit_error: str | None = None
+        self.killed_by_harness = False
+        self.stopped_monotonic_ns: int | None = None
+        self.output_closed: bool | None = None
+        #: An HTTP host is never lost: a row on it declares no loss.
+        self.lost: str | None = None
+        self.lost_monotonic_ns: int | None = None
+        self.loss_error: str | None = None
+        self._open_streams = 0
+        self._output_eof = anyio.Event()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}{HTTP_PATH}"
+
+    async def _pump(self, stream: Any) -> None:
+        buffer = ""
+        try:
+            async for chunk in TextReceiveStream(stream, errors="replace"):
+                lines = (buffer + chunk).split("\n")
+                buffer = lines.pop()
+                for line in lines:
+                    self.on_stderr(line.rstrip("\r"))
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+            pass
+        finally:
+            if buffer:
+                self.on_stderr(buffer.rstrip("\r"))
+            self._open_streams -= 1
+            if self._open_streams == 0:
+                self._output_eof.set()
+
+    async def _listening(self, process: anyio.abc.Process) -> None:
+        """Until the server's port accepts, within ``_INIT_SECONDS``; refused
+        once the server has exited or the bound passed."""
+        deadline = time.monotonic() + _INIT_SECONDS
+        while True:
+            if process.returncode is not None:
+                raise HttpHostRefused(
+                    f"the HTTP server exited with status {process.returncode} "
+                    f"before it listened"
+                )
+            try:
+                stream = await anyio.connect_tcp("127.0.0.1", self.port)
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise HttpHostRefused(
+                        f"the HTTP server did not listen within {_INIT_SECONDS}s"
+                    ) from None
+                await anyio.sleep(_HTTP_POLL_SECONDS)
+                continue
+            await stream.aclose()
+            return
+
+    async def host_quit(self) -> None:
+        """What an operator does to stop the server: interrupt it, then wait.
+
+        As ``HostQuitTransport.host_quit``, with the interrupt in place of
+        stdin EOF: *after_exit* runs once the exit is seen, then a bounded
+        wait for its output to end.
+        """
+        process = self.process
+        assert process is not None
+        self.alive_before_quit = process.returncode is None
+        began = time.monotonic()
+        self.interrupt_monotonic_ns = time.monotonic_ns()
+        try:
+            process.send_signal(signal.SIGINT)
+            self.interrupted = True
+        except (ProcessLookupError, OSError) as exc:
+            self.interrupted = False
+            self.interrupt_error = f"{type(exc).__name__}: {exc}"
+        with anyio.move_on_after(_HOST_EXIT_SECONDS):
+            await process.wait()
+        self.quit_seconds = round(time.monotonic() - began, 3)
+        self.exited_on_quit = process.returncode is not None
+        if self.exited_on_quit:
+            self.exit_seen_monotonic_ns = time.monotonic_ns()
+        self.quit_done = True
+        if self.exited_on_quit and self.after_exit is not None:
+            try:
+                await self.after_exit()
+            except Exception as exc:  # noqa: BLE001 - recorded; the quit goes on
+                self.after_exit_error = f"{type(exc).__name__}: {exc}"
+        with anyio.move_on_after(_STDERR_EOF_SECONDS):
+            await self._output_eof.wait()
+        self.output_closed = self._output_eof.is_set()
+
+    async def _stop(self, process: anyio.abc.Process) -> None:
+        """Cleanup only: a server still running when the host leaves."""
+        if process.returncode is not None:
+            return
+        self.killed_by_harness = True
+        self.stopped_monotonic_ns = time.monotonic_ns()
+        with contextlib.suppress(ProcessLookupError, OSError):
+            process.kill()
+        with anyio.move_on_after(15):
+            await process.wait()
+
+    @contextlib.asynccontextmanager
+    async def running(self) -> AsyncIterator[HttpHost]:
+        """The server started and listening, until left; then the corrective
+        stop, whatever ended it."""
+        process = await anyio.open_process(
+            self.command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=self.env,
+            cwd=str(self.cwd),
+        )
+        self.process = process
+        self.pid = process.pid
+        if self.on_process is not None:
+            self.on_process(process)
+        # Raised once the output is read and the server stopped, as itself
+        # rather than inside the task group's exception group.
+        refused: HttpHostRefused | None = None
+        async with anyio.create_task_group() as tasks:
+            self._open_streams = 2
+            tasks.start_soon(self._pump, process.stdout)
+            tasks.start_soon(self._pump, process.stderr)
+            try:
+                try:
+                    await self._listening(process)
+                except HttpHostRefused as exc:
+                    refused = exc
+                else:
+                    yield self
+            finally:
+                with anyio.CancelScope(shield=True):
+                    await self._stop(process)
+                    if refused is not None:
+                        # What the server said before it went is its reason.
+                        with anyio.move_on_after(_STDERR_EOF_SECONDS):
+                            await self._output_eof.wait()
+                tasks.cancel_scope.cancel()
+        if refused is not None:
+            raise refused
+
+
+async def run_http_host_session(
+    command: Sequence[str],
+    *,
+    env: dict[str, str],
+    cwd: Path,
+    on_stderr: Callable[[str], None],
+    after_call: Callable[[], Awaitable[None]] | None = None,
+    tool: str = READ_TOOL,
+    arguments: dict[str, Any] | None = None,
+    started: Callable[[int], None] | None = None,
+    row_script: TransportScript | None = None,
+    on_process: Callable[[Any], None] | None = None,
+    after_exit: Callable[[], Awaitable[None]] | None = None,
+    **unsupported: Any,
+) -> HostSession:
+    """``run_host_session`` over streamable HTTP (``HttpHost``): the server
+    listening, the client initialized, one call, the row's script, the
+    client gone, and then the interrupt that is this host's quit.
+
+    Only what a declared row passes is run; a scripted phase of an older row
+    or a second call is refused rather than dropped, and so is Windows.
+    """
+    if sys.platform == "win32":
+        raise HttpHostRefused(eligibility_rows.HTTP_NOT_ON_WINDOWS)
+    refused = sorted(name for name, value in unsupported.items() if value)
+    if refused:
+        raise ValueError(f"the HTTP host runs no {refused}")
+    session = HostSession(transport=STREAMABLE_HTTP)
+
+    def remember(line: str) -> None:
+        session.stderr.append(line)
+        session.user_lines.append(line)
+        on_stderr(line)
+
+    host = HttpHost(
+        command,
+        env=env,
+        cwd=cwd,
+        on_stderr=remember,
+        on_process=on_process,
+        after_exit=after_exit,
+    )
+    try:
+        async with host.running():
+            # The initialize handshake as the stdio host sends it
+            # (``run_host_session``), over the server's own port.
+            client = Client(
+                StreamableHttpTransport(host.url),
+                init_timeout=_INIT_SECONDS,
+                mode="legacy",
+            )
+            async with client:
+                if started is not None and host.pid is not None:
+                    started(host.pid)
+                session.tool = await timed_call(
+                    client,
+                    tool,
+                    READ_TOOL_ARGUMENTS if arguments is None else arguments,
+                    records=session.calls,
+                )
+                session.user_lines += session.tool["text"].splitlines()
+                if after_call is not None:
+                    await after_call()
+                if row_script is not None:
+
+                    async def call(
+                        name: str, arguments: dict[str, Any]
+                    ) -> dict[str, Any]:
+                        summary = await timed_call(
+                            client, name, arguments, records=session.calls
+                        )
+                        session.scripted.append(summary)
+                        session.user_lines += summary["text"].splitlines()
+                        return summary
+
+                    try:
+                        await row_script(call, host)
+                    except Exception as exc:  # noqa: BLE001 - the script's own evidence
+                        session.script_error = f"{type(exc).__name__}: {exc}"
+            # The client has left first: an open session would hold the
+            # server's graceful shutdown on its connection.
+            if not host.quit_done:
+                await host.host_quit()
+    except Exception as exc:  # noqa: BLE001 - reported as the row's evidence
+        detail = f"{type(exc).__name__}: {exc}"
+        if host.quit_done:
+            session.teardown_error = detail
+        else:
+            session.error = detail
+    session.pid = host.pid
+    session.alive_before_quit = host.alive_before_quit
+    session.interrupted = host.interrupted
+    session.interrupt_error = host.interrupt_error
+    session.interrupt_monotonic_ns = host.interrupt_monotonic_ns
+    session.exited_on_quit = host.exited_on_quit
+    session.quit_seconds = host.quit_seconds
+    session.exit_seen_monotonic_ns = host.exit_seen_monotonic_ns
+    session.after_exit_error = host.after_exit_error
+    session.stderr_closed = host.output_closed
+    session.killed_by_harness = host.killed_by_harness
+    session.stopped_monotonic_ns = host.stopped_monotonic_ns
+    if host.process is not None:
+        session.exit_code = host.process.returncode
+    return session
+
+
 #: The live host a declared row's script is handed: the transport of the
-#: harness's own host stub, or a stub host in a process of its own.
-LiveHost = HostQuitTransport | StubHost
+#: harness's own host stub, a stub host in a process of its own, or an HTTP
+#: host.
+LiveHost = HostQuitTransport | StubHost | HttpHost
 #: A declared row's scripted phase (``RowLifecycle.script``): the host's
 #: timed call, and the live host it talks through.
 TransportScript = Callable[[ToolCall, LiveHost], Awaitable[None]]
@@ -2063,28 +2447,37 @@ def host_failures(session: HostSession) -> list[str]:
     """Why this was not a normal host quit, or nothing when it was.
 
     A normal quit is a live server whose stdin was closed and which then exited
-    by itself with status 0. A crash or a kill may be a row of its own; it is
-    never evidence of this one.
+    by itself with status 0; on streamable HTTP, one that was interrupted
+    (``HttpHost.host_quit``) and then exited by itself with status 0. A crash
+    or a kill may be a row of its own; it is never evidence of this one.
     """
     if session.error is not None:
         return [f"the host session failed: {session.error}"]
     failures = []
     if session.alive_before_quit is not True:
         failures.append("the server was already gone before the host quit")
-    if session.stdin_closed is not True:
-        failures.append(
-            f"closing the server's stdin failed: {session.stdin_close_error}"
-        )
+    if session.transport == STREAMABLE_HTTP:
+        quit_by = "its interrupt"
+        if session.interrupted is not True:
+            failures.append(
+                f"interrupting the HTTP server failed: {session.interrupt_error}"
+            )
+    else:
+        quit_by = "stdin EOF"
+        if session.stdin_closed is not True:
+            failures.append(
+                f"closing the server's stdin failed: {session.stdin_close_error}"
+            )
     if session.killed_by_harness:
         failures.append("the harness had to kill the server")
     if session.exited_on_quit is not True:
         failures.append(
-            f"the server did not exit within {_HOST_EXIT_SECONDS}s of stdin EOF"
+            f"the server did not exit within {_HOST_EXIT_SECONDS}s of {quit_by}"
         )
     elif session.exit_code != 0:
         failures.append(
             f"the server exited abnormally, with status {session.exit_code}, "
-            f"after stdin EOF"
+            f"after {quit_by}"
         )
     return failures
 
@@ -2106,6 +2499,10 @@ def host_summary(session: HostSession) -> dict[str, Any]:
         "lost_ns": session.lost_monotonic_ns,
         "loss_error": session.loss_error,
         "stop_ns": session.stopped_monotonic_ns,
+        "transport": session.transport,
+        "interrupted": session.interrupted,
+        "interrupt_error": session.interrupt_error,
+        "interrupt_ns": session.interrupt_monotonic_ns,
     }
 
 
@@ -3138,6 +3535,42 @@ def launch_lifetimes(
     read is the start of the last sample that still found the lifetime: the
     latest moment it is known alive. None without the log.
     """
+
+    def kind(cmdline: Sequence[str]) -> str | None:
+        if invoked_module(cmdline) == OWNER_MODULE:
+            return "owner"
+        if owner_gate(cmdline, gates):
+            return "gate"
+        return None
+
+    found = _row_lifetimes(observed, kind, samples)
+    return found.get("owner", []), found.get("gate", [])
+
+
+def frontend_lifetimes(
+    observed: Iterable[dict[str, Any]],
+    samples: Sequence[Sequence[Any]] | None = None,
+) -> list[list[Any]]:
+    """Every server or frontend this row's actors ran (``-m
+    linkedin_mcp_server``), once per lifetime, in ``launch_lifetimes``'
+    shape: what ties a browser's launcher (``browser_lineage``) to the host
+    that started it, a Windows venv launcher and the interpreter it started
+    for it included (``host_comparison.same_invocation``)."""
+
+    def kind(cmdline: Sequence[str]) -> str | None:
+        return "frontend" if invoked_module(cmdline) == SERVER_MODULE else None
+
+    return _row_lifetimes(observed, kind, samples).get("frontend", [])
+
+
+def _row_lifetimes(
+    observed: Iterable[dict[str, Any]],
+    kind: Callable[[Sequence[str]], str | None],
+    samples: Sequence[Sequence[Any]] | None,
+) -> dict[str, list[list[Any]]]:
+    """The row actors' lifetimes each command line *kind* names, by that
+    name, as ``launch_lifetimes`` describes them; a name no record of the row
+    carries has no key."""
     begins = sorted(
         (float(entry[1]), float(entry[0]))
         for entry in samples or []
@@ -3166,8 +3599,7 @@ def launch_lifetimes(
             and isinstance(t, (int, float))
         ):
             exits[(pid, float(start))] = float(t)
-    owners: list[list[Any]] = []
-    started: list[list[Any]] = []
+    lifetimes: dict[str, list[list[Any]]] = {}
     for record in records:
         pid, start = record.get("pid"), record.get("start_identity")
         if not (
@@ -3178,12 +3610,10 @@ def launch_lifetimes(
             and isinstance(start, (int, float))
         ):
             continue
-        if invoked_module(record["cmdline"]) == OWNER_MODULE:
-            kept = owners
-        elif owner_gate(record["cmdline"], gates):
-            kept = started
-        else:
+        name = kind(record["cmdline"])
+        if name is None:
             continue
+        kept = lifetimes.setdefault(name, [])
         # Exact, as the watcher itself tells lifetimes apart: a pid reused
         # within any tolerance would otherwise merge two lifetimes, or lend
         # one the other's exit.
@@ -3201,7 +3631,7 @@ def launch_lifetimes(
                     last_read(ended),
                 ]
             )
-    return owners, started
+    return lifetimes
 
 
 #: The lineage each lineage expectation holds a row to.
@@ -5646,8 +6076,10 @@ class RowContext:
     lane the stand-down. A row that loses the owner
     (``RowLifecycle.owner_loss``) gets ``owner_loss``: the kill, the stop and
     the declared responder, and its readings. A row that runs profile
-    commands (``RowLifecycle.commands``) gets ``commands``, and a row that
-    stages a sign-in (``RowLifecycle.auth``) gets ``auth``.
+    commands (``RowLifecycle.commands``) gets ``commands``, a row that
+    stages a sign-in (``RowLifecycle.auth``) gets ``auth``, and a row that
+    reads how the frontend decided (``RowLifecycle.coordination``) gets
+    ``coordination``.
 
     A row may quit its host itself (``transport.host_quit``) and go on
     observing; the session then quits it no second time.
@@ -5683,6 +6115,9 @@ class RowContext:
     commands: CommandSeams | None = None
     #: Only on a row that stages a sign-in (``AuthSeams``).
     auth: AuthSeams | None = None
+    #: Only on a row that reads how the frontend decided
+    #: (``CoordinationSeams``).
+    coordination: CoordinationSeams | None = None
 
     def emit(self, actor: str, kind: str, **fields: Any) -> None:
         self._emit(actor, kind, **fields)
@@ -5915,6 +6350,32 @@ class AuthSeams:
 
 
 @dataclass(frozen=True)
+class CoordinationSeams:
+    """What a row reading how the frontend decided may do
+    (``RowContext.coordination``).
+
+    Readings, and on a row declared to take it (``RowLifecycle.rival``) one
+    action: ``rival``, a second host with the row's command and environment
+    and the settings given over it, one call of the tool given and a normal
+    quit, its server retained until shown gone; the settings are recorded
+    with their values, which are declared bounds and never a secret. Every
+    reading waits and sends nothing, and none raises.
+    """
+
+    #: The host's server's or frontend's output so far, every line in order.
+    host_output: Callable[[], list[str]]
+    #: Which owner the descriptor names now, and whether the identified one
+    #: is alive (``LossSeams.owner_reading``).
+    owner_reading: Callable[[str], Awaitable[dict[str, Any]]]
+    #: The row's own daemon log, as written so far; every owner's.
+    owner_log: Callable[[], list[str]]
+    #: What the profile shows by itself (``LossSeams.settlement``).
+    settlement: Callable[[], Awaitable[dict[str, Any]]]
+    #: Start the rival host with the settings given over the row's.
+    rival: Callable[..., Awaitable[dict[str, Any]]] | None = None
+
+
+@dataclass(frozen=True)
 class RowLifecycle:
     """How one row runs, declared before it may (``ROWS``)."""
 
@@ -5961,6 +6422,29 @@ class RowLifecycle:
     #: Settings over the actors' environment, the same in every column and
     #: recorded whole: the cell's declared bounds. Never a secret.
     environment: Mapping[str, str] | None = None
+    #: Settings that decide which runtime the row runs as
+    #: (``LINKEDIN_MCP_CONTAINER``): over the actors' environment like
+    #: ``environment``, and over the staging of its session and the
+    #: preservation session as well, so all three are one runtime. Recorded
+    #: whole; never a secret.
+    runtime_environment: Mapping[str, str] | None = None
+    #: The row's own arguments after the server's command, the same in every
+    #: column and for every host the row starts (``--no-daemon``); never the
+    #: preservation session's, which is the ordinary Direct host. Recorded.
+    arguments: tuple[str, ...] = ()
+    #: How the row's host reaches its server (``TRANSPORTS``).
+    transport: str = STDIO
+    #: Whether the row's configuration may share a browser at all. One
+    #: declared ineligible is held to Direct in every column: no column may
+    #: expect an owner, and none may publish, start or forward to one, or
+    #: leave daemon state (``row_expectations``).
+    eligible: bool = True
+    #: The script reads how the frontend decided and gets
+    #: ``CoordinationSeams``.
+    coordination: bool = False
+    #: The script starts a differently configured second host
+    #: (``CoordinationSeams.rival``).
+    rival: bool = False
 
 
 ROW_H_CAL = call_loss.ROW_H_CAL
@@ -6095,6 +6579,36 @@ ROWS: dict[str, RowLifecycle] = {
         )
         for row, case in auth_repair.CASES.items()
     },
+    # H-R12 remainder: a configuration the daemon must refuse, the same in
+    # every column, held to Direct; its one read, then what the frontend said.
+    **{
+        row: RowLifecycle(
+            idle_timeout=eligibility_rows.INELIGIBLE_IDLE_TIMEOUT_SECONDS,
+            recorded=True,
+            scenarios=False,
+            script=eligibility_rows.ineligible_script,
+            k2=eligibility_rows.K2_NOT_APPLICABLE,
+            environment=case.environment,
+            runtime_environment=case.runtime_environment,
+            arguments=case.arguments,
+            transport=case.transport,
+            eligible=False,
+            coordination=True,
+        )
+        for row, case in eligibility_rows.CASES.items()
+    },
+    # H-R14: a second host with an equal build and another configuration while
+    # the first is open, with an idle timeout of its own.
+    eligibility_rows.ROW_RIVAL: RowLifecycle(
+        idle_timeout=eligibility_rows.RIVAL_IDLE_TIMEOUT_SECONDS,
+        recorded=True,
+        scenarios=False,
+        script=eligibility_rows.rival_script,
+        k2=eligibility_rows.K2_NOT_APPLICABLE,
+        environment=eligibility_rows.RIVAL_ENVIRONMENT,
+        coordination=True,
+        rival=True,
+    ),
 }
 
 #: The verdict over each recorded row's raw record, appended after
@@ -6112,6 +6626,8 @@ ROW_VERDICTS: dict[str, RowVerdict] = {
     owner_loss.ROW_H_R9: owner_loss.h_r9_problems,
     **{row: profile_commands.problems_for for row in profile_commands.CASES},
     **{row: auth_repair.problems_for for row in auth_repair.CASES},
+    **{row: eligibility_rows.problems_for for row in eligibility_rows.CASES},
+    eligibility_rows.ROW_RIVAL: eligibility_rows.problems_for,
 }
 
 
@@ -6176,6 +6692,26 @@ def lifecycle_problems(row: str, lifecycle: RowLifecycle) -> list[str]:
             problems.append("a sign-in with no script to stage it")
         if lifecycle.scenarios:
             problems.append("a sign-in that combines with other scenarios")
+    if lifecycle.transport not in TRANSPORTS:
+        problems.append(f"no transport {lifecycle.transport!r}")
+    elif lifecycle.transport != STDIO:
+        # An HTTP host has no pipes to lose and no stub to kill, and a kill,
+        # a shim or a fault would be another scenario.
+        if lifecycle.termination != NORMAL_EOF:
+            problems.append("a loss on a host with no pipes to lose")
+        if lifecycle.scenarios:
+            problems.append("an HTTP host that combines with other scenarios")
+    if "--transport" in lifecycle.arguments:
+        problems.append("a transport given as an argument rather than declared")
+    if lifecycle.coordination and lifecycle.script is None:
+        problems.append("a coordination reading with no script to take it")
+    if lifecycle.rival:
+        if not lifecycle.coordination:
+            problems.append("a rival host with no coordination seams to start it")
+        if not lifecycle.eligible:
+            problems.append("a rival host beside a configuration with no owner")
+        if lifecycle.scenarios:
+            problems.append("a rival host that combines with other scenarios")
     if lifecycle.expect_session not in EXPECTABLE:
         problems.append(f"an expected session of {lifecycle.expect_session!r}")
     elif (
@@ -6335,19 +6871,29 @@ async def observe_preservation(
     work_dir: Path,
     on_stderr: Callable[[str], None],
     chrome_path: str | None = None,
+    environment: Mapping[str, str] | None = None,
 ) -> PostQuit:
     """Start one Direct host on the profile and ask the origin about its session.
 
     After the row's interval, with its actors gone, through the same proxy and
     fence. Nothing is re-staged first: that would repair the loss this exists
     to see. Its own browser has to be gone before the row is judged.
+    *environment* is the row's runtime (``RowLifecycle.runtime_environment``),
+    so the session is read as the runtime that staged and used it.
     """
     mark = len(origin.requests)
     session = await run_host_session(
         command,
-        env=actor_environment(
-            account, proxy.url, daemon=False, browsers=browsers, chrome_path=chrome_path
-        ),
+        env={
+            **actor_environment(
+                account,
+                proxy.url,
+                daemon=False,
+                browsers=browsers,
+                chrome_path=chrome_path,
+            ),
+            **(environment or {}),
+        },
         cwd=work_dir,
         on_stderr=on_stderr,
     )
@@ -6456,6 +7002,15 @@ async def measure_host_quit_row(
         ),
         idle_timeout=idle_timeout,
     )
+    if not lifecycle.eligible:
+        # Refused before anything is staged: a column that expected an owner
+        # here would be judged against the wrong behaviour.
+        if expect_owner:
+            raise ValueError(
+                f"{row} declares a configuration that may not share a browser, "
+                f"so no column of it may expect an owner"
+            )
+        expect_owner = False
     comparing = row in (ROW_H_R3, ROW_H_R2)
     second_host = row == ROW_H_R2
     r7 = unconfirmed_close
@@ -6483,6 +7038,12 @@ async def measure_host_quit_row(
     else:
         default_command = runtime.command()
     command = list(command or default_command)
+    #: Every host the row starts runs its own arguments; the preservation
+    #: session, the ordinary Direct host, runs ``command`` alone.
+    row_command = [*command, *lifecycle.arguments]
+    #: The settings that decide the runtime, for staging, the actors and the
+    #: preservation session alike.
+    runtime_settings = dict(lifecycle.runtime_environment or {})
 
     def emit(actor: str, kind: str, **fields: Any) -> None:
         log.emit(experiment=experiment, row=row, actor=actor, kind=kind, **fields)
@@ -6511,19 +7072,23 @@ async def measure_host_quit_row(
             stage_frozen_session,
             runtime,
             account.profile,
-            actor_environment(
-                account,
-                proxy.url,
-                daemon=False,
-                browsers=browsers,
-                idle_timeout=idle_timeout,
-            ),
+            {
+                **actor_environment(
+                    account,
+                    proxy.url,
+                    daemon=False,
+                    browsers=browsers,
+                    idle_timeout=idle_timeout,
+                ),
+                **runtime_settings,
+            },
         )
     else:
-        staged = await stage_signed_in_session(
-            account.profile,
-            accept=lambda session: origin.accept_session(session.li_at),
-        )
+        with process_environment(runtime_settings):
+            staged = await stage_signed_in_session(
+                account.profile,
+                accept=lambda session: origin.accept_session(session.li_at),
+            )
     # The staging browser has confirmed its close, but a root still on the
     # profile when the watcher takes its baseline would count against O1.
     lingering = await asyncio.to_thread(
@@ -6558,6 +7123,7 @@ async def measure_host_quit_row(
     )
     # The cell's declared bounds, the same in every column, over the row's.
     env.update(lifecycle.environment or {})
+    env.update(runtime_settings)
     if lifecycle.auth:
         # From before the row's first request: the wall and its completion
         # are served, and nothing is issued until the script releases it.
@@ -6727,6 +7293,13 @@ async def measure_host_quit_row(
                 if lifecycle.environment is not None
                 else None
             ),
+            "runtime_environment": (
+                {name: env.get(name) for name in runtime_settings}
+                if lifecycle.runtime_environment is not None
+                else None
+            ),
+            "arguments": row_command[len(command) :],
+            "transport": lifecycle.transport,
             "observation_problems": [],
         }
         if lifecycle.script is not None
@@ -7868,6 +8441,8 @@ async def measure_host_quit_row(
     async def make_loss(termination: str) -> dict[str, Any]:
         """``LossSeams.lose``: the loss, on the host's side only, now."""
         host = live[0]
+        # A row on HTTP declares no loss (``lifecycle_problems``).
+        assert not isinstance(host, HttpHost), "an HTTP host is never lost"
         if termination == call_loss.ACTOR_KILLED:
             host.mark_lost(termination)
             await fire_kill()
@@ -7899,7 +8474,9 @@ async def measure_host_quit_row(
 
     async def loss_server_exit(seconds: float) -> dict[str, Any]:
         """``LossSeams.server_exit``: the host's own handle or the tied one."""
-        return await live[0].server_exit(seconds)
+        host = live[0]
+        assert not isinstance(host, HttpHost), "an HTTP host is never lost"
+        return await host.server_exit(seconds)
 
     async def loss_settlement() -> dict[str, Any]:
         """``LossSeams.settlement``: what the profile shows by itself."""
@@ -7968,7 +8545,7 @@ async def measure_host_quit_row(
 
         launched_ns = time.monotonic_ns()
         fresh = await run_host_session(
-            command,
+            row_command,
             env=env,
             cwd=directory,
             on_stderr=lambda line: emit(
@@ -8395,6 +8972,50 @@ async def measure_host_quit_row(
         emit("origin", "login.released", **found)
         return found
 
+    async def extra_host(
+        name: str,
+        directory: Path,
+        host_env: dict[str, str],
+        *,
+        tag: str,
+        tool: str = READ_TOOL,
+        arguments: dict[str, Any] | None = None,
+    ) -> tuple[HostSession, list[Retained], int, float]:
+        """A host of the row's own command in *directory* with *host_env*:
+        one call of *tool* and a normal quit, its server, *name*, retained
+        until its own process object has a return code; its lines are its
+        own, tagged *tag*, and never the row's caller's. The session, its
+        hold, and when it was launched by the monotonic and wall clocks."""
+        directory.mkdir(exist_ok=True)
+        held: list[Retained] = []
+
+        def hold(process: Any) -> None:
+            held.append(
+                retain(
+                    f"{name} {process.pid}",
+                    lambda grace, process=process: process.returncode is not None,
+                )
+            )
+
+        def heard(line: str) -> None:
+            emit("frontend", "user.output", stream="stderr", host=tag, line=line)
+
+        launched_ns, launched = time.monotonic_ns(), time.time()
+        session = await run_host_session(
+            row_command,
+            env=host_env,
+            cwd=directory,
+            on_stderr=heard,
+            on_process=hold,
+            tool=tool,
+            arguments=arguments,
+        )
+        if held and held[0].check(0.0):
+            discharge(held[0])
+        if session.tool is not None:
+            emit("host_stub", "tool.result", **{**session.tool, "host": tag})
+        return session, held, launched_ns, launched
+
     async def auth_second_host() -> dict[str, Any]:
         """``AuthSeams.second_host``: the row's command and environment
         again, in a directory of its own, retained until its server is gone;
@@ -8421,7 +9042,7 @@ async def measure_host_quit_row(
 
         launched_ns = time.monotonic_ns()
         second, found = await run_second_host(
-            command,
+            row_command,
             env=env,
             cwd=directory,
             progress=progress,
@@ -8439,6 +9060,53 @@ async def measure_host_quit_row(
             **found,
             "retained": bool(held) and retained(held[0]),
         }
+
+    #: The differently configured hosts a rival row started.
+    rival_hosts: list[HostSession] = []
+
+    async def coordination_rival(
+        overrides: Mapping[str, str],
+        *,
+        tool: str = READ_TOOL,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """``CoordinationSeams.rival``: the row's command with *overrides*
+        over its environment, in a directory of its own (``extra_host``)."""
+        left = settlement_problems()
+        if left:
+            return {"made": False, "why": f"unsettled: {left}"}
+        rival_env = {**env, **overrides}
+        rival, held, launched_ns, launched = await extra_host(
+            "the rival host's server",
+            work_dir / f"rival-{len(rival_hosts) + 1}",
+            rival_env,
+            tag="B",
+            tool=tool,
+            arguments=arguments,
+        )
+        rival_hosts.append(rival)
+        return {
+            "made": True,
+            "launched_ns": launched_ns,
+            "launched": launched,
+            "pid": rival.pid,
+            "environment": {name: rival_env.get(name) for name in overrides},
+            "host": host_summary(rival),
+            "call": call_record(rival.tool) if rival.tool is not None else None,
+            "forwarded": any(_FORWARDING_LINE in line for line in rival.stderr),
+            "lines": eligibility_rows.decision_lines(rival.stderr),
+            "quit_problems": host_failures(rival),
+            "retained": bool(held) and retained(held[0]),
+        }
+
+    def coordination_seams() -> CoordinationSeams:
+        return CoordinationSeams(
+            host_output=lambda: list(host_lines),
+            owner_reading=loss_owner_reading,
+            owner_log=loss_owner_log,
+            settlement=loss_settlement,
+            rival=coordination_rival if lifecycle.rival else None,
+        )
 
     def auth_seams() -> AuthSeams:
         return AuthSeams(
@@ -8495,6 +9163,7 @@ async def measure_host_quit_row(
                 owner_loss=owner_loss_seams() if lifecycle.owner_loss else None,
                 commands=command_seams() if lifecycle.commands else None,
                 auth=auth_seams() if lifecycle.auth else None,
+                coordination=(coordination_seams() if lifecycle.coordination else None),
             )
         )
 
@@ -8534,6 +9203,8 @@ async def measure_host_quit_row(
         host_session = (
             run_stub_host_session
             if lifecycle.termination == call_loss.HOST_KILLED
+            else run_http_host_session
+            if lifecycle.transport == STREAMABLE_HTTP
             else run_host_session
         )
 
@@ -8548,7 +9219,7 @@ async def measure_host_quit_row(
             )
 
         host = await host_session(
-            command,
+            row_command,
             env=env,
             cwd=work_dir,
             on_stderr=host_stderr,
@@ -9120,6 +9791,7 @@ async def measure_host_quit_row(
             on_stderr=lambda line: emit(
                 "frontend", "user.output", stream="stderr", phase="post-quit", line=line
             ),
+            environment=runtime_settings,
         )
     emit(
         "harness",
@@ -9234,6 +9906,16 @@ async def measure_host_quit_row(
         row_record["owner_processes"] = owners
         row_record["gate_processes"] = gates
         row_record["browser_roots"] = browser_lineage(observed_events)
+        # Every server and frontend, each lifetime once: what a browser's
+        # launcher is tied to the host that started it by.
+        row_record["frontend_processes"] = frontend_lifetimes(
+            observed_events, (result.watcher or {}).get("sample_log")
+        )
+        # Whether the row's auth root got daemon state or a descriptor, as
+        # cleanup and the owner lookup found them; neither is ever created
+        # by the harness on a row that must stay Direct.
+        row_record["daemon_state_existed"] = result.cleanup.existed
+        row_record["descriptor_present"] = owner.get("descriptor_present")
     if comparison is not None:
         # Selected by the row, so its record is required: a missing window, a
         # failed hook or script fails here however healthy the vector is.

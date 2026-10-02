@@ -1298,6 +1298,10 @@ def test_each_mapped_test_models_one_row():
     assert all(len(rows) == 1 for rows in model_coverage.model_rows().values())
 
 
+def test_each_mapped_branch_names_a_declared_row():
+    assert {row for row, _ in model_coverage.COUNTED.values()} <= set(harness.ROWS)
+
+
 def test_the_mapped_tests_count_as_model_coverage_and_nothing_else_does():
     """The accounting marks a mapped test, parametrized or not, as its row's
     model coverage; a test it does not map, or one already counted as a row
