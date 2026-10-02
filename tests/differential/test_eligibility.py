@@ -927,6 +927,7 @@ def _rival(*, daemon: bool = True) -> dict[str, Any]:
             owner_after_b=_owner_seen(),
             owner_after_a2=_owner_seen(),
             owner_lines_after_b={"idle_exit": 0, "stood_down": 0},
+            owner_lines_after_a2={"idle_exit": 0, "stood_down": 0},
         )
     return record
 
@@ -1487,6 +1488,25 @@ def test_an_a2_sent_near_the_owner_s_idle_deadline_is_invalid_and_never_a_findin
     early = rival_problems(_a2_at(NOW + due - 1.0), daemon=True)
     assert any("the owner A reads through is not" in p for p in _findings(early))
     assert NEAR_IDLE not in " ".join(early)
+
+
+def test_an_owner_that_idled_out_before_a2_was_answered_is_invalid_not_a_finding():
+    """A2 sent in time, but the owner's log shows its own idle exit by A2's
+    end: whatever A2 met says nothing of B."""
+    record = _a2_at(NOW + 40.0)
+    record["owner_lines_after_a2"] = {"idle_exit": 1, "stood_down": 1}
+    assert rival_problems(record, daemon=True) == [
+        f"{INVALID}{eligibility_rows.IDLED_BEFORE_A2}"
+    ]
+    record["owner_lines_after_a2"] = {"idle_exit": 0, "stood_down": 0}
+    assert any(
+        "the owner A reads through is not" in p
+        for p in _findings(rival_problems(record, daemon=True))
+    )
+    del record["owner_lines_after_a2"]
+    assert rival_problems(record, daemon=True) == [
+        f"{INVALID}the owner's log was not read after A2"
+    ]
 
 
 def test_the_frozen_direct_rival_has_no_idle_deadline():
@@ -2065,6 +2085,7 @@ async def test_the_rival_script_reads_the_owner_around_b_and_settles_before_a2(
     record = modelled.record
     assert record["owner_identified"] == list(OWNER)
     assert record["owner_lines_after_b"] == {"idle_exit": 0, "stood_down": 0}
+    assert record["owner_lines_after_a2"] == {"idle_exit": 0, "stood_down": 0}
     assert record["lines"]["forwarding"] == 1
     assert record["observation_problems"] == []
 

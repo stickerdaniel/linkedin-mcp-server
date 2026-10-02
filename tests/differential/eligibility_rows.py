@@ -449,6 +449,8 @@ async def rival_script(ctx: RowContext) -> None:
     await _called(ctx, PERSON_TOOL, _read_of(A2_USERNAME))
     if ctx.daemon:
         record["owner_after_a2"] = await seams.owner_reading("after A2")
+        # Whenever A2 reached the owner, an idle exit before it is in the log.
+        record["owner_lines_after_a2"] = owner_lines(seams.owner_log())
 
 
 # --- Reading a record ---------------------------------------------------------------
@@ -892,6 +894,7 @@ def _order(
     return found
 
 
+IDLED_BEFORE_A2 = "the owner idled out on its own before A2 was answered"
 NEAR_IDLE = (
     f"A2 was due within {RIVAL_IDLE_MARGIN_SECONDS:g}s of the earliest moment "
     f"the owner could idle out"
@@ -1007,6 +1010,14 @@ def rival_problems(record: Mapping[str, Any] | None, *, daemon: bool) -> list[st
     if daemon and _near_idle(a1, _ns(a2.get("began_monotonic_ns"))):
         # Whatever A2 met, the owner may have retired on its own first.
         return [*problems, f"{INVALID}{NEAR_IDLE}"]
+    if daemon:
+        # A2 sent in time can still reach the owner late (a stalled frontend):
+        # an idle exit the log shows by A2's end is the owner's own, never B's.
+        after_a2 = _mapping(record.get("owner_lines_after_a2"))
+        if not after_a2:
+            return [*problems, f"{INVALID}the owner's log was not read after A2"]
+        if after_a2.get("idle_exit"):
+            return [*problems, f"{INVALID}{IDLED_BEFORE_A2}"]
     if not _read_ok(a2):
         problems.append("A2 did not return its profile")
     if daemon:
