@@ -416,8 +416,19 @@ class ProfileEditor:
     async def add_skill(self, name: str) -> str:
         url = sel.new_skill_form_url(await self._vanity_name())
         box = await self._open_form((url,), sel.SKILL_INPUT)
-        await box.fill("")
-        await box.press_sequentially(name, delay=60)
+        # Typing a whole name key by key lost characters while the suggestion
+        # list re-rendered ("Large LanguagModels"). Set all but the last
+        # character at once, type the last to trigger suggestions, and only
+        # continue when the box holds exactly the intended name.
+        await box.fill(name[:-1])
+        await box.press_sequentially(name[-1], delay=120)
+        if await box.input_value() != name:
+            raise ProfileEditError(
+                ProfileEditErrorCode.LINKEDIN_SAVE_FAILED,
+                "The skill box did not take the exact name; nothing was added.",
+                skill=name,
+                typed=await box.input_value(),
+            )
         options = self._page.locator(sel.TYPEAHEAD_OPTION)
         try:
             await options.first.wait_for(state="visible", timeout=_OPTION_TIMEOUT_MS)
