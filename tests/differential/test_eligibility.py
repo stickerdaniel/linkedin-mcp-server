@@ -395,6 +395,17 @@ def test_a_plant_that_changed_is_left_in_place_and_reported(tmp_path):
     assert target.read_bytes() == b'{"personal": {"path": "/somebody"}}'
 
 
+def test_a_plant_whose_write_fails_leaves_nothing_behind(tmp_path):
+    """The file is created, then the write fails (here: text, not bytes; on a
+    runner, a full disk): the file and the directories made for it go."""
+    home = tmp_path / "home"
+    home.mkdir()
+    target = home / ".dropbox" / "info.json"
+    with pytest.raises(TypeError):
+        plant_file(target, "not bytes", locations=[target])  # ty: ignore[invalid-argument-type]
+    assert list(home.iterdir()) == []
+
+
 def test_a_plant_replaced_by_the_same_bytes_is_left_in_place_and_reported(tmp_path):
     target = tmp_path / ".dropbox" / "info.json"
     planted = plant_file(target, b"{}", locations=[target])

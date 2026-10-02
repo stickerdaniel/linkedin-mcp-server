@@ -1288,11 +1288,20 @@ def plant_file(path: Path, content: bytes, *, locations: Sequence[Path]) -> Plan
     created = _missing_ancestors(path)
     for directory in created:
         directory.mkdir()
+    made: tuple[int, int] | None = None
     try:
         with open(path, "xb") as handle:
+            opened = os.fstat(handle.fileno())
+            made = (opened.st_dev, opened.st_ino)
             handle.write(content)
             stat = os.fstat(handle.fileno())
     except BaseException:
+        # A file this attempt created, and only that one, goes with it.
+        if made is not None:
+            with contextlib.suppress(OSError):
+                found = os.lstat(path)
+                if (found.st_dev, found.st_ino) == made:
+                    path.unlink()
         for directory in reversed(created):
             with contextlib.suppress(OSError):
                 directory.rmdir()
