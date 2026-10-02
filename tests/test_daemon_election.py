@@ -29,7 +29,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -2322,9 +2322,43 @@ class TestWindowsExclusionNamespace:
     inspection is blocked where the real one blocks.
     """
 
+    @pytest.fixture(autouse=True)
+    def _readers_end_with_the_test(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> Iterator[None]:
+        """Join this test's descriptor readers before its patches come off.
+
+        A reader looks ``_inspect`` up only when it runs. One still waiting at
+        teardown would find the production inspector back in place and run it
+        against whatever home the next test patches in.
+        """
+        before = set(threading.enumerate())
+        yield
+        for thread in threading.enumerate():
+            if thread not in before and thread.name == "daemon-descriptor-read":
+                thread.join(_PARKED)
+                assert not thread.is_alive(), "a descriptor reader outlived its test"
+
     @staticmethod
     def _legacy(home: Path) -> Path:
         return home / daemon_descriptor_module._LEGACY_WINDOWS_STATE_DIR
+
+    @staticmethod
+    def _exclusion(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+        """This test's own record of the name being excluded.
+
+        The real record is one flag for the whole process, and a reader thread
+        outlives the test that started it. A late write from the test before
+        would tell this test's election that a tombstone in that test's home
+        excludes the name in this one, and the election would spawn on it.
+        """
+        established = threading.Event()
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "windows_exclusion_established",
+            established.is_set,
+        )
+        return established
 
     def _predecessor(self, home: Path, taken: list[str]) -> Callable[..., _Attempt]:
         """A child from a rolled-back package, competing for the legacy name."""
@@ -2349,6 +2383,7 @@ class TestWindowsExclusionNamespace:
         release = threading.Event()
         taken: list[str] = []
         inspections = 0
+        established = self._exclusion(monkeypatch)
 
         def inspect(*_args: object) -> OwnerLookup:
             nonlocal inspections
@@ -2360,7 +2395,7 @@ class TestWindowsExclusionNamespace:
             self._legacy(home).write_bytes(
                 daemon_descriptor_module._LEGACY_WINDOWS_TOMBSTONE
             )
-            daemon_descriptor_module._windows_exclusion_established = True
+            established.set()
             return OwnerLookup(state=OwnerState.ABSENT)
 
         monkeypatch.setattr(election_module, "_IS_WINDOWS", True)
@@ -2399,12 +2434,13 @@ class TestWindowsExclusionNamespace:
         profile = _profile(tmp_path)
         home = daemon_descriptor_module._account_home()
         taken: list[str] = []
+        established = self._exclusion(monkeypatch)
 
         def inspect(*_args: object) -> OwnerLookup:
             self._legacy(home).write_bytes(
                 daemon_descriptor_module._LEGACY_WINDOWS_TOMBSTONE
             )
-            daemon_descriptor_module._windows_exclusion_established = True
+            established.set()
             return OwnerLookup(state=OwnerState.ABSENT)
 
         monkeypatch.setattr(election_module, "_IS_WINDOWS", True)
@@ -2444,6 +2480,7 @@ class TestWindowsExclusionNamespace:
         profile = _profile(tmp_path)
         home = daemon_descriptor_module._account_home()
         taken: list[str] = []
+        self._exclusion(monkeypatch)
 
         def inspect(*_args: object) -> OwnerLookup:
             # After the read budget rather than before it, so the election
