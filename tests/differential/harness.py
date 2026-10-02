@@ -928,8 +928,10 @@ def _largest_gap_cause(largest: dict[str, Any], priority: object) -> str:
 
 
 def _file_io_clause(file_io: object) -> str:
-    """What the watcher's off-path file-system calls took in the gap, so a
-    slow file system shows even though sampling did not wait on it."""
+    """What the watcher's off-path file-system calls that ended in the gap
+    took, each its whole duration, so a slow file system shows even though
+    sampling did not wait on it. A call that began before the gap counts in
+    full, so this can exceed the gap's own share."""
     if not isinstance(file_io, dict):
         return ""
     parts = []
@@ -947,7 +949,10 @@ def _file_io_clause(file_io: object) -> str:
         parts.append(part)
     if not parts:
         return ""
-    return "; off the sampling path in that gap, " + ", ".join(parts)
+    return (
+        "; off the sampling path, calls that ended in that gap (whole "
+        "durations): " + ", ".join(parts)
+    )
 
 
 def _gap_cause(summary: dict[str, Any]) -> str:

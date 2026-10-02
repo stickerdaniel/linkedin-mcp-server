@@ -1973,7 +1973,8 @@ def test_a_gap_names_the_file_system_calls_it_overlapped():
         "turning the previous sample into events outside sampling"
     )
     assert (
-        "off the sampling path in that gap, the event writer's writes took "
+        "off the sampling path, calls that ended in that gap (whole durations): "
+        "the event writer's writes took "
         "0.0011s over 2 calls, its flushes took 0.0004s over 2 calls, the "
         "stop-file checks took 0.0000s over 0 calls and one was still running "
         "after 1.2331s"
