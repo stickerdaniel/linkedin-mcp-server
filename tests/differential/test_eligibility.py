@@ -1310,8 +1310,7 @@ def test_an_http_cell_is_not_judged_by_stdin():
                     _lifetime(9002, NOW + 6.0, PID_B),
                 ],
             ),
-            "another owner was launched beside the one A elected: [[9002, "
-            "1800000006.0]]",
+            "another owner was launched before A2 was sent: [[9002, 1800000006.0]]",
             id="B launched a second owner",
         ),
         pytest.param(
@@ -1506,6 +1505,35 @@ def test_an_owner_that_idled_out_before_a2_was_answered_is_invalid_not_a_finding
     del record["owner_lines_after_a2"]
     assert rival_problems(record, daemon=True) == [
         f"{INVALID}the owner's log was not read after A2"
+    ]
+
+
+def test_what_b_did_to_the_owner_stays_judged_when_a2_meets_an_idle_exit():
+    """B turned the owner over; A2, sent in time, is answered by a successor
+    that later idles out. The idle exit leaves A2 unjudged, never B."""
+    record = _a2_at(NOW + 40.0)
+    record["owner_after_b"] = {**_owner_seen(), "alive": False}
+    record["owner_lines_after_b"] = {"idle_exit": 0, "stood_down": 1}
+    record["owner_lines_after_a2"] = {"idle_exit": 1, "stood_down": 1}
+    record["owner_processes"] = [
+        _lifetime(OWNER[0], OWNER[1], PID_A),
+        _lifetime(9002, NOW + 20.0, PID_B),
+    ]
+    problems = rival_problems(record, daemon=True)
+    assert problems[-1] == f"{INVALID}{eligibility_rows.IDLED_BEFORE_A2}"
+    assert "the owner stood down while B ran" in problems
+    assert any("not the one A1 reached at after_b" in p for p in problems)
+    assert any("launched before A2 was sent" in p for p in problems)
+
+
+def test_an_owner_launched_after_a2_was_sent_is_judged_with_a2():
+    record = _rival()
+    record["owner_processes"] = [
+        _lifetime(OWNER[0], OWNER[1], PID_A),
+        _lifetime(9002, NOW + 42.0, PID_A),
+    ]
+    assert rival_problems(record, daemon=True) == [
+        "another owner was launched beside the one A elected: [[9002, 1800000042.0]]"
     ]
 
 
