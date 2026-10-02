@@ -1536,6 +1536,25 @@ def test_what_b_did_to_the_owner_stays_judged_when_a2_is_never_sent():
     assert not any("stood down" in p for p in rival_problems(record, daemon=True))
 
 
+def test_an_owner_that_idled_out_while_b_ran_is_invalid_never_a_finding():
+    """B ends after A's owner idled out on its own: the owner is gone after
+    B, the log says idle and not stand-down, A2 is not sent. Nothing of B is
+    a finding; a stand-down line beside it still is."""
+    record = _rival()
+    record["calls"] = record["calls"][:1]
+    record["owner_after_b"] = {**_owner_seen(), "alive": False}
+    record["owner_lines_after_b"] = {"idle_exit": 1, "stood_down": 0}
+    problems = rival_problems(record, daemon=True)
+    assert _findings(problems) == []
+    assert any("idled out before A2" in p for p in problems)
+    record["owner_lines_after_b"] = {"idle_exit": 1, "stood_down": 1}
+    assert _findings(rival_problems(record, daemon=True)) == [
+        "the owner stood down while B ran"
+    ]
+    del record["owner_lines_after_b"]
+    assert _findings(rival_problems(record, daemon=True)) == []
+
+
 def test_an_owner_launched_after_a2_was_sent_is_judged_with_a2():
     record = _rival()
     record["owner_processes"] = [

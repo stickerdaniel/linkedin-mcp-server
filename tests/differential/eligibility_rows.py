@@ -949,18 +949,23 @@ def _owner_through_b(record: Mapping[str, Any], identified: Sequence[Any]) -> li
     here: a launch's start time cannot place it before A2's send (Linux
     reports process starts hundreds of milliseconds early)."""
     found = _owner_reading(record, identified, "owner_before_b")
-    found += _owner_reading(record, identified, "owner_after_b")
     lines = _mapping(record.get("owner_lines_after_b"))
     if not lines:
-        found.append(f"{INVALID}the owner's log was not read after B")
-    elif lines.get("idle_exit"):
-        found.append(
-            f"{INVALID}the owner idled out before A2: the idle timeout is too "
-            f"small for this runner"
-        )
-    elif lines.get("stood_down"):
+        # Without the log a gone owner may have idled out: the after-B
+        # reading says nothing of B.
+        return [*found, f"{INVALID}the owner's log was not read after B"]
+    if lines.get("stood_down"):
+        # Its own line; an idle exit never says it.
         found.append("the owner stood down while B ran")
-    return found
+    if lines.get("idle_exit"):
+        # An owner that idled out on its own is gone after B for a reason
+        # of its own, so the after-B reading is left unjudged.
+        return [
+            *found,
+            f"{INVALID}the owner idled out before A2: the idle timeout is too "
+            f"small for this runner",
+        ]
+    return found + _owner_reading(record, identified, "owner_after_b")
 
 
 def _owner_kept_through_a2(
