@@ -1008,6 +1008,24 @@ def test_a_failed_login_answered_with_the_post_fails(daemon):
     )
 
 
+@pytest.mark.parametrize("daemon", [True, False])
+def test_a_failed_login_reported_as_anything_but_a_failure_fails(daemon):
+    """A failed sign-in answered without an error, or with the frontend saying
+    it signed in, tells the user the login did not fail."""
+    record = _repair(ROW_FAILED, daemon=daemon)
+    assert _findings(repair_problems(record, daemon=daemon)) == []
+    reads = [c for c in record["calls"] if c["tool"] == harness.READ_TOOL]
+    reads[-1].update(is_error=False, read_the_post=False)
+    assert "the cold read was answered without an error after a failed login" in (
+        _findings(repair_problems(record, daemon=daemon))
+    )
+    record = _repair(ROW_FAILED, daemon=daemon)
+    record["host_lines"]["signed_in"] = 1
+    assert "the frontend said it signed in although the login failed" in (
+        _findings(repair_problems(record, daemon=daemon))
+    )
+
+
 _REPAIR_OBSERVATIONS = [
     pytest.param(
         lambda r: r["host_lines"].update(replayed=2),

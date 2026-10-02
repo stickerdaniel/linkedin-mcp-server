@@ -1174,7 +1174,13 @@ def _failed(
         found.append("a session was issued although the completion never was")
     if _read_the_post(read):
         found.append("the cold read returned the post although the login failed")
+    elif read.get("outcome") == "returned" and read.get("is_error") is not True:
+        # Measured in both columns: a failed sign-in answers the cold read
+        # with an error. Anything else tells the user it did not fail.
+        found.append("the cold read was answered without an error after a failed login")
     flags = _mapping(record.get("host_lines"))
+    if flags.get("signed_in"):
+        found.append("the frontend said it signed in although the login failed")
     if flags.get("replayed"):
         found.append("the frontend ran the read again after a failed login")
     if daemon and record.get("marks") != 1:
