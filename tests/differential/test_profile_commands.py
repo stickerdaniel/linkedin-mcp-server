@@ -976,6 +976,20 @@ def test_a_mutation_on_the_busy_path_fails(name):
     )
 
 
+def test_a_pid_inside_a_terminal_query_does_not_name_the_owner():
+    """Measured on CI: the owner was 6974, and every command's first line
+    carried the terminal's capability query ``7369746d``."""
+    record = _busy()
+    record["owner_identified"][0] = 6974
+    for name in ("logout", "login", "import"):
+        _add_line(record, name, 1, "\x1bP+q7369746d\x1b\\\x1b[6n🔗 LinkedIn MCP")
+    problems = h_r10b_problems(record, daemon=True)
+    assert not any("names the owner" in p for p in problems), problems
+    _add_line(record, "login", 13_800, "owner 6974 is busy")
+    problems = h_r10b_problems(record, daemon=True)
+    assert any("names the owner" in p for p in _findings(problems)), problems
+
+
 def test_an_accepted_reply_from_a_busy_owner_that_proceeds_fails():
     record = _busy()
     _add_line(record, "logout", 4_000, RETIRING_LINE)

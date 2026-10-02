@@ -80,6 +80,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import os
+import re
 import secrets
 import signal
 import sqlite3
@@ -1191,6 +1192,16 @@ def _lines(command: Mapping[str, Any]) -> list[tuple[int | None, str]]:
     return found
 
 
+def _names_number(text: str, number: Any) -> bool:
+    """Whether *text* holds *number* on its own, not inside other letters or
+    digits: a terminal's capability query (``\x1bP+q7369746d``) carries hex
+    that can hold any pid as a substring."""
+    return (
+        re.search(rf"(?<![0-9A-Za-z]){re.escape(str(number))}(?![0-9A-Za-z])", text)
+        is not None
+    )
+
+
 def _text(command: Mapping[str, Any]) -> str:
     return "\n".join(line for _, line in _lines(command))
 
@@ -1725,7 +1736,7 @@ def _refused_busy(
     if outcome == "proceeded":
         found.append(f"the {name} command changed the profile beside a busy owner")
     identified = _identified(record)
-    if identified is not None and str(identified[0]) in _text(command):
+    if identified is not None and _names_number(_text(command), identified[0]):
         found.append(f"the {name} command's output names the owner's process")
     if name == "import":
         for line, what in (
