@@ -325,9 +325,15 @@ async def test_a_group_member_no_scan_finds_still_keeps_the_command_unsettled(
         assert command.returncode == 0
         with monkeypatch.context() as blind:
             blind.setattr(psutil, "process_iter", lambda *a, **k: iter(()))
+            # Nor did any earlier one: a poll while the command still ran may
+            # have seen the helper as its child. The command has exited, so
+            # ancestry finds nothing more.
+            found = dict(command.descendants)
+            command.descendants.clear()
             assert command.settled(0.5) is False
             assert command.record()["descendants_alive"] == []
             assert command.record()["group_occupied"] is True
+        command.descendants.update(found)
     finally:
         command.end()
     assert command.settled(10) is True
