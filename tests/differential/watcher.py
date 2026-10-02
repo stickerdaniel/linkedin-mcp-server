@@ -46,6 +46,15 @@ at least ``SLOW_SAMPLE_SECONDS`` with its phases, and keeps the largest gap
 between two samples with what the time outside sampling went to
 (``BETWEEN_STEPS``) and the phases of the sample that closed it.
 
+**The loop between samples makes no file-system call.** On a Windows runner
+a stop-file check has blocked for 1.23s at no CPU while sampling waited for
+it. So the stop file is polled by a thread of its own (``StopWatch``), and
+events are serialized, written and flushed by another (``EventWriter``), in
+the order the samples produced them; the loop reads an event and hands each
+sample's events to a bounded queue. What those threads' calls took is in the
+summary's ``file_io``, and what of it fell inside the largest gap is in that
+gap's record, so a slow file system still shows without holding sampling.
+
 **When each sample was taken is part of the evidence.** The summary's
 ``sample_log`` gives every sample's start, its end (the time its events
 carry) and, on Linux, the last pid the kernel had allocated as it began; the
@@ -143,10 +152,13 @@ Imports nothing from the repository, so it runs as a plain script:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
+import queue
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -195,10 +207,33 @@ SLOW_SAMPLE_SECONDS = 0.25
 SAMPLE_PHASES = ("last_pid", "enumeration", "reads", "canonicalization", "bookkeeping")
 #: What the time between one sample's end and the next one's start is
 #: charged to, in the order it passes: turning the sample into events,
-#: serializing and writing them, the flush, the sleep asked for, how much
-#: later than asked it returned, and the stop-file check. Whatever none of
-#: them took is the record's ``unaccounted``.
-BETWEEN_STEPS = ("tracker", "write", "flush", "sleep", "wakeup_delay", "stop_check")
+#: handing them to the writer thread (``enqueue``, which waits only when the
+#: writer's queue is full), the sleep asked for, how much later than asked it
+#: returned, and reading whether a stop was requested (``stop_check``, an
+#: event the stop-file thread sets). ``write`` and ``flush`` stay zero: the
+#: loop no longer does either, and the record keeps every step it had. The
+#: writer's and the stop-file thread's own calls are in ``file_io``. Whatever
+#: none of the steps took is the record's ``unaccounted``.
+BETWEEN_STEPS = (
+    "tracker",
+    "enqueue",
+    "write",
+    "flush",
+    "sleep",
+    "wakeup_delay",
+    "stop_check",
+)
+#: The file-system calls made off the sampling path, each timed by the thread
+#: that makes it: the writer's writes (serialization included) and flushes,
+#: and the stop-file checks.
+FILE_IO_CALLS = ("write", "flush", "stop_check")
+#: How many samples' events may wait for the writer thread: ten seconds at
+#: ``SAMPLE_SECONDS``. A writer that far behind holds the loop rather than
+#: lose an event (``EventWriter``).
+WRITE_QUEUE_BATCHES = 200
+#: How often a loop held by a full queue looks again whether the writer
+#: failed, so a dead writer cannot hold it for good.
+_FULL_WAIT_POLL = 0.05
 #: At most this many slow samples are kept, the first ones.
 _SLOW_SAMPLES_KEPT = 100
 #: At most this many failed group reads are kept, the first ones.
@@ -1652,6 +1687,25 @@ def run_ahead() -> dict[str, Any]:
     return fields
 
 
+#: One event as the tracker produces it: ``(actor, kind, fields)``.
+EventTuple = tuple[str, str, dict[str, Any]]
+
+
+def event_line(
+    base: Mapping[str, Any],
+    actor: str,
+    kind: str,
+    fields: Mapping[str, Any],
+    t: float,
+) -> str:
+    return (
+        json.dumps(
+            {"t": t, **base, "actor": actor, "kind": kind, **fields}, sort_keys=True
+        )
+        + "\n"
+    )
+
+
 def write_event(
     out: IO[str],
     base: Mapping[str, Any],
@@ -1660,12 +1714,237 @@ def write_event(
     fields: Mapping[str, Any],
     t: float,
 ) -> None:
-    out.write(
-        json.dumps(
-            {"t": t, **base, "actor": actor, "kind": kind, **fields}, sort_keys=True
+    out.write(event_line(base, actor, kind, fields, t))
+
+
+class _Calls:
+    """What one kind of file-system call took, kept by the thread making it.
+
+    The lock is held to count, never across the call, so the loop reading it
+    never waits on the file system.
+    """
+
+    def __init__(self, timer: Callable[[], float], wall: Callable[[], float]) -> None:
+        self._timer, self._wall = timer, wall
+        self._lock = threading.Lock()
+        self._count = 0
+        self._seconds = 0.0
+        #: The longest call, and the wall time it ended.
+        self._longest: tuple[float, float | None] = (0.0, None)
+        #: When the call in progress began, while one is.
+        self._since: float | None = None
+
+    def run(self, call: Callable[[], Any]) -> Any:
+        began = self._timer()
+        with self._lock:
+            self._since = began
+        try:
+            return call()
+        finally:
+            seconds = self._timer() - began
+            ended = self._wall()
+            with self._lock:
+                self._since = None
+                self._count += 1
+                self._seconds += seconds
+                if seconds > self._longest[0]:
+                    self._longest = (seconds, ended)
+
+    def mark(self) -> tuple[int, float, float | None]:
+        """The calls ended so far, their seconds, and when the one in
+        progress began."""
+        with self._lock:
+            return self._count, self._seconds, self._since
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            count, seconds, since = self._count, self._seconds, self._since
+            longest, at = self._longest
+        return {
+            "count": count,
+            "seconds": round(seconds, 4),
+            "max_seconds": round(longest, 4),
+            "max_t": at,
+            "in_progress_seconds": (
+                0.0 if since is None else round(self._timer() - since, 4)
+            ),
+        }
+
+
+class EventWriter:
+    """Serializes, writes and flushes events on a thread of its own.
+
+    The loop hands it each sample's events (``put``) and never waits on the
+    file system: a queue of up to *bound* samples holds what the writer has
+    not reached. A writer that far behind holds the loop instead, which waits
+    for room rather than drop an event; each such wait is counted and timed
+    (``stats``) and charged to the gap's ``enqueue`` step. Events reach the
+    file in the order they were put, whatever has piled up going out in one
+    write and one flush. A failed write or flush ends the writer, and the
+    loop's next ``put``, or ``close``, raises it.
+    """
+
+    def __init__(
+        self,
+        out: IO[str],
+        base: Mapping[str, Any],
+        *,
+        bound: int = WRITE_QUEUE_BATCHES,
+        timer: Callable[[], float] = time.perf_counter,
+        wall: Callable[[], float] = time.time,
+    ) -> None:
+        self._out, self._base, self._timer = out, base, timer
+        self.bound = bound
+        #: Each sample's end and events, in sample order; None ends the writer.
+        self._queue: queue.Queue[tuple[float, list[EventTuple]] | None] = queue.Queue(
+            maxsize=bound
         )
-        + "\n"
-    )
+        self.write = _Calls(timer, wall)
+        self.flush = _Calls(timer, wall)
+        self._max_depth = 0
+        self._full_waits = 0
+        self._full_wait_seconds = 0.0
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run, name="watcher-event-writer", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def put(self, events: Sequence[EventTuple], t: float) -> None:
+        """Queue one sample's events, which end at *t*; raise a failed write."""
+        self._raise()
+        if events:
+            self._enqueue((t, list(events)))
+
+    def close(self) -> None:
+        """Return once everything put is written and flushed; raise a failure."""
+        self._enqueue(None)
+        self._thread.join()
+        self._raise()
+
+    def stats(self) -> dict[str, Any]:
+        return {
+            "bound": self.bound,
+            "max_depth": self._max_depth,
+            "full_waits": self._full_waits,
+            "full_wait_seconds": round(self._full_wait_seconds, 4),
+        }
+
+    def _raise(self) -> None:
+        if self._error is not None:
+            raise RuntimeError("the watcher's event writer failed") from self._error
+
+    def _enqueue(self, item: tuple[float, list[EventTuple]] | None) -> None:
+        try:
+            self._queue.put_nowait(item)
+        except queue.Full:
+            # The writer is a whole queue behind: wait for room, never drop.
+            self._full_waits += 1
+            began = self._timer()
+            try:
+                while True:
+                    self._raise()
+                    try:
+                        self._queue.put(item, timeout=_FULL_WAIT_POLL)
+                        break
+                    except queue.Full:
+                        continue
+            finally:
+                self._full_wait_seconds += self._timer() - began
+        self._max_depth = max(self._max_depth, self._queue.qsize())
+
+    def _run(self) -> None:
+        try:
+            while True:
+                items = [self._queue.get()]
+                with contextlib.suppress(queue.Empty):
+                    while True:
+                        items.append(self._queue.get_nowait())
+                batches = [item for item in items if item is not None]
+                if batches:
+                    self.write.run(lambda: self._out.write(self._lines(batches)))
+                    self.flush.run(self._out.flush)
+                if len(batches) < len(items):
+                    return
+        except BaseException as exc:
+            self._error = exc
+
+    def _lines(self, batches: list[tuple[float, list[EventTuple]]]) -> str:
+        return "".join(
+            event_line(self._base, actor, kind, fields, t)
+            for t, events in batches
+            for actor, kind, fields in events
+        )
+
+
+class StopWatch:
+    """Polls for a stop request on a thread of its own.
+
+    The loop reads only the event this sets (``requested``), so a check that
+    blocks holds this thread rather than sampling, and only delays the stop.
+    Every check is timed (``checks``). A check that raises ends the thread,
+    and the loop's next ``requested`` raises it.
+    """
+
+    def __init__(
+        self,
+        requested: Callable[[], bool],
+        *,
+        poll: float,
+        timer: Callable[[], float] = time.perf_counter,
+        wall: Callable[[], float] = time.time,
+    ) -> None:
+        self._requested = requested
+        self._poll = poll
+        self.checks = _Calls(timer, wall)
+        self._stop = threading.Event()
+        self._cancelled = threading.Event()
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run, name="watcher-stop-check", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def requested(self) -> bool:
+        if self._error is not None:
+            raise RuntimeError("the watcher's stop-file check failed") from self._error
+        return self._stop.is_set()
+
+    def cancel(self) -> None:
+        """End the polling; a check in progress finishes on its own."""
+        self._cancelled.set()
+
+    def _run(self) -> None:
+        try:
+            while not self._cancelled.is_set():
+                if self.checks.run(self._requested):
+                    self._stop.set()
+                    return
+                self._cancelled.wait(self._poll)
+        except BaseException as exc:
+            self._error = exc
+
+
+def _file_io_between(
+    before: Mapping[str, tuple[int, float, float | None]],
+    after: Mapping[str, tuple[int, float, float | None]],
+    now: float,
+) -> dict[str, dict[str, Any]]:
+    """The off-path calls that ended between two marks, and how long the one
+    in progress at the second had run by *now*."""
+    record: dict[str, dict[str, Any]] = {}
+    for name in FILE_IO_CALLS:
+        count, seconds, since = after[name]
+        record[name] = {
+            "count": count - before[name][0],
+            "seconds": round(seconds - before[name][1], 4),
+            "in_progress_seconds": 0.0 if since is None else round(now - since, 4),
+        }
+    return record
 
 
 def observe(
@@ -1682,16 +1961,25 @@ def observe(
     wall: Callable[[], float] = time.time,
     sleep: Callable[[float], None] = time.sleep,
     cpu: Callable[[], float] = time.process_time,
+    queue_bound: int = WRITE_QUEUE_BATCHES,
+    stop_poll: float | None = None,
 ) -> dict[str, Any]:
     """Sample until *stop_requested* or *deadline*; return the loop's summary.
+
+    *stop_requested* runs on the stop-file thread (``StopWatch``) every
+    *stop_poll* seconds, *interval* by default, and events reach *out*
+    through the writer thread (``EventWriter``), which is drained before
+    this returns: every event put is written and flushed by then.
 
     Besides the largest gap between two samples it keeps that gap's
     breakdown (``largest_gap``): the wall time outside sampling, from one
     sample's end to the next one's start, with what it went to
-    (``BETWEEN_STEPS``), and the wall time in the sample that closed it, with
-    that sample's phases (``Sampler.breakdown``). Each part's ``unaccounted``
-    is what none of its steps or phases took, so a stall that falls between
-    them, or a stepped wall clock, shows there rather than in a step.
+    (``BETWEEN_STEPS``), the wall time in the sample that closed it, with
+    that sample's phases (``Sampler.breakdown``), and the off-path calls
+    that ended in the gap or were still running at its end (``file_io``).
+    Each part's ``unaccounted`` is what none of its steps or phases took, so
+    a stall that falls between them, or a stepped wall clock, shows there
+    rather than in a step.
     """
     began = monotonic()
     observation_start: float | None = None
@@ -1709,6 +1997,20 @@ def observe(
     between: dict[str, float] = {}
     between_cpu = cpu()
     sleep_requested = 0.0
+    writer = EventWriter(out, base, bound=queue_bound, timer=timer, wall=wall)
+    stop = StopWatch(
+        stop_requested,
+        poll=interval if stop_poll is None else stop_poll,
+        timer=timer,
+        wall=wall,
+    )
+    file_calls = {
+        "write": writer.write,
+        "flush": writer.flush,
+        "stop_check": stop.checks,
+    }
+    #: The off-path calls as the last sample ended.
+    io_mark = {name: calls.mark() for name, calls in file_calls.items()}
 
     def step(name: str, call: Callable[[], Any]) -> Any:
         began_step = timer()
@@ -1719,11 +2021,13 @@ def observe(
 
     def take_sample() -> None:
         nonlocal observation_start, last_sample, max_gap, largest_gap, between_cpu
+        nonlocal io_mark
         cpu_outside = cpu() - between_cpu
         began_sample = monotonic()
         sample = sampler.sample()
         durations.append(monotonic() - began_sample)
         now = wall()
+        io_now = {name: calls.mark() for name, calls in file_calls.items()}
         if last_sample is not None:
             gap = now - last_sample
             # The gap and the sample that closed it, never the run's slowest
@@ -1737,54 +2041,60 @@ def observe(
                     between,
                     sleep_requested,
                     cpu_outside,
+                    _file_io_between(io_mark, io_now, timer()),
                 )
             max_gap = max(max_gap, gap)
+        io_mark = io_now
         last_sample = now
         sample_log.append([sampler.began_at, now, sampler.last_pid_at_begin])
         between.clear()
         between_cpu = cpu()
-        events = step("tracker", lambda: tracker.observe(sample, now))
+        events: list[EventTuple] = step("tracker", lambda: tracker.observe(sample, now))
+        if observation_start is None:
+            observation_start = now
+            # The baseline is taken. The harness waits for this line before
+            # it starts an actor, so no actor is mistaken for background.
+            ready = {
+                "pid": os.getpid(),
+                "baseline_processes": len(sample),
+                "baseline_pgids": list(sampler.baseline_pgids),
+            }
+            events = [*events, ("watcher", "watcher.ready", ready)]
+        # Handed over, never written here: on Windows a write or a flush can
+        # block for seconds, and sampling would wait with it.
+        step("enqueue", lambda: writer.put(events, now))
 
-        def write_all() -> None:
-            nonlocal observation_start
-            for actor, kind, fields in events:
-                write_event(out, base, actor, kind, fields, now)
-            if observation_start is None:
-                observation_start = now
-                # The baseline is taken. The harness waits for this line before
-                # it starts an actor, so no actor is mistaken for background.
-                write_event(
-                    out,
-                    base,
-                    "watcher",
-                    "watcher.ready",
-                    {
-                        "pid": os.getpid(),
-                        "baseline_processes": len(sample),
-                        "baseline_pgids": sampler.baseline_pgids,
-                    },
-                    now,
-                )
-
-        step("write", write_all)
-        step("flush", out.flush)
-
-    while monotonic() - began < deadline:
-        if step("stop_check", stop_requested):
-            stopped_by = "stop file"
-            # One more sample after the request, so the observation
-            # provably ends after whatever the harness waited for.
+    writer.start()
+    stop.start()
+    try:
+        while monotonic() - began < deadline:
+            # An event the stop-file thread sets; the file is never looked at
+            # here, for the same reason as above.
+            if step("stop_check", stop.requested):
+                stopped_by = "stop file"
+                # One more sample after the request, so the observation
+                # provably ends after whatever the harness waited for.
+                take_sample()
+                break
+            tick = monotonic()
             take_sample()
-            break
-        tick = monotonic()
-        take_sample()
-        elapsed = monotonic() - tick
-        sleep_requested = max(0.0, interval - elapsed)
-        slept_from = timer()
-        sleep(sleep_requested)
-        slept = timer() - slept_from
-        between["sleep"] = min(slept, sleep_requested)
-        between["wakeup_delay"] = max(0.0, slept - sleep_requested)
+            elapsed = monotonic() - tick
+            sleep_requested = max(0.0, interval - elapsed)
+            slept_from = timer()
+            sleep(sleep_requested)
+            slept = timer() - slept_from
+            between["sleep"] = min(slept, sleep_requested)
+            between["wakeup_delay"] = max(0.0, slept - sleep_requested)
+    except BaseException:
+        stop.cancel()
+        # What was sampled before the failure still reaches the file; the
+        # failure raised is the one that ended the loop.
+        with contextlib.suppress(Exception):
+            writer.close()
+        raise
+    stop.cancel()
+    # Everything put is written and flushed before the summary can follow it.
+    writer.close()
 
     return {
         "observation_start": observation_start,
@@ -1794,6 +2104,10 @@ def observe(
         **duration_stats(durations),
         "sample_log": sample_log,
         "stopped_by": stopped_by,
+        "file_io": {
+            **{name: calls.stats() for name, calls in file_calls.items()},
+            "queue": writer.stats(),
+        },
     }
 
 
@@ -1805,6 +2119,7 @@ def _gap_record(
     between: Mapping[str, float],
     sleep_requested: float,
     cpu_outside: float,
+    file_io: Mapping[str, Any],
 ) -> dict[str, Any]:
     """The breakdown of a gap that ended at *now*, by the sample closing it."""
     breakdown = sampler.breakdown or {}
@@ -1826,6 +2141,8 @@ def _gap_record(
             "unaccounted": round(inside - sum(phases.values()), 4),
         },
         "sample": breakdown,
+        # Off the sampling path: overlapping the parts above, never in them.
+        "file_io": dict(file_io),
     }
 
 

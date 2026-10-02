@@ -828,11 +828,21 @@ class Watcher:
 #: closed the gap (``watcher.SAMPLE_PHASES``), with read kinds named apart.
 _GAP_STEP_NAMES = {
     "tracker": "turning the previous sample into events",
+    "enqueue": "handing events to the writer thread",
+    # The loop's own writing, zero since the writer thread does it; named for
+    # a summary written before that.
     "write": "serializing and writing events",
     "flush": "flushing the event file",
     "sleep": "the sleep asked for",
     "wakeup_delay": "waking late from sleep",
-    "stop_check": "the stop-file check",
+    "stop_check": "checking for a stop request",
+}
+#: The file-system calls the watcher makes off the sampling path
+#: (``watcher.FILE_IO_CALLS``), which overlap a gap without being part of it.
+_GAP_FILE_IO_NAMES = {
+    "write": "the event writer's writes",
+    "flush": "its flushes",
+    "stop_check": "the stop-file checks",
 }
 _GAP_PHASE_NAMES = {
     "last_pid": "reading the kernel's last pid",
@@ -853,13 +863,18 @@ def _largest_gap_cause(largest: dict[str, Any], priority: object) -> str:
     inside = largest.get("in_sample") or {}
     sample = largest.get("sample") or {}
     steps = outside.get("steps") or {}
-    asked = f", after asking for {_seconds(outside.get('sleep_requested')):.4f}s"
+    details = {
+        "wakeup_delay": (
+            f", after asking for {_seconds(outside.get('sleep_requested')):.4f}s"
+        ),
+        "enqueue": ", which waits only while the writer's queue is full",
+    }
     # (seconds, name, what else the record says about it)
     parts: list[tuple[float, str, str]] = [
         (
             _seconds(steps.get(step)),
             f"{name} outside sampling",
-            asked if step == "wakeup_delay" else "",
+            details.get(step, ""),
         )
         for step, name in _GAP_STEP_NAMES.items()
     ]
@@ -908,7 +923,31 @@ def _largest_gap_cause(largest: dict[str, Any], priority: object) -> str:
         f"{_seconds(outside.get('cpu_seconds')):.4f}s of CPU outside sampling "
         f"and {_seconds(sample.get('cpu_seconds')):.4f}s in the sample; the "
         f"slowest process read in that sample was {operation}"
+        f"{_file_io_clause(largest.get('file_io'))}"
     )
+
+
+def _file_io_clause(file_io: object) -> str:
+    """What the watcher's off-path file-system calls took in the gap, so a
+    slow file system shows even though sampling did not wait on it."""
+    if not isinstance(file_io, dict):
+        return ""
+    parts = []
+    for call, name in _GAP_FILE_IO_NAMES.items():
+        calls = file_io.get(call)
+        if not isinstance(calls, dict):
+            continue
+        part = (
+            f"{name} took {_seconds(calls.get('seconds')):.4f}s over "
+            f"{calls.get('count')} calls"
+        )
+        running = _seconds(calls.get("in_progress_seconds"))
+        if running:
+            part += f" and one was still running after {running:.4f}s"
+        parts.append(part)
+    if not parts:
+        return ""
+    return "; off the sampling path in that gap, " + ", ".join(parts)
 
 
 def _gap_cause(summary: dict[str, Any]) -> str:
