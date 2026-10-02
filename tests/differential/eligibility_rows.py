@@ -1319,11 +1319,18 @@ def cloud_storage_root(home: Path, name: str) -> Path:
 
 
 def cloud_storage_profile(root: Path) -> Path:
-    """The profile the cloud cell points at, under a planted *root*. Its auth
-    root (the profile's parent) does not exist yet, as in every other cell:
-    the product creates and claims it, and refuses one that already exists
-    unclaimed (``profile_claim``)."""
-    return root / "auth" / "profile"
+    """The profile the cloud cell points at, under a planted *root*, claimed
+    the way the autouse profile fixture claims its own (``tests/conftest.py``):
+    the product creates the auth root with its ownership marker. Staging
+    writes under that root only once it is ours (``require_profile_claim``),
+    and the harness judges a root only once it exists (``claim_account``).
+    One level below *root*, so the claim takes a root that is free rather
+    than the planted folder."""
+    from linkedin_mcp_server.profile_claim import ensure_profile_claim
+
+    profile = root / "auth" / "profile"
+    ensure_profile_claim(profile)
+    return profile
 
 
 @dataclass(frozen=True)

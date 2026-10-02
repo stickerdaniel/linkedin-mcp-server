@@ -414,25 +414,20 @@ def test_a_plant_outside_the_product_s_locations_is_refused(tmp_path):
     assert not (tmp_path / "info.json").exists()
 
 
-def test_the_cloud_cell_s_auth_root_is_left_for_the_product_to_claim(tmp_path):
-    """Measured on macOS CI: a profile whose auth root the cell had created
-    was refused as unclaimed before anything ran."""
-    from linkedin_mcp_server.profile_claim import ensure_profile_claim
+def test_the_cloud_cell_s_profile_is_one_staging_may_write_under(tmp_path):
+    """Measured on macOS CI: once refused as an unclaimed existing root by
+    staging, once refused as a missing root by the harness's containment."""
+    from linkedin_mcp_server.profile_claim import require_profile_claim
 
     home = tmp_path / "home"
     (home / "Library").mkdir(parents=True)
     root = cloud_storage_root(home, "cell")
     planted = plant_tree(root)
-    try:
-        profile = cloud_storage_profile(root)
-        assert not profile.parent.exists()
-        ensure_profile_claim(profile)
-        assert profile.parent.is_dir()
-    finally:
-        import shutil
-
-        shutil.rmtree(root / "auth", ignore_errors=True)
-        assert planted.remove() == []
+    cell = cloud_storage_profile(root)
+    assert require_profile_claim(cell) == cell.resolve()
+    assert harness.claim_account(cell).profile == cell
+    assert planted.remove() == []
+    assert not root.exists()
 
 
 def test_a_planted_tree_refuses_an_existing_root_and_is_removed_exactly(tmp_path):
