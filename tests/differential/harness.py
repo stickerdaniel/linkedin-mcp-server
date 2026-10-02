@@ -90,7 +90,13 @@ row's own command line with ``--logout``, ``--login``,
 ``--import-from-browser`` or ``--status``, on a pseudo-terminal or on pipes,
 through ``CommandSeams``: a command not shown exited with its output ended
 once the row is done with it is retained, and one the script leaves running
-is ended by the teardown and recorded as a harness failure.
+is ended by the teardown and recorded as a harness failure. **Rows H-R16
+and H-R10a-login** (``auth_repair``) stage a sign-in at the synthetic origin
+through ``AuthSeams``: the harness records each authorization with the
+session read right after it, the teardown closes the sign-in so nothing
+issues a session after the row, and R17's replacement lineage
+(``session.replacement_lineage``) is judged beside the original generation's
+outcome, never in its place.
 """
 
 from __future__ import annotations
@@ -136,6 +142,7 @@ from mcp.shared.message import SessionMessage
 from typing_extensions import Unpack
 
 from differential import (
+    auth_repair,
     call_loss,
     host_comparison,
     lease_probe,
@@ -184,14 +191,29 @@ from differential.session import (
     CALLER,
     CLEARED_BY_USER,
     EXPECTABLE,
+    IMPORT,
+    LINEAGE_LOST,
+    LINEAGE_NONE,
+    LINEAGE_REPLACED,
+    LINEAGE_UNAUTHORIZED,
+    LOGIN,
     LOGOUT,
+    LOST_AFTER_AUTHORIZATION,
+    LOST_ANNOUNCED,
+    LOST_SILENT,
+    ORIGIN_REJECTED,
     PRESERVATION,
     PROBE,
+    REPLACED_AFTER_AUTHORIZATION,
+    REPLACING,
     RETAINED,
     ROW,
     UNCERTAIN,
+    Authorization,
     ProfileSnapshot,
+    ReplacementLineage,
     r17_outcome,
+    replacement_lineage,
     shown,
     snapshot,
     stage_signed_in_session,
@@ -1346,6 +1368,21 @@ class HostSession:
 #: A row's scripted phase: it is handed a function that calls one tool through
 #: the host's own client and returns the call's summary.
 ToolCall = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
+#: What the host's client is told of a call's progress: the value, the total
+#: and the message (FastMCP's ``ProgressHandler``).
+ProgressReport = Callable[[float, float | None, str | None], Awaitable[None]]
+
+
+def progress_recorder(into: list[dict[str, Any]]) -> ProgressReport:
+    """A progress handler for a host's client that keeps each message with
+    when the host heard it, on the harness's monotonic clock. Passive: the
+    client sends a progress token with every call whether or not one is
+    given (its default handler only logs), so the wire is the same."""
+
+    async def heard(progress: float, total: float | None, message: str | None) -> None:
+        into.append({"message": message, "seen_ns": time.monotonic_ns()})
+
+    return heard
 
 
 async def run_host_session(
@@ -1364,6 +1401,7 @@ async def run_host_session(
     on_process: Callable[[Any], None] | None = None,
     row_script: TransportScript | None = None,
     before_stop: Callable[[], Awaitable[None]] | None = None,
+    on_progress: ProgressReport | None = None,
 ) -> HostSession:
     """Initialize, call the read tool once, then quit the way a host does.
 
@@ -1379,7 +1417,8 @@ async def run_host_session(
     process object the moment it is spawned. *row_script* is a declared row's
     scripted phase, run where *script* would be, with the live transport as
     well; the two are one or the other. *before_stop* is the transport's
-    hook of that name.
+    hook of that name. *on_progress* is the client's progress handler
+    (``progress_recorder``); without it the client keeps its default.
     """
     if script is not None and row_script is not None:
         raise ValueError("a host session runs one scripted phase, not two")
@@ -1402,7 +1441,12 @@ async def run_host_session(
     # The initialize handshake, as a host sends it. FastMCP 4's default probes
     # server/discover first and settles on the 2026-07-28 era with a FastMCP 4
     # server, a different path from the one every row so far measured.
-    client = Client(transport, init_timeout=_INIT_SECONDS, mode="legacy")
+    client = Client(
+        transport,
+        init_timeout=_INIT_SECONDS,
+        mode="legacy",
+        progress_handler=on_progress,
+    )
     try:
         async with client:
             if started is not None and transport.pid is not None:
@@ -1473,6 +1517,37 @@ async def run_host_session(
     if transport.process is not None:
         session.exit_code = transport.process.returncode
     return session
+
+
+async def run_second_host(
+    command: Sequence[str],
+    *,
+    env: dict[str, str],
+    cwd: Path,
+    progress: list[dict[str, Any]],
+    on_stderr: Callable[[str], None],
+    on_process: Callable[[Any], None],
+) -> tuple[HostSession, dict[str, Any]]:
+    """A second host's one read and quit (``AuthSeams.second_host``), and
+    what its record keeps. *progress* fills as the host's client hears the
+    read's progress, so the row can act on it while the read runs; the
+    record keeps what was heard by the end."""
+    second = await run_host_session(
+        command,
+        env=env,
+        cwd=cwd,
+        on_stderr=on_stderr,
+        on_process=on_process,
+        on_progress=progress_recorder(progress),
+    )
+    return second, {
+        "host": host_summary(second),
+        "call": call_record(second.tool) if second.tool is not None else None,
+        "forwarded": any(_FORWARDING_LINE in line for line in second.stderr),
+        "quit_problems": host_failures(second),
+        "lines": auth_repair._flags(second.stderr),
+        "progress": list(progress),
+    }
 
 
 # --- A host in a process of its own --------------------------------------------
@@ -2621,6 +2696,9 @@ class RowVector:
     o3_protected: tuple[str, ...] = ()
     #: The protected changes the row's authorized action does cover.
     o3_authorized: tuple[str, ...] = ()
+    #: R17 beyond the original generation (``session.replacement_lineage``):
+    #: ``none`` on every row that stages no sign-in.
+    o4_lineage: str = LINEAGE_NONE
 
 
 _ASSOCIATE_SECONDS = 5.0
@@ -2984,6 +3062,13 @@ def launch_lifetimes(
     return owners, started
 
 
+#: The lineage each lineage expectation holds a row to.
+_LINEAGE_EXPECTED = {
+    REPLACED_AFTER_AUTHORIZATION: LINEAGE_REPLACED,
+    LOST_AFTER_AUTHORIZATION: LINEAGE_LOST,
+}
+
+
 def row_expectations(
     vector: RowVector,
     *,
@@ -3018,9 +3103,26 @@ def row_expectations(
         failures.append(initial.unmet)
     if expect_session not in EXPECTABLE:
         failures.append(f"O4: a row cannot expect the session {expect_session!r}")
+    elif expect_session in _LINEAGE_EXPECTED:
+        # The original generation ends lost either way; what makes it the
+        # row's expectation is the lineage beside it, never the string.
+        lineage = _LINEAGE_EXPECTED[expect_session]
+        if (
+            vector.o4_session not in (LOST_ANNOUNCED, LOST_SILENT)
+            or vector.o4_lineage != lineage
+        ):
+            failures.append(
+                f"O4: the session was {vector.o4_session} with lineage "
+                f"{vector.o4_lineage}, not {expect_session}"
+            )
     elif vector.o4_session != expect_session:
         failures.append(
             f"O4: the session was {vector.o4_session}, not {expect_session}"
+        )
+    if vector.o4_lineage == LINEAGE_UNAUTHORIZED:
+        failures.append(
+            "O4: the session was lost or replaced without an authorization "
+            "recorded before it"
         )
     if not vector.host_exit_clean:
         failures.append("the host quit was not a normal one")
@@ -3750,6 +3852,23 @@ O3_UNOBSERVED = "unobserved"
 #: behind, or quarantined anything, did something the user did not ask for.
 _AUTHORIZED_CHANGES = {
     LOGOUT: frozenset({GENERATION_REMOVED, SESSION_UNUSABLE, PROFILE_REMOVED}),
+    # A sign-in retires the session it replaces into quarantine
+    # (``rotate_shielded``, the stale path's force-move), profile and
+    # generation with it, and writes a generation of its own, or none when it
+    # fails; nothing else. Allowed only where the lineage shows the
+    # authorization first (``judge_row``).
+    **{
+        kind: frozenset(
+            {
+                GENERATION_CHANGED,
+                GENERATION_REMOVED,
+                SESSION_UNUSABLE,
+                QUARANTINED,
+                PROFILE_REMOVED,
+            }
+        )
+        for kind in REPLACING
+    },
 }
 
 
@@ -4958,7 +5077,7 @@ def compare_to_direct(direct: RowVector, daemon: RowVector) -> list[str]:
     mode quarantined it. A change only Direct made is Direct mutating more.
     """
     differences = []
-    for name in ("o1_single_browser", "o2", "o4_session"):
+    for name in ("o1_single_browser", "o2", "o4_session", "o4_lineage"):
         if getattr(direct, name) != getattr(daemon, name):
             differences.append(
                 f"{name}: Direct {getattr(direct, name)!r}, daemon "
@@ -5007,6 +5126,10 @@ class PostQuit:
     #: (``preservation_policy_refusals``): declared, so not a failure, and
     #: never an observation either.
     withheld: str | None = None
+    #: *valid* is the synthetic origin's own judgement of the ``li_at`` on
+    #: disk, read without any browser: the observation a withheld session
+    #: leaves on a row that stages a sign-in, which nothing can repair.
+    origin_judged: bool = False
 
 
 @dataclass
@@ -5051,6 +5174,9 @@ class Observations:
     initial: InitialCall = FEED_READ
     #: How the row's host was declared to end (``TERMINATIONS``).
     termination: str = NORMAL_EOF
+    #: R17 beyond the original generation, on a row that stages a sign-in
+    #: (``session.replacement_lineage``); None reads as ``none``.
+    lineage: ReplacementLineage | None = None
 
 
 @dataclass
@@ -5221,8 +5347,18 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
             post_quit=post_quit.valid if post_quit is not None else None,
             user_cleared=observed.authorized == LOGOUT,
         )
+    lineage = observed.lineage
+    if lineage is not None:
+        failures += [f"O4 lineage: {problem}" for problem in lineage.problems]
+    # A replacing authorization covers what a sign-in changes only where the
+    # lineage shows it came first; otherwise it covers nothing.
+    authorized = observed.authorized
+    if authorized in REPLACING and (
+        lineage is None or lineage.reading not in (LINEAGE_REPLACED, LINEAGE_LOST)
+    ):
+        authorized = None
     o3_protected, o3_authorized = protected_kinds(
-        observed.before, observed.after, observed.authorized
+        observed.before, observed.after, authorized
     )
 
     vector = RowVector(
@@ -5250,6 +5386,7 @@ def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
         recovered=_recovered(host) if killed and observed.daemon and normal else None,
         o3_protected=o3_protected,
         o3_authorized=o3_authorized,
+        o4_lineage=lineage.reading if lineage is not None else LINEAGE_NONE,
     )
     expected = row_expectations(
         vector,
@@ -5367,7 +5504,8 @@ class RowContext:
     lane the stand-down. A row that loses the owner
     (``RowLifecycle.owner_loss``) gets ``owner_loss``: the kill, the stop and
     the declared responder, and its readings. A row that runs profile
-    commands (``RowLifecycle.commands``) gets ``commands``.
+    commands (``RowLifecycle.commands``) gets ``commands``, and a row that
+    stages a sign-in (``RowLifecycle.auth``) gets ``auth``.
 
     A row may quit its host itself (``transport.host_quit``) and go on
     observing; the session then quits it no second time.
@@ -5401,6 +5539,8 @@ class RowContext:
     owner_loss: OwnerLossSeams | None = None
     #: Only on a row that runs profile commands (``CommandSeams``).
     commands: CommandSeams | None = None
+    #: Only on a row that stages a sign-in (``AuthSeams``).
+    auth: AuthSeams | None = None
 
     def emit(self, actor: str, kind: str, **fields: Any) -> None:
         self._emit(actor, kind, **fields)
@@ -5589,6 +5729,50 @@ class CommandSeams:
 
 
 @dataclass(frozen=True)
+class AuthSeams:
+    """What a row that stages a sign-in may do (``RowContext.auth``).
+
+    Three actions on the synthetic origin's sign-in, each recorded by the
+    harness and not by the script: ``reject``, the harness's own rejection of
+    the staged session, which is the row's authorization
+    (``ORIGIN_REJECTED``); ``authorize``, a user action the row confirms
+    (``LOGIN``, ``IMPORT``) recorded before the command it starts; and
+    ``release``, which lets the login's next ask issue a fresh session. Each
+    authorization is read back with the session right after it, which is
+    what shows it came before anything invalidated the original. The
+    teardown closes the sign-in, so nothing still asking after the row can
+    complete. Every reading waits and sends nothing, and none raises.
+    """
+
+    #: Reject every session the origin accepted; the record, with the
+    #: session read right after.
+    reject: Callable[[], dict[str, Any]]
+    #: Record the user's confirmed action of the kind given now, with the
+    #: session read right after.
+    authorize: Callable[[str], dict[str, Any]]
+    #: Let the next completion asks issue fresh sessions.
+    release: Callable[[], dict[str, Any]]
+    #: The sign-in's record so far (``SyntheticOrigin.login_record``).
+    login: Callable[[], dict[str, Any]]
+    #: The session's artefacts now, read from disk alone, labelled.
+    snapshot: Callable[[str], dict[str, Any]]
+    #: The profile's browser waited for (``RaceSeams.browser_gone``).
+    browser_gone: Callable[[float], Awaitable[dict[str, Any]]]
+    #: A second host with the row's own command and environment, one read of
+    #: the feed and a normal quit, its lines its own (``LossSeams.fresh_read``).
+    second_host: Callable[[], Awaitable[dict[str, Any]]]
+    #: The progress the latest second host's client heard for its read so
+    #: far, while it runs (``progress_recorder``).
+    second_progress: Callable[[], list[dict[str, Any]]]
+    #: Which owner the descriptor names now (``LossSeams.owner_reading``).
+    owner_reading: Callable[[str], Awaitable[dict[str, Any]]]
+    #: The row's own daemon log, as written so far; every owner's.
+    owner_log: Callable[[], list[str]]
+    #: The host's server's or frontend's stderr so far, every line in order.
+    host_output: Callable[[], list[str]]
+
+
+@dataclass(frozen=True)
 class RowLifecycle:
     """How one row runs, declared before it may (``ROWS``)."""
 
@@ -5629,6 +5813,12 @@ class RowLifecycle:
     #: what ``judge_row`` holds the session to. The authorization a clear
     #: needs is never declared here; the script records it as confirmed.
     expect_session: str = RETAINED
+    #: The script stages a sign-in and gets ``AuthSeams``; the origin's
+    #: sign-in is armed for the row and closed by its teardown.
+    auth: bool = False
+    #: Settings over the actors' environment, the same in every column and
+    #: recorded whole: the cell's declared bounds. Never a secret.
+    environment: Mapping[str, str] | None = None
 
 
 ROW_H_CAL = call_loss.ROW_H_CAL
@@ -5745,6 +5935,24 @@ ROWS: dict[str, RowLifecycle] = {
         )
         for row, case in profile_commands.CASES.items()
     },
+    # H-R16 and H-R10a-login: a sign-in staged at the origin, in the
+    # calibration's configuration with the cell's declared bounds. Nothing
+    # that could sign in again runs after it.
+    **{
+        row: RowLifecycle(
+            idle_timeout=auth_repair.AUTH_IDLE_TIMEOUT_SECONDS,
+            recorded=True,
+            scenarios=False,
+            script=case.script,
+            k2=auth_repair.K2_NOT_APPLICABLE,
+            commands=case.commands,
+            expect_session=case.expect_session,
+            preservation=MUST_NOT_REPAIR,
+            auth=True,
+            environment=auth_repair.ENVIRONMENT,
+        )
+        for row, case in auth_repair.CASES.items()
+    },
 }
 
 #: The verdict over each recorded row's raw record, appended after
@@ -5761,6 +5969,7 @@ ROW_VERDICTS: dict[str, RowVerdict] = {
     **{row: owner_loss.h_r8_problems for row in owner_loss.H_R8_CASES},
     owner_loss.ROW_H_R9: owner_loss.h_r9_problems,
     **{row: profile_commands.problems_for for row in profile_commands.CASES},
+    **{row: auth_repair.problems_for for row in auth_repair.CASES},
 }
 
 
@@ -5819,6 +6028,12 @@ def lifecycle_problems(row: str, lifecycle: RowLifecycle) -> list[str]:
             problems.append("profile commands with no script to run them")
         if lifecycle.scenarios:
             problems.append("profile commands that combine with other scenarios")
+    if lifecycle.auth:
+        # The sign-in is the script's to stage and observe.
+        if lifecycle.script is None:
+            problems.append("a sign-in with no script to stage it")
+        if lifecycle.scenarios:
+            problems.append("a sign-in that combines with other scenarios")
     if lifecycle.expect_session not in EXPECTABLE:
         problems.append(f"an expected session of {lifecycle.expect_session!r}")
     elif (
@@ -5828,6 +6043,14 @@ def lifecycle_problems(row: str, lifecycle: RowLifecycle) -> list[str]:
         problems.append(
             "a cleared session left to a preservation session that can repair it"
         )
+    elif lifecycle.expect_session in _LINEAGE_EXPECTED:
+        if not lifecycle.auth:
+            problems.append("a lineage expectation with no sign-in to read it from")
+        if lifecycle.preservation != MUST_NOT_REPAIR:
+            problems.append(
+                "a replaced or failed-login session left to a preservation "
+                "session that can repair it"
+            )
     return problems
 
 
@@ -6191,6 +6414,12 @@ async def measure_host_quit_row(
         chrome_path=chrome_path,
         idle_timeout=idle_timeout,
     )
+    # The cell's declared bounds, the same in every column, over the row's.
+    env.update(lifecycle.environment or {})
+    if lifecycle.auth:
+        # From before the row's first request: the wall and its completion
+        # are served, and nothing is issued until the script releases it.
+        origin.arm_login()
     #: H-R7: the fault's row directory, fresh for this execution, which only an
     #: overlay's actors are told about.
     fault_dir: Path | None = None
@@ -6349,6 +6578,13 @@ async def measure_host_quit_row(
                 "preservation": lifecycle.preservation,
             },
             "k2": dict(lifecycle.k2) if lifecycle.k2 is not None else None,
+            # What the actors got for each declared setting, read back from
+            # their environment rather than from the declaration.
+            "environment": (
+                {name: env.get(name) for name in lifecycle.environment}
+                if lifecycle.environment is not None
+                else None
+            ),
             "observation_problems": [],
         }
         if lifecycle.script is not None
@@ -7955,6 +8191,130 @@ async def measure_host_quit_row(
             scratch=scratch,
         )
 
+    #: The one authorization a row that stages a sign-in recorded, with the
+    #: session read right after it; what the lineage reads it from.
+    authorizations: list[Authorization] = []
+    #: The second hosts the row ran; each server held until it is gone.
+    second_hosts: list[HostSession] = []
+    #: Each second host's progress as its client hears it, the latest last.
+    second_progress: list[list[dict[str, Any]]] = []
+
+    def auth_snapshot(label: str) -> dict[str, Any]:
+        """``AuthSeams.snapshot``: the artefacts alone, stamped when read."""
+        seen = snapshot(account.profile, expected_digest=staged.li_at_digest)
+        return {
+            "label": label,
+            **seen.as_event_fields(),
+            "seen_ns": time.monotonic_ns(),
+        }
+
+    def authorize_now(kind: str, at_ns: int) -> dict[str, Any]:
+        """Record *kind* at *at_ns* and read the session after it; a second
+        authorization in one row is the row's problem and records nothing."""
+        assert row_record is not None
+        if authorizations:
+            row_record["observation_problems"].append(
+                f"the row recorded a second authorization: {kind!r}"
+            )
+            return {"kind": kind, "at_ns": at_ns, "recorded": False}
+        seen = snapshot(account.profile, expected_digest=staged.li_at_digest)
+        authorizations.append(Authorization(kind, at_ns, seen))
+        found = {
+            "kind": kind,
+            "at_ns": at_ns,
+            "snapshot": {**seen.as_event_fields(), "seen_ns": time.monotonic_ns()},
+        }
+        row_record["authorized"] = kind
+        row_record["authorization"] = found
+        emit("harness", "authorization", authorization=kind, monotonic_ns=at_ns)
+        return found
+
+    def auth_reject() -> dict[str, Any]:
+        """``AuthSeams.reject``: the origin's rejection is the authorization,
+        at the time the origin took the sessions back."""
+        found = origin.reject_sessions()
+        emit("origin", "login.rejected", **found)
+        recorded = authorize_now(ORIGIN_REJECTED, found["monotonic_ns"])
+        return {**found, "snapshot": recorded.get("snapshot")}
+
+    def auth_authorize(kind: str) -> dict[str, Any]:
+        """``AuthSeams.authorize``: a confirmed user action, now."""
+        if kind not in (LOGIN, IMPORT):
+            assert row_record is not None
+            row_record["observation_problems"].append(
+                f"the row tried to authorize {kind!r}, which no user confirms"
+            )
+            return {"kind": kind, "recorded": False}
+        return authorize_now(kind, time.monotonic_ns())
+
+    def auth_release() -> dict[str, Any]:
+        """``AuthSeams.release``: the row's, in the row's phase."""
+        found = origin.release_login()
+        emit("origin", "login.released", **found)
+        return found
+
+    async def auth_second_host() -> dict[str, Any]:
+        """``AuthSeams.second_host``: the row's command and environment
+        again, in a directory of its own, retained until its server is gone;
+        its lines are its own and never the row's caller's."""
+        left = settlement_problems()
+        if left:
+            return {"made": False, "why": f"unsettled: {left}"}
+        directory = work_dir / f"second-{len(second_hosts) + 1}"
+        directory.mkdir(exist_ok=True)
+        held: list[Retained] = []
+        progress: list[dict[str, Any]] = []
+        second_progress.append(progress)
+
+        def hold(process: Any) -> None:
+            held.append(
+                retain(
+                    f"the second host's server {process.pid}",
+                    lambda grace, process=process: process.returncode is not None,
+                )
+            )
+
+        def heard(line: str) -> None:
+            emit("frontend", "user.output", stream="stderr", host="second", line=line)
+
+        launched_ns = time.monotonic_ns()
+        second, found = await run_second_host(
+            command,
+            env=env,
+            cwd=directory,
+            progress=progress,
+            on_stderr=heard,
+            on_process=hold,
+        )
+        second_hosts.append(second)
+        if held and held[0].check(0.0):
+            discharge(held[0])
+        if second.tool is not None:
+            emit("host_stub", "tool.result", **{**second.tool, "host": "second"})
+        return {
+            "made": True,
+            "launched_ns": launched_ns,
+            **found,
+            "retained": bool(held) and retained(held[0]),
+        }
+
+    def auth_seams() -> AuthSeams:
+        return AuthSeams(
+            reject=auth_reject,
+            authorize=auth_authorize,
+            release=auth_release,
+            login=origin.login_record,
+            snapshot=auth_snapshot,
+            browser_gone=race_browser_gone,
+            second_host=auth_second_host,
+            second_progress=lambda: (
+                list(second_progress[-1]) if second_progress else []
+            ),
+            owner_reading=loss_owner_reading,
+            owner_log=loss_owner_log,
+            host_output=lambda: list(host_lines),
+        )
+
     async def declared_script(call: ToolCall, transport: LiveHost) -> None:
         """The row's own script, on the context it is allowed."""
         assert lifecycle.script is not None and row_record is not None
@@ -7992,6 +8352,7 @@ async def measure_host_quit_row(
                 race=race,
                 owner_loss=owner_loss_seams() if lifecycle.owner_loss else None,
                 commands=command_seams() if lifecycle.commands else None,
+                auth=auth_seams() if lifecycle.auth else None,
             )
         )
 
@@ -8242,6 +8603,10 @@ async def measure_host_quit_row(
         # here is the teardown's, and the gate's record says so.
         for armed in armed_gates:
             armed.release(by=RELEASED_BY_TEARDOWN)
+        if lifecycle.auth:
+            # Never released here: closed, so a login still asking after the
+            # row cannot sign in on the harness's account.
+            origin.close_login()
         # An owner left stopped is resumed, and a responder stopped, on every
         # path, whatever the row did or did not do.
         restore_stopped("in the teardown")
@@ -8478,6 +8843,8 @@ async def measure_host_quit_row(
                 cookie_names=list(request.cookie_names),
                 session_valid=request.session_valid,
                 monotonic_ns=request.monotonic_ns,
+                session_digests=list(request.session_digests),
+                redirected=request.redirected,
             )
         for decision in row_decisions:
             emit(
@@ -8584,6 +8951,19 @@ async def measure_host_quit_row(
         post_quit = PostQuit(
             valid=None, failures=[f"post-quit not run: {r}" for r in refusals]
         )
+    elif withheld and lifecycle.auth:
+        # Nothing that could sign in again runs; the origin itself says
+        # whether the session on disk is one it accepts.
+        digests = after.li_at_digests if after is not None else ()
+        post_quit = PostQuit(
+            valid=(
+                any(origin.accepts_digest(value) for value in digests)
+                if digests
+                else None
+            ),
+            withheld=lifecycle.preservation,
+            origin_judged=True,
+        )
     elif withheld:
         post_quit = PostQuit(valid=None, withheld=lifecycle.preservation)
     else:
@@ -8607,21 +8987,57 @@ async def measure_host_quit_row(
         feed_requests=post_quit.feed_requests,
         failures=post_quit.failures,
         withheld=post_quit.withheld,
+        origin_judged=post_quit.origin_judged,
     )
     result.post_quit = post_quit
     result.owner = owner or None
     # Only a confirmation the script recorded, and only one this harness
     # knows: anything else authorizes nothing and is the row's problem.
     authorized: str | None = None
-    if lifecycle.commands and row_record is not None:
+    if (lifecycle.commands or lifecycle.auth) and row_record is not None:
         claimed = row_record.get("authorized")
-        if claimed == LOGOUT:
+        if claimed == LOGOUT and lifecycle.commands:
             authorized = LOGOUT
+        elif (
+            claimed in REPLACING
+            and lifecycle.auth
+            and [a.kind for a in authorizations] == [claimed]
+        ):
+            # Only one the harness itself recorded, with its reading.
+            authorized = claimed
         elif claimed is not None:
             row_record["observation_problems"].append(
                 f"the row recorded an authorization the harness does not know: "
                 f"{claimed!r}"
             )
+    #: Each row request as the packet keeps it, with the session digests the
+    #: lineage reads which session was in use from.
+    request_records = [
+        {
+            "host": request.host,
+            "path": request.path,
+            "session_valid": request.session_valid,
+            "t": request.t,
+            "monotonic_ns": request.monotonic_ns,
+            "session_digests": list(request.session_digests),
+            "redirected": request.redirected,
+        }
+        for request in row_requests
+    ]
+    lineage: ReplacementLineage | None = None
+    if lifecycle.auth:
+        login_record = origin.login_record()
+        lineage = replacement_lineage(
+            before,
+            after,
+            authorizations[0] if authorized in REPLACING else None,
+            login_record["issued"],
+            request_records,
+        )
+        emit("harness", "r17.lineage", **lineage.as_record())
+        if row_record is not None:
+            row_record["login"] = login_record
+            row_record["lineage"] = lineage.as_record()
 
     result.vector, result.failures = judge_row(
         Observations(
@@ -8650,21 +9066,13 @@ async def measure_host_quit_row(
             termination=lifecycle.termination,
             expect_session=lifecycle.expect_session,
             authorized=authorized,
+            lineage=lineage,
         )
     )
     if row_record is not None:
         # From the row's completed history: what the origin served, in order,
         # with its arrival on the monotonic clock the call records share.
-        row_record["requests"] = [
-            {
-                "host": request.host,
-                "path": request.path,
-                "session_valid": request.session_valid,
-                "t": request.t,
-                "monotonic_ns": request.monotonic_ns,
-            }
-            for request in row_requests
-        ]
+        row_record["requests"] = request_records
         # Every name the row's proxy forwarded and refused, from its log: the
         # whole of what left the row through it.
         row_record["egress"] = {

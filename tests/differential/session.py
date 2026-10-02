@@ -44,6 +44,19 @@ post-quit observation of the session in use, it derives one of five outcomes:
 What a row expects, what it observed, and what the user authorized are three
 separate things: the expectation is the row's declaration, the outcome is read
 from the artefacts, and the authorization is only ever a recorded confirmation.
+
+**A replacement is evidence beside the outcome, never one of them**
+(``replacement_lineage``). The five outcomes read the original generation;
+a session the synthetic origin issued later, found on disk, is read apart:
+it counts only when an authorization the row recorded came first, a
+confirmed ``--login`` or import, or the harness's own rejection of the
+staged session at the origin, and the session read right after that record
+was still the original. Every issued session is recorded by digest, with
+when and in which phase it was issued and whether the origin then accepted
+it from a request. A loss of the original before the authorization, a
+session issued before it, or an issued one gone again is unauthorized,
+whatever the replacement achieved: a successful sign-in afterwards never
+waives an earlier loss.
 """
 
 from __future__ import annotations
@@ -55,7 +68,7 @@ import os
 import re
 import secrets
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -77,14 +90,48 @@ LOST_SILENT = "lost-silent"
 UNCERTAIN = "uncertain"
 OUTCOMES = (RETAINED, CLEARED_BY_USER, LOST_ANNOUNCED, LOST_SILENT, UNCERTAIN)
 
-#: What a row may declare it expects. Never a loss: no expectation waives one,
-#: and a loss the row brings about on purpose is an authorization the row
-#: records, not a string it declares. Never ``uncertain``, which is a reading
-#: that failed.
-EXPECTABLE = (RETAINED, CLEARED_BY_USER)
+#: Two expectations that are no outcome: the original generation ends lost,
+#: and the lineage (``replacement_lineage``) shows an authorization the row
+#: recorded before it was invalidated, with an authorized replacement in use
+#: (``REPLACED_AFTER_AUTHORIZATION``) or none at all
+#: (``LOST_AFTER_AUTHORIZATION``). Neither holds on the string alone.
+REPLACED_AFTER_AUTHORIZATION = "replaced-after-authorization"
+LOST_AFTER_AUTHORIZATION = "lost-after-authorization"
+
+#: What a row may declare it expects. Never a bare loss: no expectation waives
+#: one, and a loss the row brings about on purpose is an authorization the
+#: row records, not a string it declares; the two lineage expectations hold
+#: only with that record. Never ``uncertain``, which is a reading that failed.
+EXPECTABLE = (
+    RETAINED,
+    CLEARED_BY_USER,
+    REPLACED_AFTER_AUTHORIZATION,
+    LOST_AFTER_AUTHORIZATION,
+)
 
 #: A user action a row records once the user confirmed it: ``--logout``.
 LOGOUT = "logout"
+#: A confirmed ``--login`` and a confirmed ``--import-from-browser``.
+LOGIN = "login"
+IMPORT = "import"
+#: Not the user's: the harness's own recorded rejection of the staged session
+#: at the synthetic origin (``SyntheticOrigin.reject_sessions``), which is
+#: what a real expiry looks like from the product's side.
+ORIGIN_REJECTED = "origin-rejected"
+#: The authorizations a replacement of the session may follow.
+REPLACING = (LOGIN, IMPORT, ORIGIN_REJECTED)
+
+#: What ``replacement_lineage`` reads. ``none``: nothing replacing was
+#: authorized and nothing was issued. ``replaced``: authorized first, and the
+#: one issued session on disk in a new generation and accepted in use.
+#: ``lost``: authorized first, and nothing issued. ``unauthorized``: a loss or
+#: an issue the authorization does not cover. ``uncertain``: a reading failed
+#: or the replacement's evidence is incomplete.
+LINEAGE_NONE = "none"
+LINEAGE_REPLACED = "replaced"
+LINEAGE_LOST = "lost"
+LINEAGE_UNAUTHORIZED = "unauthorized"
+LINEAGE_UNCERTAIN = "uncertain"
 
 #: When a line was shown: during the row, or in the preservation check after it.
 ROW = "row"
@@ -275,6 +322,9 @@ class ProfileSnapshot:
     last_version: str | None
     #: Every artefact that exists but could not be read or is malformed.
     unreadable: tuple[str, ...] = ()
+    #: The digest of every ``li_at`` value in the file, never the value: which
+    #: session is on disk, the staged one or one the origin issued.
+    li_at_digests: tuple[str, ...] = ()
 
     @property
     def usable(self) -> bool:
@@ -300,7 +350,7 @@ class ProfileSnapshot:
 
     def as_event_fields(self) -> dict[str, Any]:
         fields = asdict(self)
-        for name in ("cookie_names", "quarantine", "unreadable"):
+        for name in ("cookie_names", "quarantine", "unreadable", "li_at_digests"):
             fields[name] = list(fields[name])
         fields["usable"] = self.usable
         fields["cleared"] = self.cleared
@@ -334,6 +384,7 @@ def _judge_li_at(
     entries: Sequence[Any], expected_digest: str | None, now: float
 ) -> tuple[dict[str, Any], list[str]]:
     malformed: list[str] = []
+    digests: list[str] = []
     found = staged = on_domain = unexpired = usable = False
     for entry in entries:
         if not isinstance(entry, dict) or entry.get("name") != "li_at":
@@ -353,6 +404,7 @@ def _judge_li_at(
         ):
             malformed.append("cookies.json: a li_at entry is malformed")
             continue
+        digests.append(digest(value))
         this_staged = expected_digest is not None and digest(value) == expected_digest
         this_domain = domain == SESSION_DOMAIN
         # -1 is Playwright's session-cookie sentinel: gone with the browser.
@@ -368,6 +420,7 @@ def _judge_li_at(
             "li_at_on_domain": on_domain,
             "li_at_unexpired": unexpired,
             "li_at_usable": usable,
+            "li_at_digests": tuple(sorted(set(digests))),
         },
         malformed,
     )
@@ -518,3 +571,145 @@ def r17_outcome(
     if user_cleared and after.cleared:
         return CLEARED_BY_USER
     return LOST_ANNOUNCED if announced_to_caller(user_output) else LOST_SILENT
+
+
+@dataclass(frozen=True)
+class Authorization:
+    """An authorization the row recorded, and the session read right after.
+
+    *at_ns* is when the row recorded it, on the harness's monotonic clock,
+    and *snapshot* was read after that: a reading that still shows the
+    original generation intact proves anything that invalidated it came
+    later, which is what "the authorization preceded the invalidation" needs.
+    """
+
+    kind: str
+    at_ns: int
+    snapshot: ProfileSnapshot
+
+
+@dataclass(frozen=True)
+class ReplacementLineage:
+    """What became of the session beyond its original generation."""
+
+    reading: str
+    problems: tuple[str, ...] = ()
+    #: The replacement's digest, generation, when and in which phase it was
+    #: issued, and the first accepted request that carried it; None without
+    #: one. Never a value.
+    replacement: dict[str, Any] | None = None
+
+    def as_record(self) -> dict[str, Any]:
+        return {
+            "reading": self.reading,
+            "problems": list(self.problems),
+            "replacement": dict(self.replacement) if self.replacement else None,
+        }
+
+
+def _int(value: Any) -> int | None:
+    return value if type(value) is int else None
+
+
+def replacement_lineage(
+    before: ProfileSnapshot,
+    after: ProfileSnapshot | None,
+    authorization: Authorization | None,
+    issued: Sequence[Mapping[str, Any]],
+    requests: Iterable[Mapping[str, Any]],
+) -> ReplacementLineage:
+    """Whether a session beyond the original was authorized, and in use.
+
+    *issued* is the origin's record of every session it issued (``digest``,
+    ``issued_ns``, ``phase``); *requests* the row's origin requests with
+    ``session_digests``, ``session_valid`` and ``monotonic_ns``. The original
+    generation's own fate is ``r17_outcome``'s and stays beside this, never
+    replaced by it.
+    """
+    if after is None or before.unreadable or after.unreadable or not before.usable:
+        return ReplacementLineage(
+            LINEAGE_UNCERTAIN, ("a reading of the session failed",)
+        )
+    issued_digests = [str(item.get("digest")) for item in issued]
+    if authorization is None or authorization.kind not in REPLACING:
+        if issued_digests:
+            return ReplacementLineage(
+                LINEAGE_UNAUTHORIZED,
+                (
+                    f"the origin issued {len(issued_digests)} session(s) and no "
+                    f"authorization that covers a replacement was recorded",
+                ),
+            )
+        return ReplacementLineage(LINEAGE_NONE)
+    at = authorization.snapshot
+    if at.unreadable:
+        return ReplacementLineage(
+            LINEAGE_UNCERTAIN, ("the reading after the authorization failed",)
+        )
+    problems: list[str] = []
+    intact = (
+        at.usable
+        and at.li_at_staged is True
+        and at.generation == before.generation
+        and set(at.quarantine) <= set(before.quarantine)
+    )
+    if not intact:
+        problems.append(
+            "the original generation was already lost when the authorization "
+            "was recorded"
+        )
+    early = [
+        item
+        for item in issued
+        if (_int(item.get("issued_ns")) or 0) <= authorization.at_ns
+    ]
+    if early:
+        problems.append(f"{len(early)} session(s) were issued before the authorization")
+    gone = [value for value in issued_digests if value not in after.li_at_digests]
+    if gone:
+        problems.append(
+            f"{len(gone)} session(s) the origin issued are no longer on disk"
+        )
+    unknown = set(after.li_at_digests) - set(before.li_at_digests) - set(issued_digests)
+    if unknown:
+        problems.append("a session on disk is neither the staged one nor issued")
+    if problems:
+        return ReplacementLineage(LINEAGE_UNAUTHORIZED, tuple(problems))
+    if not issued_digests:
+        return ReplacementLineage(LINEAGE_LOST)
+    if len(issued) != 1:
+        return ReplacementLineage(
+            LINEAGE_UNCERTAIN,
+            (f"{len(issued)} issued sessions are on disk at once",),
+        )
+    (item,) = issued
+    value = issued_digests[0]
+    issued_ns = _int(item.get("issued_ns")) or 0
+    replacement: dict[str, Any] = {
+        "digest": value,
+        "generation": after.generation,
+        "issued_ns": issued_ns,
+        "phase": item.get("phase"),
+        "used_ns": None,
+    }
+    if after.generation is None or after.generation == before.generation:
+        problems.append("the replacement is on disk without a new generation")
+    if not (after.li_at_on_domain and after.li_at_unexpired and after.profile_present):
+        problems.append("the replacement on disk is not usable")
+    for request in requests:
+        seen = _int(request.get("monotonic_ns"))
+        if (
+            request.get("session_valid") is True
+            and value in (request.get("session_digests") or ())
+            and seen is not None
+            and seen > issued_ns
+        ):
+            replacement["used_ns"] = seen
+            break
+    if replacement["used_ns"] is None:
+        problems.append(
+            "no request after the issue carried the replacement and was accepted"
+        )
+    if problems:
+        return ReplacementLineage(LINEAGE_UNCERTAIN, tuple(problems), replacement)
+    return ReplacementLineage(LINEAGE_REPLACED, (), replacement)

@@ -1360,6 +1360,33 @@ def test_candidates_that_read_nothing_are_no_replacement():
     assert any("the stopped owner is not shown kept" in p for p in problems), problems
 
 
+def test_each_release_gate_belongs_to_the_launch_it_started():
+    """Measured on Windows: a candidate gone 1.6 s after its start left its
+    gate behind, and the candidate's gate started before the owner's. A gate
+    counts as a launch's when a process of that launch is its child; only a
+    gate that started none of the row's launches is an extra start."""
+    record = _h_r8(ROW_OWNER_ERROR)
+    record["owner_processes"][0][2] = 4610
+    record["gate_processes"].append(_lifetime(4610, 999.4, digest="gate"))
+    for pid, start, gate in ((4601, 999.0, 4611), (4602, 1016.0, 4612)):
+        candidate = _lifetime(pid, start, ppid=gate)
+        candidate[4] = start + 1.3
+        record["owner_processes"].append(candidate)
+        record["gate_processes"].append(_lifetime(gate, start - 0.1, digest="gate"))
+    assert owner_loss.problems_for(record, daemon=True) == []
+    # A start that ran no owner, whatever the count of excused candidates.
+    record["gate_processes"].append(_lifetime(4613, 1017.0, digest="gate"))
+    problems = owner_loss.problems_for(record, daemon=True)
+    assert any("the stopped owner is not shown kept" in p for p in problems), problems
+    # A candidate whose gate went unrecorded excuses no other gate.
+    record["gate_processes"] = [
+        g for g in record["gate_processes"] if g[0] not in (4612, 4613)
+    ]
+    record["gate_processes"].append(_lifetime(4614, 1017.0, digest="gate"))
+    problems = owner_loss.problems_for(record, daemon=True)
+    assert any("the stopped owner is not shown kept" in p for p in problems), problems
+
+
 def test_every_row_here_is_declared_with_its_verdict_and_seams():
     for row, case in H_R8_CASES.items():
         lifecycle = harness.ROWS[row]

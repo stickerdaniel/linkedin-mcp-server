@@ -814,8 +814,9 @@ jobs:
   # Calls that lose their caller (tests/differential/call_loss.py), calls
   # that race the owner's retirement (tests/differential/retirement_race.py),
   # calls that lose the owner before or after dispatch
-  # (tests/differential/owner_loss.py), and the profile commands beside a
-  # live owner (tests/differential/profile_commands.py), in a job of their own rather than more steps in `platform-behaviour`,
+  # (tests/differential/owner_loss.py), the profile commands beside a live
+  # owner (tests/differential/profile_commands.py), and a sign-in staged at
+  # the origin (tests/differential/auth_repair.py), in a job of their own rather than more steps in `platform-behaviour`,
   # whose budget the rows before them already fill. Four legs: the Ubuntu x64
   # job's platform and the three `platform-behaviour` runs on, each with its
   # own browser build. The setup is the one the differential steps above
@@ -830,7 +831,7 @@ jobs:
     # The camelCase read shims off, for the reason given at `windows-daemon`.
     env:
       FASTMCP_MCP_CAMELCASE_COMPAT: "false"
-    # Five groups of rows per leg, so no job's bound comes near the hosted
+    # Six groups of rows per leg, so no job's bound comes near the hosted
     # runner's six hours. The sum of a group's step bounds: 45 for a cold
     # browser download for each runtime and the frozen baseline (bound 15),
     # with room for Windows, the slowest leg, to sync and install twice; then
@@ -839,9 +840,11 @@ jobs:
     # `idle` 50 for each of the two H-R13 steps and 35 for each of the four
     # turnover lanes (285), and `owner` 5 for the oracle, 40 for each of the
     # three H-R8 lanes that kill, 45 for the stopped owner and 50 for H-R9
-    # (265), and `commands` 30 for H-R10a's logout, 40 for its declined and
-    # no-terminal cells, 40 for H-R10b and 30 for H-R15 (185).
-    timeout-minutes: ${{ matrix.rows == 'pipes' && 165 || matrix.rows == 'processes' && 185 || matrix.rows == 'owner' && 265 || matrix.rows == 'commands' && 185 || 285 }}
+    # (265), `commands` 30 for H-R10a's logout, 40 for its declined and
+    # no-terminal cells, 40 for H-R10b and 30 for H-R15 (185), and `auth` 105
+    # for H-R16's cold and second-frontend cells, 60 for its failed login and
+    # 55 for H-R10a's login (265).
+    timeout-minutes: ${{ matrix.rows == 'pipes' && 165 || matrix.rows == 'processes' && 185 || matrix.rows == 'owner' && 265 || matrix.rows == 'commands' && 185 || matrix.rows == 'auth' && 265 || 285 }}
     strategy:
       fail-fast: false
       matrix:
@@ -856,7 +859,11 @@ jobs:
         # `commands`: --logout, --login, --import-from-browser and --status
         # beside a live owner (tests/differential/profile_commands.py); on
         # Windows only the cells on pipes run, the terminal ones are skips.
-        rows: [pipes, processes, idle, owner, commands]
+        # `auth`: a sign-in staged at the origin, the product's own login
+        # completing it or not (tests/differential/auth_repair.py); headed,
+        # on the display started below on Linux and in the runner's own
+        # desktop session elsewhere.
+        rows: [pipes, processes, idle, owner, commands, auth]
         include:
           - os: ubuntu-latest
             browsers: ~/.cache/ms-playwright
@@ -1297,6 +1304,62 @@ jobs:
           LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
         timeout-minutes: 30
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_profile_command_rows.py -k status
+
+      # Row H-R16's cold repair and its second frontend, a sign-in staged at
+      # the origin: K1 frozen, K3 and K0 of the cold cell, K3 and K0 of the
+      # second (its K1 a counted skip). Each cell is the calibration's seven
+      # minutes and its own waits: the warm browser gone (60s), the login's
+      # first ask (120s), the read (150s), the completion (90s), the host's
+      # quit (90s), the owner's idle exit (60 + 90s) and the residual browser
+      # wait (60s), 19 minutes; the second frontend adds its host (240s), 23.
+      # Five cells come to at most 103 minutes: 105.
+      - name: Repair a lost session through the owner
+        if: matrix.rows == 'auth'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+          # The login is headed; only Linux has a display to name.
+          DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
+        timeout-minutes: 105
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_auth_repair_rows.py -k "cold or second"
+
+      # H-R16's failed login, never released: K1 frozen, K3 and K0. Each cell
+      # adds to the calibration's seven minutes the warm browser gone (60s),
+      # the first ask (120s), the read (150s), the login's own budget and its
+      # settlement (60 + 60s), the host's quit (90s), the owner's idle exit
+      # (60 + 90s) and the residual browser wait (60s), 20 minutes. Three
+      # cells come to at most 60 minutes: 60.
+      - name: Fail a login the origin never completes
+        if: matrix.rows == 'auth'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+          DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
+        timeout-minutes: 60
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_auth_repair_rows.py -k failed
+
+      # Row H-R10a's login on a terminal, K1 frozen after its server settled
+      # and K3 retiring the idle owner, and K0; counted skips on Windows, as
+      # are the response-loss and import lanes everywhere. Each cell adds to
+      # the calibration's seven minutes the host's quit (90s), Direct's
+      # settlement or a checkpoint (60s), the prompt (60s), a checkpoint
+      # (60s), the owner's exit (90s), the first ask (120s), the completion
+      # (90s), the command's end (25s) and the residual browser wait (60s),
+      # 18 minutes. Three cells come to at most 54 minutes: 55.
+      - name: Sign in again beside an idle owner
+        if: matrix.rows == 'auth'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+          DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
+        timeout-minutes: 55
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_auth_repair_rows.py -k "login or natively"
 
       # The rows' evidence packet (``events.PUBLISHED_FILES``), under a name
       # apart from the other jobs' packets. Always, so a red row keeps what

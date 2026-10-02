@@ -117,7 +117,12 @@ from differential.call_loss import (
     _settled,
     _sleep_until,
 )
-from differential.host_comparison import _of_launch, host_problems, same_lifetime
+from differential.host_comparison import (
+    _of_launch,
+    host_problems,
+    owner_launches,
+    same_lifetime,
+)
 from differential.lease_probe import FREE
 from differential.retirement_race import (
     DELIVERED,
@@ -750,20 +755,62 @@ def _launches(
     # An election candidate the backoff started while the identified owner
     # held the lock, stopped or not, that is shown to have read nothing: gone,
     # and no browser of its own (``retirement_race._read_nothing``).
-    others = [
+    excused = [
         entry
         for entry in others
-        if not (type(entry[0]) is int and _read_nothing(entry, record))
+        if type(entry[0]) is int and _read_nothing(entry, record)
     ]
+    others = [entry for entry in others if not any(entry is e for e in excused)]
     owners = [list(entry) for entry in others if type(entry[0]) is int]
-    gates = [list(entry) for entry in others if entry[0] == "release gate"]
     # The identified owner not among the row's launches at all.
     strays = [
         list(entry)
         for entry in others
         if type(entry[0]) is str and entry[0] != "release gate"
     ]
-    return owners, [*strays, *gates[len(owners) :]]
+    # A gate is the one that started a launch when a process of that launch
+    # has a process of the gate's as its parent: every launch's own gate, an
+    # excused candidate's too (measured on Windows, a candidate gone 1.6 s
+    # after its start left its gate behind). One that started none of them,
+    # a second start attempted even one that never ran, is extra.
+    launched = [identified[:2], *[o[:2] for o in owners], *[c[:2] for c in excused]]
+    gate_records = _sequence(record.get("gate_processes"))
+    windows = str(record.get("platform", "")).startswith("win")
+    unclaimed = [
+        ["release gate", *gate]
+        for gate in owner_launches(gate_records, windows=windows)
+        if not any(_started(gate, launch, record) for launch in launched)
+    ]
+    return owners, [*strays, *unclaimed]
+
+
+def _started(
+    gate: Sequence[Any], launch: Sequence[Any], record: Mapping[str, Any]
+) -> bool:
+    """Whether release gate *gate* started owner *launch*: a process of the
+    launch whose parent is a process of the gate's, which started first."""
+    owner_records = _sequence(record.get("owner_processes"))
+    gate_records = _sequence(record.get("gate_processes"))
+    windows = str(record.get("platform", "")).startswith("win")
+    # The launch as ``owner_launches`` counts it, so that on Windows the venv
+    # launcher a gate started is a member even when *launch* names the
+    # interpreter it ran.
+    whole = [
+        each
+        for each in owner_launches(owner_records, windows=windows)
+        if _of_launch(list(launch[:2]), each, owner_records)
+    ] or [list(launch[:2])]
+    parents = {
+        entry[2]
+        for entry in owner_records
+        if len(entry) > 2
+        and any(_of_launch(list(entry[:2]), each, owner_records) for each in whole)
+    }
+    return any(
+        entry[0] in parents and entry[1] <= launch[1]
+        for entry in gate_records
+        if _of_launch(list(entry[:2]), gate, gate_records)
+    )
 
 
 def _successor_problems(
