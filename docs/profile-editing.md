@@ -120,8 +120,8 @@ several seconds to open, type, save and re-read.
 | `MCP_LINKEDIN_WRITE_ENABLED` | off | Allow `apply_profile_changes` to write. |
 | `LINKEDIN_PROFILE_EDITS_DIR` | `~/.linkedin-mcp/profile-edits` | Where change sets, snapshots and the audit log are kept. |
 
-> Until this lands upstream, install from this fork instead of PyPI:
-> `uvx --from git+https://github.com/stevenmcsorley/linkedin-mcp-server@feature/own-profile-editing mcp-server-linkedin`
+> To try it before it reaches a PyPI release, install from a git branch that
+> carries it: `uvx --from git+https://github.com/<owner>/linkedin-mcp-server@<branch> mcp-server-linkedin`
 
 ## The tools
 
