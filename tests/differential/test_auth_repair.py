@@ -33,6 +33,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from patchright.async_api import Error as PlaywrightError
 
 from differential import auth_repair, harness, model_coverage, synthetic_origin
 from differential.auth_repair import (
@@ -135,7 +136,12 @@ from differential.test_profile_commands import (
 )
 from differential.test_row_judgement import _healthy
 from linkedin_mcp_server.common_utils import secure_write_text
-from linkedin_mcp_server.core.auth import _LOGIN_TITLE_PATTERNS, _is_auth_blocker_url
+from linkedin_mcp_server.core.auth import (
+    _LOGIN_TITLE_PATTERNS,
+    _is_auth_blocker_url,
+    wait_for_manual_login,
+)
+from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.daemon_auth import MARKER_KEY
 from linkedin_mcp_server.daemon_liveness import HEARTBEAT_PATH
 from linkedin_mcp_server.session_state import (
@@ -1051,11 +1057,40 @@ def test_the_cold_repair_holds_each_of_its_observations(change, finding):
     assert _findings(repair_problems(record, daemon=True)) == [finding]
 
 
-def _asked_for(record: dict, asked: int, *, released_after: int) -> dict:
+def _logged(message: str, level: str = "WARNING") -> str:
+    """A server's log line as its JSON formatter writes it."""
+    return json.dumps(
+        {
+            "timestamp": "2026-10-01 22:55:10,523",
+            "level": level,
+            "logger": "linkedin_mcp_server.bootstrap",
+            "message": message,
+        }
+    )
+
+
+#: The first frontend's line once its login ran out, word for word from the
+#: native second-frontend cells (CI run 36937292318, every leg).
+_TIMED_OUT = _logged(
+    "LinkedIn login bootstrap failed: Manual login timeout: login was not "
+    "completed within 1 minutes. Increase the limit with LOGIN_TIMEOUT (seconds, "
+    "0 = no limit) and run --login again."
+)
+#: The same frontend's line for a login whose browser went away under it
+#: (``core.auth``'s other end of the manual wait).
+_CLOSED = _logged(
+    "LinkedIn login bootstrap failed: Manual login cancelled because the browser "
+    "was closed."
+)
+
+
+def _asked_for(
+    record: dict, asked: int, *, released_after: int, ended: str | None = None
+) -> dict:
     """The login's page asked from 1.7 s for *asked* ms and then stopped, and
     the row released *released_after* ms after its last ask: nothing was
     issued, no generation written, the cold read failed and was not run
-    again."""
+    again. *ended* is the frontend's line on how its login ended, if any."""
     last = 1_700 + asked
     record["login"].update(
         issued=[],
@@ -1066,6 +1101,7 @@ def _asked_for(record: dict, asked: int, *, released_after: int) -> dict:
     record["completion"].update(generation_seen_ns=None)
     record["calls"][2].update(is_error=True, read_the_post=False)
     record["host_lines"].update(replayed=0, signed_in=0, not_replayed=1)
+    record["login_failures"] = [ended] if ended is not None else []
     return record
 
 
@@ -1093,11 +1129,17 @@ _INVALID = [
         id="released-early",
     ),
     pytest.param(
-        # Released only after the login had asked for its whole budget, 60 s
-        # from its first ask: nothing could be issued.
-        lambda r: _asked_for(r, 60_000, released_after=300),
-        "the completion was released after the login had asked for its whole budget",
+        # Released only after the login said its whole budget ran out:
+        # nothing could be issued.
+        lambda r: _asked_for(r, 60_000, released_after=300, ended=_TIMED_OUT),
+        "the login says it ran out its LOGIN_TIMEOUT",
         id="released-late",
+    ),
+    pytest.param(
+        # Released after the last ask, and nothing says how the login ended.
+        lambda r: _asked_for(r, 60_000, released_after=300),
+        "the login's own process does not say how it ended",
+        id="released-after-an-unexplained-end",
     ),
     pytest.param(
         lambda r: r["authorization"].update(at_ns=1_400 * MS),
@@ -1127,18 +1169,20 @@ def test_missing_evidence_is_invalid_and_never_a_finding(change, invalid):
     assert _findings(problems) == []
 
 
-def test_a_login_that_stopped_before_its_budget_is_the_product_s_and_judged_whole():
-    """The reviewer's probe: the login stopped asking 0.6 s after its first
-    ask, inside its 60 s, and the row released 0.2 s later. The login failed
-    on its own, so that is a finding, and every check that follows from the
-    release still runs: the failed read and the missing replay among them."""
-    record = _asked_for(_repair(), 600, released_after=200)
+def test_a_login_that_failed_on_its_own_is_the_product_s_and_judged_whole():
+    """The login stopped asking 0.6 s after its first ask, the row released
+    0.2 s later, and the login's frontend says its browser went away under
+    it. The login failed on its own, so that is a finding, and every check
+    that follows from the release still runs: the failed read and the
+    missing replay among them."""
+    record = _asked_for(_repair(), 600, released_after=200, ended=_CLOSED)
     problems = repair_problems(record, daemon=True)
 
     assert invalid_evidence(problems) == []
     assert _findings(problems) == [
-        "the login stopped asking for its completion 0.6s after its first ask, "
-        "before its LOGIN_TIMEOUT of 60s and before the release",
+        "the login stopped asking for its completion before the release and "
+        "failed for a reason other than its LOGIN_TIMEOUT: 'LinkedIn login "
+        "bootstrap failed: Manual login cancelled because the browser was closed.'",
         "no fresh session was issued after the release",
         "the login did not write a new generation after its release",
         "the cold read was not answered after the sign-in: outcome 'returned', "
@@ -1148,38 +1192,152 @@ def test_a_login_that_stopped_before_its_budget_is_the_product_s_and_judged_whol
 
 
 @pytest.mark.parametrize(
-    ("asked", "late"),
+    "asked",
     [
-        # Its whole budget less the longest gap between two asks: the login
-        # can have waited it out, so the late release is the row's.
-        pytest.param(
-            int(
-                (auth_repair.LOGIN_TIMEOUT_SECONDS - auth_repair.LOGIN_ASK_GAP_SECONDS)
-                * 1000
-            ),
-            True,
-            id="whole-budget",
-        ),
-        pytest.param(
-            int(
-                (auth_repair.LOGIN_TIMEOUT_SECONDS - auth_repair.LOGIN_ASK_GAP_SECONDS)
-                * 1000
-            )
-            - 100,
-            False,
-            id="just-short",
-        ),
+        # The reviewer's probe: a renderer stopped 2 s in, so the page asked
+        # for 2.076 s of a login that waited its whole 60.0009 s and said so.
+        pytest.param(2_076, id="asks-held-up"),
+        pytest.param(60_000, id="asked-throughout"),
     ],
 )
-def test_a_late_release_is_the_row_s_only_after_the_login_s_whole_budget(asked, late):
-    record = _asked_for(_repair(), asked, released_after=300)
-    problems = repair_problems(record, daemon=True)
+@pytest.mark.parametrize(
+    ("ended", "reading"),
+    [
+        pytest.param(_TIMED_OUT, auth_repair.RELEASED_LATE, id="timed-out"),
+        pytest.param(None, auth_repair.LATE_RELEASE_UNSHOWN, id="said-nothing"),
+    ],
+)
+def test_a_late_release_is_read_from_the_login_s_own_end_never_its_asks(
+    asked, ended, reading
+):
+    """How long the page asked is never the measure: only the login's own
+    word that its wait ran out makes the late release the row's, and silence
+    leaves the order unshown. Neither is ever a finding."""
+    record = _asked_for(_repair(), asked, released_after=300, ended=ended)
 
-    if late:
-        assert problems == [auth_repair.RELEASED_LATE]
-    else:
-        assert invalid_evidence(problems) == []
-        assert _findings(problems)[0].startswith("the login stopped asking")
+    assert repair_problems(record, daemon=True) == [reading]
+
+
+@pytest.mark.parametrize(
+    ("ended", "reading"),
+    [
+        pytest.param(
+            "Profile creation failed: Manual login timeout: login was not completed "
+            "within 1 minutes.",
+            auth_repair.RELEASED_LATE,
+            id="timed-out",
+        ),
+        pytest.param(None, auth_repair.LATE_RELEASE_UNSHOWN, id="said-nothing"),
+    ],
+)
+def test_a_late_release_to_login_is_read_from_its_terminal_and_judged_no_further(
+    ended, reading
+):
+    """``--login`` says how it ended on its own terminal. Released after its
+    last ask, nothing that follows from the release is held against it,
+    its unsaved session least of all."""
+    record = _login_released_late([ended] if ended is not None else [])
+
+    assert login_problems(record, daemon=False) == [reading]
+
+
+def _login_released_late(said: list[str]) -> dict:
+    """K1's ``--login``, released at 5.3 s after its last ask at 5.2 s;
+    nothing issued, and the command printing *said* on its terminal before
+    it exited 1."""
+    record = _login(daemon=False)
+    record["login"].update(issued=[], released_ns=5_300 * MS)
+    record["release"]["released_ns"] = 5_300 * MS
+    lines = [(4_000, f"{LOGIN_OPENED}..."), *((65_000, line) for line in said)]
+    record["login_command"] = _command(
+        "login", ["--login"], lines, started=2_000, exited=66_000, code=1
+    )
+    return record
+
+
+class _SignInPage:
+    """The page a manual login waits on, as far as that wait asks: a context
+    whose cookies never come, or, *closed*, fail as a closed browser's do."""
+
+    def __init__(self, *, closed: bool) -> None:
+        self.closed = closed
+        self.context = self
+
+    async def cookies(self, *_urls: str) -> list[dict[str, Any]]:
+        if self.closed:
+            raise PlaywrightError("Target page, context or browser has been closed")
+        await asyncio.Event().wait()
+        return []
+
+
+async def _manual_login_error(*, closed: bool, timeout_ms: int) -> tuple[Any, float]:
+    """How the product's real manual wait ends on *_SignInPage*, and when."""
+    began = time.monotonic()
+    with pytest.raises(AuthenticationError) as caught:
+        await wait_for_manual_login(
+            cast(Any, _SignInPage(closed=closed)), timeout=timeout_ms
+        )
+    return caught.value, time.monotonic() - began
+
+
+async def test_a_late_release_reads_the_frontend_s_words_for_its_login_s_end(caplog):
+    """The real manual wait ends twice, run out and closed, and the real
+    reconciliation of a server's finished login task logs each, as the
+    frontend that waited for it does. Its run-out line, said only once the
+    whole budget passed, makes the late release the row's; the closed one
+    is the product's finding."""
+    from linkedin_mcp_server import bootstrap
+
+    timed_out, waited = await _manual_login_error(closed=False, timeout_ms=200)
+    closed, _ = await _manual_login_error(closed=True, timeout_ms=60_000)
+    # A margin for Windows' 15.6 ms timer, nothing more.
+    assert waited >= 0.18
+
+    readings = []
+    for error in (timed_out, closed):
+
+        async def ended(error: Exception = error) -> None:
+            raise error
+
+        task = asyncio.ensure_future(ended())
+        await asyncio.gather(task, return_exceptions=True)
+        bootstrap._state.login_task = task
+        caplog.clear()
+        with caplog.at_level("INFO", logger=bootstrap.__name__):
+            await bootstrap._refresh_background_task_state()
+        said = [_logged(r.getMessage()) for r in caplog.records]
+        record = _asked_for(_repair(), 2_076, released_after=300)
+        record["login_failures"] = auth_repair.login_failures(said)
+        readings.append(repair_problems(record, daemon=True))
+
+    assert readings[0] == [auth_repair.RELEASED_LATE]
+    assert invalid_evidence(readings[1]) == []
+    assert readings[1][0] == (
+        "the login stopped asking for its completion before the release and failed "
+        "for a reason other than its LOGIN_TIMEOUT: 'LinkedIn login bootstrap "
+        "failed: Manual login cancelled because the browser was closed.'"
+    )
+
+
+def test_a_late_release_reads_login_s_terminal_for_its_login_s_end(
+    monkeypatch, capsys, tmp_path
+):
+    """``--login`` prints the real manual wait's run-out on its terminal,
+    which makes a late release the row's."""
+    from linkedin_mcp_server import setup
+
+    timed_out, _ = asyncio.run(_manual_login_error(closed=False, timeout_ms=50))
+
+    async def failing(*_args: Any, **_kwargs: Any) -> bool:
+        raise timed_out
+
+    monkeypatch.setattr(setup, "interactive_login", failing)
+    assert setup.run_profile_creation(str(tmp_path / "profile")) is False
+    said = capsys.readouterr().out.splitlines()
+
+    assert login_problems(_login_released_late(said), daemon=False) == [
+        auth_repair.RELEASED_LATE
+    ]
 
 
 def test_direct_must_answer_the_cold_read_with_a_started_login_and_then_read():
@@ -1284,19 +1442,18 @@ def test_a_second_frontend_a_marker_reached_ends_on_the_one_fresh_session():
 def _second_gave_up(
     record: dict,
     *,
-    waited: int,
+    spent: int,
     asked_until: int | None = None,
     over: int | None = 6_500,
 ) -> dict:
-    """The owner answered the second read busy *waited* ms after it said the
-    read waits for the profile (2.4 s), and logged that its wait ran out.
-    With *asked_until*, the login's page still asked until then and was
-    issued its session there; the first frontend said its login was over at
-    *over*."""
+    """The owner answered the second read busy *spent* ms after it was sent
+    (at 2 s), and logged that its wait ran out. With *asked_until*, the
+    login's page still asked until then and was issued its session there;
+    the first frontend said its login was over at *over*."""
     record["second"]["call"].update(
         is_error=True,
         read_the_post=False,
-        ended_monotonic_ns=(2_400 + waited) * MS,
+        ended_monotonic_ns=(2_000 + spent) * MS,
     )
     record["profile_waits_ran_out"] = 1
     if asked_until is not None:
@@ -1306,44 +1463,90 @@ def _second_gave_up(
     return record
 
 
-#: The owner's whole ``BROWSER_WAIT``, and a little over, as heard.
+#: The owner's whole ``BROWSER_WAIT``, and a little over, from send to answer.
 _FULL_WAIT = 25_100
 
 
-def test_a_full_wait_the_owner_gave_up_on_while_the_login_still_asked_is_invalid():
-    """The budget expired, shown from the wait's own start, and the login's
-    page asked after the busy answer was in: the row's release missed one of
-    the two budgets."""
+def _unshown(spent: str) -> str:
+    return (
+        f"{INVALID}the owner answered the second read busy {spent}s after it was "
+        f"sent, and whether it waited its whole BROWSER_WAIT of 25s while the "
+        f"login held the profile is not shown: nothing stamps where its wait began"
+    )
+
+
+def test_a_busy_answer_while_the_login_still_asked_leaves_the_order_unshown():
+    """The call took the whole budget and the login's page asked after the
+    busy answer was in. The owner may have waited it all, or refused early
+    behind a slow hop: nothing shows which, so the cell is invalid, and never
+    for the release missing a budget."""
     record = _second_gave_up(
-        _repair(ROW_SECOND), waited=_FULL_WAIT, asked_until=28_000, over=31_000
+        _repair(ROW_SECOND), spent=_FULL_WAIT, asked_until=28_000, over=31_000
     )
     problems = repair_problems(record, daemon=True)
 
-    assert invalid_evidence(problems) == [
-        f"{INVALID}the owner gave up on the second read's wait for the profile "
-        f"(25s) while the login still held it: the release missed one of the two "
-        f"budgets"
-    ]
+    assert invalid_evidence(problems) == [_unshown("25.1")]
     assert _findings(problems) == []
 
 
 @pytest.mark.parametrize(
-    "over", [pytest.param(None, id="never-over"), pytest.param(27_000, id="over-late")]
+    "over",
+    [
+        pytest.param(None, id="never-over"),
+        # Over exactly when a budget begun at the send would run out.
+        pytest.param(27_000, id="over-as-the-budget-ends"),
+        pytest.param(31_000, id="over-late"),
+    ],
 )
-def test_a_full_wait_not_shown_against_the_login_s_end_is_invalid_with_its_reason(
+def test_a_busy_answer_not_shown_against_the_login_s_end_is_invalid_with_its_reason(
     over,
 ):
-    """The wait expired after the login's last ask, and the first frontend
-    said its login was over only later or never: which came first is not
-    shown, and it is said so, never read as the release's miss."""
-    record = _second_gave_up(_repair(ROW_SECOND), waited=_FULL_WAIT, over=over)
+    record = _second_gave_up(_repair(ROW_SECOND), spent=_FULL_WAIT, over=over)
     problems = repair_problems(record, daemon=True)
 
-    assert invalid_evidence(problems) == [
-        f"{INVALID}the owner gave up on the second read's wait for the profile "
-        f"(25s), and whether the login still held it then is not shown"
-    ]
+    assert invalid_evidence(problems) == [_unshown("25.1")]
     assert _findings(problems) == []
+
+
+def _probe(record: dict, *, heard: int, answered: int, asked_until: int) -> dict:
+    """The reviewer's hop probes as a record: the second read sent at 2 s,
+    the owner's report of its wait heard at *heard*, the row releasing on
+    it, the busy answer at *answered*, and the login's page asking, then
+    issued, at *asked_until*. The first frontend never said its login was
+    over before the answer."""
+    record = _second_gave_up(
+        record, spent=answered - 2_000, asked_until=asked_until, over=None
+    )
+    record["second"]["progress"] = _progress(2_050, heard)
+    record["login"]["released_ns"] = (heard + 30) * MS
+    record["release"]["released_ns"] = (heard + 30) * MS
+    return record
+
+
+@pytest.mark.parametrize(
+    ("heard", "answered"),
+    [
+        # The frontend held up 2.2 s before the report of the wait: the owner
+        # waited its whole 25.002 s, heard as 22.8 s, the call 25.068 s.
+        pytest.param(4_272, 27_068, id="report-held-up"),
+        # The frontend held up 2.2 s around the answer: the owner refused
+        # after 23.002 s, heard as 25.2 s, the call 25.277 s.
+        pytest.param(2_072, 27_277, id="answer-held-up"),
+    ],
+)
+def test_a_frontend_hop_held_up_never_decides_the_owner_s_wait(heard, answered):
+    """Neither a whole wait heard short nor an early refusal heard whole is
+    read from the hop: both calls took the whole budget, so the order is
+    unshown in both, and neither is a finding or the release's miss."""
+    record = _probe(
+        _repair(ROW_SECOND),
+        heard=heard,
+        answered=answered,
+        asked_until=answered + 1_000,
+    )
+    problems = repair_problems(record, daemon=True)
+
+    assert problems == [_unshown(f"{(answered - 2_000) / 1000:.1f}")]
 
 
 _SECOND_FAILED = (
@@ -1352,62 +1555,83 @@ _SECOND_FAILED = (
 )
 
 
+def _early(spent: str) -> str:
+    return (
+        f"the owner answered the second read busy {spent}s after it was sent, "
+        f"before its BROWSER_WAIT of 25s could run out"
+    )
+
+
+def _past_the_login(lead: str) -> str:
+    return (
+        f"the owner answered the second read busy although the first frontend's "
+        f"login was over {lead}s before its BROWSER_WAIT of 25s could run out: it "
+        f"gave up early or passed over the free profile"
+    )
+
+
 @pytest.mark.parametrize(
-    ("change", "finding", "invalid"),
+    ("change", "findings", "invalid"),
     [
         pytest.param(
-            # The owner gave up 2.1 s into a 25 s wait: the reviewer's
-            # injected lease refusal, read as a record.
-            lambda r: _second_gave_up(r, waited=2_100),
-            "the owner gave up on the second read's wait for the profile after "
-            "2.1s, before its BROWSER_WAIT of 25s",
+            # The owner gave up 2.1 s after the send in a 25 s wait: the
+            # reviewer's injected lease refusal, read as a record.
+            lambda r: _second_gave_up(r, spent=2_100),
+            [_early("2.1")],
             [],
             id="refused-early",
         ),
         pytest.param(
-            # Just inside the tolerance of a whole wait is still early.
-            lambda r: _second_gave_up(r, waited=23_900),
-            "the owner gave up on the second read's wait for the profile after "
-            "23.9s, before its BROWSER_WAIT of 25s",
+            # Any whole call shorter than the budget holds a shorter wait.
+            lambda r: _second_gave_up(r, spent=24_900, over=None),
+            [_early("24.9")],
             [],
             id="refused-just-early",
         ),
         pytest.param(
-            # A whole wait that ran out long after the login said it was over:
-            # the owner did not take a free profile.
-            lambda r: _second_gave_up(r, waited=_FULL_WAIT),
-            _SECOND_FAILED,
+            # A budget begun at the send ends 20.5 s after the login said it
+            # was over: the owner refused early or passed over a free profile.
+            lambda r: _second_gave_up(r, spent=_FULL_WAIT),
+            [_past_the_login("20.5")],
             [],
             id="after-the-login",
         ),
         pytest.param(
-            # The wait ran out, and the owner never said the read waited: no
-            # start, so nothing shows its budget expired.
+            lambda r: _second_gave_up(r, spent=_FULL_WAIT, over=26_900),
+            [_past_the_login("0.1")],
+            [],
+            id="just-after-the-login",
+        ),
+        pytest.param(
+            # The wait ran out, and the owner never said the read waited:
+            # nothing about the busy answer is shown either way.
             lambda r: (
-                _second_gave_up(r, waited=_FULL_WAIT, asked_until=28_000, over=None),
+                _second_gave_up(r, spent=_FULL_WAIT, asked_until=28_000, over=None),
                 r["second"].update(progress=_progress(2_100, None)),
             ),
-            _SECOND_FAILED,
-            [_NOT_WAITING],
+            [],
+            [_NOT_WAITING, _unshown("25.1")],
             id="no-wait-start",
         ),
         pytest.param(
             # The read failed, and the owner never gave up on a wait.
             lambda r: _second_gave_up(
-                r, waited=_FULL_WAIT, asked_until=28_000, over=None
+                r, spent=_FULL_WAIT, asked_until=28_000, over=None
             ).update(profile_waits_ran_out=0),
-            _SECOND_FAILED,
+            [_SECOND_FAILED],
             [],
             id="no-wait-ran-out",
         ),
     ],
 )
-def test_a_second_read_that_fails_otherwise_is_a_finding(change, finding, invalid):
+def test_a_second_read_that_fails_otherwise_is_read_from_its_bounds(
+    change, findings, invalid
+):
     record = _repair(ROW_SECOND)
     change(record)
     problems = repair_problems(record, daemon=True)
 
-    assert _findings(problems) == [finding]
+    assert _findings(problems) == findings
     assert invalid_evidence(problems) == invalid
 
 
@@ -1415,9 +1639,9 @@ async def test_the_owner_refusing_a_wait_early_is_a_finding_and_never_the_rows(
     caplog, monkeypatch
 ):
     """The reviewer's probe: a lease refusal 0.2 s into the declared 25 s,
-    through the real middleware, its real line and its real report of the
-    wait heard by the harness's own recorder. Read into the cell's record,
-    it is the owner's finding; nothing about it is invalid."""
+    through the real middleware and its real line, timed from the call's
+    send to its answer. Read into the cell's record, it is the owner's
+    finding; nothing about it is invalid."""
     from fastmcp.exceptions import ToolError
 
     from linkedin_mcp_server import sequential_tool_middleware as sequential
@@ -1454,6 +1678,7 @@ async def test_the_owner_refusing_a_wait_early_is_a_finding_and_never_the_rows(
             )
         ),
     )
+    sent = time.monotonic_ns()
     with caplog.at_level("INFO", logger=sequential.__name__):
         with pytest.raises(ToolError):
             await sequential.SequentialToolExecutionMiddleware().on_call_tool(
@@ -1462,9 +1687,8 @@ async def test_the_owner_refusing_a_wait_early_is_a_finding_and_never_the_rows(
     answered = time.monotonic_ns()
 
     assert asked == [auth_repair.BROWSER_WAIT_SECONDS]
-    start = auth_repair.profile_wait_started(heard)
-    assert start is not None
-    record = _second_gave_up(_repair(ROW_SECOND), waited=(answered - start) // MS)
+    assert auth_repair.profile_wait_started(heard) is not None
+    record = _second_gave_up(_repair(ROW_SECOND), spent=(answered - sent) // MS)
     record["profile_waits_ran_out"] = auth_repair._count(
         [r.getMessage() for r in caplog.records], auth_repair.PROFILE_WAIT_LINE
     )
@@ -1473,9 +1697,7 @@ async def test_the_owner_refusing_a_wait_early_is_a_finding_and_never_the_rows(
     assert record["profile_waits_ran_out"] == 1
     assert invalid_evidence(problems) == []
     [finding] = _findings(problems)
-    assert finding.startswith(
-        "the owner gave up on the second read's wait for the profile after 0."
-    ), finding
+    assert finding.startswith("the owner answered the second read busy 0."), finding
 
 
 def test_direct_refusing_its_read_again_over_its_own_unconfirmed_close_is_valid():
@@ -2293,6 +2515,13 @@ class _DaemonRepair:
                 post = await self._feed(self.cookie) == 200
                 record = _record(name, began, post=post)
             else:
+                if self.login.outcome == FAILED:
+                    # Its login task over, the frontend reads it and says so,
+                    # as ``wait_for_login_to_finish`` does.
+                    self.host_lines += [
+                        _TIMED_OUT,
+                        "INFO The sign-in did not finish in time; not replaying",
+                    ]
                 record = _record(name, began, post=False, text=_OWNER_ANSWER)
         self.calls.append(record)
         return record
@@ -2540,6 +2769,56 @@ async def test_only_the_owner_s_wait_for_the_profile_shows_the_second_read_there
     assert harness.tool_summary(result)["read_the_post"] is True
 
 
+#: A stdio server standing in for the second frontend: its read reports the
+#: owner's wait for the profile as progress, then answers with the post.
+_PROGRESS_STAND_IN = """
+from fastmcp import Context, FastMCP
+
+mcp = FastMCP("stand-in")
+
+
+@mcp.tool(name=%(tool)r)
+async def read(ctx: Context, num_posts: int = 1) -> dict:
+    await ctx.report_progress(progress=0, total=100, message=%(said)r)
+    return {"url": "https://www.linkedin.com/feed/", "sections": {"feed": %(post)r}}
+
+
+mcp.run(transport="stdio", show_banner=False)
+"""
+
+
+async def test_a_second_host_keeps_the_progress_its_client_heard_during_the_read(
+    tmp_path,
+):
+    """The second host as the row runs it (``harness.run_second_host``): its
+    client hears the server's progress for the read, while the read runs,
+    and the record keeps it."""
+    server = tmp_path / "progress_stand_in.py"
+    server.write_text(
+        _PROGRESS_STAND_IN
+        % {"tool": harness.READ_TOOL, "said": _HAND_OVER, "post": harness.POST_MARKER}
+    )
+    progress: list[dict[str, Any]] = []
+    spawned: list[Any] = []
+
+    session, found = await harness.run_second_host(
+        [sys.executable, str(server)],
+        env=dict(os.environ),
+        cwd=tmp_path,
+        progress=progress,
+        on_stderr=lambda _line: None,
+        on_process=spawned.append,
+    )
+
+    assert session.error is None, session.error
+    assert spawned and harness.host_failures(session) == []
+    call = found["call"]
+    assert call["read_the_post"] is True
+    heard = auth_repair.profile_wait_started(found["progress"])
+    assert heard is not None
+    assert call["began_monotonic_ns"] <= heard <= call["ended_monotonic_ns"]
+
+
 async def test_an_owner_reopening_on_the_stale_generation_fails_the_second_frontend(
     on_disk,
     served,
@@ -2564,6 +2843,19 @@ async def test_a_frontend_whose_wait_runs_out_while_its_login_fails_replays_noth
     # The frontend's wait ran out first, and the login then failed by itself.
     assert repair_reading(record) == {"at_read_end": WAITING, "settled_failed": True}
     assert record["host_lines"]["replayed"] == 0
+
+
+async def test_the_record_keeps_how_the_frontend_says_its_login_ended(
+    on_disk,
+    served,
+    ca,
+):
+    """A frontend that waited its login out and says it ran out: the record
+    keeps that line, the evidence a late release is read from."""
+    record = await _daemon_row(ROW_FAILED, on_disk, served, ca, wait=10.0, budget=0.5)
+
+    assert repair_problems(record, daemon=True) == []
+    assert record["login_failures"] == [_TIMED_OUT]
 
 
 # --- The login command on a real terminal, signing in at the real origin ---------------------

@@ -1519,6 +1519,37 @@ async def run_host_session(
     return session
 
 
+async def run_second_host(
+    command: Sequence[str],
+    *,
+    env: dict[str, str],
+    cwd: Path,
+    progress: list[dict[str, Any]],
+    on_stderr: Callable[[str], None],
+    on_process: Callable[[Any], None],
+) -> tuple[HostSession, dict[str, Any]]:
+    """A second host's one read and quit (``AuthSeams.second_host``), and
+    what its record keeps. *progress* fills as the host's client hears the
+    read's progress, so the row can act on it while the read runs; the
+    record keeps what was heard by the end."""
+    second = await run_host_session(
+        command,
+        env=env,
+        cwd=cwd,
+        on_stderr=on_stderr,
+        on_process=on_process,
+        on_progress=progress_recorder(progress),
+    )
+    return second, {
+        "host": host_summary(second),
+        "call": call_record(second.tool) if second.tool is not None else None,
+        "forwarded": any(_FORWARDING_LINE in line for line in second.stderr),
+        "quit_problems": host_failures(second),
+        "lines": auth_repair._flags(second.stderr),
+        "progress": list(progress),
+    }
+
+
 # --- A host in a process of its own --------------------------------------------
 
 STUB_HOST_SCRIPT = Path(__file__).with_name("stub_host.py")
@@ -8247,13 +8278,13 @@ async def measure_host_quit_row(
             emit("frontend", "user.output", stream="stderr", host="second", line=line)
 
         launched_ns = time.monotonic_ns()
-        second = await run_host_session(
+        second, found = await run_second_host(
             command,
             env=env,
             cwd=directory,
+            progress=progress,
             on_stderr=heard,
             on_process=hold,
-            on_progress=progress_recorder(progress),
         )
         second_hosts.append(second)
         if held and held[0].check(0.0):
@@ -8263,12 +8294,7 @@ async def measure_host_quit_row(
         return {
             "made": True,
             "launched_ns": launched_ns,
-            "host": host_summary(second),
-            "call": call_record(second.tool) if second.tool is not None else None,
-            "forwarded": any(_FORWARDING_LINE in line for line in second.stderr),
-            "quit_problems": host_failures(second),
-            "lines": auth_repair._flags(second.stderr),
-            "progress": list(progress),
+            **found,
             "retained": bool(held) and retained(held[0]),
         }
 
