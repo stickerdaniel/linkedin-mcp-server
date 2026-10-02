@@ -127,8 +127,131 @@ AUTH_MODEL_COVERAGE: dict[str, tuple[str, tuple[str, ...]]] = {
 }
 
 
+#: Every R12 branch and R14 path the native cells do not reach, with the
+#: exact existing tests that model it: counted as model coverage when they
+#: run, never as native. Each entry's first element names its row.
+ELIGIBILITY_MODEL_COVERAGE: dict[str, tuple[str, tuple[str, ...]]] = {
+    "refused storage: no descriptor read, no transient lock, no state": (
+        "H-R12-synced",
+        (
+            "tests/test_daemon.py::TestStorageEligibility"
+            "::test_an_ineligible_root_keeps_direct_with_one_warning",
+            "tests/test_cli_main.py::TestForwardingToASharedOwner"
+            "::test_no_owner_is_sought_on_storage_that_is_not_local",
+        ),
+    ),
+    "non-local mounts (no rootless fixture on a hosted runner)": (
+        "H-R12-unknown",
+        (
+            "tests/test_storage_class.py::TestLinuxMounts"
+            "::test_every_nfs_and_smb_variant_is_nonlocal",
+            "tests/test_storage_class.py::TestMacFilesystems"
+            "::test_a_volume_without_mnt_local_is_nonlocal",
+            "tests/test_storage_class.py::TestWindowsVolumes"
+            "::test_drive_type_then_filesystem",
+        ),
+    ),
+    "a classifier or state root that cannot be read": (
+        "H-R12-unknown",
+        (
+            "tests/test_daemon.py::TestStorageEligibility"
+            "::test_a_classifier_that_raises_keeps_direct",
+            "tests/test_daemon.py::TestStorageEligibility"
+            "::test_an_unlocatable_state_root_keeps_direct",
+            "tests/test_daemon.py::TestStorageEligibility"
+            "::test_a_reader_failure_in_the_real_classifier_keeps_direct",
+        ),
+    ),
+    "other providers: OneDrive, Windows Dropbox locations, iCloud Drive": (
+        "H-R12-synced",
+        (
+            "tests/test_storage_class.py::TestWindowsProviders"
+            "::test_a_onedrive_variable_names_a_synced_root",
+            "tests/test_storage_class.py::TestWindowsProviders"
+            "::test_dropbox_is_read_from_both_windows_locations",
+            "tests/test_storage_class.py::TestClassification"
+            "::test_mac_provider_folders_are_synced",
+        ),
+    ),
+    "disabled: no election sought": (
+        "H-R12-disabled-env",
+        (
+            "tests/test_cli_main.py::TestForwardingToASharedOwner"
+            "::test_no_owner_is_sought_when_the_daemon_is_switched_off",
+            "tests/test_config.py::TestLoaders::test_no_daemon_flag_overrides_env_true",
+        ),
+    ),
+    "HTTP: no election, on every platform": (
+        "H-R12-http",
+        (
+            "tests/test_daemon.py::TestWhetherTheDaemonAppliesAtAll"
+            "::test_an_explicit_http_bind_does_not_use_a_daemon",
+            "tests/test_cli_main.py::TestForwardingToASharedOwner"
+            "::test_no_owner_is_sought_for_an_http_server",
+            "tests/test_cli_main.py::TestForwardingToASharedOwner"
+            "::test_an_interactively_chosen_http_transport_elects_no_daemon",
+            "tests/test_daemon.py::TestWhetherTheDaemonAppliesAtAll"
+            "::test_container_http_needs_no_daemon_warning",
+        ),
+    ),
+    "container: refused with its warning": (
+        "H-R12-container",
+        (
+            "tests/test_daemon.py::TestWhetherTheDaemonAppliesAtAll"
+            "::test_a_container_refuses_the_daemon_and_says_why",
+        ),
+    ),
+    "rival answered: left alone, no turnover, no lock": (
+        "H-R14",
+        (
+            "tests/test_daemon_election.py::TestAnOwnerThisBuildMayOnlyControl"
+            "::test_a_live_owner_of_this_build_with_another_configuration_is_left_alone",
+        ),
+    ),
+    "rival silent: one probe, then Direct": (
+        "H-R14",
+        (
+            "tests/test_daemon_election.py::TestAnOwnerThisBuildMayOnlyControl"
+            "::test_a_silent_owner_of_this_build_with_another_configuration_is_left_alone",
+        ),
+    ),
+    "rival refused: leftovers buried, the election goes on": (
+        "H-R14",
+        (
+            "tests/test_daemon_election.py::TestAnOwnerThisBuildMayOnlyControl"
+            "::test_a_dead_owner_of_another_configuration_is_leftovers",
+        ),
+    ),
+    "another build's configuration: not probed": (
+        "H-R14",
+        (
+            "tests/test_daemon_election.py::TestAnOwnerThisBuildMayOnlyControl"
+            "::test_another_builds_configuration_is_not_probed",
+        ),
+    ),
+    "a configuration mismatch is read, and its pair is control only": (
+        "H-R14",
+        (
+            "tests/test_daemon.py::TestRefusing"
+            "::test_a_daemon_with_a_different_configuration_is_refused",
+            "tests/test_daemon_proxy.py::TestControlOnlyNeverRunsATool"
+            "::test_a_backend_cannot_be_built_around_one",
+            "tests/test_daemon_proxy.py::TestControlOnlyNeverRunsATool"
+            "::test_a_call_is_not_preflighted_or_sent_to_one",
+        ),
+    ),
+    "the minimum hold is not fingerprinted": (
+        "H-R14",
+        (
+            "tests/test_daemon_descriptor.py::TestConfigFingerprint"
+            "::test_configuration_that_only_affects_the_client_still_matches",
+        ),
+    ),
+}
+
+
 #: Every mapping the accounting counts.
-COUNTED = {**MODEL_COVERAGE, **AUTH_MODEL_COVERAGE}
+COUNTED = {**MODEL_COVERAGE, **AUTH_MODEL_COVERAGE, **ELIGIBILITY_MODEL_COVERAGE}
 
 
 def model_rows() -> dict[str, list[str]]:

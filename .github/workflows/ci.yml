@@ -815,8 +815,10 @@ jobs:
   # that race the owner's retirement (tests/differential/retirement_race.py),
   # calls that lose the owner before or after dispatch
   # (tests/differential/owner_loss.py), the profile commands beside a live
-  # owner (tests/differential/profile_commands.py), and a sign-in staged at
-  # the origin (tests/differential/auth_repair.py), in a job of their own rather than more steps in `platform-behaviour`,
+  # owner (tests/differential/profile_commands.py), a sign-in staged at
+  # the origin (tests/differential/auth_repair.py), and configurations the
+  # daemon refuses and a rival owner of another configuration
+  # (tests/differential/eligibility_rows.py), in a job of their own rather than more steps in `platform-behaviour`,
   # whose budget the rows before them already fill. Four legs: the Ubuntu x64
   # job's platform and the three `platform-behaviour` runs on, each with its
   # own browser build. The setup is the one the differential steps above
@@ -831,7 +833,7 @@ jobs:
     # The camelCase read shims off, for the reason given at `windows-daemon`.
     env:
       FASTMCP_MCP_CAMELCASE_COMPAT: "false"
-    # Six groups of rows per leg, so no job's bound comes near the hosted
+    # Seven groups of rows per leg, so no job's bound comes near the hosted
     # runner's six hours. The sum of a group's step bounds: 45 for a cold
     # browser download for each runtime and the frozen baseline (bound 15),
     # with room for Windows, the slowest leg, to sync and install twice; then
@@ -841,10 +843,12 @@ jobs:
     # turnover lanes (285), and `owner` 5 for the oracle, 40 for each of the
     # three H-R8 lanes that kill, 45 for the stopped owner and 50 for H-R9
     # (265), `commands` 30 for H-R10a's logout, 40 for its declined and
-    # no-terminal cells, 40 for H-R10b and 30 for H-R15 (185), and `auth` 105
+    # no-terminal cells, 40 for H-R10b and 30 for H-R15 (185), `auth` 105
     # for H-R16's cold and second-frontend cells, 60 for its failed login and
-    # 55 for H-R10a's login (265).
-    timeout-minutes: ${{ matrix.rows == 'pipes' && 165 || matrix.rows == 'processes' && 185 || matrix.rows == 'owner' && 265 || matrix.rows == 'commands' && 185 || matrix.rows == 'auth' && 265 || 285 }}
+    # 55 for H-R10a's login (265), and `eligibility` 55 for the daemon switched
+    # off, 30 for a container, 40 for HTTP, 80 for synced storage, 30 for
+    # unknown storage and 75 for H-R14 (355).
+    timeout-minutes: ${{ matrix.rows == 'pipes' && 165 || matrix.rows == 'processes' && 185 || matrix.rows == 'owner' && 265 || matrix.rows == 'commands' && 185 || matrix.rows == 'auth' && 265 || matrix.rows == 'eligibility' && 355 || 285 }}
     strategy:
       fail-fast: false
       matrix:
@@ -863,7 +867,11 @@ jobs:
         # completing it or not (tests/differential/auth_repair.py); headed,
         # on the display started below on Linux and in the runner's own
         # desktop session elsewhere.
-        rows: [pipes, processes, idle, owner, commands, auth]
+        # `eligibility`: configurations the daemon refuses, some with provider
+        # metadata planted for the cell and removed exactly, one cell at a
+        # time, and a rival owner of another configuration
+        # (tests/differential/eligibility_rows.py).
+        rows: [pipes, processes, idle, owner, commands, auth, eligibility]
         include:
           - os: ubuntu-latest
             browsers: ~/.cache/ms-playwright
@@ -1360,6 +1368,92 @@ jobs:
           DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
         timeout-minutes: 55
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_auth_repair_rows.py -k "login or natively"
+
+      # The H-R12 remainder: each configuration the daemon refuses, K1 frozen
+      # Direct, K3 with the daemon enabled and K0 (K2 recorded not
+      # applicable), held to no coordination effect and a Direct read. Each
+      # cell is the calibration's seven minutes and its own waits: the storage
+      # reading (30s) and the residual browser wait (60s); nothing is an owner
+      # to idle out. Switched off by DAEMON_ENABLED=false and by --no-daemon:
+      # six cells come to at most 51 minutes: 55.
+      - name: Keep a switched-off daemon Direct
+        if: matrix.rows == 'eligibility'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 55
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_eligibility_rows.py -k "disabled_env or no_daemon"
+
+      # A container (LINKEDIN_MCP_CONTAINER=true, the session staged and
+      # preserved as the same runtime): three cells, at most 26 minutes: 30.
+      - name: Keep a container Direct
+        if: matrix.rows == 'eligibility'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 30
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_eligibility_rows.py -k container
+
+      # An HTTP server on a loopback port of its own, quit by its interrupt;
+      # counted skips on Windows. Each cell adds to the above the port's
+      # listening (bound 180s): three cells, at most 35 minutes: 40.
+      - name: Keep an HTTP server Direct
+        if: matrix.rows == 'eligibility'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 40
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_eligibility_rows.py -k http
+
+      # Synced storage: a Dropbox info.json naming the row's auth root, one
+      # naming the daemon state root, and on macOS a profile under
+      # ~/Library/CloudStorage (counted skips elsewhere), each planted for its
+      # cell only, refused where any provider configuration already is, and
+      # removed exactly. Nine cells come to at most 77 minutes: 80.
+      - name: Keep synced storage Direct
+        if: matrix.rows == 'eligibility'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 80
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_eligibility_rows.py -k "synced or cloud_storage"
+
+      # Unknown storage: a malformed Dropbox info.json, planted and removed
+      # the same way. Three cells, at most 26 minutes: 30.
+      - name: Keep unknown storage Direct
+        if: matrix.rows == 'eligibility'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 30
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_eligibility_rows.py -k unknown
+
+      # Row H-R14: host B with LOGIN_TIMEOUT one second apart while A is open,
+      # K1 frozen, K3 and K0. Each cell adds to the calibration's seven
+      # minutes the storage reading (30s), three owner readings (30s each),
+      # B's whole session (240s), the settlement before A2 (a 60s browser
+      # wait, a census and the lock, 60s each), A2 (180s), the owner's idle
+      # exit (120 + 90s) and the residual browser wait (60s), 24 minutes.
+      # Three cells come to at most 71 minutes: 75.
+      - name: Leave a differently configured owner alone
+        if: matrix.rows == 'eligibility'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 75
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_eligibility_rows.py -k rival
 
       # The rows' evidence packet (``events.PUBLISHED_FILES``), under a name
       # apart from the other jobs' packets. Always, so a red row keeps what
