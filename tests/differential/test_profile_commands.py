@@ -262,6 +262,25 @@ async def test_a_command_left_running_is_ended_by_the_teardown_and_says_so(
     assert record["ended_by_harness"] is True and record["returncode"] is not None
 
 
+async def test_a_command_the_teardown_ended_is_settled_once_it_returns(
+    tmp_path, monkeypatch
+):
+    """The teardown's own next check comes right after it: a reader thread
+    slow to see the end of the output (a loaded runner) must not leave the
+    ended command reading as still running."""
+    read = TerminalCommand._read
+
+    def slow_reader(self: TerminalCommand) -> None:
+        read(self)
+        time.sleep(0.5)
+
+    monkeypatch.setattr(TerminalCommand, "_read", slow_reader)
+    command = _driver(tmp_path, "wait", terminal=False)
+    assert await command.expect("waiting", 30) is not None
+    command.end()
+    assert command.settled(0.0) is True
+
+
 async def test_a_command_is_not_settled_while_a_helper_it_started_runs(tmp_path):
     """The command exits and its output ends, but the helper it started with
     output of its own still runs: not settled, and the teardown ends that
@@ -1548,6 +1567,11 @@ async def test_a_command_whose_output_outlives_it_is_held_and_refuses_the_next_s
         ROW_LOGOUT,
         dataclasses.replace(harness.ROWS[ROW_LOGOUT], script=finishes_it),
     )
+    # The holder is one nothing can find: the scene already hides it from
+    # every scan of the process table, and a poll that caught it as the
+    # command's child before the command exited would let the teardown end it.
+    # Only the kernel's group check and the open output still see it.
+    monkeypatch.setattr(profile_commands.TerminalCommand, "_collect", lambda self: None)
     scene.mode("linger")
     try:
         result = await scene.run_row(ROW_LOGOUT)
