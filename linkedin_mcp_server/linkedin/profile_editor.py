@@ -40,6 +40,7 @@ _SAVE_TIMEOUT_MS = 15_000
 _FIELD_TIMEOUT_MS = 10_000
 _SETTLE_MS = 500
 _SETTLE_READS = 8
+_VIEW_SETTLE_MS = 2_500
 _OPTION_TIMEOUT_MS = 6_000
 _DATE_RANGE = re.compile(r"\b(19|20)\d{2}\b")
 
@@ -350,16 +351,36 @@ class ProfileEditor:
         )
 
     async def list_skills(self) -> list[Skill]:
+        """Every skill, merged by LinkedIn's skill id across the page's views.
+
+        The default view lists only some skills; the category views list the
+        rest. Order is first appearance: the default view, then each category.
+        """
         vanity = await self._vanity_name()
         await self._goto(sel.skills_list_url(vanity))
         await self._session.scroll_body(pause_time=0.8, max_scrolls=10)
-        items = await self._page.evaluate(
-            sel.LIST_ITEMS_JS, sel.SKILL_EDIT_HREF.pattern
-        )
+        found: dict[str, str] = {}
+
+        async def collect() -> None:
+            items = await self._page.evaluate(
+                sel.LIST_ITEMS_JS, sel.SKILL_EDIT_HREF.pattern
+            )
+            for item in items:
+                if item["lines"] and item["id"] not in found:
+                    found[item["id"]] = item["lines"][0]
+
+        await collect()
+        filters = self._page.locator(sel.SKILL_FILTER_BUTTONS)
+        for i in range(await filters.count()):
+            button = filters.nth(i)
+            if await button.get_attribute("aria-current") == "true":
+                continue
+            await button.click()
+            await self._page.wait_for_timeout(_VIEW_SETTLE_MS)
+            await collect()
         return [
-            Skill(name=item["lines"][0], position=i + 1, ref=item["id"])
-            for i, item in enumerate(items)
-            if item["lines"]
+            Skill(name=name, position=n + 1, ref=ref)
+            for n, (ref, name) in enumerate(found.items())
         ]
 
     # ── writes ──────────────────────────────────────────────────────────────

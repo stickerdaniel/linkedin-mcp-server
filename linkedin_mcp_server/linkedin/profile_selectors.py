@@ -199,3 +199,9 @@ LIST_ITEMS_JS = r"""
   return out;
 }
 """
+
+# The skills page shows a bounded "All" view plus category views (Industry
+# Knowledge, Tools & Technologies, ...) that together hold every skill. The
+# category buttons are the siblings of the one marked aria-current, found by
+# structure rather than by their (localized) names.
+SKILL_FILTER_BUTTONS = "main ul:has(> li > button[aria-current]) > li > button"

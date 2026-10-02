@@ -126,10 +126,23 @@ EXPERIENCE_LIST = page_html(
     """,
 )
 SKILLS_LIST = page_html(
-    '<div id="skills"></div>',
-    """document.getElementById('skills').innerHTML = S.skills.map((s, i) =>
-         `<div><a href="/in/jane/details/skills/edit/forms/${1000 + i}/"><div>${s}</div></a>`
-         + `<a href="/in/jane/details/skills/edit/forms/${1000 + i}/" aria-label="Edit ${s}"><span>Edit ${s}</span></a></div>`).join('');""",
+    '<ul id="filters"><li><button aria-current="true" data-v="all">All</button></li>'
+    '<li><button data-v="tools">Tools &amp; Technologies</button></li></ul><div id="skills"></div>',
+    """
+    // Like LinkedIn: the default view shows a bounded subset; a category view
+    // shows skills the default view leaves out.
+    const TOOLS = ['React.js'];
+    const show = (view) => {
+      const list = view === 'all' ? S.skills.slice(0, 2) : TOOLS.concat(S.skills.slice(2));
+      document.getElementById('skills').innerHTML = list.map((s) => {
+        const i = view === 'all' || !TOOLS.includes(s) ? S.skills.indexOf(s) : 900;
+        return `<div><div>${s}</div><a href="/in/jane/details/skills/edit/forms/${1000 + i}/" aria-label="Edit ${s}"><span>Edit ${s}</span></a></div>`;
+      }).join('');
+      for (const b of document.querySelectorAll('#filters button')) b.toggleAttribute('aria-current', b.dataset.v === view);
+    };
+    for (const b of document.querySelectorAll('#filters button')) b.addEventListener('click', () => show(b.dataset.v));
+    show('all');
+    """,
 )
 NEW_SKILL = form(
     "Add skill",
@@ -294,7 +307,8 @@ class TestReads:
         assert [(s.name, s.position, s.ref) for s in skills] == [
             ("jQuery", 1, "1000"),
             ("Python", 2, "1001"),
-        ]
+            ("React.js", 3, "1900"),
+        ], "skills only a category view shows are included, each once"
 
 
 class TestWrites:
@@ -392,14 +406,17 @@ class TestWrites:
 
     async def test_a_skill_is_removed_only_from_its_own_form(self, page):
         ed = editor(page)
-        [jquery, python] = await ed.list_skills()
+        [jquery, python, *_] = await ed.list_skills()
         with pytest.raises(ProfileEditError) as e:  # the form at this ref is Python's
             await editor(page).remove_skill(
                 type(jquery)(name="jQuery", position=1, ref=python.ref)
             )
         assert e.value.code is ProfileEditErrorCode.STALE_CHANGE_SET
         await editor(page).remove_skill(jquery)
-        assert [s.name for s in await editor(page).list_skills()] == ["Python"]
+        assert [s.name for s in await editor(page).list_skills()] == [
+            "Python",
+            "React.js",
+        ]
 
 
 class TestEndToEnd:
