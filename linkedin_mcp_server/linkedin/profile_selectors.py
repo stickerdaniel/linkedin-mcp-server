@@ -1,15 +1,26 @@
 """Every LinkedIn-specific fact the own-profile editor depends on, in one place.
 
 LinkedIn changes its markup often, so this module is the only file that should
-need editing when it does. The editor reaches each form by URL and finds fields
-by, in order: a stable attribute (an ``id`` fragment, ``role``, ``type``) —
-never a layout class — then a structural fact (the dialog's only textarea),
-then, last, a visible label from the per-locale table below. Text is used only
-where nothing else identifies a control, and only through ``LABELS``, so a
-non-English account fails with SELECTOR_NOT_FOUND and diagnostics instead of
-clicking something else.
+need editing when it does. Measured on 2 October 2026 against the en-US UI:
 
-Every locator here is scoped to the open edit dialog.
+- Each edit form opens by URL as a native ``<dialog>``. The page also keeps
+  hidden ``<dialog>`` elements (ad menus), so the edit dialog is the *visible*
+  one that contains form controls.
+- Field ids are generated (``_r_4_``) and change between renders: never used.
+- Headline, About and position description are ProseMirror rich-text boxes:
+  ``[role="textbox"][contenteditable="true"]``, the only one in their dialog.
+  The description's ``aria-label`` states its limit ("maximum 2,000 characters").
+- Title and company are inputs labelled through ``aria-labelledby``.
+- Save is a plain ``<button>`` whose only identity is its text.
+- Positions offer a "notify your network" ``role="switch"``.
+- A skill's edit dialog names the skill only in its heading ("Edit React.js").
+- Skill suggestions are ``role="option"`` elements.
+
+Locators prefer, in order: structure and stable attributes (role, type,
+contenteditable), then a visible label from the per-locale ``LABELS`` table.
+Text is used only where nothing else identifies a control, so a non-English
+account fails with SELECTOR_NOT_FOUND and diagnostics instead of clicking
+something else. Every field locator is relative to the edit dialog.
 """
 
 from __future__ import annotations
@@ -22,7 +33,9 @@ LINKEDIN = "https://www.linkedin.com"
 OWN_PROFILE_URL = f"{LINKEDIN}/in/me/"
 VANITY_FROM_URL = re.compile(r"linkedin\.com/in/([^/?#]+)/?")
 
-DIALOG = '[role="dialog"]'
+# The edit dialog: visible, and holding at least one form control.
+DIALOG = 'dialog:visible, [role="dialog"]:visible'
+DIALOG_HAS = 'input, select, textarea, [role="textbox"]'
 
 
 def profile_url(vanity: str) -> str:
@@ -36,7 +49,7 @@ def intro_form_url(vanity: str) -> str:
 def about_form_urls(vanity: str) -> tuple[str, ...]:
     """Tried in order; the first that opens a dialog with an About field wins."""
     base = profile_url(vanity)
-    return (f"{base}edit/about/", f"{base}edit/forms/summary/new/")
+    return (f"{base}edit/forms/summary/new/", f"{base}edit/about/")
 
 
 def experience_list_url(vanity: str) -> str:
@@ -56,7 +69,7 @@ def skill_form_url(vanity: str, skill_id: str) -> str:
 
 
 def new_skill_form_url(vanity: str) -> str:
-    return f"{profile_url(vanity)}details/skills/edit/forms/new/"
+    return f"{profile_url(vanity)}skills/edit/forms/new/"
 
 
 # Edit links on the details pages carry LinkedIn's own entity ids. These are the
@@ -66,9 +79,11 @@ EXPERIENCE_EDIT_HREF = re.compile(
 )
 SKILL_EDIT_HREF = re.compile(r"/details/skills/edit/forms/(\d+)")
 
-# A character counter such as "57/220" next to a field. Digits only, so it is
-# locale-independent; separators are stripped before parsing.
-COUNTER = re.compile(r"(\d[\d,.   ]*)\s*/\s*(\d[\d,.   ]*)")
+# A maximum stated in a field's accessible label ("maximum 2,000 characters").
+# Only the digits are read, so it does not depend on the language.
+STATED_MAX = re.compile(r"(\d{1,2}[,.  ]?\d{3}|\d{2,4})")
+
+RICH_TEXT = '[role="textbox"][contenteditable="true"]'
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,130 +91,110 @@ class FieldSpec:
     """How to find one form control inside the edit dialog."""
 
     name: str
-    css: tuple[str, ...]
-    label_key: str | None = None
-    only_textarea: bool = False
+    css: tuple[str, ...] = ()
+    label_keys: tuple[str, ...] = ()
 
 
-HEADLINE = FieldSpec(
-    "headline",
-    (
-        f'{DIALOG} textarea[id$="-headline"]',
-        f'{DIALOG} input[id$="-headline"]',
-        f'{DIALOG} textarea[id*="headline" i]',
-        f'{DIALOG} input[id*="headline" i]',
-    ),
-    label_key="headline",
-)
-LOCATION = FieldSpec(
-    "location",
-    (
-        f'{DIALOG} input[id*="geoLocation" i]',
-        f'{DIALOG} input[id*="location" i]',
-        f'{DIALOG} input[id*="city" i]',
-    ),
-    label_key="location",
-)
-ABOUT = FieldSpec(
-    "about",
-    (f'{DIALOG} textarea[id*="summary" i]', f'{DIALOG} textarea[id*="about" i]'),
-    label_key="about",
-    only_textarea=True,
-)
-EXPERIENCE_TITLE = FieldSpec(
-    "experience_title",
-    (
-        f'{DIALOG} input[id$="-title"]',
-        f'{DIALOG} input[id*="title" i]:not([id*="subtitle" i])',
-    ),
-    label_key="title",
-)
-EXPERIENCE_DESCRIPTION = FieldSpec(
-    "experience_description",
-    (f'{DIALOG} textarea[id*="description" i]',),
-    label_key="description",
-)
-EXPERIENCE_COMPANY = FieldSpec(
-    "experience_company",
-    (f'{DIALOG} input[id*="company" i]', f'{DIALOG} input[id*="organization" i]'),
-    label_key="company",
-)
+HEADLINE = FieldSpec("headline", (RICH_TEXT,))
+ABOUT = FieldSpec("about", (RICH_TEXT,))
+EXPERIENCE_DESCRIPTION = FieldSpec("experience_description", (RICH_TEXT,))
+EXPERIENCE_TITLE = FieldSpec("experience_title", label_keys=("title",))
+EXPERIENCE_COMPANY = FieldSpec("experience_company", label_keys=("company",))
+LOCATION = FieldSpec("location", label_keys=("location",))
+# The add-skill dialog's only text input; every other input there is a checkbox.
 SKILL_INPUT = FieldSpec(
     "skill",
-    (f'{DIALOG} input[role="combobox"]', f'{DIALOG} input[id*="skill" i]'),
-    label_key="skill",
+    ('input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"])',),
 )
+NOTIFY_SWITCH = 'input[role="switch"]'
+HEADINGS = "h1, h2, h3"
 
-SAVE_BUTTON = (f'{DIALOG} button[type="submit"]',)
-TYPEAHEAD_OPTION = '[role="listbox"] [role="option"]'
+SAVE_BUTTON = ('button[type="submit"]',)
+TYPEAHEAD_OPTION = '[role="option"]'
 # Presence of either means the form refused the save; text is only reported.
-FORM_ERROR = (f'{DIALOG} [role="alert"]', f'{DIALOG} [aria-invalid="true"]')
+FORM_ERROR = ('[role="alert"]', '[aria-invalid="true"]')
 
 # Visible-text fallbacks, per locale. Extend per locale rather than loosening a
-# match: an inexact label is how the wrong control gets clicked.
-LABELS: dict[str, dict[str, str]] = {
+# match: an inexact label is how the wrong control gets clicked. A tuple lists
+# the exact variants LinkedIn has been seen to use.
+LABELS: dict[str, dict[str, tuple[str, ...]]] = {
     "en": {
-        "headline": "Headline",
-        "location": "City",
-        "about": "About",
-        "title": "Title",
-        "description": "Description",
-        "company": "Company or organization",
-        "skill": "Skill",
-        "save": "Save",
-        "delete_skill": "Delete skill",
-        "confirm_delete": "Delete",
+        "title": ("Title*", "Title"),
+        "company": ("Company or organization*", "Company or organization"),
+        "location": ("Country/Region*", "Country/Region"),
+        "save": ("Save",),
+        "delete_skill": ("Delete skill",),
+        "confirm_delete": ("Delete",),
     },
 }
 DEFAULT_LOCALE = "en"
 
 
-# Runs in the page: list the controls in the open dialog, for diagnostics when a
-# field cannot be found. Reports identity, not values.
+# Runs in the page: list the controls in the visible dialog, for diagnostics
+# when a field cannot be found. Reports identity, not values.
 DESCRIBE_DIALOG_JS = r"""
 () => {
-  const d = document.querySelector('[role="dialog"]');
+  const d = [...document.querySelectorAll('dialog, [role="dialog"]')]
+    .find((x) => (x.offsetWidth || x.offsetHeight) && x.querySelector('input, select, textarea, [role="textbox"]'));
   if (!d) return {dialog: false, controls: []};
+  const text = (el) => el ? el.innerText.trim().replace(/\s+/g, ' ').slice(0, 60) : null;
   const controls = [...d.querySelectorAll('input, textarea, select, [contenteditable="true"], button')].slice(0, 60);
   return {
     dialog: true,
-    controls: controls.map((el) => {
-      const lab = el.id ? d.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null;
-      return {
-        tag: el.tagName.toLowerCase(), id: el.id || null, type: el.getAttribute('type'),
-        role: el.getAttribute('role'), name: el.getAttribute('name'),
-        ariaLabel: el.getAttribute('aria-label'), label: lab ? lab.innerText.trim().slice(0, 60) : null,
-        maxlength: el.getAttribute('maxlength'),
-      };
-    }),
+    heading: text(d.querySelector('h1, h2, h3')),
+    controls: controls.map((el) => ({
+      tag: el.tagName.toLowerCase(), type: el.getAttribute('type'), role: el.getAttribute('role'),
+      ariaLabel: el.getAttribute('aria-label'), placeholder: el.getAttribute('placeholder'),
+      labelledBy: (el.getAttribute('aria-labelledby') || '').split(' ')
+        .map((i) => text(document.getElementById(i))).filter(Boolean).join(' | ') || null,
+      text: el.tagName === 'BUTTON' ? text(el) : null,
+    })),
   };
 }
 """
 
-# Runs in the page: every element whose href matches, with the text of its list
-# item and of the enclosing group item (a company grouping several roles).
+# Runs in the page: one record per entity edit link, with the text lines of the
+# item it belongs to. The item is the <li> around the link or, where LinkedIn
+# renders no list, the largest ancestor holding no other entity's edit link.
+# A role grouped under its company also gets the group's lines.
 LIST_ITEMS_JS = r"""
 (pattern) => {
   const re = new RegExp(pattern);
+  const links = [...document.querySelectorAll('main a[href]')].filter((a) => re.test(a.getAttribute('href')));
+  const idOf = (a) => a.getAttribute('href').match(re)[1];
+  const itemOf = (a) => {
+    let el = a, best = a;
+    while (el.parentElement && el.parentElement.tagName !== 'MAIN') {
+      const ids = new Set([...el.parentElement.querySelectorAll('a[href]')]
+        .filter((x) => re.test(x.getAttribute('href'))).map(idOf));
+      if (ids.size > 1) break;
+      el = el.parentElement;
+      best = el;
+    }
+    return best;
+  };
+  // An item's own icon controls (the pencil link, which carries an aria-label
+  // and hidden text, and buttons) are not its content; their text is dropped by
+  // identity, not by matching a word. The item's content is itself a link to
+  // the same edit form, without an aria-label, and is kept.
+  const lines = (el) => {
+    if (!el) return [];
+    const own = new Set([...el.querySelectorAll('a[aria-label][href*="/edit/"], button')]
+      .flatMap((c) => c.innerText.split('\n').map((s) => s.trim())).filter(Boolean));
+    return el.innerText.split('\n').map((s) => s.trim()).filter(Boolean)
+      .filter((s) => !own.has(s))
+      .filter((s, i, arr) => i === 0 || s !== arr[i - 1]);
+  };
   const seen = new Set();
   const out = [];
-  for (const a of document.querySelectorAll('main a[href]')) {
-    const m = a.getAttribute('href').match(re);
-    if (!m || seen.has(m[1])) continue;
-    seen.add(m[1]);
+  for (const a of links) {
+    const id = idOf(a);
+    if (seen.has(id)) continue;
+    seen.add(id);
     const li = a.closest('li');
+    const item = li || itemOf(a);
     const group = li && li.parentElement ? li.parentElement.closest('li') : null;
-    // An item's own controls (the edit pencil's hidden label, buttons) are not
-    // its content; their text is dropped by identity, not by matching a word.
-    const lines = (el) => {
-      if (!el) return [];
-      const own = new Set([...el.querySelectorAll('a[href*="/edit/"], button')]
-        .flatMap((c) => c.innerText.split('\n').map((s) => s.trim())).filter(Boolean));
-      return el.innerText.split('\n').map((s) => s.trim()).filter(Boolean)
-        .filter((s) => !own.has(s))
-        .filter((s, i, arr) => i === 0 || s !== arr[i - 1]);
-    };
-    out.push({id: m[1], href: a.getAttribute('href'), lines: lines(li), groupLines: lines(group)});
+    out.push({id, href: a.getAttribute('href'), lines: lines(item), groupLines: lines(group)});
   }
   return out;
 }

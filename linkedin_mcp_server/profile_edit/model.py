@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+import re
+
 # Used only when the form exposes no maxlength. Measured on LinkedIn's edit
 # forms; a UI-reported limit always wins (see TextField.max_length).
 DEFAULT_LIMITS: dict[str, int] = {
@@ -29,11 +31,17 @@ SINGLE_LINE = frozenset({"headline", "experience_title", "skill"})
 def normalize_text(value: str) -> str:
     """The form of a value we propose, write and compare.
 
-    Line endings are unified and outer whitespace removed, because LinkedIn
-    stores neither a trailing newline nor CRLF. Inner whitespace is kept: it
-    is the user's text, and changing it would be rewriting.
+    Line endings are unified, outer whitespace removed, and a run of blank lines
+    reduced to one paragraph break, because LinkedIn's editors store none of
+    those distinctions: a paragraph break is an empty paragraph, which reads
+    back as several newlines. Other inner whitespace is the user's text and is
+    kept.
     """
-    return value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return _BLANK_LINES.sub("\n\n", text)
+
+
+_BLANK_LINES = re.compile(r"\n[ \t]*\n(?:[ \t]*\n)+")
 
 
 @dataclass(frozen=True, slots=True)

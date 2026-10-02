@@ -2,9 +2,10 @@
 
 Implements ``profile_edit.service.ProfileEditorPort``. Each write opens the
 field's own edit form by URL, checks that the visible value is still the
-expected "before" value, changes only that control, saves, and waits for the
-dialog to close. It never reports success itself: the service re-reads the
-field afterwards and compares. Locators all come from ``profile_selectors``.
+expected "before" value, refuses if the form would notify the member's network,
+changes only that control, saves, and waits for the dialog to close. It never
+reports success itself: the service re-reads the field afterwards and compares.
+Locators all come from ``profile_selectors``.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from patchright.async_api import Locator, Page
 import linkedin_mcp_server.linkedin.profile_selectors as sel
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.session import NAV_DELAY, PageSession
+from linkedin_mcp_server.profile_edit.changeset import skill_key
 from linkedin_mcp_server.profile_edit.errors import (
     ProfileEditError,
     ProfileEditErrorCode,
@@ -30,12 +32,14 @@ from linkedin_mcp_server.profile_edit.model import (
     TextField,
     normalize_text,
 )
-from linkedin_mcp_server.profile_edit.changeset import skill_key
 
 logger = logging.getLogger(__name__)
 
-_DIALOG_TIMEOUT_MS = 10_000
+_DIALOG_TIMEOUT_MS = 15_000
 _SAVE_TIMEOUT_MS = 15_000
+_FIELD_TIMEOUT_MS = 10_000
+_SETTLE_MS = 500
+_SETTLE_READS = 8
 _OPTION_TIMEOUT_MS = 6_000
 _DATE_RANGE = re.compile(r"\b(19|20)\d{2}\b")
 
@@ -82,39 +86,51 @@ class ProfileEditor:
             self._vanity = m.group(1)
         return self._vanity
 
+    def _dialog(self) -> Locator:
+        """The visible edit dialog; hidden ad dialogs are ignored."""
+        page = self._page
+        return page.locator(sel.DIALOG).filter(has=page.locator(sel.DIALOG_HAS)).first
+
+    async def _open_dialog(self, url: str, what: str) -> None:
+        await self._goto(url)
+        try:
+            await self._dialog().wait_for(state="visible", timeout=_DIALOG_TIMEOUT_MS)
+        except Exception:
+            raise await self._not_found(what, url, "edit dialog did not open") from None
+
     async def _open_form(self, urls: tuple[str, ...], spec: sel.FieldSpec) -> Locator:
         """Navigate to the first URL whose dialog contains *spec*; return the field."""
         last: ProfileEditError | None = None
         for url in urls:
-            await self._goto(url)
             try:
-                await self._page.locator(sel.DIALOG).first.wait_for(
-                    state="visible", timeout=_DIALOG_TIMEOUT_MS
-                )
-            except Exception:
-                last = await self._not_found(spec.name, url, "edit dialog did not open")
-                continue
-            try:
+                await self._open_dialog(url, spec.name)
                 return await self._field(spec, url)
             except ProfileEditError as e:
+                if e.code is not ProfileEditErrorCode.SELECTOR_NOT_FOUND:
+                    raise
                 last = e
-        raise last or await self._not_found(
-            spec.name, urls[-1], "no URL produced the form"
-        )
+        assert last is not None
+        raise last
 
     async def _field(self, spec: sel.FieldSpec, url: str) -> Locator:
+        dialog = self._dialog()
+        # Rich-text editors mount after the dialog itself appears.
+        selector = ", ".join(spec.css) if spec.css else "input, select"
+        try:
+            await dialog.locator(selector).first.wait_for(
+                state="visible", timeout=_FIELD_TIMEOUT_MS
+            )
+        except Exception:
+            pass  # reported below with the dialog's actual controls
         for css in spec.css:
-            loc = self._page.locator(css)
+            loc = dialog.locator(css)
             if await loc.count() == 1:
                 return loc
-        if spec.only_textarea:
-            loc = self._page.locator(f"{sel.DIALOG} textarea")
-            if await loc.count() == 1:
-                return loc
-        if spec.label_key and (text := self._labels.get(spec.label_key)):
-            loc = self._page.locator(sel.DIALOG).get_by_label(text, exact=True)
-            if await loc.count() == 1:
-                return loc
+        for key in spec.label_keys:
+            for text in self._labels.get(key, ()):
+                loc = dialog.get_by_label(text, exact=True)
+                if await loc.count() == 1:
+                    return loc
         raise await self._not_found(spec.name, url, "no unique control matched")
 
     async def _not_found(self, what: str, url: str, reason: str) -> ProfileEditError:
@@ -132,31 +148,74 @@ class ProfileEditor:
         )
 
     # ── field primitives ────────────────────────────────────────────────────
-    async def _read(self, loc: Locator) -> TextField:
-        tag = await loc.evaluate("(el) => el.tagName.toLowerCase()")
-        value = (
-            await loc.input_value()
-            if tag in {"input", "textarea"}
-            else await loc.inner_text()
+    @staticmethod
+    async def _is_plain(loc: Locator) -> bool:
+        return await loc.evaluate(
+            "(el) => ['input', 'textarea'].includes(el.tagName.toLowerCase())"
         )
-        raw_max = await loc.get_attribute("maxlength")
-        max_length = (
-            int(raw_max)
-            if raw_max and raw_max.isdigit()
-            else await self._counter_limit()
-        )
-        return TextField(value=value, max_length=max_length)
 
-    async def _counter_limit(self) -> int | None:
-        try:
-            text = await self._page.locator(sel.DIALOG).first.inner_text()
-        except Exception:
-            return None
-        m = sel.COUNTER.search(text)
-        if not m:
-            return None
-        digits = re.sub(r"\D", "", m.group(2))
-        return int(digits) if digits else None
+    async def _read(self, loc: Locator) -> TextField:
+        if await self._is_plain(loc):
+            value = await loc.input_value()
+        else:
+            # A rich-text editor fills itself after it mounts; accept a value only
+            # once two reads agree, so a baseline is never taken mid-load.
+            value = await loc.inner_text()
+            for _ in range(_SETTLE_READS):
+                await self._page.wait_for_timeout(_SETTLE_MS)
+                again = await loc.inner_text()
+                if again == value:
+                    break
+                value = again
+        return TextField(value=value, max_length=await self._limit(loc))
+
+    async def _limit(self, loc: Locator) -> int | None:
+        """The field's own limit: its maxlength, or a maximum stated in its label.
+
+        Never a counter found elsewhere in the dialog: a stray "1/7" in the intro
+        form was once read as the headline's limit. Unknown means the default.
+        """
+        raw = await loc.get_attribute("maxlength")
+        if raw and raw.isdigit():
+            return int(raw)
+        label = await loc.get_attribute("aria-label") or ""
+        if m := sel.STATED_MAX.search(label):
+            return int(re.sub(r"\D", "", m.group(1)))
+        return None
+
+    async def _type(self, loc: Locator, value: str) -> None:
+        if await self._is_plain(loc):
+            await loc.fill(value)
+            return
+        # A rich-text box: replace its content. LinkedIn separates paragraphs
+        # with an empty paragraph, so a blank line is typed as two Enters; a
+        # single line break is Shift+Enter.
+        keyboard = self._page.keyboard
+        await loc.click()
+        await keyboard.press("ControlOrMeta+A")
+        await keyboard.press("Delete")
+        for i, paragraph in enumerate(value.split("\n\n")):
+            if i:
+                await keyboard.press("Enter")
+                await keyboard.press("Enter")
+            for j, line in enumerate(paragraph.split("\n")):
+                if j:
+                    await keyboard.press("Shift+Enter")
+                if line:
+                    await keyboard.insert_text(line)
+
+    async def _refuse_if_notifying(self, field: str) -> None:
+        """Never let an approved edit also broadcast an update to the network."""
+        switches = self._dialog().locator(sel.NOTIFY_SWITCH)
+        for i in range(await switches.count()):
+            if await switches.nth(i).is_checked():
+                raise ProfileEditError(
+                    ProfileEditErrorCode.VALIDATION_ERROR,
+                    f"The {field} form has LinkedIn's notify-your-network switch on. "
+                    "Turn it off on linkedin.com first; this server neither changes "
+                    "it nor saves with it on.",
+                    field=field,
+                )
 
     async def _replace(
         self, loc: Locator, *, expected: str, value: str, field: str, url: str
@@ -170,45 +229,50 @@ class ProfileEditor:
                 expected=expected,
                 actual=current,
             )
-        await loc.fill(value)
+        await self._refuse_if_notifying(field)
+        await self._type(loc, value)
         typed = normalize_text((await self._read(loc)).value)
         if typed != normalize_text(value):
             raise ProfileEditError(
                 ProfileEditErrorCode.LINKEDIN_SAVE_FAILED,
-                f"The {field} field did not accept the full value (it may enforce a shorter limit); nothing was saved.",
+                f"The {field} field did not take the exact value (a shorter limit or "
+                "reformatting); nothing was saved.",
                 field=field,
                 typedLength=len(typed),
                 wantedLength=len(value),
             )
         await self._save(field, url)
 
+    async def _button(self, key: str, scope: Locator | None = None) -> Locator | None:
+        within = scope if scope is not None else self._dialog()
+        for text in self._labels.get(key, ()):
+            loc = within.get_by_role("button", name=text, exact=True)
+            if await loc.count() == 1:
+                return loc
+        return None
+
     async def _save(self, field: str, url: str) -> None:
+        dialog = self._dialog()
         save = None
         for css in sel.SAVE_BUTTON:
-            loc = self._page.locator(css)
+            loc = dialog.locator(css)
             if await loc.count() == 1:
                 save = loc
                 break
-        if save is None:
-            loc = self._page.locator(sel.DIALOG).get_by_role(
-                "button", name=self._labels["save"], exact=True
-            )
-            if await loc.count() == 1:
-                save = loc
+        save = save or await self._button("save")
         if save is None:
             raise await self._not_found(
                 f"{field} save button", url, "no unique save control"
             )
         await save.click()
         try:
-            await self._page.locator(sel.DIALOG).first.wait_for(
-                state="detached", timeout=_SAVE_TIMEOUT_MS
-            )
+            await self._dialog().wait_for(state="hidden", timeout=_SAVE_TIMEOUT_MS)
         except Exception:
             errors: list[str] = []
             for css in sel.FORM_ERROR:
-                for i in range(await self._page.locator(css).count()):
-                    t = (await self._page.locator(css).nth(i).inner_text()).strip()
+                found = self._dialog().locator(css)
+                for i in range(await found.count()):
+                    t = (await found.nth(i).inner_text()).strip()
                     if t:
                         errors.append(t[:200])
             raise ProfileEditError(
@@ -227,27 +291,26 @@ class ProfileEditor:
         h1 = self._page.locator("main h1")
         if await h1.count():
             name = (await h1.first.inner_text()).strip() or None
+        if name is None:  # the page title is "<Name> | LinkedIn"
+            name = (await self._page.title()).rsplit(" | ", 1)[0].strip() or None
         return sel.profile_url(vanity), name, None
 
     async def read_headline(self) -> TextField:
-        vanity = await self._vanity_name()
-        loc = await self._open_form((sel.intro_form_url(vanity),), sel.HEADLINE)
-        field = await self._read(loc)
-        for css in sel.LOCATION.css:
-            candidate = self._page.locator(css)
-            if await candidate.count() == 1:
-                self._location = normalize_text(await candidate.input_value()) or None
-                break
+        url = sel.intro_form_url(await self._vanity_name())
+        field = await self._read(await self._open_form((url,), sel.HEADLINE))
+        try:
+            location = await self._field(sel.LOCATION, url)
+            self._location = normalize_text(await location.input_value()) or None
+        except ProfileEditError:
+            self._location = None  # display only; never blocks a read
         return field
 
     async def read_location(self) -> str | None:
         return self._location
 
     async def read_about(self) -> TextField:
-        vanity = await self._vanity_name()
-        return await self._read(
-            await self._open_form(sel.about_form_urls(vanity), sel.ABOUT)
-        )
+        urls = sel.about_form_urls(await self._vanity_name())
+        return await self._read(await self._open_form(urls, sel.ABOUT))
 
     async def list_experiences(self) -> list[ExperienceSummary]:
         vanity = await self._vanity_name()
@@ -277,11 +340,11 @@ class ProfileEditor:
             await self._field(sel.EXPERIENCE_DESCRIPTION, url)
         )
         company = None
-        for css in sel.EXPERIENCE_COMPANY.css:
-            candidate = self._page.locator(css)
-            if await candidate.count() == 1:
-                company = normalize_text(await candidate.input_value()) or None
-                break
+        try:
+            company_field = await self._field(sel.EXPERIENCE_COMPANY, url)
+            company = normalize_text(await company_field.input_value()) or None
+        except ProfileEditError:
+            pass  # display only
         return ExperienceForm(
             id=experience_id, title=title, description=description, company=company
         )
@@ -302,22 +365,16 @@ class ProfileEditor:
     # ── writes ──────────────────────────────────────────────────────────────
     async def write_headline(self, *, expected: str, value: str) -> None:
         url = sel.intro_form_url(await self._vanity_name())
+        loc = await self._open_form((url,), sel.HEADLINE)
         await self._replace(
-            await self._open_form((url,), sel.HEADLINE),
-            expected=expected,
-            value=value,
-            field="headline",
-            url=url,
+            loc, expected=expected, value=value, field="headline", url=url
         )
 
     async def write_about(self, *, expected: str, value: str) -> None:
         urls = sel.about_form_urls(await self._vanity_name())
+        loc = await self._open_form(urls, sel.ABOUT)
         await self._replace(
-            await self._open_form(urls, sel.ABOUT),
-            expected=expected,
-            value=value,
-            field="about",
-            url=self._page.url,
+            loc, expected=expected, value=value, field="about", url=self._page.url
         )
 
     async def write_experience(
@@ -330,12 +387,9 @@ class ProfileEditor:
     ) -> None:
         url = sel.experience_form_url(await self._vanity_name(), experience_id)
         spec = sel.EXPERIENCE_TITLE if field == "title" else sel.EXPERIENCE_DESCRIPTION
+        loc = await self._open_form((url,), spec)
         await self._replace(
-            await self._open_form((url,), spec),
-            expected=expected,
-            value=value,
-            field=f"experience {field}",
-            url=url,
+            loc, expected=expected, value=value, field=f"experience {field}", url=url
         )
 
     async def add_skill(self, name: str) -> str:
@@ -362,7 +416,8 @@ class ProfileEditor:
                 return text
         raise ProfileEditError(
             ProfileEditErrorCode.SKILL_NOT_FOUND,
-            f"LinkedIn has no skill named exactly '{name}'. Nothing was added; choose one of the offered names.",
+            f"LinkedIn has no skill named exactly '{name}'. Nothing was added; "
+            "choose one of the offered names.",
             skill=name,
             offered=offered,
         )
@@ -375,39 +430,31 @@ class ProfileEditor:
                 skill=skill.name,
             )
         url = sel.skill_form_url(await self._vanity_name(), skill.ref)
-        box = await self._open_form((url,), sel.SKILL_INPUT)
-        shown = normalize_text(await box.input_value())
-        if shown and skill_key(shown) != skill_key(skill.name):
+        await self._open_dialog(url, "skill")
+        dialog = self._dialog()
+        # The dialog names its skill only in its heading ("Edit React.js").
+        heading = normalize_text(await dialog.locator(sel.HEADINGS).first.inner_text())
+        if not skill_key(heading).endswith(skill_key(skill.name)):
             raise ProfileEditError(
                 ProfileEditErrorCode.STALE_CHANGE_SET,
-                "The skill form shows a different skill; nothing was deleted.",
+                "The skill form is for a different skill; nothing was deleted.",
                 expected=skill.name,
-                actual=shown,
+                actual=heading,
             )
-        delete = self._page.locator(sel.DIALOG).get_by_role(
-            "button", name=self._labels["delete_skill"], exact=True
-        )
-        if await delete.count() != 1:
+        delete = await self._button("delete_skill")
+        if delete is None:
             raise await self._not_found(
                 "delete skill button", url, "no unique delete control"
             )
         await delete.click()
-        confirm = self._page.get_by_role("alertdialog").get_by_role(
-            "button", name=self._labels["confirm_delete"], exact=True
-        )
-        if await confirm.count() != 1:
-            confirm = self._page.locator(sel.DIALOG).last.get_by_role(
-                "button", name=self._labels["confirm_delete"], exact=True
-            )
-        if await confirm.count() != 1:
+        confirm = await self._button("confirm_delete", self._page.locator(sel.DIALOG))
+        if confirm is None:
             raise await self._not_found(
                 "delete confirmation", url, "no unique confirm control"
             )
         await confirm.click()
         try:
-            await self._page.locator(sel.DIALOG).first.wait_for(
-                state="detached", timeout=_SAVE_TIMEOUT_MS
-            )
+            await self._dialog().wait_for(state="hidden", timeout=_SAVE_TIMEOUT_MS)
         except Exception:
             raise ProfileEditError(
                 ProfileEditErrorCode.LINKEDIN_SAVE_FAILED,
@@ -438,11 +485,12 @@ def _summary(item: dict[str, Any]) -> ExperienceSummary:
             if i + 1 < len(rest) and not _DATE_RANGE.search(rest[i + 1]):
                 location = rest[i + 1]
             break
-    preview_from = (
-        (rest.index(location) + 1)
-        if location in rest
-        else (rest.index(date_range) + 1 if date_range in rest else len(rest))
-    )
+    if location in rest:
+        preview_from = rest.index(location) + 1
+    elif date_range in rest:
+        preview_from = rest.index(date_range) + 1
+    else:
+        preview_from = len(rest)
     preview = " ".join(rest[preview_from:])[:280] or None
     return ExperienceSummary(
         id=item["id"],
