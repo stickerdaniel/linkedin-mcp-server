@@ -361,9 +361,12 @@ class TestEndToEnd:
         self, page, tmp_path: Path
     ):
         store = ProfileEditStore(tmp_path)
-        svc = lambda writes=True: ProfileEditService(
-            editor(page), store, writes_enabled=lambda: writes, pacing_seconds=0
-        )  # noqa: E731
+
+        def svc(writes: bool = True) -> ProfileEditService:
+            return ProfileEditService(
+                editor(page), store, writes_enabled=lambda: writes, pacing_seconds=0
+            )
+
         cs = await svc().propose(
             Proposal(
                 headline="Senior Product Engineer | React, TypeScript",

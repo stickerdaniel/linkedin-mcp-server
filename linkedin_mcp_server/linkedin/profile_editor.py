@@ -16,7 +16,7 @@ import re
 
 from patchright.async_api import Locator, Page
 
-from linkedin_mcp_server.linkedin import profile_selectors as sel
+import linkedin_mcp_server.linkedin.profile_selectors as sel
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.session import NAV_DELAY, PageSession
 from linkedin_mcp_server.profile_edit.errors import (

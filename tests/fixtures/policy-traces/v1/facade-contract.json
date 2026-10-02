@@ -114,6 +114,30 @@
       "send_message"
     ],
     "tool_schemas": {
+      "apply_profile_changes": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "changeSetId": {
+              "description": "id returned by propose_profile_changes",
+              "type": "string"
+            },
+            "confirm": {
+              "default": false,
+              "description": "must be true; the user's explicit approval",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "changeSetId"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "close_session": {
         "input": {
           "additionalProperties": false,
@@ -148,6 +172,25 @@
           },
           "required": [
             "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "discard_profile_changes": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "changeSetId": {
+              "description": "id returned by propose_profile_changes",
+              "type": "string"
+            }
+          },
+          "required": [
+            "changeSetId"
           ],
           "type": "object"
         },
@@ -350,6 +393,41 @@
           "type": "object"
         }
       },
+      "get_my_editable_profile": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_my_experience": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "experienceId": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional id from this tool or get_my_editable_profile"
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "get_my_profile": {
         "input": {
           "additionalProperties": false,
@@ -381,6 +459,17 @@
               "description": "Comma-separated list of extra sections to read.\nThe main profile page is always included.\nAvailable sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts\nExamples: \"experience,education\", \"contact_info\", \"skills,projects\"\nDefault (None) reads only the main profile page."
             }
           },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_my_skills": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {},
           "type": "object"
         },
         "output": {
@@ -463,6 +552,192 @@
           },
           "required": [
             "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "preview_profile_changes": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "changeSetId": {
+              "description": "id returned by propose_profile_changes",
+              "type": "string"
+            }
+          },
+          "required": [
+            "changeSetId"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "propose_profile_changes": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "changes": {
+              "additionalProperties": true,
+              "description": "headline, about, experiences [{experienceId | match, title,\ndescription}], skills {add, remove}",
+              "properties": {
+                "about": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "experiences": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "description": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "New description, as approved by the user."
+                      },
+                      "experienceId": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "id from get_my_experience. Preferred over match."
+                      },
+                      "match": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "company": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null
+                              },
+                              "startDate": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "description": "Text from the date range, e.g. 'Jan 2021' or '2021'."
+                              },
+                              "title": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null
+                              }
+                            },
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Used only when experienceId is absent; must match exactly one experience."
+                      },
+                      "title": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "New job title, as approved by the user."
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "maxItems": 20,
+                  "type": "array"
+                },
+                "headline": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "skills": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "add": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "maxItems": 20,
+                          "type": "array"
+                        },
+                        "remove": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "maxItems": 20,
+                          "type": "array"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "changes"
           ],
           "type": "object"
         },
