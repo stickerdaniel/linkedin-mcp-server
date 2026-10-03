@@ -64,6 +64,7 @@ Every tool that reads LinkedIn returns `{"url": str, "sections": {name: raw_text
 - `unknown_sections`: section names the caller asked for that do not exist.
 - `job_ids`: returned by `search_jobs` and `get_saved_jobs`.
 - `total` and `promoted_job_ids`: returned by `search_jobs`. `total` is `{count, exact}`, the result count LinkedIn advertises. `promoted_job_ids` is the promoted subset of `job_ids`.
+- `apply`: returned by `get_job_apply_url` instead of `sections`. `{type, url?}`, where `type` is `easy_apply`, `external`, `applied`, `closed` or `unknown`.
 
 ## Adding a section
 
