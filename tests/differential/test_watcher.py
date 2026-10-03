@@ -433,6 +433,9 @@ class _FakeProcess:
             raise opening
 
     def create_time(self):
+        if "start_seconds" in self._entry:
+            # A modelled slow read, as ``cmdline_seconds``.
+            self._entry["clock"]["now"] += self._entry["start_seconds"]
         return _field(self._entry, "start")
 
     def ppid(self):
@@ -492,6 +495,8 @@ def _sampler(
         # A POSIX process table unless a test models Windows: the same on
         # every host the suite runs on.
         no_exec=no_exec,
+        # pid 0 is the System Idle Process wherever the table models Windows.
+        idle_pid=0 if no_exec else None,
         # The modelled group, never the real one of a real pid.
         pgid_of=pgid_of
         or (lambda pid: _field({"pgid": (table.get(pid) or {}).get("pgid")}, "pgid")),
@@ -1979,6 +1984,70 @@ def test_a_gap_names_the_file_system_calls_it_overlapped():
         "stop-file checks took 0.0000s over 0 calls and one was still running "
         "after 1.2331s"
     ) in failure
+
+
+def test_on_windows_the_idle_process_does_not_hold_sampling():
+    """psutil answers pid 0's create time on Windows with a query of the whole
+    process table, modelled here as a stall over the gap budget every time."""
+    clock = {"now": 100.0}
+    table: dict[int, dict[str, Any]] = {
+        **_row_actor_table(),
+        80: {"start": 6.5, "ppid": 10, "exe": BROWSER_EXE, "cmdline": _chrome(PROFILE)},
+        0: {
+            "start": 0.0,
+            "ppid": 0,
+            "exe": "",
+            "cmdline": [],
+            "user": "NT AUTHORITY\\SYSTEM",
+            "start_seconds": _STALL,
+            "clock": clock,
+        },
+    }
+    samples = {"n": 0}
+
+    def pids() -> list[int]:
+        samples["n"] += 1
+        return list(table)
+
+    def now() -> float:
+        return clock["now"]
+
+    def sleep(seconds: float) -> None:
+        clock["now"] += seconds
+        # Lets the stop-file thread run.
+        time.sleep(0)
+
+    sampler = _sampler(
+        table, root=10, no_exec=True, timer=now, clock=now, cpu=lambda: 0.0, pids=pids
+    )
+    tracker = Tracker()
+    loop = watcher.observe(
+        sampler,
+        tracker,
+        io.StringIO(),
+        lambda: samples["n"] >= 8,
+        base={},
+        interval=_INTERVAL,
+        deadline=1000.0,
+        timer=now,
+        monotonic=now,
+        wall=now,
+        sleep=sleep,
+        cpu=lambda: 0.0,
+        stop_poll=0.001,
+    )
+    summary: dict[str, Any] = {**loop, **sampler.stats()}
+    assert summary["max_gap_seconds"] < harness.MAX_WATCHER_GAP_SECONDS
+    assert (
+        watcher_failures(
+            summary,
+            actors_began=summary["observation_start"],
+            actors_ended=summary["observation_end"],
+        )
+        == []
+    )
+    # Still watching the row: its browser is the profile's one root.
+    assert tracker.max_roots == {canonical_user_data_dir(PROFILE): 1}
 
 
 # --- File-system calls stay off the sampling path ----------------------------------

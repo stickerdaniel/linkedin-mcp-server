@@ -181,6 +181,15 @@ SAMPLE_SECONDS = 0.05
 #: outside this oracle.
 NO_EXEC = os.name == "nt"
 
+#: The pid the watcher never opens, on Windows only: pid 0 is the System Idle
+#: Process, which is never a browser and never recycled. psutil cannot read its
+#: times there, so its create time falls back to a snapshot of every process on
+#: the system (``NtQuerySystemInformation``). Each sample opens a fresh
+#: ``psutil.Process``, so no create time is cached and that system-wide query
+#: ran in every sample, where a loaded runner can stall it past the gap budget.
+#: Linux lists no pid 0, and macOS reads its ``kernel_task`` directly.
+IDLE_PID: int | None = 0 if os.name == "nt" else None
+
 #: The scheduling class the watcher asks for, on Windows only: POSIX lets an
 #: unprivileged process lower its priority but not raise it. A burst of process
 #: starts on a Windows runner, such as the Node driver's launch, has kept a
@@ -698,7 +707,8 @@ class Sampler:
     process table. *browser_exe* and *browser_dir* name what the row's browser
     runs. *user* is the harness's user, as *user_of* reports it. *no_exec*
     says whether a process's program is fixed for its lifetime, which is
-    Windows's by default and set in tests to model either platform. *pgid_of*
+    Windows's by default and set in tests to model either platform. *idle_pid*
+    is a listed pid that is skipped rather than opened (``IDLE_PID``). *pgid_of*
     reads a process's group, ``os.getpgid`` by default. *read_markers* says
     whether browser markers are read (``READ_MARKERS``). *timer* times each
     read and phase, ``time.perf_counter`` by default, and *cpu* is the
@@ -719,6 +729,7 @@ class Sampler:
         browser_exe: str | None = None,
         browser_dir: str | None = None,
         no_exec: bool = NO_EXEC,
+        idle_pid: int | None = IDLE_PID,
         pgid_of: Callable[[int], int | None] = posix_pgid,
         read_markers: bool = READ_MARKERS,
         timer: Callable[[], float] = time.perf_counter,
@@ -735,6 +746,7 @@ class Sampler:
         #: The process groups at the first sample.
         self.baseline_pgids: list[int] = []
         self.no_exec = no_exec
+        self.idle_pid = idle_pid
         self._pgid_of = pgid_of
         self.read_markers = read_markers
         self.own_pid = os.getpid() if own_pid is None else own_pid
@@ -1028,7 +1040,10 @@ class Sampler:
         self.began_at = self._clock()
         self.last_pid_at_begin = self._in_phase("last_pid", self._last_pid)
         cpu["last_pid"] = self._cpu()
-        pids = self._in_phase("enumeration", lambda: list(self._pids()))
+        pids = self._in_phase(
+            "enumeration",
+            lambda: [pid for pid in self._pids() if pid != self.idle_pid],
+        )
         cpu["enumeration"] = self._cpu()
         self._slowest = None
         first = self._baseline is None
