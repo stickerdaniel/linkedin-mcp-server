@@ -115,7 +115,7 @@
       "kind": "wait_for_function",
       "operation": "profile_message_target_ready",
       "program_digest": "d156e406f6bb",
-      "timeout_ms": 1000
+      "timeout_ms": 10000
     },
     {
       "call": "read_person",
