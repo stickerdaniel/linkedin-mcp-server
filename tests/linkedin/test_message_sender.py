@@ -90,6 +90,13 @@ class TestMessageTargetUrls:
             ("https://www.linkedin.com/in/testuser/edit/intro/", None),
             ("https://www.linkedin.com/in/testuser%2Fedit/", None),
             ("https://www.linkedin.com/in/testuser/?trk=profile", None),
+            # The 2026 profile page lands on this flag; it is the only query allowed.
+            (
+                "https://www.linkedin.com/in/testuser/?isSelfProfile=false",
+                "/in/testuser/",
+            ),
+            ("https://www.linkedin.com/in/testuser/?isSelfProfile=true", None),
+            ("https://www.linkedin.com/in/testuser/?isSelfProfile=false&trk=x", None),
             ("https://www.linkedin.com/in/testuser/#details", None),
         ],
     )
