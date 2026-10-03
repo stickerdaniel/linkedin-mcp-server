@@ -1953,6 +1953,17 @@ def _a_buried_browser_job() -> Any:
     return cast(Any, SimpleNamespace(closed=True, drained=True))
 
 
+def _modelled_pids(count: int) -> list[int]:
+    """Ids for the processes a Win32 double models, none of them this one.
+
+    The drain spares ``os.getpid()`` by design, so a fixed constant such as 700
+    could collide with the worker running the test and take the exclusion
+    branch instead of the one under test. Only the doubles ever see these.
+    """
+    current = os.getpid()
+    return [current + offset for offset in range(1, count + 1)]
+
+
 def test_windows_marker_drain_spares_the_owner_and_its_other_jobs(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1966,7 +1977,8 @@ def test_windows_marker_drain_spares_the_owner_and_its_other_jobs(
     sit and where any concurrent browser launch now sits too.
     """
     current = os.getpid()
-    queries = iter([(current, 700, 800), (current, 800)])
+    browser, installer = _modelled_pids(2)
+    queries = iter([(current, browser, installer), (current, installer)])
     terminated: list[int] = []
 
     class ProcessHandle:
@@ -2000,7 +2012,7 @@ def test_windows_marker_drain_spares_the_owner_and_its_other_jobs(
         @staticmethod
         def IsProcessInJob(handle: ProcessHandle, job: Any) -> bool:
             if job == "installer-job":
-                return handle.process == 800
+                return handle.process == installer
             return True
 
     monkeypatch.setattr(process_tree, "_IS_WINDOWS", True)
@@ -2021,13 +2033,14 @@ def test_windows_marker_drain_spares_the_owner_and_its_other_jobs(
         )
         is True
     )
-    assert terminated == [700]
+    assert terminated == [browser]
 
 
 def test_windows_marker_drain_reports_a_member_that_stays(
     monkeypatch: pytest.MonkeyPatch,
 ):
     current = os.getpid()
+    (member,) = _modelled_pids(1)
     terminated: list[int] = []
 
     class ProcessHandle:
@@ -2055,7 +2068,7 @@ def test_windows_marker_drain_reports_a_member_that_stays(
 
         @staticmethod
         def QueryInformationJobObject(handle: int, information: int) -> tuple[int, ...]:
-            return (current, 700)
+            return (current, member)
 
         @staticmethod
         def IsProcessInJob(handle: ProcessHandle, job: Any) -> bool:
@@ -2075,21 +2088,21 @@ def test_windows_marker_drain_reports_a_member_that_stays(
         )
         is False
     )
-    assert terminated == [700]
+    assert terminated == [member]
 
 
 @pytest.mark.parametrize(
-    ("installer", "terminated_expected", "proved_expected"),
+    ("installer", "ended_expected", "proved_expected"),
     [
-        ("claims", [], True),
-        ("raises", [], False),
-        ("declines", [700], True),
+        ("claims", False, True),
+        ("raises", False, False),
+        ("declines", True, True),
     ],
 )
 def test_windows_marker_drain_ends_only_a_member_every_held_job_declined(
     monkeypatch: pytest.MonkeyPatch,
     installer: str,
-    terminated_expected: list[int],
+    ended_expected: bool,
     proved_expected: bool,
 ):
     """Membership in another held Job is a three-way answer.
@@ -2101,6 +2114,7 @@ def test_windows_marker_drain_ends_only_a_member_every_held_job_declined(
     unproven at its deadline. Only a member every held Job declined is ended.
     """
     current = os.getpid()
+    (member,) = _modelled_pids(1)
     terminated: list[int] = []
     asked: list[str] = []
     clock = SimpleNamespace(now=0.0)
@@ -2131,7 +2145,7 @@ def test_windows_marker_drain_ends_only_a_member_every_held_job_declined(
         @staticmethod
         def QueryInformationJobObject(handle: int, information: int) -> tuple[int, ...]:
             # The member leaves the Job only if something terminates it.
-            return (current,) if terminated else (current, 700)
+            return (current,) if terminated else (current, member)
 
         @staticmethod
         def IsProcessInJob(handle: ProcessHandle, job: Any) -> bool:
@@ -2173,7 +2187,7 @@ def test_windows_marker_drain_ends_only_a_member_every_held_job_declined(
         pytest.fail("the installer Job was never asked about the member")
     if installer != "claims" and "launch-job" not in asked:
         pytest.fail("the other held Job was never asked about the member")
-    assert terminated == terminated_expected
+    assert terminated == ([member] if ended_expected else [])
     assert proved is proved_expected
 
 
@@ -2681,7 +2695,8 @@ def test_adopted_windows_job_revalidates_process_membership(
     monkeypatch: pytest.MonkeyPatch,
 ):
     current = os.getpid()
-    queries = iter([(current, 700), (current,)])
+    (outsider,) = _modelled_pids(1)
+    queries = iter([(current, outsider), (current,)])
     terminated: list[int] = []
 
     class ProcessHandle:

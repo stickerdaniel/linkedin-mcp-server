@@ -4238,26 +4238,43 @@ class TestPatchrightInstallStreaming:
             assert prefix == "linkedin-mcp-installer-"
             assert dir == Path(tempfile.gettempdir()).resolve()
             blocked.set()
-            release.wait()
+            # Bounded, so a version that ran this on the event loop stalls the
+            # loop for a while instead of hanging the suite.
+            release.wait(2.0)
             private.mkdir()
             created.set()
             return str(private)
 
         monkeypatch.setattr(bootstrap.tempfile, "mkdtemp", slow_temporary_root)
         self._patch_proc(monkeypatch, [], 0)
-        fallback = threading.Timer(0.2, release.set)
-        fallback.start()
-        started = asyncio.get_running_loop().time()
+        loop = asyncio.get_running_loop()
+        installing = asyncio.create_task(
+            bootstrap._run_patchright_install("--no-shell")
+        )
         try:
+            # The worker thread starts on the scheduler's time, not the
+            # test's. The timeout is measured from inside the blocked creation,
+            # because a 10ms budget spent before the worker even ran says
+            # nothing about whether that creation can hold the loop.
+            entry_deadline = loop.time() + 1.0
+            while not blocked.is_set():
+                assert loop.time() < entry_deadline, "the root creation never began"
+                await asyncio.sleep(0.001)
+            assert not created.is_set(), "the root was created on the event loop"
+            started = loop.time()
             with pytest.raises(TimeoutError):
                 async with asyncio.timeout(0.01):
-                    await bootstrap._run_patchright_install("--no-shell")
+                    await installing
+            elapsed = loop.time() - started
+            assert not created.is_set(), "the timeout waited for the root"
         finally:
             release.set()
-            fallback.cancel()
+            if not installing.done():
+                installing.cancel()
+            await asyncio.wait({installing}, timeout=1.0)
 
-        assert blocked.is_set()
-        assert asyncio.get_running_loop().time() - started < 0.1
+        assert installing.done()
+        assert elapsed < 0.1, f"the timeout took {elapsed:.3f}s"
         assert await asyncio.to_thread(created.wait, 1.0)
         for _ in range(100):
             if not private.exists():
