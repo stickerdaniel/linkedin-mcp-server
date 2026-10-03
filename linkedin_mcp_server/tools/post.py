@@ -113,3 +113,60 @@ def register_post_tools(
                 raise_tool_error(relogin_exc, "search_posts")
         except Exception as e:
             raise_tool_error(e, "search_posts")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Post Comment",
+        tags={"post", "comment", "write"},
+    )
+    async def post_comment(
+        post_permalink: str,
+        comment_text: str,
+        ctx: Context,
+        confirm_post: bool = True,
+    ) -> dict[str, Any]:
+        """
+        Post a comment to a LinkedIn post via browser UI automation.
+
+        Navigates to the post permalink, focuses the comment editor, enters
+        the comment text, and clicks the submit Comment button.
+
+        Args:
+            post_permalink: Post URL, activity URN, or permalink slug.
+                Accepts full URL (e.g. "https://www.linkedin.com/posts/..."),
+                activity feed URL, or activity URN.
+            comment_text: The comment text to submit.
+            ctx: FastMCP context for progress reporting.
+            confirm_post: Must be True to submit (safety gate). False performs
+                dry-run validation without submitting.
+
+        Returns:
+            Dict with url, status ("posted" or "confirmation_required"),
+            confirmed (bool), and comment_text.
+        """
+        try:
+            extractor = await get_ready_extractor(ctx, tool_name="post_comment")
+            logger.info("Posting comment to %s", post_permalink)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Preparing comment"
+            )
+
+            result = await extractor.post_comment(
+                post_permalink,
+                comment_text,
+                confirm_post=confirm_post,
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+            return result
+
+        except ToolError:
+            raise
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "post_comment")
+        except Exception as e:
+            raise_tool_error(e, "post_comment")  # NoReturn
