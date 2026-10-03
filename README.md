@@ -369,7 +369,7 @@ codex plugin add linkedin-mcp-server@linkedin-mcp-server
 The plugin pins a server release, and Codex picks up each new one in the background when it starts. On the first tool call that needs authentication, the server reuses a LinkedIn session from a signed-in local browser or opens a login window.
 
 > [!NOTE]
-> Until browser setup or sign-in finishes, tool calls may report that it is still in progress. Retry once it completes.
+> Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. Retry the tool call once the browser download or sign-in completes.
 
 <br/>
 <br/>
