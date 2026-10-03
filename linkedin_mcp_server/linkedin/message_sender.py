@@ -129,7 +129,9 @@ _PROFILE_MESSAGE_TARGET_JS = r"""() => {
 _PROFILE_MESSAGE_TARGET_READY_JS = (
     f"() => ({_PROFILE_MESSAGE_TARGET_JS})().status === 'resolved'"
 )
-_PROFILE_MESSAGE_TARGET_TIMEOUT_MS = 1_000
+# The redesigned profile page (2026) renders its top card a few seconds after
+# navigation; one second resolved nothing there.
+_PROFILE_MESSAGE_TARGET_TIMEOUT_MS = 10_000
 _MESSAGE_SUBMIT_READY_TIMEOUT_MS = 1_000
 _MESSAGE_CLEANUP_TIMEOUT_SECONDS = 1.0
 
@@ -1097,12 +1099,21 @@ def _normalize_profile_urn(value: str | None) -> str | None:
     return candidate.removeprefix(_PROFILE_URN_PREFIX)
 
 
+# The 2026 profile page lands on /in/<name>/?isSelfProfile=false. That flag is
+# the only query a profile route may carry; any other still refuses.
+_BENIGN_PROFILE_QUERIES = {"", "isSelfProfile=false"}
+
+
 def _profile_path_from_url(value: str) -> str | None:
     parsed = _safe_linkedin_url(value)
-    if parsed is None or parsed.query or not _PROFILE_PATH_RE.fullmatch(parsed.path):
+    if (
+        parsed is None
+        or parsed.query not in _BENIGN_PROFILE_QUERIES
+        or not _PROFILE_PATH_RE.fullmatch(parsed.path)
+    ):
         return None
     try:
-        username = normalize_person_identifier(value)
+        username = normalize_person_identifier(parsed._replace(query="").geturl())
     except LinkedInOperationError:
         return None
     canonical_path = urlparse(person_profile_url(username, "/")).path
