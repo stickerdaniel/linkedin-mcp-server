@@ -903,11 +903,14 @@ class TestARealOwnerGoingAway:
     def test_an_idle_owner_exits(self, tmp_path):
         import json
         import os
+        import shutil
         import subprocess
         import sys
         import time as clock
 
         from test_daemon_election import _REPO_ROOT, _alive, _stop
+
+        from linkedin_mcp_server.daemon_descriptor import daemon_dir
 
         profile = tmp_path / "state"
         profile.mkdir()
@@ -937,6 +940,10 @@ class TestARealOwnerGoingAway:
             )
         finally:
             _stop(owner)
+            # The owner derives its state from the account, not from anything
+            # this test can redirect, so remove the directory it keyed by
+            # tmp_path.
+            shutil.rmtree(daemon_dir(profile.parent), ignore_errors=True)
 
 
 class TestTheMarkerSurvivesTheRealClient:
