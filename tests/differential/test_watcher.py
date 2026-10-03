@@ -18,6 +18,7 @@ from __future__ import annotations
 import errno
 import io
 import json
+import math
 import os
 import re
 import subprocess
@@ -2004,6 +2005,7 @@ def test_on_windows_the_idle_process_does_not_hold_sampling():
         },
     }
     samples = {"n": 0}
+    seen = threading.Event()
 
     def pids() -> list[int]:
         samples["n"] += 1
@@ -2012,10 +2014,20 @@ def test_on_windows_the_idle_process_does_not_hold_sampling():
     def now() -> float:
         return clock["now"]
 
+    def stop_requested() -> bool:
+        if samples["n"] < 8:
+            return False
+        seen.set()
+        return True
+
     def sleep(seconds: float) -> None:
         clock["now"] += seconds
-        # Lets the stop-file thread run.
-        time.sleep(0)
+        # The stop-file thread runs in real time, however late it is
+        # scheduled, while modelled time costs the loop nothing. Held here
+        # until that thread has seen the request, the loop does not spin
+        # through samples meanwhile.
+        if samples["n"] >= 8:
+            seen.wait(10)
 
     sampler = _sampler(
         table, root=10, no_exec=True, timer=now, clock=now, cpu=lambda: 0.0, pids=pids
@@ -2025,10 +2037,12 @@ def test_on_windows_the_idle_process_does_not_hold_sampling():
         sampler,
         tracker,
         io.StringIO(),
-        lambda: samples["n"] >= 8,
+        stop_requested,
         base={},
         interval=_INTERVAL,
-        deadline=1000.0,
+        # Out of reach, so the stop always comes from the stop-file thread,
+        # as the row judgement requires.
+        deadline=math.inf,
         timer=now,
         monotonic=now,
         wall=now,
