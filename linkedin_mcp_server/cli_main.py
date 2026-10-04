@@ -384,7 +384,14 @@ def clear_profile_and_exit() -> None:
 
     # Before asking: what the user agrees to delete is the session there now,
     # and the deletion checks it is still that one once the profile is held.
-    confirmed = session_state.auth_state_identity(get_profile_dir())
+    try:
+        confirmed = session_state.auth_state_identity(get_profile_dir())
+    except OSError as e:
+        print(
+            "❌ The stored LinkedIn session could not be read to tell what would "
+            f"be cleared ({type(e).__name__}). Nothing was deleted."
+        )
+        sys.exit(1)
 
     print(f"🔑 Clear LinkedIn authentication state from {auth_root}?")
 

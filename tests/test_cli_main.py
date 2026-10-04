@@ -2171,6 +2171,42 @@ class TestRetiringASharedBrowser:
         assert "changed after you confirmed" in out
         assert "cleared successfully" not in out
 
+    def test_a_session_it_cannot_read_before_asking_is_left_alone(self, capsys):
+        # State from before login generations, so the cookie file's own stat is
+        # what identifies it, and that stat fails.
+        from pathlib import Path
+
+        from linkedin_mcp_server.session_state import (
+            portable_cookie_path,
+            source_state_path,
+        )
+
+        self.config.server.daemon_enabled = False
+        self._seed_session()
+        source_state_path(self.profile).unlink(missing_ok=True)
+        cookies = portable_cookie_path(self.profile)
+        cookies.write_text("[]")
+        real_stat = Path.stat
+
+        def refuse(path: Path, *args, **kwargs):
+            if path.name == cookies.name:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_stat(path, *args, **kwargs)
+
+        self.monkeypatch.setattr(Path, "stat", refuse)
+        self.monkeypatch.setattr(
+            "builtins.input", lambda _prompt="": pytest.fail("asked anyway")
+        )
+
+        assert self._logout() == 1
+
+        self.monkeypatch.setattr(Path, "stat", real_stat)
+        assert cookies.exists()
+        assert (self.profile / "Default" / "Cookies").exists()
+        out = capsys.readouterr().out
+        assert "could not be read" in out
+        assert "Nothing was deleted" in out
+
     def test_a_session_signed_in_during_the_handover_survives(self, capsys):
         # The retiring browser lets go, and another client gets in first.
         import threading
