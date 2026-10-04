@@ -348,7 +348,7 @@
       "call": "search_jobs",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5",
+      "program_digest": "bf2d4eeeaa95",
       "section": "search_results"
     },
     {

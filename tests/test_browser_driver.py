@@ -10,6 +10,7 @@ import pytest
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.core.exceptions import (
     AccountRestrictedError,
+    OffLinkedInLandingError,
     ProxyConnectionError,
 )
 from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
@@ -1368,6 +1369,129 @@ class TestFeedFailureDoesNotLeakCredentials:
         assert not any("s3cr3t" in trace for trace in traces)
         assert "s3cr3t" not in caplog.text
         assert "acctzone9" not in caplog.text
+
+
+class TestTheFeedCheckNeedsLinkedInsFeed:
+    """Only the feed itself, served by LinkedIn, proves the session.
+
+    A False here makes the caller retire the profile and open a login, so a
+    page LinkedIn did not serve has to raise instead: the session says nothing
+    about the network in front of it.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "landing",
+        [
+            "https://portal.invalid/interstitial",
+            # Every title and route a LinkedIn sign-in has, on someone else's host.
+            "https://portal.invalid/login",
+            "https://linkedin.com.filter.example/feed/",
+            "about:blank",
+        ],
+    )
+    async def test_a_landing_off_linkedin_raises_instead_of_failing_auth(
+        self, landing: str
+    ):
+        browser = _make_mock_browser()
+        browser.page.url = landing
+        browser.page.title = AsyncMock(return_value="LinkedIn Login")
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as remember_me,
+            pytest.raises(OffLinkedInLandingError),
+        ):
+            await _feed_auth_succeeds(browser)
+
+        remember_me.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_survives_the_remember_me_retry(self):
+        # The retry runs inside the try whose handler answers False, so its
+        # refusal would otherwise become an auth failure there.
+        browser = _make_mock_browser()
+
+        async def land_on_the_portal(*_args, **_kwargs) -> bool:
+            browser.page.url = "https://portal.invalid/interstitial"
+            return True
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                side_effect=land_on_the_portal,
+            ),
+            pytest.raises(OffLinkedInLandingError),
+        ):
+            await _feed_auth_succeeds(browser)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "landing",
+        [
+            "https://www.linkedin.com/",
+            "https://www.linkedin.com/feedback/",
+            "https://www.linkedin.com/in/testuser/",
+        ],
+    )
+    async def test_a_linkedin_page_other_than_the_feed_is_not_a_session(
+        self, landing: str
+    ):
+        browser = _make_mock_browser()
+        browser.page.url = landing
+
+        with patch(
+            "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+            new_callable=AsyncMock,
+            return_value=False,
+        ):
+            assert await _feed_auth_succeeds(browser) is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "landing",
+        [
+            "https://www.linkedin.com/feed/",
+            "https://www.linkedin.com/feed/?trk=guest_homepage",
+            "https://de.linkedin.com/feed/",
+        ],
+    )
+    async def test_the_feed_is(self, landing: str):
+        browser = _make_mock_browser()
+        browser.page.url = landing
+
+        with patch(
+            "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+            new_callable=AsyncMock,
+            return_value=False,
+        ):
+            assert await _feed_auth_succeeds(browser) is True
+
+    @pytest.mark.asyncio
+    async def test_startup_keeps_the_session_behind_a_portal(self, tmp_path):
+        """The startup check reports the portal, not a stored profile gone bad."""
+        _write_source_state(tmp_path, runtime_id="macos-arm64-host")
+        source_browser = _make_mock_browser()
+        source_browser.page.url = "https://portal.invalid/interstitial"
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.get_runtime_id",
+                return_value="macos-arm64-host",
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.BrowserManager",
+                return_value=source_browser,
+            ),
+            pytest.raises(OffLinkedInLandingError, match="portal.invalid"),
+        ):
+            await get_or_create_browser()
+
+        source_browser.close.assert_awaited()
 
 
 class TestTheCookieExportCannotStrandTheProfile:

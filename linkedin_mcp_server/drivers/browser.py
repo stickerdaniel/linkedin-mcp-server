@@ -13,17 +13,21 @@ import time
 from pathlib import Path
 from collections.abc import Coroutine
 from typing import Any, TypeVar
+from urllib.parse import urlsplit
 
 from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
 from linkedin_mcp_server.core import (
     AuthenticationError,
     BrowserManager,
+    OffLinkedInLandingError,
     await_deferring_cancels,
     detect_auth_barrier_quick,
     detect_rate_limit,
     goto_reporting_proxy_errors,
+    is_linkedin_landing,
     is_logged_in,
     proxy_hint,
+    raise_if_off_linkedin,
     raise_if_proxy_configured,
     redact_proxy_credentials,
     raise_if_proxy_error,
@@ -184,12 +188,23 @@ async def _log_feed_failure_context(
     )
 
 
+def _is_feed_route(url: str) -> bool:
+    """Return whether a LinkedIn address is the feed itself."""
+    path = urlsplit(url).path
+    return path == "/feed" or path.startswith("/feed/")
+
+
 async def _feed_auth_succeeds(
     browser: BrowserManager,
     *,
     allow_remember_me: bool = True,
 ) -> bool:
-    """Validate that /feed/ loads without an auth barrier."""
+    """Validate that /feed/ loads without an auth barrier.
+
+    Raises:
+        OffLinkedInLandingError: When the navigation ended on a page LinkedIn
+            did not serve, which says nothing about the session.
+    """
     try:
         await goto_reporting_proxy_errors(
             browser.page,
@@ -202,6 +217,13 @@ async def _feed_auth_succeeds(
             "feed-after-goto",
             extra={"allow_remember_me": allow_remember_me},
         )
+        # Raised, never answered with False: False makes the caller retire the
+        # profile and open a login through the portal that is in the way.
+        # Ahead of the remember-me click and the barrier check, which read an
+        # id and a title any page can carry.
+        if not is_linkedin_landing(browser.page.url):
+            await record_page_trace(browser.page, "feed-off-linkedin")
+            raise_if_off_linkedin(browser.page.url)
         if allow_remember_me:
             if await resolve_remember_me_prompt(browser.page):
                 await stabilize_navigation("remember-me resolution", logger)
@@ -220,7 +242,17 @@ async def _feed_auth_succeeds(
             )
             await _log_feed_failure_context(browser, barrier)
             return False
+        # A signed-out session is sent to the root or a guest route without
+        # any barrier the check above knows, so arriving anywhere but the feed
+        # is not proof of a session.
+        if not _is_feed_route(browser.page.url):
+            await record_page_trace(browser.page, "feed-route-missed")
+            await _log_feed_failure_context(browser, "landed off the feed route")
+            return False
         return True
+    except OffLinkedInLandingError:
+        # Also the recursive retries' refusal, which runs inside this try.
+        raise
     except Exception as exc:
         # Before anything else: a proxy fault is not a dead session. Returning
         # False here would have the caller retire a valid profile and tell the

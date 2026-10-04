@@ -271,6 +271,60 @@ async def test_detect_auth_barrier_ignores_auth_substrings_in_slugs():
     assert result is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://portal.invalid/login",
+        "https://portal.invalid/checkpoint/challenge/",
+        "https://linkedin.com.filter.example/authwall",
+        "about:blank",
+    ],
+)
+async def test_a_login_page_linkedin_did_not_serve_is_not_a_barrier(url: str):
+    """A filter page can copy LinkedIn's title, route and picker id.
+
+    Reporting it as a barrier ends in a retired session and a login opened
+    through the very page that is in the way.
+    """
+    page = _barrier_page(picker=True)
+    page.url = url
+    page.title = AsyncMock(return_value="LinkedIn Login, Sign in | LinkedIn")
+    page.evaluate = AsyncMock(
+        return_value="Welcome Back\nSign in using another account\nJoin now"
+    )
+
+    assert await detect_auth_barrier_quick(page) is None
+    assert await detect_auth_barrier(page) is None
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_restriction_route_is_not_a_restricted_account():
+    page = _barrier_page()
+    page.url = "https://portal.invalid/login/login-restriction/"
+    page.title = AsyncMock(return_value="LinkedIn")
+    page.evaluate = AsyncMock(return_value="")
+
+    assert await detect_auth_barrier(page) is None
+
+
+@pytest.mark.asyncio
+async def test_the_remember_me_button_is_not_clicked_on_a_foreign_page():
+    page = MagicMock()
+    page.url = "https://portal.invalid/login"
+    target = MagicMock()
+    target.wait_for = AsyncMock()
+    target.scroll_into_view_if_needed = AsyncMock()
+    target.click = AsyncMock()
+    target.first = target
+    page.locator.return_value = target
+    page.wait_for_selector = AsyncMock()
+    page.wait_for_load_state = AsyncMock()
+
+    assert await resolve_remember_me_prompt(page) is False
+    target.click.assert_not_awaited()
+
+
 _RESTRICTION_URLS = [
     # The route measured on 2026-09-27.
     "https://www.linkedin.com/flagship-web/login/login-restriction/",
@@ -324,6 +378,7 @@ async def test_near_misses_of_the_restriction_route(url: str, barrier: str | Non
 @pytest.mark.asyncio
 async def test_resolve_remember_me_prompt_clicks_saved_account():
     page = MagicMock()
+    page.url = "https://www.linkedin.com/login"
     target = MagicMock()
     target.wait_for = AsyncMock()
     target.scroll_into_view_if_needed = AsyncMock()
@@ -343,6 +398,7 @@ async def test_resolve_remember_me_prompt_clicks_saved_account():
 @pytest.mark.asyncio
 async def test_resolve_remember_me_prompt_returns_false_when_absent():
     page = MagicMock()
+    page.url = "https://www.linkedin.com/login"
     page.wait_for_selector = AsyncMock(side_effect=Exception("missing"))
 
     result = await resolve_remember_me_prompt(page)
@@ -353,6 +409,7 @@ async def test_resolve_remember_me_prompt_returns_false_when_absent():
 @pytest.mark.asyncio
 async def test_resolve_remember_me_prompt_returns_false_when_button_is_not_visible():
     page = MagicMock()
+    page.url = "https://www.linkedin.com/login"
     target = MagicMock()
     target.wait_for = AsyncMock(side_effect=PlaywrightTimeoutError("not visible"))
     locator = MagicMock()
@@ -754,3 +811,13 @@ async def test_wait_for_manual_login_stops_on_a_restricted_account(
         await asyncio.wait_for(wait_for_manual_login(page, timeout=0), timeout=3)
 
     assert asyncio.get_running_loop().time() - started < 0.5
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_tab_on_the_restriction_path_does_not_end_the_login():
+    """Only LinkedIn can restrict the account; another site's path says nothing."""
+    page = _manual_login_page()
+    page.context.cookies = AsyncMock(return_value=[{"name": "li_at", "value": "t"}])
+    page.context.pages = [page, _tab("https://portal.invalid/login/login-restriction/")]
+
+    await asyncio.wait_for(wait_for_manual_login(page, timeout=0), timeout=3)

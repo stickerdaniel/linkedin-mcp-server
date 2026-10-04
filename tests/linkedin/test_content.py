@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
+import pytest
+
+from linkedin_mcp_server.core.exceptions import OffLinkedInLandingError
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.session import PageSession
 
@@ -55,3 +58,34 @@ async def test_the_caller_selectors_reach_the_page_unchanged(mock_page):
     assert await_args.args[1] == {
         "selectors": ["dialog[open]", ".artdeco-modal__content"]
     }
+
+
+async def test_the_read_judges_the_document_it_read_not_the_driver(mock_page):
+    """The driver still names LinkedIn; the document that was read does not."""
+    mock_page.url = "https://www.linkedin.com/in/testuser/"
+    mock_page.evaluate = AsyncMock(
+        return_value={
+            "source": "root",
+            "text": "OFFLINE INTERSTITIAL, NOT A PROFILE",
+            "references": [],
+            "url": "https://portal.invalid/interstitial",
+        }
+    )
+
+    with pytest.raises(OffLinkedInLandingError, match="https://portal.invalid"):
+        await _reader(mock_page)._extract_root_content(["main"])
+
+
+async def test_a_linkedin_document_is_returned_in_the_existing_shape(mock_page):
+    mock_page.evaluate = AsyncMock(
+        return_value={
+            "source": "root",
+            "text": "Sample profile text",
+            "references": [],
+            "url": "https://de.linkedin.com/in/testuser/",
+        }
+    )
+
+    result = await _reader(mock_page)._extract_root_content(["main"])
+
+    assert result == {"source": "root", "text": "Sample profile text", "references": []}

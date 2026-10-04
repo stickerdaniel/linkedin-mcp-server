@@ -11,6 +11,7 @@ import pytest
 from linkedin_mcp_server.core.exceptions import (
     AccountRestrictedError,
     AuthenticationError,
+    OffLinkedInLandingError,
     ProxyConnectionError,
 )
 from linkedin_mcp_server.linkedin import session as session_module
@@ -18,7 +19,7 @@ from linkedin_mcp_server.linkedin.capture import SectionCapture
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.session import PageSession
-from .support.navigation import navigate
+from .support.navigation import navigate, with_document_identity
 
 
 def _recorders_registered(page) -> list:
@@ -771,3 +772,120 @@ class TestARestrictedAccountStopsTheRead:
                 "https://www.linkedin.com/company/testco/posts/",
                 section_name="posts",
             )
+
+
+class TestALandingOffLinkedInStopsTheRead:
+    """A portal or filter answering in LinkedIn's place is not the page asked for."""
+
+    @pytest.mark.parametrize(
+        "landing",
+        [
+            "https://portal.invalid/login",
+            "https://linkedin.com.filter.example/in/testuser/",
+            "about:blank",
+        ],
+    )
+    async def test_the_navigation_refuses_it_before_any_auth_check(
+        self, mock_page, landing: str
+    ):
+        # What a LinkedIn sign-in page would show, so only the host can tell
+        # the two apart.
+        mock_page.title = AsyncMock(return_value="LinkedIn Login")
+
+        async def land_off_linkedin(*_args, **_kwargs):
+            navigate(mock_page, landing)
+
+        mock_page.goto = AsyncMock(side_effect=land_off_linkedin)
+        navigator = PageNavigator(PageSession(mock_page))
+
+        with (
+            patch(
+                "linkedin_mcp_server.linkedin.navigation.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as remember_me,
+            pytest.raises(OffLinkedInLandingError) as excinfo,
+        ):
+            await navigator._navigate_to_page("https://www.linkedin.com/in/testuser/")
+
+        assert not isinstance(excinfo.value, AuthenticationError)
+        remember_me.assert_not_awaited()
+        assert mock_page.goto.await_count == 1
+
+    async def test_a_redirect_after_navigation_is_refused_at_the_read(self, mock_page):
+        """Navigation saw LinkedIn; the document read afterwards was the portal's."""
+        mock_page.evaluate = with_document_identity(
+            mock_page,
+            AsyncMock(
+                return_value={
+                    "source": "root",
+                    "text": "OFFLINE INTERSTITIAL, NOT A PROFILE",
+                    "references": [],
+                    "url": "https://portal.invalid/interstitial",
+                }
+            ),
+        )
+        session = PageSession(mock_page)
+        capture = SectionCapture(
+            session, PageNavigator(session), PageContentReader(session)
+        )
+
+        with (
+            patch.object(session_module, "scroll_to_bottom", new_callable=AsyncMock),
+            patch.object(session_module, "detect_rate_limit", new_callable=AsyncMock),
+            pytest.raises(OffLinkedInLandingError, match="portal.invalid"),
+        ):
+            await capture.extract_page(
+                "https://www.linkedin.com/in/testuser/", section_name="main_profile"
+            )
+
+    async def test_a_read_the_redirect_cut_short_reports_where_it_went(self, mock_page):
+        """The redirect lands mid-read and takes the read's context with it."""
+
+        async def leave_mid_read(script, *_args, **_kwargs):
+            if "timeOrigin" in script:
+                return mock_page.time_origin
+            # Only the content read, after navigation has judged the page.
+            if "selectors" not in script:
+                return ""
+            navigate(mock_page, "https://portal.invalid/interstitial")
+            raise PatchrightError(
+                "Page.evaluate: Execution context was destroyed, most likely "
+                "because of a navigation."
+            )
+
+        mock_page.evaluate = AsyncMock(side_effect=leave_mid_read)
+        session = PageSession(mock_page)
+        capture = SectionCapture(
+            session, PageNavigator(session), PageContentReader(session)
+        )
+
+        with (
+            patch.object(session_module, "scroll_to_bottom", new_callable=AsyncMock),
+            patch.object(session_module, "detect_rate_limit", new_callable=AsyncMock),
+            pytest.raises(OffLinkedInLandingError, match="portal.invalid"),
+        ):
+            await capture.extract_page(
+                "https://www.linkedin.com/in/testuser/", section_name="main_profile"
+            )
+
+    async def test_a_request_that_failed_outright_keeps_its_own_error(self, mock_page):
+        """The browser's error page is the failure itself, not a portal."""
+
+        async def fail_to_resolve(*_args, **_kwargs):
+            navigate(mock_page, "chrome-error://chromewebdata/")
+            raise PatchrightError("net::ERR_NAME_NOT_RESOLVED")
+
+        mock_page.goto = AsyncMock(side_effect=fail_to_resolve)
+        session = PageSession(mock_page)
+        capture = SectionCapture(
+            session, PageNavigator(session), PageContentReader(session)
+        )
+
+        result = await capture.extract_page(
+            "https://www.linkedin.com/in/testuser/", section_name="main_profile"
+        )
+
+        assert result.text == ""
+        assert result.error is not None
+        assert "ERR_NAME_NOT_RESOLVED" in result.error["error_message"]

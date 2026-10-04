@@ -11,6 +11,7 @@ from patchright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
+from .destination import is_linkedin_landing
 from .exceptions import AccountRestrictedError, AuthenticationError
 
 logger = logging.getLogger(__name__)
@@ -127,6 +128,13 @@ async def _detect_auth_barrier(
         AccountRestrictedError: On LinkedIn's account-restriction route, which
             no login can clear and so is not reported as a barrier.
     """
+    # Ahead of every signal below, because none of them names a host: a filter
+    # page titled "LinkedIn Login", or one that happens to carry the picker's
+    # id, would otherwise be reported as LinkedIn asking for a sign-in, and the
+    # recovery for that retires the session. A page LinkedIn did not serve is
+    # the caller's to refuse, through `raise_if_off_linkedin`.
+    if not is_linkedin_landing(page.url):
+        return None
     # Outside the try, which answers every failure with "no barrier". Ahead of
     # the blocker routes, which the bare /login/login-restriction/ also matches.
     _raise_if_account_restricted(page.url)
@@ -215,6 +223,11 @@ async def resolve_remember_me_prompt(page: Page, *, timeout: int | None = None) 
             return None
         return min(default, remaining)
 
+    # Never on a page LinkedIn did not serve: the click below would press
+    # whatever button a portal or filter page put under that id.
+    if not is_linkedin_landing(page.url):
+        return False
+
     try:
         logger.debug("Checking remember-me prompt on %s", page.url)
         try:
@@ -290,7 +303,9 @@ async def resolve_remember_me_prompt(page: Page, *, timeout: int | None = None) 
 
 
 def _is_account_restricted_url(url: str) -> bool:
-    """Return True for LinkedIn's account-restriction route, by path alone."""
+    """Return True for LinkedIn's account-restriction route."""
+    if not is_linkedin_landing(url):
+        return False
     segments = tuple(segment for segment in urlparse(url).path.split("/") if segment)
     return segments[-len(_ACCOUNT_RESTRICTION_PATH_TAIL) :] == (
         _ACCOUNT_RESTRICTION_PATH_TAIL

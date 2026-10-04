@@ -9,12 +9,14 @@ from .auth import (
     resolve_remember_me_prompt,
     wait_for_manual_login,
 )
+from .destination import is_linkedin_landing, raise_if_off_linkedin
 from .exceptions import (
     AccountRestrictedError,
     AuthenticationError,
     ElementNotFoundError,
     LinkedInOperationError,
     NetworkError,
+    OffLinkedInLandingError,
     PageReadError,
     ProfileNotFoundError,
     ProxyConnectionError,
@@ -61,6 +63,7 @@ __all__ = [
     "ElementNotFoundError",
     "LinkedInOperationError",
     "NetworkError",
+    "OffLinkedInLandingError",
     "PageReadError",
     "ProfileNotFoundError",
     "ProxyConnectionError",
@@ -75,7 +78,9 @@ __all__ = [
     "redacted_copy",
     "detect_rate_limit",
     "handle_modal_close",
+    "is_linkedin_landing",
     "is_logged_in",
+    "raise_if_off_linkedin",
     "resolve_remember_me_prompt",
     "scroll_to_bottom",
     "wait_for_manual_login",

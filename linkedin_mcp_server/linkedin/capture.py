@@ -15,6 +15,10 @@ import anyio
 import anyio.lowlevel
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from linkedin_mcp_server.core.destination import (
+    is_another_site,
+    raise_if_off_linkedin,
+)
 from linkedin_mcp_server.core.exceptions import LinkedInOperationError
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.linkedin.content import PageContentReader
@@ -290,6 +294,12 @@ class SectionCapture:
                     },
                 )
             except Exception as e:
+                # A redirect landing mid-read destroys the context under
+                # whichever read was running, and that read's error would be
+                # recorded instead of where the page went.
+                landed = self._session.page.url
+                if is_another_site(landed):
+                    raise_if_off_linkedin(landed)
                 is_overlay = CaptureMode.OVERLAY in plan.mode
                 logger.warning(
                     "Failed to extract %s %s: %s",

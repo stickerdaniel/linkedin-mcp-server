@@ -6,6 +6,7 @@ import logging
 import re
 from typing import Any
 
+from linkedin_mcp_server.core.destination import raise_if_off_linkedin
 from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.linkedin.text import strip_linkedin_noise
 
@@ -55,7 +56,11 @@ class PageContentReader:
         self,
         selectors: list[str],
     ) -> dict[str, Any]:
-        """Extract innerText and raw anchor metadata from the first matching root."""
+        """Extract innerText and raw anchor metadata from the first matching root.
+
+        Raises:
+            OffLinkedInLandingError: When the document read was not LinkedIn's.
+        """
         result = await self._session.page.evaluate(
             """({ selectors }) => {
                 const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
@@ -154,8 +159,19 @@ class PageContentReader:
                     })
                     .filter(Boolean);
 
-                return { source, text, references };
+                return { source, text, references, url: location.href };
             }""",
             {"selectors": selectors},
         )
+        # The address of the document the text came from, read in the same
+        # evaluation. Navigation checks where the page settled, but a portal can
+        # redirect a committed document later, during the readiness waits and
+        # scrolls between the two, and this is the last point it can be caught.
+        # Only a test double answers without the address; the driver's own
+        # stands in for it there.
+        if isinstance(result, dict):
+            landed = result.pop("url", None)
+            raise_if_off_linkedin(
+                landed if isinstance(landed, str) else self._session.page.url
+            )
         return result
