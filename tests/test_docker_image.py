@@ -733,10 +733,11 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
 
     The stale socket and lock are what a SIGKILL leaves in the writable layer.
     Fake Xvfb refuses to start while either exists, then creates the real socket
-    spelling for ``:N.0`` (``XN``) and dies cleanly. The supervisor must remove
-    the stale state, notice the later death despite the child becoming a zombie,
-    terminate the server, and return non-zero. ``kill -0`` keeps succeeding for
-    a zombie, which is why waiting for either child is part of the contract.
+    spelling for ``:N.0`` (``XN``) and, once the server has reached it, dies
+    cleanly. The supervisor must remove the stale state, notice the later death
+    despite the child becoming a zombie, terminate the server, and return
+    non-zero. ``kill -0`` keeps succeeding for a zombie, which is why waiting
+    for either child is part of the contract.
     """
     bash = shutil.which("bash")
     if bash is None:
@@ -761,6 +762,11 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
     # readiness loop on its own, so dropping the cleanup produces the same
     # non-zero exit and the same TERM as a display that came up and then died.
     started_marker = tmp_path / "xvfb-started"
+    # Written by the fake server once its TERM handler is in place and it has
+    # reached the display. Fake Xvfb waits for it before dying, or a server
+    # slower to start than Xvfb is to exit loses the race this test is not
+    # about: it finds no socket, or takes TERM before it can record it.
+    ready_marker = tmp_path / "server-ready"
     fake_xvfb = tmp_path / "Xvfb"
     fake_xvfb.write_text(
         textwrap.dedent(
@@ -786,7 +792,10 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
             server.bind(str(path))
             server.listen()
             pathlib.Path({str(started_marker)!r}).write_text("started")
-            time.sleep(0.3)
+            ready = pathlib.Path({str(ready_marker)!r})
+            deadline = time.monotonic() + 3.0
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
             server.close()
             path.unlink(missing_ok=True)
             lock.unlink(missing_ok=True)
@@ -811,6 +820,12 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
 
             marker = pathlib.Path(os.environ["SERVER_TERM_MARKER"])
 
+            def stop(*_args):
+                marker.write_text("term", encoding="utf-8")
+                raise SystemExit(0)
+
+            signal.signal(signal.SIGTERM, stop)
+
             # The display is what the supervisor waited for, so a server that
             # never touches it cannot tell readiness from a guess. Chromium
             # connects here; this connects and nothing else.
@@ -827,12 +842,9 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
             pathlib.Path(os.environ["SERVER_DISPLAY_MARKER"]).write_text(
                 "reachable", encoding="utf-8"
             )
-
-            def stop(*_args):
-                marker.write_text("term", encoding="utf-8")
-                raise SystemExit(0)
-
-            signal.signal(signal.SIGTERM, stop)
+            pathlib.Path(os.environ["SERVER_READY_MARKER"]).write_text(
+                "ready", encoding="utf-8"
+            )
             while True:
                 time.sleep(0.1)
             """
@@ -847,6 +859,7 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
         "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
         "SERVER_TERM_MARKER": str(term_marker),
         "SERVER_DISPLAY_MARKER": str(display_marker),
+        "SERVER_READY_MARKER": str(ready_marker),
     }
     process = subprocess.Popen(
         [bash, str(_ENTRYPOINT_PATH), str(fake_server)],

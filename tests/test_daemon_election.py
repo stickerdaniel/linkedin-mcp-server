@@ -746,18 +746,30 @@ class TestRetryPacing:
         auth_root = profile.parent
         stale = _publish_stale_owner(auth_root, profile, config)
 
+        paced = threading.Event()
+        abandoned = threading.Event()
         published = threading.Event()
+        publishers: list[threading.Thread] = []
         fresh: list[str] = []
+
+        def paced_sleep(seconds: float) -> None:
+            paced.set()
+            time.sleep(seconds)
 
         def replace_after_burial(*_args: object, **_kwargs: object) -> _Attempt:
             # Stands in for the owner a real start would have produced: the
-            # descriptor is replaced while the loop is inside its paced wait.
+            # descriptor is replaced once the loop is inside its paced wait, so
+            # the wait's first read cannot be what finds it.
             def publish_later() -> None:
-                time.sleep(0.1)
+                if not paced.wait(_PARKED) or abandoned.is_set():
+                    return
                 fresh.append(_publish_stale_owner(auth_root, profile, config))
                 published.set()
 
-            threading.Thread(target=publish_later, daemon=True).start()
+            paced.clear()
+            publisher = threading.Thread(target=publish_later, daemon=True)
+            publishers.append(publisher)
+            publisher.start()
             return _Attempt.FAILED
 
         seen: list[str] = []
@@ -778,14 +790,28 @@ class TestRetryPacing:
         # At the production 0.2s the loop would come round again on its own and
         # a wait that simply slept would look identical to one that watched.
         monkeypatch.setattr(election_module, "_RETRY_SECONDS", 4.0)
+        monkeypatch.setattr(
+            election_module,
+            "time",
+            SimpleNamespace(monotonic=time.monotonic, sleep=paced_sleep),
+        )
 
         began = time.monotonic()
-        outcome = obtain_owner(
-            auth_root, profile, config, deadline_seconds=8.0, connect=reach
-        )
-        elapsed = time.monotonic() - began
+        try:
+            outcome = obtain_owner(
+                auth_root, profile, config, deadline_seconds=8.0, connect=reach
+            )
+            # Before the publisher is waited for: the descriptor is visible
+            # before its thread returns, and that return is not what is timed.
+            elapsed = time.monotonic() - began
+            assert published.wait(2.0), "the replacement was never published"
+        finally:
+            abandoned.set()
+            paced.set()
+            for publisher in publishers:
+                publisher.join(timeout=2.0)
+        assert not any(publisher.is_alive() for publisher in publishers)
 
-        assert published.is_set()
         assert outcome.worth_connecting, "the replacement generation was never seen"
         assert seen == [stale, fresh[0]]
         # One poll interval past publication, not the whole of the wait it landed
@@ -878,11 +904,14 @@ class TestFailingFast:
         monkeypatch.setattr(election_module, "_MAX_OWNER_START_RETRY_SECONDS", 0.2)
 
         started = time.monotonic()
+        # Far past the handback bound, so the start is always reached; a slow
+        # first descriptor read could spend a 10ms budget before it. The bound
+        # below, not the budget, is what this asserts.
         outcome = obtain_owner(
             auth_root,
             profile,
             config,
-            deadline_seconds=0.01,
+            deadline_seconds=5.0,
             settlement_seconds=0,
             connect=lambda attachment, timeout: Reach.REFUSED,
         )
@@ -5444,6 +5473,16 @@ class TestRealOwner:
         waited: list[subprocess.Popen[str]] = []
 
         def spawn(*args: Any, **kwargs: Any) -> subprocess.Popen[str]:
+            # The patch is process-wide, and the interpreter spawns children of
+            # its own (``ctypes.util`` runs ``/sbin/ldconfig -p`` on Linux).
+            # Only a frontend is failed, tracked or wrapped; a ninth frontend
+            # still counts.
+            command = args[0] if args else kwargs.get("args")
+            if not (
+                isinstance(command, list)
+                and command[:3] == [sys.executable, "-c", _INSPECT_OWNER]
+            ):
+                return popen(*args, **kwargs)
             if failure == "spawn" and len(running) == 2:
                 raise OSError("frontend spawn failed")
             child = popen(*args, **kwargs)
