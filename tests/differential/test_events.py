@@ -164,3 +164,104 @@ def test_publishing_copies_only_the_evidence_files(tmp_path):
         "rows/K3/watcher.jsonl",
         "rows/K3/watcher.stderr",
     ]
+
+
+# --- The kinds a call that loses its caller records ----------------------------
+
+#: One valid record of each, by the fields its kind requires.
+_CALL_LOSS = {
+    "gate.entered": {
+        "path": "/in/synthetic-r4/details/education/",
+        "ordinal": 1,
+        "entered_monotonic_ns": 10,
+    },
+    "gate.released": {
+        "path": "/in/synthetic-r4/details/education/",
+        "ordinal": 1,
+        "entered_monotonic_ns": 10,
+        "released_monotonic_ns": 20,
+        "terminal": "served",
+    },
+    "loss": {"loss": "pipe", "target": "host_stub", "monotonic_ns": 30},
+    "phase": {"name": "post-loss", "monotonic_ns": 40},
+    "attempt": {"attempt": "preflight", "classification": None},
+}
+
+
+def _call_loss(kind: str, **change) -> dict:
+    return {
+        "t": 1.0,
+        "run": "r",
+        "experiment": "K3",
+        "row": "H-R4",
+        "platform": "p",
+        "actor": "harness",
+        "kind": kind,
+        **_CALL_LOSS[kind],
+        **change,
+    }
+
+
+@pytest.mark.parametrize(
+    ("kind", "change"),
+    [
+        *[(kind, {}) for kind in _CALL_LOSS],
+        *[("gate.released", {"terminal": t}) for t in ("deadline", "peer-gone")],
+        *[
+            ("loss", {"loss": loss})
+            for loss in (
+                "eof",
+                "host-killed",
+                "frontend-killed",
+                "server-killed",
+                "owner-killed",
+            )
+        ],
+        *[("attempt", {"attempt": a}) for a in ("dispatch", "election", "replay")],
+        ("attempt", {"classification": "UNREACHABLE"}),
+    ],
+)
+def test_a_call_loss_record_with_its_fields_reads_back(tmp_path, kind, change):
+    log = EventLog(tmp_path, run="r")
+    log.append(_call_loss(kind, **change))
+    (record,) = log.records()
+    assert record["kind"] == kind
+
+
+@pytest.mark.parametrize(
+    ("kind", "name"),
+    [(kind, name) for kind, fields in _CALL_LOSS.items() for name in fields],
+)
+def test_a_call_loss_record_missing_a_field_is_refused(tmp_path, kind, name):
+    record = _call_loss(kind)
+    del record[name]
+    with pytest.raises(ValueError, match=f"lacks {name}"):
+        validate(record)
+    log = EventLog(tmp_path, run="r")
+    with pytest.raises(ValueError):
+        log.append(record)
+    assert log.records() == []
+
+
+@pytest.mark.parametrize(
+    ("kind", "name", "value"),
+    [
+        ("gate.entered", "path", ""),
+        ("gate.entered", "ordinal", -1),
+        ("gate.entered", "ordinal", True),
+        ("gate.entered", "entered_monotonic_ns", 1.5),
+        ("gate.released", "terminal", "released"),
+        ("gate.released", "released_monotonic_ns", None),
+        ("loss", "loss", "killed"),
+        ("loss", "target", "somebody"),
+        ("loss", "monotonic_ns", "now"),
+        ("phase", "name", ""),
+        ("phase", "monotonic_ns", None),
+        ("attempt", "attempt", "retry"),
+        ("attempt", "classification", ""),
+        ("attempt", "classification", 3),
+    ],
+)
+def test_a_call_loss_field_outside_its_values_is_refused(kind, name, value):
+    with pytest.raises(ValueError, match=f"{name} is invalid"):
+        validate(_call_loss(kind, **{name: value}))

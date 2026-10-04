@@ -38,8 +38,22 @@ read again on every sample, as anywhere else.
 **What a lifetime is cannot change, so it is asked once.** Its owning user is
 read once per pid and create time, and a lifetime a full read found gone
 (``NoSuchProcess``) is not read again, however long its pid stays listed.
-Every read is timed: the summary names the slowest, and every sample of at
-least ``SLOW_SAMPLE_SECONDS`` with the read it waited on longest.
+The paths it names, its executable and its profile, are resolved once per
+lifetime and spelling, and forgotten when the lifetime ends
+(``Sampler._resolve``). Every read is timed, and each sample's time is charged to its phases
+(``SAMPLE_PHASES``). The summary names the slowest read, keeps every sample of
+at least ``SLOW_SAMPLE_SECONDS`` with its phases, and keeps the largest gap
+between two samples with what the time outside sampling went to
+(``BETWEEN_STEPS``) and the phases of the sample that closed it.
+
+**The loop between samples makes no file-system call.** On a Windows runner
+a stop-file check has blocked for 1.23s at no CPU while sampling waited for
+it. So the stop file is polled by a thread of its own (``StopWatch``), and
+events are serialized, written and flushed by another (``EventWriter``), in
+the order the samples produced them; the loop reads an event and hands each
+sample's events to a bounded queue. What those threads' calls took is in the
+summary's ``file_io``, and what of it fell inside the largest gap is in that
+gap's record, so a slow file system still shows without holding sampling.
 
 **When each sample was taken is part of the evidence.** The summary's
 ``sample_log`` gives every sample's start, its end (the time its events
@@ -138,15 +152,18 @@ Imports nothing from the repository, so it runs as a plain script:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
+import queue
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import psutil
 
@@ -164,6 +181,15 @@ SAMPLE_SECONDS = 0.05
 #: outside this oracle.
 NO_EXEC = os.name == "nt"
 
+#: The pid the watcher never opens, on Windows only: pid 0 is the System Idle
+#: Process, which is never a browser and never recycled. psutil cannot read its
+#: times there, so its create time falls back to a snapshot of every process on
+#: the system (``NtQuerySystemInformation``). Each sample opens a fresh
+#: ``psutil.Process``, so no create time is cached and that system-wide query
+#: ran in every sample, where a loaded runner can stall it past the gap budget.
+#: Linux lists no pid 0, and macOS reads its ``kernel_task`` directly.
+IDLE_PID: int | None = 0 if os.name == "nt" else None
+
 #: The scheduling class the watcher asks for, on Windows only: POSIX lets an
 #: unprivileged process lower its priority but not raise it. A burst of process
 #: starts on a Windows runner, such as the Node driver's launch, has kept a
@@ -176,10 +202,47 @@ NO_EXEC = os.name == "nt"
 #: passed on to the interpreter it starts.
 SCHEDULING_CLASS: int | None = getattr(psutil, "HIGH_PRIORITY_CLASS", None)
 
-#: A sample at least this long is recorded with its slowest single read, so a
-#: stall names the call and the process it waited on. A quarter of the gap
-#: budget the rows accept (``harness.MAX_WATCHER_GAP_SECONDS``).
+#: A sample at least this long is recorded with its phases and its largest
+#: timed read. A quarter of the gap budget the rows accept
+#: (``harness.MAX_WATCHER_GAP_SECONDS``).
 SLOW_SAMPLE_SECONDS = 0.25
+#: What a sample's time is charged to. Every instant of a sample belongs to
+#: the phase current then, so the phases add up to the sample's duration:
+#: ``last_pid`` and ``enumeration`` open it, ``reads`` is every timed read of
+#: one process (by kind in ``read_kinds``), ``canonicalization`` every path
+#: resolved to name a profile or compare an executable (a lifetime's own paths
+#: once, ``Sampler._resolve``), and ``bookkeeping``
+#: everything else: the loop around the reads, classification and judgement.
+SAMPLE_PHASES = ("last_pid", "enumeration", "reads", "canonicalization", "bookkeeping")
+#: What the time between one sample's end and the next one's start is
+#: charged to, in the order it passes: turning the sample into events,
+#: handing them to the writer thread (``enqueue``, which waits only when the
+#: writer's queue is full), the sleep asked for, how much later than asked it
+#: returned, and reading whether a stop was requested (``stop_check``, an
+#: event the stop-file thread sets). ``write`` and ``flush`` stay zero: the
+#: loop no longer does either, and the record keeps every step it had. The
+#: writer's and the stop-file thread's own calls are in ``file_io``. Whatever
+#: none of the steps took is the record's ``unaccounted``.
+BETWEEN_STEPS = (
+    "tracker",
+    "enqueue",
+    "write",
+    "flush",
+    "sleep",
+    "wakeup_delay",
+    "stop_check",
+)
+#: The file-system calls made off the sampling path, each timed by the thread
+#: that makes it: the writer's writes (serialization included) and flushes,
+#: and the stop-file checks.
+FILE_IO_CALLS = ("write", "flush", "stop_check")
+#: How many samples' events may wait for the writer thread: ten seconds at
+#: ``SAMPLE_SECONDS``. A writer that far behind holds the loop rather than
+#: lose an event (``EventWriter``).
+WRITE_QUEUE_BATCHES = 200
+#: How often a loop held by a full queue looks again whether the writer
+#: failed, so a dead writer cannot hold it for good.
+_FULL_WAIT_POLL = 0.05
 #: At most this many slow samples are kept, the first ones.
 _SLOW_SAMPLES_KEPT = 100
 #: At most this many failed group reads are kept, the first ones.
@@ -196,6 +259,12 @@ BROWSER_MARKER_ENV = "LINKEDIN_MCP_BROWSER_PROCESS_MARKER"
 READ_MARKERS = os.name != "nt"
 
 
+def _real(path: str) -> str:
+    """One spelling per path. On Windows ``realpath`` opens the file, and can
+    wait as long as the filesystem keeps it waiting."""
+    return os.path.normcase(os.path.realpath(path))
+
+
 def canonical_user_data_dir(value: str) -> str:
     """One spelling per profile directory, so two routes to it count as one.
 
@@ -203,14 +272,17 @@ def canonical_user_data_dir(value: str) -> str:
     ``/var`` and ``/private/var``, and ``normcase`` for Windows.
     """
     value = value.strip().strip('"').strip("'")
-    return os.path.normcase(os.path.realpath(value))
+    return _real(value)
 
 
-def user_data_dir(cmdline: Sequence[str]) -> str | None:
+def user_data_dir(
+    cmdline: Sequence[str], canonical: Callable[[str], str] | None = None
+) -> str | None:
     """The profile a browser *root* runs on, or None for anything else.
 
     None for a Chromium child (``--type=``), which belongs to its parent's
-    tree, and for anything without the flag.
+    tree, and for anything without the flag. *canonical* spells the flag's
+    value, ``canonical_user_data_dir`` by default.
     """
     found: str | None = None
     for argument in cmdline:
@@ -218,7 +290,9 @@ def user_data_dir(cmdline: Sequence[str]) -> str | None:
             return None
         if argument.startswith(USER_DATA_DIR_FLAG):
             found = argument[len(USER_DATA_DIR_FLAG) :]
-    return None if not found else canonical_user_data_dir(found)
+    if not found:
+        return None
+    return (canonical or canonical_user_data_dir)(found)
 
 
 @dataclass(frozen=True)
@@ -291,6 +365,7 @@ def record(
     pgid: int | None = None,
     browser_marker: str | None = None,
     pgid_error: str | None = None,
+    canonical: Callable[[str], str] | None = None,
 ) -> ProcessRecord:
     cmdline = tuple(cmdline)
     return ProcessRecord(
@@ -299,7 +374,7 @@ def record(
         start,
         exe,
         cmdline,
-        user_data_dir(cmdline),
+        user_data_dir(cmdline, canonical),
         in_row,
         launcher,
         pgid,
@@ -561,10 +636,6 @@ class Tracker:
 _UNREADABLE = (psutil.AccessDenied, OSError)
 
 
-def _real(path: str) -> str:
-    return os.path.normcase(os.path.realpath(path))
-
-
 def possible_browser(
     exe: str | None, browser_exe: str | None, browser_dir: str | None
 ) -> bool:
@@ -573,11 +644,19 @@ def possible_browser(
         return True
     if browser_exe is None and browser_dir is None:
         return True
-    real = _real(exe)
-    if browser_exe is not None and real == _real(browser_exe):
+    return _runs_browser(
+        _real(exe),
+        None if browser_exe is None else _real(browser_exe),
+        None if browser_dir is None else _real(browser_dir),
+    )
+
+
+def _runs_browser(real: str, browser_exe: str | None, directory: str | None) -> bool:
+    """Whether a resolved executable is the resolved browser or lies under the
+    resolved browsers directory."""
+    if browser_exe is not None and real == browser_exe:
         return True
-    if browser_dir is not None:
-        directory = _real(browser_dir)
+    if directory is not None:
         try:
             if os.path.commonpath([real, directory]) == directory:
                 return True
@@ -628,11 +707,13 @@ class Sampler:
     process table. *browser_exe* and *browser_dir* name what the row's browser
     runs. *user* is the harness's user, as *user_of* reports it. *no_exec*
     says whether a process's program is fixed for its lifetime, which is
-    Windows's by default and set in tests to model either platform. *pgid_of*
+    Windows's by default and set in tests to model either platform. *idle_pid*
+    is a listed pid that is skipped rather than opened (``IDLE_PID``). *pgid_of*
     reads a process's group, ``os.getpgid`` by default. *read_markers* says
     whether browser markers are read (``READ_MARKERS``). *timer* times each
-    read, ``time.perf_counter`` by default. *last_pid_of* reads the kernel's
-    last allocated pid as each sample begins (``read_last_pid``).
+    read and phase, ``time.perf_counter`` by default, and *cpu* is the
+    process's CPU time (``time.process_time``). *last_pid_of* reads the
+    kernel's last allocated pid as each sample begins (``read_last_pid``).
     """
 
     def __init__(
@@ -648,13 +729,16 @@ class Sampler:
         browser_exe: str | None = None,
         browser_dir: str | None = None,
         no_exec: bool = NO_EXEC,
+        idle_pid: int | None = IDLE_PID,
         pgid_of: Callable[[int], int | None] = posix_pgid,
         read_markers: bool = READ_MARKERS,
         timer: Callable[[], float] = time.perf_counter,
         last_pid_of: Callable[[], int | None] = read_last_pid,
+        cpu: Callable[[], float] = time.process_time,
     ) -> None:
         self.root_pid = root_pid
         self._timer = timer
+        self._cpu = cpu
         self._last_pid = last_pid_of
         #: When the sample in progress began, and the kernel's last pid then.
         self.began_at: float | None = None
@@ -662,6 +746,7 @@ class Sampler:
         #: The process groups at the first sample.
         self.baseline_pgids: list[int] = []
         self.no_exec = no_exec
+        self.idle_pid = idle_pid
         self._pgid_of = pgid_of
         self.read_markers = read_markers
         self.own_pid = os.getpid() if own_pid is None else own_pid
@@ -699,12 +784,26 @@ class Sampler:
         self.vanished = 0
         #: Each lifetime's owning user, once read: a process cannot change it.
         self._users: dict[tuple[int, float], object] = {}
+        #: Each live lifetime's resolved paths by kind (``_resolve``).
+        self._resolved: dict[tuple[int, float], dict[str, tuple[str, str]]] = {}
+        #: *browser_exe* and *browser_dir* resolved, once per run.
+        self._browser_paths: tuple[str | None, str | None] | None = None
         #: The slowest single read of the sample in progress, and of the run.
         self._slowest: dict[str, Any] | None = None
         self.slowest_read: dict[str, Any] | None = None
         #: Every sample of at least ``SLOW_SAMPLE_SECONDS``, up to a bound.
         self.slow_samples: list[dict[str, Any]] = []
         self.slow_sample_count = 0
+        #: The phase the sample in progress is in, since when, and what each
+        #: phase, read kind and canonicalization has taken so far.
+        self._phase = "bookkeeping"
+        self._phase_mark = 0.0
+        self._phase_seconds = dict.fromkeys(SAMPLE_PHASES, 0.0)
+        self._read_kinds: dict[str, dict[str, Any]] = {}
+        self._canonicalizations = 0
+        self._canonical_max = 0.0
+        #: The last sample's phases and largest timed read (``_record_cost``).
+        self.breakdown: dict[str, Any] | None = None
         #: Every group read that failed for a process still there.
         self.group_read_failures: list[dict[str, Any]] = []
         self.group_read_failure_count = 0
@@ -739,8 +838,88 @@ class Sampler:
             "group_read_failures": self.group_read_failures,
         }
 
-    def possible_browser(self, exe: str | None) -> bool:
-        return possible_browser(exe, self.browser_exe, self.browser_dir)
+    def possible_browser(
+        self, exe: str | None, lifetime: tuple[int, float] | None = None
+    ) -> bool:
+        """``possible_browser`` for the process *lifetime*, which ran *exe*
+        when this sample read it; None when its create time was not read."""
+        if not exe:
+            return True
+        if self.browser_exe is None and self.browser_dir is None:
+            return True
+        if self._browser_paths is None:
+            # Once per run: the harness names them before the row starts and
+            # never relinks them during it.
+            def once(path: str | None) -> str | None:
+                return None if path is None else self._resolve(None, "", path, _real)
+
+            self._browser_paths = (once(self.browser_exe), once(self.browser_dir))
+        return _runs_browser(
+            self._resolve(lifetime, "exe", exe, _real), *self._browser_paths
+        )
+
+    def _resolve(
+        self,
+        lifetime: tuple[int, float] | None,
+        kind: str,
+        path: str,
+        resolve: Callable[[str], str],
+    ) -> str:
+        """*path* resolved, charged to ``canonicalization`` only when it is.
+
+        Reused only for the same *lifetime*, *kind* and spelling, and only
+        while that lifetime lives: an entry goes when its lifetime leaves the
+        sample (``sample``), and a recycled pid is a new create time and is
+        resolved anew. So reuse cannot merge two profiles. A profile's
+        spelling is resolved when its root is first seen, and the harness
+        creates and owns these directories and never relinks them during a
+        row, so asking again in the same lifetime would get the same answer.
+        A POSIX process that execs into another executable or another
+        profile changes the spelling and is resolved again. Without a
+        lifetime, nothing is kept.
+        """
+        held = self._resolved.get(lifetime, {}) if lifetime is not None else {}
+        if kind in held and held[kind][0] == path:
+            return held[kind][1]
+        resolved = self._canonical(lambda: resolve(path))
+        if lifetime is not None:
+            self._resolved.setdefault(lifetime, {})[kind] = (path, resolved)
+        return resolved
+
+    def _enter(self, phase: str) -> tuple[str, float]:
+        """Charge the time since the last switch to the current phase, then
+        switch to *phase*; return the phase left and when."""
+        now = self._timer()
+        self._phase_seconds[self._phase] += now - self._phase_mark
+        self._phase_mark = now
+        previous, self._phase = self._phase, phase
+        return previous, now
+
+    def _leave(self, previous: str, entered: float) -> float:
+        """Charge the time since the last switch to the current phase, then
+        switch back to *previous*; return the seconds since *entered*."""
+        now = self._timer()
+        self._phase_seconds[self._phase] += now - self._phase_mark
+        self._phase_mark = now
+        self._phase = previous
+        return now - entered
+
+    def _in_phase(self, phase: str, call: Callable[[], Any]) -> Any:
+        previous, entered = self._enter(phase)
+        try:
+            return call()
+        finally:
+            self._leave(previous, entered)
+
+    def _canonical(self, call: Callable[[], Any]) -> Any:
+        """Run a call that resolves paths, charged to ``canonicalization``."""
+        previous, entered = self._enter("canonicalization")
+        try:
+            return call()
+        finally:
+            seconds = self._leave(previous, entered)
+            self._canonicalizations += 1
+            self._canonical_max = max(self._canonical_max, seconds)
 
     def _group(self, pid: int, start: float) -> tuple[int | None, str | None]:
         """The process's group now, or None and why not: ``GONE``, or unread.
@@ -766,12 +945,20 @@ class Sampler:
             return None, error
 
     def _timed(self, kind: str, pid: int, call: Callable[[], Any]) -> Any:
-        """Run one read, keeping the sample's slowest with its kind and pid."""
-        began = self._timer()
+        """Run one read, charged to ``reads`` and counted by *kind*, keeping
+        the sample's slowest with its kind and pid."""
+        previous, began = self._enter("reads")
         try:
             return call()
         finally:
-            seconds = self._timer() - began
+            seconds = self._leave(previous, began)
+            stats = self._read_kinds.setdefault(
+                kind, {"count": 0, "seconds": 0.0, "max_seconds": 0.0, "max_pid": pid}
+            )
+            stats["count"] += 1
+            stats["seconds"] += seconds
+            if seconds > stats["max_seconds"]:
+                stats["max_seconds"], stats["max_pid"] = seconds, pid
             if self._slowest is None or seconds > self._slowest["seconds"]:
                 self._slowest = {"kind": kind, "pid": pid, "seconds": seconds}
 
@@ -845,8 +1032,19 @@ class Sampler:
 
     def sample(self) -> dict[int, ProcessRecord]:
         began = self._timer()
+        cpu = {"began": self._cpu()}
+        self._phase, self._phase_mark = "bookkeeping", began
+        self._phase_seconds = dict.fromkeys(SAMPLE_PHASES, 0.0)
+        self._read_kinds = {}
+        self._canonicalizations, self._canonical_max = 0, 0.0
         self.began_at = self._clock()
-        self.last_pid_at_begin = self._last_pid()
+        self.last_pid_at_begin = self._in_phase("last_pid", self._last_pid)
+        cpu["last_pid"] = self._cpu()
+        pids = self._in_phase(
+            "enumeration",
+            lambda: [pid for pid in self._pids() if pid != self.idle_pid],
+        )
+        cpu["enumeration"] = self._cpu()
         self._slowest = None
         first = self._baseline is None
         sample: dict[int, ProcessRecord] = {}
@@ -857,7 +1055,7 @@ class Sampler:
         retaining: dict[int, tuple[ProcessRecord, list[str]]] = {}
         # pid -> the process whose create time this sample read.
         identified: dict[int, Any] = {}
-        for pid in self._pids():
+        for pid in pids:
             known = self._known.get(pid)
             # When opening or identifying fails, whatever runs at the pid now is
             # unverified: the failure is keyed without a create time, and no
@@ -955,6 +1153,9 @@ class Sampler:
                 if known is not None and known.cmdline == cmdline
                 else None
             )
+            # The profile its arguments name, if any, is resolved once for
+            # this lifetime and spelling (``_resolve``).
+            lifetime = (pid, start)
             sample[pid] = record(
                 pid,
                 -1 if ppid is None else ppid,
@@ -966,6 +1167,9 @@ class Sampler:
                 pgid=group,
                 pgid_error=error,
                 browser_marker=known.browser_marker if known is not None else None,
+                canonical=lambda value: self._resolve(
+                    lifetime, "profile", value, canonical_user_data_dir
+                ),
             )
             if failed and self._keeps_its_root(known, failed, exe):
                 # Decided once the sample is complete: whether it parents
@@ -982,6 +1186,7 @@ class Sampler:
                     process,
                     parent_read,
                 )
+        cpu["per_process"] = self._cpu()
         # Already counted as its profile's browser root: the record keeps that
         # reading, with the profile it named rather than one the old arguments
         # resolve to now, and the failure is kept as an audit note. Not for a
@@ -1037,39 +1242,79 @@ class Sampler:
         self._carried = 0
         self._track(sample, verdicts)
         self._resolve_by_user(sample, identified)
+        # A lifetime this sample does not hold has ended: its paths go with
+        # it, so nothing resolved for it can answer for a later process.
+        live = {process.identity for process in sample.values()}
+        for lifetime in [held for held in self._resolved if held not in live]:
+            del self._resolved[lifetime]
         self._known = sample
-        self._record_cost(sample, self._timer() - began)
+        # The rest of the sample is the bookkeeping it is in; the phases now
+        # add up to its duration.
+        self._enter("bookkeeping")
+        ended = self._phase_mark
+        cpu["classification"] = self._cpu()
+        self._record_cost(sample, ended - began, cpu)
         return sample
 
-    def _record_cost(self, sample: dict[int, ProcessRecord], seconds: float) -> None:
-        """Keep the slowest read, and every slow sample with its slowest read."""
+    def _record_cost(
+        self, sample: dict[int, ProcessRecord], seconds: float, cpu: dict[str, float]
+    ) -> None:
+        """Keep the slowest read, this sample's breakdown, and every slow
+        sample's.
+
+        ``cpu`` holds the process's CPU time where the sample began and
+        after each of its stretches, which run in order: its last-pid read,
+        the enumeration, the loop over every process (reads, the
+        canonicalization of each record and the loop's own bookkeeping), and
+        the classification and judgement after it.
+        """
+        now = self._clock()
         slowest = self._slowest
-        if slowest is None:
-            return
-        known = sample.get(slowest["pid"])
-        slowest = dict(
-            slowest,
-            seconds=round(slowest["seconds"], 4),
-            exe=known.exe if known is not None else None,
-            t=self._clock(),
-        )
-        if (
-            self.slowest_read is None
-            or slowest["seconds"] > self.slowest_read["seconds"]
-        ):
-            self.slowest_read = slowest
+        if slowest is not None:
+            known = sample.get(slowest["pid"])
+            slowest = dict(
+                slowest,
+                seconds=round(slowest["seconds"], 4),
+                exe=known.exe if known is not None else None,
+                t=now,
+            )
+            if (
+                self.slowest_read is None
+                or slowest["seconds"] > self.slowest_read["seconds"]
+            ):
+                self.slowest_read = slowest
+        marks = list(cpu.values())
+        self.breakdown = {
+            "t": now,
+            "seconds": round(seconds, 4),
+            "reads": self.reads_per_sample[-1],
+            "slowest": slowest,
+            "phases": {
+                phase: round(spent, 4) for phase, spent in self._phase_seconds.items()
+            },
+            "read_kinds": {
+                kind: dict(
+                    stats,
+                    seconds=round(stats["seconds"], 4),
+                    max_seconds=round(stats["max_seconds"], 4),
+                )
+                for kind, stats in sorted(self._read_kinds.items())
+            },
+            "canonicalization": {
+                "count": self._canonicalizations,
+                "max_seconds": round(self._canonical_max, 4),
+            },
+            "cpu_seconds": round(marks[-1] - marks[0], 4),
+            "cpu": {
+                stretch: round(mark - before, 4)
+                for (stretch, mark), before in zip(list(cpu.items())[1:], marks)
+            },
+        }
         if seconds < SLOW_SAMPLE_SECONDS:
             return
         self.slow_sample_count += 1
         if len(self.slow_samples) < _SLOW_SAMPLES_KEPT:
-            self.slow_samples.append(
-                {
-                    "t": slowest["t"],
-                    "seconds": round(seconds, 4),
-                    "reads": self.reads_per_sample[-1],
-                    "slowest": slowest,
-                }
-            )
+            self.slow_samples.append(self.breakdown)
 
     @staticmethod
     def _keeps_its_root(
@@ -1173,7 +1418,9 @@ class Sampler:
                 continue
             if pid == self.own_pid or process.identity in (self._baseline or ()):
                 continue
-            if not process.exe or not self.possible_browser(process.exe):
+            if not process.exe or not self.possible_browser(
+                process.exe, process.identity
+            ):
                 continue
             try:
                 marker = self._timed(
@@ -1253,7 +1500,7 @@ class Sampler:
                 fields = {failure.split(":", 1)[0] for failure in failures[pid][1]}
                 if fields & {"open", "identity", "exe", "cmdline"}:
                     continue
-            if not process.exe or self.possible_browser(process.exe):
+            if not process.exe or self.possible_browser(process.exe, process.identity):
                 continue
             if process.profile is not None or any(
                 argument.startswith(USER_DATA_DIR_FLAG) for argument in process.cmdline
@@ -1316,7 +1563,7 @@ class Sampler:
             elif (
                 self.no_exec
                 and exe_read
-                and not self.possible_browser(exe)
+                and not self.possible_browser(exe, lifetime)
                 and not in_row
                 and parent_read
                 and lifetime is not None
@@ -1343,7 +1590,7 @@ class Sampler:
                         "resolution": "settled by its image",
                     }
                 )
-            elif exe_read and not self.possible_browser(exe):
+            elif exe_read and not self.possible_browser(exe, lifetime):
                 # Not a browser, whatever its arguments. Kept as evidence when
                 # it belongs to the row or its ancestry could not be read.
                 verdict = _EVIDENCE if (in_row or not parent_read) else _UNRELATED
@@ -1455,6 +1702,465 @@ def run_ahead() -> dict[str, Any]:
     return fields
 
 
+#: One event as the tracker produces it: ``(actor, kind, fields)``.
+EventTuple = tuple[str, str, dict[str, Any]]
+
+
+def event_line(
+    base: Mapping[str, Any],
+    actor: str,
+    kind: str,
+    fields: Mapping[str, Any],
+    t: float,
+) -> str:
+    return (
+        json.dumps(
+            {"t": t, **base, "actor": actor, "kind": kind, **fields}, sort_keys=True
+        )
+        + "\n"
+    )
+
+
+def write_event(
+    out: IO[str],
+    base: Mapping[str, Any],
+    actor: str,
+    kind: str,
+    fields: Mapping[str, Any],
+    t: float,
+) -> None:
+    out.write(event_line(base, actor, kind, fields, t))
+
+
+class _Calls:
+    """What one kind of file-system call took, kept by the thread making it.
+
+    The lock is held to count, never across the call, so the loop reading it
+    never waits on the file system.
+    """
+
+    def __init__(self, timer: Callable[[], float], wall: Callable[[], float]) -> None:
+        self._timer, self._wall = timer, wall
+        self._lock = threading.Lock()
+        self._count = 0
+        self._seconds = 0.0
+        #: The longest call, and the wall time it ended.
+        self._longest: tuple[float, float | None] = (0.0, None)
+        #: When the call in progress began, while one is.
+        self._since: float | None = None
+
+    def run(self, call: Callable[[], Any]) -> Any:
+        began = self._timer()
+        with self._lock:
+            self._since = began
+        try:
+            return call()
+        finally:
+            seconds = self._timer() - began
+            ended = self._wall()
+            with self._lock:
+                self._since = None
+                self._count += 1
+                self._seconds += seconds
+                if seconds > self._longest[0]:
+                    self._longest = (seconds, ended)
+
+    def mark(self) -> tuple[int, float, float | None]:
+        """The calls ended so far, their seconds, and when the one in
+        progress began."""
+        with self._lock:
+            return self._count, self._seconds, self._since
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            count, seconds, since = self._count, self._seconds, self._since
+            longest, at = self._longest
+        return {
+            "count": count,
+            "seconds": round(seconds, 4),
+            "max_seconds": round(longest, 4),
+            "max_t": at,
+            "in_progress_seconds": (
+                0.0 if since is None else round(self._timer() - since, 4)
+            ),
+        }
+
+
+class EventWriter:
+    """Serializes, writes and flushes events on a thread of its own.
+
+    The loop hands it each sample's events (``put``) and never waits on the
+    file system: a queue of up to *bound* samples holds what the writer has
+    not reached. A writer that far behind holds the loop instead, which waits
+    for room rather than drop an event; each such wait is counted and timed
+    (``stats``) and charged to the gap's ``enqueue`` step. Events reach the
+    file in the order they were put, whatever has piled up going out in one
+    write and one flush. A failed write or flush ends the writer, and the
+    loop's next ``put``, or ``close``, raises it.
+    """
+
+    def __init__(
+        self,
+        out: IO[str],
+        base: Mapping[str, Any],
+        *,
+        bound: int = WRITE_QUEUE_BATCHES,
+        timer: Callable[[], float] = time.perf_counter,
+        wall: Callable[[], float] = time.time,
+    ) -> None:
+        self._out, self._base, self._timer = out, base, timer
+        self.bound = bound
+        #: Each sample's end and events, in sample order; None ends the writer.
+        self._queue: queue.Queue[tuple[float, list[EventTuple]] | None] = queue.Queue(
+            maxsize=bound
+        )
+        self.write = _Calls(timer, wall)
+        self.flush = _Calls(timer, wall)
+        self._max_depth = 0
+        self._full_waits = 0
+        self._full_wait_seconds = 0.0
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run, name="watcher-event-writer", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def put(self, events: Sequence[EventTuple], t: float) -> None:
+        """Queue one sample's events, which end at *t*; raise a failed write."""
+        self._raise()
+        if events:
+            self._enqueue((t, list(events)))
+
+    def close(self) -> None:
+        """Return once everything put is written and flushed; raise a failure."""
+        self._enqueue(None)
+        self._thread.join()
+        self._raise()
+
+    def stats(self) -> dict[str, Any]:
+        return {
+            "bound": self.bound,
+            "max_depth": self._max_depth,
+            "full_waits": self._full_waits,
+            "full_wait_seconds": round(self._full_wait_seconds, 4),
+        }
+
+    def _raise(self) -> None:
+        if self._error is not None:
+            raise RuntimeError("the watcher's event writer failed") from self._error
+
+    def _enqueue(self, item: tuple[float, list[EventTuple]] | None) -> None:
+        try:
+            self._queue.put_nowait(item)
+        except queue.Full:
+            # The writer is a whole queue behind: wait for room, never drop.
+            self._full_waits += 1
+            began = self._timer()
+            try:
+                while True:
+                    self._raise()
+                    try:
+                        self._queue.put(item, timeout=_FULL_WAIT_POLL)
+                        break
+                    except queue.Full:
+                        continue
+            finally:
+                self._full_wait_seconds += self._timer() - began
+        self._max_depth = max(self._max_depth, self._queue.qsize())
+
+    def _run(self) -> None:
+        try:
+            while True:
+                items = [self._queue.get()]
+                with contextlib.suppress(queue.Empty):
+                    while True:
+                        items.append(self._queue.get_nowait())
+                batches = [item for item in items if item is not None]
+                if batches:
+                    self.write.run(lambda: self._out.write(self._lines(batches)))
+                    self.flush.run(self._out.flush)
+                if len(batches) < len(items):
+                    return
+        except BaseException as exc:
+            self._error = exc
+
+    def _lines(self, batches: list[tuple[float, list[EventTuple]]]) -> str:
+        return "".join(
+            event_line(self._base, actor, kind, fields, t)
+            for t, events in batches
+            for actor, kind, fields in events
+        )
+
+
+class StopWatch:
+    """Polls for a stop request on a thread of its own.
+
+    The loop reads only the event this sets (``requested``), so a check that
+    blocks holds this thread rather than sampling, and only delays the stop.
+    Every check is timed (``checks``). A check that raises ends the thread,
+    and the loop's next ``requested`` raises it.
+    """
+
+    def __init__(
+        self,
+        requested: Callable[[], bool],
+        *,
+        poll: float,
+        timer: Callable[[], float] = time.perf_counter,
+        wall: Callable[[], float] = time.time,
+    ) -> None:
+        self._requested = requested
+        self._poll = poll
+        self.checks = _Calls(timer, wall)
+        self._stop = threading.Event()
+        self._cancelled = threading.Event()
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run, name="watcher-stop-check", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def requested(self) -> bool:
+        if self._error is not None:
+            raise RuntimeError("the watcher's stop-file check failed") from self._error
+        return self._stop.is_set()
+
+    def cancel(self) -> None:
+        """End the polling; a check in progress finishes on its own."""
+        self._cancelled.set()
+
+    def _run(self) -> None:
+        try:
+            while not self._cancelled.is_set():
+                if self.checks.run(self._requested):
+                    self._stop.set()
+                    return
+                self._cancelled.wait(self._poll)
+        except BaseException as exc:
+            self._error = exc
+
+
+def _file_io_between(
+    before: Mapping[str, tuple[int, float, float | None]],
+    after: Mapping[str, tuple[int, float, float | None]],
+    now: float,
+) -> dict[str, dict[str, Any]]:
+    """The off-path calls that ended between two marks, and how long the one
+    in progress at the second had run by *now*."""
+    record: dict[str, dict[str, Any]] = {}
+    for name in FILE_IO_CALLS:
+        count, seconds, since = after[name]
+        record[name] = {
+            "count": count - before[name][0],
+            "seconds": round(seconds - before[name][1], 4),
+            "in_progress_seconds": 0.0 if since is None else round(now - since, 4),
+        }
+    return record
+
+
+def observe(
+    sampler: Sampler,
+    tracker: Tracker,
+    out: IO[str],
+    stop_requested: Callable[[], bool],
+    *,
+    base: Mapping[str, Any],
+    interval: float,
+    deadline: float,
+    timer: Callable[[], float] = time.perf_counter,
+    monotonic: Callable[[], float] = time.monotonic,
+    wall: Callable[[], float] = time.time,
+    sleep: Callable[[float], None] = time.sleep,
+    cpu: Callable[[], float] = time.process_time,
+    queue_bound: int = WRITE_QUEUE_BATCHES,
+    stop_poll: float | None = None,
+) -> dict[str, Any]:
+    """Sample until *stop_requested* or *deadline*; return the loop's summary.
+
+    *stop_requested* runs on the stop-file thread (``StopWatch``) every
+    *stop_poll* seconds, *interval* by default, and events reach *out*
+    through the writer thread (``EventWriter``), which is drained before
+    this returns: every event put is written and flushed by then.
+
+    Besides the largest gap between two samples it keeps that gap's
+    breakdown (``largest_gap``): the wall time outside sampling, from one
+    sample's end to the next one's start, with what it went to
+    (``BETWEEN_STEPS``), the wall time in the sample that closed it, with
+    that sample's phases (``Sampler.breakdown``), and the off-path calls
+    that ended in the gap or were still running at its end (``file_io``).
+    Each part's ``unaccounted`` is what none of its steps or phases took, so
+    a stall that falls between them, or a stepped wall clock, shows there
+    rather than in a step.
+    """
+    began = monotonic()
+    observation_start: float | None = None
+    last_sample: float | None = None
+    max_gap = 0.0
+    largest_gap: dict[str, Any] | None = None
+    #: Wall time of each ``sampler.sample()``, the watcher's own cost.
+    durations: list[float] = []
+    #: ``[began, ended, kernel's last pid as it began]`` for every sample;
+    #: ``ended`` is the time every event of that sample carries.
+    sample_log: list[list[Any]] = []
+    stopped_by = "deadline"
+    #: What the time since the last sample ended went to (``BETWEEN_STEPS``),
+    #: and the process's CPU time when it began.
+    between: dict[str, float] = {}
+    between_cpu = cpu()
+    sleep_requested = 0.0
+    writer = EventWriter(out, base, bound=queue_bound, timer=timer, wall=wall)
+    stop = StopWatch(
+        stop_requested,
+        poll=interval if stop_poll is None else stop_poll,
+        timer=timer,
+        wall=wall,
+    )
+    file_calls = {
+        "write": writer.write,
+        "flush": writer.flush,
+        "stop_check": stop.checks,
+    }
+    #: The off-path calls as the last sample ended.
+    io_mark = {name: calls.mark() for name, calls in file_calls.items()}
+
+    def step(name: str, call: Callable[[], Any]) -> Any:
+        began_step = timer()
+        try:
+            return call()
+        finally:
+            between[name] = between.get(name, 0.0) + timer() - began_step
+
+    def take_sample() -> None:
+        nonlocal observation_start, last_sample, max_gap, largest_gap, between_cpu
+        nonlocal io_mark
+        cpu_outside = cpu() - between_cpu
+        began_sample = monotonic()
+        sample = sampler.sample()
+        durations.append(monotonic() - began_sample)
+        now = wall()
+        io_now = {name: calls.mark() for name, calls in file_calls.items()}
+        if last_sample is not None:
+            gap = now - last_sample
+            # The gap and the sample that closed it, never the run's slowest
+            # sample, which can sit anywhere.
+            if largest_gap is None or gap > max_gap:
+                largest_gap = _gap_record(
+                    gap,
+                    now,
+                    last_sample,
+                    sampler,
+                    between,
+                    sleep_requested,
+                    cpu_outside,
+                    _file_io_between(io_mark, io_now, timer()),
+                )
+            max_gap = max(max_gap, gap)
+        io_mark = io_now
+        last_sample = now
+        sample_log.append([sampler.began_at, now, sampler.last_pid_at_begin])
+        between.clear()
+        between_cpu = cpu()
+        events: list[EventTuple] = step("tracker", lambda: tracker.observe(sample, now))
+        if observation_start is None:
+            observation_start = now
+            # The baseline is taken. The harness waits for this line before
+            # it starts an actor, so no actor is mistaken for background.
+            ready = {
+                "pid": os.getpid(),
+                "baseline_processes": len(sample),
+                "baseline_pgids": list(sampler.baseline_pgids),
+            }
+            events = [*events, ("watcher", "watcher.ready", ready)]
+        # Handed over, never written here: on Windows a write or a flush can
+        # block for seconds, and sampling would wait with it.
+        step("enqueue", lambda: writer.put(events, now))
+
+    writer.start()
+    stop.start()
+    try:
+        while monotonic() - began < deadline:
+            # An event the stop-file thread sets; the file is never looked at
+            # here, for the same reason as above.
+            if step("stop_check", stop.requested):
+                stopped_by = "stop file"
+                # One more sample after the request, so the observation
+                # provably ends after whatever the harness waited for.
+                take_sample()
+                break
+            tick = monotonic()
+            take_sample()
+            elapsed = monotonic() - tick
+            sleep_requested = max(0.0, interval - elapsed)
+            slept_from = timer()
+            sleep(sleep_requested)
+            slept = timer() - slept_from
+            between["sleep"] = min(slept, sleep_requested)
+            between["wakeup_delay"] = max(0.0, slept - sleep_requested)
+    except BaseException:
+        stop.cancel()
+        # What was sampled before the failure still reaches the file; the
+        # failure raised is the one that ended the loop.
+        with contextlib.suppress(Exception):
+            writer.close()
+        raise
+    stop.cancel()
+    # Everything put is written and flushed before the summary can follow it.
+    writer.close()
+
+    return {
+        "observation_start": observation_start,
+        "observation_end": last_sample,
+        "max_gap_seconds": round(max_gap, 4),
+        "largest_gap": largest_gap,
+        **duration_stats(durations),
+        "sample_log": sample_log,
+        "stopped_by": stopped_by,
+        "file_io": {
+            **{name: calls.stats() for name, calls in file_calls.items()},
+            "queue": writer.stats(),
+        },
+    }
+
+
+def _gap_record(
+    gap: float,
+    now: float,
+    last_sample: float,
+    sampler: Sampler,
+    between: Mapping[str, float],
+    sleep_requested: float,
+    cpu_outside: float,
+    file_io: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The breakdown of a gap that ended at *now*, by the sample closing it."""
+    breakdown = sampler.breakdown or {}
+    began = sampler.began_at if sampler.began_at is not None else now
+    outside, inside = began - last_sample, now - began
+    phases = breakdown.get("phases") or {}
+    return {
+        "seconds": round(gap, 4),
+        "t": now,
+        "outside_sampling": {
+            "seconds": round(outside, 4),
+            "steps": {name: round(between.get(name, 0.0), 4) for name in BETWEEN_STEPS},
+            "sleep_requested": round(sleep_requested, 4),
+            "unaccounted": round(outside - sum(between.values()), 4),
+            "cpu_seconds": round(cpu_outside, 4),
+        },
+        "in_sample": {
+            "seconds": round(inside, 4),
+            "unaccounted": round(inside - sum(phases.values()), 4),
+        },
+        "sample": breakdown,
+        # Off the sampling path: overlapping the parts above, never in them.
+        "file_io": dict(file_io),
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True, type=Path)
@@ -1490,68 +2196,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         browser_exe=args.browser_exe,
         browser_dir=args.browser_dir,
     )
-    began = time.monotonic()
-    observation_start: float | None = None
-    last_sample: float | None = None
-    max_gap = 0.0
-    #: Wall time of each ``sampler.sample()``, the watcher's own cost.
-    durations: list[float] = []
-    #: ``[began, ended, kernel's last pid as it began]`` for every sample;
-    #: ``ended`` is the time every event of that sample carries.
-    sample_log: list[list[Any]] = []
-    stopped_by = "deadline"
     with args.out.open("a", encoding="utf-8") as out:
-
-        def write(actor: str, kind: str, fields: dict[str, Any], t: float) -> None:
-            out.write(
-                json.dumps(
-                    {"t": t, **base, "actor": actor, "kind": kind, **fields},
-                    sort_keys=True,
-                )
-                + "\n"
-            )
-
-        def take_sample() -> None:
-            nonlocal observation_start, last_sample, max_gap
-            began_sample = time.monotonic()
-            sample = sampler.sample()
-            durations.append(time.monotonic() - began_sample)
-            now = time.time()
-            if last_sample is not None:
-                max_gap = max(max_gap, now - last_sample)
-            last_sample = now
-            sample_log.append([sampler.began_at, now, sampler.last_pid_at_begin])
-            for actor, kind, fields in tracker.observe(sample, now):
-                write(actor, kind, fields, now)
-            if observation_start is None:
-                observation_start = now
-                # The baseline is taken. The harness waits for this line before
-                # it starts an actor, so no actor is mistaken for background.
-                write(
-                    "watcher",
-                    "watcher.ready",
-                    {
-                        "pid": os.getpid(),
-                        "baseline_processes": len(sample),
-                        "baseline_pgids": sampler.baseline_pgids,
-                    },
-                    now,
-                )
-            out.flush()
-
-        while time.monotonic() - began < args.deadline:
-            if args.stop.exists():
-                stopped_by = "stop file"
-                # One more sample after the request, so the observation
-                # provably ends after whatever the harness waited for.
-                take_sample()
-                break
-            tick = time.monotonic()
-            take_sample()
-            elapsed = time.monotonic() - tick
-            time.sleep(max(0.0, args.interval - elapsed))
-
-        write(
+        loop = observe(
+            sampler,
+            tracker,
+            out,
+            args.stop.exists,
+            base=base,
+            interval=args.interval,
+            deadline=args.deadline,
+        )
+        write_event(
+            out,
+            base,
             "watcher",
             "watcher.summary",
             {
@@ -1559,20 +2216,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "root_pid": args.root_pid,
                 "samples": tracker.samples,
                 "interval_seconds": args.interval,
-                "observation_start": observation_start,
-                "observation_end": last_sample,
-                "max_gap_seconds": round(max_gap, 4),
                 **scheduling,
-                **duration_stats(durations),
+                **loop,
                 **sampler.stats(),
-                "sample_log": sample_log,
                 "browser_exe": args.browser_exe,
                 "browser_dir": args.browser_dir,
                 "read_failures": sampler.read_failures,
                 "relevant_read_failures": sampler.relevant_read_failures,
                 "max_roots": tracker.max_roots,
                 "violations": tracker.violations,
-                "stopped_by": stopped_by,
             },
             time.time(),
         )

@@ -15,18 +15,25 @@ On macOS the non-browser case is exercised with the real setuid ``/bin/ps``.
 
 from __future__ import annotations
 
+import errno
+import io
+import json
+import math
 import os
+import re
 import subprocess
 import sys
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import IO, Any, cast
 
 import pytest
 
 import psutil
 
-from differential import harness
+from differential import harness, watcher
 from differential.events import EventLog, read_jsonl
 from differential.harness import watcher_failures
 from differential.watcher import (
@@ -374,6 +381,31 @@ def test_a_watcher_stopped_on_request_after_the_actors_is_healthy(tmp_path):
     assert all(r["t"] in ends for r in records if r["kind"].startswith("process."))
     (ready,) = [r for r in records if r["kind"] == "watcher.ready"]
     assert ready["baseline_pgids"] or os.name == "nt"
+    # The largest gap comes with what it went to, on either side of a sample.
+    largest = summary["largest_gap"]
+    assert largest["seconds"] == summary["max_gap_seconds"]
+    # Named here, not from the watcher's own lists: a phase or step dropped
+    # from both the record and its list must still fail.
+    assert set(largest["outside_sampling"]["steps"]) == {
+        "tracker",
+        "enqueue",
+        "write",
+        "flush",
+        "sleep",
+        "wakeup_delay",
+        "stop_check",
+    }
+    # The file-system calls made off the sampling path, for the gap and the run.
+    assert set(largest["file_io"]) == {"write", "flush", "stop_check"}
+    assert set(summary["file_io"]) == {"write", "flush", "stop_check", "queue"}
+    assert summary["file_io"]["stop_check"]["count"] >= 1
+    assert set(largest["sample"]["phases"]) == {
+        "last_pid",
+        "enumeration",
+        "reads",
+        "canonicalization",
+        "bookkeeping",
+    }
     if sys.platform.startswith("linux"):
         assert all(isinstance(last, int) for _, _, last in log)
 
@@ -402,6 +434,9 @@ class _FakeProcess:
             raise opening
 
     def create_time(self):
+        if "start_seconds" in self._entry:
+            # A modelled slow read, as ``cmdline_seconds``.
+            self._entry["clock"]["now"] += self._entry["start_seconds"]
         return _field(self._entry, "start")
 
     def ppid(self):
@@ -440,14 +475,20 @@ def _sampler(
     user_of=_user_of,
     timer=time.perf_counter,
     last_pid_of=lambda: None,
+    pids=None,
+    clock=time.time,
+    cpu=time.process_time,
+    pgid_of=None,
 ):
     return Sampler(
         root,
         own_pid=999,
-        pids=lambda: list(table),
+        pids=pids or (lambda: list(table)),
         open_process=lambda pid: _FakeProcess(table, pid),
         user_of=user_of,
         timer=timer,
+        clock=clock,
+        cpu=cpu,
         last_pid_of=last_pid_of,
         user=HARNESS,
         browser_exe=browser_exe,
@@ -455,10 +496,11 @@ def _sampler(
         # A POSIX process table unless a test models Windows: the same on
         # every host the suite runs on.
         no_exec=no_exec,
+        # pid 0 is the System Idle Process wherever the table models Windows.
+        idle_pid=0 if no_exec else None,
         # The modelled group, never the real one of a real pid.
-        pgid_of=lambda pid: _field(
-            {"pgid": (table.get(pid) or {}).get("pgid")}, "pgid"
-        ),
+        pgid_of=pgid_of
+        or (lambda pid: _field({"pgid": (table.get(pid) or {}).get("pgid")}, "pgid")),
         # Markers are read wherever a guardian drains by them: POSIX.
         read_markers=not no_exec,
     )
@@ -1589,7 +1631,7 @@ def test_a_lifetimes_user_is_read_once():
     assert sampler.relevant_read_failures
 
 
-def test_a_slow_sample_names_the_read_it_waited_on():
+def test_a_slow_sample_names_its_largest_timed_read():
     clock = {"now": 0.0}
     table = _baseline_table()
     sampler = _sampler(table, root=10, timer=lambda: clock["now"])
@@ -1612,7 +1654,8 @@ def test_a_slow_sample_names_the_read_it_waited_on():
     assert stats["slowest_read"]["kind"] == "cmdline"
 
 
-def test_a_gap_over_budget_names_what_the_slowest_samples_waited_on():
+def test_a_summary_without_a_gap_breakdown_names_the_slowest_samples():
+    # Written before the watcher kept ``largest_gap``.
     slow = {
         "seconds": 1.3,
         "reads": 55,
@@ -1633,9 +1676,10 @@ def test_a_gap_over_budget_names_what_the_slowest_samples_waited_on():
     )
     (failure,) = failures
     assert "1.38s" in failure and "'cmdline'" in failure and "x.exe" in failure
+    assert "the run's slowest samples" in failure
 
 
-def test_a_gap_spent_waiting_to_run_names_no_read():
+def test_a_summary_without_a_gap_breakdown_names_time_outside_sampling():
     # Run 36327966208, K0 on windows-latest: the only slow sample was the
     # baseline, which no gap is measured across, and the widest gap was the
     # watcher not running between two samples of 4ms.
@@ -1672,6 +1716,808 @@ def test_a_gap_spent_waiting_to_run_names_no_read():
     assert "0.0042s in the sample that closed it" in failure
     assert "NORMAL_PRIORITY_CLASS" in failure
     assert "svchost" not in failure
+
+
+# --- What a gap went to -----------------------------------------------------------
+
+#: The modelled stall: over the gap budget on its own.
+_STALL = 1.2
+_INTERVAL = 0.05
+
+
+def _timed_run(
+    monkeypatch, stalls: dict[int, dict[str, float]], *, samples: int = 8
+) -> tuple[dict[str, Any], Sampler]:
+    """Run the watcher's loop on a modelled table and clock, where sample *n*
+    begins by arming ``stalls[n]``: each named site takes the clock forward by
+    its seconds the next time it runs. Return the summary the harness judges.
+
+    Every site is on the loop's own thread. The writer and the stop-file
+    thread never move the modelled clock, so the loop may take a few samples
+    past *samples* before the stop thread sees the request.
+    """
+    clock = {"now": 100.0, "cpu": 0.0}
+    armed: dict[str, float] = {}
+    table: dict[int, dict[str, Any]] = {
+        **_row_actor_table(),
+        80: {"start": 6.5, "ppid": 10, "exe": BROWSER_EXE, "cmdline": _chrome(PROFILE)},
+    }
+    began = {"n": 0}
+
+    def stall(site: str) -> None:
+        seconds = armed.pop(site, 0.0)
+        clock["now"] += seconds
+        if site == "bookkeeping":
+            # Computing, not waiting: the CPU time moves with it.
+            clock["cpu"] += seconds
+
+    def last_pid() -> None:
+        began["n"] += 1
+        armed.update(stalls.get(began["n"], {}))
+        # A process that starts in every sample, so every sample has events.
+        table[100 + began["n"]] = {"start": 7.0, "ppid": 10, "cmdline": ["helper"]}
+        if "canonicalization" in armed:
+            # A profile is resolved when its root is first seen, not again.
+            table[90] = {
+                "start": 7.0,
+                "ppid": 10,
+                "exe": BROWSER_EXE,
+                "cmdline": _chrome(f"{PROFILE}-late"),
+            }
+        table[70]["cmdline_seconds"] = armed.pop("cmdline", 0.0)
+        stall("last_pid")
+
+    def pids() -> list[int]:
+        stall("enumeration")
+        return list(table)
+
+    def pgid(pid: int) -> int:
+        if pid == 70:
+            stall("pgid")
+        return pid
+
+    canonical = watcher.canonical_user_data_dir
+
+    def slow_canonical(value: str) -> str:
+        stall("canonicalization")
+        return canonical(value)
+
+    # The last bookkeeping of a sample, after its last read.
+    track = Sampler._track
+
+    def slow_track(self, sample, verdicts) -> None:
+        stall("bookkeeping")
+        track(self, sample, verdicts)
+
+    monkeypatch.setattr(watcher, "canonical_user_data_dir", slow_canonical)
+    monkeypatch.setattr(Sampler, "_track", slow_track)
+    table[70]["clock"] = clock
+
+    def now() -> float:
+        return clock["now"]
+
+    sampler = _sampler(
+        table,
+        root=10,
+        timer=now,
+        clock=now,
+        cpu=lambda: clock["cpu"],
+        last_pid_of=last_pid,
+        pids=pids,
+        pgid_of=pgid,
+    )
+    tracker = Tracker()
+    observe_ = tracker.observe
+
+    def slow_observe(sample, t):
+        stall("tracker")
+        return observe_(sample, t)
+
+    monkeypatch.setattr(tracker, "observe", slow_observe)
+    # The loop's own steps around the writer and the stop-file thread.
+    put = watcher.EventWriter.put
+
+    def slow_put(self, events, t) -> None:
+        stall("enqueue")
+        put(self, events, t)
+
+    requested = watcher.StopWatch.requested
+
+    def slow_requested(self) -> bool:
+        stall("stop_check")
+        return requested(self)
+
+    monkeypatch.setattr(watcher.EventWriter, "put", slow_put)
+    monkeypatch.setattr(watcher.StopWatch, "requested", slow_requested)
+
+    def stop_requested() -> bool:
+        return began["n"] >= samples
+
+    def sleep(seconds: float) -> None:
+        clock["now"] += seconds + armed.pop("wakeup_delay", 0.0)
+        # Lets the stop-file thread run.
+        time.sleep(0)
+
+    loop = watcher.observe(
+        sampler,
+        tracker,
+        io.StringIO(),
+        stop_requested,
+        base={},
+        interval=_INTERVAL,
+        deadline=1000.0,
+        timer=now,
+        monotonic=now,
+        wall=now,
+        sleep=sleep,
+        cpu=lambda: clock["cpu"],
+        stop_poll=0.001,
+    )
+    return {**loop, **sampler.stats(), "priority": "HIGH_PRIORITY_CLASS"}, sampler
+
+
+def _gap_failure(summary: dict[str, Any]) -> str:
+    (failure,) = watcher_failures(
+        summary,
+        actors_began=summary["observation_start"],
+        actors_ended=summary["observation_end"],
+    )
+    return failure
+
+
+def _largest_part(failure: str) -> tuple[str, float]:
+    found = re.search(r"largest part was (.+?) at ([0-9.]+)s[;,]", failure)
+    assert found, failure
+    return found[1], float(found[2])
+
+
+@pytest.mark.parametrize(
+    ("site", "named"),
+    [
+        ("last_pid", "reading the kernel's last pid in the sample"),
+        ("enumeration", "enumerating pids in the sample"),
+        ("cmdline", "process reads in the sample"),
+        ("pgid", "process reads in the sample"),
+        ("canonicalization", "canonicalizing paths in the sample"),
+        ("bookkeeping", "classification and bookkeeping in the sample"),
+        ("tracker", "turning the previous sample into events outside sampling"),
+        ("enqueue", "handing events to the writer thread outside sampling"),
+        ("wakeup_delay", "waking late from sleep outside sampling"),
+        ("stop_check", "checking for a stop request outside sampling"),
+    ],
+)
+def test_a_gap_names_the_phase_its_time_went_to(monkeypatch, site, named):
+    summary, _ = _timed_run(monkeypatch, {4: {site: _STALL}})
+    # The sleep after a sample shrinks by whatever the sample's own loop took.
+    assert _STALL <= summary["max_gap_seconds"] <= _STALL + _INTERVAL
+    failure = _gap_failure(summary)
+    name, seconds = _largest_part(failure)
+    assert name == named, failure
+    assert seconds == pytest.approx(_STALL, abs=0.01)
+    if name == "process reads in the sample":
+        assert f"most of it {site} reads" in failure
+        assert f"the longest {_STALL:.4f}s of pid 70" in failure
+    assert "outside sampling" in failure
+    assert "slowest process read in that sample was" in failure
+    assert "waited" not in failure
+    # The phases of the sample that closed it add up to its duration.
+    sample = summary["largest_gap"]["sample"]
+    assert sum(sample["phases"].values()) == pytest.approx(sample["seconds"])
+
+
+def test_reads_split_across_kinds_compete_as_one_phase(monkeypatch):
+    """0.8s of reads split between two kinds outweigh 0.6s of bookkeeping."""
+    summary, _ = _timed_run(
+        monkeypatch, {4: {"cmdline": 0.4, "pgid": 0.4, "bookkeeping": 0.6}}
+    )
+    name, seconds = _largest_part(_gap_failure(summary))
+    assert name == "process reads in the sample"
+    assert seconds == pytest.approx(0.8, abs=0.01)
+
+
+def test_a_late_wakeup_says_how_long_the_sleep_asked_for(monkeypatch):
+    summary, _ = _timed_run(monkeypatch, {4: {"wakeup_delay": _STALL}})
+    assert f"after asking for {_INTERVAL:.4f}s" in _gap_failure(summary)
+
+
+def test_a_gap_names_the_sample_that_closed_it_not_the_runs_slowest(monkeypatch):
+    summary, sampler = _timed_run(
+        monkeypatch,
+        {
+            # The run's slowest sample, closing a gap under the budget.
+            3: {"cmdline": 0.9},
+            # The largest gap: a late wakeup, then a sample spent computing.
+            5: {"wakeup_delay": 0.5},
+            6: {"bookkeeping": 0.6},
+        },
+    )
+    (slowest, *_) = sorted(
+        sampler.slow_samples, key=lambda entry: entry["seconds"], reverse=True
+    )
+    assert (slowest["slowest"]["kind"], slowest["seconds"]) == ("cmdline", 0.9)
+    largest = summary["largest_gap"]
+    assert largest["seconds"] == pytest.approx(0.05 + 0.5 + 0.6)
+    # The sample that ended the gap: the sixth sample's end.
+    assert largest["t"] == summary["sample_log"][5][1]
+    failure = _gap_failure(summary)
+    name, seconds = _largest_part(failure)
+    assert name == "classification and bookkeeping in the sample"
+    assert seconds == pytest.approx(0.6)
+    assert "0.5500s of it passed between two samples, outside sampling" in failure
+    assert "0.6000s in the sample that closed it" in failure
+    assert "0.6000s in the sample; the slowest process read" in failure
+    assert "0.9000" not in failure
+
+
+def test_a_gap_names_the_file_system_calls_it_overlapped():
+    # Run 37000909990's 1.23s stop-file check, had it run off the loop and
+    # the gap been over budget for another reason.
+    failure = _gap_failure(
+        {
+            "stopped_by": "stop file",
+            "observation_start": 0.0,
+            "observation_end": 10.0,
+            "max_gap_seconds": 1.284,
+            "largest_gap": {
+                "seconds": 1.284,
+                "outside_sampling": {"seconds": 1.2796, "steps": {"tracker": 1.27}},
+                "in_sample": {"seconds": 0.0043},
+                "sample": {},
+                "file_io": {
+                    "write": {"count": 2, "seconds": 0.0011, "in_progress_seconds": 0},
+                    "flush": {"count": 2, "seconds": 0.0004, "in_progress_seconds": 0},
+                    "stop_check": {
+                        "count": 0,
+                        "seconds": 0.0,
+                        "in_progress_seconds": 1.2331,
+                    },
+                },
+            },
+        }
+    )
+    assert _largest_part(failure)[0] == (
+        "turning the previous sample into events outside sampling"
+    )
+    assert (
+        "off the sampling path, calls that ended in that gap (whole durations): "
+        "the event writer's writes took "
+        "0.0011s over 2 calls, its flushes took 0.0004s over 2 calls, the "
+        "stop-file checks took 0.0000s over 0 calls and one was still running "
+        "after 1.2331s"
+    ) in failure
+
+
+def test_on_windows_the_idle_process_does_not_hold_sampling():
+    """psutil answers pid 0's create time on Windows with a query of the whole
+    process table, modelled here as a stall over the gap budget every time."""
+    clock = {"now": 100.0}
+    table: dict[int, dict[str, Any]] = {
+        **_row_actor_table(),
+        80: {"start": 6.5, "ppid": 10, "exe": BROWSER_EXE, "cmdline": _chrome(PROFILE)},
+        0: {
+            "start": 0.0,
+            "ppid": 0,
+            "exe": "",
+            "cmdline": [],
+            "user": "NT AUTHORITY\\SYSTEM",
+            "start_seconds": _STALL,
+            "clock": clock,
+        },
+    }
+    samples = {"n": 0}
+    seen = threading.Event()
+
+    def pids() -> list[int]:
+        samples["n"] += 1
+        return list(table)
+
+    def now() -> float:
+        return clock["now"]
+
+    def stop_requested() -> bool:
+        if samples["n"] < 8:
+            return False
+        seen.set()
+        return True
+
+    def sleep(seconds: float) -> None:
+        clock["now"] += seconds
+        # The stop-file thread runs in real time, however late it is
+        # scheduled, while modelled time costs the loop nothing. Held here
+        # until that thread has seen the request, the loop does not spin
+        # through samples meanwhile.
+        if samples["n"] >= 8:
+            seen.wait(10)
+
+    sampler = _sampler(
+        table, root=10, no_exec=True, timer=now, clock=now, cpu=lambda: 0.0, pids=pids
+    )
+    tracker = Tracker()
+    loop = watcher.observe(
+        sampler,
+        tracker,
+        io.StringIO(),
+        stop_requested,
+        base={},
+        interval=_INTERVAL,
+        # Out of reach, so the stop always comes from the stop-file thread,
+        # as the row judgement requires.
+        deadline=math.inf,
+        timer=now,
+        monotonic=now,
+        wall=now,
+        sleep=sleep,
+        cpu=lambda: 0.0,
+        stop_poll=0.001,
+    )
+    summary: dict[str, Any] = {**loop, **sampler.stats()}
+    assert summary["max_gap_seconds"] < harness.MAX_WATCHER_GAP_SECONDS
+    assert (
+        watcher_failures(
+            summary,
+            actors_began=summary["observation_start"],
+            actors_ended=summary["observation_end"],
+        )
+        == []
+    )
+    # Still watching the row: its browser is the profile's one root.
+    assert tracker.max_roots == {canonical_user_data_dir(PROFILE): 1}
+
+
+# --- File-system calls stay off the sampling path ----------------------------------
+
+#: What one modelled file-system call blocks for: over the gap budget on its
+#: own, as the stop-file check that took 1.2331s on windows-latest (run
+#: 37000909990).
+_BLOCKED = 1.5
+#: How long a real-time run samples before its stop is requested.
+_RUN = 2.0
+
+
+class _SlowFile(io.StringIO):
+    """An event file whose every write and flush first calls *hook* with the
+    call's name and its index among the calls of that name."""
+
+    def __init__(self, hook: Callable[[str, int], None]) -> None:
+        super().__init__()
+        self._hook = hook
+        self.calls = {"write": 0, "flush": 0}
+
+    def _call(self, name: str) -> None:
+        index = self.calls[name]
+        self.calls[name] += 1
+        self._hook(name, index)
+
+    def write(self, text: str) -> int:
+        self._call("write")
+        return super().write(text)
+
+    def flush(self) -> None:
+        self._call("flush")
+        super().flush()
+
+
+def _real_time_run(
+    out: IO[str],
+    stop_requested: Callable[[], bool],
+    *,
+    tracker: Tracker | None = None,
+    queue_bound: int = watcher.WRITE_QUEUE_BATCHES,
+    deadline: float = 20.0,
+) -> dict[str, Any]:
+    """The loop in real time on a modelled table where a process starts in
+    every sample, so every sample has events to write, the first one a
+    browser's roots."""
+    table: dict[int, dict[str, Any]] = {
+        **_row_actor_table(),
+        80: {"start": 6.5, "ppid": 10, "exe": BROWSER_EXE, "cmdline": _chrome(PROFILE)},
+    }
+    count = {"samples": 0}
+
+    def pids() -> list[int]:
+        count["samples"] += 1
+        table[100 + count["samples"]] = {"start": 7.0, "ppid": 10, "cmdline": ["x"]}
+        return list(table)
+
+    return watcher.observe(
+        _sampler(table, root=10, pids=pids),
+        tracker or Tracker(),
+        out,
+        stop_requested,
+        base={},
+        interval=_INTERVAL,
+        deadline=deadline,
+        queue_bound=queue_bound,
+    )
+
+
+def _recording(monkeypatch, tracker: Tracker) -> list[tuple[float, str, Any]]:
+    """Every event *tracker* produces, in order, with the ready line where
+    the loop adds it: after the first sample's events."""
+    produced: list[tuple[float, str, Any]] = []
+    observe_ = tracker.observe
+
+    def recording(sample, t):
+        events = observe_(sample, t)
+        produced.extend((t, kind, fields.get("pid")) for _, kind, fields in events)
+        if tracker.samples == 1:
+            produced.append((t, "watcher.ready", os.getpid()))
+        return events
+
+    monkeypatch.setattr(tracker, "observe", recording)
+    return produced
+
+
+def _written(out: io.StringIO) -> list[tuple[float, str, Any]]:
+    return [
+        (r["t"], r["kind"], r.get("pid"))
+        for r in map(json.loads, out.getvalue().splitlines())
+    ]
+
+
+@pytest.mark.parametrize("call", ["stop_check", "write", "flush"])
+def test_a_blocked_file_system_call_does_not_hold_sampling(call):
+    began = time.monotonic()
+
+    def block(name: str, index: int) -> None:
+        # Every call of its kind after the first, whichever thread makes it:
+        # the first write carries the ready line.
+        if name == call and index >= 1:
+            time.sleep(_BLOCKED)
+
+    checks = {"n": 0}
+    requested: list[float] = []
+
+    def stop_requested() -> bool:
+        block("stop_check", checks["n"])
+        checks["n"] += 1
+        if time.monotonic() - began < _RUN:
+            return False
+        requested.append(time.time())
+        return True
+
+    summary = _real_time_run(_SlowFile(block), stop_requested)
+    # One more sample began once the request was seen.
+    assert summary["stopped_by"] == "stop file"
+    assert summary["sample_log"][-1][0] >= requested[0]
+    # Sampling went on through the blocked call, and the row would pass.
+    assert summary["observation_end"] - summary["observation_start"] >= _BLOCKED
+    assert summary["max_gap_seconds"] < harness.MAX_WATCHER_GAP_SECONDS
+    assert (
+        watcher_failures(
+            summary,
+            actors_began=summary["observation_start"],
+            actors_ended=summary["observation_end"],
+        )
+        == []
+    )
+    # The slow file system is still on record.
+    assert summary["file_io"][call]["max_seconds"] >= _BLOCKED
+
+
+def test_events_reach_the_file_in_the_order_the_samples_produced_them(monkeypatch):
+    tracker = Tracker()
+    produced = _recording(monkeypatch, tracker)
+    # Every write is slow, so samples pile up behind it and leave together.
+    out = _SlowFile(lambda name, _: time.sleep(0.2) if name == "write" else None)
+    began = time.monotonic()
+    _real_time_run(out, lambda: time.monotonic() - began >= 1.0, tracker=tracker)
+    # The ready line follows the first sample's events, as the harness reads it.
+    assert [kind for _, kind, _ in produced[:2]] == ["browser.roots", "watcher.ready"]
+    assert _written(out) == produced
+    assert out.calls["write"] < len({t for t, _, _ in produced})
+
+
+def test_a_writer_a_whole_queue_behind_holds_the_loop_and_loses_nothing(
+    monkeypatch,
+):
+    tracker = Tracker()
+    produced = _recording(monkeypatch, tracker)
+    out = _SlowFile(lambda name, _: time.sleep(0.5) if name == "write" else None)
+    began = time.monotonic()
+    summary = _real_time_run(
+        out, lambda: time.monotonic() - began >= 1.5, tracker=tracker, queue_bound=2
+    )
+    assert _written(out) == produced
+    held = summary["file_io"]["queue"]
+    assert held["bound"] == 2
+    assert held["full_waits"] >= 1 and held["full_wait_seconds"] > 0
+    # The wait is the loop's, and the gap it widened names it.
+    assert summary["largest_gap"]["outside_sampling"]["steps"]["enqueue"] >= 0.1
+
+
+@pytest.mark.parametrize("when", ["while sampling", "at shutdown"])
+def test_a_failed_write_is_raised_not_swallowed(when):
+    began = time.monotonic()
+    stopping = threading.Event()
+
+    def fail(name: str, index: int) -> None:
+        if name != "write" or index == 0:
+            return
+        if when == "at shutdown" and index == 1:
+            # Held until the stop is requested, so the last sample's events
+            # wait behind it and only the drain at the end fails.
+            stopping.wait(10)
+            time.sleep(0.5)
+            return
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def stop_requested() -> bool:
+        if when == "while sampling":
+            return False
+        if time.monotonic() - began >= 0.5:
+            stopping.set()
+        return stopping.is_set()
+
+    with pytest.raises(RuntimeError, match="event writer failed") as raised:
+        _real_time_run(_SlowFile(fail), stop_requested, deadline=10.0)
+    assert isinstance(raised.value.__cause__, OSError)
+    # Raised by the next sample handed over, not once the deadline ran out.
+    assert time.monotonic() - began < 5.0
+
+
+def test_a_failed_stop_file_check_is_raised_not_swallowed():
+    def stop_requested() -> bool:
+        raise PermissionError(errno.EACCES, "Access is denied")
+
+    began = time.monotonic()
+    with pytest.raises(RuntimeError, match="stop-file check failed") as raised:
+        _real_time_run(io.StringIO(), stop_requested, deadline=10.0)
+    assert isinstance(raised.value.__cause__, PermissionError)
+    assert time.monotonic() - began < 5.0
+
+
+class _BlockedWrites(io.TextIOBase):
+    """The real event file, whose every write blocks first."""
+
+    def __init__(self, out: IO[str], seconds: float) -> None:
+        self._out, self._seconds = out, seconds
+
+    def write(self, s: str) -> int:
+        time.sleep(self._seconds)
+        return self._out.write(s)
+
+    def flush(self) -> None:
+        self._out.flush()
+
+
+def test_a_stop_request_publishes_the_whole_summary_behind_a_slow_writer(
+    tmp_path, monkeypatch
+):
+    class SlowWriter(watcher.EventWriter):
+        def __init__(self, out, *args, **kwargs) -> None:
+            super().__init__(
+                cast(IO[str], _BlockedWrites(out, _BLOCKED)), *args, **kwargs
+            )
+
+    monkeypatch.setattr(watcher, "EventWriter", SlowWriter)
+    out, stop, profile = (
+        tmp_path / "watcher.jsonl",
+        tmp_path / "watcher.stop",
+        tmp_path / "profile",
+    )
+    exits: list[int] = []
+    arguments = [
+        *("--out", str(out), "--stop", str(stop), "--run", "unit"),
+        *("--experiment", "K0", "--row", "watcher-unit", "--platform", "test"),
+        *("--root-pid", str(os.getpid()), "--deadline", "60"),
+        *("--browser-dir", str(tmp_path / "ms-playwright")),
+    ]
+    # The real loop on the real process table, in this process.
+    run = threading.Thread(target=lambda: exits.append(watcher.main(arguments)))
+    run.start()
+    browser: subprocess.Popen[bytes] | None = None
+    try:
+        limit = time.monotonic() + 30
+        while not any(r["kind"] == "watcher.ready" for r in read_jsonl(out)):
+            assert run.is_alive() and time.monotonic() < limit
+            time.sleep(0.05)
+        browser = _stand_in_browser(profile)
+        # Sampled by now, its start waits behind a blocked write.
+        time.sleep(0.5)
+        requested = time.time()
+        stop.touch()
+        run.join(timeout=60)
+    finally:
+        stop.touch()
+        run.join(timeout=60)
+        if browser is not None:
+            browser.kill()
+            browser.wait(timeout=10)
+    assert not run.is_alive() and exits == [0]
+    *events, summary = read_jsonl(out)
+    assert summary["kind"] == "watcher.summary"
+    assert summary["stopped_by"] == "stop file"
+    assert summary["observation_end"] >= requested
+    assert summary["file_io"]["write"]["max_seconds"] >= _BLOCKED
+    # Everything sampled is in the file, ahead of the summary.
+    ours = f"--user-data-dir={profile}"
+    assert any(r["kind"] == "process.start" and ours in r["cmdline"] for r in events)
+    ends = {ended for _, ended, _ in summary["sample_log"]}
+    assert all(r["t"] in ends for r in events)
+
+
+# --- A lifetime's paths are resolved once ------------------------------------------
+
+#: What one modelled path resolution takes: on Windows, ``realpath`` opens the
+#: file, and has waited over a second for a busy filesystem.
+_RESOLVE = 0.3
+PYTHON_EXE = "/usr/bin/python3"
+
+
+def _modelled_paths(monkeypatch, clock: dict[str, float], links: dict[str, str]):
+    """Replace path resolution with a slow model of a filesystem whose
+    symlinks are *links*; return the paths resolved, one list per sample."""
+    resolved: list[list[str]] = []
+
+    def slow_real(path: str) -> str:
+        clock["now"] += _RESOLVE
+        resolved[-1].append(path)
+        return links.get(path, path)
+
+    monkeypatch.setattr(watcher, "_real", slow_real)
+    return resolved
+
+
+def _modelled_sampler(table, clock: dict[str, float], no_exec: bool) -> Sampler:
+    return _sampler(table, root=10, no_exec=no_exec, timer=lambda: clock["now"])
+
+
+@pytest.mark.parametrize("no_exec", [True, False], ids=["windows", "posix"])
+def test_a_lifetimes_paths_are_resolved_when_first_seen_not_every_sample(
+    monkeypatch, no_exec
+):
+    clock = {"now": 0.0}
+    resolved = _modelled_paths(monkeypatch, clock, {})
+    table = _baseline_table()
+    sampler = _modelled_sampler(table, clock, no_exec)
+    breakdowns: list[dict[str, Any]] = []
+    for n in range(1, 7):
+        if n == 2:
+            table[80] = {
+                "start": 6.5,
+                "ppid": 10,
+                "exe": BROWSER_EXE,
+                "cmdline": _chrome(PROFILE),
+            }
+        if n >= 2:
+            # A new process in every sample, which is not a browser.
+            table[100 + n] = {"start": 7.0, "ppid": 10, "cmdline": ["helper"]}
+        resolved.append([])
+        sampler.sample()
+        assert sampler.breakdown is not None
+        breakdowns.append(sampler.breakdown)
+    if no_exec:
+        # The first sample settles pid 1 by its image, which compares it with
+        # the browser's paths; nothing new after that is compared.
+        expected = [
+            [BROWSER_DIR, BROWSER_EXE, PYTHON_EXE],
+            [PROFILE],
+            *[[]] * 4,
+        ]
+    else:
+        # The browser's own paths once in the run, then every new lifetime's
+        # executable once, when its marker is read.
+        expected = [
+            [],
+            [BROWSER_DIR, BROWSER_EXE, BROWSER_EXE, PROFILE, PYTHON_EXE],
+            *[[PYTHON_EXE]] * 4,
+        ]
+    assert [sorted(paths) for paths in resolved] == expected
+    # Each resolution is charged to the sample that made it, and only it.
+    for paths, breakdown in zip(resolved, breakdowns):
+        assert breakdown["canonicalization"]["count"] == len(paths)
+        assert breakdown["phases"]["canonicalization"] == pytest.approx(
+            _RESOLVE * len(paths)
+        )
+
+
+def _link_table() -> dict[int, dict[str, Any]]:
+    return {
+        **_baseline_table(),
+        80: {
+            "start": 6.5,
+            "ppid": 10,
+            "exe": BROWSER_EXE,
+            "cmdline": _chrome("/tmp/route"),
+        },
+    }
+
+
+@pytest.mark.parametrize("no_exec", [True, False], ids=["windows", "posix"])
+def test_a_recycled_pid_has_its_profile_resolved_again(monkeypatch, no_exec):
+    clock = {"now": 0.0}
+    links = {"/tmp/route": "/real/first"}
+    resolved = _modelled_paths(monkeypatch, clock, links)
+    table = _link_table()
+    sampler = _modelled_sampler(table, clock, no_exec)
+    resolved.append([])
+    assert sampler.sample()[80].profile == "/real/first"
+    # Another process at the same pid, on a path that now leads elsewhere.
+    table[80]["start"] = 6.6
+    links["/tmp/route"] = "/real/second"
+    resolved.append([])
+    assert sampler.sample()[80].profile == "/real/second"
+    assert "/tmp/route" in resolved[1]
+
+
+@pytest.mark.parametrize("no_exec", [True, False], ids=["windows", "posix"])
+def test_a_lifetime_that_left_a_sample_is_resolved_again(monkeypatch, no_exec):
+    # Linux reads a create time in clock ticks, so a recycled pid can show
+    # the one its predecessor had. A sample that saw the pid gone has ended
+    # that lifetime, and what was resolved for it goes with it.
+    clock = {"now": 0.0}
+    links = {"/tmp/route": "/real/first"}
+    resolved = _modelled_paths(monkeypatch, clock, links)
+    table = _link_table()
+    sampler, tracker = _modelled_sampler(table, clock, no_exec), Tracker()
+    resolved.append([])
+    _observe(sampler, tracker, 0.0)
+    entry = table.pop(80)
+    resolved.append([])
+    _observe(sampler, tracker, 1.0)
+    table[80] = entry
+    links["/tmp/route"] = "/real/second"
+    resolved.append([])
+    sample = sampler.sample()
+    events = tracker.observe(sample, 2.0)
+    assert [e[1] for e in events if e[2].get("pid") == 80] == ["process.start"]
+    assert sample[80].profile == "/real/second"
+    assert "/tmp/route" in resolved[2]
+
+
+def test_a_lifetime_that_execs_onto_another_profile_is_resolved_again():
+    # POSIX: the same pid and create time, a new command line.
+    table = _link_table()
+    sampler, tracker = _sampler(table, root=10), Tracker()
+    _observe(sampler, tracker, 0.0)
+    table[80]["cmdline"] = _chrome("/tmp/other-profile")
+    _observe(sampler, tracker, 1.0)
+    assert tracker.max_roots == {
+        canonical_user_data_dir("/tmp/route"): 1,
+        canonical_user_data_dir("/tmp/other-profile"): 1,
+    }
+
+
+def _symlinked_profile(tmp_path: Path) -> tuple[str, str]:
+    """One profile directory and a second route to it, as macOS reaches its
+    temporary directory through ``/var`` and ``/private/var``."""
+    real = tmp_path / "real"
+    (real / "profile").mkdir(parents=True)
+    route = tmp_path / "route"
+    try:
+        route.symlink_to(real, target_is_directory=True)
+    except OSError as exc:  # Windows without the symlink privilege
+        pytest.skip(f"cannot create a symlink here: {exc}")
+    return str(real / "profile"), str(route / "profile")
+
+
+@pytest.mark.parametrize("no_exec", [True, False], ids=["windows", "posix"])
+@pytest.mark.parametrize("second_route", [False, True], ids=["same", "symlink"])
+def test_a_second_root_on_a_resolved_profile_is_still_a_violation(
+    tmp_path, no_exec, second_route
+):
+    profile, route = _symlinked_profile(tmp_path)
+    table = {
+        **_baseline_table(),
+        80: {"start": 6.5, "ppid": 10, "exe": BROWSER_EXE, "cmdline": _chrome(profile)},
+    }
+    sampler, tracker = _sampler(table, root=10, no_exec=no_exec), Tracker()
+    _observe(sampler, tracker, 0.0)
+    # The first root's profile is resolved by now; the second comes later.
+    table[81] = {
+        "start": 6.6,
+        "ppid": 10,
+        "exe": BROWSER_EXE,
+        "cmdline": _chrome(route if second_route else profile),
+    }
+    for t in (1.0, 2.0, 3.0):
+        _observe(sampler, tracker, t)
+    key = canonical_user_data_dir(profile)
+    assert tracker.max_roots == {key: 2}
+    assert tracker.violations == [
+        {"t": t, "profile": key, "pids": [80, 81]} for t in (1.0, 2.0, 3.0)
+    ]
 
 
 # --- What O2 reads from the samples ----------------------------------------------

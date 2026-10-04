@@ -477,12 +477,14 @@ async def send(
         )
 
 
-async def read_profile_target(page, html: str) -> _ProfileMessageTargetResolution:
+async def read_profile_target(
+    page, html: str, *, query: str = ""
+) -> _ProfileMessageTargetResolution:
     async def fulfill(route):
         await route.fulfill(status=200, content_type="text/html", body=html)
 
     await page.route("https://www.linkedin.com/**", fulfill)
-    await page.goto(f"https://www.linkedin.com{PROFILE_PATH}")
+    await page.goto(f"https://www.linkedin.com{PROFILE_PATH}{query}")
     return await _sender(page)._read_profile_message_target()
 
 
@@ -570,6 +572,24 @@ class TestProfileMessageTargetDom:
         assert target.display_name == "Alice"
         assert target.profile_urn == "ACoAAB"
         assert target.compose_url == COMPOSE_URL
+
+    # Since late September 2026 LinkedIn lands /in/<name>/ on
+    # /in/<name>/?isSelfProfile=false (#1181). The page script resolved that
+    # card all along; the URL check after it refused every recipient.
+    async def test_redesigned_profile_url_resolves_its_top_card(self, dom_page):
+        html = profile_page(
+            f'<section><h1>{DISPLAY_NAME}</h1><a href="{COMPOSE_URL}">message</a>'
+            "</section>"
+        )
+
+        resolution = await read_profile_target(
+            dom_page, html, query="?isSelfProfile=false"
+        )
+
+        assert resolution.status == "resolved"
+        assert resolution.target is not None
+        assert resolution.target.profile_path == PROFILE_PATH
+        assert resolution.target.profile_urn == "ACoAAB"
 
     async def test_later_sections_never_compete_with_first_top_card(self, dom_page):
         card = (

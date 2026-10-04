@@ -7,11 +7,12 @@ and the candidate counts it as remaining and does not. Around that branch both
 revisions keep the same positive controls: a member a held Job claims is
 spared, a later positive answer outweighs an earlier failure, a member known
 to be in no held Job is still ended, an unanswered inventory, open or
-membership query is never read as empty, the exclusions are never opened and
-every handle opened is closed.
+membership query is never read as empty, the owner and the idle id are never
+opened, the gate is never ended and every handle opened is closed.
 
 **Evidence.** ``source-model``. The definitions of ``_drain_exclusions``,
-``_in_another_owned_job`` and ``_drain_adopted_windows_job_members`` are taken
+``_in_another_owned_job`` and ``_drain_adopted_windows_job_members``, and of
+``_windows_process_created`` where a revision has it, are taken
 from each revision's source text and run, unchanged, against Win32 doubles
 whose answers each case scripts per iteration of the drain. What the model
 shows is the branch each revision's code selects in a modelled state. It
@@ -45,15 +46,21 @@ ROUTINE = (
     "_in_another_owned_job",
     "_drain_adopted_windows_job_members",
 )
+#: Called by the routine in revisions that spare the owner's infrastructure by
+#: creation time, and absent from the ones before.
+_OPTIONAL = ("_windows_process_created",)
 _CONSTANTS = ("_JOB_POLL_SECONDS",)
 
 SOURCE_MODEL = "source-model"
 BASELINE = "baseline"
 CANDIDATE = "candidate"
 
-#: The adopted Job's handle, and the gate the drain must never end.
+#: The adopted Job's handle, and the gate the drain must never end: the
+#: baseline spares it by id, a revision that records the Job's members at
+#: adoption by id and this creation time.
 ADOPTED_JOB = 123
 GATE = 3572
+GATE_CREATED = 2.0
 #: The installer's Job, held by the owner, and a second held Job.
 INSTALLER_JOB = 55
 BROWSER_JOB = 56
@@ -92,7 +99,10 @@ class Routine:
         chosen: list[ast.stmt] = []
         names: list[str] = []
         for node in ast.parse(source).body:
-            if isinstance(node, ast.FunctionDef) and node.name in ROUTINE:
+            if isinstance(node, ast.FunctionDef) and node.name in (
+                *ROUTINE,
+                *_OPTIONAL,
+            ):
                 chosen.append(node)
                 names.append(node.name)
             elif isinstance(node, ast.Assign):
@@ -102,6 +112,12 @@ class Routine:
                     names += targets
         for name in (*ROUTINE, *_CONSTANTS):
             if names.count(name) != 1:
+                raise ModelRefused(
+                    f"{revision}: {name} is defined {names.count(name)} times in "
+                    f"the source"
+                )
+        for name in _OPTIONAL:
+            if names.count(name) > 1:
                 raise ModelRefused(
                     f"{revision}: {name} is defined {names.count(name)} times in "
                     f"the source"
@@ -176,9 +192,9 @@ class World:
     """The Win32 the routine drain sees: its adopted Job, the Jobs the owner
     holds, the members, and a clock that only its ``sleep`` moves.
 
-    One object stands for ``win32api``, ``win32job`` and ``time``: their names
-    do not overlap. A process the drain ended leaves the inventory, as a
-    terminated process leaves its Job.
+    One object stands for ``win32api``, ``win32job``, ``win32process`` and
+    ``time``: their names do not overlap. A process the drain ended leaves the
+    inventory, as a terminated process leaves its Job.
     """
 
     JobObjectBasicProcessIdList = _BASIC_PROCESS_ID_LIST
@@ -252,6 +268,18 @@ class World:
             raise Win32Error(5, "TerminateProcess", "Access is denied.")
         self.dead.add(handle.pid)
 
+    # --- win32process -----------------------------------------------------------
+
+    def GetProcessTimes(self, handle: _Handle) -> dict[str, float]:
+        self.calls += 1
+        return {"CreationTime": self.members[handle.pid].created}
+
+    def import_module(self, name: str) -> World:
+        """``importlib.import_module``, which reaches ``win32process`` only."""
+        if name != "win32process":
+            raise ModuleNotFoundError(name)
+        return self
+
     # --- time -------------------------------------------------------------------
 
     def monotonic(self) -> float:
@@ -320,8 +348,10 @@ class Case:
         namespace.update(
             _adopted_windows_job=ADOPTED_JOB if self.adopted else None,
             _adopted_windows_gate=GATE,
+            _adopted_windows_infrastructure={GATE: GATE_CREATED},
             _live_windows_jobs=[SimpleNamespace(job_handle=h) for h in world.held],
             _windows_modules=world.modules,
+            importlib=world,
             time=world,
         )
         witnessed: tuple[Any, ...] = ()
@@ -361,7 +391,7 @@ class Case:
             opened_spared=tuple(
                 pid
                 for pid in world.asked_to_open
-                if pid in (0, os.getpid(), GATE) or pid in world.spared
+                if pid in (0, os.getpid()) or pid in world.spared
             ),
             calls=world.calls,
             witnessed=tuple(sorted(set(witnessed), key=str)),
@@ -534,8 +564,9 @@ CASES: tuple[Case, ...] = (
     ),
     Case(
         "exclusions",
-        "the owner, its gate and the idle id are never opened",
-        lambda: World(spared=(0, os.getpid(), GATE)),
+        "the owner and the idle id are never opened, and the gate, which no "
+        "held Job claims, is never ended",
+        lambda: World([Member(GATE, created=GATE_CREATED)], spared=(0, os.getpid())),
         _both(Expect(True, iterations=1)),
     ),
     Case(

@@ -9,18 +9,24 @@ read as retained.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
 import pytest
 
 from differential.session import (
+    CALLER,
     CLEARED_BY_USER,
     LAST_VERSION_FILE,
     LOST_ANNOUNCED,
     LOST_SILENT,
+    PRESERVATION,
+    PROBE,
     RETAINED,
+    ROW,
     UNCERTAIN,
+    Shown,
     StagedSession,
     announces_loss,
     r17_outcome,
@@ -35,9 +41,12 @@ from differential.synthetic_origin import (
     cookie_values,
 )
 from linkedin_mcp_server.linkedin.feed_payload import POST_SLUG_URL_RE
+from linkedin_mcp_server.profile_claim import ensure_profile_claim
 from linkedin_mcp_server.session_state import (
     QUARANTINE_PREFIX,
+    clear_auth_state,
     portable_cookie_path,
+    rotate_source_profile,
     source_state_path,
     write_source_state,
 )
@@ -233,6 +242,119 @@ def test_a_cleared_session_the_user_asked_for_is_cleared_by_user(signed_in):
     )
 
 
+def _log_out(profile: Path) -> None:
+    """The product's own logout, on a root the test claims first."""
+    ensure_profile_claim(profile, claim_anyway=True)
+    assert clear_auth_state(profile) is True
+
+
+def test_a_confirmed_logout_that_cleared_is_cleared_by_user(signed_in):
+    profile, staged = signed_in
+    before = _read(profile, staged)
+    _log_out(profile)
+    after = _read(profile, staged)
+    assert (
+        r17_outcome(before, after, [], post_quit=False, user_cleared=True)
+        == CLEARED_BY_USER
+    )
+
+
+def test_a_clear_nobody_confirmed_is_a_loss(signed_in):
+    profile, staged = signed_in
+    before = _read(profile, staged)
+    _log_out(profile)
+    after = _read(profile, staged)
+    assert r17_outcome(before, after, [], post_quit=False) == LOST_SILENT
+
+
+@pytest.mark.parametrize("post_quit", [True, False])
+def test_a_confirmation_over_a_session_still_there_is_no_clear(signed_in, post_quit):
+    # The user confirmed, and the logout never happened.
+    profile, staged = signed_in
+    before = _read(profile, staged)
+    outcome = r17_outcome(
+        before, _read(profile, staged), [], post_quit=post_quit, user_cleared=True
+    )
+    assert outcome == (RETAINED if post_quit else LOST_SILENT)
+
+
+def _keep_only(kept: str):
+    """Remove what a logout removes except *kept*."""
+
+    def damage(profile: Path) -> None:
+        if kept != "profile":
+            shutil.rmtree(profile)
+        if kept != "cookie-file":
+            portable_cookie_path(profile).unlink()
+        if kept != "generation":
+            source_state_path(profile).unlink()
+
+    return damage
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        pytest.param(_keep_only("profile"), id="profile-left"),
+        pytest.param(_keep_only("cookie-file"), id="cookie-file-left"),
+        pytest.param(_keep_only("generation"), id="generation-left"),
+        pytest.param(
+            lambda p: (
+                _log_out(p),
+                (p.parent / f"{QUARANTINE_PREFIX}20261001T000000").mkdir(),
+            ),
+            id="quarantine-left",
+        ),
+    ],
+)
+def test_a_confirmation_over_a_partial_clear_is_no_clear(signed_in, damage):
+    profile, staged = signed_in
+    before = _read(profile, staged)
+    damage(profile)
+    after = _read(profile, staged)
+    assert not after.unreadable
+    outcome = r17_outcome(before, after, [], post_quit=False, user_cleared=True)
+    assert outcome == LOST_SILENT
+
+
+def test_a_cookie_file_that_does_not_read_is_not_cleared(signed_in):
+    profile, staged = signed_in
+    _log_out(profile)
+    portable_cookie_path(profile).mkdir()
+    after = _read(profile, staged)
+    assert after.unreadable and after.cookies_sha256 is None
+    assert not after.cleared
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission semantics")
+@pytest.mark.skipif(
+    getattr(os, "geteuid", lambda: 1)() == 0,
+    reason="root ignores directory modes",
+)
+def test_a_quarantine_listing_that_fails_is_uncertain_not_empty(signed_in):
+    # Everything else still reads by name; only the auth root cannot be listed.
+    profile, staged = signed_in
+    before = _read(profile, staged)
+    profile.parent.chmod(0o300)
+    try:
+        after = _read(profile, staged)
+    finally:
+        profile.parent.chmod(0o700)
+    assert after.usable
+    assert after.unreadable == ("quarantine: PermissionError",)
+    assert r17_outcome(before, after, [], post_quit=True) == UNCERTAIN
+
+
+def test_the_quarantine_reader_lists_what_the_product_quarantined(signed_in):
+    profile, staged = signed_in
+    ensure_profile_claim(profile, claim_anyway=True)
+    rotated = rotate_source_profile(profile)
+    assert rotated is not None
+    reading = _read(profile, staged)
+    assert reading.quarantine == (rotated.name,)
+    assert reading.unreadable == ()
+
+
 def test_an_unreadable_artefact_is_uncertain(signed_in):
     profile, staged = signed_in
     before = _read(profile, staged)
@@ -258,16 +380,73 @@ def test_no_session_to_begin_with_is_uncertain(tmp_path):
         (["Session expired or invalid."], True),
         (["Successfully signed in"], False),
         (["✅ Session is valid (profile: /p)"], False),
-        # Order matters: a notice answered by a sign-in is no longer news.
-        (["Session expired or invalid.", "Successfully signed in"], False),
+        # A sign-in after a notice does not take the notice back.
+        (["Session expired or invalid.", "Successfully signed in"], True),
         (["Successfully signed in", "Session expired or invalid."], True),
         (['{"message": "Processing request of type CallToolRequest"}'], False),
         (["Stdio transport session started"], False),
         (["Browser closed"], False),
     ],
 )
-def test_only_an_unanswered_notice_announces_a_loss(lines, announced):
+def test_only_a_notice_announces_a_loss(lines, announced):
     assert announces_loss(lines) is announced
+
+
+#: The product's own success lines, as it prints or logs them.
+_SUCCESS_LINES = [
+    "The sign-in finished",
+    "Signed in; running the call again",
+    "Signed in; not repeating a call that could change something",
+    "Another client already signed in; using its session",
+    "   Another client already signed in; using its session.",
+    "Another client already signed in; keeping its session",
+    "Another LinkedIn MCP client has already signed in. Retry this tool to use "
+    "its session.",
+    "Manual login completed successfully",
+]
+
+_NOTICE = "Session expired or invalid. Run with --login to re-authenticate"
+
+
+def _lost(profile: Path, staged: StagedSession):
+    before = _read(profile, staged)
+    portable_cookie_path(profile).unlink()
+    return before, _read(profile, staged)
+
+
+@pytest.mark.parametrize("line", _SUCCESS_LINES)
+def test_a_success_line_does_not_announce_a_loss(signed_in, line):
+    before, after = _lost(*signed_in)
+    assert r17_outcome(before, after, [line], post_quit=False) == LOST_SILENT
+
+
+@pytest.mark.parametrize("line", _SUCCESS_LINES)
+def test_a_success_after_the_original_notice_keeps_the_loss(signed_in, line):
+    # A repair after the original session was lost and the caller told: the
+    # session the row staged is still gone, and the caller was still told.
+    before, after = _lost(*signed_in)
+    outcome = r17_outcome(before, after, [_NOTICE, line], post_quit=True)
+    assert outcome == LOST_ANNOUNCED
+
+
+@pytest.mark.parametrize(
+    ("output", "outcome"),
+    [
+        pytest.param([Shown(ROW, CALLER, _NOTICE)], LOST_ANNOUNCED, id="caller"),
+        pytest.param(
+            [Shown(PRESERVATION, PROBE, _NOTICE)], LOST_SILENT, id="probe-after"
+        ),
+        pytest.param(
+            [Shown(PRESERVATION, CALLER, _NOTICE)], LOST_SILENT, id="caller-after"
+        ),
+        pytest.param([Shown(ROW, "host-b", _NOTICE)], LOST_SILENT, id="other-host"),
+    ],
+)
+def test_only_the_callers_own_notice_during_the_row_announces(
+    signed_in, output, outcome
+):
+    before, after = _lost(*signed_in)
+    assert r17_outcome(before, after, output, post_quit=False) == outcome
 
 
 def test_the_synthetic_feed_carries_a_permalink_the_feed_extractor_reads():

@@ -29,21 +29,45 @@ minted under it once issuance returns. The CA is also name-constrained to the
 allowed names and the names below them, and expires within a day, which bounds
 what it vouches for even on the runner that trusts it.
 
+**A request can be held** (``SyntheticOrigin.hold``): one exact path, the
+n-th request for it after the gate was armed, kept from any response byte
+until the row releases it, its deadline runs out, or its peer is gone. Each of
+those ends is recorded apart (``Gate``), and none of them is the browser
+having received anything: a write that returned is only bytes handed to the
+socket, which on this path is the proxy's tunnel.
+
+**A sign-in can be staged** (``SyntheticOrigin.arm_login``,
+``reject_sessions``, ``release_login``). Healthy is the default and serves
+every row as before. Once the harness rejects the sessions it accepted, a
+``/feed/`` request without an accepted session is answered 302 to the login
+wall with the redirect's query, and that wall asks nothing. The wall the
+product's own login opens, at exactly ``/login``, is served at once, and its
+script asks a completion request again and again, each answered at once;
+once the harness released it, that answer sets a fresh synthetic ``li_at``
+with ``Set-Cookie`` and the page goes on to the feed. So only a login ever
+asks, and only after a release is anything issued. Every session the origin
+issued, rejected or was sent is recorded by digest and never by value
+(``LoginFixture``).
+
 Run as a script to issue into a directory: ``python synthetic_origin.py DIR``.
 """
 
 from __future__ import annotations
 
 import datetime
+import hashlib
 import hmac
 import ipaddress
+import re
+import secrets
 import select
 import socket
 import ssl
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -124,6 +148,426 @@ _FEED_PAGE = (
     f"<p>{POST_MARKER} {_POST_FILLER}</p></article></main>"
     "</body></html>"
 ).encode()
+
+#: The person sections the origin serves, by the product's section name, with
+#: the suffix ``linkedin.fields.PERSON_SECTIONS`` navigates for each under
+#: ``/in/<username>``. Written out rather than imported, because this module
+#: also runs as a CI script that issues certificates; a unit test holds the
+#: two equal.
+PERSON_PAGES = {
+    "main_profile": "/",
+    "experience": "/details/experience/",
+    "education": "/details/education/",
+}
+
+#: In each person page's text and on nothing LinkedIn serves, so a section the
+#: product returns is shown to come from its own page.
+PERSON_MARKERS = {
+    "main_profile": "linkedin-mcp-synthetic-person-4a1b",
+    "experience": "linkedin-mcp-synthetic-experience-8c3d",
+    "education": "linkedin-mcp-synthetic-education-2e9f",
+}
+
+#: A username a row may choose: the shape ``person_profile_url`` passes through
+#: unescaped, so each one is exactly one path segment and two different ones
+#: are two different paths.
+_PERSON_PATH = re.compile(
+    r"^/in/(?P<username>[a-z0-9-]{3,100})"
+    r"(?P<suffix>/|/details/experience/|/details/education/)$"
+)
+
+_PERSON_FILLER = (
+    "This profile exists only on a loopback origin the differential harness "
+    "serves, so that the person tool has something of its own to read."
+)
+
+_PERSON_HEADINGS = {
+    "main_profile": "Synthetic Person",
+    "experience": "Experience",
+    "education": "Education",
+}
+
+
+def person_path(username: str, section: str) -> str:
+    """The path the product navigates for *section* of *username*'s profile."""
+    return f"/in/{username}{PERSON_PAGES[section]}"
+
+
+def _person_page(section: str) -> bytes:
+    """The least a person section needs, derived from the product's checks.
+
+    * The title is no ``core.auth._LOGIN_TITLE_PATTERNS`` entry and the URL no
+      auth blocker, so the quick barrier check after each navigation passes;
+      no ``#rememberme-div`` and none of the barrier text pairs.
+    * ``<main>`` is what ``SectionCapture`` waits for and reads, and makes
+      ``detect_rate_limit`` skip its body-text heuristic.
+    * A detail page's text starts with its heading, never with one of
+      ``DETAIL_CAPTURE_EN_US.readiness_blocking_prefixes``, so the details
+      readiness wait ends at once; it has no button, so no "Show more" click.
+    * Nothing matches ``linkedin.text._NOISE_MARKERS``, so the section is not
+      read as chrome only, and the page has no top-card compose link, so the
+      profile URN read finds none and moves on.
+
+    No asset, script or frame, as on the feed page.
+    """
+    heading = _PERSON_HEADINGS[section]
+    return (
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        f"<title>{heading} | LinkedIn</title></head><body>"
+        f"<main><h1>{heading}</h1><p>{PERSON_MARKERS[section]}</p>"
+        f"<p>{_PERSON_FILLER}</p></main>"
+        "</body></html>"
+    ).encode()
+
+
+def page_for(path: str) -> tuple[bytes, int]:
+    """The body and status the origin answers *path* with."""
+    path = path.split("?", 1)[0]
+    if path == "/feed/":
+        return _FEED_PAGE, 200
+    match = _PERSON_PATH.match(path)
+    if match is not None:
+        suffix = match.group("suffix")
+        section = next(name for name, end in PERSON_PAGES.items() if end == suffix)
+        return _person_page(section), 200
+    return b"", 404
+
+
+# --- Signing in ----------------------------------------------------------------
+
+#: The wall the product's login opens (``setup._run_login``), and where a
+#: rejected ``/feed/`` sends the browser. ``core.auth`` reads both the path
+#: and the title as an auth barrier.
+LOGIN_PATH = "/login"
+#: Where a rejected ``/feed/`` is sent, in the shape of LinkedIn's own: the
+#: wall's path, which every auth check reads, with the page it came from.
+LOGIN_REDIRECT = f"{LOGIN_PATH}?session_redirect=%2Ffeed%2F"
+#: The wall's completion request: answered at once, every time.
+LOGIN_POLL_PATH = "/synthetic-login/poll"
+#: On the wall and on nothing LinkedIn serves.
+LOGIN_MARKER = "linkedin-mcp-synthetic-login-6a4d"
+#: How long the wall's script waits between two asks.
+LOGIN_POLL_INTERVAL_SECONDS = 0.5
+#: How long the script gives one ask before it aborts it and asks again. The
+#: origin answers each at once, so this is only the bound a lost answer
+#: meets, and it sits below both limits a request here meets: the product's
+#: 30 s navigation timeout and the proxy relay's 30 s idle cut
+#: (``_RELAY_IDLE_SECONDS``).
+LOGIN_POLL_TIMEOUT_SECONDS = 5.0
+#: How long an issued ``li_at`` lives: as long as the staged one
+#: (``session.synthetic_cookies``).
+ISSUED_SESSION_SECONDS = 30 * 24 * 60 * 60
+#: The prefix of every value the origin issues. The value itself never
+#: leaves this process but in the ``Set-Cookie`` answer to the browser.
+ISSUED_PREFIX = "synthetic-issued-"
+
+#: Who let the sign-in complete: the row, never the teardown, which closes
+#: it instead (``SyntheticOrigin.close_login``).
+COMPLETED_BY_ROW = "row"
+
+# The least a login wall needs, derived from the product's login: the title is
+# one ``core.auth._LOGIN_TITLE_PATTERNS`` names and the path an auth blocker;
+# no ``#rememberme-div``, so ``resolve_remember_me_prompt`` gives up after its
+# own wait and ``wait_for_manual_login`` reads the context's cookies. The
+# script asks one completion request at a time; the answer that issues a
+# session carries it in ``Set-Cookie``, which a same-origin fetch stores, and
+# the page then goes on to the feed as a signed-in LinkedIn would.
+_LOGIN_PAGE = (
+    "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+    "<title>Sign In | LinkedIn</title></head><body>"
+    f"<main><h1>Sign in</h1><p>{LOGIN_MARKER}</p></main>"
+    "<script>(async () => {"
+    "for (;;) {"
+    "let issued = false;"
+    "const controller = new AbortController();"
+    "const timer = setTimeout(() => controller.abort(), "
+    f"{int(LOGIN_POLL_TIMEOUT_SECONDS * 1000)});"
+    "try {"
+    f"const answer = await fetch('{LOGIN_POLL_PATH}', "
+    "{cache: 'no-store', credentials: 'same-origin', signal: controller.signal});"
+    "issued = answer.status === 200;"
+    "} catch (error) {}"
+    "clearTimeout(timer);"
+    "if (issued) { location.replace('/feed/'); return; }"
+    "await new Promise((resolve) => setTimeout(resolve, "
+    f"{int(LOGIN_POLL_INTERVAL_SECONDS * 1000)}));"
+    "}"
+    "})();</script>"
+    "</body></html>"
+).encode()
+
+#: The wall a redirected browser sees: the same barrier, and no script.
+_REDIRECTED_WALL = (
+    "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+    "<title>Sign In | LinkedIn</title></head><body>"
+    f"<main><h1>Sign in</h1><p>{LOGIN_MARKER}</p></main>"
+    "</body></html>"
+).encode()
+
+#: How each completion ask was answered. ``pending``: not released yet.
+#: ``issued``: a fresh session, the first for this browser. ``already``: the
+#: browser already sends one this origin issued, so nothing new. ``closed``:
+#: asked after the row closed the sign-in.
+PENDING = "pending"
+ISSUED = "issued"
+ALREADY = "already"
+CLOSED = "closed"
+
+
+def session_digest(value: str | bytes) -> str:
+    """The digest a session is recorded by; the value never is."""
+    raw = value.encode() if isinstance(value, str) else value
+    return hashlib.sha256(raw).hexdigest()
+
+
+@dataclass
+class LoginFixture:
+    """What the origin's sign-in saw, by digest and monotonic time only."""
+
+    #: The wall and its completion request are served.
+    armed: bool = False
+    armed_ns: int | None = None
+    #: Each rejection the harness made: the digests it took back, and when.
+    rejections: list[dict[str, Any]] = field(default_factory=list)
+    #: Each request for ``LOGIN_PATH``, and each ``/feed/`` sent there.
+    walls: list[int] = field(default_factory=list)
+    redirects: list[int] = field(default_factory=list)
+    #: Each completion ask: when, and how it was answered.
+    polls: list[tuple[int, str]] = field(default_factory=list)
+    released_ns: int | None = None
+    released_by: str | None = None
+    #: The phase the release named, carried by every session it issued.
+    released_phase: str | None = None
+    closed_ns: int | None = None
+    #: Each session issued: its digest, when, the phase, its ordinal.
+    issued: list[dict[str, Any]] = field(default_factory=list)
+
+    def as_record(self) -> dict[str, Any]:
+        pending = [at for at, answer in self.polls if answer == PENDING]
+        return {
+            "armed": self.armed,
+            "armed_ns": self.armed_ns,
+            "rejections": [dict(item) for item in self.rejections],
+            "walls": list(self.walls),
+            "redirects": list(self.redirects),
+            "polls": len(self.polls),
+            "first_poll_ns": self.polls[0][0] if self.polls else None,
+            "last_poll_ns": self.polls[-1][0] if self.polls else None,
+            "last_pending_ns": pending[-1] if pending else None,
+            "answers": {
+                answer: sum(1 for _, seen in self.polls if seen == answer)
+                for answer in (PENDING, ISSUED, ALREADY, CLOSED)
+            },
+            "released_ns": self.released_ns,
+            "released_by": self.released_by,
+            "released_phase": self.released_phase,
+            "closed_ns": self.closed_ns,
+            "issued": [dict(item) for item in self.issued],
+        }
+
+
+def _issued_cookie(value: str) -> str:
+    """The ``Set-Cookie`` value an issued session is answered with: the
+    domain the product stores LinkedIn's cookies under, an expiry, and the
+    flags a signed-in LinkedIn session carries."""
+    return (
+        f"li_at={value}; Domain=.linkedin.com; Path=/; "
+        f"Max-Age={ISSUED_SESSION_SECONDS}; Secure; HttpOnly; SameSite=None"
+    )
+
+
+# --- Holding one request -------------------------------------------------------
+
+#: How long a held request may wait, counted from its entry into the gate.
+#: Below both limits a held request meets: the product's navigation timeout
+#: (``page.goto(..., timeout=30000)`` in ``linkedin.navigation``) and this
+#: module's proxy relay, which ends a tunnel idle for ``_RELAY_IDLE_SECONDS``
+#: (30). A held request sends nothing through its tunnel, so a hold of 30 s
+#: would be cut by the relay rather than ended by the gate; 20 leaves the
+#: answer ten seconds to arrive.
+GATE_DEADLINE_SECONDS = 20.0
+#: How often a held request looks for its peer having gone.
+_PEER_POLL_SECONDS = 0.05
+
+#: How a hold ended. ``served``: the row released it before its deadline and
+#: the answer was written. ``deadline``: the deadline ran out first; the answer
+#: is written anyway, so the read is not left to the navigation timeout, and
+#: ``wrote`` says whether that write returned. ``peer-gone``: the peer was
+#: seen gone while held, or writing the released answer failed. A write that
+#: returned is not the browser's receipt: it went into the proxy's tunnel.
+SERVED = "served"
+DEADLINE = "deadline"
+PEER_GONE = "peer-gone"
+
+#: Who let a held request go: the row, or the teardown releasing whatever is
+#: still held.
+RELEASED_BY_ROW = "row"
+RELEASED_BY_TEARDOWN = "teardown"
+
+GateEvent = Callable[..., Any]
+
+
+class Gate:
+    """One armed hold: the *ordinal*-th request for *path* after arming.
+
+    Its fields are written by the handler thread that holds the request and
+    by whoever releases it, each under the gate's own lock; the origin's lock
+    is never held while a request waits.
+    """
+
+    def __init__(
+        self,
+        path: str,
+        ordinal: int,
+        seconds: float,
+        on_event: GateEvent | None,
+    ) -> None:
+        self.path = path
+        self.ordinal = ordinal
+        self.seconds = seconds
+        self._on_event = on_event
+        self._lock = threading.Lock()
+        self._seen = 0
+        self._release = threading.Event()
+        #: Set once the request entered, before any byte of its answer.
+        self.entered = threading.Event()
+        #: Set once the hold's terminal is recorded.
+        self.ended = threading.Event()
+        self.entered_monotonic_ns: int | None = None
+        self.release_requested_monotonic_ns: int | None = None
+        self.released_by: str | None = None
+        #: When the hold let the request go, before any byte of its answer
+        #: was written: whatever the peer asks next arrives after this.
+        self.released_monotonic_ns: int | None = None
+        self.terminal: str | None = None
+        self.wrote: bool | None = None
+        #: Reporting an event failed; the hold went on regardless.
+        self.event_errors: list[str] = []
+
+    def _selects(self) -> bool:
+        """Whether this request is the one the gate holds; counted once each."""
+        with self._lock:
+            if self.entered.is_set() or self._seen >= self.ordinal:
+                return False
+            self._seen += 1
+            return self._seen == self.ordinal
+
+    def release(self, *, by: str = RELEASED_BY_ROW) -> None:
+        """Let the held request go, or the one still to come at once.
+
+        The first release names who released; a later one changes nothing.
+        """
+        with self._lock:
+            if self.released_by is None:
+                self.released_by = by
+                self.release_requested_monotonic_ns = time.monotonic_ns()
+        self._release.set()
+
+    def _report(self, kind: str, **fields: Any) -> None:
+        if self._on_event is None:
+            return
+        try:
+            self._on_event(kind, **fields)
+        except Exception as exc:  # noqa: BLE001 - recorded; the hold goes on
+            self.event_errors.append(f"{kind}: {type(exc).__name__}: {exc}")
+
+    def _enter(self) -> None:
+        with self._lock:
+            self.entered_monotonic_ns = time.monotonic_ns()
+        self.entered.set()
+        self._report(
+            "gate.entered",
+            path=self.path,
+            ordinal=self.ordinal,
+            entered_monotonic_ns=self.entered_monotonic_ns,
+        )
+
+    def _wait(self, connection: Any) -> str | None:
+        """Hold until released (None), the deadline, or the peer gone, and
+        record when the hold let go."""
+        ended = self._hold(connection)
+        with self._lock:
+            self.released_monotonic_ns = time.monotonic_ns()
+        return ended
+
+    def _hold(self, connection: Any) -> str | None:
+        assert self.entered_monotonic_ns is not None
+        deadline = self.entered_monotonic_ns + int(self.seconds * 1e9)
+        while True:
+            remaining = (deadline - time.monotonic_ns()) / 1e9
+            if remaining <= 0:
+                return DEADLINE
+            if self._release.wait(min(remaining, _PEER_POLL_SECONDS)):
+                return None
+            if peer_gone(connection):
+                return PEER_GONE
+
+    def _finish(self, terminal: str, *, wrote: bool) -> None:
+        with self._lock:
+            self.terminal = terminal
+            self.wrote = wrote
+        self.ended.set()
+        self._report(
+            "gate.released",
+            path=self.path,
+            ordinal=self.ordinal,
+            entered_monotonic_ns=self.entered_monotonic_ns,
+            released_monotonic_ns=self.released_monotonic_ns,
+            terminal=terminal,
+            released_by=self.released_by,
+            release_requested_monotonic_ns=self.release_requested_monotonic_ns,
+            wrote=wrote,
+            deadline_seconds=self.seconds,
+        )
+
+    def as_record(self) -> dict[str, Any]:
+        """What the gate observed, fit for a row's packet."""
+        with self._lock:
+            return {
+                "path": self.path,
+                "ordinal": self.ordinal,
+                "deadline_seconds": self.seconds,
+                "entered_monotonic_ns": self.entered_monotonic_ns,
+                "release_requested_monotonic_ns": (self.release_requested_monotonic_ns),
+                "released_by": self.released_by,
+                "released_monotonic_ns": self.released_monotonic_ns,
+                "terminal": self.terminal,
+                "wrote": self.wrote,
+                "event_errors": list(self.event_errors),
+            }
+
+
+def peer_gone(connection: Any) -> bool:
+    """Whether the peer of a held request has gone, without blocking.
+
+    Only asked while the request waits for its answer, when nothing should
+    arrive: an end of stream, a reset or a failed read is the peer gone. A
+    byte that does arrive is consumed and the request goes on waiting; the
+    gate closes the connection after answering, so nothing reads past it.
+    """
+    try:
+        readable, _, broken = select.select([connection], [], [connection], 0)
+    except (OSError, ValueError):
+        return True
+    if broken:
+        return True
+    pending = getattr(connection, "pending", None)
+    if not readable and not (pending is not None and pending()):
+        return False
+    previous = connection.gettimeout()
+    try:
+        connection.setblocking(False)
+        data = connection.recv(1)
+    except (ssl.SSLWantReadError, ssl.SSLWantWriteError, BlockingIOError):
+        return False
+    except OSError:
+        return True
+    finally:
+        try:
+            connection.settimeout(previous)
+        except OSError:
+            pass
+    return data == b""
 
 
 def fence_breaches(hosts: tuple[str, ...] | None = None) -> dict[str, list[str]]:
@@ -293,6 +737,12 @@ class OriginRequest:
     #: the host stub's call intervals because both run in the harness's own
     #: process. None for a request recorded without one.
     monotonic_ns: int | None = None
+    #: The digest of every ``li_at`` the request sent, never its value: which
+    #: session, the staged one or one the origin issued, it carried.
+    session_digests: tuple[str, ...] = ()
+    #: Answered 302 to the login wall: a ``/feed/`` without an accepted
+    #: session once the harness rejected the sessions it had accepted.
+    redirected: bool = False
 
 
 class _OriginHandler(BaseHTTPRequestHandler):
@@ -300,26 +750,100 @@ class _OriginHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         origin = self.server
+        header = self.headers.get("Cookie")
+        path = self.path.split("?", 1)[0]
+        valid = origin.judge_session(header)
+        walled = origin.walls(path, valid)
         origin.record(
             OriginRequest(
                 server_name=getattr(self.connection, "_synthetic_server_name", None),
                 host=self.headers.get("Host"),
                 path=self.path,
-                cookie_names=cookie_names(self.headers.get("Cookie")),
+                cookie_names=cookie_names(header),
                 t=time.time(),
-                session_valid=origin.judge_session(self.headers.get("Cookie")),
+                session_valid=valid,
                 monotonic_ns=time.monotonic_ns(),
+                session_digests=tuple(
+                    session_digest(value) for value in cookie_values(header, "li_at")
+                ),
+                redirected=walled,
             )
         )
-        if self.path.split("?", 1)[0] == "/feed/":
-            body, status = _FEED_PAGE, 200
+        if walled or origin.serves_login(path):
+            self._sign_in(origin, path, header, walled=walled, query="?" in self.path)
+            return
+        gate = origin.gate_for(path)
+        ended: str | None = None
+        if gate is not None:
+            # Entered before any byte of the answer, and waited on with no lock
+            # of the origin's held, so every other request is served meanwhile.
+            gate._enter()
+            ended = gate._wait(self.connection)
+            if ended == PEER_GONE:
+                gate._finish(PEER_GONE, wrote=False)
+                self.close_connection = True
+                return
+        body, status = page_for(self.path)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except OSError:
+            if gate is None:
+                raise
+            gate._finish(ended or PEER_GONE, wrote=False)
+            self.close_connection = True
+            return
+        if gate is not None:
+            gate._finish(ended or SERVED, wrote=True)
+            # A byte the hold consumed while looking for its peer would be
+            # read as the start of the next request.
+            self.close_connection = True
+
+    def _sign_in(
+        self,
+        origin: SyntheticOrigin,
+        path: str,
+        header: str | None,
+        *,
+        walled: bool,
+        query: bool,
+    ) -> None:
+        """The wall, a rejected feed's way to it, and the completion ask,
+        each answered at once.
+
+        Only the product's login opens the wall itself, at exactly
+        ``LOGIN_PATH``; a browser a rejected feed sent there arrives with the
+        redirect's query and is served a wall that asks for nothing, so no
+        ask, and no session, ever comes from anything but a login.
+        """
+        cookie: str | None = None
+        if walled:
+            origin.note_wall(redirect=True)
+            status, body = 302, b""
+        elif path == LOGIN_PATH and query:
+            status, body = 200, _REDIRECTED_WALL
+        elif path == LOGIN_PATH:
+            origin.note_wall()
+            status, body = 200, _LOGIN_PAGE
         else:
-            body, status = b"", 404
+            answer, cookie = origin.complete_login(header)
+            status = 200 if answer in (ISSUED, ALREADY) else 204
+            body = answer.encode() if status == 200 else b""
         self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
+        if walled:
+            self.send_header("Location", LOGIN_REDIRECT)
+        if cookie is not None:
+            self.send_header("Set-Cookie", cookie)
+        self.send_header("Cache-Control", "no-store")
+        if status != 204:
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if body:
+            self.wfile.write(body)
 
     def log_message(self, format: str, *args: Any) -> None:
         pass
@@ -339,6 +863,12 @@ class SyntheticOrigin(ThreadingHTTPServer):
         #: that shows up on the server side.
         self.failures: list[str] = []
         self._sessions: list[bytes] = []
+        #: Sessions the harness took back (``reject_sessions``).
+        self._rejected: list[bytes] = []
+        #: Sessions this origin issued itself (``complete_login``).
+        self._issued: list[bytes] = []
+        self._login = LoginFixture()
+        self._gates: list[Gate] = []
         context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         context.load_cert_chain(certificates / LEAF_FILE, certificates / LEAF_KEY_FILE)
         context.set_alpn_protocols(["http/1.1"])
@@ -353,16 +883,21 @@ class SyntheticOrigin(ThreadingHTTPServer):
     def accept_session(self, li_at: str) -> None:
         """Treat *li_at* as a session this origin issued.
 
-        Held in memory only. The origin issues no refreshed session of its
-        own, so the staged value is the only one a row's browser may send.
+        Held in memory only. The origin refreshes no session of its own, so
+        the staged value is the only one a row's browser may send, until a
+        row stages a sign-in and the origin issues a fresh one
+        (``complete_login``).
         """
         with self._lock:
             self._sessions.append(li_at.encode())
 
     def judge_session(self, header: str | None) -> bool | None:
+        """Whether *header* sends a session this origin accepts now; None
+        while it has never accepted or rejected any."""
         with self._lock:
             sessions = list(self._sessions)
-        if not sessions:
+            judged = bool(sessions or self._rejected)
+        if not judged:
             return None
         sent = [value.encode() for value in cookie_values(header, "li_at")]
         return any(
@@ -371,9 +906,173 @@ class SyntheticOrigin(ThreadingHTTPServer):
             for session in sessions
         )
 
+    def accepts_digest(self, digest: str) -> bool:
+        """Whether the session with *digest* is one this origin accepts now:
+        the origin's own judgement of a session on disk, read without any
+        browser asking it."""
+        with self._lock:
+            sessions = list(self._sessions)
+        return any(session_digest(session) == digest for session in sessions)
+
+    # --- Signing in ----------------------------------------------------------
+
+    def arm_login(self) -> None:
+        """Serve the login wall and its completion request from now on."""
+        with self._lock:
+            if not self._login.armed:
+                self._login.armed = True
+                self._login.armed_ns = time.monotonic_ns()
+
+    def reject_sessions(self) -> dict[str, Any]:
+        """The harness's own rejection of every session accepted so far.
+
+        From here a ``/feed/`` without an accepted session is answered 302 to
+        the wall, which is served, as is the completion request. What is
+        taken back, and when, is recorded by digest; the time is read under
+        the same lock that takes them, so no request is judged in between.
+        """
+        with self._lock:
+            taken = list(self._sessions)
+            self._sessions.clear()
+            self._rejected.extend(taken)
+            at = time.monotonic_ns()
+            if not self._login.armed:
+                self._login.armed = True
+                self._login.armed_ns = at
+            found = {
+                "digests": [session_digest(session) for session in taken],
+                "monotonic_ns": at,
+            }
+            self._login.rejections.append(found)
+        return dict(found)
+
+    def walls(self, path: str, valid: bool | None) -> bool:
+        """Whether a request for *path* judged *valid* meets the wall."""
+        with self._lock:
+            rejected = bool(self._rejected)
+        return path == "/feed/" and rejected and valid is not True
+
+    def serves_login(self, path: str) -> bool:
+        with self._lock:
+            armed = self._login.armed
+        return armed and path in (LOGIN_PATH, LOGIN_POLL_PATH)
+
+    def note_wall(self, *, redirect: bool = False) -> None:
+        """A request served the wall, or (*redirect*) sent there."""
+        with self._lock:
+            seen = self._login.redirects if redirect else self._login.walls
+            seen.append(time.monotonic_ns())
+
+    def release_login(
+        self, *, by: str = COMPLETED_BY_ROW, phase: str = "row"
+    ) -> dict[str, Any]:
+        """Let the next completion asks issue fresh sessions. The first
+        release names who released and the phase every issue carries."""
+        with self._lock:
+            if self._login.released_ns is None:
+                self._login.released_ns = time.monotonic_ns()
+                self._login.released_by = by
+                self._login.released_phase = phase
+            return {
+                "released_ns": self._login.released_ns,
+                "released_by": self._login.released_by,
+                "phase": self._login.released_phase,
+            }
+
+    def close_login(self) -> None:
+        """No session is issued from now on, released or not: the teardown's,
+        so nothing still asking after the row can sign in."""
+        with self._lock:
+            if self._login.closed_ns is None:
+                self._login.closed_ns = time.monotonic_ns()
+
+    def complete_login(self, header: str | None) -> tuple[str, str | None]:
+        """One completion ask: how it is answered, and the ``Set-Cookie``
+        value when it issues a session. Decided and recorded under one lock,
+        so two asks never both issue for one release."""
+        sent = [value.encode() for value in cookie_values(header, "li_at")]
+        with self._lock:
+            login = self._login
+            at = time.monotonic_ns()
+            if any(
+                hmac.compare_digest(value, issued)
+                for value in sent
+                for issued in self._issued
+            ):
+                login.polls.append((at, ALREADY))
+                return ALREADY, None
+            if login.closed_ns is not None:
+                login.polls.append((at, CLOSED))
+                return CLOSED, None
+            if login.released_ns is None:
+                login.polls.append((at, PENDING))
+                return PENDING, None
+            value = f"{ISSUED_PREFIX}{secrets.token_urlsafe(24)}"
+            self._issued.append(value.encode())
+            self._sessions.append(value.encode())
+            login.polls.append((at, ISSUED))
+            login.issued.append(
+                {
+                    "digest": session_digest(value),
+                    "issued_ns": at,
+                    "phase": login.released_phase,
+                    "ordinal": len(login.issued) + 1,
+                }
+            )
+        return ISSUED, _issued_cookie(value)
+
+    def login_record(self) -> dict[str, Any]:
+        """What the sign-in saw so far, fit for a row's packet."""
+        with self._lock:
+            return self._login.as_record()
+
     def record(self, request: OriginRequest) -> None:
         with self._lock:
             self.requests.append(request)
+
+    def hold(
+        self,
+        path: str,
+        *,
+        ordinal: int = 1,
+        seconds: float = GATE_DEADLINE_SECONDS,
+        on_event: GateEvent | None = None,
+    ) -> Gate:
+        """Arm a gate for the *ordinal*-th request of exactly *path* from now.
+
+        *path* is matched whole, without its query, never as a prefix.
+        *seconds* is the hold's deadline from entry, at most
+        ``GATE_DEADLINE_SECONDS``. *on_event* is told ``gate.entered`` and
+        ``gate.released`` with their fields, from the handler's thread.
+        """
+        if type(ordinal) is not int or ordinal < 1:
+            raise ValueError(f"a gate's ordinal counts from 1, not {ordinal!r}")
+        if not 0 < seconds <= GATE_DEADLINE_SECONDS:
+            raise ValueError(
+                f"a gate's deadline must be above 0 and at most "
+                f"{GATE_DEADLINE_SECONDS}s, below the navigation and relay "
+                f"limits, not {seconds!r}"
+            )
+        gate = Gate(path, ordinal, seconds, on_event)
+        with self._lock:
+            self._gates.append(gate)
+        return gate
+
+    def gate_for(self, path: str) -> Gate | None:
+        """The armed gate that holds this request of *path*, if any."""
+        with self._lock:
+            gates = [gate for gate in self._gates if gate.path == path]
+        for gate in gates:
+            if gate._selects():
+                return gate
+        return None
+
+    def release_all(self) -> None:
+        """Let every held request go, and every armed gate pass at once."""
+        with self._lock:
+            gates = list(self._gates)
+        for gate in gates:
+            gate.release(by=RELEASED_BY_TEARDOWN)
 
     @staticmethod
     def _remember_server_name(
@@ -403,6 +1102,8 @@ class SyntheticOrigin(ThreadingHTTPServer):
         self._thread.start()
 
     def stop(self) -> None:
+        # First: a request still held would otherwise wait out its deadline.
+        self.release_all()
         self.shutdown()
         self.server_close()
         if self._thread is not None:
