@@ -2541,7 +2541,7 @@ async def _install_under_supervision(
         # message, which says what went wrong, and it is read before the scan
         # below so an unreadable tree cannot answer in its place. A breach then
         # beats success, because accepting returncode 0 is what records an
-        # oversized tree as ready.
+        # oversized tree as ready: one the scan finds, and one the watcher saw.
         if returncode != 0:
             raise BrowserSetupFailedError(
                 "\n".join(lines) or "Patchright Chromium browser setup failed."
@@ -2560,6 +2560,15 @@ async def _install_under_supervision(
             # breach into the cleanup below is not a missed one to warn about.
             bound_raised = True
             raise
+        # After the scan, so a breach the watcher reported while it ran counts
+        # too. The loop above stops reading the watcher once the process task
+        # is done, and the installer deleting its archive on the way out is
+        # exactly what makes the final tree fit again. A breach the watcher
+        # observed is not undone by that, and whether it landed a turn before
+        # the exit or in the same one must not decide the install.
+        if _installer_bound_breached(activity):
+            bound_raised = True
+            await activity
     finally:
         try:
             if activity is not None:
