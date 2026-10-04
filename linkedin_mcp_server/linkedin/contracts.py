@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any
+
+import anyio
 
 from linkedin_mcp_server.linkedin.identifiers import (
     normalize_person_identifier,
@@ -30,18 +33,39 @@ from linkedin_mcp_server.linkedin.link_metadata import Reference
 RATE_LIMITED_SECTION_TEXT = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
 
 # A submission is in flight from the moment the send is dispatched until the
-# whole path has produced a result, cleanup included, and an interruption in
-# that window cannot be reported. FastMCP runs every tool inside
-# `anyio.fail_after()`, so the deadline raises `CancelledError` past
-# `except Exception` and discards any result returned from the cancelled
-# scope. The caller gets a timeout that carries no `retry_safe`, and this line
-# is then the only record that a message may already have left. Answering the
-# caller instead needs the tool to know its own deadline, which is issue #889.
+# whole path has produced a result, cleanup included, and a cancellation in
+# that window cannot be reported: it raises `CancelledError` past
+# `except Exception`, and a cancelled scope discards whatever is returned from
+# inside it. The tool's own deadline no longer lands there, because the send
+# stops ahead of it and answers `send_unconfirmed` (#889). What is left is
+# cancellation the server does not own, a client that cancels or goes away,
+# and for that this line is the only record that a message may already have
+# left.
 SEND_INTERRUPTED_WARNING = (
     "Message submission was interrupted while in flight. The send outcome is "
     "unknown; check the conversation before retrying, as a retry may deliver "
     "the message twice."
 )
+
+
+def before_the_reply_deadline(
+    limit: float = math.inf, *, shield: bool = False
+) -> anyio.CancelScope:
+    """Bound work that runs while a send's answer waits to leave.
+
+    The scope ends after ``limit`` seconds and never later than halfway to the
+    deadline the call runs under, so what follows keeps the other half to hand
+    the answer back before that deadline discards it (#889). A shielded scope
+    ignores that deadline, so without this bound a slow cleanup outlasts it.
+    Without a deadline, or once the call is already cancelled and its answer
+    gone, only ``limit`` applies.
+    """
+    now = anyio.current_time()
+    end = now + limit
+    deadline = anyio.current_effective_deadline()
+    if now < deadline < math.inf:
+        end = min(end, now + (deadline - now) / 2)
+    return anyio.CancelScope(deadline=end, shield=shield)
 
 
 def rate_limited_section_error() -> dict[str, str]:

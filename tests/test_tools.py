@@ -1782,11 +1782,11 @@ class TestMessagingTools:
     ):
         """The last await can discard an answer that says a message went out.
 
-        `ctx.report_progress` is the final await inside FastMCP's
-        `anyio.fail_after()`, so a deadline landing there raises
-        `CancelledError` past `except Exception` and throws away the result
-        the send already produced. Nothing can hand it back afterwards, and
-        the log line is then the only record.
+        `ctx.report_progress` is the final await of the tool. The tool's own
+        deadline no longer reaches it (#889), but a cancellation from outside
+        still raises `CancelledError` past `except Exception` and throws away
+        the result the send already produced. Nothing can hand it back
+        afterwards, and the log line is then the only record.
 
         Silent where the result says a retry is safe: nothing was submitted,
         so there is no duplicate delivery to warn about. That is `retry_safe`
