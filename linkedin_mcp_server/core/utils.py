@@ -5,6 +5,7 @@ import logging
 import time
 from typing import Any
 
+import anyio
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from .exceptions import RateLimitError
@@ -113,24 +114,53 @@ _RAIL_PICK_JS = r"""
 # cancelled call has nothing left running in the page. Cancelling the task that
 # awaits `page.evaluate()` does not cancel a promise the page is running, and
 # the polling loop that used to live here went on scrolling the shared page
-# after a tool timeout had handed it to the next call (#763). No node is kept
-# between steps: the pick is re-run on each one, which is also what follows a
-# rail a re-render replaced.
+# after a tool timeout had handed it to the next call (#763).
+#
+# Nothing is stored in the page between steps. The caller passes back where the
+# previous step's rail sat, as child indices from the root, and that node stays
+# the rail while it still ties the pick. Measuring whichever candidate wins
+# instead compares one container's height against another's: a taller tied
+# ancestor turning scrollable mid-wait then reads as a batch, which spends one
+# of `maxScrolls` and can end the page with the batch still in flight. A
+# re-render that replaces the rail in place lands at the same indices and is
+# measured as the rail, which is what adopting a replacement always did.
 _RAIL_STEP_JS = (
     r"""(opts) => {
-            const {selector, scroll} = opts;
+            const {selector, scroll, held} = opts;
 """
     + _RAIL_PICK_JS
     + r"""
+            const pathOf = (node) => {
+                const path = [];
+                while (node.parentElement) {
+                    path.unshift(
+                        Array.prototype.indexOf.call(
+                            node.parentElement.children, node
+                        )
+                    );
+                    node = node.parentElement;
+                }
+                return path;
+            };
+            const atPath = (path) => {
+                let node = document.documentElement;
+                for (const index of path) {
+                    node = node && node.children[index];
+                }
+                return node || null;
+            };
+
             if (!document.querySelectorAll(selector).length) {
                 return {status: 'gone'};
             }
             const tied = railGroup();
-            let rail = null;
+            let picked = null;
             for (const node of tied) {
-                if (!rail || node.contains(rail)) rail = node;
+                if (!picked || node.contains(picked)) picked = node;
             }
-            if (!rail) return {status: 'no-container'};
+            if (!picked) return {status: 'no-container'};
+            const kept = held ? atPath(held) : null;
+            const rail = kept && tied.includes(kept) ? kept : picked;
 
             // Measured before the scroll, so the batch it asks for reads as
             // growth against this step.
@@ -138,6 +168,7 @@ _RAIL_STEP_JS = (
                 status: 'ok',
                 cards: idsIn(rail),
                 height: rail.scrollHeight,
+                path: pathOf(rail),
             };
             if (scroll) {
                 // Only the tied candidates nested with the pick. Two tied
@@ -149,8 +180,8 @@ _RAIL_STEP_JS = (
                 // while the rail stayed at 6 because growth was then read
                 // off the pane instead.
                 for (const node of tied) {
-                    if (node === rail
-                        || node.contains(rail) || rail.contains(node)) {
+                    if (node === picked
+                        || node.contains(picked) || picked.contains(node)) {
                         node.scrollTop = node.scrollHeight;
                     }
                 }
@@ -159,12 +190,65 @@ _RAIL_STEP_JS = (
         }"""
 )
 
+# How long a cancelled call waits for a scroll step it has already sent. A
+# renderer busy with a long task holds the step in its queue, and a cancel does
+# not take it back out: measured behind a 1s task, the rail scrolled about
+# 0.9s after the cancel had released the page to the next call. The wait is
+# bounded so that a page that never answers cannot hold the page lock forever.
+_SENT_SCROLL_GRACE = 5.0
 
-async def _rail_step(page: Page, *, scroll: bool) -> dict[str, Any]:
-    """Measure the rail, scrolling it afterwards when ``scroll`` is set."""
-    return await page.evaluate(
-        _RAIL_STEP_JS, {"selector": _JOB_CARD_SELECTOR, "scroll": scroll}
+
+async def _rail_step(
+    page: Page, *, scroll: bool, held: list[int] | None
+) -> dict[str, Any]:
+    """Measure the rail, scrolling it afterwards when ``scroll`` is set.
+
+    A step that only measures writes nothing, so a cancel may abandon it. A
+    step that scrolls is waited for: until it has run, the page may still move
+    after this call has given it up.
+    """
+    step = asyncio.ensure_future(
+        page.evaluate(
+            _RAIL_STEP_JS,
+            {"selector": _JOB_CARD_SELECTOR, "scroll": scroll, "held": held},
+        )
     )
+    if not scroll:
+        return await step
+    try:
+        return await asyncio.shield(step)
+    except asyncio.CancelledError:
+        await _let_the_scroll_land(step)
+        raise
+
+
+async def _let_the_scroll_land(step: asyncio.Future[Any]) -> None:
+    """Wait, within the grace period, for a sent scroll step to finish.
+
+    Shielded from AnyIO as well as from asyncio: a tool timeout is an AnyIO
+    cancel scope, which cancels the task again on every pass of the event loop
+    and would end a plain wait at once. A second native cancel does not end it
+    either; only the step or the grace period does, and the caller re-raises
+    the cancel it is already handling.
+    """
+    until = time.monotonic() + _SENT_SCROLL_GRACE
+    with anyio.CancelScope(shield=True):
+        while not step.done() and time.monotonic() < until:
+            try:
+                await asyncio.wait({step}, timeout=until - time.monotonic())
+            except asyncio.CancelledError:
+                continue
+    if not step.done():
+        logger.warning(
+            "A cancelled sidebar scroll did not finish within %.0fs and may "
+            "still move the page",
+            _SENT_SCROLL_GRACE,
+        )
+        step.cancel()
+    elif not step.cancelled():
+        # Retrieved so asyncio does not report it; the cancel is what the
+        # caller propagates, whatever the step raised.
+        step.exception()
 
 
 async def detect_rate_limit(page: Page) -> None:
@@ -341,7 +425,7 @@ async def scroll_job_sidebar(
     # Moving a wait back into the page puts a loop there that outlives the
     # cancel; see `_RAIL_STEP_JS`.
     try:
-        latest = await _rail_step(page, scroll=False)
+        latest = await _rail_step(page, scroll=False, held=None)
         status = latest.get("status")
         if status == "gone":
             logger.debug("Job card link disappeared before evaluate, skipping scroll")
@@ -355,16 +439,16 @@ async def scroll_job_sidebar(
             until = min(time.monotonic() + budget, hard_deadline)
             while time.monotonic() < until:
                 await asyncio.sleep(poll_interval)
-                now = await _rail_step(page, scroll=False)
+                now = await _rail_step(page, scroll=False, held=latest["path"])
                 if now.get("status") != "ok":
                     # A re-render can leave no rail for a moment. That is not
                     # growth, and the next step picks whatever replaced it.
                     continue
                 latest = now
-                # Growth is a larger id count or a taller rail. The pick is
-                # re-run on every step, so a rail a re-render replaced is
-                # measured in its successor, and adopting that successor is
-                # not growth by itself: a framework that re-renders the same
+                # Growth is a larger id count or a taller rail, measured on
+                # the rail the last step held while it still ties. A rail a
+                # re-render replaced is measured in its successor, and
+                # adopting that successor is not growth by itself: a framework that re-renders the same
                 # cards would otherwise spend one of `max_scrolls` per render
                 # and end the page while the batch it waited for is in flight.
                 # A virtualized rail that swapped its ids while holding both
@@ -389,7 +473,7 @@ async def scroll_job_sidebar(
                 break
 
             round_started = time.monotonic()
-            before = await _rail_step(page, scroll=True)
+            before = await _rail_step(page, scroll=True, held=latest["path"])
             if before.get("status") == "ok":
                 latest = before
             else:
@@ -398,7 +482,7 @@ async def scroll_job_sidebar(
             if not grew:
                 # One confirmation round at the full budget: a batch slower
                 # than the shrunken budget is not an empty rail.
-                await _rail_step(page, scroll=True)
+                await _rail_step(page, scroll=True, held=latest["path"])
                 grew = await grew_since(before, settle_timeout)
             if not grew:
                 timed_out = time.monotonic() >= hard_deadline
