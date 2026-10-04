@@ -284,7 +284,8 @@ def reaches_the_public_internet(host: str) -> bool:
     which is the caller's decision and not this server's.
     """
     # Judged in the form the browser would ask for: it folds fullwidth letters,
-    # digits and dots (`box.locaｌ`, `１２７.0.0.1`) into ASCII before resolving.
+    # digits and dots into ASCII before resolving, so `.local` spelled with a
+    # fullwidth `l` is still `.local`.
     try:
         name = host.encode("idna").decode("ascii").rstrip(".").lower()
     except UnicodeError:
