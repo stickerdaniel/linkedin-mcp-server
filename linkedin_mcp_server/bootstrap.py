@@ -3760,14 +3760,19 @@ def _job_control_cannot_pause_setup() -> bool:
     detachment keeps the terminal's stop signal from reaching it: Ctrl+Z stops
     the command and the download carries on. Forwarding the signal would have
     to keep that containment intact, so the user is told instead (#792). Only
-    POSIX has job control, and only an interactive terminal can send it.
+    POSIX has job control, and only the foreground job of a terminal receives
+    Ctrl+Z. Any of the three standard descriptors can name that terminal:
+    ``--status </dev/null`` still stops on Ctrl+Z, measured on macOS.
     """
     if os.name == "nt":
         return False
-    try:
-        return sys.stdin is not None and sys.stdin.isatty()
-    except (OSError, ValueError):
-        return False
+    for descriptor in (0, 1, 2):
+        try:
+            if os.isatty(descriptor) and os.tcgetpgrp(descriptor) == os.getpgrp():
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def ensure_browser_installed() -> None:

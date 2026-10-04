@@ -8042,14 +8042,32 @@ class TestEnsureBrowserInstalled:
 
         assert calls["value"] == 0
 
-    @pytest.mark.parametrize("terminal", [True, False])
+    @staticmethod
+    def _terminal(monkeypatch, *, on: tuple[int, ...], foreground: bool) -> None:
+        """Put descriptors *on* a terminal, with this job in its foreground or not."""
+        group = os.getpgrp()
+        monkeypatch.setattr(os, "isatty", lambda fd: fd in on)
+        monkeypatch.setattr(
+            os, "tcgetpgrp", lambda _fd: group if foreground else group + 1
+        )
+
+    @pytest.mark.parametrize(
+        ("on", "foreground", "told"),
+        [
+            pytest.param((0, 1, 2), True, True, id="at-a-terminal"),
+            # ``--status </dev/null`` from a shell: still stopped by Ctrl+Z.
+            pytest.param((1, 2), True, True, id="stdin-redirected"),
+            pytest.param((0, 1, 2), False, False, id="background-job"),
+            pytest.param((), True, False, id="no-terminal"),
+        ],
+    )
     def test_a_terminal_user_hears_that_suspending_does_not_pause(
-        self, isolate_profile_dir, monkeypatch, capsys, terminal
+        self, isolate_profile_dir, monkeypatch, capsys, on, foreground, told
     ):
         """The installer runs outside the terminal's process group (#792).
 
-        So Ctrl+Z stops the command and the download goes on. Only someone at
-        a terminal can press it, so only they are told.
+        So Ctrl+Z stops the command and the download goes on. Only the
+        foreground job of a terminal receives it, so only that job says so.
         """
         if os.name == "nt":
             pytest.skip("Windows has no job control")
@@ -8058,19 +8076,21 @@ class TestEnsureBrowserInstalled:
             "linkedin_mcp_server.bootstrap.browser_ready", lambda: False
         )
         self._stub(monkeypatch)
-        monkeypatch.setattr("sys.stdin.isatty", lambda: terminal)
+        self._terminal(monkeypatch, on=on, foreground=foreground)
 
         ensure_browser_installed()
 
         said = "does not pause the download" in capsys.readouterr().out
-        assert said is terminal
+        assert said is told
 
     def test_a_ready_browser_says_nothing_about_suspending(
         self, isolate_profile_dir, monkeypatch, capsys
     ):
+        if os.name == "nt":
+            pytest.skip("Windows has no job control")
         monkeypatch.setattr("linkedin_mcp_server.bootstrap.browser_ready", lambda: True)
         self._stub(monkeypatch)
-        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        self._terminal(monkeypatch, on=(0, 1, 2), foreground=True)
 
         ensure_browser_installed()
 
