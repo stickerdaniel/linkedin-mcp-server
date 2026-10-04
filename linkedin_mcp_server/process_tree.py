@@ -1490,7 +1490,12 @@ def _reap_and_wait_for_group(
             except ProcessLookupError:
                 pass
         if time.monotonic() >= deadline:
-            return False
+            # A slow snapshot under load can spend the rest of the budget after
+            # the group already ended, so the clock alone is no verdict: one
+            # last look decides, by the same settled rule as the loop.
+            if not process_group_exists(pgid):
+                return True
+            return not process_group_has_live_member(pgid)
         time.sleep(0.01)
     return True
 

@@ -1041,6 +1041,104 @@ class TestPosixProcessGroups:
 
         assert process_tree.process_group_has_live_member(12345)
 
+    @staticmethod
+    def _settle_past_deadline(
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        exists: Iterator[bool],
+        live: Iterator[bool],
+    ) -> tuple[bool, list[int]]:
+        """Run one group settlement whose first run-state poll outlasts the budget.
+
+        The clock is the module's own, so the poll's two seconds are the whole
+        delay and the deadline passes during it and nowhere else. Returns the
+        verdict and every signal sent, so a verdict bought with another group
+        kill is visible.
+        """
+        clock = SimpleNamespace(now=0.0)
+        signals: list[int] = []
+        observations = iter([None, object()])
+
+        def slow_poll(pgid: int) -> bool:
+            clock.now += 2.0
+            return next(live)
+
+        monkeypatch.setattr(
+            process_tree,
+            "time",
+            SimpleNamespace(
+                monotonic=lambda: clock.now,
+                sleep=lambda seconds: setattr(clock, "now", clock.now + seconds),
+            ),
+        )
+        monkeypatch.setattr(
+            process_tree.os,
+            "waitid",
+            lambda *a, **k: next(observations),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            process_tree.os, "killpg", lambda pgid, sent: signals.append(sent)
+        )
+        monkeypatch.setattr(
+            process_tree, "process_group_exists", lambda pgid: next(exists)
+        )
+        monkeypatch.setattr(process_tree, "process_group_has_live_member", slow_poll)
+        monkeypatch.setattr(process_tree, "_kernel_start_identity", lambda pid: None)
+
+        class _Child:
+            pid = 12345
+            returncode: int | None = None
+
+            def wait(self, timeout: float | None = None) -> int:
+                self.returncode = -signal.SIGKILL
+                return self.returncode
+
+        settled = process_tree.terminate_process_group(
+            12345, timeout=1.0, child=cast(Any, _Child())
+        )
+        return settled, signals
+
+    @_POSIX_ONLY
+    def test_a_group_that_ended_during_a_slow_snapshot_is_settled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The flake under load: the budget ran out, the group did not outlive it.
+
+        The run-state poll answers from a snapshot taken while the group was
+        still there and returns after the deadline. The group is gone by then,
+        and reporting it as undrained tells the owner to stand down and keep a
+        profile whose browser is already closed.
+        """
+        settled, signals = self._settle_past_deadline(
+            monkeypatch, exists=iter([True, False]), live=iter([True])
+        )
+
+        assert settled
+        assert signals == [signal.SIGKILL, signal.SIGKILL]
+
+    @_POSIX_ONLY
+    def test_a_group_still_live_at_the_deadline_is_not_settled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        settled, signals = self._settle_past_deadline(
+            monkeypatch, exists=repeat(True), live=repeat(True)
+        )
+
+        assert not settled
+        assert signals == [signal.SIGKILL, signal.SIGKILL]
+
+    @_POSIX_ONLY
+    def test_a_group_left_with_only_zombies_at_the_deadline_is_settled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        settled, signals = self._settle_past_deadline(
+            monkeypatch, exists=repeat(True), live=iter([True, False])
+        )
+
+        assert settled
+        assert signals == [signal.SIGKILL, signal.SIGKILL]
+
     @_LINUX_ONLY
     def test_a_zombie_only_group_settles_under_a_reaper_that_never_waits(
         self, tmp_path: Path
