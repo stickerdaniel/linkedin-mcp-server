@@ -875,10 +875,49 @@ def test_lock_from_another_host_counts_as_held(isolate_profile_dir):
     _seed_session(profile_dir)
     (profile_dir / "SingletonLock").symlink_to("some-container-1")
 
-    with pytest.raises(RuntimeError, match="in use by another process"):
+    with pytest.raises(RuntimeError, match="locked by host 'some-container'"):
         rotate_source_profile(profile_dir)
 
     assert profile_dir.exists()
+
+
+def test_a_foreign_host_lock_names_what_would_free_the_profile(isolate_profile_dir):
+    """Measured on macOS: the host name changed after a crash, so the lock this
+    machine left behind read as another host's and refused every login for good.
+    The refusal stands, since a container's lock looks the same, but it has to
+    name the files and the condition under which deleting them is safe."""
+    profile_dir = isolate_profile_dir
+    _seed_session(profile_dir)
+    lock = profile_dir / "SingletonLock"
+    lock.symlink_to("old-name.local-4242")
+
+    with pytest.raises(RuntimeError) as refused:
+        rotate_source_profile(profile_dir)
+
+    message = str(refused.value)
+    assert str(lock) in message
+    assert "'old-name.local'" in message
+    assert repr(socket.gethostname()) in message
+    assert "SingletonCookie and SingletonSocket" in message
+    # Deleting a live container's lock corrupts its session, so the advice has
+    # to stay conditional on nothing using the profile.
+    stop = message.index("Stop any server, browser or container")
+    assert stop < message.index("If none is") < message.index("delete")
+    assert lock.is_symlink(), "the refusal must not remove the lock itself"
+    assert profile_dir.exists()
+
+
+def test_a_live_lock_on_this_host_does_not_suggest_deleting_it(isolate_profile_dir):
+    profile_dir = isolate_profile_dir
+    _seed_session(profile_dir)
+    lock = profile_dir / "SingletonLock"
+    lock.symlink_to(f"{socket.gethostname()}-{os.getpid()}")
+
+    with pytest.raises(RuntimeError, match="in use by another process") as refused:
+        rotate_source_profile(profile_dir)
+
+    assert str(lock) in str(refused.value)
+    assert "delete" not in str(refused.value)
 
 
 def test_uncommitted_debris_is_parked_not_deleted(isolate_profile_dir):
