@@ -156,11 +156,14 @@ def _alive(pid: int) -> bool:
 
 def _wait_gone(*pids: int, within: float = 5.0) -> bool:
     # Not proven gone until a query says so; an unanswered one waits on.
+    # The last verdict comes from a query begun after the deadline, so one
+    # slow ps cannot spend the whole budget and leave nothing to decide on.
     deadline = time.monotonic() + within
     while True:
+        began = time.monotonic()
         if all(_liveness(pid) is False for pid in pids):
             return True
-        if time.monotonic() >= deadline:
+        if began >= deadline:
             return False
         time.sleep(0.01)
 
@@ -2106,8 +2109,11 @@ def test_marker_drain_buries_a_group_whose_leader_already_exited():
             process_tree._registered_browser_markers.discard(marker)
         for leader in leaders:
             process_tree._registered_posix_groups.pop(leader.pid, None)
-            with contextlib.suppress(OSError):
-                os.killpg(leader.pid, signal.SIGKILL)
+            # Only while the unreaped leader still holds its id is the group
+            # surely ours; once it is reaped the children are killed by pid.
+            if leader.poll() is None:
+                with contextlib.suppress(OSError):
+                    os.killpg(leader.pid, signal.SIGKILL)
             with contextlib.suppress(subprocess.TimeoutExpired):
                 leader.wait(timeout=5)
             if leader.stdout is not None:
