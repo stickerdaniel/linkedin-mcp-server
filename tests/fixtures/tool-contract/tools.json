@@ -914,7 +914,7 @@
           "type": "string"
         },
         "message": {
-          "description": "Single-line message text to send. C0 control characters and\nDEL are rejected, including CR, LF, and tab.",
+          "description": "Message text. LF, CRLF and CR all end a line; an empty line\nseparates paragraphs and is kept. Whitespace-only lines count as\nempty, and leading and trailing whitespace of the whole message\nis removed, as LinkedIn does when sending. Tab, other control\ncharacters, DEL, U+0085, U+2028 and U+2029 are refused.",
           "type": "string"
         },
         "profile_urn": {

@@ -18,6 +18,7 @@ from linkedin_mcp_server.linkedin import message_sender as message_sender_module
 from linkedin_mcp_server.linkedin.message_sender import (
     MessageSender,
     _MESSAGE_COMPOSER_OWNER_JS,
+    _MESSAGE_COMPOSER_SUBMIT_READY_JS,
     _MESSAGE_CONFIRMATION_DISPOSE_JS,
     _MESSAGE_CONFIRMATION_PREPARE_JS,
     _MESSAGE_CONFIRMATION_READY_JS,
@@ -238,8 +239,8 @@ class TestSendMessage:
 
     @pytest.mark.parametrize(
         "message",
-        ["First\nSecond", "First\rSecond", "First\tSecond", "First\x7fSecond"],
-        ids=["newline", "carriage-return", "tab", "del"],
+        ["First\tSecond", "First\x7fSecond", "First\u2028Second"],
+        ids=["tab", "del", "line-separator"],
     )
     async def test_control_message_is_rejected_before_browser_interaction(
         self, mock_page, message
@@ -254,7 +255,7 @@ class TestSendMessage:
 
         assert result["status"] == "invalid_message"
         assert result["message"] == (
-            "Message must not contain control characters or line breaks."
+            "Message must not contain control characters other than line breaks."
         )
         assert result["retry_safe"] is True
         navigate.assert_not_awaited()
@@ -1003,6 +1004,73 @@ class TestSendMessage:
             "submit",
             "confirm:confirmation-token",
         ]
+
+    async def test_every_step_receives_the_normalized_message(self, mock_page):
+        """The editor is written, checked and confirmed with one text."""
+        sender = _sender(mock_page)
+        patches = self._patch_to_composer(sender, mock_page)
+        owner = mock_page.evaluate_handle.return_value
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as write,
+            patches[7] as submit,
+            patches[8],
+            patches[9] as prepare,
+            patches[10] as confirmed,
+        ):
+            result = await sender.send_message(
+                "testuser", "First\r\n \r\nSecond\n", confirm_send=True
+            )
+
+        assert result["status"] == "sent"
+        normalized = "First\n\nSecond"
+        assert write.await_args.args[0] == normalized
+        assert prepare.await_args.args[0] == normalized
+        assert submit.await_args.args[0] == normalized
+        assert confirmed.await_args.args[0] == normalized
+        ready = [
+            call.args[1]["message"]
+            for call in owner.evaluate.await_args_list
+            if call.args[0] is _MESSAGE_COMPOSER_SUBMIT_READY_JS
+        ]
+        assert ready == [normalized]
+
+    async def test_pre_submit_cleanup_receives_the_normalized_message(self, mock_page):
+        sender = _sender(mock_page)
+        patches = self._patch_to_composer(sender, mock_page)
+        owner = mock_page.evaluate_handle.return_value
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7] as submit,
+            patches[8],
+            patches[9],
+            patches[10],
+            patch.object(
+                sender,
+                "_wait_for_verified_submit",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                sender, "_cleanup_owned_message", new_callable=AsyncMock
+            ) as cleanup,
+        ):
+            result = await sender.send_message(
+                "testuser", "First\r\n \r\nSecond\n", confirm_send=True
+            )
+
+        assert result["status"] == "send_unavailable"
+        submit.assert_not_awaited()
+        cleanup.assert_awaited_once_with("First\n\nSecond", owner)
 
     async def test_interrupted_submission_is_not_a_failure(self, mock_page):
         """A click round trip can fail after dispatching the local event."""

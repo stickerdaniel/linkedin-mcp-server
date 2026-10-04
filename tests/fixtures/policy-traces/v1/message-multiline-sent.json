@@ -2,6 +2,7 @@
   "call": {
     "arguments": {
       "confirm_send": true,
+      "message": "First\r\n \r\nSecond\n",
       "submission_outcome": "sent"
     },
     "method": "send_message"
@@ -220,7 +221,7 @@
     },
     {
       "arg": {
-        "message": "New text",
+        "message": "First\n\nSecond",
         "profilePath": "/in/ada-lovelace/",
         "profileUrn": "ACoAA-policy"
       },
@@ -233,7 +234,7 @@
     },
     {
       "arg": {
-        "message": "New text",
+        "message": "First\n\nSecond",
         "profilePath": "/in/ada-lovelace/",
         "profileUrn": "ACoAA-policy"
       },
@@ -253,7 +254,7 @@
     },
     {
       "arg": {
-        "message": "New text",
+        "message": "First\n\nSecond",
         "profilePath": "/in/ada-lovelace/",
         "profileUrn": "ACoAA-policy"
       },
@@ -266,7 +267,7 @@
     },
     {
       "arg": {
-        "expected": "New text",
+        "expected": "First\n\nSecond",
         "owner": {
           "handle": "handle-1"
         },
@@ -281,7 +282,7 @@
     },
     {
       "arg": {
-        "message": "New text",
+        "message": "First\n\nSecond",
         "profilePath": "/in/ada-lovelace/",
         "profileUrn": "ACoAA-policy"
       },
@@ -294,7 +295,7 @@
     },
     {
       "arg": {
-        "expected": "New text",
+        "expected": "First\n\nSecond",
         "owner": {
           "handle": "handle-1"
         },

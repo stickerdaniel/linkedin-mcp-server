@@ -11,6 +11,7 @@ from linkedin_mcp_server.linkedin.contracts import (
     ExtractedSection,
     FilterValidationError,
     message_action_result,
+    normalize_message_text,
     rate_limited_section_error,
     refuse_an_invalid_message,
 )
@@ -85,12 +86,36 @@ class TestMessageActionResult:
 
 
 class TestRefuseAnInvalidMessage:
-    @pytest.mark.parametrize("message", ["line\nbreak", "before\tafter", "text\x7f"])
-    def test_every_c0_or_del_character_is_refused(self, message: str):
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "before\tafter",
+            "line\n\t\nnext",
+            "\t\nlater",
+            "earlier\n\t",
+            "ring\x07",
+            "text\x7f",
+            "next\x85line",
+            "line\u2028separator",
+            "paragraph\u2029separator",
+        ],
+        ids=[
+            "tab-inside",
+            "tab-only-interior-line",
+            "tab-only-leading-line",
+            "tab-only-trailing-line",
+            "bel",
+            "del",
+            "U+0085",
+            "U+2028",
+            "U+2029",
+        ],
+    )
+    def test_controls_and_other_separators_are_refused(self, message: str):
         assert refuse_an_invalid_message("alice", message) == message_action_result(
             "https://www.linkedin.com/in/alice/",
             "invalid_message",
-            "Message must not contain control characters or line breaks.",
+            "Message must not contain control characters other than line breaks.",
         )
 
     def test_whitespace_is_refused_before_normal_message_text(self):
@@ -100,8 +125,22 @@ class TestRefuseAnInvalidMessage:
             "Message must contain non-whitespace characters.",
         )
 
-    def test_safe_single_line_text_is_accepted(self):
-        assert refuse_an_invalid_message("alice", "Hello, Alice!") is None
+    def test_text_that_normalizes_to_nothing_is_blank(self):
+        # Python's strip() keeps U+FEFF, so the first check lets it through;
+        # LinkedIn's trim() removes it and would send nothing.
+        assert refuse_an_invalid_message("alice", "\ufeff\n\ufeff") == (
+            message_action_result(
+                "https://www.linkedin.com/in/alice/",
+                "invalid_message",
+                "Message must contain non-whitespace characters.",
+            )
+        )
+
+    @pytest.mark.parametrize(
+        "message", ["Hello, Alice!", "line\nbreak", "First\r\nSecond"]
+    )
+    def test_text_and_line_breaks_are_accepted(self, message: str):
+        assert refuse_an_invalid_message("alice", message) is None
 
     def test_the_refusal_calls_the_owner_constructor_directly(self, monkeypatch):
         calls: list[tuple[str, str, str]] = []
@@ -121,3 +160,41 @@ class TestRefuseAnInvalidMessage:
                 "Message must contain non-whitespace characters.",
             )
         ]
+
+
+class TestNormalizeMessageText:
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("First\r\nSecond", "First\nSecond"),
+            ("First\rSecond", "First\nSecond"),
+            ("a\r\n\rb", "a\n\nb"),
+            ("\n\nText", "Text"),
+            ("Text\n\n", "Text"),
+            ("a\n   \nb", "a\n\nb"),
+            ("a\n\u00a0\u3000\nb", "a\n\nb"),
+            ("a\n\n\nb", "a\n\n\nb"),
+            ("a \n b", "a \n b"),
+            ("  first\nlast  ", "first\nlast"),
+            ("\ufeffText\u00a0", "Text"),
+            ("x  y", "x  y"),
+            ("Hello", "Hello"),
+        ],
+        ids=[
+            "crlf",
+            "lone-cr",
+            "crlf-then-cr",
+            "leading-blank-lines",
+            "trailing-blank-lines",
+            "whitespace-only-line",
+            "nbsp-only-line",
+            "interior-blank-lines-kept",
+            "interior-line-edges-kept",
+            "message-ends-trimmed",
+            "js-only-whitespace-trimmed",
+            "inner-spaces-kept",
+            "single-line",
+        ],
+    )
+    def test_text_becomes_what_linkedin_sends(self, message: str, expected: str):
+        assert normalize_message_text(message) == expected
