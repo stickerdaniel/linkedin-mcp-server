@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import os
 from pathlib import Path
 from typing import Any
 
@@ -101,6 +102,67 @@ def test_a_system_error_without_a_cause_is_raised_unchanged(field):
     with pytest.raises(SystemError) as raised:
         read_arguments(_Reader(error), field)
     assert raised.value is error
+
+
+def _guessing_exe(monkeypatch, refuse, *, native: str):
+    """This process, as psutil's own ``Process.exe()`` sees it when the native
+    executable lookup is refused or empty: it falls back to the command line,
+    and that read is the refused one."""
+    process = psutil.Process(os.getpid())
+    process._exe = None  # psutil caches a read executable on the instance
+
+    platform = type(process._proc)
+    real_exe = platform.exe
+
+    def native_exe(self):
+        if self.pid != process.pid:
+            return real_exe(self)
+        if native == "denied":
+            raise psutil.AccessDenied(self.pid)
+        return ""
+
+    def refused_cmdline():
+        raise refuse(process.pid)
+
+    # The platform class has slots, so the lookup is replaced on the class and
+    # answers differently only for this one process.
+    monkeypatch.setattr(platform, "exe", native_exe)
+    monkeypatch.setattr(process, "cmdline", refused_cmdline)
+    return process
+
+
+@_refusals()
+def test_an_executable_guessed_from_a_refused_command_line_is_refused(
+    monkeypatch, refuse
+):
+    # An empty native answer is psutil's own business: it reads a refused
+    # guess as an empty executable, and a SystemError cannot be resumed into
+    # that, so it stays a refusal. The census below holds both to one verdict.
+    process = _guessing_exe(monkeypatch, refuse, native="denied")
+    with pytest.raises(psutil.AccessDenied):
+        read_arguments(process, "exe")
+
+
+@_refusals()
+@pytest.mark.parametrize("native", ["denied", "empty"])
+def test_a_watcher_whose_executable_guess_is_refused_records_the_refusal(
+    monkeypatch, refuse, native
+):
+    process = _guessing_exe(monkeypatch, refuse, native=native)
+    _ppid, _exe, cmdline, failures, _read = _sampler([])._read(process, None)
+    assert cmdline == () and "cmdline: AccessDenied" in failures
+
+
+@_refusals()
+@pytest.mark.parametrize("native", ["denied", "empty"])
+def test_a_census_whose_executable_guess_is_refused_stays_unresolved(
+    monkeypatch, tmp_path, refuse, native
+):
+    process = _guessing_exe(monkeypatch, refuse, native=native)
+    monkeypatch.setattr(psutil, "process_iter", lambda *_a, **_k: iter([process]))
+    account, browsers, _chrome = _scene(tmp_path)
+    census = harness.profile_census(account, browser_dir=browsers)
+    assert census.unresolved == [process.pid] and not census.complete
 
 
 @pytest.mark.parametrize(

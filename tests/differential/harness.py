@@ -2618,8 +2618,8 @@ def process_table(attrs: Sequence[str]) -> Iterator[Any]:
     """``psutil.process_iter(attrs)``, every read judged as psutil judges it.
 
     A refused read is ``None`` in ``info`` and a process gone is skipped,
-    with one difference: a command line or environment that psutil 7.2.2 on
-    macOS fails to read with a ``SystemError`` is refused too
+    with one difference: a command line, environment or executable that
+    psutil 7.2.2 on macOS fails to read with a ``SystemError`` is refused too
     (``read_arguments``). psutil's own iteration ends at that error, and
     the census with it, before any process is judged.
     """
@@ -2629,10 +2629,8 @@ def process_table(attrs: Sequence[str]) -> Iterator[Any]:
             with process.oneshot():
                 for name in attrs:
                     try:
-                        if name == "cmdline":
-                            info[name] = read_arguments(process, "cmdline")
-                        elif name == "environ":
-                            info[name] = read_arguments(process, "environ")
+                        if name in ("cmdline", "environ", "exe"):
+                            info[name] = read_arguments(process, name)
                         else:
                             info[name] = getattr(process, name)()
                     except (psutil.AccessDenied, psutil.ZombieProcess):

@@ -492,9 +492,12 @@ def invoked_module(cmdline: Sequence[str]) -> str | None:
     return None
 
 
-def read_arguments(process: Any, field: Literal["cmdline", "environ"]) -> Any:
-    """``process.cmdline()`` or ``process.environ()``, a refusal raised as
-    ``psutil.AccessDenied`` on every platform.
+def read_arguments(process: Any, field: Literal["cmdline", "environ", "exe"]) -> Any:
+    """``process.cmdline()``, ``process.environ()`` or ``process.exe()``, a
+    refusal raised as ``psutil.AccessDenied`` on every platform.
+
+    ``exe`` is here because psutil falls back to the command line when the
+    executable is refused or empty, and that read fails the same way.
 
     psutil 7.2.2 on macOS raises a refused ``sysctl(KERN_PROCARGS2)`` that
     reports errno 0 as a ``SystemError`` caused by the ``PermissionError`` it
@@ -1042,7 +1045,7 @@ class Sampler:
         except _UNREADABLE as exc:
             failures.append(f"ppid: {type(exc).__name__}")
         try:
-            exe = self._timed("exe", pid, process.exe)
+            exe = self._timed("exe", pid, lambda: read_arguments(process, "exe"))
             exe_read = True
         except _UNREADABLE as exc:
             failures.append(f"exe: {type(exc).__name__}")
