@@ -8052,22 +8052,26 @@ class TestEnsureBrowserInstalled:
         )
 
     @pytest.mark.parametrize(
-        ("on", "foreground", "told"),
+        ("on", "foreground", "told_on"),
         [
-            pytest.param((0, 1, 2), True, True, id="at-a-terminal"),
+            pytest.param((0, 1, 2), True, "out", id="at-a-terminal"),
             # ``--status </dev/null`` from a shell: still stopped by Ctrl+Z.
-            pytest.param((1, 2), True, True, id="stdin-redirected"),
-            pytest.param((0, 1, 2), False, False, id="background-job"),
-            pytest.param((), True, False, id="no-terminal"),
+            pytest.param((1, 2), True, "out", id="stdin-redirected"),
+            # ``--status > status.log``: said where the user is, not in the file.
+            pytest.param((0, 2), True, "err", id="stdout-redirected"),
+            pytest.param((0,), True, None, id="both-outputs-redirected"),
+            pytest.param((0, 1, 2), False, None, id="background-job"),
+            pytest.param((), True, None, id="no-terminal"),
         ],
     )
     def test_a_terminal_user_hears_that_suspending_does_not_pause(
-        self, isolate_profile_dir, monkeypatch, capsys, on, foreground, told
+        self, isolate_profile_dir, monkeypatch, capsys, on, foreground, told_on
     ):
         """The installer runs outside the terminal's process group (#792).
 
         So Ctrl+Z stops the command and the download goes on. Only the
-        foreground job of a terminal receives it, so only that job says so.
+        foreground job of a terminal receives it, so only that job says so,
+        and on an output that is the terminal.
         """
         if os.name == "nt":
             pytest.skip("Windows has no job control")
@@ -8080,8 +8084,13 @@ class TestEnsureBrowserInstalled:
 
         ensure_browser_installed()
 
-        said = "does not pause the download" in capsys.readouterr().out
-        assert said is told
+        captured = capsys.readouterr()
+        said = {
+            name
+            for name, text in (("out", captured.out), ("err", captured.err))
+            if "does not pause the download" in text
+        }
+        assert said == ({told_on} if told_on else set())
 
     def test_a_ready_browser_says_nothing_about_suspending(
         self, isolate_profile_dir, monkeypatch, capsys
