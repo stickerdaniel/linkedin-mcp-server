@@ -899,6 +899,10 @@ def test_a_foreign_host_lock_names_what_would_free_the_profile(isolate_profile_d
     assert "'old-name.local'" in message
     assert repr(socket.gethostname()) in message
     assert "SingletonCookie and SingletonSocket" in message
+    # Deleting a live container's lock corrupts its session, so the advice has
+    # to stay conditional on nothing using the profile.
+    stop = message.index("Stop any server, browser or container")
+    assert stop < message.index("If none is") < message.index("delete")
     assert lock.is_symlink(), "the refusal must not remove the lock itself"
     assert profile_dir.exists()
 
