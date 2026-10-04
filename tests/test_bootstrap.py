@@ -3134,16 +3134,14 @@ class TestInstallerSupervisorLaunch:
             with pytest.raises(BrowserSetupFailedError, match="could not be measured"):
                 bootstrap._installer_download_snapshot(tmp_path, (target,))
 
-    async def test_a_vanished_peak_leaves_the_install_its_result(
-        self, monkeypatch, caplog
-    ):
-        """The ceiling bounds the footprint that stays, not the peak (#815).
+    async def test_an_observed_peak_refuses_a_successful_exit(self, monkeypatch):
+        """A breach the watcher saw decides, even when the archive is gone (#837).
 
-        A breach the watcher reports in the same turn the installer exits is
-        never consumed by the supervision loop, so what decides is the final
-        accounting. It runs on every success, which is why an install whose
-        archive is gone and whose tree fits is kept, and said out loud rather
-        than dropped.
+        The watcher reports it in the same turn the installer exits, and the
+        installer has deleted its archive, so the final tree fits. Before, the
+        supervision loop never read that report and the install was kept with
+        a warning, while the same breach a turn earlier refused it. A peak no
+        poll ever saw is still bounded only by the final accounting (#815).
         """
         from linkedin_mcp_server import bootstrap
         from linkedin_mcp_server.exceptions import BrowserSetupFailedError
@@ -3163,11 +3161,31 @@ class TestInstallerSupervisorLaunch:
             asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
         )
 
-        with caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.bootstrap"):
+        with pytest.raises(BrowserSetupFailedError, match="exceeded its size limit"):
             await asyncio.wait_for(bootstrap._run_patchright_install("--no-shell"), 5)
 
-        assert proc.returncode == 0, "the install kept its own result"
-        assert "exceeded a setup bound" in caplog.text
+    async def test_a_failed_install_keeps_its_message_over_a_breach(self, monkeypatch):
+        """The installer's own failure still outranks the watcher's report."""
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        proc = _FakeProc([b"ERROR: the mirror refused the archive\n"], 1)
+
+        async def breach(*_args: object) -> None:
+            raise BrowserSetupFailedError("Browser setup exceeded its size limit")
+
+        monkeypatch.setattr(bootstrap, "_watch_installer_activity", breach)
+        monkeypatch.setattr(
+            bootstrap,
+            "_installer_download_snapshot",
+            lambda *_args: (("kept", 1024, 1),),
+        )
+        monkeypatch.setattr(
+            asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+        )
+
+        with pytest.raises(BrowserSetupFailedError, match="mirror refused"):
+            await asyncio.wait_for(bootstrap._run_patchright_install("--no-shell"), 5)
 
     async def test_a_failed_install_keeps_its_message_over_the_scan(self, monkeypatch):
         """The installer named the cause, so the accounting may not answer for it.
