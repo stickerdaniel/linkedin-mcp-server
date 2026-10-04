@@ -309,6 +309,7 @@ from differential.watcher import (
     invoked_module,
     possible_browser,
     process_user,
+    read_arguments,
     user_data_dir,
 )
 from linkedin_mcp_server import daemon_descriptor
@@ -2613,6 +2614,33 @@ def exited_zombie(
     return threads_of(process) == 1
 
 
+def process_table(attrs: Sequence[str]) -> Iterator[Any]:
+    """``psutil.process_iter(attrs)``, every read judged as psutil judges it.
+
+    A refused read is ``None`` in ``info`` and a process gone is skipped,
+    with one difference: a command line, environment or executable that
+    psutil 7.2.2 on macOS fails to read with a ``SystemError`` is refused too
+    (``read_arguments``). psutil's own iteration ends at that error, and
+    the census with it, before any process is judged.
+    """
+    for process in psutil.process_iter():
+        info: dict[str, Any] = {}
+        try:
+            with process.oneshot():
+                for name in attrs:
+                    try:
+                        if name in ("cmdline", "environ", "exe"):
+                            info[name] = read_arguments(process, name)
+                        else:
+                            info[name] = getattr(process, name)()
+                    except (psutil.AccessDenied, psutil.ZombieProcess):
+                        info[name] = None
+        except psutil.NoSuchProcess:
+            continue
+        process.info = info
+        yield process
+
+
 def profile_census(
     account: ActorAccount,
     *,
@@ -2630,9 +2658,7 @@ def profile_census(
     directory = str(browser_dir) if browser_dir is not None else None
     census = ProfileCensus()
     try:
-        processes = list(
-            (process_iter or psutil.process_iter)(["cmdline", "exe", "status"])
-        )
+        processes = list((process_iter or process_table)(["cmdline", "exe", "status"]))
     except psutil.Error:
         return ProfileCensus(unresolved=[-1])
     for process in processes:
@@ -2667,11 +2693,30 @@ def _profile_processes(account: ActorAccount) -> list[Any]:
     return profile_census(account).processes
 
 
-def wait_for_no_browser(account: ActorAccount, seconds: float) -> list[int]:
-    """Wait for the profile's browser to be gone; the pids still there if not."""
+def wait_for_no_browser(
+    account: ActorAccount,
+    seconds: float,
+    *,
+    browser_dir: str | Path,
+    browser_exe: str | None = None,
+) -> list[int]:
+    """Wait for the profile's browser to be shown gone; the pids that keep it
+    from that if the wait ends first.
+
+    Shown gone only by a complete census: a process that could be the
+    browser and whose arguments cannot be read keeps the profile occupied
+    as surely as one running on it, so its pid (or -1 for a process table
+    that could not be read) is among those returned. The browser's directory
+    is what settles every other unreadable process of this user: without it
+    each could be the browser, and on macOS the setuid ``login`` of every
+    terminal session is one.
+    """
     deadline = time.monotonic() + seconds
     while True:
-        remaining = [process.pid for process in _profile_processes(account)]
+        census = profile_census(
+            account, browser_exe=browser_exe, browser_dir=browser_dir
+        )
+        remaining = [*census.pids, *census.unresolved]
         if not remaining or time.monotonic() >= deadline:
             return remaining
         time.sleep(0.2)
@@ -6906,7 +6951,11 @@ async def observe_preservation(
     )
     failures = [f"post-quit: {problem}" for problem in host_failures(session)]
     residual = await asyncio.to_thread(
-        wait_for_no_browser, account, _BROWSER_GONE_SECONDS
+        wait_for_no_browser,
+        account,
+        _BROWSER_GONE_SECONDS,
+        browser_dir=browsers,
+        browser_exe=chrome_path,
     )
     if residual:
         failures.append(f"post-quit: its browser outlived it: {residual}")
@@ -7097,12 +7146,15 @@ async def measure_host_quit_row(
                 accept=lambda session: origin.accept_session(session.li_at),
             )
     # The staging browser has confirmed its close, but a root still on the
-    # profile when the watcher takes its baseline would count against O1.
+    # profile when the watcher takes its baseline would count against O1, and
+    # one the census cannot read could be that root. The executable is named
+    # only below; staging runs the runtime's browser, which lives in its
+    # browsers directory.
     lingering = await asyncio.to_thread(
-        wait_for_no_browser, account, _BROWSER_GONE_SECONDS
+        wait_for_no_browser, account, _BROWSER_GONE_SECONDS, browser_dir=browsers
     )
     if lingering:
-        raise RuntimeError(f"the staging browser is still running: {lingering}")
+        raise RuntimeError(f"the staging browser is not shown gone: {lingering}")
     before = snapshot(account.profile, expected_digest=staged.li_at_digest)
     result.before = before
     emit("harness", "profile.snapshot", phase="before", **before.as_event_fields())
@@ -7899,6 +7951,8 @@ async def measure_host_quit_row(
                     account,
                     _BROWSER_GONE_SECONDS,
                     seconds=_BROWSER_GONE_SECONDS + 30.0,
+                    browser_dir=browsers,
+                    browser_exe=browser_exe,
                 )
                 census = await run_owned(
                     "the census after host B",
@@ -8507,6 +8561,8 @@ async def measure_host_quit_row(
                 account,
                 _BROWSER_GONE_SECONDS,
                 seconds=_BROWSER_GONE_SECONDS + 30.0,
+                browser_dir=browsers,
+                browser_exe=browser_exe,
             )
             census = await run_owned(
                 "the census after the loss",
@@ -8654,6 +8710,8 @@ async def measure_host_quit_row(
                 account,
                 seconds,
                 seconds=seconds + 30.0,
+                browser_dir=browsers,
+                browser_exe=browser_exe,
             )
         except Exception as exc:  # noqa: BLE001 - the reading's own evidence
             found["error"] = f"{type(exc).__name__}: {exc}"
@@ -9398,13 +9456,17 @@ async def measure_host_quit_row(
                 reached(shim.reached_file),
             )
         residual = await asyncio.to_thread(
-            wait_for_no_browser, account, _BROWSER_GONE_SECONDS
+            wait_for_no_browser,
+            account,
+            _BROWSER_GONE_SECONDS,
+            browser_dir=browsers,
+            browser_exe=browser_exe,
         )
         if comparison is not None:
             # After the actors left by themselves and the passive wait above,
             # and before anything below can intervene. That wait's empty list
-            # counts only the processes it could read; the complete census
-            # this takes is what says the profile is empty.
+            # is its own; the census this takes is what the comparison
+            # records as the profile empty.
             await take_checkpoint(host_comparison.SETTLED)
         actors_ended = time.time()
         after = snapshot(account.profile, expected_digest=staged.li_at_digest)

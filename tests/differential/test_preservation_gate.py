@@ -57,12 +57,14 @@ _PROCESS_TREE = "linkedin_mcp_server/process_tree.py"
 class _Watcher:
     summary: dict = {}
     records: list = []
+    #: Whether the row has started observing, and with it its actors.
+    started = False
 
     def __init__(self, *args, **kwargs):
         pass
 
     def start(self):
-        pass
+        _Watcher.started = True
 
     def observed(self):
         return list(self.records)
@@ -251,8 +253,13 @@ def row(tmp_path, monkeypatch, profile):
     monkeypatch.setattr(harness, "bundled_executable", lambda runtime: "/b/chrome")
 
     async def run(*, processes, summary, observed=(), **row):
+        # The modelled processes are the row's: the staging wait before the
+        # watcher starts finds the profile empty.
+        monkeypatch.setattr(_Watcher, "started", False)
         monkeypatch.setattr(
-            harness.psutil, "process_iter", lambda *a, **k: list(processes)
+            harness,
+            "process_table",
+            lambda *a, **k: list(processes) if _Watcher.started else [],
         )
         _Watcher.summary = {**(healthy.watcher or {}), **summary}
         _Watcher.records = list(observed)
