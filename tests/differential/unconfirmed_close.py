@@ -73,7 +73,7 @@ from differential.signals import (
 )
 from differential.signals import HELD as HELD_O2
 from differential.signals import UNKNOWN as UNKNOWN_O2
-from differential.watcher import BROWSER_MARKER_ENV
+from differential.watcher import BROWSER_MARKER_ENV, read_arguments
 
 ROW_H_R7 = "H-R7"
 LOCK_FILE = "profile.lock"
@@ -633,7 +633,7 @@ def launch_marker(
             process = open_process(entry["pid"])
             if abs(process.create_time() - float(start)) > _START_TOLERANCE_SECONDS:
                 continue
-            value = process.environ().get(BROWSER_MARKER_ENV)
+            value = read_arguments(process, "environ").get(BROWSER_MARKER_ENV)
         except (psutil.Error, OSError):
             continue
         if value and hashlib.sha256(value.encode()).hexdigest()[:16] == digest:

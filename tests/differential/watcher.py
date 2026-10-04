@@ -163,7 +163,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Literal
 
 import psutil
 
@@ -492,6 +492,30 @@ def invoked_module(cmdline: Sequence[str]) -> str | None:
     return None
 
 
+def read_arguments(process: Any, field: Literal["cmdline", "environ"]) -> Any:
+    """``process.cmdline()`` or ``process.environ()``, a refusal raised as
+    ``psutil.AccessDenied`` on every platform.
+
+    psutil 7.2.2 on macOS raises a refused ``sysctl(KERN_PROCARGS2)`` that
+    reports errno 0 as a ``SystemError`` caused by the ``PermissionError`` it
+    meant: its C code sets that error and then returns success
+    (https://github.com/giampaolo/psutil/pull/2854, released only with 8.0.0).
+    Only that shape is converted; any other ``SystemError`` is a defect and
+    propagates. Done when the locked psutil contains that fix: then remove
+    this and call the method directly
+    (https://github.com/stickerdaniel/linkedin-mcp-server/issues/1216).
+    """
+    try:
+        return getattr(process, field)()
+    except SystemError as exc:
+        if not (
+            isinstance(exc.__cause__, PermissionError)
+            or isinstance(exc.__context__, PermissionError)
+        ):
+            raise
+        raise psutil.AccessDenied(process.pid, getattr(process, "_name", None)) from exc
+
+
 def read_launcher(process: Any) -> str | None:
     """The venv interpreter a process was started as, if it says so.
 
@@ -500,7 +524,7 @@ def read_launcher(process: Any) -> str | None:
     once per PID, create time and command line.
     """
     try:
-        value = process.environ().get(LAUNCHER_ENV)
+        value = read_arguments(process, "environ").get(LAUNCHER_ENV)
     except (psutil.Error, OSError, AttributeError):
         return None
     return value or None
@@ -514,7 +538,7 @@ def read_browser_marker(process: Any) -> str | None:
     product's guardian acts on. A failed read raises ``psutil.Error`` or
     ``OSError``: that is not knowing, and the caller asks again.
     """
-    value = process.environ().get(BROWSER_MARKER_ENV)
+    value = read_arguments(process, "environ").get(BROWSER_MARKER_ENV)
     if not value:
         return None
     return hashlib.sha256(value.encode()).hexdigest()[:16]
@@ -1025,7 +1049,9 @@ class Sampler:
         if not arguments:
             return ppid, exe, cmdline, failures, exe_read
         try:
-            cmdline = tuple(self._timed("cmdline", pid, process.cmdline))
+            cmdline = tuple(
+                self._timed("cmdline", pid, lambda: read_arguments(process, "cmdline"))
+            )
         except _UNREADABLE as exc:
             failures.append(f"cmdline: {type(exc).__name__}")
         return ppid, exe, cmdline, failures, exe_read

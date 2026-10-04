@@ -425,6 +425,8 @@ class TerminalCommand:
         no command here starts one."""
         import psutil
 
+        from differential.watcher import read_arguments
+
         own = os.getpid()
         for process in psutil.process_iter():
             if process.pid == own:
@@ -438,7 +440,8 @@ class TerminalCommand:
             try:
                 if (
                     not grouped
-                    and process.environ().get(COMMAND_MARKER_ENV) != self.marker
+                    and read_arguments(process, "environ").get(COMMAND_MARKER_ENV)
+                    != self.marker
                 ):
                     continue
                 key = (process.pid, process.create_time())
