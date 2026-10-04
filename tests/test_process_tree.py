@@ -2459,7 +2459,7 @@ daemon_owner._exit_hard(None)
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=30)
         descendant_pid = locals().get("descendant_pid")
-        if isinstance(descendant_pid, int) and _alive(descendant_pid):
+        if isinstance(descendant_pid, int) and _liveness(descendant_pid) is not False:
             os.kill(descendant_pid, signal.SIGKILL)
 
 
@@ -2594,7 +2594,7 @@ time.sleep(600)
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=30)
-        if browser_pid is not None and _alive(browser_pid):
+        if browser_pid is not None and _liveness(browser_pid) is not False:
             os.killpg(browser_pid, signal.SIGKILL)
 
 
@@ -2689,11 +2689,11 @@ time.sleep(600)
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=30)
-        if driver_pid is not None and _alive(driver_pid):
+        if driver_pid is not None and _liveness(driver_pid) is not False:
             os.kill(driver_pid, signal.SIGKILL)
         if launched.exists():
             browser_pid = int(launched.read_text())
-            if _alive(browser_pid):
+            if _liveness(browser_pid) is not False:
                 os.killpg(browser_pid, signal.SIGKILL)
 
 
@@ -2732,7 +2732,14 @@ print(browser.pid, flush=True)
     browser_pid = int(driver.stdout.readline())
     driver.wait(timeout=30)
     try:
-        process_tree.remember_detached_process_groups(marker)
+        # Setup: a scan that runs past its snapshot bound registers nothing,
+        # so ask again, bounded, until it has.
+        deadline = time.monotonic() + 30.0
+        while browser_pid not in process_tree._registered_posix_groups:
+            assert time.monotonic() < deadline, "the scan never registered the group"
+            process_tree.remember_detached_process_groups(marker)
+            if browser_pid not in process_tree._registered_posix_groups:
+                time.sleep(process_tree._JOB_POLL_SECONDS)
         registration = process_tree._registered_posix_groups[browser_pid]
         assert marker in process_tree._registered_browser_markers
         assert registration.members[browser_pid] == process_tree._kernel_start_identity(
@@ -2741,8 +2748,9 @@ print(browser.pid, flush=True)
     finally:
         process_tree._registered_browser_markers.discard(marker)
         process_tree._registered_posix_groups.pop(browser_pid, None)
-        if _alive(browser_pid):
-            os.killpg(browser_pid, signal.SIGKILL)
+        if _liveness(browser_pid) is not False:
+            with contextlib.suppress(OSError):
+                os.killpg(browser_pid, signal.SIGKILL)
         assert _wait_gone(browser_pid)
 
 
