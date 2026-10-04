@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import secrets
+import select
 import signal
 import subprocess
 import sys
@@ -131,21 +132,28 @@ def _alive(pid: int) -> bool:
         os.kill(pid, 0)
     except OSError:
         return False
-    state = subprocess.run(
-        ["ps", "-o", "stat=", "-p", str(pid)],
-        capture_output=True,
-        text=True,
-        check=False,
-    ).stdout.strip()
+    try:
+        state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5.0,
+        ).stdout.strip()
+    except subprocess.TimeoutExpired:
+        # A ps that could not answer has shown nothing; the signal above found
+        # the pid, so it counts as alive.
+        return True
     return bool(state) and not state.startswith("Z")
 
 
-def _wait_gone(*pids: int) -> bool:
-    for _ in range(500):
+def _wait_gone(*pids: int, within: float = 5.0) -> bool:
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
         if not any(_alive(pid) for pid in pids):
             return True
         time.sleep(0.01)
-    return False
+    return not any(_alive(pid) for pid in pids)
 
 
 @pytest.mark.parametrize(("exit_code", "expected"), [(259, True), (7, False)])
@@ -2022,6 +2030,9 @@ def test_marker_drain_buries_a_group_whose_leader_already_exited():
         "print(child.pid, flush=True)\n"
     )
 
+    groups: list[int] = []
+    children: list[int] = []
+
     def launch(marker: str) -> tuple[int, int]:
         environment = dict(os.environ)
         environment[process_tree._BROWSER_PROCESS_MARKER] = marker
@@ -2032,33 +2043,55 @@ def test_marker_drain_buries_a_group_whose_leader_already_exited():
             start_new_session=True,
             env=environment,
         )
+        groups.append(leader.pid)
         assert leader.stdout is not None
+        # Bounded: a leader that stalls before naming its child must not hold
+        # the test, and it is killed with its group below.
+        ready, _, _ = select.select([leader.stdout], [], [], 30.0)
+        assert ready, "the leader never named its child"
         child_pid = int(leader.stdout.readline())
+        children.append(child_pid)
         # The leader exits at once, exactly as it does once Patchright has
         # closed the browser it spawned; its group outlives it.
         assert leader.wait(timeout=30) == 0
         return leader.pid, child_pid
 
-    closing_group, closing_child = launch(closing)
-    surviving_group, surviving_child = launch(surviving)
+    def register(marker: str, group: int) -> None:
+        # Setup, before anything is drained: a scan that runs past its
+        # snapshot bound registers nothing, so ask again until it has.
+        deadline = time.monotonic() + 30.0
+        while group not in process_tree._registered_posix_groups:
+            assert time.monotonic() < deadline, "the scan never registered the group"
+            process_tree.remember_detached_process_groups(marker)
+            if group not in process_tree._registered_posix_groups:
+                time.sleep(process_tree._JOB_POLL_SECONDS)
+
     try:
-        process_tree.remember_detached_process_groups(closing)
-        process_tree.remember_detached_process_groups(surviving)
-        # No look into the group registry: a scan that ran past its snapshot
-        # bound registers nothing, and the drain then finds the group itself.
+        closing_group, closing_child = launch(closing)
+        surviving_group, surviving_child = launch(surviving)
+        register(closing, closing_group)
+        register(surviving, surviving_group)
+        registration = process_tree._registered_posix_groups[closing_group]
+        assert registration.proved_markers == {closing}
+
         assert process_tree.drain_browser_process_marker(closing) is True
         assert _wait_gone(closing_child)
         assert _alive(surviving_child), "the drain reached another launch"
         assert surviving in process_tree._registered_browser_markers
+        assert surviving in (
+            process_tree._registered_posix_groups[surviving_group].markers
+        )
     finally:
         for marker in (closing, surviving):
             process_tree._registered_browser_markers.discard(marker)
-        for group in (closing_group, surviving_group):
+        for group in groups:
             process_tree._registered_posix_groups.pop(group, None)
-        for pid in (closing_child, surviving_child):
+            with contextlib.suppress(OSError):
+                os.killpg(group, signal.SIGKILL)
+        for pid in children:
             if _alive(pid):
                 os.kill(pid, signal.SIGKILL)
-        assert _wait_gone(closing_child, surviving_child)
+        assert _wait_gone(*children)
 
 
 def _a_buried_browser_job() -> Any:
