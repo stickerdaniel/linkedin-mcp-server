@@ -125,7 +125,8 @@ def _windows_alive(pid: int) -> bool:
         handle.Close()
 
 
-def _alive(pid: int) -> bool:
+def _liveness(pid: int) -> bool | None:
+    """Whether a process is running: ``None`` when ``ps`` could not say."""
     if os.name == "nt":
         return _windows_alive(pid)
     try:
@@ -141,19 +142,27 @@ def _alive(pid: int) -> bool:
             timeout=5.0,
         ).stdout.strip()
     except subprocess.TimeoutExpired:
-        # A ps that could not answer has shown nothing; the signal above found
-        # the pid, so it counts as alive.
-        return True
+        return None
     return bool(state) and not state.startswith("Z")
 
 
+def _alive(pid: int) -> bool:
+    # An unanswered query proves neither survival nor exit, so it is no answer
+    # to either assertion this serves.
+    alive = _liveness(pid)
+    assert alive is not None, f"ps could not say whether {pid} is running"
+    return alive
+
+
 def _wait_gone(*pids: int, within: float = 5.0) -> bool:
+    # Not proven gone until a query says so; an unanswered one waits on.
     deadline = time.monotonic() + within
-    while time.monotonic() < deadline:
-        if not any(_alive(pid) for pid in pids):
+    while True:
+        if all(_liveness(pid) is False for pid in pids):
             return True
+        if time.monotonic() >= deadline:
+            return False
         time.sleep(0.01)
-    return not any(_alive(pid) for pid in pids)
 
 
 @pytest.mark.parametrize(("exit_code", "expected"), [(259, True), (7, False)])
@@ -1294,7 +1303,7 @@ class TestPosixProcessGroups:
                 locals().get("target_pid"),
                 locals().get("grandchild_pid"),
             ):
-                if isinstance(pid, int) and _alive(pid):
+                if isinstance(pid, int) and _liveness(pid) is not False:
                     os.kill(pid, signal.SIGKILL)
 
     @_POSIX_ONLY
@@ -1323,7 +1332,7 @@ class TestPosixProcessGroups:
                 locals().get("target_pid"),
                 locals().get("grandchild_pid"),
             ):
-                if isinstance(pid, int) and _alive(pid):
+                if isinstance(pid, int) and _liveness(pid) is not False:
                     os.kill(pid, signal.SIGKILL)
 
     @_POSIX_ONLY
@@ -1392,7 +1401,7 @@ os._exit(0)
             assert _wait_gone(supervisor_pid, worker_pid, target_pid, grandchild_pid)
         finally:
             for pid in (supervisor_pid, worker_pid, target_pid, grandchild_pid):
-                if _alive(pid):
+                if _liveness(pid) is not False:
                     os.kill(pid, signal.SIGKILL)
 
 
@@ -2030,8 +2039,25 @@ def test_marker_drain_buries_a_group_whose_leader_already_exited():
         "print(child.pid, flush=True)\n"
     )
 
-    groups: list[int] = []
+    leaders: list[subprocess.Popen[bytes]] = []
     children: list[int] = []
+
+    def first_line(leader: subprocess.Popen[bytes], within: float) -> bytes:
+        # The whole line under one deadline: readiness says only that some
+        # bytes arrived, and a leader can stall before the newline.
+        assert leader.stdout is not None
+        fd = leader.stdout.fileno()
+        deadline = time.monotonic() + within
+        line = b""
+        while not line.endswith(b"\n"):
+            left = deadline - time.monotonic()
+            assert left > 0, "the leader never named its child"
+            ready, _, _ = select.select([fd], [], [], left)
+            if ready:
+                chunk = os.read(fd, 64)
+                assert chunk, "the leader closed its output without a child"
+                line += chunk
+        return line
 
     def launch(marker: str) -> tuple[int, int]:
         environment = dict(os.environ)
@@ -2039,17 +2065,11 @@ def test_marker_drain_buries_a_group_whose_leader_already_exited():
         leader = subprocess.Popen(
             [sys.executable, "-c", leader_code],
             stdout=subprocess.PIPE,
-            text=True,
             start_new_session=True,
             env=environment,
         )
-        groups.append(leader.pid)
-        assert leader.stdout is not None
-        # Bounded: a leader that stalls before naming its child must not hold
-        # the test, and it is killed with its group below.
-        ready, _, _ = select.select([leader.stdout], [], [], 30.0)
-        assert ready, "the leader never named its child"
-        child_pid = int(leader.stdout.readline())
+        leaders.append(leader)
+        child_pid = int(first_line(leader, 30.0))
         children.append(child_pid)
         # The leader exits at once, exactly as it does once Patchright has
         # closed the browser it spawned; its group outlives it.
@@ -2084,13 +2104,18 @@ def test_marker_drain_buries_a_group_whose_leader_already_exited():
     finally:
         for marker in (closing, surviving):
             process_tree._registered_browser_markers.discard(marker)
-        for group in groups:
-            process_tree._registered_posix_groups.pop(group, None)
+        for leader in leaders:
+            process_tree._registered_posix_groups.pop(leader.pid, None)
             with contextlib.suppress(OSError):
-                os.killpg(group, signal.SIGKILL)
+                os.killpg(leader.pid, signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                leader.wait(timeout=5)
+            if leader.stdout is not None:
+                leader.stdout.close()
         for pid in children:
-            if _alive(pid):
-                os.kill(pid, signal.SIGKILL)
+            if _liveness(pid) is not False:
+                with contextlib.suppress(OSError):
+                    os.kill(pid, signal.SIGKILL)
         assert _wait_gone(*children)
 
 
@@ -3002,7 +3027,7 @@ daemon_owner._exit_hard(None)
                 process.kill()
                 process.wait(timeout=30)
             for pid in (owner_pid, descendant_pid):
-                if isinstance(pid, int) and _alive(pid):
+                if isinstance(pid, int) and _liveness(pid) is not False:
                     subprocess.run(
                         ["taskkill", "/PID", str(pid), "/T", "/F"],
                         check=False,
@@ -3066,7 +3091,7 @@ print(os.getpid(), child.pid, file=control, flush=True)
                 process.kill()
                 process.wait(timeout=30)
             for pid in (target_pid, descendant_pid):
-                if isinstance(pid, int) and _alive(pid):
+                if isinstance(pid, int) and _liveness(pid) is not False:
                     subprocess.run(
                         ["taskkill", "/PID", str(pid), "/T", "/F"],
                         check=False,
@@ -3163,7 +3188,7 @@ time.sleep(600)
                     await asyncio.wait_for(process.wait(), timeout=5)
                 job.close()
             for pid in (target_pid, descendant_pid):
-                if isinstance(pid, int) and _alive(pid):
+                if isinstance(pid, int) and _liveness(pid) is not False:
                     subprocess.run(
                         ["taskkill", "/PID", str(pid), "/T", "/F"],
                         check=False,
