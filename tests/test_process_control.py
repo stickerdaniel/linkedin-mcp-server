@@ -558,23 +558,54 @@ class TestWorkerLifetime:
             first.close()
             second.close()
 
+    @pytest.mark.parametrize("parked_in", ["_drain_queue", "_proves_itself"])
     def test_a_peer_that_authenticates_late_gets_the_abort(
-        self, listener: ControlListener
+        self, listener: ControlListener, parked_in: str
     ):
-        # The same thing through the socket rather than the method. Whether the
-        # worker was between accepts or already reading this peer, the peer ends
-        # up with end of file and the channel with nothing attached.
+        # The same thing through the socket rather than the method, with the
+        # worker held where the close finds it: between accepts, or already
+        # reading this peer. Either way the peer is cut off and the channel ends
+        # with nothing attached. A peer the worker never accepted is reset with
+        # the listening socket rather than shut down, so it reads a reset where
+        # an accepted one reads end of file; both are the abort. A timeout is
+        # not: that peer is still waiting.
+        parked, release = threading.Event(), threading.Event()
+        held = getattr(listener, parked_in)
+
+        def park(*args: object) -> object:
+            parked.set()
+            assert release.wait(5.0)
+            return held(*args)
+
+        setattr(listener, parked_in, park)
         peer = socket.create_connection((listener.host, listener.port))
         try:
             listener.start_accepting(nonce=_NONCE, timeout=5.0)
+            worker = listener._drain
+            assert worker is not None
+            assert parked.wait(5.0)
             listener.close()
             with contextlib.suppress(OSError):
                 peer.sendall(f"attach {_NONCE}\n".encode("ascii"))
+            release.set()
+            # Judged once the worker is done, not at whatever instant the peer
+            # happens to read: close lets a worker that is still unwinding finish.
+            worker.join(5.0)
+            assert not worker.is_alive(), (
+                "the accept worker outlived the closed channel"
+            )
             peer.settimeout(5.0)
 
-            assert peer.recv(16) == b""
+            try:
+                received = peer.recv(16)
+            except ConnectionResetError:
+                received = b""
+            except TimeoutError:
+                pytest.fail("the late peer was left waiting instead of cut off")
+            assert received == b"", "the late peer was answered instead of cut off"
             assert listener._connection is None
         finally:
+            release.set()
             peer.close()
 
     def test_the_worker_and_its_socket_are_gone_after_close(
