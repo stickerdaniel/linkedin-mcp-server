@@ -11,9 +11,11 @@ installed; run locally after ``uv run patchright install chromium --no-shell``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
+import anyio
 import pytest
 from patchright.async_api import async_playwright
 
@@ -712,6 +714,100 @@ class TestSidebarScroll:
         # 1.5s, having seen nothing and scrolled nothing.
         assert elapsed >= 0.9
         assert await rail_cards(dom_page) == 1
+
+
+async def watch_rail(page) -> None:
+    """Count the rail's scroll events on the body, where every world reads it.
+
+    Scroll anchoring goes off first: a batch lands above the filler the rail
+    is scrolled to, the browser moves ``scrollTop`` to keep the filler in
+    view, and that scroll event asks the fixture for the next batch. The page
+    then loads itself to the end, and only the scrolls a caller issues may
+    count here.
+    """
+    await page.evaluate(
+        """() => {
+            const rail = document.getElementById('rail');
+            rail.style.overflowAnchor = 'none';
+            document.body.dataset.scrolls = '0';
+            rail.addEventListener('scroll', () => {
+                document.body.dataset.scrolls =
+                    String(Number(document.body.dataset.scrolls) + 1);
+            });
+        }"""
+    )
+
+
+async def rail_scrolls(page) -> int:
+    return int(await page.evaluate("document.body.dataset.scrolls"))
+
+
+async def wait_until(probe, *, timeout: float) -> None:
+    """Poll an async predicate, failing the test if it never holds."""
+    deadline = time.monotonic() + timeout
+    while not await probe():
+        assert time.monotonic() < deadline, "the page never got there"
+        await asyncio.sleep(0.05)
+
+
+class TestCancelledScroll:
+    """A cancelled call must leave nothing scrolling the page it shared.
+
+    The sequential tool middleware releases the page as soon as the call is
+    cancelled, and the next call reads it without navigating. The page has a
+    fast first batch, a slow second one that the cancel lands in the middle
+    of, and fast batches after it, so a scroll still running in the
+    page shows up both as a scroll event and as cards right after the slow
+    batch arrives.
+    """
+
+    PAGE = sidebar(total=40, batch=5, delays=[30, 1500, 30])
+
+    async def assert_nothing_scrolls_after(self, page, scrolls_at_cancel: int):
+        # The batch that was in flight still lands: the page asked for it
+        # before the cancel. Nothing may ask for the one after it.
+        async def landed() -> bool:
+            return await rail_cards(page) == 15
+
+        await wait_until(landed, timeout=5.0)
+        await asyncio.sleep(1.0)
+
+        assert await rail_scrolls(page) == scrolls_at_cancel
+        assert await rail_cards(page) == 15
+
+    async def test_task_cancel_stops_the_scroll(self, dom_page):
+        await dom_page.set_content(self.PAGE)
+        await watch_rail(dom_page)
+
+        async def second_round() -> bool:
+            # Two scrolls are two rounds: the slow batch is now in flight.
+            return await rail_scrolls(dom_page) >= 2
+
+        task = asyncio.create_task(scroll_job_sidebar(dom_page))
+        await wait_until(second_round, timeout=5.0)
+        await asyncio.sleep(0.3)
+        scrolls_at_cancel = await rail_scrolls(dom_page)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert await rail_cards(dom_page) == 10
+        await self.assert_nothing_scrolls_after(dom_page, scrolls_at_cancel)
+
+    async def test_a_tool_timeout_stops_the_scroll(self, dom_page):
+        """FastMCP bounds a tool with `anyio.fail_after`, not `Task.cancel`."""
+        await dom_page.set_content(self.PAGE)
+        await watch_rail(dom_page)
+
+        # Long after the fast first round, well before the slow batch lands.
+        with pytest.raises(TimeoutError):
+            with anyio.fail_after(0.8):
+                await scroll_job_sidebar(dom_page)
+        scrolls_at_cancel = await rail_scrolls(dom_page)
+
+        assert scrolls_at_cancel == 2
+        assert await rail_cards(dom_page) == 10
+        await self.assert_nothing_scrolls_after(dom_page, scrolls_at_cancel)
 
 
 class TestRedesignedCards:

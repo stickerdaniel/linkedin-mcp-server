@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import time
+from typing import Any
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
@@ -106,6 +107,64 @@ _RAIL_PICK_JS = r"""
                 return picked;
             };
 """
+
+# One look at the rail and, when asked, one scroll of it. Synchronous on
+# purpose: every wait and every repeat belongs to `scroll_job_sidebar`, so a
+# cancelled call has nothing left running in the page. Cancelling the task that
+# awaits `page.evaluate()` does not cancel a promise the page is running, and
+# the polling loop that used to live here went on scrolling the shared page
+# after a tool timeout had handed it to the next call (#763). No node is kept
+# between steps: the pick is re-run on each one, which is also what follows a
+# rail a re-render replaced.
+_RAIL_STEP_JS = (
+    r"""(opts) => {
+            const {selector, scroll} = opts;
+"""
+    + _RAIL_PICK_JS
+    + r"""
+            if (!document.querySelectorAll(selector).length) {
+                return {status: 'gone'};
+            }
+            const tied = railGroup();
+            let rail = null;
+            for (const node of tied) {
+                if (!rail || node.contains(rail)) rail = node;
+            }
+            if (!rail) return {status: 'no-container'};
+
+            // Measured before the scroll, so the batch it asks for reads as
+            // growth against this step.
+            const measured = {
+                status: 'ok',
+                cards: idsIn(rail),
+                height: rail.scrollHeight,
+            };
+            if (scroll) {
+                // Only the tied candidates nested with the pick. Two tied
+                // siblings are the live shape, rail and detail pane, and
+                // scrolling the pane loads its similar-jobs module into the
+                // document, where the caller reads those ids as search
+                // results. Measured on a 6-to-6 tie: the pane reached 31 ids
+                // and the search returned 37, of which 31 were not results,
+                // while the rail stayed at 6 because growth was then read
+                // off the pane instead.
+                for (const node of tied) {
+                    if (node === rail
+                        || node.contains(rail) || rail.contains(node)) {
+                        node.scrollTop = node.scrollHeight;
+                    }
+                }
+            }
+            return measured;
+        }"""
+)
+
+
+async def _rail_step(page: Page, *, scroll: bool) -> dict[str, Any]:
+    """Measure the rail, scrolling it afterwards when ``scroll`` is set."""
+    return await page.evaluate(
+        _RAIL_STEP_JS, {"selector": _JOB_CARD_SELECTOR, "scroll": scroll}
+    )
 
 
 async def detect_rate_limit(page: Page) -> None:
@@ -223,9 +282,9 @@ async def scroll_job_sidebar(
     rounds start from three times what the previous batch took, floored at
     ``min_budget``, which shortens the terminating round on a fast link.
 
-    Returns whether the evaluate raised, which the caller needs and cannot
-    see for itself. A navigation destroys the execution context and the
-    evaluate raises, and ``page.url`` still reports the address it left for
+    Returns whether a step on the page raised, which the caller needs and
+    cannot see for itself. A navigation destroys the execution context and
+    the step raises, and ``page.url`` still reports the address it left for
     about 6ms after that, measured over ten runs at 6ms min and max alike, so
     a caller sampling the URL right here compares two copies of the old one.
     Awaiting the load state does not close that window: the previous document
@@ -272,168 +331,95 @@ async def scroll_job_sidebar(
     # The wait above is part of the deadline, not extra time on top of it. A
     # slow link can spend it down to nothing before the first card appears, and
     # the caller sized this deadline to fit a whole search inside one tool call.
-    remaining = deadline - (time.monotonic() - started)
-    if remaining <= 0:
+    hard_deadline = started + deadline
+    if time.monotonic() >= hard_deadline:
         logger.debug("Deadline spent waiting for the first job card, skipping scroll")
         return False
 
+    # Every wait is a sleep here and every look at the page is one synchronous
+    # step, so a cancel lands between steps and the next one is never sent.
+    # Moving a wait back into the page puts a loop there that outlives the
+    # cancel; see `_RAIL_STEP_JS`.
     try:
-        result = await page.evaluate(
-            r"""async (opts) => {
-            const {selector, settleMs, pollMs, minBudgetMs,
-                   maxScrolls, deadlineMs} = opts;
-"""
-            + _RAIL_PICK_JS
-            + r"""
+        latest = await _rail_step(page, scroll=False)
+        status = latest.get("status")
+        if status == "gone":
+            logger.debug("Job card link disappeared before evaluate, skipping scroll")
+            return False
+        if status == "no-container":
+            logger.debug("No scrollable container found for job sidebar")
+            return False
 
-            const scrollGroup = () => {
-                // Recollected per scroll: a re-render replaces the nodes, and
-                // a batch can add a candidate that was not scrollable before.
-                const tied = railGroup();
-                let picked = null;
-                for (const node of tied) {
-                    if (!picked || node.contains(picked)) picked = node;
-                }
-                if (!picked) return;
-                // Only the tied candidates nested with the pick. Two tied
-                // siblings are the live shape, rail and detail pane, and
-                // scrolling the pane loads its similar-jobs module into the
-                // document, where the caller reads those ids as search
-                // results. Measured on a 6-to-6 tie: the pane reached 31 ids
-                // and the search returned 37, of which 31 were not results,
-                // while the rail stayed at 6 because growth was then read
-                // off the pane instead.
-                for (const node of tied) {
-                    if (node === picked
-                        || node.contains(picked) || picked.contains(node)) {
-                        node.scrollTop = node.scrollHeight;
-                    }
-                }
-            };
+        async def grew_since(before: dict[str, Any], budget: float) -> bool:
+            nonlocal latest
+            until = min(time.monotonic() + budget, hard_deadline)
+            while time.monotonic() < until:
+                await asyncio.sleep(poll_interval)
+                now = await _rail_step(page, scroll=False)
+                if now.get("status") != "ok":
+                    # A re-render can leave no rail for a moment. That is not
+                    # growth, and the next step picks whatever replaced it.
+                    continue
+                latest = now
+                # Growth is a larger id count or a taller rail. The pick is
+                # re-run on every step, so a rail a re-render replaced is
+                # measured in its successor, and adopting that successor is
+                # not growth by itself: a framework that re-renders the same
+                # cards would otherwise spend one of `max_scrolls` per render
+                # and end the page while the batch it waited for is in flight.
+                # A virtualized rail that swapped its ids while holding both
+                # steady would read as exhausted here; LinkedIn has not been
+                # observed doing that, and no sample pins it either way.
+                if now["cards"] > before["cards"] or now["height"] > before["height"]:
+                    return True
+            return False
 
-            if (!document.querySelectorAll(selector).length) {
-                return {status: 'gone'};
-            }
-            let rail = pickRail();
-            if (!rail) return {status: 'no-container'};
+        started_with = latest["cards"]
+        budget = settle_timeout
+        scrolls = 0
+        timed_out = False
+        capped_out = False
 
-            const hardDeadline = Date.now() + deadlineMs;
-            const grewSince = async (cardCount, height) => {
-                if (!document.contains(rail)) {
-                    // A re-render detaches the rail mid-wait; polling the old
-                    // node would measure a corpse until the deadline.
-                    const again = pickRail();
-                    if (!again) return false;
-                    rail = again;
-                    // Adopting it is not growth by itself. A framework that
-                    // re-renders the same cards would otherwise spend one of
-                    // `maxScrolls` per render and end the page while the
-                    // batch it was waiting for is still in flight.
-                    return idsIn(rail) > cardCount
-                        || rail.scrollHeight > height;
-                }
-                const held = idsIn(rail);
-                const better = pickRail();
-                if (better && better !== rail && idsIn(better) > held) {
-                    // The first pick can be the detail pane, when the rail had
-                    // not rendered yet. Move once something larger exists.
-                    rail = better;
-                    return true;
-                }
-                // Growth is a larger id count or a taller rail. A
-                // virtualized rail that swapped its ids while holding both
-                // steady would read as exhausted here; LinkedIn has not been
-                // observed doing that, and no sample pins it either way.
-                return held > cardCount || rail.scrollHeight > height;
-            };
-            const waitForGrowth = async (cardCount, height, budgetMs) => {
-                const until = Math.min(Date.now() + budgetMs, hardDeadline);
-                while (Date.now() < until) {
-                    await new Promise(r => setTimeout(r, pollMs));
-                    if (await grewSince(cardCount, height)) return true;
-                }
-                return false;
-            };
+        while True:
+            if scrolls >= max_scrolls:
+                capped_out = True
+                break
+            if time.monotonic() >= hard_deadline:
+                timed_out = True
+                break
 
-            const startedWith = idsIn(rail);
-            let budgetMs = settleMs;
-            let scrolls = 0;
-            let timedOut = false;
-            let cappedOut = false;
+            round_started = time.monotonic()
+            before = await _rail_step(page, scroll=True)
+            if before.get("status") == "ok":
+                latest = before
+            else:
+                before = latest
+            grew = await grew_since(before, budget)
+            if not grew:
+                # One confirmation round at the full budget: a batch slower
+                # than the shrunken budget is not an empty rail.
+                await _rail_step(page, scroll=True)
+                grew = await grew_since(before, settle_timeout)
+            if not grew:
+                timed_out = time.monotonic() >= hard_deadline
+                break
 
-            for (;;) {
-                if (scrolls >= maxScrolls) { cappedOut = true; break; }
-                if (Date.now() >= hardDeadline) { timedOut = true; break; }
-
-                const beforeCards = idsIn(rail);
-                const beforeHeight = rail.scrollHeight;
-                const started = Date.now();
-
-                scrollGroup();
-                let grew = await waitForGrowth(
-                    beforeCards, beforeHeight, budgetMs
-                );
-                if (!grew) {
-                    // One confirmation round at the full budget: a batch
-                    // slower than the shrunken budget is not an empty rail.
-                    scrollGroup();
-                    grew = await waitForGrowth(
-                        beforeCards, beforeHeight, settleMs
-                    );
-                }
-                if (!grew) {
-                    timedOut = Date.now() >= hardDeadline;
-                    break;
-                }
-
-                const took = Date.now() - started;
-                budgetMs = Math.min(
-                    settleMs, Math.max(minBudgetMs, took * 3)
-                );
-                scrolls++;
-            }
-
-            return {
-                status: 'ok',
-                scrolls,
-                cards: idsIn(rail),
-                gained: idsIn(rail) - startedWith,
-                timedOut,
-                cappedOut,
-            };
-        }""",
-            {
-                "selector": _JOB_CARD_SELECTOR,
-                "settleMs": settle_timeout * 1000,
-                "pollMs": poll_interval * 1000,
-                "minBudgetMs": min_budget * 1000,
-                "maxScrolls": max_scrolls,
-                "deadlineMs": remaining * 1000,
-            },
-        )
+            took = time.monotonic() - round_started
+            budget = min(settle_timeout, max(min_budget, took * 3))
+            scrolls += 1
     except Exception as exc:
         # Scrolling is best effort: a navigation or a destroyed context during
-        # the evaluate must not discard the page the caller is about to read.
+        # a step must not discard the page the caller is about to read.
         logger.warning("Job sidebar scroll failed, page may be short: %s", exc)
         return True
 
-    status = result.get("status")
-    if status == "gone":
-        logger.debug("Job card link disappeared before evaluate, skipping scroll")
-    elif status == "no-container":
-        logger.debug("No scrollable container found for job sidebar")
-    else:
-        logger.debug(
-            "Job sidebar holds %d cards, %+d from %d scrolls%s",
-            result["cards"],
-            result["gained"],
-            result["scrolls"],
-            " (deadline)"
-            if result["timedOut"]
-            else " (scroll cap reached)"
-            if result["cappedOut"]
-            else "",
-        )
+    logger.debug(
+        "Job sidebar holds %d cards, %+d from %d scrolls%s",
+        latest["cards"],
+        latest["cards"] - started_with,
+        scrolls,
+        " (deadline)" if timed_out else " (scroll cap reached)" if capped_out else "",
+    )
     return False
 
 
