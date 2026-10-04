@@ -334,3 +334,165 @@ class TestEnvCookieGate:
         state["login_generation"] = "manual"
         source_state_path(isolate_profile_dir).write_text(json.dumps(state))
         assert bootstrap._read_env_cookie_marker(isolate_profile_dir) is None
+
+
+# ---------------------------------------------------------------------------
+# Inline wait for the browser download (hosts that start a process per call)
+# ---------------------------------------------------------------------------
+
+
+class TestSetupInlineWait:
+    def test_default_is_off_without_env_cookies(self):
+        assert bootstrap._setup_inline_wait_seconds() == 0
+
+    def test_env_cookies_turn_it_on(self, monkeypatch):
+        monkeypatch.setenv(COOKIES_ENV, f"li_at={LI_AT}")
+        assert bootstrap._setup_inline_wait_seconds() == 90
+
+    def test_explicit_value_wins(self, monkeypatch):
+        monkeypatch.setenv(COOKIES_ENV, f"li_at={LI_AT}")
+        monkeypatch.setenv(bootstrap.SETUP_WAIT_ENV, "0")
+        assert bootstrap._setup_inline_wait_seconds() == 0
+        monkeypatch.setenv(bootstrap.SETUP_WAIT_ENV, "nonsense")
+        assert bootstrap._setup_inline_wait_seconds() == 90
+
+    async def test_call_waits_for_the_download_then_proceeds(self, monkeypatch):
+        import asyncio
+
+        from linkedin_mcp_server.bootstrap import SetupState, initialize_bootstrap
+
+        monkeypatch.setenv(COOKIES_ENV, f"li_at={LI_AT}")
+        initialize_bootstrap("managed")
+        state = bootstrap.get_bootstrap_state()
+
+        async def finishing_setup():
+            await asyncio.sleep(0.05)
+            state.setup_state = SetupState.READY
+
+        async def no_restart():
+            return None
+
+        state.setup_state = SetupState.RUNNING
+        state.setup_task = asyncio.create_task(finishing_setup())
+        monkeypatch.setattr(
+            bootstrap, "start_background_browser_setup_if_needed", no_restart
+        )
+        imported = AsyncMock()
+        monkeypatch.setattr(bootstrap, "_import_env_cookies_if_configured", imported)
+        monkeypatch.setattr(bootstrap, "_auth_ready", lambda *a: True)
+
+        await bootstrap.ensure_tool_ready_or_raise("get_my_profile")
+
+        imported.assert_awaited_once()
+
+    async def test_budget_runs_out_without_cancelling_the_download(self, monkeypatch):
+        import asyncio
+
+        from linkedin_mcp_server.bootstrap import SetupState, initialize_bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupInProgressError
+
+        monkeypatch.setenv(bootstrap.SETUP_WAIT_ENV, "0.05")
+        initialize_bootstrap("managed")
+        state = bootstrap.get_bootstrap_state()
+        never = asyncio.Event()
+        state.setup_state = SetupState.RUNNING
+        state.setup_task = asyncio.create_task(never.wait())
+
+        async def no_restart():
+            return None
+
+        monkeypatch.setattr(
+            bootstrap, "start_background_browser_setup_if_needed", no_restart
+        )
+
+        with pytest.raises(BrowserSetupInProgressError):
+            await bootstrap.ensure_tool_ready_or_raise("get_my_profile")
+        assert not state.setup_task.done()
+        state.setup_task.cancel()
+
+
+class TestRejectionAcrossProcesses:
+    async def test_rejection_is_remembered_by_the_next_process(
+        self, monkeypatch, docker_runtime
+    ):
+        fake, calls = _fake_import(accept=False)
+        _patch_import(monkeypatch, fake)
+        monkeypatch.setenv(COOKIES_ENV, f"li_at={LI_AT}")
+
+        with pytest.raises(DockerHostLoginRequiredError, match="did not accept"):
+            await bootstrap.ensure_tool_ready_or_raise("t")
+
+        # A new process: in-memory state is gone, the file on disk is not.
+        bootstrap.reset_bootstrap_for_testing()
+        monkeypatch.setattr(
+            bootstrap, "get_runtime_policy", lambda: RuntimePolicy.DOCKER
+        )
+        with pytest.raises(DockerHostLoginRequiredError, match="did not accept"):
+            await bootstrap.ensure_tool_ready_or_raise("t")
+        assert len(calls) == 1
+
+    async def test_new_cookies_are_tried_after_a_rejection(
+        self, monkeypatch, docker_runtime
+    ):
+        fake, calls = _fake_import(accept=False)
+        _patch_import(monkeypatch, fake)
+        monkeypatch.setenv(COOKIES_ENV, f"li_at={LI_AT}")
+        with pytest.raises(DockerHostLoginRequiredError):
+            await bootstrap.ensure_tool_ready_or_raise("t")
+
+        accepting, accepted_calls = _fake_import()
+        _patch_import(monkeypatch, accepting)
+        monkeypatch.setenv(COOKIES_ENV, "li_at=a-fresh-session")
+        await bootstrap.ensure_tool_ready_or_raise("t")
+        assert len(accepted_calls) == 1
+
+    async def test_transient_failure_is_not_remembered(
+        self, monkeypatch, docker_runtime
+    ):
+        import asyncio
+
+        attempts = []
+
+        async def slow(*a, **k):
+            attempts.append(1)
+            raise TimeoutError
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.browser_import.orchestrate.import_session_from_cookies",
+            lambda *a, **k: slow(),
+        )
+        monkeypatch.setenv(COOKIES_ENV, f"li_at={LI_AT}")
+        for _ in range(2):
+            with pytest.raises(DockerHostLoginRequiredError, match="did not finish"):
+                await bootstrap.ensure_tool_ready_or_raise("t")
+        assert len(attempts) == 2
+        del asyncio
+
+
+class TestManagedHostDoesNotOpenLoginWindow:
+    async def test_rejected_cookies_report_instead_of_login(self, monkeypatch):
+        from linkedin_mcp_server.bootstrap import SetupState, initialize_bootstrap
+        from linkedin_mcp_server.exceptions import (
+            AuthenticationBootstrapFailedError,
+        )
+
+        fake, calls = _fake_import(accept=False)
+        _patch_import(monkeypatch, fake)
+        monkeypatch.setattr(bootstrap, "close_browser", AsyncMock())
+        monkeypatch.setenv(COOKIES_ENV, f"li_at={LI_AT}")
+        initialize_bootstrap("managed")
+        state = bootstrap.get_bootstrap_state()
+        state.setup_state = SetupState.READY
+
+        async def ready_setup():
+            return None
+
+        monkeypatch.setattr(
+            bootstrap, "start_background_browser_setup_if_needed", ready_setup
+        )
+        login = AsyncMock()
+        monkeypatch.setattr(bootstrap, "_start_login_if_needed", login)
+
+        with pytest.raises(AuthenticationBootstrapFailedError, match="did not accept"):
+            await bootstrap.ensure_tool_ready_or_raise("get_my_profile")
+        login.assert_not_awaited()

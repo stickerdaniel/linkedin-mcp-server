@@ -495,6 +495,13 @@ On the first tool call the server validates the cookies against your feed and st
 - The session moves to the server's IP address. LinkedIn may answer with a security check, especially for a datacenter IP; routing the server through a residential proxy in your region (see [Using a proxy](#using-a-proxy)) reduces that.
 - The cookies are a full login to your account. Store them as a secret, never in a repository.
 
+Running from `uvx` rather than the Docker image (Obot's UVX runtime, for example) needs two more things:
+
+- Set `LINKEDIN_MCP_CONTAINER=false`. The host is a container, but unlike the image it ships no browser, so the server has to download Chromium itself.
+- Allow a startup timeout of about three minutes: the first start installs the package and its dependencies.
+
+Some hosts start a fresh process for every tool call and stop it as soon as the call answers. A background download would die with each process, so while `LINKEDIN_COOKIES` is set the first call waits up to 90 seconds for Chromium to finish instead of answering at once (`LINKEDIN_SETUP_WAIT` sets the seconds, `0` turns it off). Cookies LinkedIn rejected are remembered on disk, so later calls report the rejection without asking LinkedIn again until the cookies change.
+
 ### Setup Help
 
 <details>
