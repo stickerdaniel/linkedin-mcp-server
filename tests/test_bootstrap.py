@@ -4289,10 +4289,14 @@ class TestPatchrightInstallStreaming:
 
         blocked = threading.Event()
         release = threading.Event()
+        finished = threading.Event()
 
         def slow_targets() -> dict[str, str]:
             blocked.set()
-            release.wait()
+            # Bounded, so a version that ran this on the event loop stalls the
+            # loop for a while instead of hanging the suite.
+            release.wait(2.0)
+            finished.set()
             return {"chromium-": "1217"}
 
         monkeypatch.setattr(bootstrap, "_patchright_install_targets", slow_targets)
@@ -4302,19 +4306,33 @@ class TestPatchrightInstallStreaming:
             lambda: bootstrap._InstallerTemporaryRoot(tmp_path / "private", 0, 0, None),
         )
         self._patch_proc(monkeypatch, [], 0)
-        fallback = threading.Timer(0.2, release.set)
-        fallback.start()
-        started = asyncio.get_running_loop().time()
+        loop = asyncio.get_running_loop()
+        installing = asyncio.create_task(
+            bootstrap._run_patchright_install("--no-shell")
+        )
         try:
+            # Measured from inside the blocked read, for the reason
+            # test_slow_temporary_root_creation_cannot_block_timeout gives: a
+            # 10ms budget spent before the worker ran proves nothing about it.
+            entry_deadline = loop.time() + 5.0
+            while not blocked.is_set():
+                assert loop.time() < entry_deadline, "the registry read never began"
+                await asyncio.sleep(0.001)
+            assert not finished.is_set(), "the registry read ran on the event loop"
+            started = loop.time()
             with pytest.raises(TimeoutError):
                 async with asyncio.timeout(0.01):
-                    await bootstrap._run_patchright_install("--no-shell")
+                    await installing
+            elapsed = loop.time() - started
+            assert not finished.is_set(), "the timeout waited for the registry read"
         finally:
             release.set()
-            fallback.cancel()
+            if not installing.done():
+                installing.cancel()
+            await asyncio.wait({installing}, timeout=1.0)
 
-        assert blocked.is_set()
-        assert asyncio.get_running_loop().time() - started < 0.1
+        assert installing.done()
+        assert elapsed < 0.1, f"the timeout took {elapsed:.3f}s"
 
     @pytest.mark.parametrize("release", [(3, 12, 0), (3, 12, 3), (3, 13, 15)])
     def test_windows_creates_its_own_acl_on_every_supported_python(

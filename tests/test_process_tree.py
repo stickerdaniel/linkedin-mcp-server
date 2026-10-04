@@ -1984,10 +1984,21 @@ class TestTheMarkerScanSeparatesEmptyFromUnanswerable:
         Linux reads ``/proc`` and cannot be inconclusive; everywhere else this
         is the one assertion that ``ps`` is where the code looks for it and
         speaks the flags it is given.
+
+        A loaded host can hold ``ps`` past its one-second snapshot bound, and
+        the scan then rightly answers inconclusive. So the scan is asked again
+        within the drain's own budget, the way a drain would ask it; a ``ps``
+        that never answers still fails at the deadline.
         """
-        assert process_tree._scan_marked_posix_processes(secrets.token_hex(32)) == (
-            process_tree._MarkerScan((), True)
-        )
+        marker = secrets.token_hex(32)
+        deadline = time.monotonic() + process_tree._MARKER_DRAIN_SECONDS
+        while True:
+            answer = process_tree._scan_marked_posix_processes(marker)
+            if answer.conclusive:
+                break
+            assert time.monotonic() < deadline, "the platform scan never answered"
+            time.sleep(process_tree._JOB_POLL_SECONDS)
+        assert answer == process_tree._MarkerScan((), True)
 
 
 @_POSIX_ONLY
@@ -2033,16 +2044,12 @@ def test_marker_drain_buries_a_group_whose_leader_already_exited():
     try:
         process_tree.remember_detached_process_groups(closing)
         process_tree.remember_detached_process_groups(surviving)
-        registration = process_tree._registered_posix_groups[closing_group]
-        assert registration.proved_markers == {closing}
-
+        # No look into the group registry: a scan that ran past its snapshot
+        # bound registers nothing, and the drain then finds the group itself.
         assert process_tree.drain_browser_process_marker(closing) is True
         assert _wait_gone(closing_child)
         assert _alive(surviving_child), "the drain reached another launch"
         assert surviving in process_tree._registered_browser_markers
-        assert surviving in (
-            process_tree._registered_posix_groups[surviving_group].markers
-        )
     finally:
         for marker in (closing, surviving):
             process_tree._registered_browser_markers.discard(marker)

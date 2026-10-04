@@ -3263,6 +3263,20 @@ class TestSpawnCleanupBoundary:
             ).close()
 
 
+def _await_fixture_imports(child: subprocess.Popen[Any], imported: Path) -> None:
+    """Hold a fixture owner's spawn until its interpreter has imported the server.
+
+    Startup's bound is for the owner, not for the interpreter loading the
+    package under a loaded test run, which alone can spend all five seconds
+    before ``main`` runs the behaviour a test is about.
+    """
+    deadline = time.monotonic() + 30.0
+    while not imported.exists():
+        assert child.poll() is None, "the fixture owner exited during its imports"
+        assert time.monotonic() < deadline, "the fixture owner never finished importing"
+        time.sleep(0.01)
+
+
 class TestAtomicStartupCommit:
     @pytest.fixture(autouse=True)
     def _stop_fake_groups(self, monkeypatch: pytest.MonkeyPatch):
@@ -4092,6 +4106,7 @@ class TestAtomicStartupCommit:
         monkeypatch.setattr(daemon_descriptor_module, "_account_home", lambda: home)
         log_path = daemon_owner.daemon_log_path(auth_root)
         bootstrap = tmp_path / "failing_owner.py"
+        imported = tmp_path / "owner-imported"
         bootstrap.write_text(
             "import sys\n"
             "from pathlib import Path\n"
@@ -4104,6 +4119,7 @@ class TestAtomicStartupCommit:
             "def fail_logging(**kwargs):\n"
             "    raise RuntimeError('failed after log attachment')\n"
             "daemon_owner.configure_logging = fail_logging\n"
+            "Path(sys.argv[2]).write_text('imported')\n"
             "raise SystemExit(daemon_owner.main([]))\n"
         )
         children: list[subprocess.Popen[Any]] = []
@@ -4111,9 +4127,10 @@ class TestAtomicStartupCommit:
 
         def capture(command: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
             if command[-2:] == ["-m", "linkedin_mcp_server.daemon_owner"]:
-                command = [command[0], str(bootstrap), str(home)]
+                command = [command[0], str(bootstrap), str(home), str(imported)]
             child = real(command, **kwargs)
             children.append(child)
+            _await_fixture_imports(child, imported)
             return child
 
         monkeypatch.setattr(election_module.subprocess, "Popen", capture)
@@ -4151,6 +4168,7 @@ class TestAtomicStartupCommit:
         os.mkfifo(log_path)
         bootstrap = tmp_path / "blocked_log_owner.py"
         marker = tmp_path / "opening-log"
+        imported = tmp_path / "owner-imported"
         home = daemon_descriptor_module._account_home()
         bootstrap.write_text(
             "import sys\n"
@@ -4162,6 +4180,7 @@ class TestAtomicStartupCommit:
             "    Path(sys.argv[2]).write_text('opening')\n"
             "    return attach(root)\n"
             "daemon_owner._attach_daemon_log = marked\n"
+            "Path(sys.argv[3]).write_text('imported')\n"
             "raise SystemExit(daemon_owner.main([]))\n"
         )
         children: list[subprocess.Popen[Any]] = []
@@ -4169,9 +4188,16 @@ class TestAtomicStartupCommit:
 
         def capture(command: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
             if command[-2:] == ["-m", "linkedin_mcp_server.daemon_owner"]:
-                command = [command[0], str(bootstrap), str(home), str(marker)]
+                command = [
+                    command[0],
+                    str(bootstrap),
+                    str(home),
+                    str(marker),
+                    str(imported),
+                ]
             child = real(command, **kwargs)
             children.append(child)
+            _await_fixture_imports(child, imported)
             return child
 
         monkeypatch.setattr(election_module.subprocess, "Popen", capture)
