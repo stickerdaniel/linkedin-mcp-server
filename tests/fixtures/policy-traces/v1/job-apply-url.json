@@ -96,7 +96,7 @@
       "call": "get_job_apply_url",
       "kind": "evaluate",
       "operation": "job_apply_signals",
-      "program_digest": "197225803d5b"
+      "program_digest": "78be0991443e"
     }
   ],
   "result": {

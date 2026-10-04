@@ -23,6 +23,7 @@ from linkedin_mcp_server.linkedin.capture import (
     CapturePlan,
     SectionCapture,
 )
+from linkedin_mcp_server.linkedin.connection import ActionSignals
 from linkedin_mcp_server.linkedin.connection_actions import ConnectionActions
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.conversations import ConversationReader
@@ -262,6 +263,31 @@ async def _quota_probe(page: Any) -> Any:
         return await actions._probe_invite_note_limit()
 
 
+async def _escape_after_more(page: Any) -> Any:
+    """A follow-only profile: More opens, the reread finds nothing, Escape."""
+    session = _session(page)
+    actions = ConnectionActions(
+        session,
+        PageNavigator(session),
+        AsyncMock(return_value={"sections": {"main_profile": "Profile"}}),
+    )
+    follow_only = ActionSignals(
+        has_invite_anchor=False,
+        has_compose_anchor_in_action_root=True,
+        has_edit_intro_anchor=False,
+        has_labeled_action_button=True,
+        has_labeled_action_anchor=False,
+        has_incoming_action_row=False,
+    )
+    with (
+        patch.object(
+            actions, "_read_action_signals", AsyncMock(return_value=follow_only)
+        ),
+        patch.object(actions, "_open_more_menu", AsyncMock(return_value=True)),
+    ):
+        return await actions.connect_with_person("testuser")
+
+
 ACTIONS: list[tuple[str, Read]] = [
     ("open the More menu", lambda p: _connections(p)._open_more_menu()),
     ("accept an incoming request", lambda p: _connections(p)._click_incoming_accept()),
@@ -282,6 +308,8 @@ ACTIONS: list[tuple[str, Read]] = [
     ("press Enter on the primary button", _keyboard_fallback),
     ("open the note editor for the quota probe", _quota_probe),
     ("close a modal", lambda p: handle_modal_close(p)),
+    ("dismiss a dialog with Escape", lambda p: _connections(p)._dismiss_dialog()),
+    ("close the More menu with Escape", _escape_after_more),
 ]
 
 

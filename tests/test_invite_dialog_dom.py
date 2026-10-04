@@ -8,10 +8,12 @@ custom-invite deeplink, so two dialogs are open when the invite renders.
 from __future__ import annotations
 
 from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 from patchright.async_api import Page, async_playwright
 
+from linkedin_mcp_server.core.exceptions import OffLinkedInLandingError
 from linkedin_mcp_server.linkedin.connection_actions import ConnectionActions
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.session import PageSession
@@ -119,3 +121,81 @@ async def test_invite_note_is_sent_past_an_open_chat_overlay(dom_page):
     assert await dom_page.evaluate("document.body.dataset.invite") == "sent"
     assert await dom_page.evaluate("document.body.dataset.note") == "Hello"
     assert await dom_page.evaluate("document.body.dataset.chat") is None
+
+
+PORTAL_URL = "https://portal.invalid/interstitial"
+
+UPSELL_DIALOG = """
+  <div role="dialog" id="upsell">
+    <p>You're out of free custom notes.</p>
+    <a href="https://www.linkedin.com/premium/products/">Try Premium</a>
+  </div>
+"""
+
+#: Closes an open dialog on Escape, the way LinkedIn's dialogs do. A page
+#: script, so it runs in the page's world and sees the real key event.
+CLOSES_ON_ESCAPE = """
+  <script>
+    document.addEventListener('keydown', event => {
+      if (event.key !== 'Escape') return;
+      document.body.dataset.escaped = 'true';
+      document.querySelectorAll('[role="dialog"]').forEach(d => d.remove());
+    });
+  </script>
+"""
+
+#: A portal that records any key it is sent.
+RECORDS_KEYS = """<!DOCTYPE html><html><body><p>Portal</p>
+  <script>
+    document.addEventListener('keydown', event => {
+      document.body.dataset.foreignKey = event.key;
+    });
+  </script>
+</body></html>"""
+
+
+async def test_escape_is_not_sent_to_a_portal_that_replaced_the_page(dom_page):
+    """The upsell was read on LinkedIn; the page left before the dismissal.
+
+    The review's case: the guarded snapshot answers LinkedIn's own text, a
+    navigation to a portal completes before the caller acts on it, and the
+    Escape meant to close LinkedIn's dialog would run the portal's handlers.
+    """
+    await dom_page.set_content(
+        f"<!DOCTYPE html><html><body>{UPSELL_DIALOG}{CLOSES_ON_ESCAPE}</body></html>"
+    )
+    await dom_page.route(
+        "https://portal.invalid/**",
+        lambda route: route.fulfill(content_type="text/html", body=RECORDS_KEYS),
+    )
+    actions = _actions(dom_page)
+    read_on_linkedin = actions._get_premium_upsell_message
+    answers: list[str | None] = []
+
+    async def read_then_leave(*args: Any, **kwargs: Any) -> str | None:
+        answer = await read_on_linkedin(*args, **kwargs)
+        answers.append(answer)
+        await dom_page.goto(PORTAL_URL)
+        return answer
+
+    with (
+        patch.object(actions, "_get_premium_upsell_message", read_then_leave),
+        pytest.raises(OffLinkedInLandingError, match="https://portal.invalid"),
+    ):
+        await actions._probe_invite_note_limit()
+
+    assert answers and answers[0] is not None and "custom notes" in answers[0]
+    assert dom_page.url == PORTAL_URL
+    assert await dom_page.evaluate("document.body.dataset.foreignKey") is None
+
+
+async def test_escape_still_closes_linkedins_dialog(dom_page):
+    await dom_page.set_content(
+        f"<!DOCTYPE html><html><body>{UPSELL_DIALOG}{CLOSES_ON_ESCAPE}</body></html>"
+    )
+
+    message = await _actions(dom_page)._probe_invite_note_limit()
+
+    assert message is not None and "custom notes" in message
+    assert await dom_page.evaluate("document.body.dataset.escaped") == "true"
+    assert await dom_page.locator('[role="dialog"]').count() == 0

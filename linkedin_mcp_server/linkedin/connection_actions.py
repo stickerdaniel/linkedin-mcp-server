@@ -372,9 +372,24 @@ class ConnectionActions:
             logger.debug("Invite note fill failed", exc_info=True)
             return False
 
+    async def _press_escape(self) -> None:
+        """Press Escape in the current document, and only if it is LinkedIn's.
+
+        Never through `page.keyboard`, which delivers to whatever document is
+        current: a portal that replaced the page runs its own key handlers on
+        it. Pressed on the body's handle, so the key goes to that document's
+        focused element as before, and a document replaced after the check
+        detaches the handle and fails the press instead of receiving it.
+
+        Raises:
+            OffLinkedInLandingError: When the current document is not LinkedIn's.
+        """
+        async with linkedin_element(self._session.page.locator("body")) as body:
+            await body.press("Escape")
+
     async def _dismiss_dialog(self) -> None:
         """Dismiss any open dialog via Escape key (structural)."""
-        await self._session.page.keyboard.press("Escape")
+        await self._press_escape()
         try:
             await self._session.page.wait_for_selector(
                 _DIALOG_SELECTOR, state="hidden", timeout=3000
@@ -866,7 +881,9 @@ class ConnectionActions:
                 # Close the menu before any subsequent navigation so it
                 # doesn't intercept the upcoming page transition.
                 try:
-                    await self._session.page.keyboard.press("Escape")
+                    await self._press_escape()
+                except OffLinkedInLandingError:
+                    raise
                 except Exception:
                     logger.debug("Escape after More-menu reread failed", exc_info=True)
                 logger.info("Post-More signals for %s: signals=%s", username, signals)

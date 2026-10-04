@@ -341,8 +341,11 @@ class TestAPortalIsNotReadAsTheApplyLink:
         assert dom_page.url == PORTAL_URL
 
 
-#: Every address the Python classifier is tested on, plus spellings only a
-#: browser would normalize, so the in-page copy is held to the same answers.
+#: Every address the Python classifier is tested on, in forms a browser keeps
+#: as written, plus spellings it serializes differently. Parity is claimed for
+#: these, not for raw strings in general: the browser normalizes IDN,
+#: percent-encoded hosts and Unicode separators where urllib does not, and a
+#: page script is only ever handed a browser-serialized address.
 HOST_RULE_ADDRESSES = [
     "https://www.linkedin.com/in/testuser/",
     "https://linkedin.com/feed/",
@@ -361,6 +364,8 @@ HOST_RULE_ADDRESSES = [
     "https://www.linkedin.com:8443/feed/",
     "https://user:pass@www.linkedin.com/feed/",
     "https://user@www.linkedin.com/feed/",
+    "https://@linkedin.com/feed/",
+    "https://www.linkedin.com/in/someone@example/",
     "https://www.linkedin.com../feed/",
     "https://www.lіnkedin.com/feed/",
     "https://[::1/feed/",
@@ -374,7 +379,10 @@ HOST_RULE_ADDRESSES = [
 
 
 async def test_the_page_scripts_apply_the_same_host_rule(dom_page):
-    """Two copies of one rule: Python's, and the one a page script runs."""
+    """Two copies of one rule agree on browser-serialized addresses.
+
+    Python's, and the one a page script runs before it acts.
+    """
     in_page = await dom_page.evaluate(
         f"""(addresses) => {{
             const onLinkedIn = {LINKEDIN_LANDING_JS};

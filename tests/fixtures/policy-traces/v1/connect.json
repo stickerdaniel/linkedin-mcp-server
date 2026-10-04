@@ -99,7 +99,7 @@
       "call": "connect_with_person",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "571a440efbe5",
+      "program_digest": "e6b2be4ebddd",
       "section": "main_profile"
     },
     {
@@ -123,7 +123,7 @@
       "call": "connect_with_person",
       "kind": "evaluate",
       "operation": "connection_action_signals",
-      "program_digest": "ffcd34dd639a",
+      "program_digest": "ee2cb619b2e5",
       "section": "main_profile"
     }
   ],

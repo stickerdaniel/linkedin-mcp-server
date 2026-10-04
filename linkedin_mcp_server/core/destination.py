@@ -24,9 +24,14 @@ LINKEDIN_HOST_PATTERN = _LINKEDIN_HOST.pattern
 # `is_linkedin_landing` for a page script, which has to decide inside its own
 # evaluation, before it clicks, whether the document it is about to act on is
 # LinkedIn's: the address Python saw belongs to a moment that has passed. Called
-# as `(href, hostPattern)` with LINKEDIN_HOST_PATTERN. The rules are Python's,
-# rule for rule; `tests/test_off_linkedin_landing_dom.py` holds the two to the
-# same answers.
+# as `(href, hostPattern)` with LINKEDIN_HOST_PATTERN.
+#
+# The two agree on browser-serialized addresses, which is all a page script is
+# ever handed (`location.href`); `tests/test_off_linkedin_landing_dom.py` holds
+# them to the same answers there. On raw strings they can differ, because the
+# browser's parser normalizes what urllib keeps: IDN, percent-encoded hosts and
+# Unicode separators. The `@` rule below is the one difference a raw string
+# exposed that was cheap to close.
 LINKEDIN_LANDING_JS = r"""(href, hostPattern) => {
     let url;
     try {
@@ -34,6 +39,10 @@ LINKEDIN_LANDING_JS = r"""(href, hostPattern) => {
     } catch {
         return false;
     }
+    // Any userinfo, even an empty one, as urllib reads it; the parsed URL
+    // reports an empty username for `https://@host/`.
+    const authority = String(href).replace(/^[^:]*:\/\//, '').split(/[/?#\\]/, 1)[0];
+    if (authority.includes('@')) return false;
     const host = url.hostname.replace(/\.$/, '');
     return url.protocol === 'https:'
         && (url.port === '' || url.port === '443')

@@ -96,7 +96,7 @@
       "call": "read_job",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "571a440efbe5"
+      "program_digest": "e6b2be4ebddd"
     }
   ],
   "result": {
