@@ -1208,12 +1208,14 @@ class AuthStateIdentity:
 
     Read from metadata only, never from the cookies themselves: the login
     generation or, without one, the cookie file's inode, size and modification
-    time, and whether the profile has anything in it.
+    time, whether the profile has anything in it, and the metadata file's own
+    identity when it is there but could not be read.
     """
 
     login_generation: str | None
     cookies: tuple[int, int, int] | None
     profile: bool
+    unreadable_state: tuple[int, int, int] | None = None
 
 
 class SessionChangedError(RuntimeError):
@@ -1257,8 +1259,17 @@ def auth_state_identity(source_profile_dir: Path | None = None) -> AuthStateIden
     profile = profile_exists(profile_dir)
     if state is not None:
         return AuthStateIdentity(state.login_generation, None, profile)
+    # The loader reads a file it cannot parse as no file at all, which is
+    # right for a server deciding whether to log in and wrong here: a
+    # generation that became unreadable, or a login half-written over older
+    # state, would compare equal to what the user confirmed. Its own identity
+    # tells them apart, while a file that was already unreadable when the user
+    # was asked still compares equal and can be cleared.
     return AuthStateIdentity(
-        None, _file_identity(portable_cookie_path(profile_dir)), profile
+        None,
+        _file_identity(portable_cookie_path(profile_dir)),
+        profile,
+        _file_identity(source_state_path(profile_dir)),
     )
 
 

@@ -832,6 +832,51 @@ class TestClearingOnlyTheConfirmedSession:
         assert cookies.exists()
         assert (profile_dir / "Local State").exists()
 
+    def test_metadata_that_became_unreadable_is_not_cleared(self, isolate_profile_dir):
+        # The loader reads an unparsable file as no file, so without its own
+        # identity this compared equal to whatever the cookie file said.
+        profile_dir = isolate_profile_dir
+        _seed_session(profile_dir)
+        confirmed = auth_state_identity(profile_dir)
+        source_state_path(profile_dir).write_text("{")
+
+        with pytest.raises(SessionChangedError):
+            clear_auth_state(profile_dir, confirmed=confirmed)
+
+        assert portable_cookie_path(profile_dir).exists()
+        assert (profile_dir / "Local State").exists()
+
+    def test_metadata_written_after_confirmation_is_not_cleared(
+        self, isolate_profile_dir
+    ):
+        # Older state without a generation, and a login that has begun writing
+        # one over it.
+        profile_dir = isolate_profile_dir
+        _seed_session(profile_dir)
+        source_state_path(profile_dir).unlink()
+        confirmed = auth_state_identity(profile_dir)
+        source_state_path(profile_dir).write_text('{"version"')
+
+        with pytest.raises(SessionChangedError):
+            clear_auth_state(profile_dir, confirmed=confirmed)
+
+        assert portable_cookie_path(profile_dir).exists()
+
+    def test_metadata_already_unreadable_when_confirmed_is_cleared(
+        self, isolate_profile_dir
+    ):
+        # What the user was shown and agreed to delete. A logout is the way out
+        # of a broken session, so it must not refuse one.
+        profile_dir = isolate_profile_dir
+        _seed_session(profile_dir)
+        source_state_path(profile_dir).write_text("{")
+        confirmed = auth_state_identity(profile_dir)
+
+        assert clear_auth_state(profile_dir, confirmed=confirmed) is True
+
+        assert not portable_cookie_path(profile_dir).exists()
+        assert not source_state_path(profile_dir).exists()
+
 
 class TestRestoreSourceProfile:
     def test_puts_a_retired_session_back(self, isolate_profile_dir):

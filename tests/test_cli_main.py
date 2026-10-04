@@ -3,6 +3,7 @@
 import importlib.metadata
 import json
 import logging
+import threading
 from typing import Literal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -2133,6 +2134,23 @@ class TestRetiringASharedBrowser:
             and (self.profile / "Default" / "Cookies").read_text() == "theirs"
         )
 
+    def _after_the_first_prompt(self, timer: threading.Timer) -> threading.Timer:
+        """Answer yes to every prompt, starting *timer* at the first one.
+
+        Not before the logout runs: it reads the session before it asks, and a
+        change landing ahead of that read is the session the user confirms.
+        """
+        started: list[bool] = []
+
+        def ask(_prompt: str = "") -> str:
+            if not started:
+                started.append(True)
+                timer.start()
+            return "y"
+
+        self.monkeypatch.setattr("builtins.input", ask)
+        return timer
+
     def test_a_session_signed_in_during_the_prompt_survives(self, capsys):
         # Direct: nothing shared to retire, and the prompt can stay open for as
         # long as the user leaves it.
@@ -2166,9 +2184,7 @@ class TestRetiringASharedBrowser:
             generation.append(self._sign_in_elsewhere())
             release()
 
-        timer = threading.Timer(0.3, sign_in_then_let_go)
-        timer.start()
-        self._answers("y", "y")
+        timer = self._after_the_first_prompt(threading.Timer(0.3, sign_in_then_let_go))
         try:
             assert self._logout() == 1
         finally:
@@ -2200,9 +2216,7 @@ class TestRetiringASharedBrowser:
             secure_write_text(portable_cookie_path(self.profile), '[{"name": "li_at"}]')
             release()
 
-        timer = threading.Timer(0.3, export_then_let_go)
-        timer.start()
-        self._answers("y", "y")
+        timer = self._after_the_first_prompt(threading.Timer(0.3, export_then_let_go))
         try:
             assert self._logout() == 0
         finally:
