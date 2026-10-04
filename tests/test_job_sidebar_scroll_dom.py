@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from typing import cast
 
 import anyio
@@ -730,52 +731,123 @@ class TestSidebarScroll:
         scroll here and returns ten cards instead of fifteen.
         """
         await dom_page.set_content(
-            """
-            <body style="margin:0">
-              <div id="outer">
-                <div id="rail"
-                     style="height:120px;overflow-y:scroll;overflow-anchor:none">
-                  <div id="list"></div><div style="height:600px"></div>
-                </div>
-                <div style="height:3000px"></div>
-              </div>
-              <script>
-                const list = document.getElementById('list');
-                const rail = document.getElementById('rail');
-                let n = 0;
-                const add = (count) => {
-                  for (let i = 0; i < count; i++) {
-                    n++;
-                    const a = document.createElement('a');
-                    a.href = '/jobs/view/' + (1000 + n) + '/';
-                    a.style.cssText = 'display:block;height:40px';
-                    list.appendChild(a);
-                  }
-                };
-                add(5);
-                let scrolls = 0;
-                let pending = false;
-                rail.addEventListener('scroll', () => {
-                  if (pending || n >= 15) return;
-                  pending = true;
-                  scrolls++;
-                  if (scrolls === 2) {
-                    setTimeout(() => {
-                      document.getElementById('outer').style.cssText =
-                        'height:200px;overflow-y:auto';
-                    }, 300);
-                  }
-                  setTimeout(() => { add(5); pending = false; },
-                             scrolls === 1 ? 30 : 1500);
-                });
-              </script>
-            </body>
-            """
+            rail_with_a_late_tie(
+                """
+                document.getElementById('outer').style.cssText =
+                    'height:200px;overflow-y:auto';
+                """
+            )
         )
 
         await scroll_job_sidebar(dom_page, max_scrolls=2)
 
         assert await rail_cards(dom_page) == 15
+
+    async def test_a_new_wrapper_around_the_rail_is_not_the_rail(self, dom_page):
+        """A tied scroller wrapped around the rail takes the rail's place.
+
+        It sits where the rail sat and holds every id the rail holds, so
+        anything that finds the rail by its position finds the wrapper, and
+        the wrapper's height reads as a batch.
+        """
+        await dom_page.set_content(
+            rail_with_a_late_tie(
+                """
+                const wrap = document.createElement('div');
+                wrap.style.cssText = 'height:200px;overflow-y:auto';
+                rail.replaceWith(wrap);
+                wrap.appendChild(rail);
+                const room = document.createElement('div');
+                room.style.height = '3000px';
+                wrap.appendChild(room);
+                """
+            )
+        )
+
+        await scroll_job_sidebar(dom_page, max_scrolls=2)
+
+        assert await rail_cards(dom_page) == 15
+
+    async def test_a_tied_sibling_inserted_before_the_rail_is_not_the_rail(
+        self, dom_page
+    ):
+        """A tied container inserted ahead of the rail takes its position.
+
+        It holds as many ids as the rail, all of them other jobs, and is far
+        taller, so a rail found by position becomes this container and its
+        height reads as a batch.
+        """
+        await dom_page.set_content(
+            rail_with_a_late_tie(
+                """
+                const pane = document.createElement('div');
+                pane.style.cssText = 'height:120px;overflow-y:scroll';
+                for (let i = 1; i <= n; i++) {
+                  const a = document.createElement('a');
+                  a.href = '/jobs/view/' + (999000 + i) + '/';
+                  a.style.cssText = 'display:block;height:40px';
+                  pane.appendChild(a);
+                }
+                const room = document.createElement('div');
+                room.style.height = '3000px';
+                pane.appendChild(room);
+                rail.before(pane);
+                """
+            )
+        )
+
+        await scroll_job_sidebar(dom_page, max_scrolls=2)
+
+        assert await rail_cards(dom_page) == 15
+
+
+def rail_with_a_late_tie(tie: str) -> str:
+    """A rail whose last batch is slow, with a tie made while it is in flight.
+
+    Five cards, a fast batch, then a 1.5s one. ``tie`` runs 300ms after the
+    scroll that asked for the slow batch, with ``rail`` and the card count
+    ``n`` in scope, and makes another container tie the rail. With
+    ``max_scrolls=2`` the call has no scroll to spare: reading the tie as a
+    batch returns before the real one lands, at ten cards.
+    """
+    return f"""
+    <body style="margin:0">
+      <div id="outer">
+        <div id="rail"
+             style="height:120px;overflow-y:scroll;overflow-anchor:none">
+          <div id="list"></div><div style="height:600px"></div>
+        </div>
+        <div style="height:3000px"></div>
+      </div>
+      <script>
+        const list = document.getElementById('list');
+        const rail = document.getElementById('rail');
+        let n = 0;
+        const add = (count) => {{
+          for (let i = 0; i < count; i++) {{
+            n++;
+            const a = document.createElement('a');
+            a.href = '/jobs/view/' + (1000 + n) + '/';
+            a.style.cssText = 'display:block;height:40px';
+            list.appendChild(a);
+          }}
+        }};
+        add(5);
+        let scrolls = 0;
+        let pending = false;
+        rail.addEventListener('scroll', () => {{
+          if (pending || n >= 15) return;
+          pending = true;
+          scrolls++;
+          if (scrolls === 2) {{
+            setTimeout(() => {{ {tie} }}, 300);
+          }}
+          setTimeout(() => {{ add(5); pending = false; }},
+                     scrolls === 1 ? 30 : 1500);
+        }});
+      </script>
+    </body>
+    """
 
 
 async def watch_rail(page) -> None:
@@ -876,13 +948,16 @@ class BusyRendererPage:
     """The real page, except that the first scroll step queues behind a task.
 
     A renderer busy with a long task holds every message sent to it, and a
-    cancel does not take one back out. The step is sent while a 1.5s task is
-    running, and ``queued`` is set only once it has gone out, so a cancel
-    after that lands on a step the page has not run yet.
+    cancel does not take one back out. The step is sent while a task of
+    ``busy_for()`` seconds is running, sized at that moment so that it can
+    outlast whatever cancels the call, and ``queued`` is set only once the
+    step has gone out, so a cancel after that lands on a step the page has
+    not run yet.
     """
 
-    def __init__(self, page) -> None:
+    def __init__(self, page, busy_for: Callable[[], float] = lambda: 1.5) -> None:
         self._page = page
+        self._busy_for = busy_for
         self.queued = asyncio.Event()
 
     def __getattr__(self, name):
@@ -892,16 +967,36 @@ class BusyRendererPage:
         if not (isinstance(arg, dict) and arg.get("scroll")) or self.queued.is_set():
             return await self._page.evaluate(expression, arg)
         await self._page.evaluate(
-            """() => setTimeout(() => {
-                const end = performance.now() + 1500;
+            """(ms) => setTimeout(() => {
+                const end = performance.now() + ms;
                 while (performance.now() < end) {}
-            }, 0)"""
+            }, 0)""",
+            self._busy_for() * 1000,
         )
         await asyncio.sleep(0.05)
         step = asyncio.ensure_future(self._page.evaluate(expression, arg))
         await asyncio.sleep(0.05)
         self.queued.set()
         return await step
+
+
+async def until_queued(page: BusyRendererPage, call: asyncio.Task) -> None:
+    """Wait for the queued step, failing rather than hanging if it never comes.
+
+    The call can end first, cancelled before it scrolled at all, and then
+    nothing would ever set the event.
+    """
+    queued = asyncio.ensure_future(page.queued.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {queued, call}, timeout=10.0, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        queued.cancel()
+    if queued not in done:
+        call.cancel()
+        (outcome,) = await asyncio.gather(call, return_exceptions=True)
+        pytest.fail(f"the scroll step never went out; the call ended in {outcome!r}")
 
 
 async def record_scrolls(page) -> None:
@@ -950,7 +1045,7 @@ class TestAScrollAlreadySent:
         page = BusyRendererPage(dom_page)
 
         task = asyncio.create_task(scroll_job_sidebar(cast(Page, page)))
-        await page.queued.wait()
+        await until_queued(page, task)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -962,14 +1057,21 @@ class TestAScrollAlreadySent:
         """Through the middleware, with FastMCP's own tool timeout."""
         await dom_page.set_content(self.PAGE)
         await record_scrolls(dom_page)
-        page = BusyRendererPage(dom_page)
+        timeout = 2.0
+        times_out_at: list[float] = []
+        # The busy task runs a second past the tool timeout however long the
+        # browser took to reach the scroll, so the timeout always lands while
+        # the step is queued and no fixed window has to fit the round trips.
+        page = BusyRendererPage(
+            dom_page, busy_for=lambda: times_out_at[0] - time.monotonic() + 1.0
+        )
         mcp = FastMCP("test")
         mcp.add_middleware(SequentialToolExecutionMiddleware())
         handed_over_at: list[float] = []
 
-        # Long enough for the step to go out, short of the 1.5s task.
-        @mcp.tool(timeout=0.5)
+        @mcp.tool(timeout=timeout)
         async def search_jobs() -> dict[str, bool]:
+            times_out_at.append(time.monotonic() + timeout)
             await scroll_job_sidebar(cast(Page, page))
             return {"done": True}
 
@@ -979,7 +1081,7 @@ class TestAScrollAlreadySent:
             return {"done": True}
 
         search = asyncio.create_task(mcp.call_tool("search_jobs", {}))
-        await page.queued.wait()
+        await until_queued(page, search)
         # Queued on the lock behind the search, which still holds it.
         following = asyncio.create_task(mcp.call_tool("next_tool", {}))
         with pytest.raises(Exception, match="timed out"):
