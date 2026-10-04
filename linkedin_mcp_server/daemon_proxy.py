@@ -1204,7 +1204,7 @@ def create_proxy_provider(
 #: Fixed text and never the failure's own: that names the loopback address, and
 #: through the transport's message it can carry whatever the owner's port said.
 _OWNER_LOST = (
-    "The shared browser process went away and could not be restarted. "
+    "This server lost the shared browser process and could not reach a new one. "
     "Reconnect or restart your MCP client to start a new one."
 )
 

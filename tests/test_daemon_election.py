@@ -6102,7 +6102,7 @@ class TestRealOwner:
             # becomes "Server returned an error response", which is written only
             # once a response of 400 or more has arrived. Which status it was is
             # asked of the owner directly, with the same token.
-            with pytest.raises(Exception, match="could not be restarted"):
+            with pytest.raises(Exception, match="could not reach a new one"):
                 asyncio.run(served())
             assert any(
                 isinstance(exc, MCPError)

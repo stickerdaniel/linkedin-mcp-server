@@ -76,7 +76,7 @@ def _a_dead_attachment(*, port: int) -> Any:
 #: What a client of either era reads once no owner is left to forward to.
 #: Written out rather than imported, because the text is what a user sees.
 _THE_OWNER_IS_GONE = (
-    "The shared browser process went away and could not be restarted. "
+    "This server lost the shared browser process and could not reach a new one. "
     "Reconnect or restart your MCP client to start a new one."
 )
 
