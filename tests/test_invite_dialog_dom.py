@@ -199,3 +199,32 @@ async def test_escape_still_closes_linkedins_dialog(dom_page):
     assert message is not None and "custom notes" in message
     assert await dom_page.evaluate("document.body.dataset.escaped") == "true"
     assert await dom_page.locator('[role="dialog"]').count() == 0
+
+
+#: A dialog whose own handler closes it, with focus on a field inside it and a
+#: body that can take focus, so a press that refocuses the body misses it.
+FOCUSED_DIALOG_ON_A_FOCUSABLE_BODY = """<!DOCTYPE html><html>
+<body tabindex="-1">
+  <div role="dialog" id="upsell">
+    <p>You're out of free custom notes.</p>
+    <a href="https://www.linkedin.com/premium/products/">Try Premium</a>
+    <input id="inside">
+  </div>
+  <script>
+    const dialog = document.getElementById('upsell');
+    dialog.addEventListener('keydown', event => {
+      if (event.key === 'Escape') dialog.remove();
+    });
+    document.getElementById('inside').focus();
+  </script>
+</body></html>"""
+
+
+async def test_escape_reaches_the_dialog_that_has_focus(dom_page):
+    """Pressed where focus is, not on the body, which would take it away."""
+    await dom_page.set_content(FOCUSED_DIALOG_ON_A_FOCUSABLE_BODY)
+
+    message = await _actions(dom_page)._probe_invite_note_limit()
+
+    assert message is not None and "custom notes" in message
+    assert await dom_page.locator('[role="dialog"]').count() == 0

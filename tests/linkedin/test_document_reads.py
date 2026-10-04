@@ -322,6 +322,8 @@ async def test_an_action_on_another_sites_page_is_refused_unperformed(
     element = _portal_element()
     mock_page.element = element
     mock_page.locator = MagicMock(return_value=element)
+    # The focused element, for an action pressed where focus is.
+    mock_page.evaluate_handle = AsyncMock(return_value=element)
     mock_page.url = PORTAL_URL
     mock_page.evaluate = AsyncMock(return_value=True)
 

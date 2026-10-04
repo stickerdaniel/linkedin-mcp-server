@@ -164,6 +164,21 @@ async def linkedin_element(
         handle = await locator.element_handle()
     else:
         handle = await locator.element_handle(timeout=timeout)
+    async with linkedin_handle(handle) as checked:
+        yield checked
+
+
+@asynccontextmanager
+async def linkedin_handle(handle: Any) -> AsyncIterator[Any]:
+    """Yield an element *handle* already resolved, only if its document is LinkedIn's.
+
+    For an element no locator names, such as the one that has focus. Disposes
+    of the handle on the way out, as :func:`linkedin_element` does.
+
+    Raises:
+        OffLinkedInLandingError: When the element's own document is not
+            LinkedIn's.
+    """
     try:
         raise_if_off_linkedin(await handle.evaluate(_OWNER_DOCUMENT_ADDRESS_JS))
         yield handle

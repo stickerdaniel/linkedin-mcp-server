@@ -34,6 +34,7 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.destination import (
     linkedin_element,
+    linkedin_handle,
     raise_if_off_linkedin,
 )
 from linkedin_mcp_server.core.exceptions import OffLinkedInLandingError
@@ -377,15 +378,27 @@ class ConnectionActions:
 
         Never through `page.keyboard`, which delivers to whatever document is
         current: a portal that replaced the page runs its own key handlers on
-        it. Pressed on the body's handle, so the key goes to that document's
-        focused element as before, and a document replaced after the check
-        detaches the handle and fails the press instead of receiving it.
+        it. Pressed on the handle of the element that has focus, or the body
+        when nothing does: a handle press focuses its element first, so
+        pressing on the body would take focus from a dialog whose own handler
+        listens for Escape whenever the body can be focused. A document
+        replaced after the check detaches the handle and fails the press
+        instead of receiving it.
 
         Raises:
             OffLinkedInLandingError: When the current document is not LinkedIn's.
         """
-        async with linkedin_element(self._session.page.locator("body")) as body:
-            await body.press("Escape")
+        focused = await self._session.page.evaluate_handle(
+            "() => document.activeElement || document.body"
+        )
+        element = focused.as_element()
+        if element is None:
+            await focused.dispose()
+            async with linkedin_element(self._session.page.locator("body")) as body:
+                await body.press("Escape")
+            return
+        async with linkedin_handle(element) as target:
+            await target.press("Escape")
 
     async def _dismiss_dialog(self) -> None:
         """Dismiss any open dialog via Escape key (structural)."""

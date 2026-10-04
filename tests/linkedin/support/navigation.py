@@ -79,6 +79,7 @@ def held_in(
     address says which page it sits on.
     """
     element.element_handle = AsyncMock(return_value=element)
+    element.as_element = MagicMock(return_value=element)
     element.evaluate = AsyncMock(return_value=document_url)
     element.dispose = AsyncMock()
     return element
