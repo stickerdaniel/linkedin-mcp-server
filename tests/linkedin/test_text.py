@@ -2,8 +2,10 @@
 
 import re
 
+
 from linkedin_mcp_server.linkedin.text import (
     DETAIL_CAPTURE_EN_US,
+    JOB_APPLY_EN_US,
     JOB_POSTING_EN_US,
     JOB_SEARCH_EN_US,
     JobPostingTextTable,
@@ -105,6 +107,21 @@ class TestJobPostingText:
         assert not JOB_POSTING_EN_US.has_description("Read About the job below")
         assert not JOB_POSTING_EN_US.has_description("Engineer\nAcme\nApply")
         assert not JOB_POSTING_EN_US.has_description("")
+
+
+class TestOneDescriptionHeadingTable:
+    """The heading that opens a description has one owner.
+
+    Two tables need it: `JobPostingTextTable` waits for it to know the
+    description has loaded, and `JobApplyTextTable` reads posting state above
+    it. They have to agree — a wait that succeeds on a heading the state read
+    does not know leaves every posting reading as `unknown`.
+    """
+
+    def test_the_apply_table_reads_the_posting_table_headings(self):
+        assert JOB_APPLY_EN_US.description_headings == (
+            JOB_POSTING_EN_US.description_headings
+        )
 
 
 class TestStripLinkedInNoise:

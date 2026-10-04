@@ -339,6 +339,39 @@
       "openWorldHint": true,
       "readOnlyHint": true
     },
+    "description": "Get how a job posting takes applications, and the employer's application link.\n\nReads the posting without clicking anything.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "job_id": {
+          "description": "LinkedIn job ID (e.g., \"4252026496\", \"3856789012\")",
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "type": "object"
+    },
+    "name": "get_job_apply_url",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Job Apply URL"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "job"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
     "description": "Get job details for a specific job posting on LinkedIn.",
     "inputSchema": {
       "additionalProperties": false,

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from urllib.parse import urlparse
+import re
+from ipaddress import IPv6Address, ip_address
+from typing import Literal
+from urllib.parse import parse_qs, urlparse
 
 from linkedin_mcp_server.linkedin.link_metadata import (
     JOB_PATH_RE,
@@ -251,3 +254,96 @@ SAVED_JOBS_PATHS = frozenset({"/my-items/saved-jobs", "/jobs-tracker"})
 # returns the 11th saved job, while ?start=25 lands past the end of a two-page
 # list and yields nothing.
 SAVED_JOBS_PAGE_SIZE = 10
+
+ApplyType = Literal["easy_apply", "external", "applied", "closed", "unknown"]
+
+# LinkedIn's interstitial for links that leave the site, with the destination in
+# its `url` parameter. Measured on 2026-09-19: an external posting's Apply is
+# such a link, `/safety/go/?url=https%3A%2F%2Fgrnh.se%2F...`.
+SAFETY_REDIRECT_PATH = "/safety/go"
+
+
+# Name suffixes reserved for a host's own network, which no registry serves.
+_PRIVATE_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
+
+# A hexadecimal number as the URL standard reads one in a host, `0x` included.
+_HEX_LABEL = re.compile(r"0x[0-9a-f]*")
+
+
+def reaches_the_public_internet(host: str) -> bool:
+    """Whether an apply destination names somewhere outside this host.
+
+    The destination of an external Apply is chosen by whoever posted the job.
+    The server never loads it, but it hands it to a caller that may: a
+    loopback, link-local or private-range address would turn that into a
+    request against whatever the caller's host can reach, on a stranger's word.
+    None of those is an employer's site, so they answer as no address at all.
+
+    Judged on the address as written. A public name that resolves into private
+    space, or a redirect into one, is only reached by loading the address,
+    which is the caller's decision and not this server's.
+    """
+    # Judged in the form the browser would ask for: it folds fullwidth letters,
+    # digits and dots into ASCII before resolving, so `.local` spelled with a
+    # fullwidth `l` is still `.local`.
+    try:
+        name = host.encode("idna").decode("ascii").rstrip(".").lower()
+    except UnicodeError:
+        return False
+    try:
+        address = ip_address(name)
+    except ValueError:
+        # Not a literal `ipaddress` accepts. A name's rightmost label is never
+        # a number, so one that is belongs to an address written the long way
+        # round (`0177.0.0.1`, `0x7f.0.0.1`, `127.0.0.0x1`), which the browser
+        # still resolves to the loopback.
+        label = name.rpartition(".")[2]
+        if not label or label.isdigit() or _HEX_LABEL.fullmatch(label):
+            return False
+        # A single-label name has no public registry behind it.
+        return "." in name and not name.endswith(_PRIVATE_SUFFIXES)
+    if isinstance(address, IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return address.is_global
+
+
+def employer_apply_url(href: str) -> str | None:
+    """The employer's address an apply link leads to, or None.
+
+    The interstitial answers with its destination, and any other address off
+    LinkedIn answers as itself. A LinkedIn page that is not the interstitial is
+    not the employer's site, so it answers None rather than passing for one.
+    An address that never leaves this host is refused the same way.
+    """
+    parsed = urlparse(href)
+    host = parsed.hostname
+    if parsed.scheme not in ("http", "https") or not host:
+        return None
+    # Chromium decodes host escapes and treats a backslash as a slash;
+    # urllib.parse does neither. Do not validate one host and load another.
+    if "%" in host or "\\" in parsed.netloc:
+        return None
+    if not reaches_the_public_internet(host):
+        return None
+    if host != "linkedin.com" and not host.endswith(".linkedin.com"):
+        return href
+    if parsed.path.rstrip("/") != SAFETY_REDIRECT_PATH:
+        return None
+    destination = parse_qs(parsed.query).get("url", [""])[0]
+    return employer_apply_url(destination) if destination else None
+
+
+def apply_link_missing_section_error() -> dict[str, str]:
+    """The ``section_errors`` entry for an external Apply with no usable link.
+
+    The posting is still external, which is worth keeping, but a type with no
+    link and nothing beside it reads as a posting that has none. Being told is
+    what lets a caller open the posting itself.
+    """
+    return {
+        "error_type": "apply_link_missing",
+        "error_message": (
+            "The Apply link names no employer address outside LinkedIn and "
+            "this host's own network, so none is returned."
+        ),
+    }
