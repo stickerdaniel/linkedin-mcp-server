@@ -4256,7 +4256,9 @@ class TestPatchrightInstallStreaming:
             # test's. The timeout is measured from inside the blocked creation,
             # because a 10ms budget spent before the worker even ran says
             # nothing about whether that creation can hold the loop.
-            entry_deadline = loop.time() + 1.0
+            # Five seconds, the allowance this suite gives a thread to start
+            # under -n auto load; the entry wait is no claim about the timeout.
+            entry_deadline = loop.time() + 5.0
             while not blocked.is_set():
                 assert loop.time() < entry_deadline, "the root creation never began"
                 await asyncio.sleep(0.001)

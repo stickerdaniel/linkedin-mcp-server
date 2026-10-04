@@ -761,7 +761,7 @@ class TestRetryPacing:
             # descriptor is replaced once the loop is inside its paced wait, so
             # the wait's first read cannot be what finds it.
             def publish_later() -> None:
-                if not paced.wait(2.0) or abandoned.is_set():
+                if not paced.wait(_PARKED) or abandoned.is_set():
                     return
                 fresh.append(_publish_stale_owner(auth_root, profile, config))
                 published.set()
