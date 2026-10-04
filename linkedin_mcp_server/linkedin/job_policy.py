@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from ipaddress import IPv6Address, ip_address
 from typing import Literal
 from urllib.parse import parse_qs, urlparse
@@ -265,6 +266,9 @@ SAFETY_REDIRECT_PATH = "/safety/go"
 # Name suffixes reserved for a host's own network, which no registry serves.
 _PRIVATE_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
 
+# A hexadecimal number as the URL standard reads one in a host, `0x` included.
+_HEX_LABEL = re.compile(r"0x[0-9a-f]*")
+
 
 def reaches_the_public_internet(host: str) -> bool:
     """Whether an apply destination names somewhere outside this host.
@@ -279,16 +283,21 @@ def reaches_the_public_internet(host: str) -> bool:
     space, or a redirect into one, is only reached by loading the address,
     which is the caller's decision and not this server's.
     """
-    name = host.rstrip(".").lower()
+    # Judged in the form the browser would ask for: it folds fullwidth letters,
+    # digits and dots (`box.locaｌ`, `１２７.0.0.1`) into ASCII before resolving.
+    try:
+        name = host.encode("idna").decode("ascii").rstrip(".").lower()
+    except UnicodeError:
+        return False
     try:
         address = ip_address(name)
     except ValueError:
         # Not a literal `ipaddress` accepts. A name's rightmost label is never
-        # all digits, so one that is belongs to an address written the long way
-        # round (`0177.0.0.1`, `0x7f.0.0.1`), which the browser still resolves
-        # to the loopback.
+        # a number, so one that is belongs to an address written the long way
+        # round (`0177.0.0.1`, `0x7f.0.0.1`, `127.0.0.0x1`), which the browser
+        # still resolves to the loopback.
         label = name.rpartition(".")[2]
-        if not label or label.isdigit():
+        if not label or label.isdigit() or _HEX_LABEL.fullmatch(label):
             return False
         # A single-label name has no public registry behind it.
         return "." in name and not name.endswith(_PRIVATE_SUFFIXES)

@@ -126,6 +126,12 @@ def serve_extractor(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], AsyncMoc
             "job_id is not a LinkedIn id",
         ),
         (
+            "job",
+            "get_job_apply_url",
+            {"job_id": "/feed/"},
+            "job_id is not a LinkedIn id",
+        ),
+        (
             "messaging",
             "get_conversation",
             {"linkedin_username": "/feed/"},

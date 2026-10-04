@@ -251,6 +251,22 @@ async def test_a_closed_posting_is_its_state(dom_page, line):
     assert await read(dom_page, html) == JobApplyRead("closed")
 
 
+async def test_a_state_waits_for_the_description_boundary(dom_page):
+    """Easy Apply is found before the heading renders; the state line is not."""
+    late_heading = """<script>
+        setTimeout(() => document.querySelector('main').insertAdjacentHTML(
+            'beforeend', '<h2>About the job</h2>'), 300);
+    </script>"""
+    html = (
+        posting(EASY_APPLY, state="<p>Application submitted</p>").replace(
+            "<h2>About the job</h2>", ""
+        )
+        + late_heading
+    )
+
+    assert await read(dom_page, html) == JobApplyRead("applied")
+
+
 async def test_state_lines_below_the_description_belong_to_other_postings(dom_page):
     below = "<p>No longer accepting applications</p><p>Applied 2 days ago</p>"
 

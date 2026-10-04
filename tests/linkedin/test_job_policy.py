@@ -171,6 +171,11 @@ class TestEmployerApplyUrl:
 
         assert employer_apply_url(url) == url
 
+    def test_an_international_employer_name_answers_as_itself(self):
+        url = "https://bücher.example/jobs/1"
+
+        assert employer_apply_url(url) == url
+
     def test_a_linkedin_page_is_not_an_employer_site(self):
         assert employer_apply_url("https://www.linkedin.com/jobs/view/1/") is None
         assert employer_apply_url("https://fr.linkedin.com/company/acme/") is None
@@ -211,6 +216,12 @@ class TestEmployerApplyUrl:
             "0177.0.0.1",
             "0x7f.0.0.1",
             "2130706433",
+            "127.0.0.0x1",
+            "0xa.0x0.0x0.0x1",
+            # Fullwidth forms the browser folds into the loopback and `.local`.
+            "\uff11\uff12\uff17.0.0.1",
+            "box.loca\uff4c",
+            "box\u3002local",
             "%31%32%37.0.0.%31",
             "127.0.0.1\\@jobs.example.com",
         ],

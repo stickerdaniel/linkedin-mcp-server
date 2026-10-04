@@ -191,6 +191,7 @@ APPLY_SIGNALS_JS = r"""(opts) => {
         && (anchor.innerText || '').trim() === externalLabel
         && pathOf(anchor) === redirectPath);
     return {
+        bounded: Boolean(heading),
         easy_apply: anchors.some((anchor) => pathOf(anchor) === applyPath),
         external_link: link ? link.href : null,
         applied: top.some((line) => applied.test(line)),
@@ -198,9 +199,13 @@ APPLY_SIGNALS_JS = r"""(opts) => {
     };
 }"""
 
+# Ready once the description heading and a signal are both in. Easy Apply is
+# found without the heading, but the applied and closed lines are not, so a
+# read that settled on the anchor alone could call such a posting open.
 APPLY_READY_JS = (
     "(opts) => {\n    const signals = (" + APPLY_SIGNALS_JS + ")(opts);\n"
-    "    return Boolean(signals && Object.values(signals).some(Boolean));\n}"
+    "    return Boolean(signals && signals.bounded && (signals.easy_apply\n"
+    "        || signals.external_link || signals.applied || signals.closed));\n}"
 )
 
 # How long the apply control gets to render.

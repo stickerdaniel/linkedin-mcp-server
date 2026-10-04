@@ -101,6 +101,7 @@ def register_job_tools(
             A posting that could not be read returns section_errors instead.
         """
         try:
+            job_id = normalize_job_id(job_id)
             extractor = await get_ready_extractor(ctx, tool_name="get_job_apply_url")
             logger.info("Reading apply link: %s", job_id)
 
