@@ -462,6 +462,39 @@ username.
 > [!NOTE]
 > Sessions expire over time. When tool calls start asking for authentication, repeat the login command above, or run `uvx mcp-server-linkedin@latest --login` on the host.
 
+### Cloud hosts without a browser (Obot, Kubernetes, CI)
+
+A hosted MCP gateway can neither show you a login window nor read the browser on your machine. Hand the server the session of a signed-in browser tab through the environment instead:
+
+1. Sign in at linkedin.com in your everyday browser.
+2. Export the site's cookies, either as JSON with a cookie extension such as Cookie-Editor ("Export → JSON"), or by copying the `Cookie` request header from the Network tab of the developer tools. The `li_at` value on its own also works.
+3. Set one of these in the server's environment (as a secret):
+
+| Variable | Content |
+| --- | --- |
+| `LINKEDIN_COOKIES` | The exported JSON, the `Cookie` header (`li_at=...; JSESSIONID="ajax:..."`), or the bare `li_at` value. Prefix with `base64:` if your host's env editor mangles quotes or newlines. |
+| `LINKEDIN_COOKIES_FILE` | Path to a file with any of the above, for secret mounts. Takes precedence over `LINKEDIN_COOKIES`. |
+
+On the first tool call the server validates the cookies against your feed and stores them where `--login` would. No volume is required, though mounting `/home/pwuser/.linkedin-mcp` saves a validation on every restart.
+
+```json
+{
+  "mcpServers": {
+    "mcp-server-linkedin": {
+      "command": "docker",
+      "args": ["run", "--rm", "-i", "-e", "LINKEDIN_COOKIES", "stickerdaniel/linkedin-mcp-server:latest"],
+      "env": { "LINKEDIN_COOKIES": "li_at=AQEDA...; JSESSIONID=\"ajax:123\"" }
+    }
+  }
+}
+```
+
+- While the variable is set it is the source of truth: a different `li_at` replaces the stored session on the next start; the same one is not imported twice.
+- If LinkedIn rejects the cookies, any earlier session is kept and the tool error says what to do. A rejected value is not retried until it changes.
+- Signing out of LinkedIn in the browser you exported from ends this session too. Use a browser profile you keep signed in.
+- The session moves to the server's IP address. LinkedIn may answer with a security check, especially for a datacenter IP; routing the server through a residential proxy in your region (see [Using a proxy](#using-a-proxy)) reduces that.
+- The cookies are a full login to your account. Store them as a secret, never in a repository.
+
 ### Setup Help
 
 <details>

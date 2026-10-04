@@ -84,7 +84,9 @@ async def handle_auth_error(
         raise DockerHostLoginRequiredError(
             "No valid LinkedIn session is available in Docker. Create one with "
             "the explicit --login --login-viewer Docker command, or run --login "
-            "on the host, then retry this tool."
+            "on the host, then retry this tool. If the session came from "
+            "LINKEDIN_COOKIES, export fresh cookies into it and restart the "
+            "server."
         ) from error
 
     # Read before the close rather than after it, deliberately, though the
