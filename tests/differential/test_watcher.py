@@ -340,8 +340,10 @@ def test_a_process_that_execs_into_a_browser_late_is_still_seen(tmp_path):
             },
         )
         try:
+            # Not until the stand-in exits: on Windows the exec is a new
+            # process, and the one launched here ends as it starts.
             deadline = time.monotonic() + 30
-            while time.monotonic() < deadline and stand_in.poll() is None:
+            while time.monotonic() < deadline:
                 if any(
                     r.get("actor") == "browser"
                     and (
