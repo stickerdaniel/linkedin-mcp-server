@@ -307,7 +307,17 @@ profile = os.environ["STAND_IN_PROFILE"]
 os.execv(sys.executable, [sys.executable, sys.argv[1], "--user-data-dir=" + profile])
 """
 
-_AFTER_EXEC = "import time\ntime.sleep(3)\n"
+# Browser-shaped until the test has seen the watcher record it, so a slow
+# sample on a loaded machine cannot miss a phase that ended on its own clock.
+_AFTER_EXEC = """
+import os
+import time
+
+release = os.environ["STAND_IN_RELEASE"]
+deadline = time.monotonic() + 30
+while not os.path.exists(release) and time.monotonic() < deadline:
+    time.sleep(0.05)
+"""
 
 
 def test_a_process_that_execs_into_a_browser_late_is_still_seen(tmp_path):
@@ -317,13 +327,32 @@ def test_a_process_that_execs_into_a_browser_late_is_still_seen(tmp_path):
     before, after = tmp_path / "before_exec.py", tmp_path / "after_exec.py"
     before.write_text(_DELAYED_EXEC)
     after.write_text(_AFTER_EXEC)
+    release = tmp_path / "release"
+    key = canonical_user_data_dir(str(profile))
     watcher = _start_watcher(tmp_path)
     try:
         stand_in = subprocess.Popen(
             [sys.executable, str(before), str(after)],
-            env={**os.environ, "STAND_IN_PROFILE": str(profile)},
+            env={
+                **os.environ,
+                "STAND_IN_PROFILE": str(profile),
+                "STAND_IN_RELEASE": str(release),
+            },
         )
         try:
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and stand_in.poll() is None:
+                if any(
+                    r.get("actor") == "browser"
+                    and (
+                        f"--user-data-dir={profile}" in r.get("cmdline", "")
+                        or r.get("profile") == key
+                    )
+                    for r in read_jsonl(tmp_path / "watcher.jsonl")
+                ):
+                    break
+                time.sleep(0.05)
+            release.touch()
             stand_in.wait(timeout=30)
         finally:
             if stand_in.poll() is None:
@@ -331,7 +360,6 @@ def test_a_process_that_execs_into_a_browser_late_is_still_seen(tmp_path):
     finally:
         records = _stop_watcher(tmp_path, watcher)
     (summary,) = [r for r in records if r["kind"] == "watcher.summary"]
-    key = canonical_user_data_dir(str(profile))
     assert summary["max_roots"].get(key) == 1, summary["max_roots"]
     # On Windows the exec is a new process whose parent is gone before it is
     # sampled, so it is not tied to the row and its arguments are withheld;
