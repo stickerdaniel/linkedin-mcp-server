@@ -357,6 +357,9 @@ def test_a_process_that_execs_into_a_browser_late_is_still_seen(tmp_path):
             release.touch()
             stand_in.wait(timeout=30)
         finally:
+            # Released on every path: on Windows the exec'd process is not
+            # ``stand_in`` and would otherwise run on into other tests.
+            release.touch()
             if stand_in.poll() is None:
                 stand_in.kill()
     finally:
