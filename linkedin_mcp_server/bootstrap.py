@@ -3752,6 +3752,24 @@ async def _ensure_browser_installed(
     await _run_browser_setup(line_callback=line_callback)
 
 
+def _job_control_cannot_pause_setup() -> bool:
+    """Whether a terminal user could suspend this command and expect setup to stop.
+
+    The installer runs outside the terminal's process group, so it survives
+    this process long enough to clean up after itself (#789). The same
+    detachment keeps the terminal's stop signal from reaching it: Ctrl+Z stops
+    the command and the download carries on. Forwarding the signal would have
+    to keep that containment intact, so the user is told instead (#792). Only
+    POSIX has job control, and only an interactive terminal can send it.
+    """
+    if os.name == "nt":
+        return False
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (OSError, ValueError):
+        return False
+
+
 def ensure_browser_installed() -> None:
     """Install the Patchright Chromium browser for a CLI mode, if absent.
 
@@ -3781,6 +3799,10 @@ def ensure_browser_installed() -> None:
     # carries the encoding fallback, which the cross mark below needs on an
     # ascii terminal for the same reason.
     _print_whatever_the_stream_takes("   Installing Patchright Chromium browser...")
+    if _job_control_cannot_pause_setup():
+        _print_whatever_the_stream_takes(
+            "   Suspending this command (Ctrl+Z) does not pause the download."
+        )
     try:
         with _cli_progress() as report:
             asyncio.run(_ensure_browser_installed(line_callback=report))

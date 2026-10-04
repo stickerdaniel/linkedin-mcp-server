@@ -8042,6 +8042,40 @@ class TestEnsureBrowserInstalled:
 
         assert calls["value"] == 0
 
+    @pytest.mark.parametrize("terminal", [True, False])
+    def test_a_terminal_user_hears_that_suspending_does_not_pause(
+        self, isolate_profile_dir, monkeypatch, capsys, terminal
+    ):
+        """The installer runs outside the terminal's process group (#792).
+
+        So Ctrl+Z stops the command and the download goes on. Only someone at
+        a terminal can press it, so only they are told.
+        """
+        if os.name == "nt":
+            pytest.skip("Windows has no job control")
+        _patch_targets_and_version(monkeypatch)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.browser_ready", lambda: False
+        )
+        self._stub(monkeypatch)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: terminal)
+
+        ensure_browser_installed()
+
+        said = "does not pause the download" in capsys.readouterr().out
+        assert said is terminal
+
+    def test_a_ready_browser_says_nothing_about_suspending(
+        self, isolate_profile_dir, monkeypatch, capsys
+    ):
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.browser_ready", lambda: True)
+        self._stub(monkeypatch)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+        ensure_browser_installed()
+
+        assert "pause" not in capsys.readouterr().out
+
     def test_shell_only_is_not_enough(self, isolate_profile_dir, monkeypatch):
         """A pre-existing shell-only install must still trigger the download.
 
