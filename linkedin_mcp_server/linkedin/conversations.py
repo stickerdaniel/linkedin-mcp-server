@@ -412,7 +412,7 @@ class ConversationReader:
         # clickable element, so class-name selectors are unavoidable here.
         # The aria-label value flows through unmodified — Python strips any
         # known locale prefix to derive a clean participant name for refs.
-        outcome: dict[str, Any] = await self._session.page.evaluate(
+        outcome: dict[str, Any] = await self._session.read_document(
             """async ({ limit, nameFilter }) => {
                 const labels = Array.from(document.querySelectorAll(
                     'main li label[aria-label]'

@@ -19,7 +19,7 @@ from linkedin_mcp_server.linkedin.capture import SectionCapture
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.session import PageSession
-from .support.navigation import navigate, with_document_identity
+from .support.navigation import navigate
 
 
 def _recorders_registered(page) -> list:
@@ -811,33 +811,6 @@ class TestALandingOffLinkedInStopsTheRead:
         assert not isinstance(excinfo.value, AuthenticationError)
         remember_me.assert_not_awaited()
         assert mock_page.goto.await_count == 1
-
-    async def test_a_redirect_after_navigation_is_refused_at_the_read(self, mock_page):
-        """Navigation saw LinkedIn; the document read afterwards was the portal's."""
-        mock_page.evaluate = with_document_identity(
-            mock_page,
-            AsyncMock(
-                return_value={
-                    "source": "root",
-                    "text": "OFFLINE INTERSTITIAL, NOT A PROFILE",
-                    "references": [],
-                    "url": "https://portal.invalid/interstitial",
-                }
-            ),
-        )
-        session = PageSession(mock_page)
-        capture = SectionCapture(
-            session, PageNavigator(session), PageContentReader(session)
-        )
-
-        with (
-            patch.object(session_module, "scroll_to_bottom", new_callable=AsyncMock),
-            patch.object(session_module, "detect_rate_limit", new_callable=AsyncMock),
-            pytest.raises(OffLinkedInLandingError, match="portal.invalid"),
-        ):
-            await capture.extract_page(
-                "https://www.linkedin.com/in/testuser/", section_name="main_profile"
-            )
 
     async def test_a_read_the_redirect_cut_short_reports_where_it_went(self, mock_page):
         """The redirect lands mid-read and takes the read's context with it."""

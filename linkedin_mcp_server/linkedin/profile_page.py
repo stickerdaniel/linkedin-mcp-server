@@ -48,7 +48,7 @@ class ProfilePageReader:
 
     async def _read_profile_display_name(self) -> str | None:
         """Read the visible profile name from the current person page."""
-        display_name = await self._session.page.evaluate(
+        display_name = await self._session.read_document(
             """() => {
                 const heading = document.querySelector('main h1');
                 const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();

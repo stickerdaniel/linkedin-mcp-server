@@ -45,6 +45,15 @@ _AUTH_BARRIER_TEXT_MARKERS = (
 )
 _REMEMBER_ME_CONTAINER_SELECTOR = "#rememberme-div"
 _REMEMBER_ME_BUTTON_SELECTOR = "#rememberme-div button"
+_AUTH_SNAPSHOT_JS = """({ picker, includeBody }) => ({
+    href: location.href,
+    title: document.title || '',
+    picker: document.querySelector(picker) !== null,
+    body: includeBody ? (document.body?.innerText || '') : '',
+})"""
+# Reads the address of the document an element lives in, so a click is judged
+# by the page holding the button rather than by the page the driver last saw.
+_OWNER_DOCUMENT_ADDRESS_JS = "element => element.ownerDocument.location.href"
 _MANUAL_LOGIN_STATUS_INTERVAL_SECONDS = 30
 _AUTH_COOKIE_URL = "https://www.linkedin.com/feed/"
 
@@ -135,55 +144,25 @@ async def _detect_auth_barrier(
     # the caller's to refuse, through `raise_if_off_linkedin`.
     if not is_linkedin_landing(page.url):
         return None
-    # Outside the try, which answers every failure with "no barrier". Ahead of
-    # the blocker routes, which the bare /login/login-restriction/ also matches.
+    # Outside any try, which would answer the failure with "no barrier". Ahead
+    # of the blocker routes, which the bare /login/login-restriction/ also
+    # matches.
     _raise_if_account_restricted(page.url)
+    if _is_auth_blocker_url(page.url):
+        return f"auth blocker URL: {page.url}"
+
+    # One evaluation, so the title, the picker and the body text are all the
+    # document's whose address comes back with them. Read one at a time, a
+    # redirect landing between the address check and a later read paired
+    # LinkedIn's address with a portal's title.
     try:
-        current_url = page.url
-        if _is_auth_blocker_url(current_url):
-            return f"auth blocker URL: {current_url}"
-
-        try:
-            title = (await page.title()).strip().lower()
-        except Exception:
-            title = ""
-        if any(pattern in title for pattern in _LOGIN_TITLE_PATTERNS):
-            return f"login title: {title}"
-
-        # An id, so it says the same thing in every interface language, which
-        # the picker's own words do not. The rest of the codebase already reads
-        # this container as the picker; here it is the only signal that
-        # survives a locale change, because the URL of an in-place picker is
-        # the page that was asked for and its title is that page's title.
-        #
-        # Ahead of the quick check's exit, and not behind it, because the two
-        # signals it does read are exactly the two this page defeats. The
-        # quick check runs after every navigation, so a picker served in a
-        # locale the table below does not cover reached every reading tool
-        # as page text. It costs one selector count, where the body read
-        # below is what the quick check exists to skip.
-        try:
-            if await page.locator(_REMEMBER_ME_CONTAINER_SELECTOR).count() > 0:
-                return f"account picker: {_REMEMBER_ME_CONTAINER_SELECTOR}"
-        except Exception:
-            logger.debug("Could not count remember-me containers", exc_info=True)
-
-        if not include_body_text:
-            return None
-
-        try:
-            body_text = await page.evaluate("() => document.body?.innerText || ''")
-        except Exception:
-            body_text = ""
-        if not isinstance(body_text, str):
-            body_text = ""
-
-        normalized = re.sub(r"\s+", " ", body_text).strip().lower()
-        for marker_group in _AUTH_BARRIER_TEXT_MARKERS:
-            if all(marker in normalized for marker in marker_group):
-                return f"auth barrier text: {' + '.join(marker_group)}"
-
-        return None
+        snapshot = await page.evaluate(
+            _AUTH_SNAPSHOT_JS,
+            {
+                "picker": _REMEMBER_ME_CONTAINER_SELECTOR,
+                "includeBody": include_body_text,
+            },
+        )
     except PlaywrightTimeoutError:
         logger.warning(
             "Timeout checking auth barrier on %s — continuing without barrier detection",
@@ -191,8 +170,50 @@ async def _detect_auth_barrier(
         )
         return None
     except Exception:
-        logger.error("Unexpected error checking auth barrier", exc_info=True)
+        # Also a document replaced mid-read, which leaves nothing to judge.
+        logger.debug("Could not read the page for auth barriers", exc_info=True)
         return None
+    if not isinstance(snapshot, dict):
+        return None
+    address = snapshot.get("href")
+    if not is_linkedin_landing(address):
+        return None
+    _raise_if_account_restricted(address)
+    if _is_auth_blocker_url(address):
+        return f"auth blocker URL: {address}"
+
+    title = snapshot.get("title")
+    title = title.strip().lower() if isinstance(title, str) else ""
+    if any(pattern in title for pattern in _LOGIN_TITLE_PATTERNS):
+        return f"login title: {title}"
+
+    # An id, so it says the same thing in every interface language, which
+    # the picker's own words do not. The rest of the codebase already reads
+    # this container as the picker; here it is the only signal that
+    # survives a locale change, because the URL of an in-place picker is
+    # the page that was asked for and its title is that page's title.
+    #
+    # Ahead of the quick check's exit, and not behind it, because the two
+    # signals it does read are exactly the two this page defeats. The
+    # quick check runs after every navigation, so a picker served in a
+    # locale the table below does not cover reached every reading tool
+    # as page text. It costs one selector lookup inside the same read,
+    # where the body text is what the quick check exists to skip.
+    if snapshot.get("picker") is True:
+        return f"account picker: {_REMEMBER_ME_CONTAINER_SELECTOR}"
+
+    if not include_body_text:
+        return None
+
+    body_text = snapshot.get("body")
+    if not isinstance(body_text, str):
+        body_text = ""
+    normalized = re.sub(r"\s+", " ", body_text).strip().lower()
+    for marker_group in _AUTH_BARRIER_TEXT_MARKERS:
+        if all(marker in normalized for marker in marker_group):
+            return f"auth barrier text: {' + '.join(marker_group)}"
+
+    return None
 
 
 async def detect_auth_barrier_quick(page: Page) -> str | None:
@@ -223,11 +244,6 @@ async def resolve_remember_me_prompt(page: Page, *, timeout: int | None = None) 
             return None
         return min(default, remaining)
 
-    # Never on a page LinkedIn did not serve: the click below would press
-    # whatever button a portal or filter page put under that id.
-    if not is_linkedin_landing(page.url):
-        return False
-
     try:
         logger.debug("Checking remember-me prompt on %s", page.url)
         try:
@@ -255,28 +271,51 @@ async def resolve_remember_me_prompt(page: Page, *, timeout: int | None = None) 
             )
             return False
 
-        logger.info("Clicking LinkedIn saved-account chooser to resume session")
+        operation_timeout = _operation_timeout(3000)
+        if operation_timeout is None:
+            return False
+        button = await target.element_handle(timeout=operation_timeout)
         try:
-            operation_timeout = _operation_timeout(3000)
-            if operation_timeout is None:
+            # The waits above give a redirect time to put the chooser's id on a
+            # portal's page, so the address checked on entry says nothing about
+            # this button. Ask the document that holds it, and click through
+            # the same handle: a navigation after this check destroys the
+            # handle and fails the click rather than retargeting it.
+            owner_address = await button.evaluate(_OWNER_DOCUMENT_ADDRESS_JS)
+            if not is_linkedin_landing(owner_address):
+                logger.warning(
+                    "Saved-account chooser is on a page LinkedIn did not serve; "
+                    "not clicking it"
+                )
                 return False
-            await target.scroll_into_view_if_needed(timeout=operation_timeout)
-        except PlaywrightTimeoutError:
-            logger.debug("Remember-me button did not scroll into view in time")
 
-        try:
-            operation_timeout = _operation_timeout(5000)
-            if operation_timeout is None:
-                return False
-            await target.click(timeout=operation_timeout)
-            logger.debug("Remember-me button click succeeded")
-        except PlaywrightTimeoutError:
-            logger.debug("Retrying remember-me prompt click with force=True")
-            operation_timeout = _operation_timeout(5000)
-            if operation_timeout is None:
-                return False
-            await target.click(timeout=operation_timeout, force=True)
-            logger.debug("Remember-me button force-click succeeded")
+            logger.info("Clicking LinkedIn saved-account chooser to resume session")
+            try:
+                operation_timeout = _operation_timeout(3000)
+                if operation_timeout is None:
+                    return False
+                await button.scroll_into_view_if_needed(timeout=operation_timeout)
+            except PlaywrightTimeoutError:
+                logger.debug("Remember-me button did not scroll into view in time")
+
+            try:
+                operation_timeout = _operation_timeout(5000)
+                if operation_timeout is None:
+                    return False
+                await button.click(timeout=operation_timeout)
+                logger.debug("Remember-me button click succeeded")
+            except PlaywrightTimeoutError:
+                logger.debug("Retrying remember-me prompt click with force=True")
+                operation_timeout = _operation_timeout(5000)
+                if operation_timeout is None:
+                    return False
+                await button.click(timeout=operation_timeout, force=True)
+                logger.debug("Remember-me button force-click succeeded")
+        finally:
+            try:
+                await button.dispose()
+            except Exception:
+                logger.debug("Could not release the chooser button", exc_info=True)
         try:
             operation_timeout = _operation_timeout(10000)
             if operation_timeout is None:

@@ -9,7 +9,7 @@ from .auth import (
     resolve_remember_me_prompt,
     wait_for_manual_login,
 )
-from .destination import is_linkedin_landing, raise_if_off_linkedin
+from .destination import is_another_site, is_linkedin_landing, raise_if_off_linkedin
 from .exceptions import (
     AccountRestrictedError,
     AuthenticationError,
@@ -78,6 +78,7 @@ __all__ = [
     "redacted_copy",
     "detect_rate_limit",
     "handle_modal_close",
+    "is_another_site",
     "is_linkedin_landing",
     "is_logged_in",
     "raise_if_off_linkedin",

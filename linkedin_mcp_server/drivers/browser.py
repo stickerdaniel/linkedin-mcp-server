@@ -13,7 +13,6 @@ import time
 from pathlib import Path
 from collections.abc import Coroutine
 from typing import Any, TypeVar
-from urllib.parse import urlsplit
 
 from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
 from linkedin_mcp_server.core import (
@@ -24,6 +23,7 @@ from linkedin_mcp_server.core import (
     detect_auth_barrier_quick,
     detect_rate_limit,
     goto_reporting_proxy_errors,
+    is_another_site,
     is_linkedin_landing,
     is_logged_in,
     proxy_hint,
@@ -188,10 +188,26 @@ async def _log_feed_failure_context(
     )
 
 
-def _is_feed_route(url: str) -> bool:
-    """Return whether a LinkedIn address is the feed itself."""
-    path = urlsplit(url).path
-    return path == "/feed" or path.startswith("/feed/")
+async def _refuse_a_landing_off_linkedin(
+    browser: BrowserManager, step: str, *, hostless_too: bool = True
+) -> None:
+    """Raise when the feed check is looking at a page LinkedIn did not serve.
+
+    Raised, never answered with a verdict. False makes the caller retire the
+    profile and open a login through the portal that is in the way, and True
+    would accept another site's page as a signed-in session.
+
+    *hostless_too* is off after a failed navigation, where a blank document or
+    the browser's own error page is what the failure left behind and the
+    failure itself is the better report.
+    """
+    url = browser.page.url
+    if is_linkedin_landing(url):
+        return
+    if not hostless_too and not is_another_site(url):
+        return
+    await record_page_trace(browser.page, step)
+    raise_if_off_linkedin(url)
 
 
 async def _feed_auth_succeeds(
@@ -217,13 +233,9 @@ async def _feed_auth_succeeds(
             "feed-after-goto",
             extra={"allow_remember_me": allow_remember_me},
         )
-        # Raised, never answered with False: False makes the caller retire the
-        # profile and open a login through the portal that is in the way.
-        # Ahead of the remember-me click and the barrier check, which read an
-        # id and a title any page can carry.
-        if not is_linkedin_landing(browser.page.url):
-            await record_page_trace(browser.page, "feed-off-linkedin")
-            raise_if_off_linkedin(browser.page.url)
+        # Ahead of the remember-me click and the barrier check, so neither
+        # runs on another site's page.
+        await _refuse_a_landing_off_linkedin(browser, "feed-off-linkedin")
         if allow_remember_me:
             if await resolve_remember_me_prompt(browser.page):
                 await stabilize_navigation("remember-me resolution", logger)
@@ -234,6 +246,9 @@ async def _feed_auth_succeeds(
                 )
                 return await _feed_auth_succeeds(browser, allow_remember_me=False)
         barrier = await detect_auth_barrier_quick(browser.page)
+        # Again, because the waits above give a redirect time to land, and a
+        # verdict either way is only about LinkedIn while the page still is.
+        await _refuse_a_landing_off_linkedin(browser, "feed-off-linkedin-settled")
         if barrier is not None:
             await record_page_trace(
                 browser.page,
@@ -241,13 +256,6 @@ async def _feed_auth_succeeds(
                 extra={"barrier": barrier},
             )
             await _log_feed_failure_context(browser, barrier)
-            return False
-        # A signed-out session is sent to the root or a guest route without
-        # any barrier the check above knows, so arriving anywhere but the feed
-        # is not proof of a session.
-        if not _is_feed_route(browser.page.url):
-            await record_page_trace(browser.page, "feed-route-missed")
-            await _log_feed_failure_context(browser, "landed off the feed route")
             return False
         return True
     except OffLinkedInLandingError:
@@ -278,6 +286,12 @@ async def _feed_auth_succeeds(
         # to /login and merely missed the load event, which is real evidence
         # about the session and must outrank the proxy explanation below.
         barrier = await detect_auth_barrier_quick(browser.page)
+        # A navigation that timed out after committing a portal's page is not
+        # evidence about the session either, and neither verdict may be given
+        # about one. After the read, so a redirect during it is seen too.
+        await _refuse_a_landing_off_linkedin(
+            browser, "feed-navigation-error-off-linkedin", hostless_too=False
+        )
         detail = redact_proxy_credentials(f"{type(exc).__name__}: {exc}")
         await record_page_trace(
             browser.page,

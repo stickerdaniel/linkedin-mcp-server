@@ -1371,12 +1371,13 @@ class TestFeedFailureDoesNotLeakCredentials:
         assert "acctzone9" not in caplog.text
 
 
-class TestTheFeedCheckNeedsLinkedInsFeed:
-    """Only the feed itself, served by LinkedIn, proves the session.
+class TestTheFeedCheckNeedsLinkedInsPage:
+    """The feed check gives a verdict only about a page LinkedIn served.
 
-    A False here makes the caller retire the profile and open a login, so a
-    page LinkedIn did not serve has to raise instead: the session says nothing
-    about the network in front of it.
+    A False here makes the caller retire the profile and open a login, and a
+    True accepts the page as signed in, so a page LinkedIn did not serve has to
+    raise instead, however late it arrived: the session says nothing about the
+    network in front of it.
     """
 
     @pytest.mark.asyncio
@@ -1433,12 +1434,18 @@ class TestTheFeedCheckNeedsLinkedInsFeed:
     @pytest.mark.parametrize(
         "landing",
         [
+            "https://www.linkedin.com/feed/",
+            "https://de.linkedin.com/feed/",
+            # Not the feed, but LinkedIn's, and without a barrier. A route on
+            # LinkedIn's own host says nothing about the session expiring, and
+            # False here retires the profile.
             "https://www.linkedin.com/",
-            "https://www.linkedin.com/feedback/",
             "https://www.linkedin.com/in/testuser/",
+            "https://www.linkedin.com/mynetwork/",
+            "https://www.linkedin.com/start/",
         ],
     )
-    async def test_a_linkedin_page_other_than_the_feed_is_not_a_session(
+    async def test_a_linkedin_landing_without_a_barrier_keeps_the_session(
         self, landing: str
     ):
         browser = _make_mock_browser()
@@ -1449,27 +1456,126 @@ class TestTheFeedCheckNeedsLinkedInsFeed:
             new_callable=AsyncMock,
             return_value=False,
         ):
-            assert await _feed_auth_succeeds(browser) is False
+            assert await _feed_auth_succeeds(browser) is True
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "landing",
+        ("landing", "barrier"),
         [
-            "https://www.linkedin.com/feed/",
-            "https://www.linkedin.com/feed/?trk=guest_homepage",
-            "https://de.linkedin.com/feed/",
+            ("https://portal.invalid/interstitial", None),
+            ("https://portal.invalid/feed/", None),
+            ("https://portal.invalid/login", "login title: linkedin login"),
         ],
+        ids=["would-fail", "would-pass", "barrier-before-redirect"],
     )
-    async def test_the_feed_is(self, landing: str):
+    async def test_a_redirect_during_the_awaited_checks_still_raises(
+        self, landing: str, barrier: str | None
+    ):
+        """The feed was LinkedIn's on arrival and a portal's by the verdict.
+
+        Whichever verdict the checks reached, False would retire the session
+        and True would accept the portal's page as signed in.
+        """
         browser = _make_mock_browser()
-        browser.page.url = landing
+
+        async def redirect_while_checking(_page):
+            browser.page.url = landing
+            return barrier
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+                side_effect=redirect_while_checking,
+            ),
+            pytest.raises(OffLinkedInLandingError, match="portal.invalid"),
+        ):
+            await _feed_auth_succeeds(browser)
+
+    @pytest.mark.asyncio
+    async def test_a_redirect_during_the_remember_me_wait_still_raises(self):
+        browser = _make_mock_browser()
+
+        async def redirect_while_waiting(*_args, **_kwargs) -> bool:
+            browser.page.url = "https://portal.invalid/interstitial"
+            return False
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                side_effect=redirect_while_waiting,
+            ),
+            pytest.raises(OffLinkedInLandingError, match="portal.invalid"),
+        ):
+            await _feed_auth_succeeds(browser)
+
+    @pytest.mark.asyncio
+    async def test_a_timed_out_navigation_onto_a_portal_raises(self):
+        """No proxy, so without the refusal this was False and a retired session."""
+        browser = _make_mock_browser()
+
+        async def commit_the_portal_then_time_out(*_args, **_kwargs):
+            browser.page.url = "https://portal.invalid/interstitial"
+            raise Exception("Page.goto: Timeout 30000ms exceeded.")
+
+        browser.page.goto = AsyncMock(side_effect=commit_the_portal_then_time_out)
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(OffLinkedInLandingError, match="portal.invalid"),
+        ):
+            await _feed_auth_succeeds(browser)
+
+    @pytest.mark.asyncio
+    async def test_a_redirect_during_the_error_path_checks_still_raises(self):
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(
+            side_effect=Exception("Page.goto: Timeout 30000ms exceeded.")
+        )
+
+        async def redirect_while_checking(_page):
+            browser.page.url = "https://portal.invalid/login"
+            return "login title: linkedin login"
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+                side_effect=redirect_while_checking,
+            ),
+            pytest.raises(OffLinkedInLandingError, match="portal.invalid"),
+        ):
+            await _feed_auth_succeeds(browser)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_request_keeps_its_existing_verdict(self):
+        """The browser's own error page is the failure, not a landing."""
+        browser = _make_mock_browser()
+
+        async def fail_to_resolve(*_args, **_kwargs):
+            browser.page.url = "chrome-error://chromewebdata/"
+            raise Exception("net::ERR_NAME_NOT_RESOLVED")
+
+        browser.page.goto = AsyncMock(side_effect=fail_to_resolve)
 
         with patch(
             "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
             new_callable=AsyncMock,
             return_value=False,
         ):
-            assert await _feed_auth_succeeds(browser) is True
+            assert await _feed_auth_succeeds(browser) is False
 
     @pytest.mark.asyncio
     async def test_startup_keeps_the_session_behind_a_portal(self, tmp_path):

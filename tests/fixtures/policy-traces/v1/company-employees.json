@@ -97,7 +97,7 @@
       "call": "get_company_employees",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "bf2d4eeeaa95"
+      "program_digest": "5a15538325b2"
     }
   ],
   "result": {

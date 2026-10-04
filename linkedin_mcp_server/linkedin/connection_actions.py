@@ -32,6 +32,7 @@ import logging
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from linkedin_mcp_server.core.exceptions import OffLinkedInLandingError
 import linkedin_mcp_server.linkedin.connection as connection
 from linkedin_mcp_server.linkedin.connection import ActionSignals
 from linkedin_mcp_server.linkedin.identifiers import (
@@ -391,7 +392,7 @@ class ConnectionActions:
                 return None
 
         try:
-            message = await self._session.page.evaluate(
+            message = await self._session.read_document(
                 """() => {
                     const link = document.querySelector(
                         'dialog[open] a[href*="/premium/"], [role="dialog"] a[href*="/premium/"]'
@@ -402,6 +403,8 @@ class ConnectionActions:
             )
             if isinstance(message, str) and message.strip():
                 return message.strip()
+        except OffLinkedInLandingError:
+            raise
         except Exception:
             logger.debug("Could not read Premium upsell dialog text", exc_info=True)
 
@@ -473,7 +476,7 @@ class ConnectionActions:
         portal-rendered "Send profile in a message" anchor that appears
         inside the More menu after click.
         """
-        data = await self._session.page.evaluate(ACTION_SIGNALS_JS, username)
+        data = await self._session.read_document(ACTION_SIGNALS_JS, username)
         if not isinstance(data, dict):
             return ActionSignals(
                 has_invite_anchor=False,

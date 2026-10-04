@@ -518,7 +518,10 @@ async def test_compatibility_helpers_keep_their_browser_behavior():
         "locator.scroll_into_view",
     }
     recorder = TraceRecorder("compatibility-helpers", allowed)
-    page = ScriptedPage(recorder).script("evaluate:page_text", "Policy text")
+    # A LinkedIn address, because the read refuses any other page.
+    page = ScriptedPage(recorder, url="https://www.linkedin.com/feed/").script(
+        "evaluate:page_text", "Policy text"
+    )
     page.declare_locator("main", "main-scope")
     page.declare_locator(
         "button, a, [role='button']", "click-candidates", parent="main-scope"
