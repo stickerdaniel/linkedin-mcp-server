@@ -125,7 +125,7 @@
       "call": "search_jobs",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "5a15538325b2",
+      "program_digest": "571a440efbe5",
       "section": "search_results"
     },
     {
@@ -139,7 +139,7 @@
       "call": "search_jobs",
       "kind": "evaluate",
       "operation": "job_total_pages",
-      "program_digest": "57c924a2de6f",
+      "program_digest": "c8fa0187dc0a",
       "section": "search_results"
     },
     {
@@ -150,7 +150,7 @@
       "call": "search_jobs",
       "kind": "evaluate",
       "operation": "job_ids",
-      "program_digest": "1a5954cff33b",
+      "program_digest": "354aaa80a8cb",
       "section": "search_results"
     },
     {
@@ -161,7 +161,7 @@
       "call": "search_jobs",
       "kind": "evaluate",
       "operation": "job_promoted_ids",
-      "program_digest": "a232ed04ce4f",
+      "program_digest": "5e4447eeb44f",
       "section": "search_results"
     },
     {
@@ -289,7 +289,7 @@
       "call": "search_jobs",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "5a15538325b2",
+      "program_digest": "571a440efbe5",
       "section": "search_results"
     },
     {
@@ -307,7 +307,7 @@
       "call": "search_jobs",
       "kind": "evaluate",
       "operation": "job_ids",
-      "program_digest": "1a5954cff33b",
+      "program_digest": "354aaa80a8cb",
       "section": "search_results"
     }
   ],

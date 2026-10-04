@@ -511,11 +511,14 @@ def test_facade_methods_are_exactly_the_frozen_coroutine_surface():
 async def test_compatibility_helpers_keep_their_browser_behavior():
     allowed = {
         "evaluate",
-        "locator.click",
+        "handle.click",
+        "handle.dispose",
+        "handle.evaluate",
+        "handle.scroll_into_view",
         "locator.count",
         "locator.create",
         "locator.derive",
-        "locator.scroll_into_view",
+        "locator.element_handle",
     }
     recorder = TraceRecorder("compatibility-helpers", allowed)
     # A LinkedIn address, because the read refuses any other page.
@@ -531,8 +534,6 @@ async def test_compatibility_helpers_keep_their_browser_behavior():
     )
     page.declare_derived("exact-connect", "first", "connect-target")
     page.script("exact-connect.count", 1)
-    page.script("connect-target.scroll_into_view", None)
-    page.script("connect-target.click", None)
     extractor = LinkedInExtractor(cast(Page, page))
 
     assert await extractor.get_page_text() == "Policy text"
@@ -544,8 +545,13 @@ async def test_compatibility_helpers_keep_their_browser_behavior():
         "locator.derive",
         "locator.count",
         "locator.derive",
-        "locator.scroll_into_view",
-        "locator.click",
+        # Resolved once, asked for its own document, and acted on through
+        # that handle, so a redirect cannot move the click to another page.
+        "locator.element_handle",
+        "handle.evaluate",
+        "handle.scroll_into_view",
+        "handle.click",
+        "handle.dispose",
     ]
 
 

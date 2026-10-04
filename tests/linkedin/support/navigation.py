@@ -66,6 +66,24 @@ def mock_page():
     return page
 
 
+def held_in(
+    element,
+    document_url: str = "https://www.linkedin.com/in/testuser/",
+):
+    """Let a locator double resolve to itself, held in a document at *document_url*.
+
+    An action on a LinkedIn element first resolves the locator to one handle
+    and asks that handle for its own document's address, then acts through
+    the handle. A double that answers as both the locator and the handle keeps
+    every assertion about its `click`, `fill` or `press` where it was, and its
+    address says which page it sits on.
+    """
+    element.element_handle = AsyncMock(return_value=element)
+    element.evaluate = AsyncMock(return_value=document_url)
+    element.dispose = AsyncMock()
+    return element
+
+
 def with_document_identity(page, evaluate):
     """Answer the document-identity read from `page.time_origin`.
 

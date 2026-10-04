@@ -328,7 +328,7 @@ class JobPageReader:
         except PlaywrightTimeoutError:
             logger.debug("No apply control or posting state rendered on %s", url)
 
-        signals = await self._session.read_document(APPLY_SIGNALS_JS, opts)
+        signals = await self._session.run_on_linkedin(APPLY_SIGNALS_JS, opts)
         # Both states before any control, so a posting in either never reads
         # as open.
         if signals and signals["applied"]:
@@ -356,7 +356,7 @@ class JobPageReader:
             scoped: Read only the results rail, chosen by the same rule the
                 sidebar scroll uses. Off for lists that have no rail.
         """
-        result = await self._session.read_document(
+        result = await self._session.run_on_linkedin(
             JOB_IDS_JS, {"selector": _JOB_CARD_SELECTOR, "scoped": scoped}
         )
         if scoped and not result["scoped"]:
@@ -379,7 +379,7 @@ class JobPageReader:
         treating this as best effort cannot mistake a failed read for a page
         without promoted jobs.
         """
-        result = await self._session.read_document(
+        result = await self._session.run_on_linkedin(
             PROMOTED_JOB_IDS_JS, {"selector": _JOB_CARD_SELECTOR, "label": label}
         )
         if not isinstance(result, list):
@@ -584,7 +584,7 @@ class JobPageReader:
         selector is the only reliable way to read it. Gracefully returns ``None`` if
         LinkedIn renames the class — pagination just falls back to ``max_pages``.
         """
-        text = await self._session.read_document(
+        text = await self._session.run_on_linkedin(
             """() => {
                 const el = document.querySelector(
                     '.jobs-search-pagination__page-state'
@@ -752,7 +752,7 @@ class JobPageReader:
         ``None`` — pagination then falls back to ``max_pages`` and the
         no-new-ids early stop.
         """
-        value = await self._session.read_document(
+        value = await self._session.run_on_linkedin(
             """() => {
                 const buttons = document.querySelectorAll(
                     'ul.artdeco-pagination__pages li button'

@@ -1214,7 +1214,7 @@ class MessageSender:
             logger.debug("Could not wait for the profile Message action", exc_info=True)
 
         try:
-            # Not through `read_document`: the script returns its document's
+            # Not through `run_on_linkedin`: the script returns its document's
             # own `pageUrl`, and `_profile_path_from_url` below refuses any
             # address but a LinkedIn profile, so another site reads as failed.
             data = await self._page.evaluate(_PROFILE_MESSAGE_TARGET_JS)

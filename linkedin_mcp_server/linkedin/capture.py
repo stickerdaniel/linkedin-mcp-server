@@ -17,9 +17,13 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.destination import (
     is_another_site,
+    linkedin_element,
     raise_if_off_linkedin,
 )
-from linkedin_mcp_server.core.exceptions import LinkedInOperationError
+from linkedin_mcp_server.core.exceptions import (
+    LinkedInOperationError,
+    OffLinkedInLandingError,
+)
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.contracts import (
@@ -420,9 +424,12 @@ class SectionCapture:
                     target = button.first
                     if not await target.is_visible():
                         break
-                    await target.scroll_into_view_if_needed(timeout=2000)
-                    await target.click(timeout=2000)
+                    async with linkedin_element(target, timeout=2000) as button:
+                        await button.scroll_into_view_if_needed(timeout=2000)
+                        await button.click(timeout=2000)
                     await self._session.delay(1.0)
+                except OffLinkedInLandingError:
+                    raise
                 except PlaywrightTimeoutError:
                     logger.debug("Show more click timed out after %d clicks", i)
                     break

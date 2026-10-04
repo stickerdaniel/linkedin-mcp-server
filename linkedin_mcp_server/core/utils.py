@@ -12,7 +12,8 @@ from patchright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
-from .exceptions import RateLimitError
+from .destination import linkedin_element
+from .exceptions import OffLinkedInLandingError, RateLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -548,12 +549,15 @@ async def handle_modal_close(page: Page) -> bool:
         ).first
 
         if await close_button.is_visible(timeout=1000):
-            await close_button.click()
+            async with linkedin_element(close_button, timeout=1000) as button:
+                await button.click()
             await asyncio.sleep(0.5)
             logger.debug("Closed modal")
             return True
     except PlaywrightTimeoutError:
         pass
+    except OffLinkedInLandingError:
+        raise
     except Exception as e:
         logger.debug("Error closing modal: %s", e)
 

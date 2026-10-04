@@ -32,6 +32,10 @@ import logging
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from linkedin_mcp_server.core.destination import (
+    linkedin_element,
+    raise_if_off_linkedin,
+)
 from linkedin_mcp_server.core.exceptions import OffLinkedInLandingError
 import linkedin_mcp_server.linkedin.connection as connection
 from linkedin_mcp_server.linkedin.connection import ActionSignals
@@ -342,8 +346,13 @@ class ConnectionActions:
         if count == 0:
             return False
         try:
-            await buttons.nth(count - 1).click(timeout=timeout)
+            async with linkedin_element(
+                buttons.nth(count - 1), timeout=timeout
+            ) as button:
+                await button.click(timeout=timeout)
             return True
+        except OffLinkedInLandingError:
+            raise
         except Exception:
             logger.debug("Primary dialog button click failed", exc_info=True)
             return False
@@ -354,8 +363,11 @@ class ConnectionActions:
         try:
             if await self._session.page.locator(_DIALOG_TEXTAREA_SELECTOR).count() == 0:
                 return False
-            await locator.fill(value, timeout=timeout)
+            async with linkedin_element(locator, timeout=timeout) as textarea:
+                await textarea.fill(value, timeout=timeout)
             return True
+        except OffLinkedInLandingError:
+            raise
         except Exception:
             logger.debug("Invite note fill failed", exc_info=True)
             return False
@@ -392,7 +404,7 @@ class ConnectionActions:
                 return None
 
         try:
-            message = await self._session.read_document(
+            message = await self._session.run_on_linkedin(
                 """() => {
                     const link = document.querySelector(
                         'dialog[open] a[href*="/premium/"], [role="dialog"] a[href*="/premium/"]'
@@ -408,12 +420,19 @@ class ConnectionActions:
         except Exception:
             logger.debug("Could not read Premium upsell dialog text", exc_info=True)
 
+        # The snapshot above can fail because the page left mid-read, and then
+        # neither the link nor the bare fact of a dialog is LinkedIn's. Both
+        # are taken only from a page that still is.
         try:
-            link_text = await locator.inner_text()
+            async with linkedin_element(locator, timeout=timeout) as link:
+                link_text = await link.inner_text()
             if link_text.strip():
                 return link_text.strip()
+        except OffLinkedInLandingError:
+            raise
         except Exception:
             pass
+        raise_if_off_linkedin(self._session.page.url)
         return "LinkedIn Premium upsell modal detected."
 
     async def _open_more_menu(self) -> bool:
@@ -432,7 +451,9 @@ class ConnectionActions:
         contents itself.
         """
         try:
-            clicked = await self._session.page.evaluate(OPEN_MORE_BUTTON_JS)
+            clicked = await self._session.run_on_linkedin(OPEN_MORE_BUTTON_JS)
+        except OffLinkedInLandingError:
+            raise
         except Exception:
             logger.debug("More button click via JS failed", exc_info=True)
             return False
@@ -457,7 +478,9 @@ class ConnectionActions:
         mitigations. Returns True iff the click landed.
         """
         try:
-            return bool(await self._session.page.evaluate(CLICK_INCOMING_ACCEPT_JS))
+            return bool(await self._session.run_on_linkedin(CLICK_INCOMING_ACCEPT_JS))
+        except OffLinkedInLandingError:
+            raise
         except Exception:
             logger.debug("Incoming accept click via JS failed", exc_info=True)
             return False
@@ -476,7 +499,7 @@ class ConnectionActions:
         portal-rendered "Send profile in a message" anchor that appears
         inside the More menu after click.
         """
-        data = await self._session.read_document(ACTION_SIGNALS_JS, username)
+        data = await self._session.run_on_linkedin(ACTION_SIGNALS_JS, username)
         if not isinstance(data, dict):
             return ActionSignals(
                 has_invite_anchor=False,
@@ -541,7 +564,8 @@ class ConnectionActions:
                 )
                 btn_count = await buttons.count()
                 if btn_count >= 2:
-                    await buttons.nth(btn_count - 2).click()
+                    async with linkedin_element(buttons.nth(btn_count - 2)) as add_note:
+                        await add_note.click()
                     textarea_appeared = True
                     try:
                         await self._session.page.wait_for_selector(
@@ -611,9 +635,13 @@ class ConnectionActions:
             btn_count = await buttons.count()
             if btn_count > 0:
                 try:
-                    await buttons.nth(btn_count - 1).focus()
-                    await self._session.page.keyboard.press("Enter")
+                    # Through the handle, so Enter lands on this button in
+                    # this document rather than on whatever holds focus.
+                    async with linkedin_element(buttons.nth(btn_count - 1)) as button:
+                        await button.press("Enter")
                     sent = not await self._dialog_is_open(timeout=2000)
+                except OffLinkedInLandingError:
+                    raise
                 except Exception:
                     logger.debug("Keyboard submit fallback failed", exc_info=True)
             if not sent:
@@ -701,7 +729,10 @@ class ConnectionActions:
             btn_count = 0
         if btn_count >= 3:
             try:
-                await buttons.nth(btn_count - 2).click()
+                async with linkedin_element(buttons.nth(btn_count - 2)) as add_note:
+                    await add_note.click()
+            except OffLinkedInLandingError:
+                raise
             except Exception:
                 logger.debug("Could not open invite note editor", exc_info=True)
             try:

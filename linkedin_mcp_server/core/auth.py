@@ -11,8 +11,12 @@ from patchright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
-from .destination import is_linkedin_landing
-from .exceptions import AccountRestrictedError, AuthenticationError
+from .destination import is_linkedin_landing, linkedin_element
+from .exceptions import (
+    AccountRestrictedError,
+    AuthenticationError,
+    OffLinkedInLandingError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +55,6 @@ _AUTH_SNAPSHOT_JS = """({ picker, includeBody }) => ({
     picker: document.querySelector(picker) !== null,
     body: includeBody ? (document.body?.innerText || '') : '',
 })"""
-# Reads the address of the document an element lives in, so a click is judged
-# by the page holding the button rather than by the page the driver last saw.
-_OWNER_DOCUMENT_ADDRESS_JS = "element => element.ownerDocument.location.href"
 _MANUAL_LOGIN_STATUS_INTERVAL_SECONDS = 30
 _AUTH_COOKIE_URL = "https://www.linkedin.com/feed/"
 
@@ -274,48 +275,40 @@ async def resolve_remember_me_prompt(page: Page, *, timeout: int | None = None) 
         operation_timeout = _operation_timeout(3000)
         if operation_timeout is None:
             return False
-        button = await target.element_handle(timeout=operation_timeout)
+        # The waits above give a redirect time to put the chooser's id on a
+        # portal's page, so whatever address was seen earlier says nothing
+        # about this button. Only its own document does, and the click goes
+        # through the handle that was asked.
         try:
-            # The waits above give a redirect time to put the chooser's id on a
-            # portal's page, so the address checked on entry says nothing about
-            # this button. Ask the document that holds it, and click through
-            # the same handle: a navigation after this check destroys the
-            # handle and fails the click rather than retargeting it.
-            owner_address = await button.evaluate(_OWNER_DOCUMENT_ADDRESS_JS)
-            if not is_linkedin_landing(owner_address):
-                logger.warning(
-                    "Saved-account chooser is on a page LinkedIn did not serve; "
-                    "not clicking it"
-                )
-                return False
+            async with linkedin_element(target, timeout=operation_timeout) as button:
+                logger.info("Clicking LinkedIn saved-account chooser to resume session")
+                try:
+                    operation_timeout = _operation_timeout(3000)
+                    if operation_timeout is None:
+                        return False
+                    await button.scroll_into_view_if_needed(timeout=operation_timeout)
+                except PlaywrightTimeoutError:
+                    logger.debug("Remember-me button did not scroll into view in time")
 
-            logger.info("Clicking LinkedIn saved-account chooser to resume session")
-            try:
-                operation_timeout = _operation_timeout(3000)
-                if operation_timeout is None:
-                    return False
-                await button.scroll_into_view_if_needed(timeout=operation_timeout)
-            except PlaywrightTimeoutError:
-                logger.debug("Remember-me button did not scroll into view in time")
-
-            try:
-                operation_timeout = _operation_timeout(5000)
-                if operation_timeout is None:
-                    return False
-                await button.click(timeout=operation_timeout)
-                logger.debug("Remember-me button click succeeded")
-            except PlaywrightTimeoutError:
-                logger.debug("Retrying remember-me prompt click with force=True")
-                operation_timeout = _operation_timeout(5000)
-                if operation_timeout is None:
-                    return False
-                await button.click(timeout=operation_timeout, force=True)
-                logger.debug("Remember-me button force-click succeeded")
-        finally:
-            try:
-                await button.dispose()
-            except Exception:
-                logger.debug("Could not release the chooser button", exc_info=True)
+                try:
+                    operation_timeout = _operation_timeout(5000)
+                    if operation_timeout is None:
+                        return False
+                    await button.click(timeout=operation_timeout)
+                    logger.debug("Remember-me button click succeeded")
+                except PlaywrightTimeoutError:
+                    logger.debug("Retrying remember-me prompt click with force=True")
+                    operation_timeout = _operation_timeout(5000)
+                    if operation_timeout is None:
+                        return False
+                    await button.click(timeout=operation_timeout, force=True)
+                    logger.debug("Remember-me button force-click succeeded")
+        except OffLinkedInLandingError:
+            logger.warning(
+                "Saved-account chooser is on a page LinkedIn did not serve; "
+                "not clicking it"
+            )
+            return False
         try:
             operation_timeout = _operation_timeout(10000)
             if operation_timeout is None:

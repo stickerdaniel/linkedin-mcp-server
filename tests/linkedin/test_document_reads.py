@@ -1,8 +1,8 @@
-"""Every read whose result is taken as LinkedIn content refuses another site.
+"""Every read and action on a LinkedIn page refuses another site.
 
 Each case drives one reader's own script on a page that is a portal's by the
 time it is read, with whatever plausible answer the script would give. A read
-that skips ``PageSession.read_document`` returns that answer and fails here;
+that skips ``PageSession.run_on_linkedin`` returns that answer and fails here;
 ``tests/test_off_linkedin_landing_dom.py`` runs the wrapper itself in a real
 browser.
 """
@@ -16,7 +16,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from linkedin_mcp_server.core.exceptions import OffLinkedInLandingError
-from linkedin_mcp_server.linkedin.capture import SectionCapture
+from linkedin_mcp_server.core.utils import handle_modal_close
+from linkedin_mcp_server.linkedin import session as session_module
+from linkedin_mcp_server.linkedin.capture import (
+    CaptureMode,
+    CapturePlan,
+    SectionCapture,
+)
 from linkedin_mcp_server.linkedin.connection_actions import ConnectionActions
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.conversations import ConversationReader
@@ -26,6 +32,8 @@ from linkedin_mcp_server.linkedin.person import PersonReader
 from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
 from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.linkedin.text import JOB_APPLY_EN_US
+
+from .support.navigation import held_in
 
 PORTAL_URL = "https://portal.invalid/interstitial"
 
@@ -176,3 +184,183 @@ async def test_a_read_on_another_sites_page_is_refused(
 
     with pytest.raises(OffLinkedInLandingError, match="https://portal.invalid"):
         await read(mock_page)
+
+
+# Actions. A page script that clicks runs through `run_on_linkedin`, which
+# refuses before the script runs; here the double cannot run a script, so the
+# driver's address stands in and a bypass returns the click's answer instead
+# of raising. A locator action resolves one handle first and asks that handle
+# for its own document, so those doubles hold their element on the portal
+# while the driver still reports LinkedIn: the handle, not the driver, decides.
+
+LINKEDIN_URL = "https://www.linkedin.com/in/testuser/"
+
+
+def _portal_element() -> MagicMock:
+    element = held_in(MagicMock(), PORTAL_URL)
+    for action in ("click", "fill", "press", "scroll_into_view_if_needed"):
+        setattr(element, action, AsyncMock())
+    element.count = AsyncMock(return_value=3)
+    element.is_visible = AsyncMock(return_value=True)
+    element.wait_for = AsyncMock()
+    element.inner_text = AsyncMock(return_value="FOREIGN PORTAL MESSAGE")
+    element.first = element
+    element.filter = MagicMock(return_value=element)
+    element.locator = MagicMock(return_value=element)
+    element.nth = MagicMock(return_value=element)
+    return element
+
+
+async def _show_more(page: Any) -> Any:
+    # The driver still says LinkedIn, so the content read after the loop would
+    # succeed: only the handle's refusal, carried out of the loop, can fail it.
+    page.url = LINKEDIN_URL
+    session = _session(page)
+    capture = SectionCapture(
+        session, PageNavigator(session), PageContentReader(session)
+    )
+    with (
+        patch.object(session_module, "scroll_to_bottom", new_callable=AsyncMock),
+        patch.object(session_module, "detect_rate_limit", new_callable=AsyncMock),
+        patch.object(session_module, "handle_modal_close", new_callable=AsyncMock),
+    ):
+        return await capture._extract_loaded_section(
+            "https://www.linkedin.com/in/testuser/details/experience/",
+            "experience",
+            CapturePlan(CaptureMode.DETAILS),
+        )
+
+
+async def _keyboard_fallback(page: Any) -> Any:
+    actions = _connections(page)
+    with (
+        patch.object(actions, "_dialog_is_open", AsyncMock(return_value=True)),
+        patch.object(actions, "_fill_dialog_textarea", AsyncMock(return_value=True)),
+        patch.object(
+            actions, "_click_dialog_primary_button", AsyncMock(return_value=False)
+        ),
+    ):
+        return await actions._submit_invite_dialog(None)
+
+
+async def _add_note(page: Any) -> Any:
+    actions = _connections(page)
+    page.element.count = AsyncMock(side_effect=[0, 2])
+    with patch.object(actions, "_dialog_is_open", AsyncMock(return_value=True)):
+        return await actions._submit_invite_dialog("Hello")
+
+
+async def _quota_probe(page: Any) -> Any:
+    actions = _connections(page)
+    page.element.count = AsyncMock(side_effect=[0, 3])
+    with (
+        patch.object(actions, "_dialog_is_open", AsyncMock(return_value=True)),
+        patch.object(
+            actions, "_get_premium_upsell_message", AsyncMock(return_value=None)
+        ),
+    ):
+        return await actions._probe_invite_note_limit()
+
+
+ACTIONS: list[tuple[str, Read]] = [
+    ("open the More menu", lambda p: _connections(p)._open_more_menu()),
+    ("accept an incoming request", lambda p: _connections(p)._click_incoming_accept()),
+    (
+        "scroll the conversation list",
+        lambda p: _conversations(p)._scroll_main_scrollable_region(
+            position="bottom", attempts=1
+        ),
+    ),
+    ("click a button by its text", lambda p: _content(p).click_button_by_text("Go")),
+    ("click a details Show more", _show_more),
+    (
+        "click the dialog's primary button",
+        lambda p: _connections(p)._click_dialog_primary_button(),
+    ),
+    ("fill the invite note", lambda p: _connections(p)._fill_dialog_textarea("Hi")),
+    ("open the note editor", _add_note),
+    ("press Enter on the primary button", _keyboard_fallback),
+    ("open the note editor for the quota probe", _quota_probe),
+    ("close a modal", lambda p: handle_modal_close(p)),
+]
+
+
+@pytest.mark.parametrize(
+    "act", [act for _name, act in ACTIONS], ids=[name for name, _act in ACTIONS]
+)
+async def test_an_action_on_another_sites_page_is_refused_unperformed(
+    mock_page, act: Read
+):
+    element = _portal_element()
+    mock_page.element = element
+    mock_page.locator = MagicMock(return_value=element)
+    mock_page.url = PORTAL_URL
+    mock_page.evaluate = AsyncMock(return_value=True)
+
+    with pytest.raises(OffLinkedInLandingError, match="https://portal.invalid"):
+        await act(mock_page)
+
+    for action in ("click", "fill", "press"):
+        getattr(element, action).assert_not_awaited()
+
+
+async def test_a_handle_on_a_portal_is_refused_while_the_driver_says_linkedin(
+    mock_page,
+):
+    """The driver's address lags the redirect; the element's own document does not."""
+    element = _portal_element()
+    mock_page.locator = MagicMock(return_value=element)
+    mock_page.url = LINKEDIN_URL
+
+    with pytest.raises(OffLinkedInLandingError, match="https://portal.invalid"):
+        await _connections(mock_page)._click_dialog_primary_button()
+
+    element.click.assert_not_awaited()
+
+
+class TestTheUpsellFallbackReadsOnlyLinkedIn:
+    """The snapshot can fail because the page left; the fallback must not follow."""
+
+    async def test_an_interrupted_snapshot_on_a_portal_is_refused(self, mock_page):
+        mock_page.url = PORTAL_URL
+        mock_page.locator = MagicMock(return_value=_portal_element())
+        mock_page.evaluate = AsyncMock(
+            side_effect=Exception(
+                "Execution context was destroyed, most likely because of a navigation"
+            )
+        )
+
+        with pytest.raises(OffLinkedInLandingError, match="https://portal.invalid"):
+            await _connections(mock_page)._get_premium_upsell_message()
+
+    async def test_the_link_is_judged_by_its_own_document(self, mock_page):
+        """The driver still says LinkedIn; the link is on the portal."""
+        mock_page.url = LINKEDIN_URL
+        mock_page.locator = MagicMock(return_value=_portal_element())
+        mock_page.evaluate = AsyncMock(side_effect=Exception("context destroyed"))
+
+        with pytest.raises(OffLinkedInLandingError, match="https://portal.invalid"):
+            await _connections(mock_page)._get_premium_upsell_message()
+
+    async def test_no_link_left_on_a_portal_is_not_a_detected_modal(self, mock_page):
+        link = _portal_element()
+        link.element_handle = AsyncMock(side_effect=Exception("detached"))
+        mock_page.url = PORTAL_URL
+        mock_page.locator = MagicMock(return_value=link)
+        mock_page.evaluate = AsyncMock(side_effect=Exception("context destroyed"))
+
+        with pytest.raises(OffLinkedInLandingError, match="https://portal.invalid"):
+            await _connections(mock_page)._get_premium_upsell_message()
+
+    async def test_linkedin_s_link_text_is_still_the_fallback(self, mock_page):
+        link = held_in(MagicMock(), LINKEDIN_URL)
+        link.first = link
+        link.wait_for = AsyncMock()
+        link.inner_text = AsyncMock(return_value="Upgrade to send more notes")
+        mock_page.url = LINKEDIN_URL
+        mock_page.locator = MagicMock(return_value=link)
+        mock_page.evaluate = AsyncMock(side_effect=Exception("context destroyed"))
+
+        message = await _connections(mock_page)._get_premium_upsell_message()
+
+        assert message == "Upgrade to send more notes"

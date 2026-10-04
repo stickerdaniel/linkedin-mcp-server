@@ -6,6 +6,8 @@ import logging
 import re
 from typing import Any
 
+from linkedin_mcp_server.core.destination import linkedin_element
+from linkedin_mcp_server.core.exceptions import OffLinkedInLandingError
 from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.linkedin.text import strip_linkedin_noise
 
@@ -21,7 +23,7 @@ class PageContentReader:
 
     async def get_page_text(self) -> str:
         """Extract innerText from the main content area of the current page."""
-        text = await self._session.read_document(
+        text = await self._session.run_on_linkedin(
             "() => (document.querySelector('main') || document.body).innerText || ''"
         )
         return strip_linkedin_noise(text) if isinstance(text, str) else ""
@@ -39,14 +41,16 @@ class PageContentReader:
         logger.debug("click_button_by_text(%r): %d matches in %s", text, count, scope)
         if count == 0:
             return False
-        target = matches.first
         try:
-            await target.scroll_into_view_if_needed(timeout=timeout)
-        except Exception:
-            logger.debug("Scroll failed for button '%s'", text, exc_info=True)
-        try:
-            await target.click(timeout=timeout)
+            async with linkedin_element(matches.first, timeout=timeout) as target:
+                try:
+                    await target.scroll_into_view_if_needed(timeout=timeout)
+                except Exception:
+                    logger.debug("Scroll failed for button '%s'", text, exc_info=True)
+                await target.click(timeout=timeout)
             return True
+        except OffLinkedInLandingError:
+            raise
         except Exception:
             logger.debug("Click failed for button '%s'", text, exc_info=True)
             return False
@@ -60,7 +64,7 @@ class PageContentReader:
         Raises:
             OffLinkedInLandingError: When the document read was not LinkedIn's.
         """
-        result = await self._session.read_document(
+        result = await self._session.run_on_linkedin(
             """({ selectors }) => {
                 const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
                 const containerSelector = 'section, article, li, div';

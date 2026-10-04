@@ -6,11 +6,16 @@ from dataclasses import dataclass
 from typing import Any
 
 import asyncio
+import json
 import time
 
 from patchright.async_api import Page
 
-from linkedin_mcp_server.core.destination import raise_if_off_linkedin
+from linkedin_mcp_server.core.destination import (
+    LINKEDIN_HOST_PATTERN,
+    LINKEDIN_LANDING_JS,
+    raise_if_off_linkedin,
+)
 from linkedin_mcp_server.core.utils import (
     detect_rate_limit,
     handle_modal_close,
@@ -47,20 +52,30 @@ class PageSession:
         """Pause through the session delay boundary."""
         await asyncio.sleep(seconds)
 
-    async def read_document(self, script: str, arg: Any = _NO_ARGUMENT) -> Any:
-        """Run a read *script* and answer its result only from a LinkedIn page.
+    async def run_on_linkedin(self, script: str, arg: Any = _NO_ARGUMENT) -> Any:
+        """Run a page *script* only in a LinkedIn document, and answer its result.
 
-        *script* is a function expression. Its result comes back together with
-        the address of the document it ran in, read in the same evaluation, so
-        a redirect landing between navigation and this read cannot hand over
-        another site's page as LinkedIn's. Every script whose result is read as
-        LinkedIn content goes through here.
+        *script* is a function expression. The same evaluation first asks
+        whether its own document is LinkedIn's and, if not, returns before the
+        script runs, so a script that clicks or types never acts on another
+        site's page, and one that reads never hands that page over as
+        LinkedIn's. The address Python last saw cannot answer either question:
+        a redirect can land between it and this evaluation. Every page script
+        that reads LinkedIn content, clicks, focuses or types goes through
+        here.
 
         Raises:
             OffLinkedInLandingError: When that document was not LinkedIn's.
         """
+        # A refusal returns the address alone, and the address is the marker:
+        # the check below refuses it, and the same check covers an async
+        # script whose document changed while it ran.
         wrapped = (
             "async (arg) => {\n"
+            f"const onLinkedIn = {LINKEDIN_LANDING_JS};\n"
+            f"if (!onLinkedIn(location.href, {json.dumps(LINKEDIN_HOST_PATTERN)})) {{\n"
+            f"return {{ {_DOCUMENT_ADDRESS}: location.href }};\n"
+            "}\n"
             f"const value = await ({script})(arg);\n"
             f"return {{ value, {_DOCUMENT_ADDRESS}: location.href }};\n"
             "}"

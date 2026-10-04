@@ -2,6 +2,9 @@
 
 import logging
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any, NoReturn
 from urllib.parse import urlsplit
 
 from .exceptions import OffLinkedInLandingError
@@ -13,6 +16,36 @@ logger = logging.getLogger(__name__)
 # a reference on: the root, `www`, and the locale subdomains that serve a
 # profile themselves.
 _LINKEDIN_HOST = re.compile(r"^(?:[a-z0-9-]+\.)*linkedin\.com$")
+
+# The host pattern above, in the one syntax both Python and JavaScript read the
+# same way, so the in-page check below cannot drift from it.
+LINKEDIN_HOST_PATTERN = _LINKEDIN_HOST.pattern
+
+# `is_linkedin_landing` for a page script, which has to decide inside its own
+# evaluation, before it clicks, whether the document it is about to act on is
+# LinkedIn's: the address Python saw belongs to a moment that has passed. Called
+# as `(href, hostPattern)` with LINKEDIN_HOST_PATTERN. The rules are Python's,
+# rule for rule; `tests/test_off_linkedin_landing_dom.py` holds the two to the
+# same answers.
+LINKEDIN_LANDING_JS = r"""(href, hostPattern) => {
+    let url;
+    try {
+        url = new URL(href);
+    } catch {
+        return false;
+    }
+    const host = url.hostname.replace(/\.$/, '');
+    return url.protocol === 'https:'
+        && (url.port === '' || url.port === '443')
+        && url.username === ''
+        && url.password === ''
+        && new RegExp(hostPattern).test(host);
+}"""
+
+# Reads the address of the document an element lives in, so an action is
+# judged by the page holding the element rather than the page the driver last
+# reported.
+_OWNER_DOCUMENT_ADDRESS_JS = "element => element.ownerDocument.location.href"
 
 
 def is_linkedin_landing(url: object) -> bool:
@@ -82,14 +115,51 @@ def describe_landing(url: object) -> str:
     return "an unknown page"
 
 
+def refuse_landing(url: object) -> NoReturn:
+    """Raise for a page that is not LinkedIn's, whoever decided it.
+
+    Raises:
+        OffLinkedInLandingError: Always.
+    """
+    landed_on = describe_landing(url)
+    logger.warning("Navigation ended off LinkedIn, on %s", landed_on)
+    raise OffLinkedInLandingError(landed_on)
+
+
 def raise_if_off_linkedin(url: object) -> None:
     """Refuse a page LinkedIn did not serve.
 
     Raises:
         OffLinkedInLandingError: When *url* is not a LinkedIn document.
     """
-    if is_linkedin_landing(url):
-        return
-    landed_on = describe_landing(url)
-    logger.warning("Navigation ended off LinkedIn, on %s", landed_on)
-    raise OffLinkedInLandingError(landed_on)
+    if not is_linkedin_landing(url):
+        refuse_landing(url)
+
+
+@asynccontextmanager
+async def linkedin_element(
+    locator: Any, *, timeout: float | None = None
+) -> AsyncIterator[Any]:
+    """Resolve *locator* to one element, yielded only from a LinkedIn document.
+
+    Act through the yielded handle, never through the locator. A locator
+    resolves again for every action, so a redirect after this check would aim
+    the click at the new page; a handle belongs to one document, and a
+    navigation away fails the action instead of retargeting it.
+
+    Raises:
+        OffLinkedInLandingError: When the element's own document is not
+            LinkedIn's.
+    """
+    if timeout is None:
+        handle = await locator.element_handle()
+    else:
+        handle = await locator.element_handle(timeout=timeout)
+    try:
+        raise_if_off_linkedin(await handle.evaluate(_OWNER_DOCUMENT_ADDRESS_JS))
+        yield handle
+    finally:
+        try:
+            await handle.dispose()
+        except Exception:
+            logger.debug("Could not release an element handle", exc_info=True)

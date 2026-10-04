@@ -91,7 +91,7 @@
       "call": "get_inbox",
       "kind": "evaluate",
       "operation": "scroll_main_region",
-      "program_digest": "2a74f7f069d9",
+      "program_digest": "2df83e7ee63c",
       "section": "conversation"
     },
     {
@@ -110,7 +110,7 @@
       "call": "get_inbox",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "5a15538325b2",
+      "program_digest": "571a440efbe5",
       "section": "conversation"
     },
     {

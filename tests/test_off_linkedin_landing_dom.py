@@ -15,6 +15,7 @@ installed; run locally after ``uv run patchright install chromium --no-shell``.
 from __future__ import annotations
 
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from patchright.async_api import Page, async_playwright
@@ -24,10 +25,16 @@ from linkedin_mcp_server.core.auth import (
     detect_auth_barrier_quick,
     resolve_remember_me_prompt,
 )
+from linkedin_mcp_server.core.destination import (
+    LINKEDIN_HOST_PATTERN,
+    LINKEDIN_LANDING_JS,
+    is_linkedin_landing,
+)
 from linkedin_mcp_server.core.exceptions import OffLinkedInLandingError
 from linkedin_mcp_server.linkedin import job_pages
 from linkedin_mcp_server.linkedin.capture import SectionCapture
 from linkedin_mcp_server.linkedin.content import PageContentReader
+from linkedin_mcp_server.linkedin.conversations import ConversationReader
 from linkedin_mcp_server.linkedin.job_pages import JobPageReader
 from linkedin_mcp_server.linkedin.message_sender import MessageSender
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
@@ -172,7 +179,7 @@ class TestTheReadAnswersForItsOwnDocument:
         await serve(dom_page, linkedin={PROFILE_URL: profile()}, portal_html=portal())
         await dom_page.goto(PROFILE_URL)
 
-        value = await PageSession(dom_page).read_document(
+        value = await PageSession(dom_page).run_on_linkedin(
             "async (suffix) => document.querySelector('h1').innerText + suffix", "!"
         )
 
@@ -183,7 +190,7 @@ class TestTheReadAnswersForItsOwnDocument:
         await dom_page.goto(PORTAL_URL)
 
         with pytest.raises(OffLinkedInLandingError, match="https://portal.invalid"):
-            await PageSession(dom_page).read_document("() => document.title")
+            await PageSession(dom_page).run_on_linkedin("() => document.title")
 
 
 class TestAPortalIsNotReadAsTheProfile:
@@ -332,3 +339,92 @@ class TestAPortalIsNotReadAsTheApplyLink:
             await reader.read_apply_link(JOB_URL, "123", JOB_APPLY_EN_US)
 
         assert dom_page.url == PORTAL_URL
+
+
+#: Every address the Python classifier is tested on, plus spellings only a
+#: browser would normalize, so the in-page copy is held to the same answers.
+HOST_RULE_ADDRESSES = [
+    "https://www.linkedin.com/in/testuser/",
+    "https://linkedin.com/feed/",
+    "https://de.linkedin.com/in/testuser/",
+    "https://WWW.LinkedIn.COM/feed/",
+    "https://www.linkedin.com./feed/",
+    "https://www.linkedin.com:443/feed/",
+    "https://www.linkedin.com:0443/feed/",
+    "https://www.linkedin.com/jobs/search/?keywords=python#top",
+    "https://evil-linkedin.com/in/testuser/",
+    "https://notlinkedin.com/feed/",
+    "https://linkedin.com.evil.test/feed/",
+    "https://www.linkedin.com.evil.test/in/testuser/",
+    "https://portal.invalid/login",
+    "http://www.linkedin.com/feed/",
+    "https://www.linkedin.com:8443/feed/",
+    "https://user:pass@www.linkedin.com/feed/",
+    "https://user@www.linkedin.com/feed/",
+    "https://www.linkedin.com../feed/",
+    "https://www.lіnkedin.com/feed/",
+    "https://[::1/feed/",
+    "about:blank",
+    "data:text/html,<main>LinkedIn</main>",
+    "blob:https://www.linkedin.com/1b2c3d",
+    "file:///www.linkedin.com/feed/",
+    "chrome-error://chromewebdata/",
+    "",
+]
+
+
+async def test_the_page_scripts_apply_the_same_host_rule(dom_page):
+    """Two copies of one rule: Python's, and the one a page script runs."""
+    in_page = await dom_page.evaluate(
+        f"""(addresses) => {{
+            const onLinkedIn = {LINKEDIN_LANDING_JS};
+            return addresses.map(href => onLinkedIn(href, {LINKEDIN_HOST_PATTERN!r}));
+        }}""",
+        HOST_RULE_ADDRESSES,
+    )
+
+    assert dict(zip(HOST_RULE_ADDRESSES, in_page)) == {
+        address: is_linkedin_landing(address) for address in HOST_RULE_ADDRESSES
+    }
+
+
+def conversation_rows() -> str:
+    """Two rows a conversation scan would click; each records the click."""
+    return "".join(
+        f'<li><label aria-label="Select conversation with {name}">'
+        f'<div class="msg-conversation-listitem__link" '
+        f"onclick=\"document.body.dataset.pressed = 'true'\">{name}</div>"
+        "</label></li>"
+        for name in ("Ada Lovelace", "Grace Hopper")
+    )
+
+
+class TestAPortalRowIsNeverClicked:
+    async def test_the_scan_refuses_a_portal_before_clicking_a_row(self, dom_page):
+        """The compose page redirected before the scan; the rows are a portal's."""
+        await serve(
+            dom_page,
+            linkedin={},
+            portal_html=document(f"<ul>{conversation_rows()}</ul>"),
+        )
+        await dom_page.goto(PORTAL_URL)
+        session = PageSession(dom_page)
+        reader = ConversationReader(
+            session,
+            PageNavigator(session),
+            PageContentReader(session),
+            ProfilePageReader(session, AsyncMock()),
+        )
+
+        with pytest.raises(OffLinkedInLandingError, match="https://portal.invalid"):
+            await reader._extract_conversation_thread_refs(5, "inbox")
+
+        assert not await pressed(dom_page)
+
+    async def test_a_page_script_runs_on_linkedin(self, dom_page):
+        await serve(dom_page, linkedin={PROFILE_URL: profile()}, portal_html=portal())
+        await dom_page.goto(PROFILE_URL)
+
+        await PageSession(dom_page).run_on_linkedin(f"() => {{ {PRESSED}; }}")
+
+        assert await pressed(dom_page)
