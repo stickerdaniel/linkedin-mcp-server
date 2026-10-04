@@ -266,6 +266,9 @@ async def _release(holder: JSHandle) -> None:
                 logger.debug(
                     "Releasing the rail handle failed: %s", release.exception()
                 )
+    # A deadline that expired inside the shield is delivered here, so a caller
+    # that returns right after the scroll does not report success past it.
+    await anyio.lowlevel.checkpoint()
 
 
 async def detect_rate_limit(page: Page) -> None:
