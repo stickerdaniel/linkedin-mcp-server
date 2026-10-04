@@ -1202,8 +1202,71 @@ def _retire(backup_dir: Path, targets: list[Path]) -> None:
             logger.warning("Could not re-retire %s: %s", target, exc)
 
 
+@dataclass(frozen=True)
+class AuthStateIdentity:
+    """Which stored session a logout was confirmed for, without its contents.
+
+    Read from metadata only, never from the cookies themselves: the login
+    generation or, without one, the cookie file's inode, size and modification
+    time, and whether the profile has anything in it.
+    """
+
+    login_generation: str | None
+    cookies: tuple[int, int, int] | None
+    profile: bool
+
+
+class SessionChangedError(RuntimeError):
+    """The stored session is no longer the one the logout was confirmed for.
+
+    A ``RuntimeError`` like the busy-profile refusal beside it, because a caller
+    reads both the same way: nothing was deleted, and saying why is enough.
+    """
+
+
+def _file_identity(path: Path) -> tuple[int, int, int] | None:
+    """*path*'s inode, size and modification time, or ``None`` when absent.
+
+    Any other failure to stat it is raised: a file that is there but cannot be
+    read is not the same as one that is not there.
+    """
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
+def auth_state_identity(source_profile_dir: Path | None = None) -> AuthStateIdentity:
+    """Identify the stored session, to compare against later under the lease.
+
+    Every login and import writes a fresh generation once its cookies are
+    exported, so where there is one it alone says which session this is. The
+    cookie file is deliberately left out then: a browser closing on the source
+    profile re-exports its cookies (``_close_browser_locked``), and the shared
+    browser a logout has just asked to retire does exactly that during the
+    handover, so its stat moves while the session stays the same. Without a
+    generation no server runs on the profile, which is what makes the cookie
+    file's stat a usable stand-in for state written before generations existed.
+
+    Raises:
+        OSError: The cookie file or the profile is there but cannot be read.
+    """
+    profile_dir = canonical(source_profile_dir or get_source_profile_dir())
+    state = load_source_state(profile_dir)
+    profile = profile_exists(profile_dir)
+    if state is not None:
+        return AuthStateIdentity(state.login_generation, None, profile)
+    return AuthStateIdentity(
+        None, _file_identity(portable_cookie_path(profile_dir)), profile
+    )
+
+
 def clear_auth_state(
-    source_profile_dir: Path | None = None, *, wait_seconds: float = 0.0
+    source_profile_dir: Path | None = None,
+    *,
+    wait_seconds: float = 0.0,
+    confirmed: AuthStateIdentity | None = None,
 ) -> bool:
     """Remove source auth artifacts, derived runtime profiles and quarantines.
 
@@ -1214,8 +1277,16 @@ def clear_auth_state(
     *wait_seconds* bounds a wait for another holder of the profile to let go,
     and only a logout that has asked a shared browser to retire passes one.
 
+    *confirmed* is the session the user agreed to delete, read before they were
+    asked. Given one, this deletes nothing unless the session on disk is still
+    that one once the profile is held. A prompt can stay open indefinitely and
+    the handover wait is long too, and another client that signs in or imports
+    in between leaves a session nobody agreed to delete.
+
     Raises:
         ProfileRootRefusedError: The root is not one this server owns.
+        SessionChangedError: The session on disk is no longer *confirmed*, or
+            could not be read to tell. Nothing was deleted.
         RuntimeError: Another process is using the profile. Deleting it out from
             under a live browser corrupts that session and, with several clients,
             destroys everyone's rather than just this caller's.
@@ -1224,6 +1295,24 @@ def clear_auth_state(
     with _exclusive_profile(
         profile_dir, action="clearing the stored session", wait_seconds=wait_seconds
     ):
+        # Under the lease and before the first deletion: read any earlier, and
+        # a login completing in between would still be deleted.
+        if confirmed is not None:
+            try:
+                current = auth_state_identity(profile_dir)
+            except OSError as exc:
+                raise SessionChangedError(
+                    "The stored LinkedIn session could not be read to confirm it "
+                    "is the one you agreed to clear. Nothing was deleted."
+                ) from exc
+            if current != confirmed:
+                raise SessionChangedError(
+                    "The stored LinkedIn session changed after you confirmed: "
+                    "another client signed in or imported a session in the "
+                    "meantime. Nothing was deleted. Run --logout again to clear "
+                    "the session stored now."
+                )
+
         # Quarantines hold previous sessions' cookies, so a logout that left them
         # behind would not be the "clear all stored auth state" the CLI
         # advertises.

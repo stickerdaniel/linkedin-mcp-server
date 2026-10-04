@@ -8,7 +8,9 @@ import pytest
 
 from linkedin_mcp_server.profile_claim import ensure_profile_claim
 from linkedin_mcp_server.session_state import (
+    SessionChangedError,
     _native_machine_win32,
+    auth_state_identity,
     clear_auth_state,
     get_runtime_id,
     load_runtime_state,
@@ -766,6 +768,69 @@ class TestClearingOnceTheHolderLetsGo:
             release()
 
         assert heard == [True]
+
+
+class TestClearingOnlyTheConfirmedSession:
+    """A logout deletes the session the user agreed to, and no later one."""
+
+    def test_an_unchanged_session_is_cleared(self, isolate_profile_dir):
+        profile_dir = isolate_profile_dir
+        _seed_session(profile_dir)
+        confirmed = auth_state_identity(profile_dir)
+
+        assert clear_auth_state(profile_dir, confirmed=confirmed) is True
+
+        assert not profile_dir.exists()
+        assert not portable_cookie_path(profile_dir).exists()
+
+    def test_a_login_after_confirmation_is_left_in_place(self, isolate_profile_dir):
+        profile_dir = isolate_profile_dir
+        _seed_session(profile_dir)
+        confirmed = auth_state_identity(profile_dir)
+        rotate_source_profile(profile_dir)
+        _seed_session(profile_dir, machine_id="9999")
+        generation = write_source_state(profile_dir).login_generation
+
+        with pytest.raises(SessionChangedError, match="changed after you confirmed"):
+            clear_auth_state(profile_dir, confirmed=confirmed)
+
+        state = load_source_state(profile_dir)
+        assert state is not None and state.login_generation == generation
+        assert portable_cookie_path(profile_dir).exists()
+        assert "9999" in (profile_dir / "Local State").read_text()
+        assert len(quarantine_dirs(profile_dir)) == 1
+
+    def test_a_re_export_under_the_same_login_is_still_cleared(
+        self, isolate_profile_dir
+    ):
+        # What a browser closing on the source profile does to the cookie file.
+        profile_dir = isolate_profile_dir
+        _seed_session(profile_dir)
+        confirmed = auth_state_identity(profile_dir)
+        cookies = portable_cookie_path(profile_dir)
+        cookies.unlink()
+        cookies.write_text('[{"name": "li_at"}, {"name": "JSESSIONID"}]')
+
+        assert clear_auth_state(profile_dir, confirmed=confirmed) is True
+
+        assert not cookies.exists()
+
+    def test_without_metadata_the_cookie_file_decides(self, isolate_profile_dir):
+        # State from before generations existed: only the cookie file and the
+        # profile can say whether it is still the one confirmed.
+        profile_dir = isolate_profile_dir
+        _seed_session(profile_dir)
+        source_state_path(profile_dir).unlink()
+        confirmed = auth_state_identity(profile_dir)
+        cookies = portable_cookie_path(profile_dir)
+        cookies.unlink()
+        cookies.write_text('[{"name": "li_at"}, {"name": "JSESSIONID"}]')
+
+        with pytest.raises(SessionChangedError):
+            clear_auth_state(profile_dir, confirmed=confirmed)
+
+        assert cookies.exists()
+        assert (profile_dir / "Local State").exists()
 
 
 class TestRestoreSourceProfile:

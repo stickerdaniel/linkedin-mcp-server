@@ -895,7 +895,7 @@ def test_clear_profile_and_exit_clears_all_auth_state(
 
     cleared = {}
 
-    def fake_clear(profile):
+    def fake_clear(profile, **_kwargs):
         cleared["profile"] = profile
         return True
 
@@ -2097,6 +2097,120 @@ class TestRetiringASharedBrowser:
             release()
 
         assert not self._session_intact()
+
+    # -- the session the user confirmed ------------------------------------- #
+
+    def _sign_in_elsewhere(self) -> str:
+        """Leave what another client's login leaves; return its generation.
+
+        Written directly rather than through a rotation, which would need the
+        profile lease the handover test is holding on that client's behalf.
+        """
+        import shutil
+
+        from linkedin_mcp_server.session_state import (
+            portable_cookie_path,
+            write_source_state,
+        )
+
+        shutil.rmtree(self.profile)
+        (self.profile / "Default").mkdir(parents=True)
+        (self.profile / "Default" / "Cookies").write_text("theirs")
+        portable_cookie_path(self.profile).write_text('[{"name": "li_at"}]')
+        return write_source_state(self.profile).login_generation
+
+    def _signed_in_as(self, generation: str) -> bool:
+        from linkedin_mcp_server.session_state import (
+            load_source_state,
+            portable_cookie_path,
+        )
+
+        state = load_source_state(self.profile)
+        return (
+            state is not None
+            and state.login_generation == generation
+            and portable_cookie_path(self.profile).exists()
+            and (self.profile / "Default" / "Cookies").read_text() == "theirs"
+        )
+
+    def test_a_session_signed_in_during_the_prompt_survives(self, capsys):
+        # Direct: nothing shared to retire, and the prompt can stay open for as
+        # long as the user leaves it.
+        self.config.server.daemon_enabled = False
+        self._seed_session()
+        generation: list[str] = []
+
+        def ask(_prompt: str = "") -> str:
+            generation.append(self._sign_in_elsewhere())
+            return "y"
+
+        self.monkeypatch.setattr("builtins.input", ask)
+
+        assert self._logout() == 1
+
+        assert self._signed_in_as(generation[0])
+        out = capsys.readouterr().out
+        assert "changed after you confirmed" in out
+        assert "cleared successfully" not in out
+
+    def test_a_session_signed_in_during_the_handover_survives(self, capsys):
+        # The retiring browser lets go, and another client gets in first.
+        import threading
+
+        self._seed_session()
+        owner = self._owner()
+        release = self._hold_the_profile()
+        generation: list[str] = []
+
+        def sign_in_then_let_go() -> None:
+            generation.append(self._sign_in_elsewhere())
+            release()
+
+        timer = threading.Timer(0.3, sign_in_then_let_go)
+        timer.start()
+        self._answers("y", "y")
+        try:
+            assert self._logout() == 1
+        finally:
+            timer.join()
+            release()
+
+        assert owner.liveness.retiring is True
+        assert self._signed_in_as(generation[0])
+        assert "changed after you confirmed" in capsys.readouterr().out
+
+    def test_cookies_the_retiring_browser_exports_are_still_cleared(self):
+        # Closing on the source profile rewrites cookies.json for the same
+        # session. That is the handover itself, not another client.
+        import threading
+
+        from linkedin_mcp_server.common_utils import secure_write_text
+        from linkedin_mcp_server.session_state import (
+            portable_cookie_path,
+            write_source_state,
+        )
+
+        self._seed_session()
+        write_source_state(self.profile)
+        portable_cookie_path(self.profile).write_text("[]")
+        self._owner()
+        release = self._hold_the_profile()
+
+        def export_then_let_go() -> None:
+            secure_write_text(portable_cookie_path(self.profile), '[{"name": "li_at"}]')
+            release()
+
+        timer = threading.Timer(0.3, export_then_let_go)
+        timer.start()
+        self._answers("y", "y")
+        try:
+            assert self._logout() == 0
+        finally:
+            timer.join()
+            release()
+
+        assert not self._session_intact()
+        assert not portable_cookie_path(self.profile).exists()
 
     @pytest.mark.parametrize("command", ["logout", "login", "import"])
     def test_an_interrupt_while_waiting_says_it_may_be_retiring(self, command, capsys):
