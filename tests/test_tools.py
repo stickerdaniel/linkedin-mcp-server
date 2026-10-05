@@ -521,8 +521,12 @@ class TestPersonTool:
         from linkedin_mcp_server.core.exceptions import AuthenticationError
         from linkedin_mcp_server.exceptions import AuthenticationStartedError
 
+        # Live on purpose: a bare mock's ``is_closed()`` is truthy, which reads
+        # as a closed page and sends the call down the shutdown path instead of
+        # the auth failure this test is about.
         mock_browser = MagicMock()
-        mock_browser.page = MagicMock()
+        mock_browser.page.is_closed.return_value = False
+        mock_browser.context.browser.is_connected.return_value = True
         monkeypatch.setattr(
             "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
             AsyncMock(return_value=None),
@@ -809,8 +813,12 @@ class TestPersonTool:
         from linkedin_mcp_server.core.exceptions import AuthenticationError
         from linkedin_mcp_server.exceptions import AuthenticationStartedError
 
+        # Live on purpose: a bare mock's ``is_closed()`` is truthy, which reads
+        # as a closed page and sends the call down the shutdown path instead of
+        # the auth failure this test is about.
         mock_browser = MagicMock()
-        mock_browser.page = MagicMock()
+        mock_browser.page.is_closed.return_value = False
+        mock_browser.context.browser.is_connected.return_value = True
         monkeypatch.setattr(
             "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
             AsyncMock(return_value=None),

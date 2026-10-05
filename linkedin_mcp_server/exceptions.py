@@ -265,6 +265,27 @@ class BrowserShutdownUnconfirmedError(LinkedInMCPError):
         a_held_profile_means_this_owner_must_go()
 
 
+class BrowserUnavailableError(LinkedInMCPError):
+    """The cached browser had stopped, and it was shut down and the profile freed.
+
+    Raised by a tool call that found its browser dead before doing any work, once
+    the close proved Chromium gone. The next call starts a new browser; this one
+    reports an ordinary failure rather than launching inside the same call.
+
+    Deliberately not an ``AuthenticationError``: the session is not the problem,
+    and that class is routed into a login, which retires the profile.
+    """
+
+    def __init__(self, message: str | None = None):
+        super().__init__(
+            message
+            or (
+                "The browser stopped unexpectedly and was shut down. Run the "
+                "tool again to start a new browser."
+            )
+        )
+
+
 class BrowserBusyError(LinkedInMCPError):
     """Another server process holds the shared browser profile.
 

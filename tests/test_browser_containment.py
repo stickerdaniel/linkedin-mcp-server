@@ -411,3 +411,240 @@ class TestMarkerScanVerdicts:
         with pytest.raises(AssertionError, match="could not prove"):
             await launch.prove()
         assert launch.close_calls == 2
+
+
+# --- A browser that stopped under a tool call -------------------------------------
+#
+# Self-contained on purpose: the helpers above belong to the containment gate and
+# change with it, and these tests ask a different question of the same launch.
+
+
+def _alive(process: Any) -> bool:
+    import psutil
+
+    try:
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+
+
+def _the_chromium_root(profile: Path) -> tuple[Any, Any]:
+    """This launch's Chromium root and the Node driver that started it.
+
+    Looked for among this test process's own descendants, by the profile it was
+    handed, so a browser another test or the developer runs is never picked.
+    """
+    import psutil
+
+    roots = []
+    for process in psutil.Process().children(recursive=True):
+        try:
+            args = process.cmdline()
+        except psutil.Error:
+            continue
+        if any(arg.startswith("--type=") for arg in args):
+            continue
+        for arg in args:
+            if not arg.startswith("--user-data-dir="):
+                continue
+            try:
+                if os.path.samefile(arg.partition("=")[2], profile):
+                    roots.append(process)
+            except OSError:
+                pass
+    assert len(roots) == 1, f"expected one Chromium root on {profile}: {roots}"
+    root = roots[0]
+    # The process that started Chromium. Node, where the browser runs out of
+    # process, and this test process itself where Patchright runs Chromium
+    # in-process (Linux arm64). A parent outside this test would be another
+    # launch.
+    driver = root.parent()
+    assert driver is not None and (
+        driver.pid == os.getpid() or _is_this_tests_descendant(driver)
+    ), driver
+    return root, driver
+
+
+def _is_this_tests_descendant(process: Any) -> bool:
+    me = os.getpid()
+    seen: set[int] = set()
+    while process is not None and process.pid not in seen:
+        if process.pid == me:
+            return True
+        seen.add(process.pid)
+        try:
+            process = process.parent()
+        except process.Error:
+            return False
+    return False
+
+
+def _reports_stopped(manager: BrowserManager) -> bool:
+    try:
+        browser = manager.context.browser
+        return manager.page.is_closed() or (
+            browser is not None and not browser.is_connected()
+        )
+    except Exception:
+        return False
+
+
+def _assert_nothing_of_it_runs(manager: BrowserManager) -> None:
+    """Every process of the launch has gone, by the platform's own attribution."""
+    if os.name == "nt":
+        # The handle is already released after a proved close, so the proof is
+        # what the Job recorded before letting go, not a query on it.
+        job = manager._containment
+        assert job is not None and job.closed and job.drained
+    else:
+        # One `ps` on macOS can time out and come back inconclusive. The same
+        # bounded retry the gate uses asks again; a scan that stays unreadable
+        # still fails, and a survivor still fails at once.
+        processes = _conclusive_marker_scan(manager._process_marker, "after the close")
+        assert not processes, f"still running: {processes}"
+
+
+@pytest.mark.parametrize("fault", ["chromium-killed", "page-closed"])
+async def test_a_browser_that_stopped_is_drained_and_started_again(
+    tmp_path, isolate_profile_dir, monkeypatch, fault
+):
+    """The call that finds it dead drains it; only the next call launches.
+
+    Two faults, because they leave different things behind. Killing Chromium
+    leaves the Node driver reporting a disconnected browser. Closing the active
+    page leaves Chromium itself running, on a second page kept open, so the
+    drain has a live root to end rather than one already gone.
+
+    Everything the driver does to launch is real except signing in, which would
+    visit LinkedIn: the shipped options, the lease, the guardian and the
+    containment, on this test's own claimed profile.
+    """
+    import asyncio
+    import contextlib
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    import psutil
+    from fastmcp.exceptions import ToolError
+
+    from linkedin_mcp_server import dependencies
+    from linkedin_mcp_server.dependencies import get_ready_extractor
+    from linkedin_mcp_server.drivers import browser as drv
+    from linkedin_mcp_server.exceptions import BrowserUnavailableError
+    from linkedin_mcp_server.profile_lease import get_profile_lease
+    from linkedin_mcp_server.sequential_tool_middleware import (
+        SequentialToolExecutionMiddleware,
+    )
+
+    executable = await _the_browser_this_launch_would_use(
+        _manager(tmp_path / "probe-profile")
+    )
+    if executable is None:
+        _unavailable("the browser executable could not be resolved")
+    elif not Path(executable).exists():
+        _unavailable(f"no browser installed at {executable}")
+
+    profile = isolate_profile_dir
+    profile.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(drv, "_browser_lifecycle_lock", asyncio.Lock())
+    monkeypatch.setattr(drv, "_browser_create_lock", asyncio.Lock())
+    monkeypatch.setattr(dependencies, "ensure_tool_ready_or_raise", AsyncMock())
+    launched: list[BrowserManager] = []
+
+    async def launch_without_signing_in() -> BrowserManager:
+        manager = _manager(profile)
+        launched.append(manager)
+        await manager.start()
+        manager.is_authenticated = True
+        drv._browser = manager
+        return manager
+
+    monkeypatch.setattr(drv, "_create_browser_locked", launch_without_signing_in)
+    middleware = SequentialToolExecutionMiddleware()
+    request: Any = SimpleNamespace(
+        message=SimpleNamespace(name="get_feed"), fastmcp_context=None
+    )
+
+    async def body(context: Any) -> Any:
+        return await get_ready_extractor(None, tool_name="get_feed")
+
+    async def call() -> Any:
+        return await middleware.on_call_tool(request, body)
+
+    try:
+        await call()
+        first = launched[0]
+        root, node = _the_chromium_root(profile)
+        lease = get_profile_lease()
+        if os.name == "nt":
+            assert first._containment is not None
+            assert root.pid in _windows_job_members(first._containment)
+
+        if fault == "page-closed":
+            await first.context.new_page()
+            await first.page.close()
+        else:
+            for process in [*root.children(recursive=True), root]:
+                with contextlib.suppress(psutil.NoSuchProcess):
+                    process.kill()
+            # The driver reports the browser gone before Windows has dropped
+            # the process, so both have to be true, inside the same bound.
+            for _ in range(500):
+                if _reports_stopped(first) and not _alive(root):
+                    break
+                await asyncio.sleep(0.01)
+        # What the fault ended and what it left, observed apart.
+        assert _reports_stopped(first), "the driver never reported the fault"
+        assert _alive(node), "the fault took the Node driver as well"
+        if fault == "page-closed":
+            assert _alive(root), "closing the page ended Chromium"
+        else:
+            assert not _alive(root), "Chromium survived the kill"
+
+        with pytest.raises(ToolError) as raised:
+            await call()
+
+        assert isinstance(raised.value.__cause__, BrowserUnavailableError)
+        assert len(launched) == 1, "the rejecting call launched a browser"
+        assert not _alive(root)
+        assert not lease.browser_open
+        # The browser's reference and the call's both returned.
+        assert not lease.held
+        _assert_nothing_of_it_runs(first)
+
+        await call()
+
+        assert len(launched) == 2 and drv._browser is launched[1]
+        second_root, _ = _the_chromium_root(profile)
+        assert second_root.pid != root.pid or (
+            second_root.create_time() != root.create_time()
+        )
+        assert lease.browser_open
+    finally:
+        await drv.close_browser()
+        for manager in launched:
+            await manager.close()
+
+
+def test_the_driver_may_be_this_process(tmp_path, monkeypatch):
+    """Linux arm64 runs Chromium in-process, so its parent is the test itself."""
+    import psutil
+
+    profile = tmp_path / "profile"
+    profile.mkdir()
+
+    class InProcessRoot:
+        def cmdline(self) -> list[str]:
+            return ["chromium", f"--user-data-dir={profile}"]
+
+        def parent(self) -> psutil.Process:
+            return psutil.Process()
+
+    class Self(psutil.Process):
+        def children(self, recursive: bool = False) -> list[InProcessRoot]:
+            return [InProcessRoot()]
+
+    monkeypatch.setattr(psutil, "Process", Self)
+    root, driver = _the_chromium_root(profile)
+    assert isinstance(root, InProcessRoot)
+    assert driver.pid == os.getpid()
