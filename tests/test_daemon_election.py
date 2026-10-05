@@ -376,7 +376,9 @@ class TestLiveness:
         assert outcome.worth_connecting
         assert not outcome.started_owner
 
-    def test_a_corpse_is_not_probed_over_and_over(self, tmp_path: Path):
+    def test_a_corpse_is_not_probed_over_and_over(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         # The descriptor stays on disk until a live owner overwrites it, so a
         # loop that re-read it would probe the same dead endpoint every pass.
         # Each probe is a network timeout, which is how a fail-fast path turns
@@ -385,6 +387,11 @@ class TestLiveness:
         config = _config(profile)
         auth_root = profile.parent
         _publish_stale_owner(auth_root, profile, config)
+        # A real start would key its state under the account's own home, out of
+        # this test's reach. Failing it leaves the dead endpoint the only one.
+        monkeypatch.setattr(
+            election_module, "_start_owner", lambda *a, **k: _Attempt.FAILED
+        )
 
         probes: list[Attachment] = []
 
@@ -583,7 +590,9 @@ class TestSilenceIsNotDeath:
         assert silent.attachment_lookup.reason != refused.attachment_lookup.reason
         assert not silent.worth_connecting
 
-    def test_a_refusal_still_buries_on_the_first_probe(self, tmp_path: Path):
+    def test_a_refusal_still_buries_on_the_first_probe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         """The corpse path keeps its fail-fast, and the grace does not leak into it.
 
         Written as "would have answered next time" rather than "never answers":
@@ -596,6 +605,11 @@ class TestSilenceIsNotDeath:
         config = _config(profile)
         auth_root = profile.parent
         _publish_stale_owner(auth_root, profile, config)
+        # A real start would key its state under the account's own home, out of
+        # this test's reach. Failing it leaves the buried endpoint the only one.
+        monkeypatch.setattr(
+            election_module, "_start_owner", lambda *a, **k: _Attempt.FAILED
+        )
 
         probes: list[Attachment] = []
 
@@ -616,7 +630,7 @@ class TestSilenceIsNotDeath:
         assert not outcome.worth_connecting
 
     def test_an_owner_that_never_answers_does_not_outlast_the_deadline(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         """Nothing is buried now, so the deadline is the only thing bounding this.
 
@@ -631,6 +645,12 @@ class TestSilenceIsNotDeath:
 
         held = DaemonLock(auth_root)
         assert held.try_acquire(), "could not simulate the frozen owner's lock"
+        # What a real child reports against that lock. A real one would look
+        # for it under the account's own home, find none, and leave its state
+        # there instead.
+        monkeypatch.setattr(
+            election_module, "_start_owner", lambda *a, **k: _Attempt.CONTENDED
+        )
         try:
             began = time.monotonic()
             outcome = obtain_owner(
