@@ -1561,7 +1561,8 @@ class TestRepeatingOnlyWhatIsSafe:
         A read that could be repeated has no unknown outcome to describe, so
         turning this into a result would dress a plain transport failure up as a
         LinkedIn answer and hand a client a `retry_safe` flag about a call that
-        never acted.
+        never acted. It is raised as a `ToolError` saying the owner is gone, so
+        the masking below and the SDK above leave the reason readable.
         """
         from linkedin_mcp_server.daemon_proxy import (
             FrontendOwnerRecoveryMiddleware,
@@ -1581,7 +1582,7 @@ class TestRepeatingOnlyWhatIsSafe:
             )
 
         middleware = FrontendOwnerRecoveryMiddleware(backend)
-        with pytest.raises(OwnerUnreachableError, match="did not answer"):
+        with pytest.raises(ToolError, match="could not reach a new one"):
             await middleware.on_call_tool(
                 self._context(read_only=True),
                 call_next,  # ty: ignore
@@ -2878,7 +2879,7 @@ class TestWritingAnOwnerOff:
                 classification=OwnerFailure.RETIRING,
             )
 
-        with pytest.raises(OwnerUnreachableError):
+        with pytest.raises(ToolError, match="could not reach a new one"):
             await FrontendOwnerRecoveryMiddleware(backend).on_call_tool(
                 MagicMock(),
                 call_next,  # ty: ignore
@@ -3045,7 +3046,7 @@ class TestWhatOneCallCanCost:
         context.message.name = "get_person_profile"
         context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
 
-        with pytest.raises(OwnerUnreachableError):
+        with pytest.raises(ToolError, match="could not reach a new one"):
             await FrontendAuthRepairMiddleware(tool_timeout=30.0).on_call_tool(
                 context,
                 through_recovery,
@@ -3164,7 +3165,7 @@ class TestWhatOneCallCanCost:
         context.message.name = "get_person_profile"
         context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
 
-        with pytest.raises(OwnerUnreachableError):
+        with pytest.raises(ToolError, match="could not reach a new one"):
             await FrontendAuthRepairMiddleware(tool_timeout=30.0).on_call_tool(
                 context,
                 through_recovery,

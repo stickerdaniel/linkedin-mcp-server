@@ -6032,7 +6032,7 @@ class TestRealOwner:
             _stop(result.get("pid"))
 
     def test_a_proxy_refuses_an_owner_it_has_the_wrong_token_for(
-        self, real_state_root: Path
+        self, real_state_root: Path, monkeypatch: pytest.MonkeyPatch
     ):
         """The credential is load-bearing, not decoration.
 
@@ -6045,9 +6045,26 @@ class TestRealOwner:
         import dataclasses
 
         from fastmcp import Client
+        from mcp import MCPError
 
+        from linkedin_mcp_server import daemon_proxy
         from linkedin_mcp_server.daemon import look_up_owner
         from linkedin_mcp_server.server import ServerRole, create_mcp_server
+
+        # What the proxy's recovery was handed, because the client no longer
+        # reads it: a failure recognised as the owner's reaches the client as a
+        # fixed sentence about a lost owner, whatever the owner answered.
+        seen: list[BaseException] = []
+        recognise = daemon_proxy.unreachable_owner_in
+
+        def recording(exc: BaseException) -> Any:
+            current: BaseException | None = exc
+            while current is not None:
+                seen.append(current)
+                current = current.__cause__
+            return recognise(exc)
+
+        monkeypatch.setattr(daemon_proxy, "unreachable_owner_in", recording)
 
         profile = real_state_root
         result = _run_frontend(profile)
@@ -6063,9 +6080,6 @@ class TestRealOwner:
             )
 
             async def served() -> None:
-                # The handshake era, because only there does the proxy's own
-                # error text reach its client; the 2026-07-28 era answers any
-                # failure that is not an `MCPError` with "Internal server error".
                 async with Client(proxy, mode="legacy") as client:
                     await client.list_tools()
 
@@ -6088,8 +6102,13 @@ class TestRealOwner:
             # becomes "Server returned an error response", which is written only
             # once a response of 400 or more has arrived. Which status it was is
             # asked of the owner directly, with the same token.
-            with pytest.raises(Exception, match="Server returned an error response"):
+            with pytest.raises(Exception, match="could not reach a new one"):
                 asyncio.run(served())
+            assert any(
+                isinstance(exc, MCPError)
+                and exc.message == "Server returned an error response"
+                for exc in seen
+            ), seen
             assert asyncio.run(asked_directly()) == 401
         finally:
             _stop(result.get("pid"))
