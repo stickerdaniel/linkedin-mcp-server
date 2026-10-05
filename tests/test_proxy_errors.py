@@ -257,6 +257,21 @@ class TestNavigationBudget:
                 page, "https://www.linkedin.com/feed/", timeout=100
             )
 
+    async def test_a_request_that_is_never_sent_fails(self, monkeypatch):
+        """A browser that never sends does not wait forever.
+
+        The navigation budget cannot start until the request exists, so the
+        wait for that request has its own cap.
+        """
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.proxy_errors.STARTUP_BUDGET_MS", 50
+        )
+        page = _ClockPage([(2.0, _Request())], finish_after=0.01)
+        with pytest.raises(TimeoutError, match="before the request was sent"):
+            await goto_reporting_proxy_errors(
+                page, "https://www.linkedin.com/feed/", timeout=100
+            )
+
     async def test_a_subresource_does_not_start_the_budget(self):
         page = _ClockPage(
             [

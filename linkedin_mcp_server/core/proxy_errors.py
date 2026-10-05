@@ -165,6 +165,10 @@ def raise_if_proxy_configured(error: BaseException) -> None:
 #: A held request is inside this budget: the gate's 20s deadline leaves the
 #: answer ten seconds, and the relay drops a silent tunnel at 30s.
 NAVIGATION_BUDGET_MS = 30_000
+#: How long to wait for the browser to send the request at all. A wedged
+#: browser never emits one, and the navigation budget cannot start then, so
+#: this cap is what ends the call. It is not part of the navigation budget.
+STARTUP_BUDGET_MS = 30_000
 
 
 def _page_reports_requests(page: Any) -> bool:
@@ -232,8 +236,17 @@ async def _goto_within_budget(page: Any, url: str, **kwargs: Any) -> Any:
     # the time before this browser sends anything, which is not the navigation.
     goto = asyncio.ensure_future(page.goto(url, timeout=0, **kwargs))
     try:
-        while not goto.done() and not sent.done():
-            await asyncio.wait({goto, sent}, return_when=asyncio.FIRST_COMPLETED)
+        await asyncio.wait(
+            {goto, sent},
+            timeout=STARTUP_BUDGET_MS / 1000,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not goto.done() and not sent.done():
+            await _stop_goto(goto)
+            raise TimeoutError(
+                f"Page.goto: Timeout {STARTUP_BUDGET_MS:g}ms exceeded before "
+                "the request was sent."
+            )
         if goto.done():
             return await goto
         try:
