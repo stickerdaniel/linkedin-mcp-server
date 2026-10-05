@@ -9522,8 +9522,16 @@ async def measure_host_quit_row(
             # records as the profile empty.
             await take_checkpoint(host_comparison.SETTLED)
         actors_ended = time.time()
-        # What the row's browsers left after reopening it: the export into
-        # the cookie file and the store, beside the staging's own reading.
+        after = snapshot(account.profile, expected_digest=staged.li_at_digest)
+        result.after = after
+        emit("harness", "profile.snapshot", phase="after", **after.as_event_fields())
+    except BaseException as exc:
+        row_failure = exc
+        raise
+    finally:
+        # Before the teardown releases anything. A row that failed after
+        # reopening the profile still needs the cookie counts; the success
+        # path used to be the only one that took them.
         try:
             await asyncio.to_thread(
                 record_cookie_lineage,
@@ -9533,15 +9541,10 @@ async def measure_host_quit_row(
                 cookie_file=portable_cookie_path(account.profile),
                 expected_digest=staged.li_at_digest,
             )
-        except Exception:
+        except BaseException:
+            # A diagnostic miss, including cancellation of this read, must not
+            # skip the releases below or replace the row's own error.
             pass
-        after = snapshot(account.profile, expected_digest=staged.li_at_digest)
-        result.after = after
-        emit("harness", "profile.snapshot", phase="after", **after.as_event_fields())
-    except BaseException as exc:
-        row_failure = exc
-        raise
-    finally:
         if comparison is not None:
             # From here on the harness acts: a checkpoint after this marker
             # could be reading its cleanup rather than the product.

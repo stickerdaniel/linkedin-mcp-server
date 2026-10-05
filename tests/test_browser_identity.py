@@ -63,7 +63,7 @@ from linkedin_mcp_server.config.schema import BrowserConfig
 from linkedin_mcp_server.core.browser import BrowserManager
 from browser_identity_harness import IdentityServer, describe_browser
 from differential.events import OUT_ENV, current_platform, publish
-from differential.first_navigation import observing
+from differential.first_navigation import flush_evidence, observing
 
 
 def _evidence_out() -> str | None:
@@ -254,6 +254,9 @@ def _identity_evidence(tmp_path_factory) -> Iterator[Path]:
     directory = tmp_path_factory.mktemp("identity-evidence")
     yield directory
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    # The launch records land on a writer thread. Publish only after they have,
+    # or a fast failure is copied while it still says it is running.
+    flush_evidence()
     # Publishing is evidence, not part of the result: a directory that cannot
     # be written must not fail the cases that already passed.
     with contextlib.suppress(Exception):
