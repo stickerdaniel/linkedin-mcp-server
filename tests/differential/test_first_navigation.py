@@ -43,6 +43,8 @@ from differential.first_navigation import (
     STOP_SECONDS,
     LifetimeSampler,
     observe_navigation,
+    observing,
+    record_origin,
     read_document,
     record_cookie_lineage,
     requested_ends,
@@ -158,9 +160,19 @@ async def _browser(profile: Path) -> AsyncIterator[Any]:
 
 
 def _record(path: Path) -> dict[str, Any]:
+    # The last write started before this read has landed: writers replace the
+    # file on their own thread, so reading at once can see the one before.
+    _flush_evidence()
     document = read_document(path)
     assert document is not None, f"{path.name} was not written"
     return document
+
+
+def _flush_evidence() -> None:
+    deadline = time.monotonic() + 5
+    for thread in threading.enumerate():
+        if thread.name.startswith("evidence-"):
+            thread.join(max(0.0, deadline - time.monotonic()))
 
 
 async def _until(condition: Callable[[], Any], seconds: float, what: str) -> Any:
@@ -350,6 +362,7 @@ async def test_observers_detach_and_the_sampler_stops_within_its_bound(tmp_path)
                 context = await stack.enter_async_context(_browser(profile))
                 await context.pages[0].goto(origin.url("/"))
             lifetimes.stop(exc=None, requested=requested_ends(path))
+            _flush_evidence()
             observed = path.read_bytes()
             # The same browser goes on: another page, another navigation, a
             # second context of its own. None of it reaches the record.
@@ -762,3 +775,122 @@ def test_the_closing_sample_still_reads_after_a_stop_request(tmp_path, monkeypat
     lifetimes._run()
     (record,) = lifetimes.document["processes"]
     assert (record["role"], record["pid"]) == ("browser-root", 4343)
+
+
+def test_the_origin_record_drops_the_query(tmp_path):
+    from types import SimpleNamespace
+
+    from differential.events import publish
+
+    path = tmp_path / FIRST_NAVIGATION_FILE
+    record_origin(
+        path,
+        [SimpleNamespace(t=1.0, host="localhost", path="/feed/?token=query-secret")],
+        [],
+    )
+    assert _record(path)["origin"]["requests"][0]["path"] == "/feed/"
+    out = tmp_path / "published"
+    publish(tmp_path, str(out), "run")
+    assert b"query-secret" not in (out / "run" / FIRST_NAVIGATION_FILE).read_bytes()
+
+
+def test_a_stop_does_not_wait_out_a_read_past_its_bound(tmp_path, monkeypatch):
+    # One read holds the sampler's lock for far longer than the stop bound.
+    # The stop ends at the bound and reports that it did, instead of waiting
+    # the read out and calling that on time.
+    holding = threading.Event()
+    release = threading.Event()
+
+    class Blocking:
+        pid = 7
+
+        def create_time(self) -> float:
+            holding.set()
+            release.wait()
+            return 1.0
+
+        def status(self) -> str:
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self) -> list[str]:
+            return ["not-chromium"]
+
+    monkeypatch.setattr(
+        psutil.Process, "children", lambda self, recursive: [Blocking()]
+    )
+    lifetimes = LifetimeSampler(
+        tmp_path / BROWSER_LIFETIMES_FILE, profile=tmp_path / "profile", label="held"
+    ).start()
+    assert holding.wait(5), "the sampler never reached the blocking read"
+    stopper = threading.Thread(target=lambda: lifetimes.stop(exc=None, requested=None))
+    stopper.start()
+    stopper.join(STOP_SECONDS * 2)
+    assert not stopper.is_alive(), "the stop waited out the blocked read"
+    release.set()
+    stopper.join(5)
+    assert lifetimes.document["stopped_within_bound"] is False
+
+
+def test_an_unreadable_process_is_not_recorded_as_gone(tmp_path):
+    lifetimes = LifetimeSampler(
+        tmp_path / BROWSER_LIFETIMES_FILE, profile=tmp_path / "profile", label="unread"
+    )
+    lifetimes._track((5151, 1.0), "browser-root", 0.0)
+
+    class Unreadable:
+        pid = 5151
+
+        def create_time(self) -> float:
+            return 1.0
+
+        def status(self) -> str:
+            raise psutil.AccessDenied(self.pid)
+
+    lifetimes._sample(
+        psutil, SimpleNamespace(children=lambda recursive: [Unreadable()])
+    )
+    (record,) = lifetimes.document["processes"]
+    # The one promise: an unreadable sample never invents a time of death, so
+    # a later sample that can read the process may still find it alive.
+    assert record["gone_ms"] is None
+
+
+def test_a_death_read_during_a_sample_is_not_ordered_before_a_close(tmp_path):
+    lifetimes = LifetimeSampler(
+        tmp_path / BROWSER_LIFETIMES_FILE, profile=tmp_path / "profile", label="order"
+    )
+    lifetimes._track((6161, 1.0), "browser-root", 0.0)
+
+    class DiedWhileReading:
+        pid = 6161
+
+        def create_time(self) -> float:
+            return 1.0
+
+        def status(self) -> str:
+            return psutil.STATUS_ZOMBIE
+
+    lifetimes._sample(
+        psutil, SimpleNamespace(children=lambda recursive: [DiedWhileReading()])
+    )
+    (record,) = lifetimes.document["processes"]
+    assert record["order_uncertain"] is True
+    asked = {"browser-root": record["gone_ms"] / 1000 + lifetimes._began_wall + 5}
+    assert lifetimes._ended(record, asked) == "ambiguous"
+
+
+def test_a_sampler_that_cannot_start_does_not_stop_the_launch(tmp_path, monkeypatch):
+    real_start = threading.Thread.start
+
+    def start(self) -> None:
+        if self.name.startswith("lifetimes-"):
+            raise RuntimeError("can't start new thread")
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    entered = []
+    with observing(tmp_path, profile=tmp_path / "profile", label="unstarted"):
+        entered.append(True)
+    assert entered == [True]
+    document = read_document(tmp_path / BROWSER_LIFETIMES_FILE)
+    assert document is None or document["samples"] == 0

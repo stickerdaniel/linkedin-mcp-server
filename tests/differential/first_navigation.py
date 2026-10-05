@@ -152,12 +152,36 @@ class _JsonFile:
         self.path = path
         self.failures = 0
         self._lock = threading.Lock()
+        self._writers: list[threading.Thread] = []
+        self._writers_guard = threading.Lock()
 
     def write(self, document: Mapping[str, Any]) -> None:
+        # Replaced on its own thread. The caller is the event loop a
+        # navigation's deadline runs on, and a slow disc must not spend that
+        # deadline. ``flush`` waits the writers out for a reader that needs the
+        # file as this call left it.
+        text = json.dumps(document, indent=2, sort_keys=True) + "\n"
+        worker = threading.Thread(
+            target=self._replace, args=(text,), name=f"evidence-{self.path.name}"
+        )
+        with self._writers_guard:
+            self._writers.append(worker)
+        worker.start()
+
+    def flush(self, seconds: float = 5.0) -> None:
+        deadline = time.monotonic() + seconds
+        for worker in list(self._writers):
+            worker.join(max(0.0, deadline - time.monotonic()))
+
+    def read(self) -> dict[str, Any] | None:
+        """The document as last written, once that write has landed."""
+        self.flush()
+        return read_document(self.path)
+
+    def _replace(self, text: str) -> None:
         with self._lock:
             temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
             try:
-                text = json.dumps(document, indent=2, sort_keys=True) + "\n"
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 temporary.write_text(text, encoding="utf-8")
                 os.replace(temporary, self.path)
@@ -249,10 +273,14 @@ class NavigationRecorder:
     def _ms(self) -> float:
         return round((time.monotonic_ns() - self._began_ns) / 1e6, 1)
 
-    def persist(self) -> None:
+    def persist(self, *, wait: bool = False) -> None:
         with self._lock:
             self.document["write_failures"] = self._file.failures
             self._file.write(self.document)
+        # The last write of a finished observation, read back by whoever adds
+        # to the record next: it has to be the file before that read.
+        if wait:
+            self._file.flush()
 
     def _guarded(self, handler: Callable[..., None]) -> Callable[..., None]:
         """A listener that can never raise into Patchright's dispatch."""
@@ -479,7 +507,7 @@ class NavigationRecorder:
                     "Patchright's own handle on the driver, whose parent is the "
                     "observed process"
                 )
-            self.persist()
+            self.persist(wait=True)
 
     def detach(self) -> None:
         observer = self.document["observer"]
@@ -789,54 +817,63 @@ class LifetimeSampler:
         truncated = False
         with self._lock:
             self.document["samples"] += 1
-            for child in children:
-                # A stop request ends a routine sample at once; the closing one
-                # runs to its own deadline instead.
-                if (
-                    time.monotonic() > deadline
-                    if deadline is not None
-                    else self._halt.is_set()
-                ):
-                    truncated = True
-                    break
+        # Process reads stay outside the lock, so a stop can record that it
+        # gave up while one of them is still blocked.
+        for child in children:
+            if (
+                time.monotonic() > deadline
+                if deadline is not None
+                else self._halt.is_set()
+            ):
+                truncated = True
+                break
+            try:
+                key = (child.pid, child.create_time())
+            except Exception:  # noqa: BLE001 - unreadable, not shown gone
+                continue
+            if key in self._tracked:
                 try:
-                    key = (child.pid, child.create_time())
-                except Exception:  # noqa: BLE001 - gone or unreadable
+                    zombie = child.status() == psutil.STATUS_ZOMBIE
+                except Exception:  # noqa: BLE001 - unreadable, asked again
+                    alive.add(key)
                     continue
-                if key in self._tracked:
-                    try:
-                        zombie = child.status() == psutil.STATUS_ZOMBIE
-                    except Exception:  # noqa: BLE001 - gone between the reads
-                        zombie = True
-                    if not zombie:
-                        alive.add(key)
-                    continue
-                if key in self._settled:
-                    continue
-                try:
-                    # Read again on every sample until it is settled: a child
-                    # forked by the driver shows the driver's command line
-                    # until it executes Chromium.
-                    root = self._is_root(child.cmdline())
-                except Exception:  # noqa: BLE001 - read again next time
-                    continue
-                if root is False:
-                    self._settled.add(key)
-                    continue
-                if root is None:
-                    continue
+                if zombie:
+                    # Read after the sample began, so unordered against a close
+                    # asked for while this sample was still reading.
+                    with self._lock:
+                        self._tracked[key]["gone_ms"] = self._ms()
+                        self._tracked[key]["order_uncertain"] = True
+                    changed = True
+                else:
+                    alive.add(key)
+                continue
+            if key in self._settled:
+                continue
+            try:
+                # Read again on every sample until it is settled: a child
+                # forked by the driver shows the driver's command line
+                # until it executes Chromium.
+                root = self._is_root(child.cmdline())
+            except Exception:  # noqa: BLE001 - read again next time
+                continue
+            if root is False:
                 self._settled.add(key)
-                self._track(key, "browser-root", now)
-                alive.add(key)
-                changed = True
-                try:
-                    parent = child.parent()
-                    if parent is not None:
-                        parent_key = (parent.pid, parent.create_time())
-                        self._track(parent_key, "driver", now)
-                        alive.add(parent_key)
-                except Exception:  # noqa: BLE001 - the driver stays unidentified
-                    pass
+                continue
+            if root is None:
+                continue
+            self._settled.add(key)
+            self._track(key, "browser-root", now)
+            alive.add(key)
+            changed = True
+            try:
+                parent = child.parent()
+                if parent is not None:
+                    parent_key = (parent.pid, parent.create_time())
+                    self._track(parent_key, "driver", now)
+                    alive.add(parent_key)
+            except Exception:  # noqa: BLE001 - the driver stays unidentified
+                pass
+        with self._lock:
             if truncated:
                 # Cut short, so a process not reached is unknown, not gone.
                 self.document["truncated_samples"] += 1
@@ -869,7 +906,14 @@ class LifetimeSampler:
             if self._thread.is_alive():
                 self._thread.join(STOP_SECONDS)
             stopped = not self._thread.is_alive()
-            with self._lock:
+            # A write can still hold the lock. Waiting without a bound would
+            # spend the stop's own bound on it.
+            if not self._lock.acquire(timeout=0 if stopped else STOP_SECONDS):
+                self.document["stopped_within_bound"] = False
+                self.document["stop_seconds"] = round(time.monotonic() - began, 3)
+                self.document["ended_ms"] = self._ms()
+                return
+            try:
                 outcome, error = _outcome(exc)
                 self.document.update(
                     outcome=outcome,
@@ -884,6 +928,8 @@ class LifetimeSampler:
                 for record in self._tracked.values():
                     record["ended"] = self._ended(record, requested)
                 self._persist()
+            finally:
+                self._lock.release()
         except Exception:  # noqa: BLE001 - diagnostics never fail what they watch
             pass
 
@@ -891,6 +937,8 @@ class LifetimeSampler:
         self, record: Mapping[str, Any], requested: Mapping[str, float | None] | None
     ) -> str:
         if record["gone_ms"] is None:
+            if self.document["truncated_samples"] or self.document["sample_failures"]:
+                return "unknown"
             return "alive-at-stop"
         if requested is None:
             return "unknown"
@@ -898,6 +946,8 @@ class LifetimeSampler:
         if asked is None:
             return "unexpected"
         asked_ms = (asked - self._began_wall) * 1000
+        if record.get("order_uncertain"):
+            return "ambiguous"
         if record["gone_ms"] <= asked_ms:
             return "unexpected"
         if record["last_alive_ms"] >= asked_ms:
@@ -917,9 +967,13 @@ def observing(
     end against what that record says was asked for.
     """
     navigation = directory / FIRST_NAVIGATION_FILE
-    lifetimes = LifetimeSampler(
-        directory / BROWSER_LIFETIMES_FILE, profile=profile, label=label
-    ).start()
+    try:
+        lifetimes: LifetimeSampler | None = LifetimeSampler(
+            directory / BROWSER_LIFETIMES_FILE, profile=profile, label=label
+        )
+        lifetimes.start()
+    except Exception:  # noqa: BLE001 - no sampler, the launch still happens
+        lifetimes = None
     failure: BaseException | None = None
     try:
         with (
@@ -932,7 +986,8 @@ def observing(
         failure = exc
         raise
     finally:
-        lifetimes.stop(exc=failure, requested=requested_ends(navigation))
+        if lifetimes is not None:
+            lifetimes.stop(exc=failure, requested=requested_ends(navigation))
 
 
 # --- The session's lineage -----------------------------------------------------
@@ -1072,7 +1127,9 @@ def record_cookie_lineage(
                     "store": read_cookie_store(profile),
                 }
             )
-        _JsonFile(path).write(document)
+        file = _JsonFile(path)
+        file.write(document)
+        file.flush()
     except Exception:  # noqa: BLE001 - diagnostics never fail what they watch
         pass
 
@@ -1095,7 +1152,7 @@ def record_origin(
                 {
                     "wall": getattr(r, "t", None),
                     "host": _text(getattr(r, "host", None)),
-                    "path": _text(getattr(r, "path", None)),
+                    "path": _text(urlsplit(getattr(r, "path", "")).path),
                     "cookie_names": _names(getattr(r, "cookie_names", ())),
                     "session_valid": getattr(r, "session_valid", None),
                 }
@@ -1113,6 +1170,8 @@ def record_origin(
             ],
             "dropped_decisions": max(0, len(decisions) - MAX_EVENTS),
         }
-        _JsonFile(path).write(document)
+        file = _JsonFile(path)
+        file.write(document)
+        file.flush()
     except Exception:  # noqa: BLE001 - diagnostics never fail what they watch
         pass

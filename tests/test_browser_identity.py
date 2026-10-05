@@ -47,6 +47,7 @@ many cases replay it.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
@@ -253,11 +254,14 @@ def _identity_evidence(tmp_path_factory) -> Iterator[Path]:
     directory = tmp_path_factory.mktemp("identity-evidence")
     yield directory
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    publish(
-        directory,
-        _EVIDENCE_OUT,
-        f"identity-gate-{current_platform()}-{stamp}-{uuid.uuid4().hex[:8]}",
-    )
+    # Publishing is evidence, not part of the result: a directory that cannot
+    # be written must not fail the cases that already passed.
+    with contextlib.suppress(Exception):
+        publish(
+            directory,
+            _EVIDENCE_OUT,
+            f"identity-gate-{current_platform()}-{stamp}-{uuid.uuid4().hex[:8]}",
+        )
 
 
 @pytest.fixture(scope="module")

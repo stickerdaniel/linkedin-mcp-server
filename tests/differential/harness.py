@@ -181,7 +181,6 @@ from differential.fault_overlay import (
 )
 from differential.first_navigation import (
     COOKIE_LINEAGE_FILE,
-    FIRST_NAVIGATION_FILE,
     observing,
     record_cookie_lineage,
     record_origin,
@@ -7172,7 +7171,7 @@ async def measure_host_quit_row(
                     )
     finally:
         record_origin(
-            work_dir / FIRST_NAVIGATION_FILE,
+            navigation_file,
             origin.requests[staging_marks[0] :],
             proxy.decisions[staging_marks[1] :],
         )
