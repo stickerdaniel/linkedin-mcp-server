@@ -15,6 +15,7 @@ import anyio
 import anyio.lowlevel
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from linkedin_mcp_server.core.destination import raise_if_off_linkedin
 from linkedin_mcp_server.core.exceptions import LinkedInOperationError
 import linkedin_mcp_server.linkedin.contracts as contracts
 from linkedin_mcp_server.linkedin.identifiers import (
@@ -1223,6 +1224,11 @@ class MessageSender:
             return _ProfileMessageTargetResolution("failed")
         if not isinstance(data, dict):
             return _ProfileMessageTargetResolution("failed")
+        # Said as the landing it is: read as a failed recipient, a portal that
+        # replaced the profile would look like a profile without a Message
+        # action, and nothing would name where the browser went.
+        if isinstance(data.get("pageUrl"), str):
+            raise_if_off_linkedin(data["pageUrl"])
         if data.get("status") == "unavailable":
             page_url = data.get("pageUrl")
             if (

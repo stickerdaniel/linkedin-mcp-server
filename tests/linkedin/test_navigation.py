@@ -64,6 +64,38 @@ class TestNavigationDiagnostics:
         assert mock_page.goto.await_count == 2
         mock_resolve.assert_awaited_once()
 
+    async def test_a_chooser_wait_that_ends_on_a_portal_is_not_an_expired_session(
+        self, mock_page
+    ):
+        """The chooser was on LinkedIn when found and on a portal by the click.
+
+        The click refuses the portal and reports nothing clicked, which used to
+        fall through to an authentication error, retiring a valid session.
+        """
+        navigator = PageNavigator(PageSession(mock_page))
+        mock_page.url = "https://www.linkedin.com/in/testuser/"
+        mock_page.goto = AsyncMock(return_value=None)
+
+        async def refused_after_the_page_left(*args, **kwargs) -> bool:
+            mock_page.url = "https://portal.invalid/interstitial"
+            return False
+
+        with (
+            patch(
+                "linkedin_mcp_server.linkedin.navigation.resolve_remember_me_prompt",
+                new=refused_after_the_page_left,
+            ),
+            patch(
+                "linkedin_mcp_server.linkedin.navigation.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                return_value="account picker",
+            ),
+            pytest.raises(OffLinkedInLandingError, match="https://portal.invalid"),
+        ):
+            await navigator._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
     async def test_goto_with_auth_checks_unhooks_outer_listener_before_retry(
         self, mock_page
     ):

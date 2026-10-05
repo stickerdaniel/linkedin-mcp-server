@@ -277,6 +277,11 @@ class PageNavigator:
                 )
                 return
 
+            # The chooser wait gives a redirect time to land, and a chooser it
+            # found on another site was refused rather than clicked. Neither
+            # says the session expired, which the error below would retire it
+            # for.
+            raise_if_off_linkedin(page.url)
             await record_page_trace(
                 page,
                 "extractor-auth-barrier",

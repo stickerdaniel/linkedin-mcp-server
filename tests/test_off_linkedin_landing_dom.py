@@ -367,7 +367,9 @@ HOST_RULE_ADDRESSES = [
     "https://@linkedin.com/feed/",
     "https://www.linkedin.com/in/someone@example/",
     "https://www.linkedin.com../feed/",
-    "https://www.lіnkedin.com/feed/",
+    # A Cyrillic i (U+0456) in place of the Latin one, written as an escape
+    # so the source itself carries no look-alike letter.
+    "https://www.l\u0456nkedin.com/feed/",
     "https://[::1/feed/",
     "about:blank",
     "data:text/html,<main>LinkedIn</main>",
