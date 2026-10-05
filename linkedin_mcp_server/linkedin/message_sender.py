@@ -1739,15 +1739,19 @@ class MessageSender:
     ) -> None:
         """Release the handle that holds the confirmation path.
 
-        Bounded by the deadline captured before the send budget, not by the
-        scope this runs in. A stalled read cancels that budget, and a fresh
-        bound taken from the cancelled scope would outlast the tool deadline
-        and lose the unconfirmed answer.
+        Bounded by the deadline captured before the send budget and, when it
+        is still live, by that budget too. The captured one matters once a
+        stalled read has cancelled the budget, where the effective deadline
+        reads as gone and a fresh bound would outlast the tool deadline. The
+        live one matters when the snapshot arrived just before the budget
+        ends: disposal has to finish inside it, or the budget cancels the
+        accepted result on the way out.
         """
         now = anyio.current_time()
         limit = _MESSAGE_CLEANUP_TIMEOUT_SECONDS
-        if now < reply_deadline < math.inf:
-            limit = min(limit, (reply_deadline - now) / 2)
+        for deadline in (reply_deadline, anyio.current_effective_deadline()):
+            if now < deadline < math.inf:
+                limit = min(limit, (deadline - now) / 2)
         if limit <= 0:
             return
         with anyio.CancelScope(deadline=now + limit, shield=True) as scope:

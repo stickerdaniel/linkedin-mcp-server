@@ -1532,6 +1532,47 @@ class TestSendMessageDeadline:
         assert "thread_id" not in result.structured_content
         assert mocks.submit.call_count == 1
 
+    @pytest.mark.parametrize(
+        ("path", "thread_id"),
+        [("/messaging/thread/2-abc==/", "2-abc=="), ("/messaging/compose/", None)],
+    )
+    async def test_a_late_snapshot_keeps_the_thread_when_disposal_stalls(
+        self, mock_page, monkeypatch, path, thread_id
+    ):
+        """A snapshot taken just before the work deadline survives a stalled disposal.
+
+        Disposal has to finish inside the work budget the answer returns
+        through, not only inside the later tool deadline. A longer bound lets
+        that budget cancel the accepted result.
+        """
+
+        async def late_snapshot():
+            deadline = anyio.current_effective_deadline()
+            await anyio.sleep(max(0.0, deadline - anyio.current_time() - 0.02))
+            return {"path": path}
+
+        handle = MagicMock()
+        handle.json_value = AsyncMock(side_effect=late_snapshot)
+        handle.dispose = AsyncMock(side_effect=_stall)
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+        sender = _sender(mock_page)
+
+        async def confirmed(*args, **kwargs):
+            return await MessageSender._message_send_confirmed(sender, *args, **kwargs)
+
+        with ExitStack() as stack:
+            mocks = self._composer(stack, sender, mock_page)
+            mocks.confirmed.side_effect = confirmed
+            result = await self._call(sender, monkeypatch)
+
+        assert result.is_error is False, result.content
+        body = result.structured_content
+        assert body is not None
+        assert body["status"] == "sent"
+        assert body["sent"] is True
+        assert body["thread_id"] == thread_id
+        assert mocks.submit.call_count == 1
+
     async def test_a_stalled_snapshot_disposal_keeps_the_thread(
         self, mock_page, monkeypatch
     ):
