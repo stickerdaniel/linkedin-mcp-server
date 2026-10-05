@@ -179,6 +179,13 @@ from differential.fault_overlay import (
     scenario_problems,
     selection_problems,
 )
+from differential.first_navigation import (
+    COOKIE_LINEAGE_FILE,
+    FIRST_NAVIGATION_FILE,
+    observing,
+    record_cookie_lineage,
+    record_origin,
+)
 from differential.host_comparison import ROW_H_R2, ROW_H_R3
 from differential.job_query import (
     SHIM_SHA256,
@@ -7119,32 +7126,56 @@ async def measure_host_quit_row(
     emit("harness", "row.identity", mode=mode, **identity)
 
     browsers = runtime.browsers
-    if runtime.frozen:
-        # Written here, validated and committed by the baseline's own code and
-        # browser, so the profile never meets a newer Chromium first.
-        staged = write_synthetic_cookie_file(portable_cookie_path(account.profile))
-        origin.accept_session(staged.li_at)
-        await asyncio.to_thread(
-            stage_frozen_session,
-            runtime,
-            account.profile,
-            {
-                **actor_environment(
-                    account,
-                    proxy.url,
-                    daemon=False,
-                    browsers=browsers,
-                    idle_timeout=idle_timeout,
-                ),
-                **runtime_settings,
-            },
+    # From before the staging, whichever runtime stages: a first navigation
+    # that stalls there, a staging browser that goes, or a session that does
+    # not reach the row is visible only to observers that were already there
+    # (``first_navigation``). The frozen baseline drives its browser from its
+    # own interpreter, which records its navigation itself; the lifetimes are
+    # this process's descendants either way. No verdict reads any of it.
+    staging_marks = len(origin.requests), len(proxy.decisions)
+    try:
+        with observing(
+            work_dir,
+            profile=account.profile,
+            label="frozen-staging" if runtime.frozen else "candidate-staging",
+            in_process=not runtime.frozen,
+        ) as navigation_file:
+            if runtime.frozen:
+                # Written here, validated and committed by the baseline's own
+                # code and browser, so the profile never meets a newer
+                # Chromium first.
+                staged = write_synthetic_cookie_file(
+                    portable_cookie_path(account.profile)
+                )
+                origin.accept_session(staged.li_at)
+                await asyncio.to_thread(
+                    stage_frozen_session,
+                    runtime,
+                    account.profile,
+                    {
+                        **actor_environment(
+                            account,
+                            proxy.url,
+                            daemon=False,
+                            browsers=browsers,
+                            idle_timeout=idle_timeout,
+                        ),
+                        **runtime_settings,
+                    },
+                    diagnostics=navigation_file,
+                )
+            else:
+                with process_environment(runtime_settings):
+                    staged = await stage_signed_in_session(
+                        account.profile,
+                        accept=lambda session: origin.accept_session(session.li_at),
+                    )
+    finally:
+        record_origin(
+            work_dir / FIRST_NAVIGATION_FILE,
+            origin.requests[staging_marks[0] :],
+            proxy.decisions[staging_marks[1] :],
         )
-    else:
-        with process_environment(runtime_settings):
-            staged = await stage_signed_in_session(
-                account.profile,
-                accept=lambda session: origin.accept_session(session.li_at),
-            )
     # The staging browser has confirmed its close, but a root still on the
     # profile when the watcher takes its baseline would count against O1, and
     # one the census cannot read could be that root. The executable is named
@@ -7152,6 +7183,14 @@ async def measure_host_quit_row(
     # browsers directory.
     lingering = await asyncio.to_thread(
         wait_for_no_browser, account, _BROWSER_GONE_SECONDS, browser_dir=browsers
+    )
+    # What the staging left for the row's browser to reopen.
+    record_cookie_lineage(
+        work_dir / COOKIE_LINEAGE_FILE,
+        point="after-staging",
+        profile=account.profile,
+        cookie_file=portable_cookie_path(account.profile),
+        expected_digest=staged.li_at_digest,
     )
     if lingering:
         raise RuntimeError(f"the staging browser is not shown gone: {lingering}")
@@ -9469,6 +9508,15 @@ async def measure_host_quit_row(
             # records as the profile empty.
             await take_checkpoint(host_comparison.SETTLED)
         actors_ended = time.time()
+        # What the row's browsers left after reopening it: the export into
+        # the cookie file and the store, beside the staging's own reading.
+        record_cookie_lineage(
+            work_dir / COOKIE_LINEAGE_FILE,
+            point="after-row",
+            profile=account.profile,
+            cookie_file=portable_cookie_path(account.profile),
+            expected_digest=staged.li_at_digest,
+        )
         after = snapshot(account.profile, expected_digest=staged.li_at_digest)
         result.after = after
         emit("harness", "profile.snapshot", phase="after", **after.as_event_fields())

@@ -311,16 +311,24 @@ def bundled_executable(runtime: Runtime) -> str:
 
 
 def stage_frozen_session(
-    runtime: Runtime, profile: Path, env: dict[str, str], *, timeout: float = 600
+    runtime: Runtime,
+    profile: Path,
+    env: dict[str, str],
+    *,
+    timeout: float = 600,
+    diagnostics: Path | None = None,
 ) -> None:
     """Validate and commit the staged cookie file with the baseline's own code.
 
     The cookie file is already written; the baseline's import validation then
     launches the baseline's browser on the profile, so the profile starts from
-    the browser build that will run it, never from a newer one.
+    the browser build that will run it, never from a newer one. *diagnostics*
+    is where the staging script records that browser's first navigation
+    (``first_navigation``); the baseline's code and browser run as before.
     """
+    extra = [str(diagnostics)] if diagnostics is not None else []
     result = _run(
-        [runtime.python, str(STAGE_SCRIPT), str(profile)],
+        [runtime.python, str(STAGE_SCRIPT), str(profile), *extra],
         cwd=runtime.checkout,
         env=env,
         timeout=timeout,

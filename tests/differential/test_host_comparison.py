@@ -1239,7 +1239,7 @@ async def test_the_row_picks_its_idle_timeout_once_for_every_use(
         environments.append(env[EnvironmentKeys.BROWSER_IDLE_TIMEOUT])
         return env
 
-    def stage_frozen_session(runtime, directory, env):
+    def stage_frozen_session(runtime, directory, env, **_):
         staged.append(env[EnvironmentKeys.BROWSER_IDLE_TIMEOUT])
 
     def wait_until_dead(process, seconds, **kwargs):
