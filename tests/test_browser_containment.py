@@ -454,9 +454,29 @@ def _the_chromium_root(profile: Path) -> tuple[Any, Any]:
                 pass
     assert len(roots) == 1, f"expected one Chromium root on {profile}: {roots}"
     root = roots[0]
+    # The process that started Chromium. Node, where the browser runs out of
+    # process, and this test process itself where Patchright runs Chromium
+    # in-process (Linux arm64). A parent outside this test would be another
+    # launch.
     driver = root.parent()
-    assert driver is not None and "node" in driver.name().lower(), driver
+    assert driver is not None and (
+        driver.pid == os.getpid() or _is_this_tests_descendant(driver)
+    ), driver
     return root, driver
+
+
+def _is_this_tests_descendant(process: Any) -> bool:
+    me = os.getpid()
+    seen: set[int] = set()
+    while process is not None and process.pid not in seen:
+        if process.pid == me:
+            return True
+        seen.add(process.pid)
+        try:
+            process = process.parent()
+        except process.Error:
+            return False
+    return False
 
 
 def _reports_stopped(manager: BrowserManager) -> bool:
@@ -602,3 +622,27 @@ async def test_a_browser_that_stopped_is_drained_and_started_again(
         await drv.close_browser()
         for manager in launched:
             await manager.close()
+
+
+def test_the_driver_may_be_this_process(tmp_path, monkeypatch):
+    """Linux arm64 runs Chromium in-process, so its parent is the test itself."""
+    import psutil
+
+    profile = tmp_path / "profile"
+    profile.mkdir()
+
+    class InProcessRoot:
+        def cmdline(self) -> list[str]:
+            return ["chromium", f"--user-data-dir={profile}"]
+
+        def parent(self) -> psutil.Process:
+            return psutil.Process()
+
+    class Self(psutil.Process):
+        def children(self, recursive: bool = False) -> list[InProcessRoot]:
+            return [InProcessRoot()]
+
+    monkeypatch.setattr(psutil, "Process", Self)
+    root, driver = _the_chromium_root(profile)
+    assert isinstance(root, InProcessRoot)
+    assert driver.pid == os.getpid()
