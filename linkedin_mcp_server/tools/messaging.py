@@ -19,6 +19,7 @@ from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_er
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.linkedin.contracts import (
     SEND_INTERRUPTED_WARNING,
+    before_the_reply_deadline,
     refuse_an_invalid_message,
 )
 from linkedin_mcp_server.linkedin.identifiers import (
@@ -337,14 +338,19 @@ def register_messaging_tools(
             )
 
             try:
-                await ctx.report_progress(progress=100, total=100, message="Complete")
-            except BaseException:
                 # The send has already answered, and this notification is the
                 # last await inside FastMCP's `anyio.fail_after()`. A deadline
-                # landing here discards a result that may say the send was
-                # confirmed, and nothing can hand it back afterwards, so the
-                # log line is all that is left. Quiet where the result says a
-                # retry is safe, because then there is nothing to warn about.
+                # landing here would discard a result that may say the send was
+                # confirmed, so a notification that stalls gives up first.
+                with before_the_reply_deadline():
+                    await ctx.report_progress(
+                        progress=100, total=100, message="Complete"
+                    )
+            except BaseException:
+                # Cancellation from outside, such as a client that cancels,
+                # which nothing can answer, so the log line is all that is
+                # left. Quiet where the result says a retry is safe, because
+                # then there is nothing to warn about.
                 if result.get("retry_safe") is False:
                     logger.warning(SEND_INTERRUPTED_WARNING)
                 raise
