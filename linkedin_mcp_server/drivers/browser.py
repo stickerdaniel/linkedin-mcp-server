@@ -18,12 +18,16 @@ from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
 from linkedin_mcp_server.core import (
     AuthenticationError,
     BrowserManager,
+    OffLinkedInLandingError,
     await_deferring_cancels,
     detect_auth_barrier_quick,
     detect_rate_limit,
     goto_reporting_proxy_errors,
+    is_another_site,
+    is_linkedin_landing,
     is_logged_in,
     proxy_hint,
+    raise_if_off_linkedin,
     raise_if_proxy_configured,
     redact_proxy_credentials,
     raise_if_proxy_error,
@@ -184,12 +188,39 @@ async def _log_feed_failure_context(
     )
 
 
+async def _refuse_a_landing_off_linkedin(
+    browser: BrowserManager, step: str, *, hostless_too: bool = True
+) -> None:
+    """Raise when the feed check is looking at a page LinkedIn did not serve.
+
+    Raised, never answered with a verdict. False makes the caller retire the
+    profile and open a login through the portal that is in the way, and True
+    would accept another site's page as a signed-in session.
+
+    *hostless_too* is off after a failed navigation, where a blank document or
+    the browser's own error page is what the failure left behind and the
+    failure itself is the better report.
+    """
+    url = browser.page.url
+    if is_linkedin_landing(url):
+        return
+    if not hostless_too and not is_another_site(url):
+        return
+    await record_page_trace(browser.page, step)
+    raise_if_off_linkedin(url)
+
+
 async def _feed_auth_succeeds(
     browser: BrowserManager,
     *,
     allow_remember_me: bool = True,
 ) -> bool:
-    """Validate that /feed/ loads without an auth barrier."""
+    """Validate that /feed/ loads without an auth barrier.
+
+    Raises:
+        OffLinkedInLandingError: When the navigation ended on a page LinkedIn
+            did not serve, which says nothing about the session.
+    """
     try:
         await goto_reporting_proxy_errors(
             browser.page,
@@ -202,6 +233,9 @@ async def _feed_auth_succeeds(
             "feed-after-goto",
             extra={"allow_remember_me": allow_remember_me},
         )
+        # Ahead of the remember-me click and the barrier check, so neither
+        # runs on another site's page.
+        await _refuse_a_landing_off_linkedin(browser, "feed-off-linkedin")
         if allow_remember_me:
             if await resolve_remember_me_prompt(browser.page):
                 await stabilize_navigation("remember-me resolution", logger)
@@ -212,6 +246,9 @@ async def _feed_auth_succeeds(
                 )
                 return await _feed_auth_succeeds(browser, allow_remember_me=False)
         barrier = await detect_auth_barrier_quick(browser.page)
+        # Again, because the waits above give a redirect time to land, and a
+        # verdict either way is only about LinkedIn while the page still is.
+        await _refuse_a_landing_off_linkedin(browser, "feed-off-linkedin-settled")
         if barrier is not None:
             await record_page_trace(
                 browser.page,
@@ -221,6 +258,9 @@ async def _feed_auth_succeeds(
             await _log_feed_failure_context(browser, barrier)
             return False
         return True
+    except OffLinkedInLandingError:
+        # Also the recursive retries' refusal, which runs inside this try.
+        raise
     except Exception as exc:
         # Before anything else: a proxy fault is not a dead session. Returning
         # False here would have the caller retire a valid profile and tell the
@@ -246,6 +286,12 @@ async def _feed_auth_succeeds(
         # to /login and merely missed the load event, which is real evidence
         # about the session and must outrank the proxy explanation below.
         barrier = await detect_auth_barrier_quick(browser.page)
+        # A navigation that timed out after committing a portal's page is not
+        # evidence about the session either, and neither verdict may be given
+        # about one. After the read, so a redirect during it is seen too.
+        await _refuse_a_landing_off_linkedin(
+            browser, "feed-navigation-error-off-linkedin", hostless_too=False
+        )
         detail = redact_proxy_credentials(f"{type(exc).__name__}: {exc}")
         await record_page_trace(
             browser.page,

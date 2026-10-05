@@ -273,6 +273,79 @@ async def test_valid_input_reaches_the_patched_readiness_call(
     assert ready.await_args.kwargs == {"tool_name": tool_name}
 
 
+@pytest.mark.parametrize(
+    ("module_name", "tool_name", "method", "arguments"),
+    [
+        ("person", "get_person_profile", "read_person", {"linkedin_username": "a"}),
+        ("person", "get_my_profile", "get_my_profile", {}),
+        (
+            "person",
+            "connect_with_person",
+            "connect_with_person",
+            {"linkedin_username": "alice"},
+        ),
+        ("messaging", "get_inbox", "get_inbox", {}),
+        (
+            "messaging",
+            "get_conversation",
+            "get_conversation",
+            {"linkedin_username": "alice"},
+        ),
+        (
+            "messaging",
+            "search_conversations",
+            "search_conversations",
+            {"keywords": "hello"},
+        ),
+        ("feed", "get_feed", "extract_feed", {}),
+    ],
+)
+async def test_a_landing_off_linkedin_reaches_a_masked_client_by_name(
+    module_name, tool_name, method, arguments
+):
+    """The one useful fact, where the browser landed, survives the masking.
+
+    And the session stays: this is the network, so the recovery for an expired
+    session, which retires the profile and opens a login, must not run.
+    """
+    import importlib
+
+    from fastmcp.exceptions import ToolError
+
+    from linkedin_mcp_server.core.destination import raise_if_off_linkedin
+    from linkedin_mcp_server.core.exceptions import OffLinkedInLandingError
+
+    try:
+        raise_if_off_linkedin("https://portal.invalid/interstitial?token=s3cret")
+    except OffLinkedInLandingError as landed:
+        refusal = landed
+
+    module = importlib.import_module(f"linkedin_mcp_server.tools.{module_name}")
+    mcp = FastMCP("test", mask_error_details=True)
+    getattr(module, f"register_{module_name}_tools")(mcp)
+    extractor = _make_mock_extractor({})
+    setattr(extractor, method, AsyncMock(side_effect=refusal))
+
+    with (
+        patch(
+            f"linkedin_mcp_server.tools.{module_name}.get_ready_extractor",
+            AsyncMock(return_value=extractor),
+        ),
+        patch(
+            f"linkedin_mcp_server.tools.{module_name}.handle_auth_error",
+            new_callable=AsyncMock,
+        ) as relogin,
+        pytest.raises(ToolError) as excinfo,
+    ):
+        await mcp.call_tool(tool_name, arguments)
+
+    message = str(excinfo.value)
+    assert "https://portal.invalid" in message
+    assert "instead of LinkedIn" in message
+    assert "s3cret" not in message
+    relogin.assert_not_awaited()
+
+
 class TestPersonTool:
     async def test_get_person_profile_success(self, mock_context, serve_extractor):
         expected = {

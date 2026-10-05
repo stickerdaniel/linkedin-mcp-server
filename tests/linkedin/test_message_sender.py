@@ -191,6 +191,25 @@ class TestReadProfileMessageTarget:
         assert resolution.target.profile_path == "/in/canonical-user/"
         assert resolution.target.profile_urn == "ACoAAB"
 
+    @pytest.mark.parametrize("status", ["resolved", "unavailable"])
+    async def test_a_profile_that_became_a_portal_names_the_landing(
+        self, mock_page, status
+    ):
+        # Read as a failed recipient, the redirect would be hidden as a profile
+        # without a Message action.
+        from linkedin_mcp_server.core.exceptions import OffLinkedInLandingError
+
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "status": status,
+                "pageUrl": "https://portal.invalid/interstitial",
+                "composeHrefs": ["/messaging/compose/?recipient=ACoAAB"],
+            }
+        )
+
+        with pytest.raises(OffLinkedInLandingError, match="https://portal.invalid"):
+            await _sender(mock_page)._read_profile_message_target()
+
 
 class TestSendMessage:
     @pytest.mark.parametrize("message", ["", " \t\n"], ids=["empty", "whitespace"])

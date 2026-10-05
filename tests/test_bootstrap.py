@@ -9640,6 +9640,44 @@ class TestProxyErrorSurvivesTheImportTask:
         assert get_bootstrap_state().login_task is None
 
 
+class TestAPortalDuringImportOpensNoLogin:
+    """An import validation that lands on a portal is not a missing session.
+
+    Both handlers on the way out are broad enough to read it as one: the import
+    catches every network error as "nothing to import", and the awaiting caller
+    catches everything else as "fall back to a login". Either way the login it
+    opens has to go through the portal that is in the way.
+    """
+
+    async def test_the_refusal_reaches_the_caller_and_starts_no_login(
+        self, isolate_profile_dir, monkeypatch, _stub_import_env
+    ):
+        from linkedin_mcp_server.core.destination import raise_if_off_linkedin
+        from linkedin_mcp_server.core.exceptions import OffLinkedInLandingError
+
+        started: list[int] = []
+
+        async def fake_login_flow() -> None:
+            started.append(1)
+
+        async def landing_on_a_portal(*_args, **_kwargs):
+            raise_if_off_linkedin("https://portal.invalid/interstitial")
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_login_flow", fake_login_flow
+        )
+        # The real import wrapper runs, so its own handler is part of the path.
+        monkeypatch.setattr(_IMPORT_TARGET, landing_on_a_portal)
+        _patch_inline_wait(monkeypatch, 5, auto_import=True)
+        initialize_bootstrap("managed")
+
+        with pytest.raises(OffLinkedInLandingError, match="portal.invalid"):
+            await ensure_tool_ready_or_raise("get_person_profile")
+
+        assert started == []
+        assert get_bootstrap_state().login_task is None
+
+
 class TestARestrictedAccountOpensNoLoginWindow:
     """LinkedIn's restriction ends the login, and no retry reopens one.
 

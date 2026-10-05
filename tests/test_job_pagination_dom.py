@@ -46,6 +46,13 @@ async def dom_page():
         except Exception as exc:  # pragma: no cover - environment dependent
             pytest.skip(f"chromium unavailable: {exc}")
         try:
+            # On a LinkedIn address, because the reads refuse any other
+            # page, and `set_content` keeps the address it replaces.
+            await page.route(
+                "https://www.linkedin.com/**",
+                lambda route: route.fulfill(content_type="text/html", body=""),
+            )
+            await page.goto("https://www.linkedin.com/jobs/search/")
             yield page
         finally:
             await browser.close()

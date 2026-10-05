@@ -206,6 +206,17 @@ class ScriptedLocator:
     async def focus(self) -> None:
         await self._operation("focus")
 
+    async def element_handle(self, *, timeout: float | None = None) -> ScriptedHandle:
+        """The one element this locator resolves to, as an element handle.
+
+        Its own document is the page's: the scripted page holds one document,
+        so the address it answers for the element is the page's address.
+        """
+        self.page.recorder.record(
+            "locator.element_handle", locator=self.semantic_id, timeout_ms=timeout
+        )
+        return ScriptedHandle(self.page, self.semantic_id, is_element=True)
+
 
 class _Mouse:
     def __init__(self, page: ScriptedPage):
@@ -278,7 +289,23 @@ class ScriptedHandle:
         if arg is not _MISSING:
             values["arg"] = arg
         self.page.recorder.record("handle.evaluate", **values)
+        if operation == "owner_document_address":
+            return self.page.url
         return self.page._take(f"{self.semantic_id}.evaluate:{operation}")
+
+    async def _action(self, name: str, **values: Any) -> Any:
+        self._assert_live()
+        self.page.recorder.record(f"handle.{name}", handle=self.semantic_id, **values)
+        return self.page._take(f"{self.semantic_id}.{name}", default=None)
+
+    async def scroll_into_view_if_needed(self, *, timeout: int | None = None) -> None:
+        await self._action("scroll_into_view", timeout_ms=timeout)
+
+    async def click(self, *, timeout: int | None = None) -> None:
+        await self._action("click", timeout_ms=timeout)
+
+    async def inner_text(self) -> str:
+        return str(await self._action("inner_text"))
 
     async def dispose(self) -> None:
         self._assert_live()
@@ -596,6 +623,7 @@ def semantic_program_id(program: str) -> str:
     compact = " ".join(program.split())
     checks = (
         ("performance.timeOrigin", "document_origin"),
+        ("element.ownerDocument.location.href", "owner_document_address"),
         ("MAX_HEADING_CONTAINERS", "root_content"),
         ("SIDEBAR_SECTIONS", "sidebar_profiles"),
         ("showAllUrls", "sidebar_profiles"),

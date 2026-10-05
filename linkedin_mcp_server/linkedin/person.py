@@ -403,7 +403,7 @@ class PersonReader:
 
         await self._session.dismiss_modal()
 
-        sidebar_data: dict[str, Any] = await self._session.page.evaluate(
+        sidebar_data: dict[str, Any] = await self._session.run_on_linkedin(
             _SIDEBAR_PROFILES_JS
         )
 
@@ -447,7 +447,7 @@ class PersonReader:
 
             await self._session.dismiss_modal()
 
-            expanded_links: list[str] = await self._session.page.evaluate(
+            expanded_links: list[str] = await self._session.run_on_linkedin(
                 _SIDEBAR_EXPANDED_PROFILES_JS
             )
 

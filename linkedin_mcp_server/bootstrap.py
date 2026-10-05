@@ -4138,6 +4138,7 @@ async def _try_auto_import_session(ctx: Context | None = None) -> bool:
     from linkedin_mcp_server.core.exceptions import (
         AuthenticationError,
         NetworkError,
+        OffLinkedInLandingError,
         ProxyConnectionError,
     )
     from linkedin_mcp_server.exceptions import (
@@ -4188,10 +4189,11 @@ async def _try_auto_import_session(ctx: Context | None = None) -> bool:
     except TimeoutError:
         logger.info("Auto-import timed out after 60s; falling back to manual login")
         return False
-    except ProxyConnectionError:
-        # Ahead of NetworkError, which it subclasses. A dead proxy is not a
-        # missing browser session: swallowing it here would hide the real cause
-        # and fall back to a manual login that has to fail the same way.
+    except (ProxyConnectionError, OffLinkedInLandingError):
+        # Ahead of NetworkError, which both subclass. A dead proxy, or a portal
+        # answering in LinkedIn's place, is not a missing browser session:
+        # swallowing it here would hide the real cause and fall back to a
+        # manual login that has to go through the same network.
         raise
     except (
         NoLinkedInSessionFoundError,
@@ -4229,6 +4231,7 @@ async def _start_login_if_needed(
     # bootstrap out of the config -> core import cycle.
     from linkedin_mcp_server.core.exceptions import (
         AccountRestrictedError,
+        OffLinkedInLandingError,
         ProxyConnectionError,
     )
 
@@ -4282,10 +4285,10 @@ async def _start_login_if_needed(
             await import_task
         except asyncio.CancelledError:
             raise
-        except ProxyConnectionError:
-            # The import itself re-raises this rather than reporting "no
-            # session"; swallowing it here would undo that and send the user
-            # into a manual login that has to fail through the same proxy.
+        except (ProxyConnectionError, OffLinkedInLandingError):
+            # The import itself re-raises these rather than reporting "no
+            # session"; swallowing them here would undo that and send the user
+            # into a manual login that has to go through the same network.
             raise
         except AccountRestrictedError:
             # For the same reason: the manual login would land on the page the
