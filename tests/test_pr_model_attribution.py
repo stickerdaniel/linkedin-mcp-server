@@ -44,7 +44,7 @@ def test_workflow_checks_attribution_in_required_job() -> None:
     (step,) = job["steps"]
     assert set(step) == {"name", "uses", "with", "env"}
     assert re.fullmatch(rf"{re.escape(_ACTION)}@[0-9a-f]{{40}}", step["uses"])
-    assert step["with"] == {"require-model-attribution": True}
+    assert step["with"] == {"model-attribution": "model"}
     assert step["env"] == {
         "GUARDRAILS_WORKFLOW_REF": "${{ github.workflow_ref }}",
         "GUARDRAILS_WORKFLOW_SHA": "${{ github.workflow_sha }}",

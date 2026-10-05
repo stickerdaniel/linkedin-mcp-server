@@ -17,9 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check agent attribution and hidden Unicode
-        uses: stickerdaniel/post-no-bills@a3508d7320e64370b878359b1f4ae541b507224f # v1.0.0
+        uses: stickerdaniel/post-no-bills@3a0295140a40edc1ded01766ed9d0ac42cd148a5 # v3.0.0
         with:
-          require-model-attribution: true
+          model-attribution: model
         # Bind live evidence to this run, not a later branch-tip lookup.
         env:
           GUARDRAILS_WORKFLOW_REF: ${{ github.workflow_ref }}
