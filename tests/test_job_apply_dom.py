@@ -44,6 +44,17 @@ EASY_APPLY = (
     '<a href="https://www.linkedin.com/jobs/view/123/apply/?openSDUIApplyFlow=true"'
     ' aria-label="Easy Apply to this job">Easy Apply</a>'
 )
+#: The shape that replaced the anchor, as measured on 2026-09-25: a button with
+#: no href, its text in a span beside an icon.
+EASY_APPLY_BUTTON = (
+    '<button type="button" aria-label="Easy Apply to this job">'
+    '<span><svg aria-hidden="true"></svg><span>Easy Apply</span></span></button>'
+)
+#: A "More jobs" card as measured the same day: the words as text in its link.
+OTHER_EASY_APPLY_CARD = (
+    '<a href="https://www.linkedin.com/jobs/search-results/?currentJobId=999">'
+    "<p>AI Engineer</p><p>Easy Apply</p></a>"
+)
 OTHER_EASY_APPLY = (
     '<a href="https://www.linkedin.com/jobs/view/999/apply/">Easy Apply</a>'
 )
@@ -160,6 +171,20 @@ async def read(page, html: str) -> JobApplyRead:
 
 async def test_easy_apply_is_the_postings_own_apply_route(dom_page):
     assert await read(dom_page, posting(EASY_APPLY)) == JobApplyRead("easy_apply")
+
+
+async def test_easy_apply_is_the_postings_own_button(dom_page):
+    html = posting(EASY_APPLY_BUTTON, script=NO_CLICK)
+
+    assert await read(dom_page, html) == JobApplyRead("easy_apply")
+
+
+async def test_an_easy_apply_button_below_the_description_is_another_postings(
+    dom_page,
+):
+    below = OTHER_EASY_APPLY_CARD + EASY_APPLY_BUTTON
+
+    assert await read(dom_page, posting("", below=below)) == JobApplyRead("unknown")
 
 
 async def test_an_external_apply_link_is_read_off_its_href_without_a_click(

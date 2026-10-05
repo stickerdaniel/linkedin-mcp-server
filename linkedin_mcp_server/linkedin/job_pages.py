@@ -134,11 +134,13 @@ PROMOTED_JOB_IDS_JS = (
 }"""
 )
 
-# This posting's apply control and state, once they render. Easy Apply is found
-# by its URL, an anchor into the posting's own `/apply/` route that the "More
-# jobs" cards, each linking its own posting, cannot match. It is an
-# `<a href=".../jobs/view/<id>/apply/?openSDUIApplyFlow=true">` (measured on
-# 2026-09-14).
+# This posting's apply control and state, once they render. Easy Apply comes in
+# two shapes. The anchor into the posting's own `/apply/` route
+# (`<a href=".../jobs/view/<id>/apply/?openSDUIApplyFlow=true">`, measured on
+# 2026-09-14) is found by its URL, which the "More jobs" cards, each linking its
+# own posting, cannot match. The `<button>` with no href that replaced it
+# (measured on 2026-09-25) is found by its text, above the description only; the
+# cards below show the same words, as text inside their links.
 #
 # The external control is an `<a target="_blank">` into the off-site
 # interstitial, which names the employer's page in its href (measured on
@@ -159,8 +161,8 @@ PROMOTED_JOB_IDS_JS = (
 # poll runs this program on every frame for up to ten seconds.
 APPLY_SIGNALS_JS = r"""(opts) => {
     const {
-        applyPath, redirectPath, externalLabel, descriptionHeadings, closedLines,
-        appliedPattern,
+        applyPath, redirectPath, easyApplyLabel, externalLabel, descriptionHeadings,
+        closedLines, appliedPattern,
     } = opts;
     const main = document.querySelector('main');
     if (!main) return null;
@@ -192,7 +194,9 @@ APPLY_SIGNALS_JS = r"""(opts) => {
         && pathOf(anchor) === redirectPath);
     return {
         bounded: Boolean(heading),
-        easy_apply: anchors.some((anchor) => pathOf(anchor) === applyPath),
+        easy_apply: anchors.some((anchor) => pathOf(anchor) === applyPath)
+            || [...main.querySelectorAll('button')].some((el) => above(el)
+                && (el.innerText || '').trim() === easyApplyLabel),
         external_link: link ? link.href : null,
         applied: top.some((line) => applied.test(line)),
         closed: top.some((line) => closedLines.includes(line)),
@@ -316,6 +320,7 @@ class JobPageReader:
         opts = {
             "applyPath": f"/jobs/view/{job_id}/apply",
             "redirectPath": SAFETY_REDIRECT_PATH,
+            "easyApplyLabel": text.easy_apply_label,
             "externalLabel": text.external_apply_label,
             "descriptionHeadings": list(text.description_headings),
             "closedLines": list(text.closed_lines),
