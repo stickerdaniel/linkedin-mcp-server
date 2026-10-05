@@ -6,6 +6,7 @@ checks read it as a dead session. These helpers let those call sites tell the
 two apart before they draw that conclusion.
 """
 
+import asyncio
 import logging
 from typing import Any
 from urllib.parse import quote
@@ -155,6 +156,98 @@ def raise_if_proxy_configured(error: BaseException) -> None:
     ) from None
 
 
+#: The product's navigation budget, in milliseconds, counted from the moment
+#: the browser sends the navigation request. Patchright's own default is the
+#: same number but starts at the ``goto`` call. On a Windows runner the first
+#: request of a fresh browser is not sent for seconds after that call (1.1s to
+#: 2.5s on a green idle leg; a loaded one never sent it inside 30s), so a clock
+#: that starts at the call expires before the origin has anything to answer.
+#: A held request is inside this budget: the gate's 20s deadline leaves the
+#: answer ten seconds, and the relay drops a silent tunnel at 30s.
+NAVIGATION_BUDGET_MS = 30_000
+
+
+def _page_reports_requests(page: Any) -> bool:
+    """Whether *page* is a real page, not a stand-in whose ``on`` is invented.
+
+    A mock grows ``on`` the moment it is asked for, and treating that as a
+    listener would wait for a request the stand-in never emits. A method that
+    exists on the class is one the page actually has.
+    """
+    kind = type(page)
+    return callable(getattr(kind, "on", None)) and callable(
+        getattr(kind, "remove_listener", None)
+    )
+
+
+def _is_main_frame_navigation(page: Any, request: Any) -> bool:
+    """Whether *request* is the navigation ``goto`` is waiting on.
+
+    A subresource, or a frame that is not the page's main one, must not start
+    the budget: the answer the gate holds is the main document.
+    """
+    is_navigation = getattr(request, "is_navigation_request", None)
+    if callable(is_navigation) and not is_navigation():
+        return False
+    frame = getattr(request, "frame", None)
+    main = getattr(page, "main_frame", None)
+    return frame is None or main is None or frame is main
+
+
+async def _stop_goto(goto: asyncio.Future[Any]) -> None:
+    """Cancel a ``goto`` that is still running, and wait until it has stopped."""
+    if goto.done():
+        return
+    goto.cancel()
+    await asyncio.shield(asyncio.gather(goto, return_exceptions=True))
+
+
+async def _goto_within_budget(page: Any, url: str, **kwargs: Any) -> Any:
+    """``page.goto``, with :data:`NAVIGATION_BUDGET_MS` starting at the request.
+
+    A caller that passes ``timeout`` sets that budget. ``0`` keeps Patchright's
+    meaning, no limit. A page that cannot report its requests is unchanged:
+    the driver's own clock applies, which is the only clock it has.
+    """
+    caller_set_timeout = "timeout" in kwargs
+    timeout = kwargs.pop("timeout", None)
+    if not _page_reports_requests(page):
+        if caller_set_timeout:
+            kwargs["timeout"] = timeout
+        return await page.goto(url, **kwargs)
+    if timeout is None:
+        timeout = NAVIGATION_BUDGET_MS
+    if timeout == 0:
+        return await page.goto(url, timeout=0, **kwargs)
+
+    sent: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    def on_request(request: Any) -> None:
+        if sent.done() or not _is_main_frame_navigation(page, request):
+            return
+        sent.set_result(None)
+
+    page.on("request", on_request)
+    # ``timeout=0`` turns the driver's clock off. It would otherwise include
+    # the time before this browser sends anything, which is not the navigation.
+    goto = asyncio.ensure_future(page.goto(url, timeout=0, **kwargs))
+    try:
+        while not goto.done() and not sent.done():
+            await asyncio.wait({goto, sent}, return_when=asyncio.FIRST_COMPLETED)
+        if goto.done():
+            return await goto
+        try:
+            return await asyncio.wait_for(asyncio.shield(goto), timeout / 1000)
+        except TimeoutError:
+            await _stop_goto(goto)
+            raise TimeoutError(
+                f"Page.goto: Timeout {timeout:g}ms exceeded after the request was sent."
+            ) from None
+    finally:
+        page.remove_listener("request", on_request)
+        await _stop_goto(goto)
+
+
 async def goto_reporting_proxy_errors(page: Any, url: str, **kwargs: Any) -> Any:
     """``page.goto(url)``, reporting a proxy fault as :class:`ProxyConnectionError`.
 
@@ -162,9 +255,12 @@ async def goto_reporting_proxy_errors(page: Any, url: str, **kwargs: Any) -> Any
     happen before any auth check (manual login, cookie-import validation, the
     runtime bridge) would otherwise surface the raw driver error, which reads
     like a LinkedIn problem and can carry the proxy URL into a log.
+
+    The navigation budget starts when the browser sends the request, not when
+    this function is called. See :data:`NAVIGATION_BUDGET_MS`.
     """
     try:
-        return await page.goto(url, **kwargs)
+        return await _goto_within_budget(page, url, **kwargs)
     except Exception as exc:
         raise_if_proxy_error(exc)
         raise
