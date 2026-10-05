@@ -497,11 +497,11 @@ def _assert_nothing_of_it_runs(manager: BrowserManager) -> None:
         job = manager._containment
         assert job is not None and job.closed and job.drained
     else:
-        from linkedin_mcp_server.process_tree import _scan_marked_posix_processes
-
-        scan = _scan_marked_posix_processes(manager._process_marker)
-        assert scan.conclusive, "the marker scan could not tell"
-        assert not scan.processes, f"still running: {scan.processes}"
+        # One `ps` on macOS can time out and come back inconclusive. The same
+        # bounded retry the gate uses asks again; a scan that stays unreadable
+        # still fails, and a survivor still fails at once.
+        processes = _conclusive_marker_scan(manager._process_marker, "after the close")
+        assert not processes, f"still running: {processes}"
 
 
 @pytest.mark.parametrize("fault", ["chromium-killed", "page-closed"])
