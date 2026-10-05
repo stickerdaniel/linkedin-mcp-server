@@ -74,6 +74,22 @@ _FAIL_CLOSED_SCENARIOS = {
 }
 
 
+class _Win32Error(Exception):
+    """The shape of ``pywintypes.error``, copied from pywin32's own definition.
+
+    pywin32 builds that class from source text in ``PyWinTypesmodule.cpp``:
+    ``args`` is ``(winerror, funcname, strerror)`` and each is also an
+    attribute. The census failure seen in CI printed exactly this triple,
+    ``(87, 'OpenProcess', 'The parameter is incorrect.')``.
+    """
+
+    def __init__(self, winerror: int, funcname: str, strerror: str) -> None:
+        self.winerror = winerror
+        self.funcname = funcname
+        self.strerror = strerror
+        super().__init__(winerror, funcname, strerror)
+
+
 def communicate_harness(
     process: Any, harness: Any, *, timeout: float
 ) -> tuple[bytes, bytes]:
@@ -721,6 +737,127 @@ def test_guardian_loss_rechecks_owner_after_browser_job_query() -> None:
             active_descendants=lambda: 2,
             browser_job_active_processes=query_browser_job,
         )
+
+
+class _GuardianBetweenReads:
+    """A guardian that can exit, and a lease that can be taken, mid-sample."""
+
+    def __init__(self, *, exits_on_lease_read: bool) -> None:
+        self.live = True
+        self.lease = False
+        self.exits_on_lease_read = exits_on_lease_read
+
+    def guardian_active(self) -> bool:
+        return self.live
+
+    def lease_signaled(self) -> bool:
+        if self.exits_on_lease_read:
+            self.live = False
+            self.lease = True
+        return self.lease
+
+
+def test_guardian_loss_accepts_an_exit_between_the_liveness_and_lease_reads() -> None:
+    actors = _GuardianBetweenReads(exits_on_lease_read=True)
+    ticks = iter([12, 13])
+
+    measurement = sample_guardian_loss_progress(
+        {},
+        termination_requested_ns=10,
+        lease_acquired_ns=lambda: 11,
+        guardian_active=actors.guardian_active,
+        lease_signaled=actors.lease_signaled,
+        owner_active=lambda: True,
+        active_descendants=lambda: 2,
+        browser_job_active_processes=lambda: 2,
+        clock_ns=lambda: next(ticks),
+    )
+
+    assert measurement == {
+        "guardian_termination_requested_ns": 10,
+        "guardian_exit_observed_ns": 12,
+        "lease_acquired_ns": 11,
+        "lease_observed_ns": 13,
+        "owner_active_at_lease_observation": True,
+        "active_descendants_at_lease_observation": 2,
+        "browser_job_active_processes_at_lease_observation": 2,
+    }
+
+
+def test_guardian_loss_keeps_a_lease_seen_while_the_guardian_lives() -> None:
+    actors = _GuardianBetweenReads(exits_on_lease_read=False)
+    actors.lease = True
+    ticks = iter(range(11, 100))
+    observation: dict[str, int] = {}
+
+    def sample() -> dict[str, int | bool] | None:
+        return sample_guardian_loss_progress(
+            observation,
+            termination_requested_ns=10,
+            lease_acquired_ns=lambda: 11,
+            guardian_active=actors.guardian_active,
+            lease_signaled=actors.lease_signaled,
+            owner_active=lambda: True,
+            active_descendants=lambda: 2,
+            browser_job_active_processes=lambda: 2,
+            clock_ns=lambda: next(ticks),
+        )
+
+    with pytest.raises(RuntimeError, match="before guardian exit"):
+        sample()
+    # The guardian dying afterwards does not turn the contradiction into a pass.
+    actors.live = False
+    with pytest.raises(RuntimeError, match="before guardian exit"):
+        sample()
+
+
+def test_guardian_loss_rechecks_owner_after_a_between_reads_exit() -> None:
+    actors = _GuardianBetweenReads(exits_on_lease_read=True)
+    owner_active = True
+
+    def query_browser_job() -> int:
+        nonlocal owner_active
+        owner_active = False
+        return 2
+
+    with pytest.raises(RuntimeError, match="owner exited"):
+        sample_guardian_loss_progress(
+            {},
+            termination_requested_ns=10,
+            lease_acquired_ns=lambda: 11,
+            guardian_active=actors.guardian_active,
+            lease_signaled=actors.lease_signaled,
+            owner_active=lambda: owner_active,
+            active_descendants=lambda: 2,
+            browser_job_active_processes=query_browser_job,
+            clock_ns=iter([12, 13]).__next__,
+        )
+
+
+def test_guardian_loss_never_measures_a_guardian_that_never_exits() -> None:
+    actors = _GuardianBetweenReads(exits_on_lease_read=False)
+    observation: dict[str, int] = {}
+    ticks = iter(range(11, 100))
+
+    def sample() -> dict[str, int | bool] | None:
+        return sample_guardian_loss_progress(
+            observation,
+            termination_requested_ns=10,
+            lease_acquired_ns=lambda: 11,
+            guardian_active=actors.guardian_active,
+            lease_signaled=actors.lease_signaled,
+            owner_active=lambda: True,
+            active_descendants=lambda: 2,
+            browser_job_active_processes=lambda: 2,
+            clock_ns=lambda: next(ticks),
+        )
+
+    assert [sample() for _ in range(5)] == [None] * 5
+    assert observation == {}
+    actors.lease = True
+    with pytest.raises(RuntimeError, match="before guardian exit"):
+        sample()
+    assert "guardian_exit_observed_ns" not in observation
 
 
 def test_guardian_loss_wait_deadline_is_checked_before_waiting() -> None:
@@ -3139,6 +3276,269 @@ class TestBrowserLaunchEvidenceHelpers:
             )
         assert raised.value is error
         assert closed == [1]
+
+    def test_a_member_gone_before_open_restarts_the_whole_census(self) -> None:
+        jobs = iter([{1, 2, 3, 4}, {1, 2, 3}, {1, 2, 3}])
+        events: list[str] = []
+        live: set[int] = set()
+
+        def sample_cdp() -> list[dict[str, Any]]:
+            events.append(f"cdp live={sorted(live)}")
+            return [{"id": 2, "type": "browser"}, {"id": 3, "type": "renderer"}]
+
+        def sample_job_pids() -> set[int]:
+            events.append(f"job live={sorted(live)}")
+            return next(jobs)
+
+        def open_handle(pid: int) -> int:
+            if pid == 4:
+                raise _Win32Error(87, "OpenProcess", "The parameter is incorrect.")
+            live.add(pid)
+            return pid
+
+        def close_handle(handle: int) -> None:
+            live.remove(handle)
+
+        cdp, retained = probe.retain_stable_browser_inventory(
+            sample_cdp=sample_cdp,
+            sample_job_pids=sample_job_pids,
+            open_handle=open_handle,
+            validate_handle=lambda _pid, _handle: None,
+            close_handle=close_handle,
+            driver_pid=1,
+            deadline=10,
+            wait_for_retry=lambda: events.append("wait"),
+            monotonic=lambda: 0,
+        )
+
+        assert cdp == {2: "browser", 3: "renderer"}
+        assert retained == {1: 1, 2: 2, 3: 3}
+        # Every handle from the abandoned census is closed before a fresh CDP
+        # and Job inventory is taken.
+        assert events == [
+            "cdp live=[]",
+            "job live=[]",
+            "wait",
+            "cdp live=[]",
+            "job live=[]",
+            "cdp live=[1, 2, 3]",
+            "job live=[1, 2, 3]",
+        ]
+
+    def test_a_member_that_never_opens_fails_at_the_census_deadline(self) -> None:
+        clock = iter([0.0, 1.0, 2.0, 3.0])
+        opened: list[int] = []
+        closed: list[int] = []
+        waits: list[str] = []
+
+        def open_handle(pid: int) -> int:
+            opened.append(pid)
+            if pid == 4:
+                raise _Win32Error(87, "OpenProcess", "The parameter is incorrect.")
+            return pid
+
+        with pytest.raises(TimeoutError, match="did not become quiescent") as raised:
+            probe.retain_stable_browser_inventory(
+                sample_cdp=lambda: [
+                    {"id": 2, "type": "browser"},
+                    {"id": 3, "type": "renderer"},
+                ],
+                sample_job_pids=lambda: {1, 2, 3, 4},
+                open_handle=open_handle,
+                validate_handle=lambda _pid, _handle: None,
+                close_handle=closed.append,
+                driver_pid=1,
+                deadline=2.0,
+                wait_for_retry=lambda: waits.append("wait"),
+                monotonic=lambda: next(clock),
+            )
+
+        assert isinstance(raised.value.__cause__, _Win32Error)
+        assert opened == [1, 2, 3, 4] * 3
+        assert closed == [1, 2, 3] * 3
+        assert waits == ["wait", "wait"]
+
+    @pytest.mark.parametrize(
+        ("fault", "error"),
+        [
+            pytest.param(
+                "validate",
+                _Win32Error(87, "IsProcessInJob", "The parameter is incorrect."),
+                id="87-from-validation",
+            ),
+            pytest.param(
+                "job",
+                _Win32Error(
+                    87, "QueryInformationJobObject", "The parameter is incorrect."
+                ),
+                id="87-from-job-query",
+            ),
+            pytest.param(
+                "cdp",
+                _Win32Error(87, "OpenProcess", "The parameter is incorrect."),
+                id="87-shaped-from-cdp",
+            ),
+            pytest.param(
+                "open",
+                _Win32Error(87, "GetProcessId", "The parameter is incorrect."),
+                id="87-named-for-another-call",
+            ),
+            pytest.param(
+                "open",
+                OSError(22, "The parameter is incorrect.", None, 87),
+                id="87-without-a-win32-call-name",
+            ),
+            pytest.param(
+                "open",
+                _Win32Error(5, "OpenProcess", "Access is denied."),
+                id="access-denied",
+            ),
+            pytest.param(
+                "open",
+                _Win32Error(6, "OpenProcess", "The handle is invalid."),
+                id="invalid-handle",
+            ),
+        ],
+    )
+    def test_only_open_process_87_is_churn(
+        self, fault: str, error: BaseException
+    ) -> None:
+        closed: list[int] = []
+        cdp_samples: list[str] = []
+
+        def raise_on(name: str, pid: int | None = None) -> None:
+            if fault == name and pid in (None, 4):
+                raise error
+
+        def sample_cdp() -> list[dict[str, Any]]:
+            cdp_samples.append("cdp")
+            if len(cdp_samples) == 2:
+                raise_on("cdp")
+            return [{"id": 2, "type": "browser"}, {"id": 3, "type": "renderer"}]
+
+        def sample_job_pids() -> set[int]:
+            if cdp_samples == ["cdp", "cdp"]:
+                raise_on("job")
+            return {1, 2, 3, 4}
+
+        def open_handle(pid: int) -> int:
+            raise_on("open", pid)
+            return pid
+
+        def validate_handle(pid: int, _handle: int) -> None:
+            raise_on("validate", pid)
+
+        with pytest.raises(type(error)) as raised:
+            probe.retain_stable_browser_inventory(
+                sample_cdp=sample_cdp,
+                sample_job_pids=sample_job_pids,
+                open_handle=open_handle,
+                validate_handle=validate_handle,
+                close_handle=closed.append,
+                driver_pid=1,
+                deadline=10,
+                wait_for_retry=lambda: pytest.fail(f"{error!r} is not churn"),
+                monotonic=lambda: 0,
+            )
+
+        assert raised.value is error
+        assert sorted(closed) == (
+            [1, 2, 3, 4] if fault in {"validate", "job", "cdp"} else [1, 2, 3]
+        )
+
+    @pytest.mark.parametrize("pid", [0, -4])
+    def test_87_for_a_nonpositive_pid_is_not_churn(self, pid: int) -> None:
+        error = _Win32Error(87, "OpenProcess", "The parameter is incorrect.")
+
+        def open_handle(candidate: int) -> int:
+            if candidate == pid:
+                raise error
+            return candidate
+
+        with pytest.raises(_Win32Error) as raised:
+            probe.retain_stable_browser_inventory(
+                sample_cdp=lambda: [
+                    {"id": 2, "type": "browser"},
+                    {"id": 3, "type": "renderer"},
+                ],
+                sample_job_pids=lambda: {pid, 1, 2, 3},
+                open_handle=open_handle,
+                validate_handle=lambda _pid, _handle: None,
+                close_handle=lambda _handle: None,
+                driver_pid=1,
+                deadline=10,
+                wait_for_retry=lambda: pytest.fail("a nonpositive PID is not churn"),
+                monotonic=lambda: 0,
+            )
+        assert raised.value is error
+
+    def test_a_fresh_census_after_87_still_requires_browser_and_renderer(
+        self,
+    ) -> None:
+        cdp = iter(
+            [
+                [{"id": 2, "type": "browser"}, {"id": 3, "type": "renderer"}],
+                [{"id": 2, "type": "browser"}],
+                [{"id": 2, "type": "browser"}],
+            ]
+        )
+        jobs = iter([{1, 2, 3, 4}, {1, 2}, {1, 2}])
+        closed: list[int] = []
+
+        def open_handle(pid: int) -> int:
+            if pid == 4:
+                raise _Win32Error(87, "OpenProcess", "The parameter is incorrect.")
+            return pid
+
+        with pytest.raises(RuntimeError, match="required roles"):
+            probe.retain_stable_browser_inventory(
+                sample_cdp=lambda: next(cdp),
+                sample_job_pids=lambda: next(jobs),
+                open_handle=open_handle,
+                validate_handle=lambda _pid, _handle: None,
+                close_handle=closed.append,
+                driver_pid=1,
+                deadline=10,
+                wait_for_retry=lambda: None,
+                monotonic=lambda: 0,
+            )
+        assert closed == [1, 2, 3, 1, 2]
+
+    def test_a_failed_close_after_87_fails_the_census(self) -> None:
+        close_error = _Win32Error(6, "CloseHandle", "The handle is invalid.")
+        attempted: list[int] = []
+        samples: list[str] = []
+
+        def open_handle(pid: int) -> int:
+            if pid == 4:
+                raise _Win32Error(87, "OpenProcess", "The parameter is incorrect.")
+            return pid
+
+        def close_handle(handle: int) -> None:
+            attempted.append(handle)
+            if handle == 2:
+                raise close_error
+
+        def sample_cdp() -> list[dict[str, Any]]:
+            samples.append("cdp")
+            return [{"id": 2, "type": "browser"}, {"id": 3, "type": "renderer"}]
+
+        with pytest.raises(_Win32Error) as raised:
+            probe.retain_stable_browser_inventory(
+                sample_cdp=sample_cdp,
+                sample_job_pids=lambda: {1, 2, 3, 4},
+                open_handle=open_handle,
+                validate_handle=lambda _pid, _handle: None,
+                close_handle=close_handle,
+                driver_pid=1,
+                deadline=10,
+                wait_for_retry=lambda: pytest.fail("cleanup failed; no retry"),
+                monotonic=lambda: 0,
+            )
+        assert raised.value is close_error
+        # The failure does not strand the handles after the one that failed.
+        assert attempted == [1, 2, 3]
+        assert samples == ["cdp"]
 
     def test_handle_waits_share_one_deadline(self) -> None:
         times = iter([0.0, 0.4])
