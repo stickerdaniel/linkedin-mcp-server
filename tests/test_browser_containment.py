@@ -587,8 +587,10 @@ async def test_a_browser_that_stopped_is_drained_and_started_again(
             for process in [*root.children(recursive=True), root]:
                 with contextlib.suppress(psutil.NoSuchProcess):
                     process.kill()
+            # The driver reports the browser gone before Windows has dropped
+            # the process, so both have to be true, inside the same bound.
             for _ in range(500):
-                if _reports_stopped(first):
+                if _reports_stopped(first) and not _alive(root):
                     break
                 await asyncio.sleep(0.01)
         # What the fault ended and what it left, observed apart.
