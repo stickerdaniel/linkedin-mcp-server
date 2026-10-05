@@ -265,7 +265,7 @@ def posting_state(
     """The state a posting's captured text shows above its description, if any.
 
     The same reading `get_job_apply_url` makes on the page, on the same lines,
-    so a caller can learn it without the click an external Apply would cost.
+    so `get_job_details` answers it without a second navigation.
     Applied is read first, as there. None covers an open posting and a capture
     without any of its description headings alike: the lines are only trusted
     above the earliest one, and without it there is no boundary.
