@@ -726,11 +726,19 @@ _MESSAGE_CONFIRMATION_READY_JS = (
         // inside the conversation pane of the one composer the page now shows.
         // That node must be the newest message in the pane, so older history
         // loaded later cannot stand in for it. A send that started on a
-        // thread route must stay on that thread. One that started on the
-        // compose route and now sits on a thread route is the first message
-        // of a new thread, whose pane holds that one message; a pane with
-        // other messages there is some other conversation, and so is one
-        // whose header does not link the recipient.
+        // thread route must stay on that thread; leaving it for compose is
+        // a different conversation too. One that started on the compose
+        // route and now sits on a thread route is the first message of a
+        // new thread, whose pane holds that one message; a pane with other
+        // messages there is some other conversation, and so is one whose
+        // header does not link the recipient.
+        // Both arms. The shape is the one messageRoute admits for a thread.
+        const threadRoute = path =>
+            /^\/messaging\/thread\/[A-Za-z0-9_=-]+\/$/.test(path);
+        const routeContinues = marker => {
+            const startPath = marker?.getAttribute('data-linkedin-mcp-route') || '';
+            return !threadRoute(startPath) || window.location.pathname === startPath;
+        };
         const serverAcknowledged = () => {
             const marker = Array.from(
                 arg.owner?.querySelectorAll('[data-linkedin-mcp-confirmation]') || []
@@ -754,12 +762,11 @@ _MESSAGE_CONFIRMATION_READY_JS = (
             const items = Array.from(
                 scope.querySelectorAll(itemSelector)
             ).filter(visible);
+            if (!routeContinues(marker)) return false;
             const startPath = marker.getAttribute('data-linkedin-mcp-route') || '';
             const path = window.location.pathname;
-            if (path.startsWith('/messaging/thread/')) {
-                if (startPath.startsWith('/messaging/thread/')) {
-                    if (path !== startPath) return false;
-                } else if (
+            if (path.startsWith('/messaging/thread/') && !threadRoute(startPath)) {
+                if (
                     items.length !== 1 ||
                     !Array.from(scope.querySelectorAll('a[href*="/in/"]')).some(
                         anchor => !anchor.closest(itemSelector) &&
@@ -779,38 +786,44 @@ _MESSAGE_CONFIRMATION_READY_JS = (
                 acknowledged[0] === items[items.length - 1] &&
                 !sentByRecipient(scope, acknowledged[0]);
         };
-        if (!arg.owner?.isConnected) return serverAcknowledged();
-        const markers = Array.from(
-            arg.owner.querySelectorAll('[data-linkedin-mcp-confirmation]')
-        ).filter(
-            marker => marker.getAttribute('data-linkedin-mcp-confirmation') === arg.token
-        );
-        if (
-            markers.length !== 1 ||
-            markers[0].getAttribute('data-linkedin-mcp-invalid') !== 'false'
-        ) {
-            return serverAcknowledged();
-        }
-        const composer = inspect(arg);
-        if (
-            composer.status !== 'valid' ||
-            composer.messageRoute === null ||
-            composer.owner !== arg.owner ||
-            composer.buttons.length !== 1 ||
-            composer.editor.getAttribute('data-linkedin-mcp-editor') !== arg.token
-        ) {
-            return serverAcknowledged();
-        }
-        const candidates = Array.from(
-            threadScope(arg.owner).querySelectorAll('[data-linkedin-mcp-candidate]')
-        ).filter(node =>
-            node.getAttribute('data-linkedin-mcp-candidate') === arg.token &&
-            node.getAttribute('data-linkedin-mcp-matched') === arg.token &&
-            node.getAttribute('data-linkedin-mcp-transitioned') === arg.token &&
-            (node.getAttribute('data-event-urn') || '').trim() &&
-            exactVisibleUnit(node)
-        );
-        return candidates.length === 1 || serverAcknowledged();
+        const confirmed = (() => {
+            if (!arg.owner?.isConnected) return serverAcknowledged();
+            const markers = Array.from(
+                arg.owner.querySelectorAll('[data-linkedin-mcp-confirmation]')
+            ).filter(
+                marker => marker.getAttribute('data-linkedin-mcp-confirmation') === arg.token
+            );
+            if (
+                markers.length !== 1 ||
+                markers[0].getAttribute('data-linkedin-mcp-invalid') !== 'false'
+            ) {
+                return serverAcknowledged();
+            }
+            if (!routeContinues(markers[0])) return serverAcknowledged();
+            const composer = inspect(arg);
+            if (
+                composer.status !== 'valid' ||
+                composer.messageRoute === null ||
+                composer.owner !== arg.owner ||
+                composer.buttons.length !== 1 ||
+                composer.editor.getAttribute('data-linkedin-mcp-editor') !== arg.token
+            ) {
+                return serverAcknowledged();
+            }
+            const candidates = Array.from(
+                threadScope(arg.owner).querySelectorAll('[data-linkedin-mcp-candidate]')
+            ).filter(node =>
+                node.getAttribute('data-linkedin-mcp-candidate') === arg.token &&
+                node.getAttribute('data-linkedin-mcp-matched') === arg.token &&
+                node.getAttribute('data-linkedin-mcp-transitioned') === arg.token &&
+                (node.getAttribute('data-event-urn') || '').trim() &&
+                exactVisibleUnit(node)
+            );
+            return candidates.length === 1 || serverAcknowledged();
+        })();
+        // Resolves on any truthy value, so a miss stays null. The path is
+        // the one this invocation just accepted.
+        return confirmed ? {path: window.location.pathname} : null;
     }"""
 )
 
@@ -1209,6 +1222,38 @@ class _ProfileMessageTarget:
 class _ProfileMessageTargetResolution:
     status: Literal["resolved", "unavailable", "failed"]
     target: _ProfileMessageTarget | None = None
+
+
+@dataclass(frozen=True)
+class _SendConfirmation:
+    """Thread segment of a confirmed send, or None on the compose route.
+
+    Taken from the confirmation snapshot. A later page URL is not a source.
+    """
+
+    thread_id: str | None
+
+
+def _confirmation_from_snapshot(snapshot: Any) -> _SendConfirmation | None:
+    """Accept only ``{path}`` for a compose or thread route.
+
+    ``wait_for_function`` resolves on every truthy value, so a snapshot that
+    is not this shape is not a confirmation.
+    """
+    if (
+        not isinstance(snapshot, dict)
+        or set(snapshot) != {"path"}
+        or not isinstance(snapshot["path"], str)
+    ):
+        return None
+    path = snapshot["path"]
+    if path == "/messaging/compose/":
+        return _SendConfirmation(thread_id=None)
+    if _MESSAGE_THREAD_PATH_RE.fullmatch(path) is None:
+        return None
+    return _SendConfirmation(
+        thread_id=path.removeprefix("/messaging/thread/").removesuffix("/")
+    )
 
 
 def _safe_linkedin_url(value: str, *, base: str | None = None) -> ParseResult | None:
@@ -1626,7 +1671,7 @@ class MessageSender:
         target: _ProfileMessageTarget,
         owner: Any,
         confirmation: str,
-    ) -> bool:
+    ) -> _SendConfirmation | None:
         """Wait for LinkedIn to acknowledge the submitted message in its thread.
 
         Two signals count. The observer accepts a node inserted after it was
@@ -1639,9 +1684,15 @@ class MessageSender:
         thread remounts the pane under /messaging/thread/<id>/. Every timeout
         or ambiguity answers "not observed" because submission already
         happened.
+
+        The predicate returns the path that invocation accepted. A thread
+        path yields its segment; the compose path yields no thread. Failing
+        to read or judge that snapshot is the same unconfirmed answer as a
+        timeout. Disposal is not: a snapshot already accepted is kept when
+        releasing its handle fails or runs out of time.
         """
         try:
-            await self._page.wait_for_function(
+            handle = await self._page.wait_for_function(
                 _MESSAGE_CONFIRMATION_READY_JS,
                 arg={
                     **self._message_target_argument(target),
@@ -1650,10 +1701,43 @@ class MessageSender:
                     "token": confirmation,
                 },
             )
-            return True
         except Exception:
             logger.debug("Message send could not be confirmed", exc_info=True)
-            return False
+            return None
+
+        confirmed: _SendConfirmation | None = None
+        try:
+            snapshot = await handle.json_value()
+        except Exception:
+            logger.debug(
+                "Message confirmation snapshot could not be read", exc_info=True
+            )
+        else:
+            confirmed = _confirmation_from_snapshot(snapshot)
+            if confirmed is None:
+                logger.debug("Message confirmation snapshot was not a route")
+        finally:
+            # Also when the snapshot is unusable. A caller with no deadline
+            # still finishes: disposal carries its own cap.
+            await self._dispose_confirmation_snapshot(handle)
+        return confirmed
+
+    @staticmethod
+    async def _dispose_confirmation_snapshot(handle: Any) -> None:
+        """Release the handle that holds the confirmation path."""
+        with contracts.before_the_reply_deadline(
+            _MESSAGE_CLEANUP_TIMEOUT_SECONDS, shield=True
+        ) as scope:
+            try:
+                await handle.dispose()
+            except Exception:
+                logger.debug(
+                    "Could not release message confirmation snapshot",
+                    exc_info=True,
+                )
+        if scope.cancel_called:
+            logger.warning("Timed out releasing message confirmation snapshot")
+        await anyio.lowlevel.checkpoint()
 
     async def _dispose_message_confirmation(
         self, owner: Any, confirmation: str
@@ -1993,7 +2077,7 @@ class MessageSender:
                             owner=owner,
                             confirmation=confirmation,
                         )
-                        if not confirmed:
+                        if confirmed is None:
                             return contracts.message_action_result(
                                 self._page.url,
                                 "send_unconfirmed",
@@ -2012,6 +2096,7 @@ class MessageSender:
                             recipient_selected=recipient_selected,
                             sent=True,
                             retry_safe=False,
+                            thread_id=confirmed.thread_id,
                         )
 
                     # Reached only when the budget ran out.

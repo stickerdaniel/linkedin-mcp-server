@@ -1902,3 +1902,174 @@ class TestMultiLineConfirmationDom:
 
         assert _unconfirmed(result), result
         assert await dom_page.evaluate("document.body.dataset.clicked") == "1"
+
+
+def acknowledging_page(
+    arm: str, *, start: str | None = None, leave_to: str | None = None
+) -> str:
+    """A compose page whose click answers on one arm, maybe after a route change."""
+    start_js = f"history.replaceState({{}}, '', {json.dumps(start)});" if start else ""
+    leave_js = (
+        f"history.pushState({{}}, '', {json.dumps(leave_to)});" if leave_to else ""
+    )
+    if arm == "opaque":
+        ack = """
+          const entry = messageItem(text, 'client-opaque-id');
+          document.getElementById('thread').appendChild(entry);
+          setTimeout(() => {
+            entry.setAttribute('data-event-urn', 'server-opaque-id');
+          }, 0);
+          composer.textContent = '';
+        """
+    elif arm == "server":
+        ack = """
+          const placeholder = messageItem(text, 'client-uuid');
+          document.getElementById('thread').appendChild(placeholder);
+          composer.textContent = '';
+          setTimeout(() => {
+            document.getElementById('thread').appendChild(
+              messageItem(text, 'urn:li:msg_message:(self,server-new)', SELF_URN));
+            placeholder.remove();
+          }, 50);
+        """
+    else:
+        raise AssertionError(arm)
+    return compose_page(
+        f"""
+          {start_js}
+          document.getElementById('send').addEventListener('click', event => {{
+            event.preventDefault();
+            document.body.dataset.clicked = 'true';
+            {leave_js}
+            const composer = document.getElementById('composer');
+            const text = composer.innerText;
+            {ack}
+          }});
+        """
+    )
+
+
+_ROUTE_ARMS = ["opaque", "server"]
+_OPEN_THREAD = "/messaging/thread/2-open==/"
+_OTHER_THREAD = "/messaging/thread/2-other==/"
+_COMPOSE_PATH = "/messaging/compose/?recipient=ACoAAB"
+
+
+class TestConfirmationThread:
+    """The thread id is the path the confirmation itself observed."""
+
+    @pytest.mark.parametrize("arm", _ROUTE_ARMS)
+    async def test_the_same_thread_confirms(self, dom_page, arm):
+        result = await send(dom_page, acknowledging_page(arm, start=_OPEN_THREAD))
+
+        assert _sent(result), result
+        assert result["thread_id"] == "2-open=="
+
+    @pytest.mark.parametrize("arm", _ROUTE_ARMS)
+    async def test_a_move_to_another_thread_does_not_confirm(self, dom_page, arm):
+        result = await send(
+            dom_page,
+            acknowledging_page(arm, start=_OPEN_THREAD, leave_to=_OTHER_THREAD),
+        )
+
+        assert _unconfirmed(result), result
+        assert "thread_id" not in result
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
+
+    @pytest.mark.parametrize("arm", _ROUTE_ARMS)
+    async def test_leaving_a_thread_for_compose_does_not_confirm(self, dom_page, arm):
+        result = await send(
+            dom_page,
+            acknowledging_page(arm, start=_OPEN_THREAD, leave_to=_COMPOSE_PATH),
+        )
+
+        assert _unconfirmed(result), result
+        assert "thread_id" not in result
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
+
+    @pytest.mark.parametrize("arm", _ROUTE_ARMS)
+    async def test_compose_staying_on_compose_has_no_thread(self, dom_page, arm):
+        result = await send(dom_page, acknowledging_page(arm))
+
+        assert _sent(result), result
+        assert result["thread_id"] is None
+
+    async def test_compose_opening_a_thread_reports_that_thread(self, dom_page):
+        html = compose_page(
+            PANE_REMOUNT_SEND_JS + "remountTo('/messaging/thread/2-abc==/', "
+            "['urn:li:msg_message:(self,server-first)']);"
+        )
+
+        result = await send(dom_page, html)
+
+        assert _sent(result), result
+        assert result["thread_id"] == "2-abc=="
+        assert await dom_page.locator("#conversation").count() == 0
+
+    async def test_server_replacement_confirms_after_the_marker_is_invalidated(
+        self, dom_page
+    ):
+        from patchright.async_api import JSHandle
+
+        seen: list[str | None] = []
+        original = JSHandle.json_value
+
+        async def json_value(self):
+            seen.append(
+                await dom_page.evaluate(
+                    """() => {
+                        const marker = document.querySelector(
+                            '[data-linkedin-mcp-confirmation]'
+                        );
+                        return marker
+                            ? marker.getAttribute('data-linkedin-mcp-invalid')
+                            : null;
+                    }"""
+                )
+            )
+            return await original(self)
+
+        with patch.object(JSHandle, "json_value", json_value):
+            result = await send(dom_page, acknowledging_page("server"))
+
+        assert seen == ["true"]
+        assert _sent(result), result
+        assert result["thread_id"] is None
+
+    async def test_owner_preserving_compose_to_thread_confirms(self, dom_page):
+        # Prior history and no recipient header: the server arm's compose
+        # transition refuses this pane. The candidate arm does not.
+        result = await send(
+            dom_page,
+            acknowledging_page("opaque", leave_to="/messaging/thread/2-kept==/"),
+        )
+
+        assert _sent(result), result
+        assert result["thread_id"] == "2-kept=="
+        assert (
+            await dom_page.locator('[data-view-name="message-list-item"]').count() >= 2
+        )
+
+    @pytest.mark.parametrize("arm", _ROUTE_ARMS)
+    async def test_thread_id_is_the_snapshot_not_a_later_route(self, dom_page, arm):
+        from patchright.async_api import JSHandle
+
+        original = JSHandle.json_value
+
+        async def json_value(self):
+            value = await original(self)
+            if (
+                isinstance(value, dict)
+                and value.get("path") == "/messaging/thread/2-open==/"
+            ):
+                await dom_page.evaluate(
+                    "() => history.pushState({}, '', '/messaging/thread/2-later==/')"
+                )
+            return value
+
+        with patch.object(JSHandle, "json_value", json_value):
+            result = await send(dom_page, acknowledging_page(arm, start=_OPEN_THREAD))
+
+        assert _sent(result), result
+        assert result["thread_id"] == "2-open=="
+        assert dom_page.url.endswith("/messaging/thread/2-later==/")

@@ -285,7 +285,7 @@
       "call": "send_message",
       "kind": "wait_for_function",
       "operation": "message_confirmation_ready",
-      "program_digest": "4444171d134b",
+      "program_digest": "d7d0e51b08d2",
       "section": "message",
       "timeout_ms": null
     },

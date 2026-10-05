@@ -314,6 +314,40 @@ class ScriptedHandle:
         self.disposed = True
 
 
+class ScriptedSnapshot:
+    """The value handle ``wait_for_function`` returns for a confirmation."""
+
+    def __init__(self, page: ScriptedPage, semantic_id: str, value: Any):
+        self.page = page
+        self.semantic_id = semantic_id
+        self.value = value
+        self.disposed = False
+
+    @property
+    def trace_reference(self) -> dict[str, str]:
+        return {"handle": self.semantic_id}
+
+    def _assert_live(self) -> None:
+        if self.disposed:
+            raise AssertionError(
+                f"{self.page.recorder.scenario}: snapshot {self.semantic_id!r} "
+                "was disposed"
+            )
+
+    async def json_value(self) -> Any:
+        self._assert_live()
+        self.page.recorder.record(
+            "handle.json_value", handle=self.semantic_id, value=self.value
+        )
+        return self.value
+
+    async def dispose(self) -> None:
+        self._assert_live()
+        self.page.recorder.record("handle.dispose", handle=self.semantic_id)
+        self.page._take(f"{self.semantic_id}.dispose", default=None)
+        self.disposed = True
+
+
 class ScriptedPage:
     """Strict Page subset with semantic JavaScript dispatch and exact listeners."""
 
@@ -337,6 +371,7 @@ class ScriptedPage:
         self.listeners: dict[str, list[Callable[..., Any]]] = defaultdict(list)
         self.goto_landings: deque[str] = deque()
         self.handles: list[ScriptedHandle] = []
+        self.snapshots: list[ScriptedSnapshot] = []
 
     def script(self, operation: str, *values: Any) -> ScriptedPage:
         self.scripts[operation] = Script(values)
@@ -465,7 +500,7 @@ class ScriptedPage:
         *,
         arg: Any = None,
         timeout: int | None = None,
-    ) -> None:
+    ) -> ScriptedSnapshot | None:
         operation = semantic_program_id(expression)
         self.recorder.record(
             "wait_for_function",
@@ -474,7 +509,14 @@ class ScriptedPage:
             arg=arg,
             timeout_ms=timeout,
         )
-        self._take(f"wait_for_function:{operation}", default=None)
+        outcome = self._take(f"wait_for_function:{operation}", default=None)
+        if operation != "message_confirmation_ready":
+            return None
+        snapshot = ScriptedSnapshot(
+            self, f"snapshot-{len(self.snapshots) + 1}", outcome
+        )
+        self.snapshots.append(snapshot)
+        return snapshot
 
     async def wait_for_load_state(
         self, state: str = "load", *, timeout: int | None = None
@@ -547,6 +589,12 @@ class ScriptedPage:
         ]
         assert not live_handles, (
             f"{self.recorder.scenario}: browser handles remain: {live_handles}"
+        )
+        live_snapshots = [
+            snapshot.semantic_id for snapshot in self.snapshots if not snapshot.disposed
+        ]
+        assert not live_snapshots, (
+            f"{self.recorder.scenario}: confirmation snapshots remain: {live_snapshots}"
         )
         self.recorder.assert_no_pending_reads()
 
@@ -640,7 +688,7 @@ def semantic_program_id(program: str) -> str:
         ("inputType: 'deleteContentBackward'", "message_composer_cleanup"),
         ("pinned.button.click()", "message_submit"),
         ("__linkedinMcpConfirmationCounter", "message_confirmation_prepare"),
-        ("return candidates.length === 1", "message_confirmation_ready"),
+        ("const routeContinues", "message_confirmation_ready"),
         ("confirmations?.delete(arg.token)", "message_confirmation_dispose"),
         ("delete owner.__linkedinMcpComposer", "message_composer_dispose"),
         ("return {ids: ids, scoped", "job_ids"),

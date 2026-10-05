@@ -465,7 +465,7 @@ class TestSendMessage:
                 sender,
                 "_message_send_confirmed",
                 new_callable=AsyncMock,
-                return_value=True,
+                return_value=message_sender_module._SendConfirmation(thread_id=None),
             ),
         )
 
@@ -823,7 +823,7 @@ class TestSendMessage:
                 sender,
                 "_message_send_confirmed",
                 new_callable=AsyncMock,
-                return_value=True,
+                return_value=message_sender_module._SendConfirmation(thread_id=None),
             ),
         ):
             result = await sender.send_message("testuser", "Hello!", confirm_send=True)
@@ -980,7 +980,7 @@ class TestSendMessage:
             assert target == self._target()
             assert owner is mock_page.evaluate_handle.return_value
             steps.append(f"confirm:{confirmation}")
-            return True
+            return message_sender_module._SendConfirmation(thread_id=None)
 
         with (
             patches[1],
@@ -1475,6 +1475,84 @@ class TestSendMessageDeadline:
         warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
         assert any("retry may deliver the message twice" in w for w in warnings)
 
+    async def test_a_stalled_snapshot_read_is_unconfirmed(self, mock_page, monkeypatch):
+        """The path is read after the click, so a stall there is unconfirmed."""
+        handle = MagicMock()
+        handle.json_value = AsyncMock(side_effect=_stall)
+        handle.dispose = AsyncMock()
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+        sender = _sender(mock_page)
+
+        async def confirmed(*args, **kwargs):
+            return await MessageSender._message_send_confirmed(sender, *args, **kwargs)
+
+        with ExitStack() as stack:
+            mocks = self._composer(stack, sender, mock_page)
+            mocks.confirmed.side_effect = confirmed
+            result = await self._call(sender, monkeypatch)
+
+        assert result.is_error is False, result.content
+        assert result.structured_content is not None
+        assert result.structured_content["status"] == "send_unconfirmed"
+        assert result.structured_content["sent"] is False
+        assert result.structured_content["retry_safe"] is False
+        assert "thread_id" not in result.structured_content
+        assert mocks.submit.call_count == 1
+        handle.dispose.assert_awaited()
+
+    async def test_a_stalled_snapshot_disposal_keeps_the_thread(
+        self, mock_page, monkeypatch
+    ):
+        """Disposal runs out of time after the path is known, so the send stands."""
+        handle = MagicMock()
+        handle.json_value = AsyncMock(
+            return_value={"path": "/messaging/thread/2-abc==/"}
+        )
+        handle.dispose = AsyncMock(side_effect=_stall)
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+        sender = _sender(mock_page)
+
+        async def confirmed(*args, **kwargs):
+            return await MessageSender._message_send_confirmed(sender, *args, **kwargs)
+
+        with ExitStack() as stack:
+            mocks = self._composer(stack, sender, mock_page)
+            mocks.confirmed.side_effect = confirmed
+            result = await self._call(sender, monkeypatch)
+
+        assert result.is_error is False, result.content
+        body = result.structured_content
+        assert body is not None
+        assert body["status"] == "sent"
+        assert body["sent"] is True
+        assert body["thread_id"] == "2-abc=="
+        assert "2-abc==" not in body["url"]
+        assert mocks.submit.call_count == 1
+
+    async def test_a_refusal_omits_thread_id(self):
+        """A result that is not ``sent`` does not carry ``thread_id``."""
+        from fastmcp import Client, FastMCP
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "send_message",
+                {
+                    "linkedin_username": "testuser",
+                    "message": "   ",
+                    "confirm_send": True,
+                },
+                raise_on_error=False,
+            )
+
+        assert result.is_error is False, result.content
+        assert result.structured_content is not None
+        assert result.structured_content["status"] == "invalid_message"
+        assert "thread_id" not in result.structured_content
+
 
 class TestResolveMessageComposeBox:
     async def test_requires_exactly_one_visible_editor(self, mock_page):
@@ -1584,17 +1662,21 @@ class TestMessageConfirmation:
     async def test_confirmation_waits_for_the_exact_token(self, mock_page):
         sender = _sender(mock_page)
         target, owner = self._arguments()
-        mock_page.wait_for_function = AsyncMock(return_value=None)
-
-        assert (
-            await sender._message_send_confirmed(
-                "Hello!",
-                target=target,
-                owner=owner,
-                confirmation="confirmation-token",
-            )
-            is True
+        handle = MagicMock()
+        handle.json_value = AsyncMock(
+            return_value={"path": "/messaging/thread/2-abc==/"}
         )
+        handle.dispose = AsyncMock()
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+
+        assert await sender._message_send_confirmed(
+            "Hello!",
+            target=target,
+            owner=owner,
+            confirmation="confirmation-token",
+        ) == message_sender_module._SendConfirmation(thread_id="2-abc==")
+        handle.json_value.assert_awaited_once_with()
+        handle.dispose.assert_awaited_once_with()
         mock_page.wait_for_function.assert_awaited_once_with(
             _MESSAGE_CONFIRMATION_READY_JS,
             arg={
@@ -1626,7 +1708,104 @@ class TestMessageConfirmation:
                 owner=owner,
                 confirmation="confirmation-token",
             )
-            is False
+            is None
+        )
+
+    @pytest.mark.parametrize(
+        "snapshot",
+        [
+            None,
+            {"path": "/feed/"},
+            {"path": "/messaging/compose"},
+            {"path": "/messaging/thread/2-abc=="},
+            {"path": "/messaging/thread/2-abc==/", "ok": True},
+            {"path": 1},
+            {"confirmed": True},
+            "/messaging/thread/2-abc==/",
+        ],
+    )
+    async def test_a_snapshot_that_is_not_a_route_is_not_a_send(
+        self, mock_page, snapshot
+    ):
+        sender = _sender(mock_page)
+        target, owner = self._arguments()
+        handle = MagicMock()
+        handle.json_value = AsyncMock(return_value=snapshot)
+        handle.dispose = AsyncMock()
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+
+        assert (
+            await sender._message_send_confirmed(
+                "Hello!",
+                target=target,
+                owner=owner,
+                confirmation="confirmation-token",
+            )
+            is None
+        )
+        handle.dispose.assert_awaited_once_with()
+
+    async def test_a_snapshot_read_error_is_not_a_send(self, mock_page):
+        sender = _sender(mock_page)
+        target, owner = self._arguments()
+        handle = MagicMock()
+        handle.json_value = AsyncMock(side_effect=RuntimeError("gone"))
+        handle.dispose = AsyncMock()
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+
+        assert (
+            await sender._message_send_confirmed(
+                "Hello!",
+                target=target,
+                owner=owner,
+                confirmation="confirmation-token",
+            )
+            is None
+        )
+        handle.dispose.assert_awaited_once_with()
+
+    async def test_disposal_failure_keeps_the_thread(self, mock_page):
+        sender = _sender(mock_page)
+        target, owner = self._arguments()
+        handle = MagicMock()
+        handle.json_value = AsyncMock(
+            return_value={"path": "/messaging/thread/2-abc==/"}
+        )
+        handle.dispose = AsyncMock(side_effect=RuntimeError("closed"))
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+
+        assert await sender._message_send_confirmed(
+            "Hello!",
+            target=target,
+            owner=owner,
+            confirmation="confirmation-token",
+        ) == message_sender_module._SendConfirmation(thread_id="2-abc==")
+
+    async def test_disposal_stall_finishes_without_a_deadline(self, mock_page, caplog):
+        sender = _sender(mock_page)
+        target, owner = self._arguments()
+        handle = MagicMock()
+        handle.json_value = AsyncMock(return_value={"path": "/messaging/compose/"})
+        handle.dispose = AsyncMock(side_effect=_stall)
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+
+        with caplog.at_level(
+            logging.WARNING, logger="linkedin_mcp_server.linkedin.message_sender"
+        ):
+            confirmed = await asyncio.wait_for(
+                sender._message_send_confirmed(
+                    "Hello!",
+                    target=target,
+                    owner=owner,
+                    confirmation="confirmation-token",
+                ),
+                timeout=3,
+            )
+
+        assert confirmed == message_sender_module._SendConfirmation(thread_id=None)
+        assert any(
+            "Timed out releasing message confirmation snapshot" in record.message
+            for record in caplog.records
         )
 
     async def test_dispose_disconnects_the_owner_token(self, mock_page):

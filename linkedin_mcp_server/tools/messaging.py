@@ -279,6 +279,11 @@ def register_messaging_tools(
         contradiction fails closed. No Voyager or other private API is used. This
         is a write operation when confirm_send is True.
 
+        ``thread_id`` is present only on ``sent``: the conversation the
+        confirmed message was observed in, or null when the page stayed on
+        the compose route. ``retry_safe`` stays the authority for whether a
+        retry is safe.
+
         Args:
             linkedin_username: LinkedIn username of the recipient; a full profile URL is accepted too
             message: Message text. LF, CRLF and CR all end a line; an empty line
@@ -296,7 +301,8 @@ def register_messaging_tools(
 
         Returns:
             Dict with url, status, message, recipient_selected, sent, and
-            retry_safe. ``sent`` is true only after the thread shows the submitted
+            retry_safe. ``thread_id`` is present only on ``sent``. ``sent``
+            is true only after the thread shows the submitted
             text under a new server message ID (or its DOM node gains a
             different event ID); this does not claim delivery or read status.
             It is false both where nothing was submitted and

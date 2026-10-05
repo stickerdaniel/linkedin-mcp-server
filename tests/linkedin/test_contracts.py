@@ -77,6 +77,45 @@ class TestMessageActionResult:
             "retry_safe": False,
         }
 
+    def test_thread_id_is_present_only_when_the_caller_passes_it(self):
+        omitted = message_action_result(
+            "https://www.linkedin.com/messaging/compose/",
+            "confirmation_required",
+            "Set confirm_send=true to send the message.",
+        )
+        assert "thread_id" not in omitted
+
+        named = message_action_result(
+            "https://www.linkedin.com/messaging/thread/2-abc==/",
+            "sent",
+            "Message submitted.",
+            recipient_selected=True,
+            sent=True,
+            retry_safe=False,
+            thread_id="2-abc==",
+        )
+        assert named["thread_id"] == "2-abc=="
+        assert set(named) == {
+            "url",
+            "status",
+            "message",
+            "recipient_selected",
+            "sent",
+            "retry_safe",
+            "thread_id",
+        }
+
+        stayed = message_action_result(
+            "https://www.linkedin.com/messaging/compose/",
+            "sent",
+            "Message submitted.",
+            sent=True,
+            retry_safe=False,
+            thread_id=None,
+        )
+        assert "thread_id" in stayed
+        assert stayed["thread_id"] is None
+
     def test_the_interruption_warning_names_duplicate_delivery(self):
         assert SEND_INTERRUPTED_WARNING == (
             "Message submission was interrupted while in flight. The send outcome "
