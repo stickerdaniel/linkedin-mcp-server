@@ -615,7 +615,16 @@ async def _create_browser() -> BrowserManager:
     # A previous close could not confirm Chromium had exited, so it may still be
     # running on this profile. Launching a second one now is exactly the
     # corruption this module exists to prevent, and the operator has to clear it.
-    if lease.browser_open:
+    #
+    # Both halves, because they answer about different profiles. The marker is
+    # read from the lease the path resolves to *now*; a lease this module kept
+    # from an unconfirmed close belongs to the path it resolved to *then*. After
+    # the profile root is retargeted, the first says B is free while the second
+    # still holds A with a Chromium that may be running on it, and creating on B
+    # would leave two marked leases and a later confirmed close on B clearing A
+    # without ever draining it. `close_unusable_browser` reads its verdict from
+    # `_browser_lease` and depends on that never happening.
+    if lease.browser_open or _browser_lease is not None:
         raise BrowserBusyError(
             "A previous browser on this profile did not shut down cleanly and "
             "may still be running. Restart the server to recover."
@@ -923,6 +932,33 @@ async def _close_browser_locked() -> None:
     finally:
         _settle_the_profile(confirmed=confirmed)
     logger.info("Browser closed")
+
+
+async def close_unusable_browser(manager: BrowserManager) -> bool | None:
+    """Close *manager* if it is still the cached browser, and say how it ended.
+
+    For a tool call that found its browser dead. The identity is checked under
+    the lifecycle lock, so a manager another closer already retired, or one
+    created since, is never closed from here.
+
+    * ``None``: *manager* is no longer cached, so nothing was closed. This does
+      not say how the other close ended.
+    * ``True``: closed and Chromium proven gone. The browser's reference to the
+      profile is released; a reference the caller's middleware holds can still
+      keep the lease until that call unwinds.
+    * ``False``: closed but not proven gone. The lease is kept, as any close
+      keeps it, and settlement has asked a shared owner to stand down.
+
+    The verdict is ``_browser_lease`` read before the lock is released, not a
+    lookup by path: settlement clears it only on a proven drain, and a lookup
+    answers for whatever the profile root resolves to by then. Cancellation and
+    an exception escaping the teardown behave exactly as in ``close_browser``.
+    """
+    async with _browser_lifecycle_lock:
+        if _browser is not manager:
+            return None
+        await _run_deferring_cancels(_close_browser_locked())
+        return _browser_lease is None
 
 
 def get_profile_dir() -> Path:

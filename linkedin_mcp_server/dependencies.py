@@ -14,9 +14,11 @@ from linkedin_mcp_server.bootstrap import (
     invalidate_auth_and_trigger_relogin,
     invalidate_browser_setup,
 )
+from linkedin_mcp_server.core import BrowserManager
 from linkedin_mcp_server.core.exceptions import AuthenticationError, NetworkError
 from linkedin_mcp_server.drivers.browser import (
     close_browser,
+    close_unusable_browser,
     ensure_authenticated,
     get_or_create_browser,
 )
@@ -25,6 +27,7 @@ from linkedin_mcp_server.exceptions import (
     AuthStaleOnOwnerError,
     BrowserBinaryMissingError,
     BrowserShutdownUnconfirmedError,
+    BrowserUnavailableError,
     DockerHostLoginRequiredError,
     LinuxBrowserDependencyError,
 )
@@ -159,6 +162,56 @@ async def handle_auth_error(
     )  # always raises
 
 
+def _browser_is_unusable(browser: BrowserManager) -> bool:
+    """Whether the cached browser is known to be dead, from local state alone.
+
+    Two signals, both already delivered by the driver: the active page closed, or
+    the browser it belongs to disconnected (Chromium exited while the Node driver
+    lived on). Neither costs a round trip. They miss a driver that died itself
+    and a renderer crash that leaves the page open; those still fail inside the
+    tool, as before. An event that has not arrived yet is caught by a later call.
+
+    Only positive evidence counts. A missing browser handle or a property that
+    raises says nothing about whether Chromium is gone, and closing a browser
+    on a guess would end a working one.
+    """
+    try:
+        # The page first: a closed page is enough, and the context read below
+        # can raise once the manager has started tearing down.
+        if browser.page.is_closed():
+            return True
+        handle = browser.context.browser
+        return handle is not None and not handle.is_connected()
+    except Exception:
+        logger.debug("Could not read the browser's state", exc_info=True)
+        return False
+
+
+async def _shut_down_unusable_browser(browser: BrowserManager) -> BrowserManager:
+    """Close a dead browser and raise how that ended.
+
+    Returns only when another close retired *browser* first, so this call closed
+    nothing, with whatever the getter hands out now. That is one reacquisition,
+    not a loop, and its own errors (a busy profile, a login) take the normal
+    path.
+    """
+    logger.warning("The browser stopped unexpectedly; shutting it down")
+    failure: Exception | None = None
+    try:
+        outcome = await close_unusable_browser(browser)
+    except Exception as exc:
+        # Settlement has already run unconfirmed and kept the lease.
+        logger.warning("Shutting down the stopped browser failed: %s", exc)
+        failure, outcome = exc, False
+    # Outside the try, so a confirmed close can never be caught there as a
+    # failed one and reported as unconfirmed.
+    if outcome is None:
+        return await get_or_create_browser()
+    if outcome:
+        raise BrowserUnavailableError()
+    raise BrowserShutdownUnconfirmedError() from failure
+
+
 async def get_ready_extractor(
     ctx: Context | None,
     *,
@@ -168,6 +221,12 @@ async def get_ready_extractor(
     try:
         await ensure_tool_ready_or_raise(tool_name, ctx)
         browser = await get_or_create_browser()
+        # Before the auth check, which reads only a flag the dead browser still
+        # has set, and before any tool work, so the failure is an ordinary one
+        # and starts no login. A browser this call shut down is not replaced
+        # inside it; the error asks the caller to run the tool again.
+        if _browser_is_unusable(browser):
+            browser = await _shut_down_unusable_browser(browser)
         await ensure_authenticated()
         return LinkedInExtractor(browser.page)
     except AuthenticationError as e:
