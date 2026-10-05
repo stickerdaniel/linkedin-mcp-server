@@ -11,6 +11,8 @@ import logging
 from typing import Any
 from urllib.parse import quote
 
+from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
 from linkedin_mcp_server.config.schema import BrowserConfig
 
 from .exceptions import ProxyConnectionError
@@ -243,7 +245,7 @@ async def _goto_within_budget(page: Any, url: str, **kwargs: Any) -> Any:
         )
         if not goto.done() and not sent.done():
             await _stop_goto(goto)
-            raise TimeoutError(
+            raise PlaywrightTimeoutError(
                 f"Page.goto: Timeout {STARTUP_BUDGET_MS:g}ms exceeded before "
                 "the request was sent."
             )
@@ -253,7 +255,7 @@ async def _goto_within_budget(page: Any, url: str, **kwargs: Any) -> Any:
             return await asyncio.wait_for(asyncio.shield(goto), timeout / 1000)
         except TimeoutError:
             await _stop_goto(goto)
-            raise TimeoutError(
+            raise PlaywrightTimeoutError(
                 f"Page.goto: Timeout {timeout:g}ms exceeded after the request was sent."
             ) from None
     finally:

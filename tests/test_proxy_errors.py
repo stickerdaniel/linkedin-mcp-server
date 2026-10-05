@@ -6,6 +6,8 @@ from typing import Any
 
 import pytest
 
+from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.core.exceptions import NetworkError, ProxyConnectionError
 from linkedin_mcp_server.core.proxy_errors import (
@@ -252,7 +254,7 @@ class TestNavigationBudget:
 
     async def test_the_budget_still_bounds_the_answer(self):
         page = _ClockPage([(0.01, _Request())], finish_after=0.25)
-        with pytest.raises(TimeoutError, match="after the request was sent"):
+        with pytest.raises(PlaywrightTimeoutError, match="after the request was sent"):
             await goto_reporting_proxy_errors(
                 page, "https://www.linkedin.com/feed/", timeout=100
             )
@@ -267,7 +269,7 @@ class TestNavigationBudget:
             "linkedin_mcp_server.core.proxy_errors.STARTUP_BUDGET_MS", 50
         )
         page = _ClockPage([(2.0, _Request())], finish_after=0.01)
-        with pytest.raises(TimeoutError, match="before the request was sent"):
+        with pytest.raises(PlaywrightTimeoutError, match="before the request was sent"):
             await goto_reporting_proxy_errors(
                 page, "https://www.linkedin.com/feed/", timeout=100
             )
@@ -286,6 +288,35 @@ class TestNavigationBudget:
             )
             == "ok"
         )
+
+    async def test_an_iframe_navigation_does_not_start_the_budget(self):
+        main = object()
+        page = _ClockPage(
+            [
+                (0.01, _Request(frame=object())),
+                (0.30, _Request(frame=main)),
+            ],
+            finish_after=0.02,
+            main_frame=main,
+        )
+        assert (
+            await goto_reporting_proxy_errors(
+                page, "https://www.linkedin.com/feed/", timeout=200
+            )
+            == "ok"
+        )
+
+    async def test_the_main_frame_starts_the_budget(self):
+        main = object()
+        page = _ClockPage(
+            [(0.01, _Request(frame=main))],
+            finish_after=0.25,
+            main_frame=main,
+        )
+        with pytest.raises(PlaywrightTimeoutError, match="after the request was sent"):
+            await goto_reporting_proxy_errors(
+                page, "https://www.linkedin.com/feed/", timeout=100
+            )
 
     async def test_a_proxy_failure_on_a_reporting_page_is_still_converted(
         self, proxy_config
