@@ -940,10 +940,15 @@ class TestARealOwnerGoingAway:
             )
         finally:
             _stop(owner)
+            gone_by = clock.monotonic() + 5
+            while clock.monotonic() < gone_by and _alive(owner):
+                clock.sleep(0.1)
             # The owner derives its state from the account, not from anything
             # this test can redirect, so remove the directory it keyed by
-            # tmp_path.
-            shutil.rmtree(daemon_dir(profile.parent), ignore_errors=True)
+            # tmp_path, but only once the owner is gone: removing a live
+            # owner's lock file would let a later election take it over.
+            if not _alive(owner):
+                shutil.rmtree(daemon_dir(profile.parent), ignore_errors=True)
 
 
 class TestTheMarkerSurvivesTheRealClient:
