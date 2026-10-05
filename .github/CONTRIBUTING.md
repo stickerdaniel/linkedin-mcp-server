@@ -25,7 +25,7 @@ The server reads what a signed-in LinkedIn page shows. It never calls Voyager or
 
 Every section a tool offers maps to exactly one LinkedIn URL, and a section never combines several. The assistant calling the tool asks only for the sections it needs, so it skips the navigations it has no use for, and every page it visits is read in full through `innerText`.
 
-The sections live in `scraping/fields.py`:
+The sections live in `linkedin/fields.py`:
 
 ```python
 # Maps section name -> (url_suffix, is_overlay)
@@ -39,7 +39,7 @@ PERSON_SECTIONS: dict[str, tuple[str, bool]] = {
 
 Overlays such as contact info open as a modal, so they are read from the `<dialog>` element instead of the whole page.
 
-`scraping/person.py` and `scraping/company.py` own these sections. `scraping/extractor.py` is a stable facade that delegates to them. The generated [architecture reference](../docs/scraping-architecture.md) shows which module owns what, how they import each other, and which ones touch the page directly.
+`linkedin/person.py` and `linkedin/company.py` own these sections. `linkedin/extractor.py` is a stable facade that delegates to them. The generated [architecture reference](../docs/linkedin-architecture.md) shows which module owns what, how they import each other, and which ones touch the page directly.
 
 ### Minimize DOM dependence
 
@@ -64,6 +64,7 @@ Every tool that reads LinkedIn returns `{"url": str, "sections": {name: raw_text
 - `unknown_sections`: section names the caller asked for that do not exist.
 - `job_ids`: returned by `search_jobs` and `get_saved_jobs`.
 - `total` and `promoted_job_ids`: returned by `search_jobs`. `total` is `{count, exact}`, the result count LinkedIn advertises. `promoted_job_ids` is the promoted subset of `job_ids`.
+- `apply`: returned by `get_job_apply_url` instead of `sections`. `{type, url?}`, where `type` is `easy_apply`, `external`, `applied`, `closed` or `unknown`.
 
 ## Adding a section
 
@@ -71,14 +72,14 @@ For example, adding `certifications` to `get_person_profile`.
 
 **Code**
 
-- [ ] Add the entry to `PERSON_SECTIONS` or `COMPANY_SECTIONS` in `scraping/fields.py`.
-- [ ] Add its context and an explicit reference cap in `scraping/link_metadata.py`.
+- [ ] Add the entry to `PERSON_SECTIONS` or `COMPANY_SECTIONS` in `linkedin/fields.py`.
+- [ ] Add its context and an explicit reference cap in `linkedin/link_metadata.py`.
 - [ ] Name the section in the tool docstring in `tools/person.py` or `tools/company.py`.
 
 **Tests**
 
 - [ ] In `tests/test_fields.py`, add it to `test_exported_mapping_retains_exact_tuple_contract_and_identity` and `test_expected_keys`, and for a person section also to `test_all_sections`.
-- [ ] In `tests/scraping/test_person.py` or `tests/scraping/test_company.py`, add it to the all-sections navigation test and give it its own navigation test, such as `test_certifications_visits_details_page`.
+- [ ] In `tests/linkedin/test_person.py` or `tests/linkedin/test_company.py`, add it to the all-sections navigation test and give it its own navigation test, such as `test_certifications_visits_details_page`.
 
 **Docs**
 
@@ -90,14 +91,14 @@ For example, `search_companies`.
 
 **Code**
 
-- [ ] Put the workflow in the module that owns it according to `docs/scraping-architecture.md`. Add a method to `LinkedInExtractor` in `scraping/extractor.py` only if the facade needs one, and keep it a thin delegate.
+- [ ] Put the workflow in the module that owns it according to `docs/linkedin-architecture.md`. Add a method to `LinkedInExtractor` in `linkedin/extractor.py` only if the facade needs one, and keep it a thin delegate.
 - [ ] Add or extend a registration function in `tools/`.
 - [ ] If you created a new file there, register it in `create_mcp_server()` in `server.py`.
 
 **Tests**
 
 - [ ] Add a mock method to `_make_mock_extractor` and a test for the tool in `tests/test_tools.py`.
-- [ ] Test the workflow in the owner's `tests/scraping/test_<owner>.py`. If the facade's delegates changed, cover them in `tests/scraping/test_facade_*.py`.
+- [ ] Test the workflow in the owner's `tests/linkedin/test_<owner>.py`. If the facade's delegates changed, cover them in `tests/linkedin/test_facade_*.py`.
 
 **Docs**
 
@@ -109,28 +110,28 @@ Pre-commit fails when either of these is out of date.
 
 ### Architecture reference
 
-`docs/scraping-architecture.md` is generated from the AST of the `scraping` package, so don't edit it by hand. Regenerate it after you change module imports, public owners, the facade's coroutines or construction state, or which modules touch the page directly:
+`docs/linkedin-architecture.md` is generated from the AST of the `linkedin` package, so don't edit it by hand. Regenerate it after you change module imports, public owners, the facade's coroutines or construction state, or which modules touch the page directly:
 
 ```bash
-uv run python scripts/generate_scraping_architecture.py
-uv run python scripts/generate_scraping_architecture.py --check
+uv run python scripts/generate_linkedin_architecture.py
+uv run python scripts/generate_linkedin_architecture.py --check
 ```
 
 ### Policy traces
 
-The traces in `tests/fixtures/scraping-policy/` record every browser operation the code performs in fixed scenarios against a scripted page, such as navigations, waits and clicks, so a refactor can prove it did not change how the server behaves on LinkedIn. The checker only compares them and refuses to write into that directory. Generate candidates into a directory that does not exist yet and read the whole diff:
+The traces in `tests/fixtures/policy-traces/` record every browser operation the code performs in fixed scenarios against a scripted page, such as navigations, waits and clicks, so a refactor can prove it did not change how the server behaves on LinkedIn. The checker only compares them and refuses to write into that directory. Generate candidates into a directory that does not exist yet and read the whole diff:
 
 ```bash
-uv run python scripts/check_scraping_policy_traces.py --output ../linkedin-mcp-policy-traces
-diff -ru tests/fixtures/scraping-policy/v1 ../linkedin-mcp-policy-traces
+uv run python scripts/check_policy_traces.py --output ../linkedin-mcp-policy-traces
+diff -ru tests/fixtures/policy-traces/v1 ../linkedin-mcp-policy-traces
 ```
 
 Copy them in only if you meant every change the diff shows:
 
 ```bash
-cp ../linkedin-mcp-policy-traces/*.json tests/fixtures/scraping-policy/v1/
+cp ../linkedin-mcp-policy-traces/*.json tests/fixtures/policy-traces/v1/
 rm -rf ../linkedin-mcp-policy-traces
-uv run python scripts/check_scraping_policy_traces.py --check
+uv run python scripts/check_policy_traces.py --check
 ```
 
 ## Before you open a PR

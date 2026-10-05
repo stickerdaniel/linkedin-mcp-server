@@ -23,9 +23,9 @@ From the thread extract the tool, arguments, observed result, runtime, LinkedIn 
 Map the tool to code:
 
 1. `linkedin_mcp_server/tools/<surface>.py`. MCP entrypoint and arg validation
-2. `docs/scraping-architecture.md`. Generated ownership table; follow it to `linkedin_mcp_server/scraping/<owner>.py` rather than treating `scraping/extractor.py` as the implementation
-3. `linkedin_mcp_server/scraping/fields.py`. `PERSON_SECTIONS` / `COMPANY_SECTIONS` (each entry = one navigation)
-4. The owner-local test, usually `tests/scraping/test_<owner>.py`; use `tests/test_fields.py`, `tests/test_identifiers.py`, and `tests/test_link_metadata.py` for those owners, and `tests/scraping/test_facade_*.py` only for facade contracts
+2. `docs/linkedin-architecture.md`. Generated ownership table; follow it to `linkedin_mcp_server/linkedin/<owner>.py` rather than treating `linkedin/extractor.py` as the implementation
+3. `linkedin_mcp_server/linkedin/fields.py`. `PERSON_SECTIONS` / `COMPANY_SECTIONS` (each entry = one navigation)
+4. The owner-local test, usually `tests/linkedin/test_<owner>.py`; use `tests/test_fields.py`, `tests/test_identifiers.py`, and `tests/test_link_metadata.py` for those owners, and `tests/linkedin/test_facade_*.py` only for facade contracts
 
 ## 2. Packet and source
 

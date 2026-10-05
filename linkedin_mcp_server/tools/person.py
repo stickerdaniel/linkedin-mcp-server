@@ -1,5 +1,5 @@
 """
-LinkedIn person profile scraping tools.
+LinkedIn person profile reading tools.
 
 Uses innerText extraction for resilient profile data capture
 with configurable section selection.
@@ -18,10 +18,10 @@ from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scraping import parse_person_sections
-from linkedin_mcp_server.scraping.contracts import FilterValidationError
-from linkedin_mcp_server.scraping.identifiers import normalize_person_identifier
-from linkedin_mcp_server.scraping.search_urls import build_people_search_url
+from linkedin_mcp_server.linkedin import parse_person_sections
+from linkedin_mcp_server.linkedin.contracts import FilterValidationError
+from linkedin_mcp_server.linkedin.identifiers import normalize_person_identifier
+from linkedin_mcp_server.linkedin.search_urls import build_people_search_url
 
 logger = logging.getLogger(__name__)
 
@@ -111,13 +111,13 @@ def register_person_tools(
             requested, unknown = parse_person_sections(sections)
 
             logger.info(
-                "Scraping profile: %s (sections=%s)",
+                "Reading profile: %s (sections=%s)",
                 linkedin_username,
                 sections,
             )
 
             cb = MCPContextProgressCallback(ctx)
-            result = await extractor.scrape_person(
+            result = await extractor.read_person(
                 linkedin_username,
                 requested,
                 callbacks=cb,
@@ -401,7 +401,7 @@ def register_person_tools(
             extractor = await get_ready_extractor(ctx, tool_name="get_my_profile")
             requested, unknown = parse_person_sections(sections)
 
-            logger.info("Scraping own profile (sections=%s)", sections)
+            logger.info("Reading own profile (sections=%s)", sections)
 
             cb = MCPContextProgressCallback(ctx)
             result = await extractor.get_my_profile(

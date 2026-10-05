@@ -16,18 +16,18 @@ import anyio
 import pytest
 from patchright.async_api import async_playwright
 
-from linkedin_mcp_server.scraping.message_sender import (
+from linkedin_mcp_server.linkedin.message_sender import (
     MessageSender,
     _ProfileMessageTarget,
     _ProfileMessageTargetResolution,
 )
-from linkedin_mcp_server.scraping.navigation import PageNavigator
-from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
-from linkedin_mcp_server.scraping.session import ScrapingSession
+from linkedin_mcp_server.linkedin.navigation import PageNavigator
+from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
+from linkedin_mcp_server.linkedin.session import PageSession
 
 
 def _sender(page) -> MessageSender:
-    session = ScrapingSession(page)
+    session = PageSession(page)
     return MessageSender(session, PageNavigator(session))
 
 
@@ -468,7 +468,7 @@ async def send(
             return_value=_ProfileMessageTargetResolution("resolved", TARGET),
         ),
         patch(
-            "linkedin_mcp_server.scraping.message_sender._message_page_url_is_safe",
+            "linkedin_mcp_server.linkedin.message_sender._message_page_url_is_safe",
             return_value=True,
         ),
     ):
@@ -477,12 +477,14 @@ async def send(
         )
 
 
-async def read_profile_target(page, html: str) -> _ProfileMessageTargetResolution:
+async def read_profile_target(
+    page, html: str, *, query: str = ""
+) -> _ProfileMessageTargetResolution:
     async def fulfill(route):
         await route.fulfill(status=200, content_type="text/html", body=html)
 
     await page.route("https://www.linkedin.com/**", fulfill)
-    await page.goto(f"https://www.linkedin.com{PROFILE_PATH}")
+    await page.goto(f"https://www.linkedin.com{PROFILE_PATH}{query}")
     return await _sender(page)._read_profile_message_target()
 
 
@@ -533,7 +535,7 @@ class TestProfileMessageTargetDom:
         # The reader borrows the facade's top-card read until the message
         # sender owns it, so wiring it here is what the facade does.
         reader = ProfilePageReader(
-            ScrapingSession(dom_page), sender._read_profile_message_target
+            PageSession(dom_page), sender._read_profile_message_target
         )
 
         resolution = await read_profile_target(dom_page, html)
@@ -570,6 +572,24 @@ class TestProfileMessageTargetDom:
         assert target.display_name == "Alice"
         assert target.profile_urn == "ACoAAB"
         assert target.compose_url == COMPOSE_URL
+
+    # Since late September 2026 LinkedIn lands /in/<name>/ on
+    # /in/<name>/?isSelfProfile=false (#1181). The page script resolved that
+    # card all along; the URL check after it refused every recipient.
+    async def test_redesigned_profile_url_resolves_its_top_card(self, dom_page):
+        html = profile_page(
+            f'<section><h1>{DISPLAY_NAME}</h1><a href="{COMPOSE_URL}">message</a>'
+            "</section>"
+        )
+
+        resolution = await read_profile_target(
+            dom_page, html, query="?isSelfProfile=false"
+        )
+
+        assert resolution.status == "resolved"
+        assert resolution.target is not None
+        assert resolution.target.profile_path == PROFILE_PATH
+        assert resolution.target.profile_urn == "ACoAAB"
 
     async def test_later_sections_never_compete_with_first_top_card(self, dom_page):
         card = (
@@ -1460,7 +1480,7 @@ class TestSendConfirmationDom:
                 return_value=_ProfileMessageTargetResolution("resolved", TARGET),
             ),
             patch(
-                "linkedin_mcp_server.scraping.message_sender._message_page_url_is_safe",
+                "linkedin_mcp_server.linkedin.message_sender._message_page_url_is_safe",
                 return_value=True,
             ),
             patch.object(sender, "_resolve_message_owner", side_effect=capture_owner),

@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check agent attribution and hidden Unicode
-        uses: stickerdaniel/agent-guardrails@a3508d7320e64370b878359b1f4ae541b507224f # v1.0.0
+        uses: stickerdaniel/post-no-bills@a3508d7320e64370b878359b1f4ae541b507224f # v1.0.0
         with:
           require-model-attribution: true
         # Bind live evidence to this run, not a later branch-tip lookup.

@@ -3,6 +3,7 @@
 import importlib.metadata
 import json
 import logging
+import threading
 from typing import Literal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -895,7 +896,7 @@ def test_clear_profile_and_exit_clears_all_auth_state(
 
     cleared = {}
 
-    def fake_clear(profile):
+    def fake_clear(profile, **_kwargs):
         cleared["profile"] = profile
         return True
 
@@ -2098,6 +2099,169 @@ class TestRetiringASharedBrowser:
 
         assert not self._session_intact()
 
+    # -- the session the user confirmed ------------------------------------- #
+
+    def _sign_in_elsewhere(self) -> str:
+        """Leave what another client's login leaves; return its generation.
+
+        Written directly rather than through a rotation, which would need the
+        profile lease the handover test is holding on that client's behalf.
+        """
+        import shutil
+
+        from linkedin_mcp_server.session_state import (
+            portable_cookie_path,
+            write_source_state,
+        )
+
+        shutil.rmtree(self.profile)
+        (self.profile / "Default").mkdir(parents=True)
+        (self.profile / "Default" / "Cookies").write_text("theirs")
+        portable_cookie_path(self.profile).write_text('[{"name": "li_at"}]')
+        return write_source_state(self.profile).login_generation
+
+    def _signed_in_as(self, generation: str) -> bool:
+        from linkedin_mcp_server.session_state import (
+            load_source_state,
+            portable_cookie_path,
+        )
+
+        state = load_source_state(self.profile)
+        return (
+            state is not None
+            and state.login_generation == generation
+            and portable_cookie_path(self.profile).exists()
+            and (self.profile / "Default" / "Cookies").read_text() == "theirs"
+        )
+
+    def _after_the_first_prompt(self, timer: threading.Timer) -> threading.Timer:
+        """Answer yes to every prompt, starting *timer* at the first one.
+
+        Not before the logout runs: it reads the session before it asks, and a
+        change landing ahead of that read is the session the user confirms.
+        """
+        started: list[bool] = []
+
+        def ask(_prompt: str = "") -> str:
+            if not started:
+                started.append(True)
+                timer.start()
+            return "y"
+
+        self.monkeypatch.setattr("builtins.input", ask)
+        return timer
+
+    def test_a_session_signed_in_during_the_prompt_survives(self, capsys):
+        # Direct: nothing shared to retire, and the prompt can stay open for as
+        # long as the user leaves it.
+        self.config.server.daemon_enabled = False
+        self._seed_session()
+        generation: list[str] = []
+
+        def ask(_prompt: str = "") -> str:
+            generation.append(self._sign_in_elsewhere())
+            return "y"
+
+        self.monkeypatch.setattr("builtins.input", ask)
+
+        assert self._logout() == 1
+
+        assert self._signed_in_as(generation[0])
+        out = capsys.readouterr().out
+        assert "changed after you confirmed" in out
+        assert "cleared successfully" not in out
+
+    def test_a_session_it_cannot_read_before_asking_is_left_alone(self, capsys):
+        # State from before login generations, so the cookie file's own stat is
+        # what identifies it, and that stat fails.
+        from pathlib import Path
+
+        from linkedin_mcp_server.session_state import (
+            portable_cookie_path,
+            source_state_path,
+        )
+
+        self.config.server.daemon_enabled = False
+        self._seed_session()
+        source_state_path(self.profile).unlink(missing_ok=True)
+        cookies = portable_cookie_path(self.profile)
+        cookies.write_text("[]")
+        real_stat = Path.stat
+
+        def refuse(path: Path, *args, **kwargs):
+            if path.name == cookies.name:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_stat(path, *args, **kwargs)
+
+        self.monkeypatch.setattr(Path, "stat", refuse)
+        self.monkeypatch.setattr(
+            "builtins.input", lambda _prompt="": pytest.fail("asked anyway")
+        )
+
+        assert self._logout() == 1
+
+        self.monkeypatch.setattr(Path, "stat", real_stat)
+        assert cookies.exists()
+        assert (self.profile / "Default" / "Cookies").exists()
+        out = capsys.readouterr().out
+        assert "could not be read" in out
+        assert "Nothing was deleted" in out
+
+    def test_a_session_signed_in_during_the_handover_survives(self, capsys):
+        # The retiring browser lets go, and another client gets in first.
+        import threading
+
+        self._seed_session()
+        owner = self._owner()
+        release = self._hold_the_profile()
+        generation: list[str] = []
+
+        def sign_in_then_let_go() -> None:
+            generation.append(self._sign_in_elsewhere())
+            release()
+
+        timer = self._after_the_first_prompt(threading.Timer(0.3, sign_in_then_let_go))
+        try:
+            assert self._logout() == 1
+        finally:
+            timer.join()
+            release()
+
+        assert owner.liveness.retiring is True
+        assert self._signed_in_as(generation[0])
+        assert "changed after you confirmed" in capsys.readouterr().out
+
+    def test_cookies_the_retiring_browser_exports_are_still_cleared(self):
+        # Closing on the source profile rewrites cookies.json for the same
+        # session. That is the handover itself, not another client.
+        import threading
+
+        from linkedin_mcp_server.common_utils import secure_write_text
+        from linkedin_mcp_server.session_state import (
+            portable_cookie_path,
+            write_source_state,
+        )
+
+        self._seed_session()
+        write_source_state(self.profile)
+        portable_cookie_path(self.profile).write_text("[]")
+        self._owner()
+        release = self._hold_the_profile()
+
+        def export_then_let_go() -> None:
+            secure_write_text(portable_cookie_path(self.profile), '[{"name": "li_at"}]')
+            release()
+
+        timer = self._after_the_first_prompt(threading.Timer(0.3, export_then_let_go))
+        try:
+            assert self._logout() == 0
+        finally:
+            timer.join()
+            release()
+
+        assert not self._session_intact()
+        assert not portable_cookie_path(self.profile).exists()
+
     @pytest.mark.parametrize("command", ["logout", "login", "import"])
     def test_an_interrupt_while_waiting_says_it_may_be_retiring(self, command, capsys):
         self._seed_session()
@@ -2208,3 +2372,109 @@ class TestRetiringASharedBrowser:
 
         assert exit_info.value.code == 1
         assert "Another LinkedIn MCP client" in capsys.readouterr().out
+
+
+class TestStatusUnderAHeldProfile:
+    """``--status`` while another process holds the profile lease.
+
+    The contract: exit 1 without checking the session, say that another process
+    holds the profile and that the saved session was not changed, and name a
+    shared browser only when a trusted record of one exists for this profile.
+    Naming it reads files and contacts nothing, and a process that would not
+    share a browser does not read them at all.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _machine(self, monkeypatch, tmp_path, isolate_profile_dir):
+        from linkedin_mcp_server import daemon_descriptor
+        from linkedin_mcp_server.exceptions import BrowserBusyError
+        from linkedin_mcp_server.session_state import (
+            get_runtime_id,
+            portable_cookie_path,
+            source_state_path,
+        )
+        from linkedin_mcp_server.storage_class import Classification, StorageClass
+
+        self.home = tmp_path / "home"
+        self.home.mkdir()
+        monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: self.home)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.storage_class.classify",
+            lambda path: Classification(StorageClass.LOCAL, "local test filesystem"),
+        )
+        self.profile = isolate_profile_dir
+        (self.profile / "Default").mkdir(parents=True)
+        (self.profile / "Default" / "Cookies").write_text("placeholder")
+        portable_cookie_path(self.profile).write_text(json.dumps([{"name": "li_at"}]))
+        source_state_path(self.profile).write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "source_runtime_id": get_runtime_id(),
+                    "login_generation": "gen-1",
+                    "created_at": "2026-03-12T17:00:00Z",
+                    "profile_path": str(self.profile),
+                    "cookies_path": str(portable_cookie_path(self.profile)),
+                }
+            )
+        )
+        self.config = AppConfig()
+        self.config.server.daemon_enabled = True
+        self.config.browser.user_data_dir = str(self.profile)
+        monkeypatch.setattr(cli_main, "get_config", lambda: self.config)
+        monkeypatch.setattr(cli_main, "configure_logging", lambda **_kwargs: None)
+        monkeypatch.setattr(cli_main, "get_version", lambda: "4.0.0")
+
+        async def held() -> None:
+            raise BrowserBusyError()
+
+        monkeypatch.setattr(cli_main, "get_or_create_browser", held)
+        monkeypatch.setattr(cli_main, "close_browser", AsyncMock(return_value=None))
+        self.monkeypatch = monkeypatch
+
+    def _status(self, capsys, caplog) -> str:
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(SystemExit) as exit_info:
+                cli_main.profile_info_and_exit()
+        assert exit_info.value.code == 1
+        # Contention is not an internal error: no traceback, no "check logs".
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+        out = capsys.readouterr().out.lower()
+        assert "another process holds the browser profile" in out
+        assert "your saved session was not changed" in out
+        assert "check logs" not in out
+        # The tool wording speaks to an MCP client, not to a terminal user.
+        assert "call this exact tool again" not in out
+        return out
+
+    def test_a_recorded_shared_browser_is_named_without_contacting_it(
+        self, capsys, caplog
+    ):
+        owner = _Owner(self.monkeypatch, self.home, self.profile)
+
+        out = self._status(capsys, caplog)
+
+        assert "shared browser" in out
+        assert owner.requests == []
+
+    def test_nothing_recorded_names_no_shared_browser(self, capsys, caplog):
+        assert "shared browser" not in self._status(capsys, caplog)
+
+    def test_a_process_that_would_not_share_never_looks(self, capsys, caplog):
+        self.config.server.daemon_enabled = False
+        _Owner(self.monkeypatch, self.home, self.profile)
+        looked = MagicMock(side_effect=AssertionError("looked for an owner"))
+        self.monkeypatch.setattr("linkedin_mcp_server.daemon.look_up_owner", looked)
+
+        out = self._status(capsys, caplog)
+
+        looked.assert_not_called()
+        assert "shared browser" not in out
+
+    def test_an_unreadable_record_names_nothing(self, capsys, caplog):
+        self.monkeypatch.setattr(
+            "linkedin_mcp_server.daemon.look_up_owner",
+            MagicMock(side_effect=OSError("state storage went away")),
+        )
+
+        assert "shared browser" not in self._status(capsys, caplog)

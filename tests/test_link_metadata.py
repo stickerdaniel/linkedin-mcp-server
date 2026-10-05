@@ -2,8 +2,8 @@
 
 from urllib.parse import quote
 
-from linkedin_mcp_server.scraping.fields import COMPANY_SECTIONS, PERSON_SECTIONS
-from linkedin_mcp_server.scraping.link_metadata import (
+from linkedin_mcp_server.linkedin.fields import COMPANY_SECTIONS, PERSON_SECTIONS
+from linkedin_mcp_server.linkedin.link_metadata import (
     _REFERENCE_CAPS,
     RawReference,
     build_references,
@@ -651,7 +651,7 @@ class TestBuildReferences:
             "feed": "feed",
         }
 
-    def test_every_scraped_section_gives_its_references_a_context(self):
+    def test_every_read_section_gives_its_references_a_context(self):
         """Nothing tied the context table to the section tables, which is how
         seven sections have now reached main without an entry. A context-less
         reference also scores below every duplicate that has one, so it loses

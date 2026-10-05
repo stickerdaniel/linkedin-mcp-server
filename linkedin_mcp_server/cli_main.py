@@ -134,6 +134,15 @@ _RETIRE_INTERRUPTED = (
     "❌ Cancelled. The shared browser was asked to retire and may be retiring now."
 )
 
+_STATUS_PROFILE_HELD = (
+    "❌ Another process holds the browser profile, so the session could not be "
+    "checked. Your saved session was not changed. Run --status again once that "
+    "process is done."
+)
+_STATUS_HELD_BY_SHARED_BROWSER = (
+    "   A shared browser serving other MCP clients is recorded for this profile."
+)
+
 #: How long the owner has to answer. It decides without waiting on anything, so
 #: this bounds a hung process, not a slow decision.
 _RETIRE_REPLY_SECONDS = 5.0
@@ -254,6 +263,39 @@ def _owner_to_retire(config: AppConfig) -> "Attachment | None":
     return attachment
 
 
+def _shared_browser_recorded(config: AppConfig) -> bool:
+    """Whether a trusted shared browser of this runtime is recorded for the profile.
+
+    For ``--status`` to name what may hold the profile. The same local lookup
+    as ``_owner_to_retire``, which prepares the daemon state directories but
+    contacts no owner, made only by a process that would itself use a shared
+    browser, and silent: an unreadable record means nothing is named, never
+    that the status check failed.
+    """
+    from linkedin_mcp_server.daemon import (
+        OwnerState,
+        daemon_would_be_used,
+        look_up_owner,
+    )
+    from linkedin_mcp_server.session_state import auth_root_dir
+
+    if not daemon_would_be_used(config):
+        return False
+    profile = get_profile_dir()
+    try:
+        lookup = look_up_owner(
+            auth_root_dir(profile), profile, config, for_retirement=True
+        )
+    except Exception:
+        logger.debug("The shared browser record could not be read", exc_info=True)
+        return False
+    return (
+        lookup.state is OwnerState.ATTACHABLE
+        and lookup.attachment is not None
+        and not lookup.attachment.control_only
+    )
+
+
 def _ask_to_retire(attachment: "Attachment") -> bool:
     """Send the idle-only retirement and act on the answer.
 
@@ -340,6 +382,17 @@ def clear_profile_and_exit() -> None:
         print("Nothing to clear.")
         sys.exit(0)
 
+    # Before asking: what the user agrees to delete is the session there now,
+    # and the deletion checks it is still that one once the profile is held.
+    try:
+        confirmed = session_state.auth_state_identity(get_profile_dir())
+    except OSError as e:
+        print(
+            "❌ The stored LinkedIn session could not be read to tell what would "
+            f"be cleared ({type(e).__name__}). Nothing was deleted."
+        )
+        sys.exit(1)
+
     print(f"🔑 Clear LinkedIn authentication state from {auth_root}?")
 
     try:
@@ -359,16 +412,23 @@ def clear_profile_and_exit() -> None:
         if _retire_a_shared_browser(config, retirement):
             try:
                 cleared = session_state.clear_auth_state(
-                    get_profile_dir(), wait_seconds=PROFILE_HANDOVER_WAIT_SECONDS
+                    get_profile_dir(),
+                    wait_seconds=PROFILE_HANDOVER_WAIT_SECONDS,
+                    confirmed=confirmed,
                 )
             except RuntimeError as e:
                 # The profile did not come free in time: a successor may have
-                # taken it, or the retiring browser is slow to close. Nothing
-                # was deleted.
+                # taken it, or the retiring browser is slow to close. Or it did,
+                # and another client had signed in while this one waited.
+                # Nothing was deleted.
                 print(f"❌ {e}")
                 sys.exit(1)
         else:
-            cleared = clear_auth_state(get_profile_dir())
+            try:
+                cleared = clear_auth_state(get_profile_dir(), confirmed=confirmed)
+            except session_state.SessionChangedError as e:
+                print(f"❌ {e}")
+                sys.exit(1)
 
     if cleared:
         print("✅ LinkedIn authentication state cleared successfully!")
@@ -546,11 +606,11 @@ def profile_info_and_exit() -> None:
             return browser.is_authenticated
         except AuthenticationError:
             return False
-        except (BrowserDowngradeError, AccountRestrictedError):
+        except (BrowserDowngradeError, AccountRestrictedError, BrowserBusyError):
             # Not "unexpected", and no traceback. This is the guard doing its
             # job, the message already says what happened and what to do, and
             # `--status` is the first thing a puzzled user runs. The tool path
-            # treats both the same way, in `error_handler`.
+            # treats the first two the same way, in `error_handler`.
             raise
         except Exception as e:
             logger.exception(f"Unexpected error checking session: {e}")
@@ -578,6 +638,14 @@ def profile_info_and_exit() -> None:
         # Ahead of the generic handler, which would add "Check logs and browser
         # configuration" to a message that already names the fix exactly.
         print(f"\n❌ {e}")
+        sys.exit(1)
+    except BrowserBusyError:
+        # The tool wording ("call this exact tool again") is for an MCP client,
+        # and nothing here failed: the profile lease kept this check off a
+        # browser that is running.
+        print(_STATUS_PROFILE_HELD)
+        if _shared_browser_recorded(config):
+            print(_STATUS_HELD_BY_SHARED_BROWSER)
         sys.exit(1)
     except Exception as e:
         print(f"❌ Could not validate session: {e}")

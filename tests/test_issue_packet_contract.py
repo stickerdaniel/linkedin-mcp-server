@@ -275,7 +275,7 @@ def test_maintainer_skills_evaluate_packet_before_live() -> None:
     assert "Incomplete packets never enter the reproduction shortlist." in triage
     assert "Recommend `needs more info`" in triage
     assert (
-        "Do not check out, start the MCP server, run scrapers, apply labels, "
+        "Do not check out, start the MCP server, call its LinkedIn tools, apply labels, "
         "comment, close, or assign."
     ) in triage
 

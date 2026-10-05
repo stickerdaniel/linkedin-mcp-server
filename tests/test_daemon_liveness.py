@@ -259,7 +259,7 @@ class TestTheOwnerSideMiddleware:
 
         async def call_next(_context: Any) -> str:
             started.set()
-            await asyncio.sleep(3600)  # the scrape nobody is waiting for
+            await asyncio.sleep(3600)  # the read nobody is waiting for
             return "never reached"  # pragma: no cover
 
         running = asyncio.create_task(

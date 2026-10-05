@@ -14,18 +14,18 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from patchright.async_api import BrowserType, async_playwright
 
-from linkedin_mcp_server.scraping.message_sender import (
+from linkedin_mcp_server.linkedin.message_sender import (
     MessageSender,
     _MESSAGE_COMPOSER_STATE_JS,
     _PROFILE_MESSAGE_TARGET_JS,
     _ProfileMessageTarget,
 )
-from linkedin_mcp_server.scraping.navigation import PageNavigator
-from linkedin_mcp_server.scraping.session import ScrapingSession
+from linkedin_mcp_server.linkedin.navigation import PageNavigator
+from linkedin_mcp_server.linkedin.session import PageSession
 
 
 def _sender(page) -> MessageSender:
-    session = ScrapingSession(page)
+    session = PageSession(page)
     return MessageSender(session, PageNavigator(session))
 
 

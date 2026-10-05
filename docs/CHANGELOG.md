@@ -5,6 +5,20 @@ described on [GitHub Releases](https://github.com/stickerdaniel/linkedin-mcp-ser
 
 <!-- towncrier release notes start -->
 
+## 4.26.2 (2026-10-03)
+
+### Breaking Changes
+
+- Python imports move from `linkedin_mcp_server.scraping` to `linkedin_mcp_server.linkedin`. ([#1189](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1189))
+- Every Python name containing "scrap" is renamed, keywords too; error context: `read_*`. ([#1190](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1190))
+
+### Bug Fixes
+
+- `--status` now says another process holds the browser profile instead of failing. ([#1191](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1191))
+- On Windows, closing the shared daemon's browser no longer breaks its next browser start. ([#1201](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1201))
+- Send messages and return `profile_urn` again on LinkedIn's redesigned profile page. ([#1214](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1214))
+
+
 ## 4.26.1 (2026-09-28)
 
 ### Bug Fixes

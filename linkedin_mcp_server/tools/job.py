@@ -1,5 +1,5 @@
 """
-LinkedIn job scraping tools with search and detail extraction.
+LinkedIn job reading tools with search and detail extraction.
 
 Uses innerText extraction for resilient job data capture.
 """
@@ -15,7 +15,7 @@ from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scraping.identifiers import normalize_job_id
+from linkedin_mcp_server.linkedin.identifiers import normalize_job_id
 
 logger = logging.getLogger(__name__)
 
@@ -54,13 +54,13 @@ def register_job_tools(
         try:
             job_id = normalize_job_id(job_id)
             extractor = await get_ready_extractor(ctx, tool_name="get_job_details")
-            logger.info("Scraping job: %s", job_id)
+            logger.info("Reading job: %s", job_id)
 
             await ctx.report_progress(
                 progress=0, total=100, message="Reading the job posting"
             )
 
-            result = await extractor.scrape_job(job_id)
+            result = await extractor.read_job(job_id)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
@@ -73,6 +73,55 @@ def register_job_tools(
                 raise_tool_error(relogin_exc, "get_job_details")
         except Exception as e:
             raise_tool_error(e, "get_job_details")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get Job Apply URL",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"job"},
+    )
+    async def get_job_apply_url(
+        job_id: str,
+        ctx: Context,
+    ) -> dict[str, Any]:
+        """
+        Get how a job posting takes applications, and the employer's application link.
+
+        Reads the posting without clicking anything.
+
+        Args:
+            job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url and apply: {type, url?}. type is easy_apply,
+            external, applied, closed or unknown. url is the employer's
+            application link as LinkedIn gives it, for external postings;
+            it is not opened, so a short link is returned unexpanded.
+            A posting that could not be read returns section_errors instead.
+        """
+        try:
+            job_id = normalize_job_id(job_id)
+            extractor = await get_ready_extractor(ctx, tool_name="get_job_apply_url")
+            logger.info("Reading apply link: %s", job_id)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Opening job posting"
+            )
+
+            result = await extractor.get_job_apply_url(job_id)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_job_apply_url")
+        except Exception as e:
+            raise_tool_error(e, "get_job_apply_url")  # NoReturn
 
     @mcp.tool(
         timeout=tool_timeout,

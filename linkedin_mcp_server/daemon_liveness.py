@@ -75,10 +75,10 @@ UNKNOWN_OUTCOME_STATUS = "outcome_unknown"
 def unknown_outcome(*, tool: str, reason: str) -> dict[str, Any]:
     """The structured half of a call whose effect nobody can vouch for.
 
-    The field names are `scraping.contracts.message_action_result`'s, so a client
+    The field names are `linkedin.contracts.message_action_result`'s, so a client
     that already reads `status` and `retry_safe` on a send needs nothing new for
     this one. Built here rather than imported from there because no daemon module
-    reaches into `scraping/`: this is not a scraping outcome but the transport
+    reaches into `linkedin/`: this is not a page-read outcome but the transport
     saying it knows nothing, and it answers for every mutating tool.
 
     `url`, `sent` and `recipient_selected` are left out rather than set to null.

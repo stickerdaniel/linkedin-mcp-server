@@ -1340,18 +1340,46 @@ def test_a_public_drain_that_skips_the_private_global_fails_the_model():
     assert any("did not hand one real True back as False" in p for p in model.problems)
 
 
-def test_a_baseline_close_path_unlike_the_candidates_fails_the_model():
+def _close_path_model(baseline_driver: str, candidate_driver: str | None = None):
     files = {path: (_REPO / path).read_text(encoding="utf-8") for path in CLOSE_PATH}
-    changed = {**files, CLOSE_PATH[1]: files[CLOSE_PATH[1]] + "\n# another close\n"}
-    candidate = Path(process_tree.__file__).read_text(encoding="utf-8")
-    same = alias_model(
-        {CANDIDATE: candidate}, close_path={CANDIDATE: files, BASELINE: files}
+    candidate = {**files, CLOSE_PATH[1]: candidate_driver or files[CLOSE_PATH[1]]}
+    return alias_model(
+        {CANDIDATE: Path(process_tree.__file__).read_text(encoding="utf-8")},
+        close_path={
+            CANDIDATE: candidate,
+            BASELINE: {**files, CLOSE_PATH[1]: baseline_driver},
+        },
     )
-    other = alias_model(
-        {CANDIDATE: candidate}, close_path={CANDIDATE: files, BASELINE: changed}
-    )
-    assert same.problems == ()
+
+
+def test_a_baseline_close_path_unlike_the_candidates_fails_the_model():
+    driver = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8")
+    assert _close_path_model(driver).problems == ()
+    other = _close_path_model(driver + "\n_another_close = True\n")
     assert any(CLOSE_PATH[1] in p for p in other.problems)
+
+
+def test_a_close_path_differing_in_comments_or_docstrings_passes_the_model():
+    driver = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8")
+    commented = driver + "\n# another close\n"
+    module = driver.replace('"""\n', '"""\nAnother close.\n', 1)
+    documented = module.replace("Check whether startup", "Tell whether startup", 1)
+    assert driver not in (commented, module) and module != documented
+    assert _close_path_model(commented).problems == ()
+    assert _close_path_model(documented).problems == ()
+
+
+def test_a_coding_comment_that_decodes_into_code_fails_the_model():
+    # In UTF-7 "+AAo-" is a newline, so the last line assigns when imported.
+    driver = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8")
+    encoded = "# coding: utf-7\n" + driver + "\n# +AAo-_another_close = True\n"
+    assert any(CLOSE_PATH[1] in p for p in _close_path_model(encoded).problems)
+
+
+def test_a_close_path_that_does_not_parse_fails_the_model():
+    broken = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8") + "\ndef (\n"
+    model = _close_path_model(broken, candidate_driver=broken)
+    assert any(CLOSE_PATH[1] in p for p in model.problems)
 
 
 # --- The gate each cell passes -------------------------------------------------------------

@@ -10,6 +10,8 @@ clean control, so a verdict that refuses everything cannot pass.
 from __future__ import annotations
 
 import dataclasses
+import shutil
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -20,6 +22,12 @@ import pytest
 from differential import harness
 from differential import test_host_quit_row as rows
 from differential.harness import (
+    GENERATION_CHANGED,
+    GENERATION_REMOVED,
+    O3_UNOBSERVED,
+    PROFILE_REMOVED,
+    QUARANTINED,
+    SESSION_UNUSABLE,
     DaemonCleanup,
     HostSession,
     Observations,
@@ -36,15 +44,26 @@ from differential.harness import (
     settle_owner,
 )
 from differential.session import (
+    CLEARED_BY_USER,
     LAST_VERSION_FILE,
+    LOGOUT,
+    LOST_ANNOUNCED,
+    LOST_SILENT,
     RETAINED,
+    UNCERTAIN,
     snapshot,
     write_synthetic_cookie_file,
 )
 from differential.synthetic_origin import OriginRequest
 from differential.test_watcher import BROWSER_EXE, _sampler
 from differential.watcher import Tracker, canonical_user_data_dir
-from linkedin_mcp_server.session_state import portable_cookie_path, write_source_state
+from linkedin_mcp_server.profile_claim import ensure_profile_claim
+from linkedin_mcp_server.session_state import (
+    QUARANTINE_PREFIX,
+    clear_auth_state,
+    portable_cookie_path,
+    write_source_state,
+)
 
 KEY = "/tmp/differential-row-profile"
 
@@ -52,14 +71,17 @@ KEY = "/tmp/differential-row-profile"
 # --- judge_row -----------------------------------------------------------------
 
 
-@pytest.fixture
-def profile(tmp_path):
-    directory = tmp_path / "auth" / "profile"
+def _stage(directory: Path):
     directory.mkdir(parents=True)
     (directory / LAST_VERSION_FILE).write_text("153.0.8010.12")
     staged = write_synthetic_cookie_file(portable_cookie_path(directory))
     write_source_state(directory)
     return directory, staged
+
+
+@pytest.fixture
+def profile(tmp_path):
+    return _stage(tmp_path / "auth" / "profile")
 
 
 def _healthy(profile, *, daemon: bool = True, **changes) -> Observations:
@@ -242,6 +264,185 @@ def test_a_cleanup_intervention_fails_the_row(profile, changes, reported):
     vector, failures = judge_row(dataclasses.replace(_healthy(profile), **changes))
     assert not vector.cleanup_clean
     assert any(reported in failure for failure in failures), failures
+
+
+# --- R17's expectation, authorization and announcement, and O3 ----------------------
+
+_NOTICE = "Session expired or invalid. Run with --login to re-authenticate"
+
+
+@pytest.fixture
+def reference(tmp_path):
+    """A second signed-in profile, for the Direct row of a comparison."""
+    return _stage(tmp_path / "reference" / "auth" / "profile")
+
+
+def _log_out(directory: Path) -> None:
+    ensure_profile_claim(directory, claim_anyway=True)
+    assert clear_auth_state(directory) is True
+
+
+def _quarantine(directory: Path) -> None:
+    (directory.parent / f"{QUARANTINE_PREFIX}20261001T000000").mkdir()
+
+
+def _lose_cookies(directory: Path) -> None:
+    portable_cookie_path(directory).unlink()
+
+
+def _changed(profile, change, *, daemon=True, **changes) -> Observations:
+    """A healthy row's observations, then *change* to its profile before the
+    after-reading; None leaves the profile as it was."""
+    directory, staged = profile
+    healthy = _healthy(profile, daemon=daemon)
+    if change is not None:
+        change(directory)
+    after = snapshot(directory, expected_digest=staged.li_at_digest)
+    return dataclasses.replace(healthy, after=after, **changes)
+
+
+def _logged_out(profile, change=_log_out, *, daemon=True, **changes) -> Observations:
+    """A row whose user confirmed a logout, which by default then ran."""
+    declared: dict[str, Any] = {
+        "post_quit": PostQuit(valid=False),
+        "expect_session": CLEARED_BY_USER,
+        "authorized": LOGOUT,
+    }
+    return _changed(profile, change, daemon=daemon, **{**declared, **changes})
+
+
+_CLEARED = {GENERATION_REMOVED, PROFILE_REMOVED, SESSION_UNUSABLE}
+
+
+def test_a_confirmed_logout_meets_a_cleared_expectation(profile):
+    vector, failures = judge_row(_logged_out(profile))
+    assert failures == []
+    assert vector.o4_session == CLEARED_BY_USER
+    assert vector.o3_protected == ()
+    assert set(vector.o3_authorized) == _CLEARED
+
+
+def test_a_clear_nobody_confirmed_fails_a_cleared_expectation(profile):
+    vector, failures = judge_row(_logged_out(profile, authorized=None))
+    assert vector.o4_session == LOST_SILENT
+    assert any("not cleared-by-user" in failure for failure in failures), failures
+    assert set(vector.o3_protected) == _CLEARED
+
+
+def test_a_confirmation_over_a_session_still_there_fails_a_cleared_expectation(
+    profile,
+):
+    vector, failures = judge_row(_logged_out(profile, None))
+    assert vector.o4_session == LOST_SILENT
+    assert any("not cleared-by-user" in failure for failure in failures), failures
+
+
+@pytest.mark.parametrize("expected", [LOST_ANNOUNCED, LOST_SILENT, UNCERTAIN, "gone"])
+def test_a_row_cannot_expect_a_loss_into_passing(profile, expected):
+    observed = _changed(
+        profile,
+        _lose_cookies,
+        post_quit=PostQuit(valid=False),
+        expect_session=expected,
+    )
+    observed.host.user_lines.append(_NOTICE)
+    vector, failures = judge_row(observed)
+    assert vector.o4_session == LOST_ANNOUNCED
+    assert any("cannot expect" in failure for failure in failures), failures
+
+
+def test_the_preservation_probe_never_announces_the_rows_loss(profile):
+    lost = _changed(profile, _lose_cookies)
+    probed = dataclasses.replace(
+        lost, post_quit=PostQuit(valid=False, user_lines=[_NOTICE])
+    )
+    vector, _ = judge_row(probed)
+    assert vector.o4_session == LOST_SILENT
+
+    # The control: the same notice, shown to the row's caller during the row.
+    lost.host.user_lines.append(_NOTICE)
+    vector, _ = judge_row(dataclasses.replace(lost, post_quit=PostQuit(valid=False)))
+    assert vector.o4_session == LOST_ANNOUNCED
+
+
+def _o3(differences: list[str]) -> list[str]:
+    return [d for d in differences if d.startswith("o3")]
+
+
+@pytest.mark.parametrize("daemon", [True, False])
+def test_unchanged_sessions_read_o3_equal(profile, reference, daemon):
+    vector, _ = judge_row(_healthy(profile, daemon=daemon))
+    assert vector.o3_protected == () and vector.o3_authorized == ()
+    direct, _ = judge_row(_healthy(reference, daemon=False))
+    assert compare_to_direct(direct, vector) == []
+
+
+@pytest.mark.parametrize(
+    ("change", "kind"),
+    [
+        pytest.param(_quarantine, QUARANTINED, id="quarantined"),
+        pytest.param(write_source_state, GENERATION_CHANGED, id="new-generation"),
+        pytest.param(shutil.rmtree, PROFILE_REMOVED, id="profile-removed"),
+    ],
+)
+def test_a_protected_change_only_the_daemon_made_fails_o3(
+    profile, reference, change, kind
+):
+    direct, _ = judge_row(_healthy(reference, daemon=False))
+    daemon, _ = judge_row(_changed(profile, change))
+    assert kind in daemon.o3_protected
+    (difference,) = _o3(compare_to_direct(direct, daemon))
+    assert kind in difference
+
+
+def test_a_protected_change_only_direct_made_is_no_o3_difference(profile, reference):
+    # The daemon mutating less than Direct is not the daemon mutating more.
+    direct, _ = judge_row(_changed(reference, _quarantine, daemon=False))
+    daemon, _ = judge_row(_healthy(profile))
+    assert direct.o3_protected == (QUARANTINED,)
+    assert _o3(compare_to_direct(direct, daemon)) == []
+
+
+def test_the_same_protected_change_in_both_modes_reads_o3_equal(profile, reference):
+    direct, _ = judge_row(_changed(reference, _quarantine, daemon=False))
+    daemon, _ = judge_row(_changed(profile, _quarantine))
+    assert direct.o3_protected == daemon.o3_protected == (QUARANTINED,)
+    assert _o3(compare_to_direct(direct, daemon)) == []
+
+
+def test_an_authorized_change_only_the_daemon_made_passes_o3(profile, reference):
+    # O4 still tells the two apart; O3 asks only whether a mutation went
+    # beyond what the user authorized.
+    direct, _ = judge_row(_healthy(reference, daemon=False))
+    daemon, _ = judge_row(_logged_out(profile))
+    assert _o3(compare_to_direct(direct, daemon)) == []
+    assert compare_to_direct(direct, daemon)
+
+
+@pytest.mark.parametrize(
+    ("change", "kind"),
+    [
+        pytest.param(
+            lambda d: (_log_out(d), _quarantine(d)), QUARANTINED, id="quarantined"
+        ),
+        pytest.param(write_source_state, GENERATION_CHANGED, id="new-generation"),
+    ],
+)
+def test_a_logout_does_not_authorize_what_a_logout_does_not_do(
+    profile, reference, change, kind
+):
+    direct, _ = judge_row(_logged_out(reference, daemon=False))
+    daemon, _ = judge_row(_logged_out(profile, change))
+    assert kind in daemon.o3_protected
+    (difference,) = _o3(compare_to_direct(direct, daemon))
+    assert kind in difference
+
+
+def test_an_o3_nobody_could_read_differs_from_one_that_was_read(profile, reference):
+    direct, _ = judge_row(_healthy(reference, daemon=False))
+    daemon, _ = judge_row(dataclasses.replace(_healthy(profile), after=None))
+    assert daemon.o3_protected == (O3_UNOBSERVED,)
+    assert _o3(compare_to_direct(direct, daemon))
 
 
 # --- Owner cleanup ---------------------------------------------------------------
@@ -1037,12 +1238,17 @@ def _chrome_on(profile: object) -> list[str]:
 
 
 def _failed_read_census(
-    case: str, *, row: str = KEY, alias: tuple[Path, Path] | None = None
+    case: str,
+    *,
+    row: str = KEY,
+    alias: tuple[Path, Path] | None = None,
+    refuse: Callable[[int], BaseException] = psutil.AccessDenied,
 ) -> dict:
     """The e1eh model: pid 70 is a browser root and pid 71 its renderer, both
     readable for two samples; pid 72 is a driver. At the third sample one
     lifetime's arguments are refused, as *case* says, and at the fourth
-    everything is gone. pid 1 is init and pid 10 the harness.
+    everything is gone. pid 1 is init and pid 10 the harness. *refuse* makes
+    the refusal of the root's and of a never-read process's arguments.
 
     pid 70 runs on the row's profile *row*, on ``OTHER`` for the
     ``other-profile`` cases, or through the link of *alias*, which points at
@@ -1081,7 +1287,7 @@ def _failed_read_census(
         case.startswith("parent-of")
     ):
         # The packet: read with its profile, one refused read, then gone.
-        table[70]["cmdline"] = psutil.AccessDenied(70)
+        table[70]["cmdline"] = refuse(70)
     children = {
         # Two processes with root arguments on the row's profile under pid 70:
         # if 70 now runs on another profile, they are two roots.
@@ -1114,7 +1320,7 @@ def _failed_read_census(
             "start": 7.0,
             "ppid": 10,
             "exe": BROWSER_EXE,
-            "cmdline": psutil.AccessDenied(73),
+            "cmdline": refuse(73),
         }
     elif case == "renderer":
         table[71]["cmdline"] = psutil.AccessDenied(71)
@@ -1150,9 +1356,14 @@ def _add_children(table: dict[int, dict[str, Any]], cmdlines: list) -> None:
 
 
 def _judged_failed_read(
-    profile, case: str, *, row: str = KEY, alias: tuple[Path, Path] | None = None
+    profile,
+    case: str,
+    *,
+    row: str = KEY,
+    alias: tuple[Path, Path] | None = None,
+    refuse: Callable[[int], BaseException] = psutil.AccessDenied,
 ):
-    census = _failed_read_census(case, row=row, alias=alias)
+    census = _failed_read_census(case, row=row, alias=alias, refuse=refuse)
     vector, failures = judge_row(
         dataclasses.replace(
             _healthy(profile),

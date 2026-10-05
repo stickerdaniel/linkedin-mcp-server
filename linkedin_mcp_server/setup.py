@@ -272,10 +272,10 @@ async def _login_into_fresh_profile(
     print(f"   Please log in manually. You have {budget} to complete authentication.")
     print("   (This handles 2FA, captcha, and any security challenges)")
 
-    # The login browser must leave from the same address as later scrapes: a
+    # The login browser must leave from the same address as later reads: a
     # session created on one IP and used from another is what trips LinkedIn's
     # security checkpoint. Shared with the runtime path rather than rebuilt
-    # here, so a setting cannot apply to scraping but not to the login that
+    # here, so a setting cannot apply to page reading but not to the login that
     # created the session.
     launch_options, viewport = build_launch_options(config.browser)
     describe_launch(launch_options)

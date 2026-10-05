@@ -1,4 +1,4 @@
-"""The consumer contract; rule and grammar tests live in agent-guardrails."""
+"""The consumer contract; rule and grammar tests live in post-no-bills."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import yaml
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "check-attribution.yml"
 _TEMPLATE = _REPO_ROOT / ".github" / "pull_request_template.md"
-_ACTION = "stickerdaniel/agent-guardrails"
+_ACTION = "stickerdaniel/post-no-bills"
 
 
 def _workflow() -> dict[str, Any]:
@@ -78,10 +78,10 @@ def test_guardrails_updates_have_isolated_and_bounded_automerge_rules() -> None:
         assert rule["matchManagers"] == ["github-actions"]
         assert rule["matchPackageNames"] == [_ACTION]
     assert automatic["matchUpdateTypes"] == ["minor", "patch"]
-    assert automatic["groupName"] == "agent-guardrails"
-    assert automatic["groupSlug"] == "agent-guardrails"
+    assert automatic["groupName"] == "post-no-bills"
+    assert automatic["groupSlug"] == "post-no-bills"
     assert automatic["automerge"] is True
     assert manual["matchUpdateTypes"] == ["major", "digest", "pin", "pinDigest"]
-    assert manual["groupName"] == "agent-guardrails manual"
-    assert manual["groupSlug"] == "agent-guardrails-manual"
+    assert manual["groupName"] == "post-no-bills manual"
+    assert manual["groupSlug"] == "post-no-bills-manual"
     assert manual["automerge"] is False

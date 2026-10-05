@@ -1,17 +1,17 @@
 # src/linkedin_mcp_server/tools/__init__.py
 """
-LinkedIn scraping tools package.
+LinkedIn reading tools package.
 
 This package contains the MCP tool implementations for LinkedIn data extraction.
 Each tool module provides specific functionality for different LinkedIn entities
 while sharing common error handling and driver management patterns.
 
 Available Tools:
-- Person tools: LinkedIn profile scraping and analysis
+- Person tools: LinkedIn profile reading and analysis
 - Company tools: Company profile and information extraction
 - Job tools: Job posting details and search functionality
 - Messaging tools: Inbox, conversations, search, and sending messages
-- Feed tools: Home feed scraping
+- Feed tools: Home feed reading
 - Post tools: Global post/content search
 
 Architecture:

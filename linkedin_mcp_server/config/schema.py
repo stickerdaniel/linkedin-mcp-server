@@ -18,14 +18,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_TOOL_TIMEOUT_SECONDS: float = 180.0
 DEFAULT_LOGIN_TIMEOUT_SECONDS: float = 1800.0  # 30 min; 0 = no limit
 DEFAULT_LOGIN_INLINE_WAIT_SECONDS: float = 25.0  # bounded inline wait
-# Clamp ceiling: scrape time stacks on top of the inline wait inside one tool
+# Clamp ceiling: page reading time stacks on top of the inline wait inside one tool
 # call and the smallest MCP client timeout is ~60s, so the wait alone must stay
 # well under that floor.
 MAX_LOGIN_INLINE_WAIT_SECONDS: float = 45.0
 
 # How long a tool call waits for another process to hand over the browser. Same
 # budget and ceiling as the login inline wait, for the same reason: the wait is
-# spent inside one tool call, ahead of the scrape itself.
+# spent inside one tool call, ahead of the page read itself.
 DEFAULT_BROWSER_WAIT_SECONDS: float = 25.0
 MAX_BROWSER_WAIT_SECONDS: float = 45.0
 # Shortest time an owner keeps the browser before honouring a handoff request.
@@ -231,11 +231,11 @@ class BrowserConfig:
                 f"got {self.login_inline_wait_seconds}"
             )
         # Clamp (do not reject) so a misconfigured large value can never alone
-        # approach the client timeout floor once scrape time is added on top.
+        # approach the client timeout floor once page reading time is added on top.
         if self.login_inline_wait_seconds > MAX_LOGIN_INLINE_WAIT_SECONDS:
             logger.warning(
                 "login_inline_wait_seconds %.1f exceeds the %.1fs ceiling; "
-                "clamping (scrape time stacks on top of the wait inside one "
+                "clamping (page reading time stacks on top of the wait inside one "
                 "tool call).",
                 self.login_inline_wait_seconds,
                 MAX_LOGIN_INLINE_WAIT_SECONDS,
@@ -252,7 +252,7 @@ class BrowserConfig:
                     f"{name} must be a non-negative finite number, got {value}"
                 )
         # Clamped for the same reason as the login inline wait: the wait happens
-        # inside a tool call, ahead of the scrape.
+        # inside a tool call, ahead of the page read.
         if self.browser_wait_seconds > MAX_BROWSER_WAIT_SECONDS:
             logger.warning(
                 "browser_wait_seconds %.1f exceeds the %.1fs ceiling; clamping.",
@@ -393,7 +393,7 @@ class BrowserConfig:
         """Build the Patchright ``proxy`` option, or None when unconfigured.
 
         Both browser launch paths call this so the login session and the
-        scraping session leave from the same address. A session created on one
+        page-reading session leave from the same address. A session created on one
         IP and used from another is what trips LinkedIn's security checkpoint.
         """
         if not self.proxy_server:
@@ -439,7 +439,7 @@ class ServerConfig:
     # Serve every stdio client from one browser-owning process instead of
     # giving each its own. Off while the supervision and liveness work is
     # unfinished: an owner that outlives its client must be provably unable to
-    # keep scraping, and until then this stays something you opt into. Only
+    # keep reading LinkedIn, and until then this stays something you opt into. Only
     # applies to stdio; an explicit HTTP bind is already a single server.
     daemon_enabled: bool = False
 

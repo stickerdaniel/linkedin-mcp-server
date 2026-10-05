@@ -29,7 +29,7 @@ from linkedin_mcp_server.exceptions import (
     LinuxBrowserDependencyError,
 )
 from linkedin_mcp_server.profile_lease import get_profile_lease
-from linkedin_mcp_server.scraping import LinkedInExtractor
+from linkedin_mcp_server.linkedin import LinkedInExtractor
 from linkedin_mcp_server.server_role import (
     ServerRole,
     a_held_profile_means_this_owner_must_go,
@@ -76,7 +76,7 @@ async def handle_auth_error(
     Only :func:`get_ready_extractor` can answer yes: boundary validation may run
     first, but no tool work has started when it fails. The 18
     catch sites in the tool bodies leave it at the default, because by then the
-    scrape may be part done, and some of these tools send messages and connection
+    page read may be part done, and some of these tools send messages and connection
     requests. A 19th added later is non-replayable until someone says otherwise,
     which is the safe direction for a default to point.
     """

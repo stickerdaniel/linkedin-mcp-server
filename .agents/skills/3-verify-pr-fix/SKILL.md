@@ -36,7 +36,7 @@ Hard flags (any one downgrades a clean live pass to concerns):
 - Locale-dependent detection: `== "Connect"`, `in ["Pending", "Follow"]`, `contains("1st")`, `aria-label="..."` with translated text. Attribute presence is the locale-independent signal.
 - LinkedIn class-name selectors: `.entity-result__item`, `.artdeco-button__text`. Minimal generic selectors only (`a[href*="/jobs/view/"]`).
 - Multiple navigations behind one `PERSON_SECTIONS` / `COMPANY_SECTIONS` entry.
-- Missing tests beside the canonical owner from `docs/scraping-architecture.md`.
+- Missing tests beside the canonical owner from `docs/linkedin-architecture.md`.
 
 A supplied capture or regression fixture can support a before-and-after claim within its scope. Protocol or startup failures are execution limits, not a pass.
 

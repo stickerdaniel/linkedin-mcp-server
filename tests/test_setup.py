@@ -172,12 +172,12 @@ async def test_interactive_login_forwards_all_browser_params(monkeypatch, tmp_pa
 
 @pytest.mark.asyncio
 async def test_login_keeps_webrtc_on_the_proxy(monkeypatch, tmp_path):
-    """The login browser needs the WebRTC restriction as much as scraping does.
+    """The login browser needs the WebRTC restriction as much as page reading does.
 
     This is the path that matters most. The login is where the session is
     created, so a leak here has been attached to that session from its first
     moment — and this path used to build its own launch options, which is
-    exactly how a setting ends up applying to scraping but not to login.
+    exactly how a setting ends up applying to page reading but not to login.
     """
     browser = _make_browser(export_cookies=True)
     captured_kwargs: dict = {}
@@ -487,7 +487,7 @@ def test_rotate_shielded_does_not_wedge_event_loop_shutdown(tmp_path):
 
 @pytest.mark.asyncio
 async def test_interactive_login_forwards_the_proxy(monkeypatch, tmp_path):
-    """The login browser must use the same proxy as later scrapes.
+    """The login browser must use the same proxy as later reads.
 
     A session created from one address and then used from another is exactly
     what triggers LinkedIn's security checkpoint, so --login cannot be allowed

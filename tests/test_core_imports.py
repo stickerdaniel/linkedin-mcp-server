@@ -25,7 +25,7 @@ def test_navigation_leaf_import_does_not_load_browser_lifecycle_modules():
     _run_isolated(
         """
 import sys
-import linkedin_mcp_server.scraping.navigation
+import linkedin_mcp_server.linkedin.navigation
 
 loaded = set(sys.modules)
 forbidden = {

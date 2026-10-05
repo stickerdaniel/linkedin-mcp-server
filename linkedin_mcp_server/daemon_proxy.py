@@ -49,11 +49,12 @@ import httpx2
 import mcp.types as mt
 from fastmcp.client.progress import ProgressHandler
 from fastmcp.client.telemetry import client_span
+from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.telemetry import inject_trace_context
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.timeout import normalize_timeout_to_seconds
-from mcp import ClientSession
+from mcp import ClientSession, MCPError
 from opentelemetry.trace import Status, StatusCode
 
 from linkedin_mcp_server import daemon_owner
@@ -195,7 +196,7 @@ _call_being_made: contextvars.ContextVar[_CallBinding | None] = contextvars.Cont
 #: second timeout, queued two seconds behind another call, succeeded after 2.02s.
 #: So under real concurrency this deadline can expire while the call is still
 #: waiting its turn, and because cancellation is not forwarded, the owner may go
-#: on scraping afterwards. That is the orphaned call #606 names, and the heartbeat
+#: on reading afterwards. That is the orphaned call #606 names, and the heartbeat
 #: is what will bound it.
 _TIMEOUT_MARGIN_SECONDS = 30.0
 
@@ -1199,6 +1200,42 @@ def create_proxy_provider(
     )
 
 
+#: What a client is told once recovery has ended without an owner to forward to.
+#: Fixed text and never the failure's own: that names the loopback address, and
+#: through the transport's message it can carry whatever the owner's port said.
+_OWNER_LOST = (
+    "This server lost the shared browser process and could not reach a new one. "
+    "Reconnect or restart your MCP client to start a new one."
+)
+
+
+def _owner_lost_from_a_listing() -> MCPError:
+    """The listing failure a client of either protocol era can read.
+
+    An ``MCPError`` because that is the one exception the SDK carries to the
+    wire as it is. On a 2026-07-28 connection anything else becomes ``Internal
+    server error`` (``mcp/server/runner.py``, ``modern_error_data``, SDK 2.2.0),
+    and on a handshake-era one it arrives as the failure's own text, which says
+    "connect" and not what to do about it. A ``ToolError`` would not help here:
+    no listing handler converts one, so it is just another exception to the SDK.
+    """
+    return MCPError(code=mt.INTERNAL_ERROR, message=_OWNER_LOST)
+
+
+def _owner_lost_from_a_call() -> ToolError:
+    """The tool call failure a client of either protocol era can read.
+
+    A ``ToolError`` rather than the ``MCPError`` a listing gets, because a call
+    has an error result and a listing does not. FastMCP's ``tools/call`` handler
+    turns a ``FastMCPError`` into a result carrying its text, in both eras,
+    which is the shape a model reads; an ``MCPError`` would leave the handler
+    as a protocol error instead. What it replaces is either the masked ``Error
+    calling tool '<name>'`` or, when the heartbeat preflight found nobody, a
+    plain exception the SDK masks in its turn.
+    """
+    return ToolError(_OWNER_LOST)
+
+
 class FrontendOwnerRecoveryMiddleware(Middleware):
     """Find a replacement owner when this one is gone, and repeat what is safe.
 
@@ -1243,6 +1280,14 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
     async def _repeat_the_listing(
         self, context: MiddlewareContext[Any], call_next: CallNext[Any, Any]
     ) -> Any:
+        """List once, and once more against a replacement if the owner was lost.
+
+        When no owner is left, either because recovery found none or because
+        the replacement failed the repeat as well, the client is told so in
+        words it can act on (:func:`_owner_lost_from_a_listing`). Only a
+        failure recognised as the owner's is put that way; anything else leaves
+        as it arrived, and the SDK masks it as it would on any server.
+        """
         try:
             return await call_next(context)
         except Exception as exc:
@@ -1254,10 +1299,15 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
                 failure.instance_id, classification=failure.classification
             )
             if replacement is None:
-                raise
-            # Unconditional, because listing changes nothing on LinkedIn. There is
-            # no effect a second one could repeat.
+                raise _owner_lost_from_a_listing() from exc
+        # Unconditional, because listing changes nothing on LinkedIn. There is
+        # no effect a second one could repeat.
+        try:
             return await call_next(context)
+        except Exception as again:
+            if unreachable_owner_in(again) is None:
+                raise
+            raise _owner_lost_from_a_listing() from again
 
     async def on_list_tools(
         self, context: MiddlewareContext[Any], call_next: CallNext[Any, Any]
@@ -1380,7 +1430,11 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
                     return self._report_an_unknown_outcome(context, failure)
 
             if replacement is None:
-                raise
+                # Only now, after the unknown outcome above had its chance: a
+                # call that may have acted keeps that answer, and this one is
+                # for a call that was never sent or could not have changed
+                # anything.
+                raise _owner_lost_from_a_call() from exc
 
             logger.info("Attached to a replacement owner; running the call again")
             try:
@@ -1433,7 +1487,9 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
                         )
                     if could_change_something:
                         return self._report_an_unknown_outcome(context, repeat)
-                raise
+                if repeat is None:
+                    raise
+                raise _owner_lost_from_a_call() from again
 
 
 class _NotAnOwnerAnswer(Exception):

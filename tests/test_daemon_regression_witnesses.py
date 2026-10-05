@@ -204,7 +204,7 @@ async def test_an_owner_exiting_after_an_unconfirmed_close_sends_no_signal(
             def QueryInformationJobObject(
                 handle: int, information: int
             ) -> tuple[int, ...]:
-                return (current, 700) if browser["alive"] else (current,)
+                return (current, current + 1) if browser["alive"] else (current,)
 
             @staticmethod
             def IsProcessInJob(handle: ProcessHandle, job: Any) -> bool:
@@ -212,7 +212,7 @@ async def test_an_owner_exiting_after_an_unconfirmed_close_sends_no_signal(
 
         monkeypatch.setattr(process_tree, "_IS_WINDOWS", True)
         monkeypatch.setattr(process_tree, "_adopted_windows_job", 123)
-        monkeypatch.setattr(process_tree, "_adopted_windows_gate", None)
+        monkeypatch.setattr(process_tree, "_adopted_windows_infrastructure", {})
         monkeypatch.setattr(
             process_tree, "_windows_modules", lambda: (Api(), Con(), Job(), object())
         )
@@ -255,6 +255,10 @@ def test_an_unanswered_job_membership_never_terminates_or_proves_the_drain(
     platform.
     """
     current = os.getpid()
+    # Derived from the real id rather than a constant such as 700, which could
+    # collide with this worker's own id and take the drain's self-exclusion
+    # branch instead. Only the doubles below ever see it.
+    candidate = current + 1
     terminated: list[int] = []
     opened: list[int] = []
     in_the_adopted_job: list[int] = []
@@ -289,7 +293,7 @@ def test_an_unanswered_job_membership_never_terminates_or_proves_the_drain(
         @staticmethod
         def QueryInformationJobObject(handle: int, information: int) -> tuple[int, ...]:
             # The member leaves the Job only if something terminates it.
-            return (current,) if terminated else (current, 700)
+            return (current,) if terminated else (current, candidate)
 
         @staticmethod
         def IsProcessInJob(handle: ProcessHandle, job: Any) -> bool:
@@ -307,7 +311,7 @@ def test_an_unanswered_job_membership_never_terminates_or_proves_the_drain(
 
     monkeypatch.setattr(process_tree, "_IS_WINDOWS", True)
     monkeypatch.setattr(process_tree, "_adopted_windows_job", 123)
-    monkeypatch.setattr(process_tree, "_adopted_windows_gate", None)
+    monkeypatch.setattr(process_tree, "_adopted_windows_infrastructure", {})
     monkeypatch.setattr(
         process_tree,
         "_live_windows_jobs",
@@ -332,12 +336,12 @@ def test_an_unanswered_job_membership_never_terminates_or_proves_the_drain(
     # so the witness counts only once the modelled question was actually put.
     if unknown_jobs:
         pytest.fail(f"membership was asked of a Job not modelled: {unknown_jobs!r}")
-    if 700 not in opened:
-        pytest.fail(f"candidate 700 was never opened: {opened!r}")
-    if 700 not in in_the_adopted_job:
-        pytest.fail("candidate 700 was never confirmed in the adopted Job")
-    if 700 not in unanswered:
-        pytest.fail("the installer Job was never asked about candidate 700")
+    if candidate not in opened:
+        pytest.fail(f"candidate {candidate} was never opened: {opened!r}")
+    if candidate not in in_the_adopted_job:
+        pytest.fail(f"candidate {candidate} was never confirmed in the adopted Job")
+    if candidate not in unanswered:
+        pytest.fail(f"the installer Job was never asked about candidate {candidate}")
 
     assert terminated == []
     assert proved is False

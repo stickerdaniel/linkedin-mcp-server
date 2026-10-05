@@ -12,7 +12,7 @@ repos:
 
 -   repo: https://github.com/astral-sh/ruff-pre-commit
     # Ruff version.
-    rev: v0.16.7
+    rev: v0.16.10
     hooks:
     -   id: ruff
         args: [--fix]
@@ -21,15 +21,15 @@ repos:
 
 -   repo: local
     hooks:
-    -   id: scraping-policy-traces
-        name: scraping policy traces
-        entry: uv run python scripts/check_scraping_policy_traces.py --check
+    -   id: policy-traces
+        name: policy traces
+        entry: uv run python scripts/check_policy_traces.py --check
         language: system
         pass_filenames: false
         always_run: true
-    -   id: scraping-architecture
-        name: scraping architecture
-        entry: uv run python scripts/generate_scraping_architecture.py --check
+    -   id: linkedin-architecture
+        name: linkedin architecture
+        entry: uv run python scripts/generate_linkedin_architecture.py --check
         language: system
         pass_filenames: false
         always_run: true

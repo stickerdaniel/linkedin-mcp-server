@@ -1,4 +1,4 @@
-"""Browser-DOM tests for the job posting readiness predicate in ``scraping/text.py``.
+"""Browser-DOM tests for the job posting readiness predicate in ``linkedin/text.py``.
 
 The unit suite mocks ``page.wait_for_function``, so the predicate never runs
 there. These cases execute it in headless chromium against synthetic
@@ -14,7 +14,7 @@ import asyncio
 import pytest
 from patchright.async_api import async_playwright
 
-from linkedin_mcp_server.scraping.text import JOB_POSTING_EN_US
+from linkedin_mcp_server.linkedin.text import JOB_POSTING_EN_US
 
 #: Keep every test that launches Chromium on one worker; see
 #: ``test_root_content_dom.py``.

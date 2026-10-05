@@ -933,12 +933,12 @@ class TestServingTheOwnersTools:
 
     async def test_progress_from_the_owner_reaches_the_clients_handler(self):
         # Eighteen of the nineteen tools report progress (`close_session` is the
-        # exception), and a long scrape with no progress looks indistinguishable
+        # exception), and a long read with no progress looks indistinguishable
         # from a hung one. A plain Client in the factory drops these silently.
         owner = FastMCP("owner")
 
         @owner.tool
-        async def scrape(ctx: Context) -> dict[str, bool]:
+        async def read_page(ctx: Context) -> dict[str, bool]:
             await ctx.report_progress(progress=50, total=100, message="halfway")
             return {"ok": True}
 
@@ -949,7 +949,7 @@ class TestServingTheOwnersTools:
             seen.append((progress, total, message))
 
         async with Client(proxy, progress_handler=record) as client:
-            await client.call_tool("scrape", {})
+            await client.call_tool("read_page", {})
 
         assert seen == [(50.0, 100.0, "halfway")]
 
@@ -1331,13 +1331,13 @@ class TestRepeatingOnlyWhatIsSafe:
         """The two halves of the payload are keys a send already uses.
 
         The builder lives in `daemon_proxy` on purpose: this is the transport
-        saying it knows nothing, not a scraping outcome, and no daemon module
-        imports from `scraping/`. The cost of that is two places naming the same
+        saying it knows nothing, not a page-read outcome, and no daemon module
+        imports from `linkedin/`. The cost of that is two places naming the same
         keys, so the names are pinned against their source here rather than
         left to drift until a client reads one of them and not the other.
         """
         from linkedin_mcp_server.daemon_liveness import unknown_outcome
-        from linkedin_mcp_server.scraping.contracts import message_action_result
+        from linkedin_mcp_server.linkedin.contracts import message_action_result
 
         reported = unknown_outcome(tool="send_message", reason="the owner went away")
         a_send = message_action_result("https://www.linkedin.com/in/x/", "sent", "ok")
@@ -1459,7 +1459,7 @@ class TestRepeatingOnlyWhatIsSafe:
         `a_repeat_could_change_something` catches that and answers `True` on the
         cautious side. The read would then come back as `outcome_unknown`
         carrying `retry_safe: False` — a client sent to look on LinkedIn for an
-        effect a scrape cannot have had, and a safely repeatable read declared
+        effect a read cannot have had, and a safely repeatable read declared
         unrepeatable, for no reason but that the owner holding the answer died.
 
         So the armed failure is never reached. Which is what the await count
@@ -1561,7 +1561,8 @@ class TestRepeatingOnlyWhatIsSafe:
         A read that could be repeated has no unknown outcome to describe, so
         turning this into a result would dress a plain transport failure up as a
         LinkedIn answer and hand a client a `retry_safe` flag about a call that
-        never acted.
+        never acted. It is raised as a `ToolError` saying the owner is gone, so
+        the masking below and the SDK above leave the reason readable.
         """
         from linkedin_mcp_server.daemon_proxy import (
             FrontendOwnerRecoveryMiddleware,
@@ -1581,7 +1582,7 @@ class TestRepeatingOnlyWhatIsSafe:
             )
 
         middleware = FrontendOwnerRecoveryMiddleware(backend)
-        with pytest.raises(OwnerUnreachableError, match="did not answer"):
+        with pytest.raises(ToolError, match="could not reach a new one"):
             await middleware.on_call_tool(
                 self._context(read_only=True),
                 call_next,  # ty: ignore
@@ -2878,7 +2879,7 @@ class TestWritingAnOwnerOff:
                 classification=OwnerFailure.RETIRING,
             )
 
-        with pytest.raises(OwnerUnreachableError):
+        with pytest.raises(ToolError, match="could not reach a new one"):
             await FrontendOwnerRecoveryMiddleware(backend).on_call_tool(
                 MagicMock(),
                 call_next,  # ty: ignore
@@ -3045,7 +3046,7 @@ class TestWhatOneCallCanCost:
         context.message.name = "get_person_profile"
         context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
 
-        with pytest.raises(OwnerUnreachableError):
+        with pytest.raises(ToolError, match="could not reach a new one"):
             await FrontendAuthRepairMiddleware(tool_timeout=30.0).on_call_tool(
                 context,
                 through_recovery,
@@ -3164,7 +3165,7 @@ class TestWhatOneCallCanCost:
         context.message.name = "get_person_profile"
         context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
 
-        with pytest.raises(OwnerUnreachableError):
+        with pytest.raises(ToolError, match="could not reach a new one"):
             await FrontendAuthRepairMiddleware(tool_timeout=30.0).on_call_tool(
                 context,
                 through_recovery,

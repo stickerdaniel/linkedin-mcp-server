@@ -1,5 +1,5 @@
 """
-LinkedIn feed scraping tool.
+LinkedIn feed reading tool.
 
 Fetches posts from the authenticated user's LinkedIn home feed using
 innerText extraction. Scrolls until the requested number of post
@@ -18,9 +18,9 @@ from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scraping.contracts import RATE_LIMITED_SECTION_TEXT
-from linkedin_mcp_server.scraping.contracts import rate_limited_section_error
-from linkedin_mcp_server.scraping.link_metadata import Reference
+from linkedin_mcp_server.linkedin.contracts import RATE_LIMITED_SECTION_TEXT
+from linkedin_mcp_server.linkedin.contracts import rate_limited_section_error
+from linkedin_mcp_server.linkedin.link_metadata import Reference
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ def register_feed_tools(
         """
         try:
             extractor = await get_ready_extractor(ctx, tool_name="get_feed")
-            logger.info("Scraping feed (num_posts=%d)", num_posts)
+            logger.info("Reading feed (num_posts=%d)", num_posts)
 
             await ctx.report_progress(
                 progress=0, total=100, message="Reading the home feed"

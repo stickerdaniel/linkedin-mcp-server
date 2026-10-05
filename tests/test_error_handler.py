@@ -9,7 +9,7 @@ from linkedin_mcp_server.core.exceptions import (
     InvalidReferenceError,
     ProxyConnectionError,
     RateLimitError,
-    ScrapingError,
+    PageReadError,
 )
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.exceptions import (
@@ -148,16 +148,16 @@ def test_owner_stand_down_keeps_its_replacement_guidance():
     assert str(caught.value) == message
 
 
-def test_raises_tool_error_for_scraping_error():
+def test_raises_tool_error_for_page_read_error():
     with pytest.raises(ToolError, match="Could not read the page"):
-        raise_tool_error(ScrapingError("bad html"))
+        raise_tool_error(PageReadError("bad html"))
 
 
-def test_raises_tool_error_for_base_scraper_exception():
-    from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+def test_raises_tool_error_for_base_operation_error():
+    from linkedin_mcp_server.core.exceptions import LinkedInOperationError
 
-    with pytest.raises(ToolError, match="generic scraper error"):
-        raise_tool_error(LinkedInScraperException("generic scraper error"))
+    with pytest.raises(ToolError, match="generic operation error"):
+        raise_tool_error(LinkedInOperationError("generic operation error"))
 
 
 def test_raises_tool_error_for_linkedin_mcp_error():
@@ -249,7 +249,7 @@ def test_proxy_error_skips_issue_diagnostics(monkeypatch):
 
 
 def test_invalid_reference_surfaces_the_correction_verbatim():
-    # It subclasses LinkedInScraperException, so the specific branch has to come
+    # It subclasses LinkedInOperationError, so the specific branch has to come
     # first; otherwise the catch-all handles it and the correction arrives buried.
     #
     # Compared whole rather than searched for a substring: the catch-all keeps

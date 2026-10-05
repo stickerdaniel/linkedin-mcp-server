@@ -146,6 +146,27 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     _ACTIVE[:] = [a for a in _ACTIVE if a.config is not config]
 
 
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Count each test a branch is left to (``model_coverage``) as that
+    branch's model coverage, from the test's own run. A test already counted
+    as a row of its own keeps that; a parametrized test counts each case."""
+    from differential.model_coverage import model_rows
+
+    rows = model_rows()
+    for item in items:
+        base = item.nodeid.split("[", 1)[0]
+        if base not in rows or item.get_closest_marker(PROPERTY) is not None:
+            continue
+        # One row a test: ``model_coverage`` maps each test to one row.
+        item.add_marker(
+            pytest.mark.differential_row(
+                row=rows[base][0], experiment="K3", column="unit"
+            )
+        )
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]):
     outcome = yield
