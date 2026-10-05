@@ -382,6 +382,17 @@ def clear_profile_and_exit() -> None:
         print("Nothing to clear.")
         sys.exit(0)
 
+    # Before asking: what the user agrees to delete is the session there now,
+    # and the deletion checks it is still that one once the profile is held.
+    try:
+        confirmed = session_state.auth_state_identity(get_profile_dir())
+    except OSError as e:
+        print(
+            "❌ The stored LinkedIn session could not be read to tell what would "
+            f"be cleared ({type(e).__name__}). Nothing was deleted."
+        )
+        sys.exit(1)
+
     print(f"🔑 Clear LinkedIn authentication state from {auth_root}?")
 
     try:
@@ -401,16 +412,23 @@ def clear_profile_and_exit() -> None:
         if _retire_a_shared_browser(config, retirement):
             try:
                 cleared = session_state.clear_auth_state(
-                    get_profile_dir(), wait_seconds=PROFILE_HANDOVER_WAIT_SECONDS
+                    get_profile_dir(),
+                    wait_seconds=PROFILE_HANDOVER_WAIT_SECONDS,
+                    confirmed=confirmed,
                 )
             except RuntimeError as e:
                 # The profile did not come free in time: a successor may have
-                # taken it, or the retiring browser is slow to close. Nothing
-                # was deleted.
+                # taken it, or the retiring browser is slow to close. Or it did,
+                # and another client had signed in while this one waited.
+                # Nothing was deleted.
                 print(f"❌ {e}")
                 sys.exit(1)
         else:
-            cleared = clear_auth_state(get_profile_dir())
+            try:
+                cleared = clear_auth_state(get_profile_dir(), confirmed=confirmed)
+            except session_state.SessionChangedError as e:
+                print(f"❌ {e}")
+                sys.exit(1)
 
     if cleared:
         print("✅ LinkedIn authentication state cleared successfully!")
