@@ -1676,6 +1676,44 @@ class TestABrowserAnotherCloseRetired:
         assert stale.closes == 1, "only the other closer may have closed it"
         lease.release()
 
+    async def test_identity_is_read_after_the_lifecycle_lock_is_taken(
+        self, driver, monkeypatch
+    ):
+        """The cache can change while this helper waits behind another close.
+
+        A check made before the lock sees the dead manager still cached, then
+        closes nothing and reports a restart. The check belongs under the lock,
+        where the other close has already cleared the cache.
+        """
+        stale, lease = await _cached_with_a_call_reference(driver)
+        stale.page_closed = True
+        held = asyncio.Event()
+        release = asyncio.Event()
+        real_defer = driver.drv._run_deferring_cancels
+
+        async def hold_the_lock(coroutine: Any) -> Any:
+            held.set()
+            await release.wait()
+            return await real_defer(coroutine)
+
+        monkeypatch.setattr(driver.drv, "_run_deferring_cancels", hold_the_lock)
+        closer = asyncio.create_task(driver.drv.close_browser())
+        await held.wait()
+
+        task = asyncio.create_task(get_ready_extractor(None, tool_name="get_feed"))
+        await asyncio.sleep(0.05)
+        assert not task.done(), "the helper did not wait for the lock"
+        release.set()
+        await closer
+        await task
+
+        current = driver.launched[-1]
+        assert current is not stale and current.closes == 0
+        assert len(driver.launched) == 2
+        assert stale.closes == 1, "only the other closer may have closed it"
+        driver.extractor.assert_called_once_with(current.page)
+        lease.release()
+
     async def test_the_reacquired_browser_is_not_checked_again(
         self, driver, monkeypatch
     ):
