@@ -68,6 +68,7 @@ import functools
 import hashlib
 import json
 import os
+import queue
 import re
 import sqlite3
 import threading
@@ -146,47 +147,103 @@ def _spelling(path: str | os.PathLike[str]) -> str:
 
 
 class _JsonFile:
-    """One JSON document, replaced whole on every write, never raising."""
+    """One JSON document per path, replaced whole, in the order it was asked.
+
+    One daemon thread owns the file. A later snapshot cannot be overwritten by
+    an earlier one, because the thread writes the queue in order. The thread is
+    a daemon, so a disc that never returns cannot keep the interpreter alive
+    after the caller has stopped waiting. ``write`` never raises and never
+    waits: the caller is the event loop a navigation's own deadline runs on.
+    """
+
+    _by_path: dict[str, _JsonFile] = {}
+    _by_path_guard = threading.Lock()
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self.failures = 0
+        self._queue: queue.Queue[tuple[int, str] | None] = queue.Queue()
+        self._written = 0
+        self._asked = 0
         self._lock = threading.Lock()
-        self._writers: list[threading.Thread] = []
-        self._writers_guard = threading.Lock()
+        self._thread: threading.Thread | None = None
+
+    @classmethod
+    def for_path(cls, path: Path) -> _JsonFile:
+        """The one writer for *path*, so two recorders cannot pass each other."""
+        key = os.path.normcase(os.path.abspath(path))
+        with cls._by_path_guard:
+            writer = cls._by_path.get(key)
+            if writer is None:
+                writer = cls(path)
+                cls._by_path[key] = writer
+            return writer
 
     def write(self, document: Mapping[str, Any]) -> None:
-        # Replaced on its own thread. The caller is the event loop a
-        # navigation's deadline runs on, and a slow disc must not spend that
-        # deadline. ``flush`` waits the writers out for a reader that needs the
-        # file as this call left it.
         text = json.dumps(document, indent=2, sort_keys=True) + "\n"
-        worker = threading.Thread(
-            target=self._replace, args=(text,), name=f"evidence-{self.path.name}"
-        )
-        with self._writers_guard:
-            self._writers.append(worker)
-        worker.start()
+        try:
+            self._ensure_started()
+        except Exception:  # noqa: BLE001 - a record that cannot start is a miss
+            self.failures += 1
+            return
+        with self._lock:
+            self._asked += 1
+            asked = self._asked
+        self._queue.put((asked, text))
 
     def flush(self, seconds: float = 5.0) -> None:
+        """Wait until every snapshot asked for so far has been replaced in."""
+        with self._lock:
+            target = self._asked
         deadline = time.monotonic() + seconds
-        for worker in list(self._writers):
-            worker.join(max(0.0, deadline - time.monotonic()))
+        while self._written < target and time.monotonic() < deadline:
+            time.sleep(0.01)
 
     def read(self) -> dict[str, Any] | None:
         """The document as last written, once that write has landed."""
         self.flush()
         return read_document(self.path)
 
+    def _ensure_started(self) -> None:
+        if self._thread is not None:
+            return
+        thread = threading.Thread(
+            target=self._serve, name=f"evidence-{self.path.name}", daemon=True
+        )
+        thread.start()
+        self._thread = thread
+
+    def _serve(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            _seq, text = item
+            self._replace(text)
+            self._written += 1
+
     def _replace(self, text: str) -> None:
-        with self._lock:
-            temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
-            try:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                temporary.write_text(text, encoding="utf-8")
-                os.replace(temporary, self.path)
-            except (OSError, TypeError, ValueError):
-                self.failures += 1
+        temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(text, encoding="utf-8")
+            os.replace(temporary, self.path)
+        except (OSError, TypeError, ValueError):
+            self.failures += 1
+
+
+def _loop_is_running() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def flush_evidence(seconds: float = 5.0) -> None:
+    """Land every snapshot the process has asked a writer for."""
+    for writer in list(_JsonFile._by_path.values()):
+        writer.flush(seconds)
 
 
 def read_document(path: Path) -> dict[str, Any] | None:
@@ -225,7 +282,7 @@ class NavigationRecorder:
     """What one process's browser did, from before its launch to its close."""
 
     def __init__(self, path: Path, *, label: str) -> None:
-        self._file = _JsonFile(path)
+        self._file = _JsonFile.for_path(path)
         self._began_ns = time.monotonic_ns()
         self._lock = threading.RLock()
         self._targets: list[Any] = []
@@ -507,7 +564,7 @@ class NavigationRecorder:
                     "Patchright's own handle on the driver, whose parent is the "
                     "observed process"
                 )
-            self.persist(wait=True)
+            self.persist()
 
     def detach(self) -> None:
         observer = self.document["observer"]
@@ -661,6 +718,11 @@ def observe_navigation(path: Path, *, label: str) -> Iterator[NavigationRecorder
         if not _ACTIVE:
             _uninstall()
         recorder.detach()
+        # A sync caller, including the baseline interpreter, is about to exit
+        # or read the file. Landing it here does not touch a running event
+        # loop; an async caller flushes on its own thread instead.
+        if not _loop_is_running():
+            recorder._file.flush()
 
 
 def requested_ends(path: Path) -> dict[str, float | None] | None:
@@ -700,7 +762,7 @@ class LifetimeSampler:
         label: str,
         interval: float = SAMPLE_SECONDS,
     ) -> None:
-        self._file = _JsonFile(path)
+        self._file = _JsonFile.for_path(path)
         self._profile = _spelling(profile)
         self._interval = interval
         self._began_ns = time.monotonic_ns()
@@ -761,7 +823,9 @@ class LifetimeSampler:
                     break
             # The closing sample reads the ends, but on a loaded host one sample
             # can take longer than the whole stop bound, so it gets half of it.
-            self._sample(psutil, me, deadline=time.monotonic() + STOP_SECONDS / 2)
+            # A stop that already finalised the document is not read again.
+            if self.document["ended_ms"] is None:
+                self._sample(psutil, me, deadline=time.monotonic() + STOP_SECONDS / 2)
         except Exception as exc:  # noqa: BLE001 - the sampler ends, the row does not
             with self._lock:
                 self.document["sampler"] = f"failed: {type(exc).__name__}"
@@ -827,23 +891,36 @@ class LifetimeSampler:
             ):
                 truncated = True
                 break
+            with self._lock:
+                # A stop that already finished owns the document. A read that
+                # returns afterwards must not rewrite it.
+                if self.document["ended_ms"] is not None:
+                    return
             try:
                 key = (child.pid, child.create_time())
             except Exception:  # noqa: BLE001 - unreadable, not shown gone
+                with self._lock:
+                    self.document["sample_failures"] += 1
                 continue
+            with self._lock:
+                if self.document["ended_ms"] is not None:
+                    return
             if key in self._tracked:
                 try:
                     zombie = child.status() == psutil.STATUS_ZOMBIE
                 except Exception:  # noqa: BLE001 - unreadable, asked again
-                    alive.add(key)
+                    with self._lock:
+                        self.document["sample_failures"] += 1
                     continue
                 if zombie:
-                    # Read after the sample began, so unordered against a close
-                    # asked for while this sample was still reading.
+                    # The first time it was seen gone, and not ordered against a
+                    # close asked for while this sample was still reading.
                     with self._lock:
-                        self._tracked[key]["gone_ms"] = self._ms()
-                        self._tracked[key]["order_uncertain"] = True
-                    changed = True
+                        record = self._tracked[key]
+                        if record["gone_ms"] is None:
+                            record["gone_ms"] = self._ms()
+                            record["order_uncertain"] = True
+                            changed = True
                 else:
                     alive.add(key)
                 continue
@@ -874,13 +951,19 @@ class LifetimeSampler:
             except Exception:  # noqa: BLE001 - the driver stays unidentified
                 pass
         with self._lock:
+            if self.document["ended_ms"] is not None:
+                return
             if truncated:
                 # Cut short, so a process not reached is unknown, not gone.
                 self.document["truncated_samples"] += 1
             for key, record in self._tracked.items():
                 if key in alive:
                     record["last_alive_ms"] = now
-                elif not truncated and record["gone_ms"] is None:
+                elif (
+                    not truncated
+                    and self.document["sample_failures"] == 0
+                    and record["gone_ms"] is None
+                ):
                     record["gone_ms"] = now
                     changed = True
             if changed:
@@ -1114,7 +1197,10 @@ def record_cookie_lineage(
     cannot be written leaves the row as it was.
     """
     try:
-        document = read_document(path) or {"readings": [], "dropped": 0}
+        file = _JsonFile.for_path(path)
+        # Land the snapshots already asked for before reading, so this one
+        # cannot overwrite a newer record with an older snapshot.
+        document = file.read() or {"readings": [], "dropped": 0}
         readings = document.setdefault("readings", [])
         if len(readings) >= MAX_READINGS:
             document["dropped"] = int(document.get("dropped") or 0) + 1
@@ -1127,7 +1213,6 @@ def record_cookie_lineage(
                     "store": read_cookie_store(profile),
                 }
             )
-        file = _JsonFile(path)
         file.write(document)
         file.flush()
     except Exception:  # noqa: BLE001 - diagnostics never fail what they watch
@@ -1145,7 +1230,8 @@ def record_origin(
     """
     try:
         # A driving process that wrote nothing leaves only this, which says so.
-        document = read_document(path) or {"record": "absent"}
+        file = _JsonFile.for_path(path)
+        document = file.read() or {"record": "absent"}
         requests, decisions = list(requests), list(decisions)
         document["origin"] = {
             "requests": [
@@ -1170,7 +1256,7 @@ def record_origin(
             ],
             "dropped_decisions": max(0, len(decisions) - MAX_EVENTS),
         }
-        file = _JsonFile(path)
+        file = _JsonFile.for_path(path)
         file.write(document)
         file.flush()
     except Exception:  # noqa: BLE001 - diagnostics never fail what they watch

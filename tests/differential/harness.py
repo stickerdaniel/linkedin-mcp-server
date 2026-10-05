@@ -7132,6 +7132,7 @@ async def measure_host_quit_row(
     # own interpreter, which records its navigation itself; the lifetimes are
     # this process's descendants either way. No verdict reads any of it.
     staging_marks = len(origin.requests), len(proxy.decisions)
+    navigation_file = None
     try:
         with observing(
             work_dir,
@@ -7170,11 +7171,15 @@ async def measure_host_quit_row(
                         accept=lambda session: origin.accept_session(session.li_at),
                     )
     finally:
-        record_origin(
-            navigation_file,
-            origin.requests[staging_marks[0] :],
-            proxy.decisions[staging_marks[1] :],
-        )
+        if navigation_file is not None:
+            # Off the event loop: landing the file waits on the disc, and that
+            # wait must not freeze the row's other tasks.
+            await asyncio.to_thread(
+                record_origin,
+                navigation_file,
+                origin.requests[staging_marks[0] :],
+                proxy.decisions[staging_marks[1] :],
+            )
     # The staging browser has confirmed its close, but a root still on the
     # profile when the watcher takes its baseline would count against O1, and
     # one the census cannot read could be that root. The executable is named

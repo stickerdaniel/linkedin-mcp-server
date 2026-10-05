@@ -169,10 +169,9 @@ def _record(path: Path) -> dict[str, Any]:
 
 
 def _flush_evidence() -> None:
-    deadline = time.monotonic() + 5
-    for thread in threading.enumerate():
-        if thread.name.startswith("evidence-"):
-            thread.join(max(0.0, deadline - time.monotonic()))
+    from differential.first_navigation import flush_evidence
+
+    flush_evidence()
 
 
 async def _until(condition: Callable[[], Any], seconds: float, what: str) -> Any:
@@ -875,7 +874,12 @@ def test_a_death_read_during_a_sample_is_not_ordered_before_a_close(tmp_path):
     )
     (record,) = lifetimes.document["processes"]
     assert record["order_uncertain"] is True
-    asked = {"browser-root": record["gone_ms"] / 1000 + lifetimes._began_wall + 5}
+    first_gone = record["gone_ms"]
+    lifetimes._sample(
+        psutil, SimpleNamespace(children=lambda recursive: [DiedWhileReading()])
+    )
+    assert record["gone_ms"] == first_gone
+    asked = {"browser-root": first_gone / 1000 + lifetimes._began_wall + 5}
     assert lifetimes._ended(record, asked) == "ambiguous"
 
 
