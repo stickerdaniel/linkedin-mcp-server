@@ -113,14 +113,16 @@ async def test_dom_page_launch_failure_skips_locally(monkeypatch):
         await fixture.__anext__()
 
 
-def _composer(*, identity: str, buttons: str = "", extra: str = "") -> str:
+def _composer(
+    *, identity: str, buttons: str = "", extra: str = "", editor: str = ""
+) -> str:
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
       <main>
         <section role="dialog">
           {identity}
           <form>
             <div role="textbox" contenteditable="true"
-                 style="display:block;width:200px;height:30px"></div>
+                 style="display:block;width:200px;height:30px">{editor}</div>
             {buttons}
           </form>
         </section>
@@ -943,3 +945,199 @@ class TestMessageComposerDom:
             is None
         )
         assert await dom_page.evaluate("document.body.dataset.foreignKey") is None
+
+
+# The empty LinkedIn composer holds one empty paragraph, `<p><br></p>`
+# (measured live in a recipient-less probe, September 2026). Inserting a
+# multi-line message there with `insertText` gives `<p>` per line and
+# `<p><br></p>` per empty line, as it did live; the shapes below are what this
+# Chromium produces from that start, not copies of LinkedIn markup.
+_EMPTY_PARAGRAPH = "<p><br></p>"
+
+_COUNTING_BUTTON = (
+    '<button type="submit" onclick="event.preventDefault();'
+    "document.body.dataset.clicks = Number(document.body.dataset.clicks || 0) + 1"
+    '">Send</button>'
+)
+
+
+class TestMultiLineComposerDom:
+    @staticmethod
+    async def _open(page):
+        await _set_composer_content(
+            page,
+            _composer(
+                identity='<a href="https://www.linkedin.com/in/testuser/">Test</a>',
+                buttons=_COUNTING_BUTTON,
+                editor=_EMPTY_PARAGRAPH,
+            ),
+        )
+        await page.evaluate(
+            """() => {
+                const count = name => {
+                    document.body.dataset[name] =
+                        Number(document.body.dataset[name] || 0) + 1;
+                };
+                document.querySelector('form').addEventListener('submit', event => {
+                    event.preventDefault();
+                    count('submits');
+                });
+                document.querySelector('[role="textbox"]').addEventListener(
+                    'keydown', event => { if (event.key === 'Enter') count('enters'); }
+                );
+            }"""
+        )
+        sender = _sender(page)
+        owner = await sender._resolve_message_owner(
+            _message_target(), expected_route=page.url
+        )
+        assert owner is not None
+        return sender, owner
+
+    @staticmethod
+    async def _counters(page) -> dict:
+        return await page.evaluate(
+            """() => ({
+                clicks: document.body.dataset.clicks || '0',
+                submits: document.body.dataset.submits || '0',
+                enters: document.body.dataset.enters || '0',
+            })"""
+        )
+
+    @staticmethod
+    async def _editor_html(page) -> str:
+        return await page.locator('[role="textbox"]').evaluate("e => e.innerHTML")
+
+    async def test_two_lines_are_written_and_clicked_once(self, dom_page):
+        message = "Line one\nLine two"
+        sender, owner = await self._open(dom_page)
+
+        written = await sender._write_verified_message(
+            message, target=_message_target(), owner=owner
+        )
+        ready = await sender._wait_for_verified_submit(
+            message, target=_message_target(), owner=owner
+        )
+        before = await self._counters(dom_page)
+        html = await self._editor_html(dom_page)
+        submitted = await sender._submit_verified_message(
+            message, target=_message_target(), owner=owner
+        )
+        after = await self._counters(dom_page)
+        await sender._dispose_message_owner(owner)
+
+        assert html == "<p>Line one</p><p>Line two</p>"
+        assert (written, ready, submitted) == ("written", True, "clicked")
+        assert before == {"clicks": "0", "submits": "0", "enters": "0"}
+        assert after == {"clicks": "1", "submits": "0", "enters": "0"}
+
+    @pytest.mark.parametrize("message", ["a\n\nb", "a\n\n\nb"])
+    async def test_empty_lines_are_written_and_clicked(self, dom_page, message):
+        sender, owner = await self._open(dom_page)
+
+        written = await sender._write_verified_message(
+            message, target=_message_target(), owner=owner
+        )
+        submitted = await sender._submit_verified_message(
+            message, target=_message_target(), owner=owner
+        )
+        await sender._dispose_message_owner(owner)
+
+        assert (written, submitted) == ("written", "clicked")
+        assert (await self._counters(dom_page))["clicks"] == "1"
+
+    async def test_space_stored_as_nbsp_still_belongs_to_the_message(self, dom_page):
+        message = "line \nnext"
+        sender, owner = await self._open(dom_page)
+
+        written = await sender._write_verified_message(
+            message, target=_message_target(), owner=owner
+        )
+        html = await self._editor_html(dom_page)
+        await sender._dispose_message_owner(owner)
+
+        assert html == "<p>line&nbsp;</p><p>next</p>"
+        assert written == "written"
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            "editor.insertAdjacentHTML('beforeend', '<p>Author draft</p>')",
+            "editor.firstChild.replaceChildren("
+            "Object.assign(document.createElement('span'), {textContent: 'Line one'}))",
+            "editor.innerHTML = '<p>Line one<br>Line two</p>'",
+            "editor.firstChild.replaceWith("
+            "Object.assign(document.createElement('div'), {textContent: 'Line one'}))",
+            "editor.append(document.createComment('note'))",
+            "editor.firstChild.replaceWith('Line one')",
+            "editor.firstChild.setAttribute('dir', 'ltr')",
+        ],
+        ids=[
+            "appended-paragraph",
+            "line-in-span",
+            "br-joined-lines",
+            "root-div",
+            "root-comment",
+            "root-text",
+            "paragraph-attribute",
+        ],
+    )
+    async def test_foreign_content_after_write_is_never_sent_or_cleared(
+        self, dom_page, change
+    ):
+        message = "Line one\nLine two"
+        sender, owner = await self._open(dom_page)
+        written = await sender._write_verified_message(
+            message, target=_message_target(), owner=owner
+        )
+        await dom_page.locator('[role="textbox"]').evaluate(
+            f"editor => {{ {change}; }}"
+        )
+        changed = await self._editor_html(dom_page)
+
+        ready = await sender._wait_for_verified_submit(
+            message, target=_message_target(), owner=owner
+        )
+        submitted = await sender._submit_verified_message(
+            message, target=_message_target(), owner=owner
+        )
+        await sender._cleanup_owned_message(message, owner)
+        await sender._dispose_message_owner(owner)
+
+        assert written == "written"
+        assert (ready, submitted) == (False, "invalid")
+        assert (await self._counters(dom_page))["clicks"] == "0"
+        assert await self._editor_html(dom_page) == changed
+
+    async def test_removed_empty_line_is_never_sent(self, dom_page):
+        message = "a\n\nb"
+        sender, owner = await self._open(dom_page)
+        written = await sender._write_verified_message(
+            message, target=_message_target(), owner=owner
+        )
+        await dom_page.locator('[role="textbox"] p:nth-child(2)').evaluate(
+            "paragraph => paragraph.remove()"
+        )
+
+        submitted = await sender._submit_verified_message(
+            message, target=_message_target(), owner=owner
+        )
+        await sender._dispose_message_owner(owner)
+
+        assert (written, submitted) == ("written", "invalid")
+        assert (await self._counters(dom_page))["clicks"] == "0"
+        assert await self._editor_html(dom_page) == "<p>a</p><p>b</p>"
+
+    async def test_cleanup_empties_an_owned_multi_line_message(self, dom_page):
+        message = "Line one\n\nLine two"
+        sender, owner = await self._open(dom_page)
+        written = await sender._write_verified_message(
+            message, target=_message_target(), owner=owner
+        )
+
+        await sender._cleanup_owned_message(message, owner)
+        await sender._dispose_message_owner(owner)
+
+        assert written == "written"
+        assert await self._editor_html(dom_page) == ""
+        assert (await self._counters(dom_page))["clicks"] == "0"

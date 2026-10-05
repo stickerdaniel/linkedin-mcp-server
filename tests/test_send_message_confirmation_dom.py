@@ -8,6 +8,7 @@ JavaScript in headless Chromium without making a LinkedIn request or write.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from unittest.mock import AsyncMock, patch
@@ -411,6 +412,166 @@ def compose_page(
   </body>
 </html>
 """
+
+
+# A claim about LinkedIn, not only about the algorithm. A multi-line bubble is
+# built here the way LinkedIn's renderer builds it, as read from its public
+# bundles (renderer 21n8dymcy7qe3tbr4kbnklkro.js, stylesheets
+# 8ej77maal5yhg38yq0r08m98y.css and 1ntcyzykfazitrrwl0qzxiss5.css, fetched
+# October 2026) and matched against pages captured in September 2026: one
+# <br> per LF; per text run, the whitespace at either edge moved into a
+# `white-space: pre` span holding one space; a URL as its own <a> run; the
+# body <p> inside two <div>s that hold nothing else, with the sender link,
+# name and time outside that pair. The two CSS rules are the bundles' own.
+# Every bubble is built from the body text the test chooses, never from the
+# composer, so a test decides what LinkedIn "received".
+MULTILINE_BUBBLE_JS = r"""
+  document.head.insertAdjacentHTML('beforeend',
+    '<style>.msg-s-event-listitem__body { white-space: normal; }'
+    + '.white-space-pre { white-space: pre !important; }</style>');
+  const P = inner => '<p class="msg-s-event-listitem__body">' + inner + '</p>';
+  const SHAPE = __SHAPE__;
+  const escaped = text => Object.assign(
+    document.createElement('span'), {textContent: text}).innerHTML;
+  const PRE_SPACE = '<span class="white-space-pre"> </span>';
+  function renderedLines(text) {
+    return text.split('\n').map(line => line.split(/(https:\/\/\S+)/)
+      .filter(Boolean)
+      .map(run => {
+        if (run.startsWith('https://')) {
+          return `<a href="${run}"><!---->${escaped(run)}<!----></a>`;
+        }
+        const lead = /^\s+/.exec(run)?.[0] || '';
+        const trail = /\S/.test(run) ? /\s+$/.exec(run)?.[0] || '' : '';
+        const core = run.slice(lead.length, run.length - trail.length);
+        return '<!---->' + (lead ? PRE_SPACE : '') + escaped(core)
+          + (trail ? PRE_SPACE : '') + '<!---->';
+      }).join('')).join('<br>');
+  }
+  function bubbleItem(text, eventUrn, sender) {
+    const entry = document.createElement('div');
+    entry.className = 'msg';
+    entry.dataset.viewName = 'message-list-item';
+    entry.dataset.eventUrn = eventUrn;
+    const header = sender
+      ? `<a href="https://www.linkedin.com/in/${sender}/"><img alt=""></a>`
+        + '<span>Sender name</span>'
+      : '';
+    entry.innerHTML = `<div>${header}<time>10:42</time></div>`
+      + SHAPE(renderedLines(text));
+    return entry;
+  }
+  function remount(text, path, header, urns) {
+    const conversation = document.getElementById('conversation');
+    setTimeout(() => {
+      history.pushState({}, '', path);
+      const fresh = document.createElement('section');
+      fresh.id = 'conversation-remounted';
+      if (conversation.hasAttribute('role')) {
+        fresh.setAttribute('role', conversation.getAttribute('role'));
+      }
+      fresh.innerHTML = '<a id="header">Participant</a>'
+        + '<div id="thread-remounted"></div>'
+        + '<form onsubmit="return false"><div role="textbox" '
+        + 'contenteditable="true" style="display:block;width:200px;'
+        + 'height:30px"><p><br></p></div><button type="submit">Send</button></form>';
+      fresh.querySelector('#header').href = `https://www.linkedin.com${header}`;
+      for (const urn of urns) {
+        fresh.querySelector('#thread-remounted').appendChild(
+          bubbleItem(text, urn, SELF_URN));
+      }
+      conversation.replaceWith(fresh);
+    }, 30);
+  }
+  // `arm` picks how LinkedIn answers the click; `body` is what it renders.
+  function sendAs(arm, body) {
+    const thread = document.getElementById('thread');
+    if (arm === 'other-header') {
+      // On the full messaging page the header sits outside the composer's
+      // form, so only the pane check can tell the participant apart.
+      document.getElementById('conversation').removeAttribute('role');
+    }
+    if (arm === 'rerender') {
+      thread.appendChild(
+        bubbleItem(body, 'urn:li:msg_message:(self,old)', SELF_URN));
+    }
+    document.getElementById('send').addEventListener('click', event => {
+      event.preventDefault();
+      document.body.dataset.clicked = String(
+        Number(document.body.dataset.clicked || 0) + 1);
+      const composer = document.getElementById('composer');
+      if (arm === 'opaque') {
+        const entry = bubbleItem(body, 'client-opaque-id');
+        thread.appendChild(entry);
+        setTimeout(() => entry.setAttribute('data-event-urn', 'server-opaque-id'), 0);
+      } else if (arm === 'removed-twin') {
+        const twin = bubbleItem(body, 'client-twin-id');
+        const entry = bubbleItem(body, 'client-opaque-id');
+        thread.append(twin, entry);
+        twin.remove();
+        setTimeout(() => entry.setAttribute('data-event-urn', 'server-opaque-id'), 0);
+      } else if (arm === 'server') {
+        const placeholder = bubbleItem(body, 'client-uuid');
+        thread.appendChild(placeholder);
+        setTimeout(() => {
+          thread.appendChild(bubbleItem(
+            body, 'urn:li:msg_message:(self,server-new)', SELF_URN));
+          placeholder.remove();
+        }, 50);
+      } else if (arm === 'remount') {
+        remount(body, '/messaging/thread/2-abc==/', '/in/fadi-eliwi/',
+          ['urn:li:msg_message:(self,server-first)']);
+      } else if (arm === 'off-route') {
+        remount(body, '/feed/', '/in/fadi-eliwi/',
+          ['urn:li:msg_message:(self,server-first)']);
+      } else if (arm === 'other-header') {
+        remount(body, '/messaging/thread/2-other==/', '/in/ACoAAC/',
+          ['urn:li:msg_message:(self,elsewhere)']);
+      } else if (arm === 'incoming') {
+        setTimeout(() => thread.appendChild(bubbleItem(
+          body, 'urn:li:msg_message:(other,incoming)', RECIPIENT_URN)), 30);
+      } else if (arm === 'older') {
+        thread.insertBefore(
+          bubbleItem(body, 'urn:li:msg_message:(self,older)', SELF_URN),
+          thread.firstChild);
+      } else if (arm === 'rerender') {
+        const entry = thread.lastElementChild;
+        const copy = entry.cloneNode(true);
+        entry.remove();
+        thread.appendChild(copy);
+      } else if (arm === 'duplicate') {
+        for (const suffix of ['one', 'two']) {
+          thread.appendChild(bubbleItem(
+            body, `urn:li:msg_message:(self,${suffix})`, SELF_URN));
+        }
+      }
+      composer.replaceChildren();
+    });
+  }
+"""
+
+# The measured item: the body <p> in its two-<div> pair, inside one more <div>
+# (the bubble) that adds nothing to the text here.
+BUBBLE_SHAPE = "inner => '<div><div><div>' + P(inner) + '</div></div></div>'"
+ACKNOWLEDGEMENT_ARMS = ["opaque", "server", "remount"]
+
+
+def multiline_page(arm: str, body: str, *, shape: str = BUBBLE_SHAPE) -> str:
+    """A compose page whose click makes LinkedIn answer with *body* via *arm*."""
+    send_js = MULTILINE_BUBBLE_JS.replace("__SHAPE__", shape) + (
+        f"sendAs({json.dumps(arm)}, {json.dumps(body)});"
+    )
+    # The empty composer holds one empty paragraph (measured live, September
+    # 2026), which is where whole-message insertion yields one <p> per line.
+    return compose_page(send_js, draft="<p><br></p>")
+
+
+async def bubble_bodies(page) -> list[str]:
+    return await page.evaluate(
+        """() => Array.from(
+            document.querySelectorAll('[data-view-name="message-list-item"] p')
+        ).map(body => body.innerText)"""
+    )
 
 
 def profile_page(top_card: str, *, other: str = "") -> str:
@@ -1051,8 +1212,8 @@ class TestComposerRecipientDom:
 class TestSendConfirmationDom:
     @pytest.mark.parametrize(
         "message",
-        ["First\nSecond", "First\rSecond", "First\tSecond", "First\x7fSecond"],
-        ids=["newline", "carriage-return", "tab", "del"],
+        ["First\tSecond", "First\x7fSecond", "First\u2028Second"],
+        ids=["tab", "del", "line-separator"],
     )
     async def test_control_characters_are_rejected_before_dom_interaction(
         self, dom_page, message
@@ -1063,7 +1224,7 @@ class TestSendConfirmationDom:
 
         assert result["status"] == "invalid_message"
         assert result["message"] == (
-            "Message must not contain control characters or line breaks."
+            "Message must not contain control characters other than line breaks."
         )
         assert result["retry_safe"] is True
         assert await dom_page.evaluate("document.body.dataset.clicked") is None
@@ -1525,3 +1686,219 @@ class TestSendConfirmationDom:
         assert (await dom_page.locator("#composer").inner_text()).strip() == MESSAGE
         with pytest.raises(Exception, match="closed"):
             await captured["owner"].evaluate("owner => owner.isConnected")
+
+
+def _sent(result: dict) -> bool:
+    return result["status"] == "sent" and result["sent"] is True
+
+
+def _unconfirmed(result: dict) -> bool:
+    return (
+        result["status"] == "send_unconfirmed"
+        and result["sent"] is False
+        and result["retry_safe"] is False
+    )
+
+
+class TestMultiLineConfirmationDom:
+    """Confirmation of a multi-line message against the measured bubble.
+
+    Each acknowledgement arm is driven on its own: ``opaque`` is the same-node
+    event-ID transition, ``server`` the placeholder replaced by a new server
+    URN node, ``remount`` the compose route remounting as a new thread.
+    """
+
+    @pytest.mark.parametrize("arm", ACKNOWLEDGEMENT_ARMS)
+    @pytest.mark.parametrize(
+        ("message", "rendered"),
+        [
+            ("Line one\nLine two", "Line one\nLine two"),
+            ("a\n\n\nb", "a\n\n\nb"),
+            ("x  y\nz", "x y\nz"),
+            (
+                "See https://example.com/a\nThanks",
+                "See https://example.com/a\nThanks",
+            ),
+        ],
+        ids=["two-lines", "two-empty-lines", "collapsed-spaces", "link-line"],
+    )
+    async def test_rendered_body_confirms(self, dom_page, arm, message, rendered):
+        result = await send(dom_page, multiline_page(arm, message), message=message)
+
+        assert _sent(result), result
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "1"
+        assert (await bubble_bodies(dom_page))[-1] == rendered
+
+    @pytest.mark.parametrize("arm", ACKNOWLEDGEMENT_ARMS)
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "Line one\nLine two",
+            "Line one\n\n\nLine two",
+            "Line two\n\nLine one",
+            "Line one",
+        ],
+        ids=["lost-empty-line", "extra-empty-line", "reordered", "first-line-only"],
+    )
+    async def test_different_lines_are_not_confirmed(self, dom_page, arm, body):
+        message = "Line one\n\nLine two"
+
+        result = await send(dom_page, multiline_page(arm, body), message=message)
+
+        assert _unconfirmed(result), result
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "1"
+
+    @pytest.mark.parametrize("arm", ACKNOWLEDGEMENT_ARMS)
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            "inner => '<div><div><div><p>Intro <span>' + inner"
+            " + '</span> outro</p></div></div></div>'",
+            "inner => '<div><div><div><p>Intro <a href=\"https://example.com/\">'"
+            " + inner + '</a> outro</p></div></div></div>'",
+            "inner => '<div><p>' + inner + '</p><div><div>' + P('Other text')"
+            " + '</div></div></div>'",
+            "inner => '<div><div><div>' + P(inner) + '</div></div><div><div>'"
+            " + P('Second paragraph') + '</div></div></div>'",
+            "inner => '<div><div><div>prefix' + P(inner) + 'suffix</div></div></div>'",
+            "inner => '<div><div>Extra text<div>' + P(inner) + '</div></div></div>'",
+            "inner => '<div><div><div><p><span>' + inner"
+            " + '</span><br>extra</p></div></div></div>'",
+            "inner => '<div><div><div><p>' + inner"
+            " + '<img alt=\"\"></p></div></div></div>'",
+            "inner => '<div><div><section>' + P(inner) + '</section></div></div>'",
+            "inner => '<div><section><div>' + P(inner) + '</div></section></div>'",
+            "inner => '<div>' + P(inner) + '</div>'",
+            "inner => P(inner)",
+        ],
+        ids=[
+            "span-inside-larger-body",
+            "link-inside-larger-body",
+            "matching-metadata-paragraph",
+            "second-body-paragraph",
+            "text-beside-body",
+            "text-in-grandparent-only",
+            "span-then-more-lines",
+            "image-in-body",
+            "parent-not-div",
+            "grandparent-not-div",
+            "grandparent-is-the-item",
+            "parent-is-the-item",
+        ],
+    )
+    async def test_body_outside_the_measured_boundary_is_not_confirmed(
+        self, dom_page, arm, shape
+    ):
+        """The sent lines appear, but not as the item's one complete body.
+
+        Synthetic counterexamples to the boundary, not layouts seen on
+        LinkedIn. In each, the text "A\\nB" is still rendered somewhere in
+        the item.
+        """
+        message = "A\nB"
+
+        result = await send(
+            dom_page, multiline_page(arm, message, shape=shape), message=message
+        )
+
+        assert _unconfirmed(result), result
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "1"
+
+    @pytest.mark.parametrize("arm", ACKNOWLEDGEMENT_ARMS)
+    async def test_extra_outer_div_around_the_pair_confirms(self, dom_page, arm):
+        # The rule constrains the two immediate wrappers, not the depth.
+        shape = (
+            "inner => '<div><div><div><div>' + P(inner) + '</div></div></div></div>'"
+        )
+
+        result = await send(
+            dom_page, multiline_page(arm, "A\nB", shape=shape), message="A\nB"
+        )
+
+        assert _sent(result), result
+
+    @pytest.mark.parametrize("arm", ACKNOWLEDGEMENT_ARMS)
+    @pytest.mark.parametrize(
+        ("message", "body", "rendered", "confirmed"),
+        [
+            ("A\u2003\u2003B\nC", "A B\nC", "A B\nC", False),
+            ("A\u00a0\u00a0B\nC", "A\u00a0\u00a0B\nC", "A\u00a0\u00a0B\nC", True),
+            # The editor holds "line\u00a0" and LinkedIn sends that.
+            ("line \nnext", "line\u00a0\nnext", "line \nnext", True),
+            # The editor holds "\u00a0 B": the bubble differs from the input.
+            ("A\n  B\nC", "A\n\u00a0 B\nC", "A\n B\nC", True),
+        ],
+        ids=["em-space-shown-as-space", "nbsp-kept", "nbsp-at-line-end", "nbsp-lead"],
+    )
+    async def test_whitespace_is_compared_exactly(
+        self, dom_page, arm, message, body, rendered, confirmed
+    ):
+        result = await send(dom_page, multiline_page(arm, body), message=message)
+
+        assert (await bubble_bodies(dom_page))[-1] == rendered
+        if confirmed:
+            assert _sent(result), result
+        else:
+            assert _unconfirmed(result), result
+
+    @pytest.mark.parametrize("arm", ["opaque", "remount"])
+    async def test_missing_prediction_is_not_confirmed(self, dom_page, arm):
+        message = "Line one\nLine two"
+        original = MessageSender._prepare_message_confirmation
+        dropped = []
+
+        async def prepare_then_drop(self, message, *, target, owner):
+            token = await original(self, message, target=target, owner=owner)
+            dropped.append(
+                await self._page.evaluate(
+                    """owner => {
+                        const marker = owner.querySelector(
+                            '[data-linkedin-mcp-confirmation]'
+                        );
+                        const had = marker.hasAttribute('data-linkedin-mcp-rendered');
+                        marker.removeAttribute('data-linkedin-mcp-rendered');
+                        return had;
+                    }""",
+                    owner,
+                )
+            )
+            return token
+
+        with patch.object(
+            MessageSender, "_prepare_message_confirmation", prepare_then_drop
+        ):
+            result = await send(dom_page, multiline_page(arm, message), message=message)
+
+        assert dropped == [True]
+        assert _unconfirmed(result), result
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "1"
+
+    @pytest.mark.parametrize(
+        "arm",
+        [
+            "incoming",
+            "older",
+            "rerender",
+            "duplicate",
+            "off-route",
+            "other-header",
+            "removed-twin",
+        ],
+        ids=[
+            "sent-by-recipient",
+            "older-history",
+            "baseline-rerendered",
+            "two-server-nodes",
+            "off-message-route",
+            "other-participant",
+            "removed-matching-twin",
+        ],
+    )
+    async def test_existing_guards_hold_for_multi_line(self, dom_page, arm):
+        """Each case renders the right body; an existing guard refuses it."""
+        message = "Line one\n\nLine two"
+
+        result = await send(dom_page, multiline_page(arm, message), message=message)
+
+        assert _unconfirmed(result), result
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "1"

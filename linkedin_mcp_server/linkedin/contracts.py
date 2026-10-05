@@ -116,6 +116,49 @@ def message_action_result(
     }
 
 
+# ECMAScript WhiteSpace without the characters a message may not contain (tab,
+# VT and FF are C0 controls). LinkedIn trims the composed text with JavaScript's
+# `trim()` before sending, so a blank line and the ends of a message are judged
+# by this set, never by Python's `str.isspace()`, which disagrees both ways:
+# it counts U+001C-U+001F and U+0085 and misses U+FEFF.
+_JS_WHITESPACE = frozenset(
+    "\u0020\u00a0\ufeff\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u202f\u205f\u3000"
+)
+# Line structure is LF alone. These three are line or paragraph separators of
+# their own (and U+0085 is one that JavaScript's `trim()` keeps while Python's
+# `strip()` removes it), so they are refused rather than guessed at.
+_REFUSED_SEPARATORS = frozenset("\u0085\u2028\u2029")
+
+
+def _refused_character(character: str) -> bool:
+    code = ord(character)
+    return (
+        (code < 32 and character not in "\r\n")
+        or code == 127
+        or character in _REFUSED_SEPARATORS
+    )
+
+
+def normalize_message_text(message: str) -> str:
+    """Return the text LinkedIn would send for an accepted *message*.
+
+    Callers refuse the message with ``refuse_an_invalid_message`` first, so no
+    refused character reaches this. CRLF and a lone CR end a line like LF. A
+    line made only of whitespace becomes empty, and the whole message is
+    trimmed at both ends, as LinkedIn's own send does. Interior empty lines and
+    spaces inside or at the edges of interior lines are kept.
+    """
+    text = message.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [
+        "" if all(character in _JS_WHITESPACE for character in line) else line
+        for line in text.split("\n")
+    ]
+    edges = "".join(_JS_WHITESPACE) + "\n"
+    return "\n".join(lines).strip(edges)
+
+
 def refuse_an_invalid_message(
     linkedin_username: str, message: str
 ) -> dict[str, Any] | None:
@@ -123,11 +166,14 @@ def refuse_an_invalid_message(
     reason = None
     if not message.strip():
         reason = "Message must contain non-whitespace characters."
-    elif any(ord(character) < 32 or ord(character) == 127 for character in message):
-        # Keep the browser-side insertion contract to plain message text.
-        # Reject every C0 control and DEL before a session is acquired so no
-        # control input can reach the contenteditable surface.
-        reason = "Message must not contain control characters or line breaks."
+    elif any(_refused_character(character) for character in message):
+        # Keep the browser-side insertion contract to plain message text and
+        # line breaks. Reject every other C0 control, DEL and the Unicode
+        # separators before a session is acquired, so no control input can
+        # reach the contenteditable surface.
+        reason = "Message must not contain control characters other than line breaks."
+    elif not normalize_message_text(message):
+        reason = "Message must contain non-whitespace characters."
     if reason is None:
         return None
     return message_action_result(

@@ -1656,7 +1656,7 @@ class TestMessagingTools:
             "connection request is accepted."
         ) in description
 
-    async def test_send_message_schema_explains_single_line_controls(self):
+    async def test_send_message_schema_explains_lines_and_controls(self):
         from linkedin_mcp_server.tools.messaging import register_messaging_tools
 
         mcp = FastMCP("test")
@@ -1666,8 +1666,11 @@ class TestMessagingTools:
         assert tool is not None
         message_schema = tool.parameters["properties"]["message"]
         assert " ".join(message_schema["description"].split()) == (
-            "Single-line message text to send. C0 control characters and DEL are "
-            "rejected, including CR, LF, and tab."
+            "Message text. LF, CRLF and CR all end a line; an empty line "
+            "separates paragraphs and is kept. Whitespace-only lines count as "
+            "empty, and leading and trailing whitespace of the whole message is "
+            "removed, as LinkedIn does when sending. Tab, other control "
+            "characters, DEL, U+0085, U+2028 and U+2029 are refused."
         )
 
     @pytest.mark.parametrize("message", ["", "   \t\n"], ids=["empty", "whitespace"])
@@ -1700,10 +1703,18 @@ class TestMessagingTools:
         assert result["retry_safe"] is True
         assert result["url"] == "https://www.linkedin.com/in/testuser/"
 
+    _REFUSED_CODEPOINTS = (
+        *(codepoint for codepoint in range(32) if codepoint not in (10, 13)),
+        127,
+        0x85,
+        0x2028,
+        0x2029,
+    )
+
     @pytest.mark.parametrize(
         "message",
-        [f"First{chr(codepoint)}Second" for codepoint in (*range(32), 127)],
-        ids=[f"U+{codepoint:04X}" for codepoint in (*range(32), 127)],
+        [f"First{chr(codepoint)}Second" for codepoint in _REFUSED_CODEPOINTS],
+        ids=[f"U+{codepoint:04X}" for codepoint in _REFUSED_CODEPOINTS],
     )
     async def test_send_message_refuses_controls_before_a_session(
         self, mock_context, message
@@ -1723,9 +1734,31 @@ class TestMessagingTools:
         ready.assert_not_awaited()
         assert result["status"] == "invalid_message"
         assert result["message"] == (
-            "Message must not contain control characters or line breaks."
+            "Message must not contain control characters other than line breaks."
         )
         assert result["retry_safe"] is True
+
+    async def test_send_message_forwards_line_breaks_unchanged(
+        self, mock_context, serve_extractor
+    ):
+        """The tool refuses but never rewrites; the sender normalizes."""
+        mock_extractor = _make_mock_extractor(
+            {"status": "sent", "sent": True, "retry_safe": False}
+        )
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "send_message")
+        result = await tool_fn("testuser", "First\r\nSecond", True, mock_context)
+
+        assert result["status"] == "sent"
+        mock_extractor.send_message.assert_awaited_once_with(
+            "testuser", "First\r\nSecond", confirm_send=True, profile_urn=None
+        )
 
     @pytest.mark.parametrize(
         "username",

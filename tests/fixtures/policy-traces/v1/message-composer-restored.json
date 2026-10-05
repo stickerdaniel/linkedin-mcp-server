@@ -228,7 +228,7 @@
       "handle": "handle-1",
       "kind": "handle.evaluate",
       "operation": "message_composer_write",
-      "program_digest": "a3b97c3cbab7",
+      "program_digest": "15efb9e4ed54",
       "section": "message"
     },
     {
@@ -239,7 +239,7 @@
       "handle": "handle-1",
       "kind": "handle.evaluate",
       "operation": "message_composer_cleanup",
-      "program_digest": "458e24a33728",
+      "program_digest": "8ed97191f86b",
       "section": "message"
     },
     {
