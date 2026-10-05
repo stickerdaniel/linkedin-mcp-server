@@ -388,6 +388,12 @@ PUBLISHED_FILES = frozenset(
         "activation.json",
         "claim.json",
         "outcome.json",
+        # Why a first navigation stalled and how a browser or the session went
+        # (``first_navigation``): phases, lifetimes, counts and names, never a
+        # cookie value, header or URL query.
+        "first-navigation.json",
+        "browser-lifetimes.json",
+        "cookie-lineage.json",
     }
 )
 
