@@ -191,18 +191,41 @@ class _JsonFile:
             asked = self._asked
         self._queue.put((asked, text))
 
-    def flush(self, seconds: float = 5.0) -> None:
-        """Wait until every snapshot asked for so far has been replaced in."""
+    def flush(self, seconds: float = 5.0) -> bool:
+        """Whether every snapshot asked for so far has been replaced in.
+
+        False when the wait ran out. A caller that then rewrote the file from
+        what it could read would put an older snapshot after a newer one.
+        """
         with self._lock:
             target = self._asked
         deadline = time.monotonic() + seconds
         while self._written < target and time.monotonic() < deadline:
             time.sleep(0.01)
+        landed = self._written >= target
+        if landed:
+            self._retire_if_idle()
+        return landed
 
     def read(self) -> dict[str, Any] | None:
-        """The document as last written, once that write has landed."""
-        self.flush()
+        """The document as last written, or None when that write has not landed."""
+        if not self.flush():
+            return None
         return read_document(self.path)
+
+    def _retire_if_idle(self) -> None:
+        """Stop the worker once nothing is queued, so a long run does not keep one per file."""
+        with self._lock:
+            if (
+                self._thread is None
+                or not self._queue.empty()
+                or self._written < self._asked
+            ):
+                return
+            self._queue.put(None)
+            thread, self._thread = self._thread, None
+            _JsonFile._by_path.pop(os.path.normcase(os.path.abspath(self.path)), None)
+        thread.join(0.5)
 
     def _ensure_started(self) -> None:
         if self._thread is not None:
@@ -725,7 +748,9 @@ def observe_navigation(path: Path, *, label: str) -> Iterator[NavigationRecorder
             recorder._file.flush()
 
 
-def requested_ends(path: Path) -> dict[str, float | None] | None:
+def requested_ends(
+    path: Path, document: Mapping[str, Any] | None = None
+) -> dict[str, float | None] | None:
     """When the observed process asked its browser root and driver to end.
 
     By wall clock, which the sampler shares with any process on the machine.
@@ -733,7 +758,11 @@ def requested_ends(path: Path) -> dict[str, float | None] | None:
     started before the observation has a stop it could not see, and an end
     read against a request nobody could record would be invented.
     """
-    document = read_document(path) or {}
+    # The recorder's own document when the caller still has it. The file can
+    # be a snapshot from before the close was asked for, and that would make
+    # an intentional close look unexpected.
+    if document is None:
+        document = read_document(path) or {}
     launch = document.get("launch")
     if not isinstance(launch, dict) or launch.get("started_ms") is None:
         return None
@@ -879,6 +908,8 @@ class LifetimeSampler:
         alive: set[tuple[int, float]] = set()
         changed = False
         truncated = False
+        # Only this sample. An earlier miss must not hide a later disappearance.
+        incomplete = False
         with self._lock:
             self.document["samples"] += 1
         # Process reads stay outside the lock, so a stop can record that it
@@ -899,6 +930,7 @@ class LifetimeSampler:
             try:
                 key = (child.pid, child.create_time())
             except Exception:  # noqa: BLE001 - unreadable, not shown gone
+                incomplete = True
                 with self._lock:
                     self.document["sample_failures"] += 1
                 continue
@@ -909,6 +941,7 @@ class LifetimeSampler:
                 try:
                     zombie = child.status() == psutil.STATUS_ZOMBIE
                 except Exception:  # noqa: BLE001 - unreadable, asked again
+                    incomplete = True
                     with self._lock:
                         self.document["sample_failures"] += 1
                     continue
@@ -916,6 +949,8 @@ class LifetimeSampler:
                     # The first time it was seen gone, and not ordered against a
                     # close asked for while this sample was still reading.
                     with self._lock:
+                        if self.document["ended_ms"] is not None:
+                            return
                         record = self._tracked[key]
                         if record["gone_ms"] is None:
                             record["gone_ms"] = self._ms()
@@ -959,11 +994,7 @@ class LifetimeSampler:
             for key, record in self._tracked.items():
                 if key in alive:
                     record["last_alive_ms"] = now
-                elif (
-                    not truncated
-                    and self.document["sample_failures"] == 0
-                    and record["gone_ms"] is None
-                ):
+                elif not truncated and not incomplete and record["gone_ms"] is None:
                     record["gone_ms"] = now
                     changed = True
             if changed:
@@ -985,13 +1016,15 @@ class LifetimeSampler:
             return
         try:
             began = time.monotonic()
+            deadline = began + STOP_SECONDS
             self._halt.set()
             if self._thread.is_alive():
-                self._thread.join(STOP_SECONDS)
+                self._thread.join(max(0.0, deadline - time.monotonic()))
             stopped = not self._thread.is_alive()
-            # A write can still hold the lock. Waiting without a bound would
-            # spend the stop's own bound on it.
-            if not self._lock.acquire(timeout=0 if stopped else STOP_SECONDS):
+            # The join and the lock share one bound. A write still holding the
+            # lock must not buy a second full wait.
+            remaining = 0.0 if stopped else max(0.0, deadline - time.monotonic())
+            if not self._lock.acquire(timeout=remaining):
                 self.document["stopped_within_bound"] = False
                 self.document["stop_seconds"] = round(time.monotonic() - began, 3)
                 self.document["ended_ms"] = self._ms()
@@ -1058,19 +1091,27 @@ def observing(
     except Exception:  # noqa: BLE001 - no sampler, the launch still happens
         lifetimes = None
     failure: BaseException | None = None
+    recorder: NavigationRecorder | None = None
     try:
         with (
             observe_navigation(navigation, label=label)
             if in_process
             else contextlib.nullcontext()
-        ):
+        ) as recorder:
             yield navigation
     except BaseException as exc:
         failure = exc
         raise
     finally:
         if lifetimes is not None:
-            lifetimes.stop(exc=failure, requested=requested_ends(navigation))
+            # The recorder's document, not the file: the close request is set
+            # before its snapshot reaches the disc.
+            lifetimes.stop(
+                exc=failure,
+                requested=requested_ends(
+                    navigation, None if recorder is None else recorder.document
+                ),
+            )
 
 
 # --- The session's lineage -----------------------------------------------------
@@ -1199,8 +1240,12 @@ def record_cookie_lineage(
     try:
         file = _JsonFile.for_path(path)
         # Land the snapshots already asked for before reading, so this one
-        # cannot overwrite a newer record with an older snapshot.
-        document = file.read() or {"readings": [], "dropped": 0}
+        # cannot overwrite a newer record with an older snapshot. A flush that
+        # ran out is not that landing, and then nothing is written.
+        document = file.read()
+        if document is None and file._asked:
+            return
+        document = document or {"readings": [], "dropped": 0}
         readings = document.setdefault("readings", [])
         if len(readings) >= MAX_READINGS:
             document["dropped"] = int(document.get("dropped") or 0) + 1
@@ -1231,7 +1276,10 @@ def record_origin(
     try:
         # A driving process that wrote nothing leaves only this, which says so.
         file = _JsonFile.for_path(path)
-        document = file.read() or {"record": "absent"}
+        document = file.read()
+        if document is None and file._asked:
+            return
+        document = document or {"record": "absent"}
         requests, decisions = list(requests), list(decisions)
         document["origin"] = {
             "requests": [

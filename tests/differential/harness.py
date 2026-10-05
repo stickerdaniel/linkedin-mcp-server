@@ -7173,13 +7173,19 @@ async def measure_host_quit_row(
     finally:
         if navigation_file is not None:
             # Off the event loop: landing the file waits on the disc, and that
-            # wait must not freeze the row's other tasks.
-            await asyncio.to_thread(
-                record_origin,
-                navigation_file,
-                origin.requests[staging_marks[0] :],
-                proxy.decisions[staging_marks[1] :],
-            )
+            # wait must not freeze the row's other tasks. A failure to start
+            # the worker must not replace the staging error this finally runs
+            # after.
+            try:
+                await asyncio.to_thread(
+                    record_origin,
+                    navigation_file,
+                    origin.requests[staging_marks[0] :],
+                    proxy.decisions[staging_marks[1] :],
+                )
+            except Exception:
+                # The staging error, if there is one, is what the row reports.
+                pass
     # The staging browser has confirmed its close, but a root still on the
     # profile when the watcher takes its baseline would count against O1, and
     # one the census cannot read could be that root. The executable is named
@@ -7189,7 +7195,8 @@ async def measure_host_quit_row(
         wait_for_no_browser, account, _BROWSER_GONE_SECONDS, browser_dir=browsers
     )
     # What the staging left for the row's browser to reopen.
-    record_cookie_lineage(
+    await asyncio.to_thread(
+        record_cookie_lineage,
         work_dir / COOKIE_LINEAGE_FILE,
         point="after-staging",
         profile=account.profile,
@@ -9514,7 +9521,8 @@ async def measure_host_quit_row(
         actors_ended = time.time()
         # What the row's browsers left after reopening it: the export into
         # the cookie file and the store, beside the staging's own reading.
-        record_cookie_lineage(
+        await asyncio.to_thread(
+            record_cookie_lineage,
             work_dir / COOKIE_LINEAGE_FILE,
             point="after-row",
             profile=account.profile,
