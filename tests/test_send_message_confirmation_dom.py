@@ -2036,19 +2036,58 @@ class TestConfirmationThread:
         assert _sent(result), result
         assert result["thread_id"] is None
 
-    async def test_owner_preserving_compose_to_thread_confirms(self, dom_page):
-        # Prior history and no recipient header: the server arm's compose
-        # transition refuses this pane. The candidate arm does not.
+    async def test_a_compose_thread_with_history_does_not_confirm(self, dom_page):
+        """Prior history and no recipient header is some other conversation.
+
+        Both arms: a candidate must not confirm a pane the server arm refuses.
+        """
         result = await send(
             dom_page,
             acknowledging_page("opaque", leave_to="/messaging/thread/2-kept==/"),
         )
 
-        assert _sent(result), result
-        assert result["thread_id"] == "2-kept=="
+        assert _unconfirmed(result), result
+        assert "thread_id" not in result
         assert (
             await dom_page.locator('[data-view-name="message-list-item"]').count() >= 2
         )
+
+    async def test_owner_preserving_compose_to_thread_confirms(self, dom_page):
+        """The owner stays, and the pane is one new thread.
+
+        One visible item and the recipient linked outside the messages, which
+        is the transition both arms admit. The section is not remounted.
+        """
+        result = await send(
+            dom_page,
+            compose_page(
+                """
+                  document.getElementById('send').addEventListener('click', event => {
+                    event.preventDefault();
+                    document.body.dataset.clicked = 'true';
+                    const composer = document.getElementById('composer');
+                    const text = composer.innerText;
+                    composer.textContent = '';
+                    history.pushState({}, '', '/messaging/thread/2-kept==/');
+                    const thread = document.getElementById('thread');
+                    thread.replaceChildren();
+                    const header = document.createElement('a');
+                    header.href = 'https://www.linkedin.com/in/fadi-eliwi/';
+                    header.textContent = 'Participant';
+                    thread.before(header);
+                    const entry = messageItem(text, 'client-opaque-id');
+                    thread.appendChild(entry);
+                    setTimeout(() => {
+                      entry.setAttribute('data-event-urn', 'server-opaque-id');
+                    }, 0);
+                  });
+                """
+            ),
+        )
+
+        assert _sent(result), result
+        assert result["thread_id"] == "2-kept=="
+        assert await dom_page.locator("#conversation").count() == 1
 
     @pytest.mark.parametrize("arm", _ROUTE_ARMS)
     async def test_thread_id_is_the_snapshot_not_a_later_route(self, dom_page, arm):

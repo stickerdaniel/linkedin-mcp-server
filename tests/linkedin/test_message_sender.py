@@ -975,7 +975,8 @@ class TestSendMessage:
             steps.append("submit")
             return "clicked"
 
-        async def confirmed(message, *, target, owner, confirmation):
+        async def confirmed(message, *, target, owner, confirmation, reply_deadline):
+            assert isinstance(reply_deadline, float)
             assert message == "Hello!"
             assert target == self._target()
             assert owner is mock_page.evaluate_handle.return_value
@@ -1309,6 +1310,7 @@ class TestSendMessage:
             target=self._target(),
             owner=mock_page.evaluate_handle.return_value,
             confirmation=1,
+            reply_deadline=float("inf"),
         )
 
 
@@ -1499,6 +1501,36 @@ class TestSendMessageDeadline:
         assert "thread_id" not in result.structured_content
         assert mocks.submit.call_count == 1
         handle.dispose.assert_awaited()
+
+    async def test_a_stalled_read_and_disposal_stays_unconfirmed(
+        self, mock_page, monkeypatch
+    ):
+        """Disposal of a stalled read stays inside the tool deadline.
+
+        The read is cancelled by the send budget, and disposal then runs in
+        that cancelled scope. A bound taken there would outlast the deadline,
+        and the client would get a bare timeout instead of this answer.
+        """
+        handle = MagicMock()
+        handle.json_value = AsyncMock(side_effect=_stall)
+        handle.dispose = AsyncMock(side_effect=_stall)
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+        sender = _sender(mock_page)
+
+        async def confirmed(*args, **kwargs):
+            return await MessageSender._message_send_confirmed(sender, *args, **kwargs)
+
+        with ExitStack() as stack:
+            mocks = self._composer(stack, sender, mock_page)
+            mocks.confirmed.side_effect = confirmed
+            result = await self._call(sender, monkeypatch)
+
+        assert result.is_error is False, result.content
+        assert result.structured_content is not None
+        assert result.structured_content["status"] == "send_unconfirmed"
+        assert result.structured_content["retry_safe"] is False
+        assert "thread_id" not in result.structured_content
+        assert mocks.submit.call_count == 1
 
     async def test_a_stalled_snapshot_disposal_keeps_the_thread(
         self, mock_page, monkeypatch

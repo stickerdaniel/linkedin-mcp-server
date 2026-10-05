@@ -739,6 +739,24 @@ _MESSAGE_CONFIRMATION_READY_JS = (
             const startPath = marker?.getAttribute('data-linkedin-mcp-route') || '';
             return !threadRoute(startPath) || window.location.pathname === startPath;
         };
+        // A compose start that now sits on a thread is the first message of a
+        // new thread: one visible item, and the pane links the recipient
+        // outside the messages. Both arms, so a candidate cannot confirm a
+        // pane the server arm would call some other conversation.
+        const admittedTransition = (marker, scope) => {
+            const startPath = marker?.getAttribute('data-linkedin-mcp-route') || '';
+            const path = window.location.pathname;
+            if (!path.startsWith('/messaging/thread/') || threadRoute(startPath)) {
+                return true;
+            }
+            const visibleItems = Array.from(
+                scope.querySelectorAll(itemSelector)
+            ).filter(visible);
+            return visibleItems.length === 1 &&
+                Array.from(scope.querySelectorAll('a[href*="/in/"]')).some(
+                    anchor => !anchor.closest(itemSelector) && linksRecipient(anchor)
+                );
+        };
         const serverAcknowledged = () => {
             const marker = Array.from(
                 arg.owner?.querySelectorAll('[data-linkedin-mcp-confirmation]') || []
@@ -763,19 +781,7 @@ _MESSAGE_CONFIRMATION_READY_JS = (
                 scope.querySelectorAll(itemSelector)
             ).filter(visible);
             if (!routeContinues(marker)) return false;
-            const startPath = marker.getAttribute('data-linkedin-mcp-route') || '';
-            const path = window.location.pathname;
-            if (path.startsWith('/messaging/thread/') && !threadRoute(startPath)) {
-                if (
-                    items.length !== 1 ||
-                    !Array.from(scope.querySelectorAll('a[href*="/in/"]')).some(
-                        anchor => !anchor.closest(itemSelector) &&
-                            linksRecipient(anchor)
-                    )
-                ) {
-                    return false;
-                }
-            }
+            if (!admittedTransition(marker, scope)) return false;
             const acknowledged = items.filter(node => {
                 const urn = (node.getAttribute('data-event-urn') || '').trim();
                 return urn.startsWith('urn:li:msg_message:') &&
@@ -810,8 +816,9 @@ _MESSAGE_CONFIRMATION_READY_JS = (
             ) {
                 return serverAcknowledged();
             }
+            const scope = threadScope(arg.owner);
             const candidates = Array.from(
-                threadScope(arg.owner).querySelectorAll('[data-linkedin-mcp-candidate]')
+                scope.querySelectorAll('[data-linkedin-mcp-candidate]')
             ).filter(node =>
                 node.getAttribute('data-linkedin-mcp-candidate') === arg.token &&
                 node.getAttribute('data-linkedin-mcp-matched') === arg.token &&
@@ -819,7 +826,10 @@ _MESSAGE_CONFIRMATION_READY_JS = (
                 (node.getAttribute('data-event-urn') || '').trim() &&
                 exactVisibleUnit(node)
             );
-            return candidates.length === 1 || serverAcknowledged();
+            if (candidates.length === 1 && admittedTransition(markers[0], scope)) {
+                return true;
+            }
+            return serverAcknowledged();
         })();
         // Resolves on any truthy value, so a miss stays null. The path is
         // the one this invocation just accepted.
@@ -1671,6 +1681,7 @@ class MessageSender:
         target: _ProfileMessageTarget,
         owner: Any,
         confirmation: str,
+        reply_deadline: float = math.inf,
     ) -> _SendConfirmation | None:
         """Wait for LinkedIn to acknowledge the submitted message in its thread.
 
@@ -1719,15 +1730,27 @@ class MessageSender:
         finally:
             # Also when the snapshot is unusable. A caller with no deadline
             # still finishes: disposal carries its own cap.
-            await self._dispose_confirmation_snapshot(handle)
+            await self._dispose_confirmation_snapshot(handle, reply_deadline)
         return confirmed
 
     @staticmethod
-    async def _dispose_confirmation_snapshot(handle: Any) -> None:
-        """Release the handle that holds the confirmation path."""
-        with contracts.before_the_reply_deadline(
-            _MESSAGE_CLEANUP_TIMEOUT_SECONDS, shield=True
-        ) as scope:
+    async def _dispose_confirmation_snapshot(
+        handle: Any, reply_deadline: float
+    ) -> None:
+        """Release the handle that holds the confirmation path.
+
+        Bounded by the deadline captured before the send budget, not by the
+        scope this runs in. A stalled read cancels that budget, and a fresh
+        bound taken from the cancelled scope would outlast the tool deadline
+        and lose the unconfirmed answer.
+        """
+        now = anyio.current_time()
+        limit = _MESSAGE_CLEANUP_TIMEOUT_SECONDS
+        if now < reply_deadline < math.inf:
+            limit = min(limit, (reply_deadline - now) / 2)
+        if limit <= 0:
+            return
+        with anyio.CancelScope(deadline=now + limit, shield=True) as scope:
             try:
                 await handle.dispose()
             except Exception:
@@ -2033,6 +2056,9 @@ class MessageSender:
                 # after it, so the work after dispatch ends at this earlier
                 # one and still answers. Only the tool's own deadline is
                 # covered: a client that cancels gets no answer either way.
+                # Captured before the budget: snapshot disposal runs after the
+                # budget has cancelled, where this deadline would read as gone.
+                reply_deadline = anyio.current_effective_deadline()
                 budget = anyio.CancelScope(deadline=budget_deadline)
                 try:
                     with budget:
@@ -2076,6 +2102,7 @@ class MessageSender:
                             target=target,
                             owner=owner,
                             confirmation=confirmation,
+                            reply_deadline=reply_deadline,
                         )
                         if confirmed is None:
                             return contracts.message_action_result(
