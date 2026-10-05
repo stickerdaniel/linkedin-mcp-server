@@ -162,7 +162,7 @@ class _JsonFile:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.failures = 0
-        self._queue: queue.Queue[tuple[int, str] | None] = queue.Queue()
+        self._queue: queue.Queue[tuple[int, str]] = queue.Queue()
         self._written = 0
         self._asked = 0
         self._lock = threading.Lock()
@@ -181,15 +181,18 @@ class _JsonFile:
 
     def write(self, document: Mapping[str, Any]) -> None:
         text = json.dumps(document, indent=2, sort_keys=True) + "\n"
-        try:
-            self._ensure_started()
-        except Exception:  # noqa: BLE001 - a record that cannot start is a miss
-            self.failures += 1
-            return
+        # Start, register and enqueue under one lock. A flush cannot retire
+        # the worker between the start and the enqueue, and a writer that was
+        # dropped from the registry puts itself back before the next lookup.
         with self._lock:
+            try:
+                self._ensure_started()
+            except Exception:  # noqa: BLE001 - a record that cannot start is a miss
+                self.failures += 1
+                return
             self._asked += 1
-            asked = self._asked
-        self._queue.put((asked, text))
+            self._queue.put((self._asked, text))
+            _JsonFile._by_path[os.path.normcase(os.path.abspath(self.path))] = self
 
     def flush(self, seconds: float = 5.0) -> bool:
         """Whether every snapshot asked for so far has been replaced in.
@@ -202,30 +205,13 @@ class _JsonFile:
         deadline = time.monotonic() + seconds
         while self._written < target and time.monotonic() < deadline:
             time.sleep(0.01)
-        landed = self._written >= target
-        if landed:
-            self._retire_if_idle()
-        return landed
+        return self._written >= target
 
     def read(self) -> dict[str, Any] | None:
         """The document as last written, or None when that write has not landed."""
         if not self.flush():
             return None
         return read_document(self.path)
-
-    def _retire_if_idle(self) -> None:
-        """Stop the worker once nothing is queued, so a long run does not keep one per file."""
-        with self._lock:
-            if (
-                self._thread is None
-                or not self._queue.empty()
-                or self._written < self._asked
-            ):
-                return
-            self._queue.put(None)
-            thread, self._thread = self._thread, None
-            _JsonFile._by_path.pop(os.path.normcase(os.path.abspath(self.path)), None)
-        thread.join(0.5)
 
     def _ensure_started(self) -> None:
         if self._thread is not None:
@@ -238,9 +224,22 @@ class _JsonFile:
 
     def _serve(self) -> None:
         while True:
-            item = self._queue.get()
-            if item is None:
-                return
+            try:
+                item = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                # Idle, and still the worker this object points at: leave. A
+                # write that arrives while this lock is held starts the next one.
+                with self._lock:
+                    if (
+                        self._queue.empty()
+                        and self._thread is threading.current_thread()
+                    ):
+                        self._thread = None
+                        key = os.path.normcase(os.path.abspath(self.path))
+                        if _JsonFile._by_path.get(key) is self:
+                            _JsonFile._by_path.pop(key, None)
+                        return
+                continue
             _seq, text = item
             self._replace(text)
             self._written += 1
@@ -973,6 +972,9 @@ class LifetimeSampler:
                 continue
             if root is None:
                 continue
+            with self._lock:
+                if self.document["ended_ms"] is not None:
+                    return
             self._settled.add(key)
             self._track(key, "browser-root", now)
             alive.add(key)

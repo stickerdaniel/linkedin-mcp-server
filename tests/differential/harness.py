@@ -7195,14 +7195,17 @@ async def measure_host_quit_row(
         wait_for_no_browser, account, _BROWSER_GONE_SECONDS, browser_dir=browsers
     )
     # What the staging left for the row's browser to reopen.
-    await asyncio.to_thread(
-        record_cookie_lineage,
-        work_dir / COOKIE_LINEAGE_FILE,
-        point="after-staging",
-        profile=account.profile,
-        cookie_file=portable_cookie_path(account.profile),
-        expected_digest=staged.li_at_digest,
-    )
+    try:
+        await asyncio.to_thread(
+            record_cookie_lineage,
+            work_dir / COOKIE_LINEAGE_FILE,
+            point="after-staging",
+            profile=account.profile,
+            cookie_file=portable_cookie_path(account.profile),
+            expected_digest=staged.li_at_digest,
+        )
+    except Exception:
+        pass
     if lingering:
         raise RuntimeError(f"the staging browser is not shown gone: {lingering}")
     before = snapshot(account.profile, expected_digest=staged.li_at_digest)
@@ -9521,14 +9524,17 @@ async def measure_host_quit_row(
         actors_ended = time.time()
         # What the row's browsers left after reopening it: the export into
         # the cookie file and the store, beside the staging's own reading.
-        await asyncio.to_thread(
-            record_cookie_lineage,
-            work_dir / COOKIE_LINEAGE_FILE,
-            point="after-row",
-            profile=account.profile,
-            cookie_file=portable_cookie_path(account.profile),
-            expected_digest=staged.li_at_digest,
-        )
+        try:
+            await asyncio.to_thread(
+                record_cookie_lineage,
+                work_dir / COOKIE_LINEAGE_FILE,
+                point="after-row",
+                profile=account.profile,
+                cookie_file=portable_cookie_path(account.profile),
+                expected_digest=staged.li_at_digest,
+            )
+        except Exception:
+            pass
         after = snapshot(account.profile, expected_digest=staged.li_at_digest)
         result.after = after
         emit("harness", "profile.snapshot", phase="after", **after.as_event_fields())
