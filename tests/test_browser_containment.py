@@ -30,9 +30,11 @@ install step is what was supposed to provide it.
 
 from __future__ import annotations
 
+import contextlib
+import itertools
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -157,9 +159,10 @@ async def _prove_marked_launch_drains(
 
     The close's own verdict is not taken alone. A close that claims success
     while the independent scan cannot read the process table has proved
-    nothing, so the gate fails rather than trusting it.
+    nothing, so the gate fails rather than trusting it, and for the same reason
+    it closes the launch again on the way out instead of leaving it running.
     """
-    closed = False
+    drained = False
     try:
         assert manager._containment is None, "POSIX grew a Windows Job"
         marked = _conclusive_marker_scan(
@@ -174,9 +177,12 @@ async def _prove_marked_launch_drains(
             manager._process_marker, "after the close", scan=scan, pause=pause
         )
         assert not survivors, f"marked processes survived the close: {survivors}"
+        drained = True
     finally:
-        if not closed:
-            await manager.close()
+        if not drained:
+            # Cleanup only: whatever it returns, the failure above stands.
+            with contextlib.suppress(Exception):
+                await manager.close()
 
 
 def _windows_job_members(job: Any) -> tuple[int, ...]:
@@ -245,6 +251,8 @@ class _FakeLaunch:
 
     Scans answer from *before_close* until the first close and from
     *after_close* from then on; ``scans`` records which side each one read.
+    The launch actually stops on close number *stops_at*, whatever the close
+    reports, so ``alive`` is what a lying close leaves behind.
     """
 
     _containment = None
@@ -252,20 +260,25 @@ class _FakeLaunch:
 
     def __init__(
         self,
-        before_close: list[_MarkerScan],
-        after_close: list[_MarkerScan],
+        before_close: Iterable[_MarkerScan],
+        after_close: Iterable[_MarkerScan],
         *,
         closes_as: bool = True,
+        stops_at: int = 1,
     ) -> None:
         self._before = iter(before_close)
         self._after = iter(after_close)
         self.closes_as = closes_as
+        self.stops_at = stops_at
+        self.alive = True
         self.close_calls = 0
         self.scans: list[str] = []
         self.pauses: list[float] = []
 
     async def close(self) -> bool:
         self.close_calls += 1
+        if self.close_calls >= self.stops_at:
+            self.alive = False
         return self.closes_as
 
     def scan(self, marker: str) -> _MarkerScan:
@@ -349,14 +362,49 @@ class TestMarkerScanVerdicts:
         assert launch.scans == ["before"] * len(before_close) + ["after"] * len(
             after_close
         )
-        assert launch.close_calls == 1
+        assert not launch.alive
 
-    async def test_a_close_claiming_success_needs_a_readable_scan(self) -> None:
-        launch = _FakeLaunch(
-            [_RUNNING], [_UNKNOWN] * _MARKER_SCAN_ATTEMPTS, closes_as=True
-        )
-        with pytest.raises(_INCONCLUSIVE, match="after the close stayed inconclusive"):
+    @pytest.mark.parametrize(
+        ("after_close", "error", "message"),
+        [
+            pytest.param(
+                [_UNKNOWN] * _MARKER_SCAN_ATTEMPTS,
+                _INCONCLUSIVE,
+                "after the close stayed inconclusive",
+                id="unreadable-after",
+            ),
+            pytest.param(
+                [_RUNNING],
+                AssertionError,
+                "marked processes survived the close",
+                id="survivors-after",
+            ),
+        ],
+    )
+    async def test_a_close_claiming_success_is_not_trusted_for_cleanup(
+        self,
+        after_close: list[_MarkerScan],
+        error: type[BaseException],
+        message: str,
+    ) -> None:
+        # The first close says True and stops nothing. The gate must reject the
+        # verdict and still not leave the launch running behind it.
+        launch = _FakeLaunch([_RUNNING], after_close, closes_as=True, stops_at=2)
+        with pytest.raises(error, match=message):
             await launch.prove()
+        assert not launch.alive
+
+    async def test_an_unreadable_process_table_fails_within_a_short_budget(
+        self,
+    ) -> None:
+        # Literal numbers on purpose: this is the budget the gate promises (a
+        # few `ps` timeouts plus about two seconds of pauses per side), and it
+        # must not grow silently with the constants that implement it.
+        launch = _FakeLaunch([_RUNNING], itertools.repeat(_UNKNOWN))
+        with pytest.raises(_INCONCLUSIVE):
+            await launch.prove()
+        assert launch.scans.count("after") <= 5
+        assert sum(launch.pauses) <= 2.0
 
     async def test_a_close_that_cannot_prove_itself_is_closed_again(self) -> None:
         launch = _FakeLaunch([_RUNNING], [], closes_as=False)

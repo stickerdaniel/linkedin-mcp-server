@@ -3540,6 +3540,39 @@ class TestBrowserLaunchEvidenceHelpers:
         assert attempted == [1, 2, 3]
         assert samples == ["cdp"]
 
+    def test_a_failed_close_after_ordinary_churn_fails_the_census(self) -> None:
+        # The same cleanup serves a census whose two inventories disagree
+        # without any open failing, so it gets the same guarantee.
+        close_error = _Win32Error(6, "CloseHandle", "The handle is invalid.")
+        attempted: list[int] = []
+        jobs = iter([{1, 2, 3}, {1, 2, 4}])
+        samples: list[str] = []
+
+        def close_handle(handle: int) -> None:
+            attempted.append(handle)
+            if handle == 2:
+                raise close_error
+
+        def sample_cdp() -> list[dict[str, Any]]:
+            samples.append("cdp")
+            return [{"id": 2, "type": "browser"}, {"id": 3, "type": "renderer"}]
+
+        with pytest.raises(_Win32Error) as raised:
+            probe.retain_stable_browser_inventory(
+                sample_cdp=sample_cdp,
+                sample_job_pids=lambda: next(jobs),
+                open_handle=lambda pid: pid,
+                validate_handle=lambda _pid, _handle: None,
+                close_handle=close_handle,
+                driver_pid=1,
+                deadline=10,
+                wait_for_retry=lambda: pytest.fail("cleanup failed; no retry"),
+                monotonic=lambda: 0,
+            )
+        assert raised.value is close_error
+        assert attempted == [1, 2, 3]
+        assert samples == ["cdp", "cdp"]
+
     def test_handle_waits_share_one_deadline(self) -> None:
         times = iter([0.0, 0.4])
         timeouts: list[int] = []

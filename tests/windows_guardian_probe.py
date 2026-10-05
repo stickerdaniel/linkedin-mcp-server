@@ -231,9 +231,11 @@ def sample_guardian_loss_progress(
         # read, so ask its retained handle again before stamping the lease.
         # A guardian seen gone here makes one consistent observation of exit
         # and acquisition, which is the claim; the kernel's order of the two
-        # was never sampled. One still live is a lease taken from a running
-        # guardian, recorded so that no later exit can make the pair look
-        # ordered.
+        # was never sampled. A handle not yet signalled fails the measurement
+        # and is recorded so that no later exit can make the pair look
+        # ordered. It is not proof that guardian code still ran: Windows may
+        # release the lock during process rundown before the process object
+        # signals, and this sample cannot tell those apart.
         if "guardian_exit_observed_ns" not in observation:
             if guardian_active():
                 observation["lease_observed_ns"] = clock_ns()
