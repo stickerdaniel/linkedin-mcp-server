@@ -234,10 +234,10 @@ class _JsonFile:
                         self._queue.empty()
                         and self._thread is threading.current_thread()
                     ):
+                        # The object stays registered. A later write on this
+                        # same object starts the next worker; a second object
+                        # for the path never appears.
                         self._thread = None
-                        key = os.path.normcase(os.path.abspath(self.path))
-                        if _JsonFile._by_path.get(key) is self:
-                            _JsonFile._by_path.pop(key, None)
                         return
                 continue
             _seq, text = item
@@ -981,12 +981,17 @@ class LifetimeSampler:
             changed = True
             try:
                 parent = child.parent()
+                parent_key = None
                 if parent is not None:
                     parent_key = (parent.pid, parent.create_time())
+            except Exception:  # noqa: BLE001 - the driver stays unidentified
+                parent_key = None
+            if parent_key is not None:
+                with self._lock:
+                    if self.document["ended_ms"] is not None:
+                        return
                     self._track(parent_key, "driver", now)
                     alive.add(parent_key)
-            except Exception:  # noqa: BLE001 - the driver stays unidentified
-                pass
         with self._lock:
             if self.document["ended_ms"] is not None:
                 return
