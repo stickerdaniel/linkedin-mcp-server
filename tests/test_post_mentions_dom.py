@@ -6,10 +6,10 @@ import pytest
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.post_actions import (
     CHECK_MENTION_PREFIX_JS,
+    GUARDED_PIN_AUTHOR_MENTION_JS,
     PIN_EDITOR_JS,
     PostActions,
 )
-from linkedin_mcp_server.linkedin.post_mentions import PIN_AUTHOR_MENTION_JS
 from linkedin_mcp_server.linkedin.session import PageSession
 from test_post_actions_dom import dom_page  # noqa: F401
 from test_post_identity_dom import AUTHOR, author_post, mention_picker
@@ -63,7 +63,7 @@ async def test_trailing_break_does_not_relax_mention_or_draft_guards(
                 "editor => editor.insertAdjacentText('beforeend', 'Human draft')"
             )
         result = await original(self, program, *args, **kwargs)
-        if program == PIN_AUTHOR_MENTION_JS and result:
+        if program == GUARDED_PIN_AUTHOR_MENTION_JS and result:
             await root.evaluate(
                 """(root, change) => {
               const editor = root.querySelector('[contenteditable=true]');

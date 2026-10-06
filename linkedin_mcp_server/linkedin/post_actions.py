@@ -49,7 +49,7 @@ from linkedin_mcp_server.linkedin.post_mentions import (
 )
 from linkedin_mcp_server.linkedin.post_comments import (
     COMMENT_HELPERS_JS,
-    CLEAR_PREPARED_REPLY_JS,
+    CLEAR_PREPARED_REPLY_JS as _CLEAR_PREPARED_REPLY_JS,
     PARENT_READINESS_JS,
     READ_COMMENTS_JS,
     PIN_PARENT_COMMENT_JS,
@@ -379,6 +379,32 @@ function postIdentityMatches(root) {
 """
 )
 
+# Reply editors are separate rows; their original post, not the editor row,
+# owns the publication. Receipts may outlive the editor but never that post.
+_WRITE_SCOPE_IDENTITY_FN_JS = (
+    _VISIBLE_FN_JS
+    + _FIND_ACTION_BAR_FN_JS
+    + _FIND_POST_ROOT_FN_JS
+    + _POST_IDENTITY_FN_JS
+    + r"""
+function writeScopeIdentityMatches(scope) {
+  const pin = scope?.__linkedinMcpPost;
+  const post = pin?.replyRange ? pin.actorRoot : scope;
+  return Boolean(pin && post && (!pin.replyRange || post.__linkedinMcpPost === pin.actorPin) &&
+    postIdentityMatches(post));
+}
+"""
+)
+
+# Clearing LinkedIn's automatic reply mention also modifies a draft.
+CLEAR_PREPARED_REPLY_JS = (
+    "scope => {"
+    + _WRITE_SCOPE_IDENTITY_FN_JS
+    + "if (!writeScopeIdentityMatches(scope)) return false;"
+    + f"return ({_CLEAR_PREPARED_REPLY_JS})(scope);"
+    + "}"
+)
+
 POST_ACTION_SIGNALS_JS = (
     r"""
 ((arg) => {
@@ -603,23 +629,41 @@ PIN_EDITOR_JS = (
 # refuse an editor that changed underneath it.
 CAN_TYPE_EDITOR_JS = (
     "(editor) => {"
+    + _WRITE_SCOPE_IDENTITY_FN_JS
     + ACTOR_HELPERS_JS
     + r"""
     const root = editor?.__linkedinMcpScope;
-    return Boolean(editor?.isConnected && root?.contains(editor) && actorStillMatches(root));
+    return Boolean(editor?.isConnected && root?.contains(editor) &&
+      writeScopeIdentityMatches(root) && actorStillMatches(root));
     }
 """
+)
+
+# Mention selection and caret pinning modify the draft too. Keep their identity
+# check in the same browser evaluation as the mutation.
+GUARDED_SELECT_AUTHOR_MENTION_JS = (
+    "arg => {"
+    + f"if (!({CAN_TYPE_EDITOR_JS})(arg.editor)) return 'unavailable';"
+    + f"return ({SELECT_AUTHOR_MENTION_JS})(arg);"
+    + "}"
+)
+GUARDED_PIN_AUTHOR_MENTION_JS = (
+    "arg => {"
+    + f"if (!({CAN_TYPE_EDITOR_JS})(arg.editor)) return false;"
+    + f"return ({PIN_AUTHOR_MENTION_JS})(arg);"
+    + "}"
 )
 
 # SDUI can render a separator image and trailing BR after the rich mention.
 # Accept that layout newline only while the exact pinned draft still belongs to us.
 CHECK_MENTION_PREFIX_JS = (
     "({editor, expected}) => {"
+    + _WRITE_SCOPE_IDENTITY_FN_JS
     + ACTOR_HELPERS_JS
     + MENTION_STILL_MATCHES_JS
     + r"""
   const root = editor?.__linkedinMcpScope;
-  if (!editor?.isConnected || !root?.contains(editor) || !actorStillMatches(root) ||
+  if (!editor?.isConnected || !root?.contains(editor) || !writeScopeIdentityMatches(root) || !actorStillMatches(root) ||
       !editor.__linkedinMcpMention || !mentionStillMatches(editor) ||
       editor.innerText !== expected) return false;
   return true;
@@ -638,12 +682,13 @@ OWN_EDITOR_JS = r"""
 # belong to the caller and must survive a refusal.
 CLEAR_EDITOR_JS = (
     "((arg) => {"
+    + _WRITE_SCOPE_IDENTITY_FN_JS
     + ACTOR_HELPERS_JS
     + r"""
   const editor = arg.editor;
   const scope = editor?.__linkedinMcpScope;
   const owned = editor?.__linkedinMcpOwnedText;
-  if (!editor?.isConnected || !scope?.contains(editor) || !actorStillMatches(scope) ||
+  if (!editor?.isConnected || !scope?.contains(editor) || !writeScopeIdentityMatches(scope) || !actorStillMatches(scope) ||
       typeof owned !== 'string' ||
       editor.innerText.replace(/\r\n/g, '\n').replace(/\u00a0/g, ' ').trim() !== owned.trim()) return false;
   editor.focus();
@@ -677,13 +722,13 @@ SUBMIT_EDITOR_JS = (
     r"""
 ((arg) => {
 """
-    + _VISIBLE_FN_JS
+    + _WRITE_SCOPE_IDENTITY_FN_JS
     + ACTOR_HELPERS_JS
     + MENTION_STILL_MATCHES_JS
     + r"""
   const scope = arg.scope || document;
   const pin = scope.__linkedinMcpPost;
-  if (!pin || !scope.isConnected || window.location.href !== pin.route) return 'not_owned';
+  if (!pin || !scope.isConnected || !writeScopeIdentityMatches(scope)) return 'not_owned';
   if (!actorStillMatches(scope)) return 'actor_changed';
   const editors = Array.from(
     scope.querySelectorAll('[role="textbox"][contenteditable="true"]')
@@ -777,10 +822,11 @@ COUNT_TEXT_UNITS_JS = (
     r"""
 ((arg) => {
 """
-    + _VISIBLE_FN_JS
+    + _WRITE_SCOPE_IDENTITY_FN_JS
     + COMMENT_HELPERS_JS
     + r"""
   const pin = arg.root?.__linkedinMcpPost;
+  if (!writeScopeIdentityMatches(arg.root)) return -1;
   const root = pin?.confirmationScope;
   const replyNodes = pin?.replyRange ? replyRangeNodes(pin, false) : null;
   if (pin?.replyRange && !replyNodes) return -1;
@@ -1546,6 +1592,8 @@ class PostActions:
         await editor.click()
         if not await editor.evaluate("element => element === document.activeElement"):
             return "not_focusable"
+        if not await self._session.run_on_linkedin(CAN_TYPE_EDITOR_JS, editor):
+            return "not_owned"
 
         expected = text
         if author is not None:
@@ -1557,7 +1605,8 @@ class PostActions:
                 await editor.type(query, delay=_TYPE_DELAY)
                 for _ in range(20):
                     selected = await self._session.run_on_linkedin(
-                        SELECT_AUTHOR_MENTION_JS, {"editor": editor, "author": author}
+                        GUARDED_SELECT_AUTHOR_MENTION_JS,
+                        {"editor": editor, "author": author},
                     )
                     if selected != "pending":
                         break
@@ -1566,7 +1615,8 @@ class PostActions:
             if selected == "selected":
                 for _ in range(20):
                     pinned = await self._session.run_on_linkedin(
-                        PIN_AUTHOR_MENTION_JS, {"editor": editor, "author": author}
+                        GUARDED_PIN_AUTHOR_MENTION_JS,
+                        {"editor": editor, "author": author},
                     )
                     if pinned:
                         break
@@ -1588,11 +1638,11 @@ class PostActions:
             text = (" " if not trailing else "") + text
 
         for index, line in enumerate(text.split("\n")):
+            if not await self._session.run_on_linkedin(CAN_TYPE_EDITOR_JS, editor):
+                return "not_owned"
             if index:
                 await editor.press("Shift+Enter")
             if line:
-                if not await self._session.run_on_linkedin(CAN_TYPE_EDITOR_JS, editor):
-                    return "not_owned"
                 await editor.type(line, delay=_TYPE_DELAY)
 
         actual = str(await editor.evaluate("element => element.innerText || ''"))
