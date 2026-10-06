@@ -12,6 +12,7 @@ from linkedin_mcp_server.linkedin.link_metadata import (
     Reference,
     _SEARCH_RESULTS_REFERENCE_CAP,
 )
+from linkedin_mcp_server.linkedin.text import JobApplyTextTable
 
 
 def reconcile_search_references(
@@ -261,6 +262,33 @@ JobsTrackerStage = Literal["saved", "in_progress", "applied", "archived"]
 SAVED_JOBS_PAGE_SIZE = 10
 
 ApplyType = Literal["easy_apply", "external", "applied", "closed", "unknown"]
+
+
+def posting_state(
+    text: str, table: JobApplyTextTable
+) -> Literal["applied", "closed"] | None:
+    """The state a posting's captured text shows above its description, if any.
+
+    The same reading `get_job_apply_url` makes on the page, on the same lines,
+    so `get_job_details` answers it without a second navigation.
+    Applied is read first, as there. None covers an open posting and a capture
+    without any of its description headings alike: the lines are only trusted
+    above the earliest one, and without it there is no boundary.
+    """
+    lines = [line.strip() for line in text.splitlines()]
+    end = next(
+        (i for i, line in enumerate(lines) if line in table.description_headings),
+        None,
+    )
+    if end is None:
+        return None
+    top = lines[:end]
+    if any(table.applied_pattern.match(line) for line in top):
+        return "applied"
+    if any(line in table.closed_lines for line in top):
+        return "closed"
+    return None
+
 
 # LinkedIn's interstitial for links that leave the site, with the destination in
 # its `url` parameter. Measured on 2026-09-19: an external posting's Apply is

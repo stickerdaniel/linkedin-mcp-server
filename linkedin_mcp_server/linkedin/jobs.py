@@ -40,6 +40,7 @@ from linkedin_mcp_server.linkedin.job_policy import (
     lost_keywords_section_error,
     missing_description_section_error,
     no_matching_jobs_section_error,
+    posting_state,
     reconcile_search_references,
 )
 from linkedin_mcp_server.linkedin.link_metadata import Reference, dedupe_references
@@ -101,7 +102,8 @@ class JobReader:
         """Read a single job posting.
 
         Returns:
-            {url, sections: {name: text}}
+            {url, sections: {name: text}}, plus {apply: {type}} when the
+            posting shows it was applied to or has closed.
         """
         job_id = normalize_job_id(job_id)
         url = job_view_url(job_id, "/")
@@ -133,6 +135,10 @@ class JobReader:
         }
         if references:
             result["references"] = references
+        if "job_posting" in sections:
+            state = posting_state(sections["job_posting"], self._apply_text)
+            if state is not None:
+                result["apply"] = {"type": state}
         if section_errors:
             result["section_errors"] = section_errors
         return result

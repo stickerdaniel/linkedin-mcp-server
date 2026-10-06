@@ -126,6 +126,56 @@ class TestReadJob:
         assert result["sections"] == {}
         assert "references" not in result
 
+    @pytest.mark.parametrize(
+        ("state", "expected"),
+        [
+            ("Application status\nApplication submitted\n2 days ago", "applied"),
+            ("Applied 3 days ago", "applied"),
+            ("No longer accepting applications", "closed"),
+            ("Not currently accepting applications", "closed"),
+        ],
+    )
+    async def test_a_posting_state_is_read_above_the_description(
+        self, mock_page, state, expected
+    ):
+        reader = _reader(mock_page)
+        text = f"Applied AI Engineer\nAcme\n{state}\nAbout the job\nBuild agents."
+        with patch.object(
+            reader._capture,
+            "capture",
+            new_callable=AsyncMock,
+            return_value=extracted(text),
+        ):
+            result = await reader.read_job("12345")
+
+        assert result["apply"] == {"type": expected}
+        assert result["sections"]["job_posting"] == text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # Open: the title opens with "Applied", which is not a state line.
+            "Applied AI Engineer\nAcme\nApply\nAbout the job\nBuild agents.",
+            # The same words below the heading belong to the description or to
+            # a "More jobs" card.
+            "Engineer\nAbout the job\nApplied 3 days ago\n"
+            "No longer accepting applications",
+            # No heading, so no boundary to trust a line above.
+            "Engineer\nNo longer accepting applications\nBuild agents.",
+        ],
+    )
+    async def test_no_posting_state_is_claimed_without_one(self, mock_page, text):
+        reader = _reader(mock_page)
+        with patch.object(
+            reader._capture,
+            "capture",
+            new_callable=AsyncMock,
+            return_value=extracted(text),
+        ):
+            result = await reader.read_job("12345")
+
+        assert "apply" not in result
+
     async def test_jobs_a_posting_links_to_are_labelled_similar(self, mock_page):
         """The posting's own link and its "More jobs" cards are both jobs.
 
