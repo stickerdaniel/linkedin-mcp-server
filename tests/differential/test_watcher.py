@@ -410,16 +410,12 @@ def test_a_watcher_stopped_on_request_after_the_actors_covers_them(tmp_path):
         )
         == []
     )
-    # The evidence states what sampling cost on this machine. One slow
-    # sample lifts the mean above the 95th percentile, which a shared
-    # runner does, so the percentile is not bounded by a fraction of the
-    # mean. The summary reports both to 4 decimal places; at that precision
-    # they still fall between the cheapest and costliest logged sample.
+    # Costs use a monotonic clock; sample_log uses wall time. Check the
+    # published values here and their arithmetic with fixed durations below.
+    assert math.isfinite(summary["sample_seconds_mean"])
     assert summary["sample_seconds_mean"] > 0
-    costs = [round(ended - began, 4) for began, ended, _ in summary["sample_log"]]
-    cheapest, costliest = min(costs), max(costs)
-    assert cheapest <= summary["sample_seconds_p95"] <= costliest
-    assert cheapest <= summary["sample_seconds_mean"] <= costliest
+    assert math.isfinite(summary["sample_seconds_p95"])
+    assert summary["sample_seconds_p95"] >= 0
     assert summary["first_sample_cached"] > 0
     assert summary["reads_per_sample_max"] >= 1
     # Every sample is logged, and each event's time is a logged sample's end.
@@ -1114,9 +1110,20 @@ def test_the_summary_states_what_sampling_cost(no_exec):
         assert (stats["first_sample_cached"], stats["first_sample_watched"]) == (2, 1)
         # Every process in the first sample, then only the harness and 61.
         assert sampler.reads_per_sample == [4, 2, 2]
-    assert duration_stats([0.01, 0.02, 0.03]) == {
-        "sample_seconds_mean": 0.02,
-        "sample_seconds_p95": 0.03,
+
+
+@pytest.mark.parametrize(
+    ("durations", "mean", "p95"),
+    [
+        ([0.01, 0.02, 0.03], 0.02, 0.03),
+        ([0.0019] * 99 + [1.0019], 0.0119, 0.0019),
+    ],
+    ids=["uniform", "one-slow-sample"],
+)
+def test_sample_duration_statistics(durations, mean, p95):
+    assert duration_stats(durations) == {
+        "sample_seconds_mean": mean,
+        "sample_seconds_p95": p95,
     }
 
 
