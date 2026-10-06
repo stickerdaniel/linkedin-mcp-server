@@ -99,6 +99,10 @@ JOB_POSTING_EN_US = _JOB_POSTING_TEXT["en-US"]
 class JobApplyTextTable:
     """Visible-text policy for reading how a job posting takes applications."""
 
+    # The whole visible text of the button that opens Easy Apply, for the
+    # posting whose Easy Apply is a button rather than an anchor into its own
+    # `/apply/` route. The anchor needs no entry here: its URL names it.
+    easy_apply_label: str
     # The whole visible text of the link that sends the applicant to the
     # employer's site. Its href is LinkedIn's interstitial, which the
     # description's own outbound links share, so the text is what tells it
@@ -121,6 +125,7 @@ class JobApplyTextTable:
 
 _JOB_APPLY_TEXT: dict[str, JobApplyTextTable] = {
     "en-US": JobApplyTextTable(
+        easy_apply_label="Easy Apply",
         external_apply_label="Apply",
         description_headings=JOB_POSTING_EN_US.description_headings,
         closed_lines=(
@@ -133,8 +138,9 @@ _JOB_APPLY_TEXT: dict[str, JobApplyTextTable] = {
     ),
 }
 
-# Same locale contract as `DETAIL_CAPTURE_EN_US`. The label and the heading were
-# measured on 2026-09-14 against an external and an Easy Apply posting. On
+# Same locale contract as `DETAIL_CAPTURE_EN_US`. The external label and the
+# heading were measured on 2026-09-14 against an external and an Easy Apply
+# posting, the Easy Apply label on 2026-09-25 against a button-shaped one. On
 # 2026-09-21 an applied posting that was still open read "Application status",
 # "Application submitted", "2 days ago" and no "Applied N days ago" line, and
 # two closed postings read one closed line each. "Applied 3 days ago" and
