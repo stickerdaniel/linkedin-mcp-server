@@ -9,7 +9,7 @@ from patchright.async_api import ElementHandle
 import anyio
 import pytest
 
-from test_post_actions import FakePage, POST_URL, actions
+from .test_post_actions import FakePage, POST_URL, actions
 
 
 @pytest.mark.parametrize(
