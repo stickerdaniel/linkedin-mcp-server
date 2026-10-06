@@ -305,9 +305,24 @@
       "call": "send_message",
       "kind": "wait_for_function",
       "operation": "message_confirmation_ready",
-      "program_digest": "4444171d134b",
+      "program_digest": "7356dcc5c2c3",
       "section": "message",
       "timeout_ms": null
+    },
+    {
+      "call": "send_message",
+      "handle": "snapshot-1",
+      "kind": "handle.json_value",
+      "section": "message",
+      "value": {
+        "path": "/messaging/thread/2-policy-thread==/"
+      }
+    },
+    {
+      "call": "send_message",
+      "handle": "snapshot-1",
+      "kind": "handle.dispose",
+      "section": "message"
     },
     {
       "arg": {
@@ -343,6 +358,7 @@
     "retry_safe": false,
     "sent": true,
     "status": "sent",
+    "thread_id": "2-policy-thread==",
     "url": "https://www.linkedin.com/messaging/thread/2-policy-thread==/"
   },
   "scenario": "send_message__sent",

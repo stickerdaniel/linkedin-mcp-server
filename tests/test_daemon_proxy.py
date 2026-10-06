@@ -1326,6 +1326,7 @@ class TestRepeatingOnlyWhatIsSafe:
         assert "sent" not in reported
         assert "recipient_selected" not in reported
         assert "url" not in reported
+        assert "thread_id" not in reported
 
     async def test_the_unknown_outcome_speaks_the_send_contracts_vocabulary(self):
         """The two halves of the payload are keys a send already uses.
