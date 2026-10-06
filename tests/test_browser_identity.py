@@ -35,13 +35,25 @@ Everything else is true of a browser however it was started, so it runs against
 both, which costs nothing because both launches are already cached. A
 regression that appears in headed Chromium alone is otherwise invisible here,
 and headed is not the cheaper mode to leave uncovered.
+
+**Each launch leaves evidence of its first navigation.** The page's first
+``goto`` has run out Patchright's 30s on a Windows runner against this plain
+loopback origin, and the cached failure then fails every case of that mode
+with one message. ``differential.first_navigation`` observes each launch from
+before it starts, without asking the browser anything, and the module
+publishes what it saw whatever the cases did: one record per launch, however
+many cases replay it.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
+import time
+import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -50,6 +62,30 @@ from linkedin_mcp_server.browser_launch import build_launch_options
 from linkedin_mcp_server.config.schema import BrowserConfig
 from linkedin_mcp_server.core.browser import BrowserManager
 from browser_identity_harness import IdentityServer, describe_browser
+from differential.events import OUT_ENV, current_platform, publish
+from differential.first_navigation import flush_evidence, observing
+
+
+def _evidence_out() -> str | None:
+    """Where this module's navigation evidence goes, read once at import.
+
+    At import because the suite's autouse fixture deletes every ``LINKEDIN*``
+    variable for each test. The identity gate's CI step sets no
+    ``LINKEDIN_MCP_DIFFERENTIAL_OUT``; the job it runs in uploads
+    ``$RUNNER_TEMP/differential-evidence`` with ``if: always()`` in its
+    "Keep the differential evidence" step, so on GitHub Actions that is where
+    a red gate's evidence goes. Anywhere else, unset means nowhere.
+    """
+    configured = os.environ.get(OUT_ENV)
+    if configured:
+        return configured
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    if os.environ.get("GITHUB_ACTIONS") == "true" and runner_temp:
+        return str(Path(runner_temp) / "differential-evidence")
+    return None
+
+
+_EVIDENCE_OUT = _evidence_out()
 
 #: The group keeps every test that launches Chromium on one xdist worker. The
 #: identity cases reuse two cached launches, while the DOM and auth-contract
@@ -209,12 +245,37 @@ async def _describe(tmp_path: Path, *, headless: bool) -> dict:
 
 
 @pytest.fixture(scope="module")
+def _identity_evidence(tmp_path_factory) -> Iterator[Path]:
+    """This module's launch evidence, published once its cases are done.
+
+    Module-scoped like the launch cache, and published in its teardown, so a
+    launch that failed every case still leaves its record.
+    """
+    directory = tmp_path_factory.mktemp("identity-evidence")
+    yield directory
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    # The launch records land on a writer thread. Publish only after they have,
+    # or a fast failure is copied while it still says it is running.
+    flush_evidence()
+    # Publishing is evidence, not part of the result: a directory that cannot
+    # be written must not fail the cases that already passed.
+    with contextlib.suppress(Exception):
+        publish(
+            directory,
+            _EVIDENCE_OUT,
+            f"identity-gate-{current_platform()}-{stamp}-{uuid.uuid4().hex[:8]}",
+        )
+
+
+@pytest.fixture(scope="module")
 def _mode_results() -> dict:
     """One launch per mode for the whole module, because each costs seconds."""
     return {}
 
 
-async def _for_mode(tmp_path_factory, cache: dict, headless: bool) -> dict:
+async def _for_mode(
+    tmp_path_factory, cache: dict, headless: bool, evidence: Path
+) -> dict:
     """The cached description of one launch, successful or not.
 
     The failure is cached too, which is not symmetry for its own sake. Most of
@@ -240,7 +301,13 @@ async def _for_mode(tmp_path_factory, cache: dict, headless: bool) -> dict:
     if key not in cache:
         base = tmp_path_factory.mktemp(f"identity-{key}")
         try:
-            cache[key] = (None, await _describe(base, headless=headless))
+            with observing(
+                evidence / f"identity-{key}",
+                profile=base / f"identity-{key}",
+                label=f"identity-{key}",
+            ):
+                described = await _describe(base, headless=headless)
+            cache[key] = (None, described)
         except BaseException as exc:
             skipped = isinstance(exc, pytest.skip.Exception)
             cache[key] = ((skipped, f"{type(exc).__name__}: {exc}"), None)
@@ -255,20 +322,26 @@ async def _for_mode(tmp_path_factory, cache: dict, headless: bool) -> dict:
 
 
 @pytest.fixture
-async def default_mode(tmp_path_factory, _mode_results) -> dict:
+async def default_mode(tmp_path_factory, _mode_results, _identity_evidence) -> dict:
     """The product default: what a user's browser actually is."""
-    return await _for_mode(tmp_path_factory, _mode_results, headless=True)
+    return await _for_mode(
+        tmp_path_factory, _mode_results, headless=True, evidence=_identity_evidence
+    )
 
 
 @pytest.fixture
-async def headed_mode(tmp_path_factory, _mode_results) -> dict:
+async def headed_mode(tmp_path_factory, _mode_results, _identity_evidence) -> dict:
     """Headed, which is where the container image is going and where the
     headless token must be absent."""
-    return await _for_mode(tmp_path_factory, _mode_results, headless=False)
+    return await _for_mode(
+        tmp_path_factory, _mode_results, headless=False, evidence=_identity_evidence
+    )
 
 
 @pytest.fixture(params=[True, False], ids=["default", "headed"])
-async def either_mode(request, tmp_path_factory, _mode_results) -> dict:
+async def either_mode(
+    request, tmp_path_factory, _mode_results, _identity_evidence
+) -> dict:
     """Both launches, for every relation that does not depend on the mode.
 
     Most of what this file asserts is true of a browser regardless of how it
@@ -281,7 +354,12 @@ async def either_mode(request, tmp_path_factory, _mode_results) -> dict:
     No extra launches. Both modes are already started and cached for the module,
     so this only decides which of the two an existing case reads.
     """
-    return await _for_mode(tmp_path_factory, _mode_results, headless=request.param)
+    return await _for_mode(
+        tmp_path_factory,
+        _mode_results,
+        headless=request.param,
+        evidence=_identity_evidence,
+    )
 
 
 def _split_outside_quotes(value: str, separator: str) -> list[str]:

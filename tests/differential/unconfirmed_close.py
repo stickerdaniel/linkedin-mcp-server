@@ -73,7 +73,7 @@ from differential.signals import (
 )
 from differential.signals import HELD as HELD_O2
 from differential.signals import UNKNOWN as UNKNOWN_O2
-from differential.watcher import BROWSER_MARKER_ENV
+from differential.watcher import BROWSER_MARKER_ENV, read_arguments
 
 ROW_H_R7 = "H-R7"
 LOCK_FILE = "profile.lock"
@@ -633,7 +633,7 @@ def launch_marker(
             process = open_process(entry["pid"])
             if abs(process.create_time() - float(start)) > _START_TOLERANCE_SECONDS:
                 continue
-            value = process.environ().get(BROWSER_MARKER_ENV)
+            value = read_arguments(process, "environ").get(BROWSER_MARKER_ENV)
         except (psutil.Error, OSError):
             continue
         if value and hashlib.sha256(value.encode()).hexdigest()[:16] == digest:
@@ -1312,18 +1312,53 @@ def _alias_problems(text: str) -> list[str]:
     return problems
 
 
+#: Where the driver's close begins, by module-level name. The browser-free
+#: controls (``test_r7_fault``) enter it through ``close_browser`` and the
+#: idle close behind ``release_profile_if_idle_or_requested``.
+#: ``_close_holding_back_cancels`` is the other way a manager's close is
+#: entered, and the poll is what starts an idle close in a running actor; no
+#: control drives them, and each is kept because a close entered there is
+#: still this one. A helper needs no entry of its own (``close_path_slice``),
+#: and a root that goes missing reads as another close, never a smaller one.
+#:
+#: What the slice still cannot see. A name dropped from a ``from`` line could
+#: itself be a submodule whose import has effects; like any module outside
+#: ``CLOSE_PATH``, its code is not compared here. The names the driver takes
+#: from ``linkedin_mcp_server.core`` are functions that package re-exports.
+#: And a name built at run time (``globals()["close_" + suffix]``) reaches
+#: nothing; only a literal string is followed.
+#:
+#: Every other file is compared whole (None). The core is nearly all
+#: ``BrowserManager``, whose close reaches the rest of the class by
+#: dispatch no name shows (``__getattribute__``, a descriptor, a hook
+#: installed by an assignment), and the lease and the role are mostly the
+#: close's own bookkeeping, the release, the marker and the stand-down. Only
+#: the driver holds whole features the close never enters, such as the feed
+#: check.
+CLOSE_ROOTS: Mapping[str, tuple[str, ...] | None] = {
+    "linkedin_mcp_server/core/browser.py": None,
+    "linkedin_mcp_server/drivers/browser.py": (
+        "close_browser",
+        "_close_browser_locked",
+        "_close_holding_back_cancels",
+        "release_profile_if_idle_or_requested",
+        "_close_unless_a_call_arrived",
+        "_close_browser_if_still_idle",
+        "watch_for_handoff_requests",
+    ),
+    "linkedin_mcp_server/profile_lease.py": None,
+    "linkedin_mcp_server/server_role.py": None,
+}
+
 #: The close path whose one-drain serialization the browser-free controls run
 #: on this checkout's own bodies (``test_r7_fault``): the core and driver
 #: close, the lease and the role. Those controls speak for a runtime only
-#: while its copies are these in code, comments and docstrings aside: the
+#: while its close is this one in code, comments and docstrings aside: the
 #: controls run the bodies, and text that never executes cannot change what
-#: they prove (``close_path_code``).
-CLOSE_PATH = (
-    "linkedin_mcp_server/core/browser.py",
-    "linkedin_mcp_server/drivers/browser.py",
-    "linkedin_mcp_server/profile_lease.py",
-    "linkedin_mcp_server/server_role.py",
-)
+#: they prove (``close_path_code``). Nor can a driver function nothing calls
+#: on the way, such as the feed check, which is all a slice leaves out
+#: (``CLOSE_ROOTS``, ``close_path_slice``).
+CLOSE_PATH = tuple(CLOSE_ROOTS)
 
 
 def alias_model(
@@ -1334,8 +1369,9 @@ def alias_model(
     """``AliasModel`` for each named source text.
 
     With *close_path*, each revision's copy of ``CLOSE_PATH`` too: a baseline
-    whose close path differs from the candidate's is one the serialization
-    controls never ran, and the model says so.
+    whose close differs from the candidate's is one the serialization
+    controls never ran, and the model says so. A copy that does not parse,
+    or has lost a root, says so in its own words and matches no other.
     """
     problems: list[str] = []
     for revision, text in sources.items():
@@ -1346,14 +1382,21 @@ def alias_model(
     if close_path is not None:
         reference = close_path.get(CANDIDATE) or {}
         for revision, files in close_path.items():
-            for path in CLOSE_PATH:
+            for path, roots in CLOSE_ROOTS.items():
                 if path not in files or path not in reference:
                     problems.append(f"{revision}: {path} was not read")
                     continue
-                code = close_path_code(files[path])
-                if code is None:
-                    problems.append(f"{revision}: {path} does not parse")
-                elif code != close_path_code(reference[path]):
+                try:
+                    code = close_path_slice(files[path], roots)
+                except ValueError as exc:
+                    problems.append(f"{revision}: {path} {exc}")
+                    continue
+                try:
+                    same = code == close_path_slice(reference[path], roots)
+                except ValueError:
+                    # The candidate's own entry above names why.
+                    same = False
+                if not same:
                     problems.append(
                         f"{revision}: {path} differs from the candidate's, whose "
                         f"close the serialization controls ran"
@@ -1364,15 +1407,12 @@ def alias_model(
     )
 
 
-def close_path_code(text: str) -> str | None:
-    """*text* as the code it runs, or None when it does not parse.
-
-    The syntax tree without positions and without docstrings; comments never
-    reach it. A body left empty keeps a ``pass``. None compares unequal to any
-    tree, so a copy that does not parse never matches one that does.
+def _code_tree(text: str) -> ast.Module | None:
+    """*text* parsed as it runs, docstrings removed; None when it does not parse.
 
     Parsed from bytes, as the importer reads a file: a ``coding`` comment then
-    decodes the copy as it would run, and a line it turns into code counts.
+    decodes the copy as it would run, and a line it turns into code counts. A
+    body left empty keeps a ``pass``.
     """
     try:
         tree = ast.parse(text.encode("utf-8"))
@@ -1389,7 +1429,188 @@ def close_path_code(text: str) -> str | None:
             and isinstance(first.value.value, str)
         ):
             node.body = node.body[1:] or [ast.Pass()]
-    return ast.dump(tree, include_attributes=False)
+    return tree
+
+
+def close_path_code(text: str) -> str | None:
+    """*text* as the code it runs, or None when it does not parse.
+
+    The syntax tree without positions and without docstrings; comments never
+    reach it. None compares unequal to any tree, so a copy that does not parse
+    never matches one that does.
+    """
+    tree = _code_tree(text)
+    return None if tree is None else ast.dump(tree, include_attributes=False)
+
+
+def close_path_slice(text: str, roots: Sequence[str] | None) -> str:
+    """The code of *text* a close entered at *roots* can run, as a dump.
+
+    *roots* None is the whole file, as ``close_path_code`` reads it. Otherwise
+    the whole file less what provably does nothing until something calls it:
+    a plain module-level ``def`` (``_inert_def``) that no kept code names,
+    and a name a ``from`` import binds that no kept code names. Everything
+    else runs at import or may, so it is kept and its names followed: every
+    import statement, with its module, even when none of its names is used;
+    an assignment of any target, a class, an ``if`` or ``try``, a call, a
+    decorated def, and any def or name Python looks up by itself (a dunder
+    such as a module ``__getattr__``). A def that kept code names is kept,
+    nested defs and all, and its names are followed in turn; so is one a
+    literal string in kept code spells, which is how ``getattr`` and
+    ``globals()`` usually reach a function. ``__future__`` and star imports
+    stay whole.
+
+    Raises ValueError, naming the reason, when *text* does not parse or a
+    root is not bound in it: a close that cannot be found is never the same
+    as one that can, nor as another that cannot.
+    """
+    tree = _code_tree(text)
+    if tree is None:
+        raise ValueError("does not parse")
+    if roots is None:
+        return ast.dump(tree, include_attributes=False)
+    return ast.dump(ast.Module(body=_close_slice(tree.body, roots), type_ignores=[]))
+
+
+_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def _close_slice(body: list[ast.stmt], roots: Sequence[str]) -> list[ast.stmt]:
+    """*body* less the inert defs, and the ``from`` names, nothing kept names."""
+    bound: set[str] = set()
+    # Name to the inert defs binding it, and to the (index, position) of each
+    # name a ``from`` import binds; both are left out until a name reaches
+    # them. The import statement itself always stays, names or none.
+    defs: dict[str, list[int]] = {}
+    aliases: dict[str, list[tuple[int, int]]] = {}
+    kept: set[int] = set()
+    taken: dict[int, set[int]] = {}
+    for index, node in enumerate(body):
+        if isinstance(node, _DEFS) and _inert_def(node) and not _dunder(node.name):
+            defs.setdefault(node.name, []).append(index)
+            bound.add(node.name)
+        elif isinstance(node, ast.ImportFrom) and not (
+            node.module == "__future__" or any(a.name == "*" for a in node.names)
+        ):
+            taken[index] = set()
+            for position, alias in enumerate(node.names):
+                name = alias.asname or alias.name
+                if _dunder(name):
+                    taken[index].add(position)
+                aliases.setdefault(name, []).append((index, position))
+                bound.add(name)
+        else:
+            kept.add(index)
+            bound |= _bound_names(node)
+    for root in roots:
+        if root not in bound:
+            raise ValueError(f"has no close root {root}")
+    pending = [*roots, *(name for i in kept for name in _named(body[i]))]
+    reached: set[str] = set()
+    while pending:
+        name = pending.pop()
+        if name in reached:
+            continue
+        reached.add(name)
+        for index, position in aliases.get(name, []):
+            taken.setdefault(index, set()).add(position)
+        for index in defs.get(name, []):
+            kept.add(index)
+            pending += _named(body[index])
+    sliced: list[ast.stmt] = []
+    for index, node in enumerate(body):
+        if index in kept:
+            sliced.append(node)
+        elif index in taken and isinstance(node, ast.ImportFrom):
+            # Empty when no name is used: never compiled, only compared, and
+            # the module it imports is still on the line.
+            names = [node.names[p] for p in sorted(taken[index])]
+            sliced.append(
+                ast.ImportFrom(module=node.module, names=names, level=node.level)
+            )
+    return sliced
+
+
+def _dunder(name: str) -> bool:
+    """Whether Python may look *name* up on the module by itself, as it does a
+    module ``__getattr__`` during a ``from`` import: never inert."""
+    return len(name) > 4 and name.startswith("__") and name.endswith("__")
+
+
+#: What an annotation may hold and still evaluate without effect: names,
+#: attributes, subscripts, unions and constants. A call is not among them.
+_INERT_ANNOTATION = (
+    ast.Name,
+    ast.Attribute,
+    ast.Subscript,
+    ast.Constant,
+    ast.Tuple,
+    ast.List,
+    ast.BinOp,
+    ast.BitOr,
+    ast.Load,
+)
+
+
+def _inert_def(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Whether defining *node* runs nothing: no decorator, constant defaults,
+    and annotations that only name things. Evaluated when the module is
+    imported, every one of those can install a hook; a body cannot until it
+    is called."""
+    if node.decorator_list:
+        return False
+    arguments = node.args
+    defaults = [*arguments.defaults, *arguments.kw_defaults]
+    if not all(d is None or isinstance(d, ast.Constant) for d in defaults):
+        return False
+    every = (
+        *arguments.posonlyargs,
+        *arguments.args,
+        *arguments.kwonlyargs,
+        arguments.vararg,
+        arguments.kwarg,
+    )
+    annotations = [a.annotation for a in every if a is not None and a.annotation]
+    if node.returns is not None:
+        annotations.append(node.returns)
+    return all(
+        isinstance(sub, _INERT_ANNOTATION)
+        for annotation in annotations
+        for sub in ast.walk(annotation)
+    )
+
+
+def _named(node: ast.AST) -> list[str]:
+    """Every module-level name *node* can reach: a name it reads or writes,
+    a ``global``, or a string spelling one."""
+    named: list[str] = []
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name):
+            named.append(sub.id)
+        elif isinstance(sub, (ast.Global, ast.Nonlocal)):
+            named += sub.names
+        elif (
+            isinstance(sub, ast.Constant)
+            and isinstance(sub.value, str)
+            and sub.value.isidentifier()
+        ):
+            named.append(sub.value)
+    return named
+
+
+def _bound_names(node: ast.stmt) -> set[str]:
+    """Every name a module-level statement binds, anywhere inside it."""
+    bound: set[str] = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)):
+            bound.add(sub.id)
+        elif isinstance(sub, (*_DEFS, ast.ClassDef)):
+            bound.add(sub.name)
+        elif isinstance(sub, ast.alias):
+            bound.add(sub.asname or sub.name.partition(".")[0])
+        elif isinstance(sub, (ast.MatchAs, ast.MatchStar)) and sub.name:
+            bound.add(sub.name)
+    return bound
 
 
 def source_sha256(text: str) -> str:

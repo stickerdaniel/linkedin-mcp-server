@@ -307,7 +307,17 @@ profile = os.environ["STAND_IN_PROFILE"]
 os.execv(sys.executable, [sys.executable, sys.argv[1], "--user-data-dir=" + profile])
 """
 
-_AFTER_EXEC = "import time\ntime.sleep(3)\n"
+# Browser-shaped until the test has seen the watcher record it, so a slow
+# sample on a loaded machine cannot miss a phase that ended on its own clock.
+_AFTER_EXEC = """
+import os
+import time
+
+release = os.environ["STAND_IN_RELEASE"]
+deadline = time.monotonic() + 30
+while not os.path.exists(release) and time.monotonic() < deadline:
+    time.sleep(0.05)
+"""
 
 
 def test_a_process_that_execs_into_a_browser_late_is_still_seen(tmp_path):
@@ -317,21 +327,44 @@ def test_a_process_that_execs_into_a_browser_late_is_still_seen(tmp_path):
     before, after = tmp_path / "before_exec.py", tmp_path / "after_exec.py"
     before.write_text(_DELAYED_EXEC)
     after.write_text(_AFTER_EXEC)
+    release = tmp_path / "release"
+    key = canonical_user_data_dir(str(profile))
     watcher = _start_watcher(tmp_path)
     try:
         stand_in = subprocess.Popen(
             [sys.executable, str(before), str(after)],
-            env={**os.environ, "STAND_IN_PROFILE": str(profile)},
+            env={
+                **os.environ,
+                "STAND_IN_PROFILE": str(profile),
+                "STAND_IN_RELEASE": str(release),
+            },
         )
         try:
+            # Not until the stand-in exits: on Windows the exec is a new
+            # process, and the one launched here ends as it starts.
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if any(
+                    r.get("actor") == "browser"
+                    and (
+                        f"--user-data-dir={profile}" in r.get("cmdline", "")
+                        or r.get("profile") == key
+                    )
+                    for r in read_jsonl(tmp_path / "watcher.jsonl")
+                ):
+                    break
+                time.sleep(0.05)
+            release.touch()
             stand_in.wait(timeout=30)
         finally:
+            # Released on every path: on Windows the exec'd process is not
+            # ``stand_in`` and would otherwise run on into other tests.
+            release.touch()
             if stand_in.poll() is None:
                 stand_in.kill()
     finally:
         records = _stop_watcher(tmp_path, watcher)
     (summary,) = [r for r in records if r["kind"] == "watcher.summary"]
-    key = canonical_user_data_dir(str(profile))
     assert summary["max_roots"].get(key) == 1, summary["max_roots"]
     # On Windows the exec is a new process whose parent is gone before it is
     # sampled, so it is not tied to the row and its arguments are withheld;
@@ -358,7 +391,7 @@ def test_a_watcher_that_stops_early_cannot_carry_o1(tmp_path):
     assert any("ended before" in failure for failure in failures)
 
 
-def test_a_watcher_stopped_on_request_after_the_actors_is_healthy(tmp_path):
+def test_a_watcher_stopped_on_request_after_the_actors_covers_them(tmp_path):
     watcher = _start_watcher(tmp_path)
     began = time.time()
     time.sleep(0.3)
@@ -367,7 +400,16 @@ def test_a_watcher_stopped_on_request_after_the_actors_is_healthy(tmp_path):
     (summary,) = [r for r in records if r["kind"] == "watcher.summary"]
     assert summary["observation_start"] <= began
     assert summary["observation_end"] >= ended
-    assert watcher_failures(summary, actors_began=began, actors_ended=ended) == []
+    # Coverage and the requested stop, not the gap: this test shares the
+    # machine with every other xdist worker and launches no browser, so a slow
+    # sample here says nothing about O1. The rows keep the 1.0s bound, and the
+    # summary tests further down hold that it rejects a gap.
+    assert (
+        watcher_failures(
+            summary, actors_began=began, actors_ended=ended, max_gap=math.inf
+        )
+        == []
+    )
     # The evidence states what sampling cost on this machine.
     assert summary["sample_seconds_mean"] > 0
     assert summary["sample_seconds_p95"] >= summary["sample_seconds_mean"] * 0.5

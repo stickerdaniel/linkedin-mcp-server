@@ -166,11 +166,11 @@ def test_every_declared_key_is_referenced(manifest: dict[str, Any]) -> None:
     )
 
 
-def test_send_message_documents_single_line_controls(manifest: dict[str, Any]) -> None:
+def test_send_message_documents_lines_and_controls(manifest: dict[str, Any]) -> None:
     tools = {tool["name"]: tool["description"] for tool in manifest["tools"]}
     assert (
-        "single-line message without C0 or DEL control characters "
-        "(including CR, LF, and tab)"
+        "message, line breaks and empty lines included, without tab or other "
+        "control characters"
     ) in tools["send_message"]
 
 

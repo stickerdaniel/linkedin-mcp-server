@@ -1340,22 +1340,36 @@ def test_a_public_drain_that_skips_the_private_global_fails_the_model():
     assert any("did not hand one real True back as False" in p for p in model.problems)
 
 
-def _close_path_model(baseline_driver: str, candidate_driver: str | None = None):
+def _close_path_model(
+    baseline_driver: str,
+    candidate_driver: str | None = None,
+    *,
+    path: str = CLOSE_PATH[1],
+):
     files = {path: (_REPO / path).read_text(encoding="utf-8") for path in CLOSE_PATH}
-    candidate = {**files, CLOSE_PATH[1]: candidate_driver or files[CLOSE_PATH[1]]}
+    candidate = {**files, path: candidate_driver or files[path]}
     return alias_model(
         {CANDIDATE: Path(process_tree.__file__).read_text(encoding="utf-8")},
         close_path={
             CANDIDATE: candidate,
-            BASELINE: {**files, CLOSE_PATH[1]: baseline_driver},
+            BASELINE: {**files, path: baseline_driver},
         },
     )
+
+
+def _changed(text: str, *edits: tuple[str, str]) -> str:
+    """*text* with each edit made exactly once, where it is written once."""
+    for old, new in edits:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    return text
 
 
 def test_a_baseline_close_path_unlike_the_candidates_fails_the_model():
     driver = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8")
     assert _close_path_model(driver).problems == ()
-    other = _close_path_model(driver + "\n_another_close = True\n")
+    # A second binding of a global the close reads, past the first.
+    other = _close_path_model(driver + "\n_browser_lifecycle_lock = None\n")
     assert any(CLOSE_PATH[1] in p for p in other.problems)
 
 
@@ -1363,7 +1377,12 @@ def test_a_close_path_differing_in_comments_or_docstrings_passes_the_model():
     driver = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8")
     commented = driver + "\n# another close\n"
     module = driver.replace('"""\n', '"""\nAnother close.\n', 1)
-    documented = module.replace("Check whether startup", "Tell whether startup", 1)
+    documented = _changed(
+        module,
+        ("Check whether startup", "Tell whether startup"),
+        # A close root's own docstring, inside the slice compared.
+        ("Close the browser, releasing", "Close the browser, then release"),
+    )
     assert driver not in (commented, module) and module != documented
     assert _close_path_model(commented).problems == ()
     assert _close_path_model(documented).problems == ()
@@ -1372,8 +1391,240 @@ def test_a_close_path_differing_in_comments_or_docstrings_passes_the_model():
 def test_a_coding_comment_that_decodes_into_code_fails_the_model():
     # In UTF-7 "+AAo-" is a newline, so the last line assigns when imported.
     driver = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8")
-    encoded = "# coding: utf-7\n" + driver + "\n# +AAo-_another_close = True\n"
+    encoded = "# coding: utf-7\n" + driver + "\n# +AAo-_browser_lifecycle_lock = None\n"
     assert any(CLOSE_PATH[1] in p for p in _close_path_model(encoded).problems)
+
+
+def test_a_change_the_close_runs_fails_the_model():
+    driver = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8")
+    in_a_root = _changed(
+        driver,
+        (
+            "    await _close_browser_locked()\n    return True\n",
+            "    await _close_browser_locked()\n    return False\n",
+        ),
+    )
+    # Reached only through ``_close_browser_locked``, never named as a root.
+    in_a_helper = _changed(driver, ("        lease.mark_browser_closed()\n", ""))
+    for changed in (in_a_root, in_a_helper):
+        assert any(CLOSE_PATH[1] in p for p in _close_path_model(changed).problems)
+    # The core is compared whole: even a method no close names counts.
+    core = (_REPO / CLOSE_PATH[0]).read_text(encoding="utf-8")
+    started = _changed(
+        core,
+        (
+            '"Browser already started. Call close() first."',
+            '"Browser already started."',
+        ),
+    )
+    model = _close_path_model(started, path=CLOSE_PATH[0])
+    assert any(CLOSE_PATH[0] in p for p in model.problems)
+    # So does a function only another module calls: the driver's close runs
+    # the primitive through ``linkedin_mcp_server.core``, whether or not the
+    # core's own text still names it.
+    unnamed = core.replace("await await_deferring_cancels(", "await _held_back(")
+    assert unnamed.count("await _held_back(") == 3
+    held = _changed(
+        unnamed,
+        (
+            "                return task.result(), True\n",
+            "                return task.result(), False\n",
+        ),
+    )
+    model = _close_path_model(unnamed, candidate_driver=held, path=CLOSE_PATH[0])
+    assert any(CLOSE_PATH[0] in p for p in model.problems)
+
+
+def test_a_changed_import_the_close_uses_fails_the_model():
+    driver = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8")
+    moved = _changed(
+        driver,
+        ("    release_browser_guardian,\n", ""),
+        (
+            "from linkedin_mcp_server.profile_lease import",
+            "from linkedin_mcp_server.guardian import release_browser_guardian\n"
+            "from linkedin_mcp_server.profile_lease import",
+        ),
+    )
+    # The idle close reads ``time.monotonic()``.
+    swapped = _changed(driver, ("import time\n", "import trio as time\n"))
+    for changed in (moved, swapped):
+        assert any(CLOSE_PATH[1] in p for p in _close_path_model(changed).problems)
+    core = (_REPO / CLOSE_PATH[0]).read_text(encoding="utf-8")
+    renamed = _changed(
+        core,
+        (
+            "    drain_browser_process_marker,\n    forget_browser_process_marker,\n",
+            "    drain_marked_groups as drain_browser_process_marker,\n"
+            "    forget_browser_process_marker,\n",
+        ),
+    )
+    model = _close_path_model(renamed, path=CLOSE_PATH[0])
+    assert any(CLOSE_PATH[0] in p for p in model.problems)
+
+
+def test_a_change_the_close_never_reaches_passes_the_model():
+    # A feed-check change: the check rewritten, a helper for it, and the
+    # names it uses added to the existing ``linkedin_mcp_server.core`` line.
+    driver = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8")
+    feed = _changed(
+        driver,
+        (
+            "    is_logged_in,\n",
+            "    is_another_site,\n    is_logged_in,\n    refuse_off_linkedin,\n",
+        ),
+        (
+            "async def _feed_auth_succeeds(",
+            "async def _refuse_a_landing(browser: BrowserManager) -> None:\n"
+            "    if is_another_site(browser.page.url):\n"
+            "        refuse_off_linkedin(browser.page.url)\n\n\n"
+            "async def _feed_auth_succeeds(",
+        ),
+        (
+            '        await stabilize_navigation("feed navigation", logger)\n',
+            '        await stabilize_navigation("feed navigation", logger)\n'
+            "        await _refuse_a_landing(browser)\n",
+        ),
+    )
+    assert _close_path_model(feed).problems == ()
+    assert _close_path_model(driver, candidate_driver=feed).problems == ()
+
+
+#: A close that skips the drain, installed when the module is imported by a
+#: statement whose own name nothing reads.
+_IMPORT_HOOK = """
+async def _fast_close_for_registration(self):
+    return True
+
+_close_registration = BrowserManager.close = _fast_close_for_registration
+"""
+
+
+def test_a_hook_installed_at_import_fails_the_model():
+    for path in CLOSE_PATH[:2]:
+        text = (_REPO / path).read_text(encoding="utf-8")
+        model = _close_path_model(text + _IMPORT_HOOK, path=path)
+        assert any(path in p for p in model.problems), path
+
+
+def test_a_module_imported_for_its_effects_fails_the_model():
+    # Importing a module runs it, and it can replace the close from there,
+    # whether or not anything here uses the name it binds.
+    driver = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8")
+    for line in (
+        "import r7_close_registration\n",
+        "import r7_close_registration as _unused\n",
+        "from r7_close_registration import registration\n",
+        "from . import r7_close_registration\n",
+    ):
+        model = _close_path_model(driver + "\n" + line)
+        assert any(CLOSE_PATH[1] in p for p in model.problems), line
+
+
+def test_a_module_hook_python_calls_by_itself_fails_the_model():
+    # A ``from`` import of this module asks its ``__getattr__`` for
+    # ``__path__``, with no name here ever calling it.
+    driver = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8")
+    getattr_hook = (
+        "\n\nasync def _fast_close_for_registration(self):\n    return True\n\n\n"
+        "def __getattr__(name):\n"
+        "    BrowserManager.close = _fast_close_for_registration\n"
+        "    raise AttributeError(name)\n"
+    )
+    # Or one taken onto a line that already imports the module, so only the
+    # name is new.
+    imported = _changed(
+        driver, ("    is_logged_in,\n", "    is_logged_in,\n    __getattr__,\n")
+    )
+    for changed in (driver + getattr_hook, imported):
+        model = _close_path_model(changed)
+        assert any(CLOSE_PATH[1] in p for p in model.problems)
+
+
+def test_a_definition_the_close_never_calls_that_runs_at_import_fails_the_model():
+    driver = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8")
+    install = (
+        "def _install(function=None):\n"
+        "    BrowserManager.close = _fast_close_for_registration\n"
+        "    return function\n\n\n"
+        "async def _fast_close_for_registration(self):\n"
+        "    return True\n\n\n"
+        "async def _feed_auth_succeeds("
+    )
+    feed = ("async def _feed_auth_succeeds(", install)
+    # Defined and never called, the hook is two more functions nobody runs.
+    assert _close_path_model(_changed(driver, feed)).problems == ()
+    decorated = _changed(
+        driver,
+        feed,
+        ("async def _feed_auth_succeeds(", "@_install\nasync def _feed_auth_succeeds("),
+    )
+    defaulted = _changed(
+        driver,
+        feed,
+        (
+            "    allow_remember_me: bool = True,\n",
+            "    allow_remember_me=_install(),\n",
+        ),
+    )
+    annotated = _changed(driver, feed, ("\n) -> bool:\n", "\n) -> _install():\n"))
+    for changed in (decorated, defaulted, annotated):
+        assert any(CLOSE_PATH[1] in p for p in _close_path_model(changed).problems)
+
+
+def test_a_hook_on_the_manager_that_no_name_reaches_fails_the_model():
+    core = (_REPO / CLOSE_PATH[0]).read_text(encoding="utf-8")
+    hooked = _changed(
+        core,
+        (
+            "    def __init__(\n",
+            "    def __getattribute__(self, name):\n"
+            '        if name == "_close_proven":\n'
+            "            return True\n"
+            "        return object.__getattribute__(self, name)\n\n"
+            "    def __init__(\n",
+        ),
+    )
+    model = _close_path_model(hooked, path=CLOSE_PATH[0])
+    assert any(CLOSE_PATH[0] in p for p in model.problems)
+
+
+def test_a_function_the_close_finds_by_its_name_fails_the_model():
+    driver = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8")
+    by_name = _changed(
+        driver,
+        (
+            "    await _close_browser_locked()\n    return True\n",
+            '    await globals()["_close_later"]()\n    return True\n',
+        ),
+    )
+    later = "\n\nasync def _close_later():\n    await _close_browser_locked()\n"
+    skipped = "\n\nasync def _close_later():\n    return None\n"
+    model = _close_path_model(by_name + later, candidate_driver=by_name + skipped)
+    assert any(CLOSE_PATH[1] in p for p in model.problems)
+
+
+def test_a_close_root_gone_fails_the_model_on_either_side_or_both():
+    driver = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8")
+    # Renamed with its one caller, so the rest of the slice reads the same.
+    renamed = _changed(
+        driver,
+        (
+            "async def _close_browser_if_still_idle(",
+            "async def _close_browser_when_idle(",
+        ),
+        (
+            "_run_deferring_cancels(_close_browser_if_still_idle())",
+            "_run_deferring_cancels(_close_browser_when_idle())",
+        ),
+    )
+    gone = "has no close root _close_browser_if_still_idle"
+    for model in (
+        _close_path_model(renamed),
+        _close_path_model(driver, candidate_driver=renamed),
+        _close_path_model(renamed, candidate_driver=renamed),
+    ):
+        assert any(CLOSE_PATH[1] in p and gone in p for p in model.problems)
 
 
 def test_a_close_path_that_does_not_parse_fails_the_model():

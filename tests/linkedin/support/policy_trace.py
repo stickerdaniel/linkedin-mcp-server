@@ -206,6 +206,17 @@ class ScriptedLocator:
     async def focus(self) -> None:
         await self._operation("focus")
 
+    async def element_handle(self, *, timeout: float | None = None) -> ScriptedHandle:
+        """The one element this locator resolves to, as an element handle.
+
+        Its own document is the page's: the scripted page holds one document,
+        so the address it answers for the element is the page's address.
+        """
+        self.page.recorder.record(
+            "locator.element_handle", locator=self.semantic_id, timeout_ms=timeout
+        )
+        return ScriptedHandle(self.page, self.semantic_id, is_element=True)
+
 
 class _Mouse:
     def __init__(self, page: ScriptedPage):
@@ -278,7 +289,57 @@ class ScriptedHandle:
         if arg is not _MISSING:
             values["arg"] = arg
         self.page.recorder.record("handle.evaluate", **values)
+        if operation == "owner_document_address":
+            return self.page.url
         return self.page._take(f"{self.semantic_id}.evaluate:{operation}")
+
+    async def _action(self, name: str, **values: Any) -> Any:
+        self._assert_live()
+        self.page.recorder.record(f"handle.{name}", handle=self.semantic_id, **values)
+        return self.page._take(f"{self.semantic_id}.{name}", default=None)
+
+    async def scroll_into_view_if_needed(self, *, timeout: int | None = None) -> None:
+        await self._action("scroll_into_view", timeout_ms=timeout)
+
+    async def click(self, *, timeout: int | None = None) -> None:
+        await self._action("click", timeout_ms=timeout)
+
+    async def inner_text(self) -> str:
+        return str(await self._action("inner_text"))
+
+    async def dispose(self) -> None:
+        self._assert_live()
+        self.page.recorder.record("handle.dispose", handle=self.semantic_id)
+        self.page._take(f"{self.semantic_id}.dispose", default=None)
+        self.disposed = True
+
+
+class ScriptedSnapshot:
+    """The value handle ``wait_for_function`` returns for a confirmation."""
+
+    def __init__(self, page: ScriptedPage, semantic_id: str, value: Any):
+        self.page = page
+        self.semantic_id = semantic_id
+        self.value = value
+        self.disposed = False
+
+    @property
+    def trace_reference(self) -> dict[str, str]:
+        return {"handle": self.semantic_id}
+
+    def _assert_live(self) -> None:
+        if self.disposed:
+            raise AssertionError(
+                f"{self.page.recorder.scenario}: snapshot {self.semantic_id!r} "
+                "was disposed"
+            )
+
+    async def json_value(self) -> Any:
+        self._assert_live()
+        self.page.recorder.record(
+            "handle.json_value", handle=self.semantic_id, value=self.value
+        )
+        return self.value
 
     async def dispose(self) -> None:
         self._assert_live()
@@ -310,6 +371,7 @@ class ScriptedPage:
         self.listeners: dict[str, list[Callable[..., Any]]] = defaultdict(list)
         self.goto_landings: deque[str] = deque()
         self.handles: list[ScriptedHandle] = []
+        self.snapshots: list[ScriptedSnapshot] = []
 
     def script(self, operation: str, *values: Any) -> ScriptedPage:
         self.scripts[operation] = Script(values)
@@ -438,7 +500,7 @@ class ScriptedPage:
         *,
         arg: Any = None,
         timeout: int | None = None,
-    ) -> None:
+    ) -> ScriptedSnapshot | None:
         operation = semantic_program_id(expression)
         self.recorder.record(
             "wait_for_function",
@@ -447,7 +509,14 @@ class ScriptedPage:
             arg=arg,
             timeout_ms=timeout,
         )
-        self._take(f"wait_for_function:{operation}", default=None)
+        outcome = self._take(f"wait_for_function:{operation}", default=None)
+        if operation != "message_confirmation_ready":
+            return None
+        snapshot = ScriptedSnapshot(
+            self, f"snapshot-{len(self.snapshots) + 1}", outcome
+        )
+        self.snapshots.append(snapshot)
+        return snapshot
 
     async def wait_for_load_state(
         self, state: str = "load", *, timeout: int | None = None
@@ -520,6 +589,12 @@ class ScriptedPage:
         ]
         assert not live_handles, (
             f"{self.recorder.scenario}: browser handles remain: {live_handles}"
+        )
+        live_snapshots = [
+            snapshot.semantic_id for snapshot in self.snapshots if not snapshot.disposed
+        ]
+        assert not live_snapshots, (
+            f"{self.recorder.scenario}: confirmation snapshots remain: {live_snapshots}"
         )
         self.recorder.assert_no_pending_reads()
 
@@ -596,6 +671,7 @@ def semantic_program_id(program: str) -> str:
     compact = " ".join(program.split())
     checks = (
         ("performance.timeOrigin", "document_origin"),
+        ("element.ownerDocument.location.href", "owner_document_address"),
         ("MAX_HEADING_CONTAINERS", "root_content"),
         ("SIDEBAR_SECTIONS", "sidebar_profiles"),
         ("showAllUrls", "sidebar_profiles"),
@@ -612,7 +688,7 @@ def semantic_program_id(program: str) -> str:
         ("inputType: 'deleteContentBackward'", "message_composer_cleanup"),
         ("pinned.button.click()", "message_submit"),
         ("__linkedinMcpConfirmationCounter", "message_confirmation_prepare"),
-        ("return candidates.length === 1", "message_confirmation_ready"),
+        ("const routeContinues", "message_confirmation_ready"),
         ("confirmations?.delete(arg.token)", "message_confirmation_dispose"),
         ("delete owner.__linkedinMcpComposer", "message_composer_dispose"),
         ("return {ids: ids, scoped", "job_ids"),

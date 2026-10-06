@@ -1,6 +1,12 @@
 """Tests for recognizing and safely reporting proxy failures."""
 
+import asyncio
+from collections.abc import Callable
+from typing import Any
+
 import pytest
+
+from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.core.exceptions import NetworkError, ProxyConnectionError
@@ -169,6 +175,159 @@ class _FakePage:
         if self._error:
             raise self._error
         return "ok"
+
+
+class _Request:
+    def __init__(self, *, navigation=True, frame=None):
+        self.frame = frame
+        self._navigation = navigation
+
+    def is_navigation_request(self):
+        return self._navigation
+
+
+class _ClockPage:
+    """A page whose driver times the whole ``goto``, the way Patchright does.
+
+    *events* are ``(delay_seconds, request)`` from the call. The driver timeout,
+    when one is set, covers those delays and *finish_after*. ``timeout=0`` is
+    the driver's "no limit".
+    """
+
+    def __init__(self, events, *, finish_after, main_frame=None, error=None):
+        self._events = events
+        self._finish_after = finish_after
+        self.main_frame = main_frame
+        self._error = error
+        self._listeners: list[tuple[str, Callable[..., Any]]] = []
+
+    def on(self, event, handler):
+        self._listeners.append((event, handler))
+
+    def remove_listener(self, event, handler):
+        self._listeners = [
+            (found, callback)
+            for found, callback in self._listeners
+            if not (found == event and callback == handler)
+        ]
+
+    async def goto(self, url, **kwargs):
+        timeout = kwargs.get("timeout", 30_000)
+
+        async def body():
+            if self._error is not None:
+                raise self._error
+            elapsed = 0.0
+            for delay, request in self._events:
+                await asyncio.sleep(delay - elapsed)
+                elapsed = delay
+                for event, handler in list(self._listeners):
+                    if event == "request":
+                        handler(request)
+            await asyncio.sleep(self._finish_after)
+            return "ok"
+
+        if not timeout:
+            return await body()
+        return await asyncio.wait_for(body(), timeout / 1000)
+
+
+class TestNavigationBudget:
+    """The 30s budget starts when the request is sent, not when ``goto`` is called.
+
+    A fresh browser on a loaded Windows runner spends the driver's whole 30s
+    before it sends the first feed request. That time is not the navigation,
+    and it is not the ten seconds a held answer has inside the same budget.
+    """
+
+    async def test_a_request_sent_after_the_old_clock_still_completes(self):
+        page = _ClockPage(
+            [(0.25, _Request())],
+            finish_after=0.02,
+        )
+        assert (
+            await goto_reporting_proxy_errors(
+                page, "https://www.linkedin.com/feed/", timeout=100
+            )
+            == "ok"
+        )
+
+    async def test_the_budget_still_bounds_the_answer(self):
+        page = _ClockPage([(0.01, _Request())], finish_after=0.25)
+        with pytest.raises(PlaywrightTimeoutError, match="after the request was sent"):
+            await goto_reporting_proxy_errors(
+                page, "https://www.linkedin.com/feed/", timeout=100
+            )
+
+    async def test_a_request_that_is_never_sent_fails(self, monkeypatch):
+        """A browser that never sends does not wait forever.
+
+        The navigation budget cannot start until the request exists, so the
+        wait for that request has its own cap.
+        """
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.proxy_errors.STARTUP_BUDGET_MS", 50
+        )
+        page = _ClockPage([(2.0, _Request())], finish_after=0.01)
+        with pytest.raises(PlaywrightTimeoutError, match="before the request was sent"):
+            await goto_reporting_proxy_errors(
+                page, "https://www.linkedin.com/feed/", timeout=100
+            )
+
+    async def test_a_subresource_does_not_start_the_budget(self):
+        page = _ClockPage(
+            [
+                (0.01, _Request(navigation=False)),
+                (0.2, _Request()),
+            ],
+            finish_after=0.02,
+        )
+        assert (
+            await goto_reporting_proxy_errors(
+                page, "https://www.linkedin.com/feed/", timeout=150
+            )
+            == "ok"
+        )
+
+    async def test_an_iframe_navigation_does_not_start_the_budget(self):
+        main = object()
+        page = _ClockPage(
+            [
+                (0.01, _Request(frame=object())),
+                (0.30, _Request(frame=main)),
+            ],
+            finish_after=0.02,
+            main_frame=main,
+        )
+        assert (
+            await goto_reporting_proxy_errors(
+                page, "https://www.linkedin.com/feed/", timeout=200
+            )
+            == "ok"
+        )
+
+    async def test_the_main_frame_starts_the_budget(self):
+        main = object()
+        page = _ClockPage(
+            [(0.01, _Request(frame=main))],
+            finish_after=0.25,
+            main_frame=main,
+        )
+        with pytest.raises(PlaywrightTimeoutError, match="after the request was sent"):
+            await goto_reporting_proxy_errors(
+                page, "https://www.linkedin.com/feed/", timeout=100
+            )
+
+    async def test_a_proxy_failure_on_a_reporting_page_is_still_converted(
+        self, proxy_config
+    ):
+        page = _ClockPage(
+            [],
+            finish_after=0,
+            error=Exception("net::ERR_PROXY_CONNECTION_FAILED"),
+        )
+        with pytest.raises(ProxyConnectionError):
+            await goto_reporting_proxy_errors(page, "https://www.linkedin.com/login")
 
 
 class TestUsernameIsTreatedAsSecret:

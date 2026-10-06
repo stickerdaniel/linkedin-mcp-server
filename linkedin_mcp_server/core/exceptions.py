@@ -84,6 +84,28 @@ class ProxyConnectionError(NetworkError):
     pass
 
 
+class OffLinkedInLandingError(NetworkError):
+    """A navigation ended on a page LinkedIn did not serve.
+
+    A captive portal, a proxy interstitial or a web filter answers in
+    LinkedIn's place, and its page would otherwise be read as the profile or
+    job that was asked for. A network error and not an ``AuthenticationError``
+    for the same reason as :class:`ProxyConnectionError`: the stored session
+    says nothing about the network in front of it, and the login that recovery
+    would open has to go through the very page that is in the way.
+    """
+
+    def __init__(self, landed_on: str):
+        super().__init__(
+            f"The browser landed on {landed_on} instead of LinkedIn, so nothing "
+            "was read. A captive portal, proxy or network filter is likely "
+            "answering in LinkedIn's place. Open linkedin.com in a normal "
+            "browser on this network, clear whatever page it shows, then retry. "
+            "The stored LinkedIn session was kept."
+        )
+        self.landed_on = landed_on
+
+
 class PageReadError(LinkedInOperationError):
     """Raised when reading a page fails for various reasons."""
 

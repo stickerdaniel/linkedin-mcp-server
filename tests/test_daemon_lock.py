@@ -438,10 +438,10 @@ class TestHandoff:
         def refuse(*args: object, **kwargs: object) -> None:
             raise OSError("cannot mark inheritable")
 
-        monkeypatch.setattr(os, "set_inheritable", refuse)
-        with pytest.raises(OSError):
-            lock.inheritable_copy()
-        monkeypatch.undo()
+        with monkeypatch.context() as scoped:
+            scoped.setattr(os, "set_inheritable", refuse)
+            with pytest.raises(OSError):
+                lock.inheritable_copy()
 
         lock.release()
 
@@ -465,10 +465,10 @@ class TestHandoff:
         def refuse(*args: object, **kwargs: object) -> None:
             raise OSError("cannot clear inheritance")
 
-        monkeypatch.setattr(os, "set_inheritable", refuse)
-        with pytest.raises(DaemonLockError, match="could not be taken over"):
-            DaemonLock(tmp_path).adopt(inherited)
-        monkeypatch.undo()
+        with monkeypatch.context() as scoped:
+            scoped.setattr(os, "set_inheritable", refuse)
+            with pytest.raises(DaemonLockError, match="could not be taken over"):
+                DaemonLock(tmp_path).adopt(inherited)
 
         successor = DaemonLock(tmp_path)
         assert successor.try_acquire(), "the lock was left held by nobody"

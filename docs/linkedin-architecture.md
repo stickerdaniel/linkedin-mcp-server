@@ -21,7 +21,7 @@ a page-owning collaborator.
 | `connection` | `ActionSignals`, `ConnectionState`, `detect_connection_state()` | `browser-free` |
 | `connection_actions` | `ACTION_SIGNALS_JS`, `CLICK_INCOMING_ACCEPT_JS`, `ConnectionActions`, `OPEN_MORE_BUTTON_JS`, `ReadMainProfile` | `page-owning` |
 | `content` | `PageContentReader` | `page-owning` |
-| `contracts` | `ExtractedSection`, `FilterValidationError`, `RATE_LIMITED_SECTION_TEXT`, `SEND_INTERRUPTED_WARNING`, `message_action_result()`, `rate_limited_section_error()`, `refuse_an_invalid_message()` | `browser-free` |
+| `contracts` | `ExtractedSection`, `FilterValidationError`, `RATE_LIMITED_SECTION_TEXT`, `SEND_INTERRUPTED_WARNING`, `before_the_reply_deadline()`, `message_action_result()`, `normalize_message_text()`, `rate_limited_section_error()`, `refuse_an_invalid_message()` | `browser-free` |
 | `conversations` | `ConversationReader`, `strip_select_conversation_prefix()` | `page-owning` |
 | `extractor` | `LinkedInExtractor` | `page-owning` |
 | `feed` | `FeedReader` | `page-owning` |
@@ -29,14 +29,14 @@ a page-owning collaborator.
 | `fields` | `COMPANY_SECTIONS`, `PERSON_SECTIONS`, `parse_company_sections()`, `parse_person_sections()` | `browser-free` |
 | `identifiers` | `company_page_url()`, `job_view_url()`, `messaging_thread_url()`, `normalize_company_identifier()`, `normalize_job_id()`, `normalize_opaque_id()`, `normalize_person_identifier()`, `normalize_profile_urn()`, `normalize_thread_id()`, `person_profile_url()` | `browser-free` |
 | `job_pages` | `APPLY_READY_JS`, `APPLY_SIGNALS_JS`, `JOB_IDS_JS`, `JobApplyRead`, `JobPageCapture`, `JobPageReader`, `PROMOTED_JOB_IDS_JS` | `page-owning` |
-| `job_policy` | `ApplyType`, `JOB_SEARCH_PATHS`, `RESULTS_PER_LINKEDIN_PAGE`, `SAFETY_REDIRECT_PATH`, `SAVED_JOBS_PAGE_SIZE`, `SAVED_JOBS_PATHS`, `SAVED_JOBS_URL`, `SCROLL_BUDGET_TOTAL`, `SCROLL_DEADLINE_MAX`, `SEARCH_TIMEOUT_FRACTION`, `apply_link_missing_section_error()`, `dropped_filters_section_error()`, `dropped_offset_section_error()`, `employer_apply_url()`, `label_similar_jobs()`, `lost_keywords_section_error()`, `missing_description_section_error()`, `no_matching_jobs_section_error()`, `posting_state()`, `reaches_the_public_internet()`, `reconcile_search_references()`, `route()`, `same_job_search()` | `browser-free` |
+| `job_policy` | `ApplyType`, `JOB_SEARCH_PATHS`, `JobsTrackerStage`, `RESULTS_PER_LINKEDIN_PAGE`, `SAFETY_REDIRECT_PATH`, `SAVED_JOBS_PAGE_SIZE`, `SAVED_JOBS_PATHS`, `SAVED_JOBS_URL`, `SCROLL_BUDGET_TOTAL`, `SCROLL_DEADLINE_MAX`, `SEARCH_TIMEOUT_FRACTION`, `apply_link_missing_section_error()`, `dropped_filters_section_error()`, `dropped_offset_section_error()`, `employer_apply_url()`, `label_similar_jobs()`, `lost_keywords_section_error()`, `missing_description_section_error()`, `no_matching_jobs_section_error()`, `posting_state()`, `reaches_the_public_internet()`, `reconcile_search_references()`, `route()`, `same_job_search()` | `browser-free` |
 | `jobs` | `JobReader` | `browser-free` |
 | `link_metadata` | `JOB_PATH_RE`, `RawReference`, `Reference`, `ReferenceKind`, `build_references()`, `choose_reference_text()`, `classify_link()`, `clean_heading()`, `clean_label()`, `dedupe_references()`, `derive_context()`, `normalize_reference()`, `normalize_url()` | `browser-free` |
 | `message_sender` | `MessageSender` | `page-owning` |
 | `navigation` | `PageNavigator`, `WaitUntil` | `page-owning` |
 | `person` | `PersonReader` | `page-owning` |
 | `posts` | `PostSearch` | `browser-free` |
-| `profile_page` | `MessageTarget`, `MessageTargetResolution`, `ProfilePageReader`, `ReadMessageTarget` | `page-owning` |
+| `profile_page` | `MessageTarget`, `MessageTargetResolution`, `ProfilePageReader`, `ReadMessageTarget` | `browser-free` |
 | `search_urls` | `CONTENT_DATE_POSTED_MAP`, `EXPERIENCE_LEVEL_MAP`, `JOB_DATE_POSTED_MAP`, `JOB_TYPE_MAP`, `NETWORK_TOKENS`, `SORT_BY_MAP`, `WORK_TYPE_MAP`, `build_company_search_url()`, `build_content_search_url()`, `build_job_search_url()`, `build_people_search_url()` | `browser-free` |
 | `session` | `NAV_DELAY`, `PageSession` | `page-owning` |
 | `text` | `DETAIL_CAPTURE_EN_US`, `DetailCaptureTextTable`, `JOB_APPLY_EN_US`, `JOB_POSTING_EN_US`, `JOB_SEARCH_EN_US`, `JobApplyTextTable`, `JobPostingTextTable`, `JobSearchTextTable`, `SIDEBAR_CHROME_EN`, `SidebarChromeTable`, `filter_linkedin_noise_lines()`, `strip_conversation_chrome()`, `strip_linkedin_noise()`, `truncate_linkedin_noise()` | `browser-free` |
@@ -51,7 +51,7 @@ a page-owning collaborator.
 - `content` -> `session`, `text`
 - `contracts` -> `identifiers`, `link_metadata`
 - `conversations` -> `content`, `identifiers`, `link_metadata`, `navigation`, `profile_page`, `session`, `text`
-- `extractor` -> `capture`, `company`, `connection_actions`, `content`, `contracts`, `conversations`, `feed`, `job_pages`, `jobs`, `message_sender`, `navigation`, `person`, `posts`, `profile_page`, `session`, `text`
+- `extractor` -> `capture`, `company`, `connection_actions`, `content`, `contracts`, `conversations`, `feed`, `job_pages`, `job_policy`, `jobs`, `message_sender`, `navigation`, `person`, `posts`, `profile_page`, `session`, `text`
 - `feed` -> `content`, `contracts`, `feed_payload`, `navigation`, `session`, `text`
 - `feed_payload` -> `link_metadata`
 - `fields` -> `capture`

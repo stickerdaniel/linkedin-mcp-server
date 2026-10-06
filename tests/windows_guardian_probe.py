@@ -227,6 +227,22 @@ def sample_guardian_loss_progress(
     if "guardian_exit_observed_ns" not in observation and not guardian_active():
         observation["guardian_exit_observed_ns"] = clock_ns()
     if "lease_observed_ns" not in observation and lease_signaled():
+        # The guardian can exit between the liveness read above and the lease
+        # read, so ask its retained handle again before stamping the lease.
+        # A guardian seen gone here makes one consistent observation of exit
+        # and acquisition, which is the claim; the kernel's order of the two
+        # was never sampled. A handle not yet signalled fails the measurement
+        # and is recorded so that no later exit can make the pair look
+        # ordered. It is not proof that guardian code still ran: Windows may
+        # release the lock during process rundown before the process object
+        # signals, and this sample cannot tell those apart.
+        if "guardian_exit_observed_ns" not in observation:
+            if guardian_active():
+                observation["lease_observed_ns"] = clock_ns()
+                raise RuntimeError(
+                    "lease acquisition was observed before guardian exit"
+                )
+            observation["guardian_exit_observed_ns"] = clock_ns()
         observation["lease_observed_ns"] = clock_ns()
     if not {"guardian_exit_observed_ns", "lease_observed_ns"} <= observation.keys():
         return None
@@ -2551,20 +2567,28 @@ def retain_stable_browser_inventory[T](
     while True:
         provisional: dict[int, T] = {}
         first_error: BaseException | None = None
+        vanished: BaseException | None = None
         try:
             cdp_a = normalize_cdp_processes(sample_cdp())
             job_a = sample_job_pids()
             for pid in sorted(job_a):
-                handle = open_handle(pid)
+                try:
+                    handle = open_handle(pid)
+                except BaseException as exc:
+                    if not _member_exited_before_open(exc, pid):
+                        raise
+                    vanished = exc
+                    break
                 provisional[pid] = handle
                 validate_handle(pid, handle)
-            cdp_b = normalize_cdp_processes(sample_cdp())
-            job_b = sample_job_pids()
-            if cdp_a == cdp_b and job_a == job_b == set(provisional):
-                require_browser_inventory(cdp_b, set(provisional), driver_pid)
-                for pid, handle in provisional.items():
-                    validate_handle(pid, handle)
-                return cdp_b, provisional
+            if vanished is None:
+                cdp_b = normalize_cdp_processes(sample_cdp())
+                job_b = sample_job_pids()
+                if cdp_a == cdp_b and job_a == job_b == set(provisional):
+                    require_browser_inventory(cdp_b, set(provisional), driver_pid)
+                    for pid, handle in provisional.items():
+                        validate_handle(pid, handle)
+                    return cdp_b, provisional
         except BaseException as exc:
             first_error = exc
         if first_error is not None:
@@ -2572,11 +2596,40 @@ def retain_stable_browser_inventory[T](
                 with contextlib.suppress(BaseException):
                     close_handle(handle)
             raise first_error
+        # A retry starts from no handles at all, so a close that fails ends the
+        # census instead of carrying a handle it could not release into the next.
+        close_error: BaseException | None = None
         for handle in provisional.values():
-            close_handle(handle)
+            try:
+                close_handle(handle)
+            except BaseException as exc:
+                close_error = close_error or exc
+        if close_error is not None:
+            raise close_error
         if monotonic() >= deadline:
-            raise TimeoutError("browser process census did not become quiescent")
+            raise TimeoutError(
+                "browser process census did not become quiescent"
+            ) from vanished
         wait_for_retry()
+
+
+_ERROR_INVALID_PARAMETER = 87
+
+
+def _member_exited_before_open(exc: BaseException, pid: int) -> bool:
+    """Whether ``OpenProcess`` refused a Job member because it had already gone.
+
+    The census enumerates the Job and then opens each PID, and a member that
+    exits in between is answered with ERROR_INVALID_PARAMETER, the same code
+    psutil reads as "no such process". That is churn, and only that: 87 from
+    any other call, or for a PID that was never a process ID, is a real fault,
+    and so is every other code, AccessDenied included.
+    """
+    return (
+        pid > 0
+        and getattr(exc, "funcname", None) == "OpenProcess"
+        and getattr(exc, "winerror", None) == _ERROR_INVALID_PARAMETER
+    )
 
 
 def wait_handles_to_deadline[T](

@@ -30,6 +30,7 @@ from linkedin_mcp_server.linkedin.contracts import (
 )
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.session import PageSession
+from .support.navigation import held_in
 from linkedin_mcp_server.linkedin.text import (
     JOB_POSTING_EN_US,
     DetailCaptureTextTable,
@@ -725,6 +726,7 @@ class TestActivityFeedExtraction:
         show_more.scroll_into_view_if_needed = AsyncMock()
         show_more.click = AsyncMock()
         show_more.first = show_more
+        held_in(show_more)
         show_more.filter = MagicMock(return_value=show_more)
 
         def locator_side_effect(selector):
@@ -775,6 +777,7 @@ class TestActivityFeedExtraction:
         show_more.scroll_into_view_if_needed = AsyncMock()
         show_more.click = AsyncMock()
         show_more.first = show_more
+        held_in(show_more)
         show_more.filter = MagicMock(return_value=show_more)
 
         def locator_side_effect(selector):
@@ -832,6 +835,7 @@ class TestActivityFeedExtraction:
         show_more.scroll_into_view_if_needed = AsyncMock()
         show_more.click = AsyncMock()
         show_more.first = show_more
+        held_in(show_more)
         show_more.filter = MagicMock(return_value=show_more)
 
         def locator_side_effect(selector):
@@ -880,6 +884,7 @@ class TestActivityFeedExtraction:
         show_more.count = AsyncMock(return_value=1)
         show_more.click = AsyncMock()
         show_more.first = show_more
+        held_in(show_more)
         show_more.filter = MagicMock(return_value=show_more)
 
         def locator_side_effect(selector):

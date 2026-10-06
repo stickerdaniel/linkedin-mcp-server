@@ -141,3 +141,26 @@ class TestScrollDeadline:
         await scroll_job_sidebar(page, deadline=0.0004)
 
         assert page.wait_for_selector.await_args.kwargs["timeout"] == 1
+
+    async def test_a_deadline_spent_releasing_the_rail_still_ends_the_call(self):
+        """Releasing the rail handle is shielded, so a tool deadline that falls
+        inside it would otherwise be swallowed and the scroll return normally
+        after the caller's time was up."""
+        import asyncio
+
+        import anyio
+
+        page = self._page()
+        holder = MagicMock()
+
+        async def slow_dispose() -> None:
+            await asyncio.sleep(0.3)
+
+        holder.dispose = AsyncMock(side_effect=slow_dispose)
+        page.evaluate_handle = AsyncMock(return_value=holder)
+
+        with pytest.raises(TimeoutError):
+            with anyio.fail_after(0.1):
+                await scroll_job_sidebar(page)
+
+        holder.dispose.assert_awaited_once()

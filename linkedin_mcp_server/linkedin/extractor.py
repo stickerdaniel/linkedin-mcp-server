@@ -19,6 +19,7 @@ from linkedin_mcp_server.linkedin.contracts import (
 from linkedin_mcp_server.linkedin.conversations import ConversationReader
 from linkedin_mcp_server.linkedin.feed import FeedReader
 from linkedin_mcp_server.linkedin.job_pages import JobPageReader
+from linkedin_mcp_server.linkedin.job_policy import JobsTrackerStage
 from linkedin_mcp_server.linkedin.jobs import JobReader
 from linkedin_mcp_server.linkedin.message_sender import MessageSender
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
@@ -188,9 +189,11 @@ class LinkedInExtractor:
             tool_timeout,
         )
 
-    async def get_saved_jobs(self, max_pages: int = 3) -> dict[str, Any]:
-        """List the authenticated user's saved job postings."""
-        return await self._jobs.get_saved_jobs(max_pages)
+    async def get_saved_jobs(
+        self, max_pages: int = 3, stage: JobsTrackerStage = "saved"
+    ) -> dict[str, Any]:
+        """List the authenticated user's jobs at one job-tracker stage."""
+        return await self._jobs.get_saved_jobs(max_pages, stage)
 
     async def search_people(
         self,

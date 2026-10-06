@@ -24,9 +24,9 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
   </picture>
 </a>
 
-> Prefer not to run a server? [**Cadenza**](https://cadenza.page/?utm_source=github&utm_medium=readme&utm_campaign=oss_sponsor&utm_content=name) is the hosted LinkedIn MCP server for your agents, on web, desktop, and mobile, with 100+ actions across LinkedIn Classic, Sales Navigator, and Recruiter. Set your own limits and build workflows around your professional network.
+> Prefer not to run a server? [**Cadenza**](https://cadenza.page/?utm_source=github&utm_medium=readme&utm_campaign=oss_sponsor&utm_content=name) is the hosted LinkedIn MCP server for your agents, on web, desktop, and mobile, with 100+ actions across LinkedIn Classic, Sales Navigator, and Recruiter. You decide how many requests of each type it sends to your account per minute and per day.
 
-Use code <strong>FOUNDING20</strong> for 20% off your first year <a href="https://cadenza.page/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=oss_sponsor&amp;utm_content=cta">Try Cadenza →</a>
+Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https://cadenza.page/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=oss_sponsor&amp;utm_content=cta">Try Cadenza →</a>
 
 <br/>
 

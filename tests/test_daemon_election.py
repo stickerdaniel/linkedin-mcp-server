@@ -376,7 +376,9 @@ class TestLiveness:
         assert outcome.worth_connecting
         assert not outcome.started_owner
 
-    def test_a_corpse_is_not_probed_over_and_over(self, tmp_path: Path):
+    def test_a_corpse_is_not_probed_over_and_over(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         # The descriptor stays on disk until a live owner overwrites it, so a
         # loop that re-read it would probe the same dead endpoint every pass.
         # Each probe is a network timeout, which is how a fail-fast path turns
@@ -385,6 +387,11 @@ class TestLiveness:
         config = _config(profile)
         auth_root = profile.parent
         _publish_stale_owner(auth_root, profile, config)
+        # A real start would key its state under the account's own home, out of
+        # this test's reach. Failing it leaves the dead endpoint the only one.
+        monkeypatch.setattr(
+            election_module, "_start_owner", lambda *a, **k: _Attempt.FAILED
+        )
 
         probes: list[Attachment] = []
 
@@ -583,7 +590,9 @@ class TestSilenceIsNotDeath:
         assert silent.attachment_lookup.reason != refused.attachment_lookup.reason
         assert not silent.worth_connecting
 
-    def test_a_refusal_still_buries_on_the_first_probe(self, tmp_path: Path):
+    def test_a_refusal_still_buries_on_the_first_probe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         """The corpse path keeps its fail-fast, and the grace does not leak into it.
 
         Written as "would have answered next time" rather than "never answers":
@@ -596,6 +605,11 @@ class TestSilenceIsNotDeath:
         config = _config(profile)
         auth_root = profile.parent
         _publish_stale_owner(auth_root, profile, config)
+        # A real start would key its state under the account's own home, out of
+        # this test's reach. Failing it leaves the buried endpoint the only one.
+        monkeypatch.setattr(
+            election_module, "_start_owner", lambda *a, **k: _Attempt.FAILED
+        )
 
         probes: list[Attachment] = []
 
@@ -616,7 +630,7 @@ class TestSilenceIsNotDeath:
         assert not outcome.worth_connecting
 
     def test_an_owner_that_never_answers_does_not_outlast_the_deadline(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         """Nothing is buried now, so the deadline is the only thing bounding this.
 
@@ -631,6 +645,12 @@ class TestSilenceIsNotDeath:
 
         held = DaemonLock(auth_root)
         assert held.try_acquire(), "could not simulate the frozen owner's lock"
+        # What a real child reports against that lock. A real one would look
+        # for it under the account's own home, find none, and leave its state
+        # there instead.
+        monkeypatch.setattr(
+            election_module, "_start_owner", lambda *a, **k: _Attempt.CONTENDED
+        )
         try:
             began = time.monotonic()
             outcome = obtain_owner(
@@ -746,18 +766,30 @@ class TestRetryPacing:
         auth_root = profile.parent
         stale = _publish_stale_owner(auth_root, profile, config)
 
+        paced = threading.Event()
+        abandoned = threading.Event()
         published = threading.Event()
+        publishers: list[threading.Thread] = []
         fresh: list[str] = []
+
+        def paced_sleep(seconds: float) -> None:
+            paced.set()
+            time.sleep(seconds)
 
         def replace_after_burial(*_args: object, **_kwargs: object) -> _Attempt:
             # Stands in for the owner a real start would have produced: the
-            # descriptor is replaced while the loop is inside its paced wait.
+            # descriptor is replaced once the loop is inside its paced wait, so
+            # the wait's first read cannot be what finds it.
             def publish_later() -> None:
-                time.sleep(0.1)
+                if not paced.wait(_PARKED) or abandoned.is_set():
+                    return
                 fresh.append(_publish_stale_owner(auth_root, profile, config))
                 published.set()
 
-            threading.Thread(target=publish_later, daemon=True).start()
+            paced.clear()
+            publisher = threading.Thread(target=publish_later, daemon=True)
+            publishers.append(publisher)
+            publisher.start()
             return _Attempt.FAILED
 
         seen: list[str] = []
@@ -778,14 +810,28 @@ class TestRetryPacing:
         # At the production 0.2s the loop would come round again on its own and
         # a wait that simply slept would look identical to one that watched.
         monkeypatch.setattr(election_module, "_RETRY_SECONDS", 4.0)
+        monkeypatch.setattr(
+            election_module,
+            "time",
+            SimpleNamespace(monotonic=time.monotonic, sleep=paced_sleep),
+        )
 
         began = time.monotonic()
-        outcome = obtain_owner(
-            auth_root, profile, config, deadline_seconds=8.0, connect=reach
-        )
-        elapsed = time.monotonic() - began
+        try:
+            outcome = obtain_owner(
+                auth_root, profile, config, deadline_seconds=8.0, connect=reach
+            )
+            # Before the publisher is waited for: the descriptor is visible
+            # before its thread returns, and that return is not what is timed.
+            elapsed = time.monotonic() - began
+            assert published.wait(2.0), "the replacement was never published"
+        finally:
+            abandoned.set()
+            paced.set()
+            for publisher in publishers:
+                publisher.join(timeout=2.0)
+        assert not any(publisher.is_alive() for publisher in publishers)
 
-        assert published.is_set()
         assert outcome.worth_connecting, "the replacement generation was never seen"
         assert seen == [stale, fresh[0]]
         # One poll interval past publication, not the whole of the wait it landed
@@ -878,11 +924,14 @@ class TestFailingFast:
         monkeypatch.setattr(election_module, "_MAX_OWNER_START_RETRY_SECONDS", 0.2)
 
         started = time.monotonic()
+        # Far past the handback bound, so the start is always reached; a slow
+        # first descriptor read could spend a 10ms budget before it. The bound
+        # below, not the budget, is what this asserts.
         outcome = obtain_owner(
             auth_root,
             profile,
             config,
-            deadline_seconds=0.01,
+            deadline_seconds=5.0,
             settlement_seconds=0,
             connect=lambda attachment, timeout: Reach.REFUSED,
         )
@@ -3234,6 +3283,20 @@ class TestSpawnCleanupBoundary:
             ).close()
 
 
+def _await_fixture_imports(child: subprocess.Popen[Any], imported: Path) -> None:
+    """Hold a fixture owner's spawn until its interpreter has imported the server.
+
+    Startup's bound is for the owner, not for the interpreter loading the
+    package under a loaded test run, which alone can spend all five seconds
+    before ``main`` runs the behaviour a test is about.
+    """
+    deadline = time.monotonic() + 30.0
+    while not imported.exists():
+        assert child.poll() is None, "the fixture owner exited during its imports"
+        assert time.monotonic() < deadline, "the fixture owner never finished importing"
+        time.sleep(0.01)
+
+
 class TestAtomicStartupCommit:
     @pytest.fixture(autouse=True)
     def _stop_fake_groups(self, monkeypatch: pytest.MonkeyPatch):
@@ -4063,6 +4126,7 @@ class TestAtomicStartupCommit:
         monkeypatch.setattr(daemon_descriptor_module, "_account_home", lambda: home)
         log_path = daemon_owner.daemon_log_path(auth_root)
         bootstrap = tmp_path / "failing_owner.py"
+        imported = tmp_path / "owner-imported"
         bootstrap.write_text(
             "import sys\n"
             "from pathlib import Path\n"
@@ -4075,6 +4139,7 @@ class TestAtomicStartupCommit:
             "def fail_logging(**kwargs):\n"
             "    raise RuntimeError('failed after log attachment')\n"
             "daemon_owner.configure_logging = fail_logging\n"
+            "Path(sys.argv[2]).write_text('imported')\n"
             "raise SystemExit(daemon_owner.main([]))\n"
         )
         children: list[subprocess.Popen[Any]] = []
@@ -4082,9 +4147,10 @@ class TestAtomicStartupCommit:
 
         def capture(command: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
             if command[-2:] == ["-m", "linkedin_mcp_server.daemon_owner"]:
-                command = [command[0], str(bootstrap), str(home)]
+                command = [command[0], str(bootstrap), str(home), str(imported)]
             child = real(command, **kwargs)
             children.append(child)
+            _await_fixture_imports(child, imported)
             return child
 
         monkeypatch.setattr(election_module.subprocess, "Popen", capture)
@@ -4122,6 +4188,7 @@ class TestAtomicStartupCommit:
         os.mkfifo(log_path)
         bootstrap = tmp_path / "blocked_log_owner.py"
         marker = tmp_path / "opening-log"
+        imported = tmp_path / "owner-imported"
         home = daemon_descriptor_module._account_home()
         bootstrap.write_text(
             "import sys\n"
@@ -4133,6 +4200,7 @@ class TestAtomicStartupCommit:
             "    Path(sys.argv[2]).write_text('opening')\n"
             "    return attach(root)\n"
             "daemon_owner._attach_daemon_log = marked\n"
+            "Path(sys.argv[3]).write_text('imported')\n"
             "raise SystemExit(daemon_owner.main([]))\n"
         )
         children: list[subprocess.Popen[Any]] = []
@@ -4140,9 +4208,16 @@ class TestAtomicStartupCommit:
 
         def capture(command: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
             if command[-2:] == ["-m", "linkedin_mcp_server.daemon_owner"]:
-                command = [command[0], str(bootstrap), str(home), str(marker)]
+                command = [
+                    command[0],
+                    str(bootstrap),
+                    str(home),
+                    str(marker),
+                    str(imported),
+                ]
             child = real(command, **kwargs)
             children.append(child)
+            _await_fixture_imports(child, imported)
             return child
 
         monkeypatch.setattr(election_module.subprocess, "Popen", capture)
@@ -5444,6 +5519,16 @@ class TestRealOwner:
         waited: list[subprocess.Popen[str]] = []
 
         def spawn(*args: Any, **kwargs: Any) -> subprocess.Popen[str]:
+            # The patch is process-wide, and the interpreter spawns children of
+            # its own (``ctypes.util`` runs ``/sbin/ldconfig -p`` on Linux).
+            # Only a frontend is failed, tracked or wrapped; a ninth frontend
+            # still counts.
+            command = args[0] if args else kwargs.get("args")
+            if not (
+                isinstance(command, list)
+                and command[:3] == [sys.executable, "-c", _INSPECT_OWNER]
+            ):
+                return popen(*args, **kwargs)
             if failure == "spawn" and len(running) == 2:
                 raise OSError("frontend spawn failed")
             child = popen(*args, **kwargs)
@@ -5993,7 +6078,7 @@ class TestRealOwner:
             _stop(result.get("pid"))
 
     def test_a_proxy_refuses_an_owner_it_has_the_wrong_token_for(
-        self, real_state_root: Path
+        self, real_state_root: Path, monkeypatch: pytest.MonkeyPatch
     ):
         """The credential is load-bearing, not decoration.
 
@@ -6006,9 +6091,26 @@ class TestRealOwner:
         import dataclasses
 
         from fastmcp import Client
+        from mcp import MCPError
 
+        from linkedin_mcp_server import daemon_proxy
         from linkedin_mcp_server.daemon import look_up_owner
         from linkedin_mcp_server.server import ServerRole, create_mcp_server
+
+        # What the proxy's recovery was handed, because the client no longer
+        # reads it: a failure recognised as the owner's reaches the client as a
+        # fixed sentence about a lost owner, whatever the owner answered.
+        seen: list[BaseException] = []
+        recognise = daemon_proxy.unreachable_owner_in
+
+        def recording(exc: BaseException) -> Any:
+            current: BaseException | None = exc
+            while current is not None:
+                seen.append(current)
+                current = current.__cause__
+            return recognise(exc)
+
+        monkeypatch.setattr(daemon_proxy, "unreachable_owner_in", recording)
 
         profile = real_state_root
         result = _run_frontend(profile)
@@ -6024,9 +6126,6 @@ class TestRealOwner:
             )
 
             async def served() -> None:
-                # The handshake era, because only there does the proxy's own
-                # error text reach its client; the 2026-07-28 era answers any
-                # failure that is not an `MCPError` with "Internal server error".
                 async with Client(proxy, mode="legacy") as client:
                     await client.list_tools()
 
@@ -6049,8 +6148,13 @@ class TestRealOwner:
             # becomes "Server returned an error response", which is written only
             # once a response of 400 or more has arrived. Which status it was is
             # asked of the owner directly, with the same token.
-            with pytest.raises(Exception, match="Server returned an error response"):
+            with pytest.raises(Exception, match="could not reach a new one"):
                 asyncio.run(served())
+            assert any(
+                isinstance(exc, MCPError)
+                and exc.message == "Server returned an error response"
+                for exc in seen
+            ), seen
             assert asyncio.run(asked_directly()) == 401
         finally:
             _stop(result.get("pid"))

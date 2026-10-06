@@ -2188,7 +2188,7 @@ class _RepairScene(_CalibrationScene):
         self.lose_on_close = False
         monkeypatch.setattr(harness, "wait_for_no_browser", self._no_browser)
 
-    def _no_browser(self, account: Any, seconds: float) -> list[int]:
+    def _no_browser(self, account: Any, seconds: float, **_identity: Any) -> list[int]:
         """The double's login is the only browser there is."""
         login = self.login
         if login is not None:

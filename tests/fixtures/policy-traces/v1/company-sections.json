@@ -99,7 +99,7 @@
       "call": "read_company",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5"
+      "program_digest": "e6b2be4ebddd"
     },
     {
       "call": "read_company",
@@ -203,7 +203,7 @@
       "call": "read_company",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5"
+      "program_digest": "e6b2be4ebddd"
     },
     {
       "call": "read_company",
@@ -299,7 +299,7 @@
       "call": "read_company",
       "kind": "evaluate",
       "operation": "root_content",
-      "program_digest": "e8a0e21ac6f5"
+      "program_digest": "e6b2be4ebddd"
     },
     {
       "call": "read_company",

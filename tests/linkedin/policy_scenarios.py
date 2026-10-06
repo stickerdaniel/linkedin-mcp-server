@@ -60,6 +60,7 @@ _COMMON_ALLOWED = {
     "handle.as_element",
     "handle.dispose",
     "handle.evaluate",
+    "handle.json_value",
     "keyboard.press",
     "keyboard.type",
     "listener.add",
@@ -724,7 +725,9 @@ async def _occupied_message_scenario(*, restored_during_write: bool) -> dict[str
     )
 
 
-async def _messaging_submission_scenario(outcome: str) -> dict[str, Any]:
+async def _messaging_submission_scenario(
+    outcome: str, message: str = "New text"
+) -> dict[str, Any]:
     recorder = TraceRecorder(f"send_message__{outcome}", _COMMON_ALLOWED)
     clock = FakeClock(recorder)
     page = _page(recorder)
@@ -752,7 +755,7 @@ async def _messaging_submission_scenario(outcome: str) -> dict[str, Any]:
             page.script("handle-1.evaluate:message_submit", "clicked")
             page.script(
                 "wait_for_function:message_confirmation_ready",
-                None
+                {"path": "/messaging/thread/2-policy-thread==/"}
                 if outcome == "sent"
                 else PlaywrightTimeoutError("same-node transition not observed"),
             )
@@ -762,16 +765,13 @@ async def _messaging_submission_scenario(outcome: str) -> dict[str, Any]:
     async with boundaries(recorder, clock):
         with recorder.context("send_message", "message"):
             result = await extractor.send_message(
-                "ada-lovelace", "New text", confirm_send=True
+                "ada-lovelace", message, confirm_send=True
             )
     page.assert_clean()
-    return recorder.trace(
-        {
-            "method": "send_message",
-            "arguments": {"confirm_send": True, "submission_outcome": outcome},
-        },
-        result,
-    )
+    arguments: dict[str, Any] = {"confirm_send": True, "submission_outcome": outcome}
+    if message != "New text":
+        arguments["message"] = message
+    return recorder.trace({"method": "send_message", "arguments": arguments}, result)
 
 
 async def _messaging_cancellation_scenario() -> dict[str, Any]:
@@ -1168,9 +1168,12 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         ),
         "message-unconfirmed.json": await _messaging_submission_scenario("unconfirmed"),
         "message-sent.json": await _messaging_submission_scenario("sent"),
+        "message-multiline-sent.json": await _messaging_submission_scenario(
+            "sent", "First\r\n \r\nSecond\n"
+        ),
         "message-cancelled.json": await _messaging_cancellation_scenario(),
         "message-blank.json": await _invalid_message_scenario("   ", "blank"),
-        "message-c0.json": await _invalid_message_scenario("line\nbreak", "c0"),
+        "message-c0.json": await _invalid_message_scenario("before\tafter", "c0"),
         "message-del.json": await _invalid_message_scenario("text\x7f", "del"),
         "connect.json": await _connect_scenario(),
         "get-my-profile.json": await _get_my_profile_scenario(),

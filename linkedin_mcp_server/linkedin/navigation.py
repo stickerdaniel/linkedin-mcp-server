@@ -14,8 +14,14 @@ from linkedin_mcp_server.core.auth import (
     detect_auth_barrier_quick,
     resolve_remember_me_prompt,
 )
+from linkedin_mcp_server.core.destination import (
+    is_linkedin_landing,
+    raise_if_off_linkedin,
+)
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.core.proxy_errors import (
+    NAVIGATION_BUDGET_MS,
+    goto_reporting_proxy_errors,
     raise_if_proxy_error,
     redact_proxy_credentials,
     redacted_copy,
@@ -174,7 +180,22 @@ class PageNavigator:
                 extra={"target_url": url, "wait_until": wait_until},
             )
             try:
-                await page.goto(url, wait_until=wait_until, timeout=30000)
+                # A scripted page records the timeout it was given and does not
+                # enforce it. Only Patchright's clock starts at the call, which
+                # is the clock that expires before a cold browser sends.
+                if type(page).__module__.startswith("patchright."):
+                    await goto_reporting_proxy_errors(
+                        page,
+                        url,
+                        wait_until=wait_until,
+                        timeout=NAVIGATION_BUDGET_MS,
+                    )
+                else:
+                    await page.goto(
+                        url,
+                        wait_until=wait_until,
+                        timeout=NAVIGATION_BUDGET_MS,
+                    )
                 await stabilize_navigation(f"goto {url}", logger)
                 await record_page_trace(
                     page,
@@ -242,6 +263,18 @@ class PageNavigator:
                 # callers that branch on it are unaffected.
                 raise redacted_copy(exc) from None
 
+            # Ahead of the barrier check and the remember-me click, which read
+            # a title and an id that any page can carry. This sees where the
+            # navigation settled, not a redirect that fires later; the content
+            # read checks again for that.
+            if not is_linkedin_landing(page.url):
+                await record_page_trace(
+                    page,
+                    "extractor-off-linkedin",
+                    extra={"target_url": url, "hops": hops},
+                )
+                raise_if_off_linkedin(page.url)
+
             barrier = await detect_auth_barrier_quick(page)
             if not barrier:
                 return
@@ -261,6 +294,11 @@ class PageNavigator:
                 )
                 return
 
+            # The chooser wait gives a redirect time to land, and a chooser it
+            # found on another site was refused rather than clicked. Neither
+            # says the session expired, which the error below would retire it
+            # for.
+            raise_if_off_linkedin(page.url)
             await record_page_trace(
                 page,
                 "extractor-auth-barrier",
