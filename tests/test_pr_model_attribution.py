@@ -44,7 +44,7 @@ def test_workflow_checks_attribution_in_required_job() -> None:
     (step,) = job["steps"]
     assert set(step) == {"name", "uses", "with", "env"}
     assert re.fullmatch(rf"{re.escape(_ACTION)}@[0-9a-f]{{40}}", step["uses"])
-    assert step["with"] == {"model-attribution": "model"}
+    assert step["with"] == {"model-attribution": "host"}
     assert step["env"] == {
         "GUARDRAILS_WORKFLOW_REF": "${{ github.workflow_ref }}",
         "GUARDRAILS_WORKFLOW_SHA": "${{ github.workflow_sha }}",
@@ -64,9 +64,9 @@ def test_template_ends_with_editable_attribution_placeholder() -> None:
     lines = [
         line.strip() for line in _TEMPLATE.read_text().splitlines() if line.strip()
     ]
-    assert lines[-1] == "Generated with [model] for [job] in [harness]."
-    assert '"Generated with <model>" with or without a final period' in lines[-2]
-    assert "detailed form below, which requires its final period" in lines[-2]
+    assert lines[-1] == "Generated with [model] for [job] in [tool] via [host]."
+    assert "name the model, the job, the tool, and the host" in lines[-2]
+    assert "end with a period" in lines[-2]
     assert "coding-agent runtime" in lines[-2]
     assert "in Claude Code via T3 Code" in lines[-2]
 
