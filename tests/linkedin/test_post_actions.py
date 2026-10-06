@@ -42,6 +42,7 @@ PROGRAMS = {
     "actor_open": post_actions.OPEN_ACTOR_PICKER_JS,
     "actor_select": post_actions.SELECT_ACTOR_JS,
     "actor_pin": post_actions.PIN_ACTOR_JS,
+    "refresh_reaction": post_actions.REFRESH_REACTION_CONTROLS_JS,
     "signals": post_actions.POST_ACTION_SIGNALS_JS,
     "can_type": post_actions.CAN_TYPE_EDITOR_JS,
     "react": post_actions.CLICK_REACT_TOGGLE_JS,
@@ -206,6 +207,7 @@ class FakePage:
         answers.setdefault("actor_open", True)
         answers.setdefault("actor_select", "selected")
         answers.setdefault("actor_pin", True)
+        answers.setdefault("refresh_reaction", True)
         if isinstance(answers.get("signals"), list):
             answers["signals"] = [answers["signals"][0], *answers["signals"]]
         self._answers = {name: answers.get(name) for name in PROGRAMS}
@@ -566,7 +568,7 @@ class TestComment:
         assert "press:Enter" not in page.calls
         assert page.editor.text == "First line\nSecond line"
 
-    async def test_text_that_does_not_arrive_verbatim_is_cleared_unsent(self) -> None:
+    async def test_text_that_does_not_arrive_verbatim_is_preserved_unsent(self) -> None:
         # An autocomplete popup eating keystrokes is the live version of this.
         # What must not happen is a submit of whatever did land.
         page = FakePage(
@@ -581,7 +583,7 @@ class TestComment:
         assert result["status"] == "write_failed"
         assert result["acted"] is False
         assert "submit" not in page.calls
-        assert "clear" in page.calls
+        assert "clear" not in page.calls
 
     async def test_an_editor_that_will_not_focus_is_not_typed_into(self) -> None:
         page = FakePage(

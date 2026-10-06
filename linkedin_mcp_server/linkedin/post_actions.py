@@ -48,6 +48,7 @@ from linkedin_mcp_server.linkedin.post_mentions import (
     MENTION_STILL_MATCHES_JS,
 )
 from linkedin_mcp_server.linkedin.post_comments import (
+    COMMENT_HELPERS_JS,
     CLEAR_PREPARED_REPLY_JS,
     PARENT_READINESS_JS,
     READ_COMMENTS_JS,
@@ -55,7 +56,6 @@ from linkedin_mcp_server.linkedin.post_comments import (
     OPEN_REPLY_EDITOR_JS,
     PIN_REPLY_CONTEXT_JS,
 )
-from linkedin_mcp_server.linkedin.post_scope import REPLY_RANGE_JS
 from linkedin_mcp_server.linkedin.session import PageSession
 
 logger = logging.getLogger(__name__)
@@ -360,20 +360,50 @@ function findActionBar(root) {
 # is not evidence a reshare landed. Residual: another member reacting or
 # commenting can still change a bar button's text. `barText` is carried for
 # diagnostics only and no decision reads it.
+_POST_IDENTITY_FN_JS = (
+    r"""
+function postIdentityMatches(root) {
+  const pin = root?.__linkedinMcpPost;
+  if (!root?.isConnected || !pin || pin.route !== location.href ||
+      findPostRoot(pin.postId) !== root ||
+      !pin.rootIdentity?.every(([name, value]) => root.getAttribute(name) === value)) return false;
+  const attributes = """
+    + repr(list(_URN_ATTRIBUTES)).replace("'", '"')
+    + r""";
+  return !attributes.some(name => {
+    const value = root.getAttribute(name)?.trim();
+    return value && /^urn:li:(?:ugcPost|share|activity):[0-9]+$/.test(value) &&
+      !value.endsWith(':' + pin.postId);
+  });
+}
+"""
+)
+
 POST_ACTION_SIGNALS_JS = (
     r"""
-((postId) => {
+((arg) => {
 """
     + _VISIBLE_FN_JS
     + _FIND_POST_ROOT_FN_JS
     + _FIND_ACTION_BAR_FN_JS
     + _REACTION_STATE_FN_JS
+    + _POST_IDENTITY_FN_JS
+    + ACTOR_HELPERS_JS
     + r"""
+  const postId = typeof arg === 'string' ? arg : arg.postId;
   const main = document.querySelector('main');
   if (!main) return {hasMain: false};
-  const root = findPostRoot(postId);
+  const root = typeof arg === 'string' ? findPostRoot(postId) : arg.root;
   if (!root) return {hasMain: true, hasRoot: false};
-  const found = findActionBar(root);
+  let found;
+  if (typeof arg !== 'string') {
+    // After dispatch, a fresh query can observe another actor or remounted
+    // post. A reaction receipt belongs only to this pinned actor and toggle.
+    const pin = root.__linkedinMcpPost;
+    if (!postIdentityMatches(root) || !actorStillMatches(root) || !pin?.bar?.isConnected ||
+        !pin.toggle?.isConnected || !root.contains(pin.bar) || !pin.bar.contains(pin.toggle)) return {hasMain: true, hasRoot: false};
+    found = {bar: pin.bar, toggle: pin.toggle};
+  } else found = findActionBar(root);
   const editors = Array.from(root.querySelectorAll(
     '[role="textbox"][contenteditable="true"]'
   )).filter(visible);
@@ -428,6 +458,10 @@ PIN_POST_ROOT_JS = (
   ).filter(visible);
   root.__linkedinMcpPost = {
     postId: String(postId),
+    rootIdentity: """
+    + repr(list(_URN_ATTRIBUTES)).replace("'", '"')
+    + r""".map(name => [name, root.getAttribute(name)]).filter(([, value]) =>
+      value && /^urn:li:(?:ugcPost|share|activity):[0-9]+$/.test(value.trim())),
     route: window.location.href,
     bar: found.bar,
     toggle: found.toggle,
@@ -454,6 +488,31 @@ REFRESH_POST_ROOT_JS = (
     + "}"
 )
 
+# Actor Save can replace just the bar after identity verification. Before a
+# write, rebind controls only inside the same connected post and acting identity.
+# Never use this after dispatch: receipts must retain the clicked toggle.
+REFRESH_REACTION_CONTROLS_JS = (
+    "root => {"
+    + _HANDLE_ORIGIN_GUARD_JS
+    + _VISIBLE_FN_JS
+    + _FIND_ACTION_BAR_FN_JS
+    + _FIND_POST_ROOT_FN_JS
+    + _POST_IDENTITY_FN_JS
+    + ACTOR_HELPERS_JS
+    + r"""
+  const pin = root?.__linkedinMcpPost;
+  if (!postIdentityMatches(root) || !actorStillMatches(root)) return false;
+  if (pin.bar?.isConnected && pin.toggle?.isConnected &&
+      root.contains(pin.bar) && pin.bar.contains(pin.toggle)) return true;
+  const found = findActionBar(root);
+  if (!found) return false;
+  pin.bar = found.bar;
+  pin.toggle = found.toggle;
+  return true;
+}
+"""
+)
+
 # Click the pinned reaction toggle. Re-verifies the pin and the pressed state
 # inside the same tick as the click: a toggle already pressed would *remove*
 # the reaction, which is the one way this flow could undo something the
@@ -463,10 +522,14 @@ CLICK_REACT_TOGGLE_JS = (
 ((arg) => {
 """
     + _REACTION_STATE_FN_JS
+    + _VISIBLE_FN_JS
+    + _FIND_ACTION_BAR_FN_JS
+    + _FIND_POST_ROOT_FN_JS
+    + _POST_IDENTITY_FN_JS
     + ACTOR_HELPERS_JS
     + r"""
   const pinned = arg.root?.__linkedinMcpPost;
-  if (!pinned || !arg.root.isConnected) return 'unpinned';
+  if (!postIdentityMatches(arg.root)) return 'unpinned';
   if (window.location.href !== pinned.route) return 'unpinned';
   if (!actorStillMatches(arg.root)) return 'actor_changed';
   const toggle = pinned.toggle;
@@ -548,6 +611,22 @@ CAN_TYPE_EDITOR_JS = (
 """
 )
 
+# SDUI can render a separator image and trailing BR after the rich mention.
+# Accept that layout newline only while the exact pinned draft still belongs to us.
+CHECK_MENTION_PREFIX_JS = (
+    "({editor, expected}) => {"
+    + ACTOR_HELPERS_JS
+    + MENTION_STILL_MATCHES_JS
+    + r"""
+  const root = editor?.__linkedinMcpScope;
+  if (!editor?.isConnected || !root?.contains(editor) || !actorStillMatches(root) ||
+      !editor.__linkedinMcpMention || !mentionStillMatches(editor) ||
+      editor.innerText !== expected) return false;
+  return true;
+}
+"""
+)
+
 OWN_EDITOR_JS = r"""
 ((arg) => {
   arg.editor.__linkedinMcpOwnedText = arg.text;
@@ -555,13 +634,18 @@ OWN_EDITOR_JS = r"""
 })
 """
 
-# Empty an editor this server typed into, used when the typed text did not come
-# back verbatim. Leaving a half-written draft in a live comment box is a visible
-# side effect of a refusal, so a refusal cleans up after itself.
-CLEAR_EDITOR_JS = r"""
-((arg) => {
+# Clear only unchanged, owned text after a refused submit. Unexpected edits
+# belong to the caller and must survive a refusal.
+CLEAR_EDITOR_JS = (
+    "((arg) => {"
+    + ACTOR_HELPERS_JS
+    + r"""
   const editor = arg.editor;
-  if (!editor || !editor.isConnected) return false;
+  const scope = editor?.__linkedinMcpScope;
+  const owned = editor?.__linkedinMcpOwnedText;
+  if (!editor?.isConnected || !scope?.contains(editor) || !actorStillMatches(scope) ||
+      typeof owned !== 'string' ||
+      editor.innerText.replace(/\r\n/g, '\n').replace(/\u00a0/g, ' ').trim() !== owned.trim()) return false;
   editor.focus();
   const range = document.createRange();
   range.selectNodeContents(editor);
@@ -572,6 +656,7 @@ CLEAR_EDITOR_JS = r"""
   return (editor.innerText || '').trim() === '';
 })
 """
+)
 
 # Submit the pinned editor by clicking one structurally identified control.
 #
@@ -684,34 +769,16 @@ SUBMIT_EDITOR_JS = (
 """
 )
 
-# Whether the submitted text is now rendered inside the post as a unit that
-# was not there before. `baseline` is the count of matching units taken just
-# before the submit, so an identical earlier comment cannot be mistaken for
-# this one.
-#
-# Editable subtrees are excluded, and that exclusion is the whole difference
-# between a reading and a tautology. The editor holding the draft is a
-# descendant of the post, and its own `innerText` is exactly the text that was
-# typed into it, so a count that includes it rises from 0 to 1 on the
-# insertion alone — before any submit, and just as high when the submit
-# clicked the wrong control or LinkedIn refused the comment outright. Measured
-# against a live post: the count reached 1 with nothing published and no
-# comment node in the DOM. Only text LinkedIn rendered back is evidence.
-#
-# Ancestors of an editor are excluded for the same reason and not the same way,
-# which is why `closest` alone was not enough. A composer whose other controls
-# are icons contributes no text of its own, so the wrapping form's `innerText`
-# *is* the draft, and dropping only the editor promotes the form to the match
-# the editor used to be. Caught by the empty-aria fixture, where the button
-# labels carry no text; in a locale whose buttons are worded, the same markup
-# hides it. Nothing is lost by the wider rule: a comment LinkedIn rendered is a
-# sibling of the composer, never an ancestor of one.
+# A receipt needs a unique rendered comment URN, the exact body, and the
+# selected actor's linked identity. Arbitrary matching text (including a
+# different member's reply) is not acknowledgment. Pin all observed URNs before
+# typing so edits to existing comments cannot confirm a new publication.
 COUNT_TEXT_UNITS_JS = (
     r"""
 ((arg) => {
 """
     + _VISIBLE_FN_JS
-    + REPLY_RANGE_JS
+    + COMMENT_HELPERS_JS
     + r"""
   const pin = arg.root?.__linkedinMcpPost;
   const root = pin?.confirmationScope;
@@ -722,16 +789,23 @@ COUNT_TEXT_UNITS_JS = (
   const EDITABLE = '[contenteditable=""], [contenteditable="true"]';
   const editable = element =>
     element.closest(EDITABLE) !== null || element.querySelector(EDITABLE) !== null;
-  const elements = (replyNodes ? replyNodes.flatMap(node => [node, ...node.querySelectorAll('*')]) : Array.from(root.querySelectorAll('*'))).filter(
-    element => visible(element) && !editable(element)
-  );
-  const matches = elements.filter(
-    element => (element.innerText || '').replace(/\u00a0/g, ' ').trim() === arg.text
-  );
-  const smallest = matches.filter(
-    element => !matches.some(other => other !== element && element.contains(other))
-  );
-  return smallest.length;
+  if (!pin.actor) return -1;
+  const elements = replyNodes ? replyNodes.flatMap(node => [node, ...node.querySelectorAll('*')]) : Array.from(root.querySelectorAll('*'));
+  const components = elements.filter(node => visible(node) && !editable(node) && commentIdentity(node));
+  if (arg.captureBaseline) {
+    pin.receiptBaseline = new Set(components.map(commentIdentity));
+    return 0;
+  }
+  return components.filter(node => {
+    const urn = commentIdentity(node);
+    if (pin.receiptBaseline?.has(urn) || components.filter(other => commentIdentity(other) === urn).length !== 1) return false;
+    const body = commentBody(node, urn);
+    const author = body && commentAuthor(body);
+    const text = body && commentText(body);
+    return author?.path === pin.actor.path.replace(/\/+$/, '') &&
+      author.avatar === pin.actor.avatar && typeof text === 'string' &&
+      text.replace(/\r\n/g, '\n').replace(/\u00a0/g, ' ').trim() === arg.text;
+  }).length;
 })
 """
 )
@@ -867,9 +941,12 @@ class PostActions:
             )
         return permalink, post_id, signals
 
-    async def _read_signals(self, post_id: str) -> dict[str, Any]:
+    async def _read_signals(
+        self, post_id: str, *, root: ElementHandle | None = None
+    ) -> dict[str, Any]:
         """Read structural signals and the supported reaction-state label."""
-        data = await self._session.run_on_linkedin(POST_ACTION_SIGNALS_JS, post_id)
+        argument: Any = post_id if root is None else {"postId": post_id, "root": root}
+        data = await self._session.run_on_linkedin(POST_ACTION_SIGNALS_JS, argument)
         return data if isinstance(data, dict) else {"hasMain": False}
 
     async def _pin_root(self, post_id: str) -> ElementHandle | None:
@@ -937,6 +1014,15 @@ class PostActions:
                 )
             root = selected
             signals = await self._read_signals(post_id)
+            if not await self._session.run_on_linkedin(
+                REFRESH_REACTION_CONTROLS_JS, root
+            ):
+                return post_action_result(
+                    permalink,
+                    "react_failed",
+                    "The post or actor changed before dispatch. Nothing was clicked.",
+                    reaction=reaction,
+                )
             if signals.get("reactPressed"):
                 # Clicking a pressed toggle retracts the reaction. A caller asking
                 # for a reaction never means that, so this is a success-shaped
@@ -1016,7 +1102,7 @@ class PostActions:
                 reaction=reaction,
             )
         try:
-            return await self._confirm_reaction(permalink, post_id, reaction)
+            return await self._confirm_reaction(permalink, post_id, reaction, root=root)
         except BaseException:
             logger.warning(POST_ACTION_INTERRUPTED_WARNING)
             raise
@@ -1026,10 +1112,12 @@ class PostActions:
         permalink: str,
         post_id: str,
         reaction: str,
+        *,
+        root: ElementHandle,
     ) -> dict[str, Any]:
         """Confirm a reaction by the toggle's own pressed state."""
         try:
-            return await self._poll_reaction(permalink, post_id, reaction)
+            return await self._poll_reaction(permalink, post_id, reaction, root=root)
         except BaseException:
             logger.warning(POST_ACTION_INTERRUPTED_WARNING)
             raise
@@ -1039,11 +1127,13 @@ class PostActions:
         permalink: str,
         post_id: str,
         reaction: str,
+        *,
+        root: ElementHandle,
     ) -> dict[str, Any]:
         deadline = _CONFIRM_TIMEOUT / 1000
         waited = 0.0
         while waited < deadline:
-            signals = await self._read_signals(post_id)
+            signals = await self._read_signals(post_id, root=root)
             if signals.get("reactPressed"):
                 return post_action_result(
                     permalink,
@@ -1359,8 +1449,15 @@ class PostActions:
             )
         final_text = author["name"] + " " + text if author else text
         counted = await self._session.run_on_linkedin(
-            COUNT_TEXT_UNITS_JS, {"root": root, "text": final_text.strip()}
+            COUNT_TEXT_UNITS_JS,
+            {"root": root, "text": final_text.strip(), "captureBaseline": True},
         )
+        if counted == -1:
+            return post_action_result(
+                permalink,
+                "write_failed",
+                "The receipt scope changed; nothing was typed.",
+            )
         baseline = int(counted) if isinstance(counted, int) else 0
         editor_arguments: dict[str, Any] = {"scope": root}
         if preserve_mention:
@@ -1384,7 +1481,8 @@ class PostActions:
                 "mention_unavailable"
                 if typed == "mention_unavailable"
                 else "write_failed",
-                "The editor could not hold the exact text; nothing was submitted.",
+                "The editor could not hold the exact text; nothing was submitted. "
+                "Any changed draft was preserved for inspection.",
             )
         text = final_text
         # An evaluate can dispatch its click before its response is lost.
@@ -1478,6 +1576,13 @@ class PostActions:
             expected = author["name"] + " " + text
             current = str(await editor.evaluate("element => element.innerText || ''"))
             trailing = current[len(author["name"]) :]
+            if trailing == "\n":
+                unchanged = await self._session.run_on_linkedin(
+                    CHECK_MENTION_PREFIX_JS, {"editor": editor, "expected": current}
+                )
+                if not unchanged:
+                    return "mention_unavailable"
+                trailing = ""
             if trailing not in ("", " ", "\u00a0"):
                 return "mention_unavailable"
             text = (" " if not trailing else "") + text
@@ -1495,7 +1600,8 @@ class PostActions:
             actual.replace("\r\n", "\n").replace("\u00a0", " ").strip()
             != expected.strip()
         ):
-            await self._session.run_on_linkedin(CLEAR_EDITOR_JS, {"editor": editor})
+            # Unexpected content can include a concurrent edit. Preserve it;
+            # only exact owned text may be cleared after a refused submit.
             return "text_mismatch"
 
         await self._session.run_on_linkedin(

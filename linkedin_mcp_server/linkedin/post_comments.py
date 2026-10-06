@@ -158,7 +158,13 @@ OPEN_REPLY_EDITOR_JS = (
     button.getAttribute('aria-disabled') !== 'true');
   if (buttons.length !== 1) return 'unavailable';
   pin.beforeEditors = new Set(pin.column.querySelectorAll(selector));
-  pin.beforeChildren = new Set(pin.column.children);
+  pin.beforeChildOrder = Array.from(pin.column.children);
+  pin.beforeChildren = new Set(pin.beforeChildOrder);
+  pin.beforeComments = replyContextComments(pin.beforeChildOrder).map(node => {
+    const snapshot = replyContextSnapshot(node);
+    return snapshot && {...snapshot, child: pin.beforeChildOrder.find(child => child === node || child.contains(node))};
+  });
+  if (pin.beforeComments.some(snapshot => !snapshot)) return 'changed';
   buttons[0].click();
   return 'opened';
 }
@@ -181,13 +187,22 @@ PIN_REPLY_CONTEXT_JS = (
   if (!editorBlock || editorBlock === pin.thread) return null;
   let cursor = pin.thread.nextElementSibling;
   while (cursor && cursor !== editorBlock) {
-    if (commentComponents(cursor).length || commentIdentity(cursor)) return null;
     cursor = cursor.nextElementSibling;
   }
   if (cursor !== editorBlock) return null;
   let end = editorBlock.nextElementSibling;
   while (end && !pin.beforeChildren.has(end)) end = end.nextElementSibling;
   if (!end) return null;
+  const startIndex = pin.beforeChildOrder.indexOf(pin.thread);
+  const endIndex = pin.beforeChildOrder.indexOf(end);
+  if (startIndex < 0 || endIndex <= startIndex) return null;
+  const contextChildren = pin.beforeChildOrder.slice(startIndex + 1, endIndex);
+  const contextComments = pin.beforeComments.filter(snapshot => contextChildren.includes(snapshot.child));
+  const range = {column: pin.column, start: pin.thread, end, parent, parentId: parent.id,
+    body: pin.body, editorBlock, beforeChildren: pin.beforeChildren, contextChildren, contextComments};
+  const currentChildren = [];
+  for (let child = pin.thread.nextElementSibling; child && child !== end; child = child.nextElementSibling) currentChildren.push(child);
+  if (!replyContextUnchanged(currentChildren, range)) return null;
   const tokens = editor.querySelectorAll('[data-type="mention"][contenteditable="false"]');
   if (tokens.length !== 1 || tokens[0].innerText.trim() !== pin.author.name ||
       editor.innerText.trim() !== pin.author.name) return null;
@@ -205,7 +220,7 @@ PIN_REPLY_CONTEXT_JS = (
   if (!avatar) return null;
   editorBlock.__linkedinMcpPost = {postId: pin.postPin.postId, route: pin.postPin.route,
     actor: pin.postPin.actor, actorRoot: pin.post, actorPin: pin.postPin,
-    replyRange: {column: pin.column, start: pin.thread, end, parent, parentId: parent.id, body: pin.body, editorBlock},
+    replyRange: range,
     replyAvatar: avatar, confirmationScope: editorBlock, replyEditor: editor, replyAuthor: pin.author};
   editor.__linkedinMcpScope = editorBlock;
   editor.__linkedinMcpPreparedMention = {token: tokens[0], name: pin.author.name};

@@ -3,7 +3,6 @@
 
 from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.navigation import PageNavigator
 
 import pytest
 
@@ -333,12 +332,15 @@ async def test_actor_changed_before_typing_leaves_empty_editor(dom_page):
 
 async def test_sibling_comment_confirms_only_in_pinned_detail_column(dom_page):
     from linkedin_mcp_server.linkedin.post_actions import COUNT_TEXT_UNITS_JS
+    from test_post_actions_dom import _pin_test_actor
+    from test_post_receipts_dom import receipt
 
     body = """<html lang="en"><main data-sdui-screen="com.linkedin.sdui.flagshipnav.feed.UpdateDetail"><div data-component-type="LazyColumn" data-testid="synthetic-commentList-detail"><div role="listitem" id="target"><div><button aria-label="Reaction button state: no reaction">Like</button><button aria-expanded="false">Open</button><button>Comment</button><button aria-expanded="false">Repost</button></div><div role="textbox" contenteditable="true"></div></div><div role="listitem" id="comments"></div></div><aside id="unrelated"></aside></main></html>"""
     await routed_page(dom_page, f"/feed/update/urn:li:activity:{POST_ID}/", body)
     root = await dom_page.evaluate_handle(PIN_POST_ROOT_JS, POST_ID)
+    await _pin_test_actor(dom_page, root)
     await dom_page.locator("#unrelated").evaluate(
-        "node => { node.innerHTML='<p>Exact comment</p>'; }"
+        "(node, html) => { node.innerHTML=html; }", receipt("Exact comment")
     )
     assert (
         await dom_page.evaluate(
@@ -347,7 +349,7 @@ async def test_sibling_comment_confirms_only_in_pinned_detail_column(dom_page):
         == 0
     )
     await dom_page.locator("#comments").evaluate(
-        "node => { node.innerHTML='<p>Exact comment</p>'; }"
+        "(node, html) => { node.innerHTML=html; }", receipt("Exact comment")
     )
     assert (
         await dom_page.evaluate(
@@ -408,3 +410,60 @@ async def test_actor_save_remount_reacquires_only_original_target(dom_page, chan
     else:
         assert selected is None
         assert await dom_page.get_attribute("body", "data-clicked") is None
+
+
+@pytest.mark.parametrize("phase", ["select", "save"])
+async def test_shared_avatar_across_different_actors_refuses_before_click(
+    dom_page, phase
+):
+    root = await actor_picker(dom_page)
+    assert await dom_page.evaluate(OPEN_ACTOR_PICKER_JS, root)
+    await dom_page.evaluate(
+        """phase => {
+      const member = document.querySelector('[data-key=PERSON]');
+      const company = document.querySelector('[data-key=COMPANY]');
+      company.querySelector('img').src = member.querySelector('img').src;
+      company.onclick = () => document.body.setAttribute('data-option-clicked', 'yes');
+      document.querySelector('#save').onclick = () => {
+        document.body.setAttribute('data-save-clicked', 'yes');
+        document.querySelector('#picker').hidden = true;
+      };
+      if (phase === 'save') {
+        member.setAttribute('aria-checked', 'false');
+        company.setAttribute('aria-checked', 'true');
+      }
+    }""",
+        phase,
+    )
+    requested = {**COMPANY, "avatar": "PERSON"}
+    if phase == "select":
+        assert (
+            await dom_page.evaluate(SELECT_ACTOR_JS, {"actor": requested})
+            == "unavailable"
+        )
+    else:
+        assert await dom_page.evaluate(SAVE_ACTOR_JS, {"actor": requested}) is False
+    assert await dom_page.get_attribute("body", "data-option-clicked") is None
+    assert await dom_page.get_attribute("body", "data-save-clicked") is None
+    assert await dom_page.locator("#picker").is_visible()
+
+
+async def test_type_mismatch_preserves_intervening_draft_content(dom_page):
+    root = await _pinned(dom_page, plain_post(ENGLISH))
+    pin = await dom_page.evaluate_handle(PIN_EDITOR_JS, {"scope": root})
+    editor = (await pin.get_property("editor")).as_element()
+    assert editor is not None
+    await editor.evaluate("""editor => editor.addEventListener('input', () => {
+      if (!editor.hasAttribute('data-intervened')) {
+        editor.setAttribute('data-intervened', 'true');
+        editor.append(' HUMAN DRAFT');
+      }
+    })""")
+    session = PageSession(dom_page)
+    outcome = await PostActions(session, PageNavigator(session))._type_text(
+        editor, "Hello"
+    )
+    assert outcome == "text_mismatch"
+    assert await editor.get_attribute("data-intervened") == "true"
+    assert "HUMAN DRAFT" in await editor.inner_text()
+    assert await dom_page.get_attribute("body", "data-clicked") is None

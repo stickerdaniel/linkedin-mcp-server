@@ -219,8 +219,9 @@ def register_post_tools(
         confirm_comment=False to check that the post loads and offers a comment
         editor without typing anything.
 
-        The comment is confirmed by finding the exact text rendered inside that
-        post afterwards. A ``comment_unconfirmed`` status means the submit was
+        Confirmation requires a new unique rendered comment identity with the
+        exact body and requested actor's linked identity and avatar. A
+        ``comment_unconfirmed`` status means the submit was
         dispatched and the text never appeared, which is not the same as a
         failure — open the post before retrying.
 

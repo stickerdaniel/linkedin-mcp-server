@@ -57,7 +57,12 @@ async def setup_reply(page):
           document.body.setAttribute('data-published', 'yes');
           const text = reply.querySelector('[contenteditable=true]').innerText;
           const receipt = document.createElement('div');
-          receipt.setAttribute('data-receipt', ''); receipt.innerText = text;
+          const urn = 'urn:li:comment:(activity:7506667649444237313,998)';
+          receipt.id = 'replaceableComment_' + urn;
+          receipt.innerHTML = '<div componentkey="CommentComponentReference_' + urn + '">'
+            + '<a href="/in/actor/"><img src="https://media.licdn.com/dms/image/v2/PERSON/profile-displayphoto/x">Actor</a>'
+            + '<p data-testid="expandable-text-box" data-receipt></p></div>';
+          receipt.querySelector('[data-receipt]').innerText = text;
           reply.after(receipt); reply.remove();
         };
       };

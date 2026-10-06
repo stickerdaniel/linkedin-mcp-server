@@ -81,7 +81,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `close_session` | Close the shared browser session without deleting your saved login. |
 
 Post engagement accepts an explicit `actor` URL: `/in/<member>/` for your own
-profile or `/company/<company>/` for a page you manage. Both tools default to
+profile or `/company/<company>/` for a page you manage. Write tools default to
 a dry run. The selected actor must be verified in the page before publishing;
 unavailable or ambiguous identities refuse without publishing. An existing
 reaction is preserved. When `retry_safe` is false, inspect the post before

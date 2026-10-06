@@ -75,9 +75,15 @@ function actorPicker() {
 }
 function actorOption(picker, actor) {
   const labels = actorLabels();
-  const options = Array.from(picker.group.querySelectorAll('[role="radio"]')).filter(node => {
+  const available = Array.from(picker.group.querySelectorAll('[role="radio"]')).filter(actorVisible);
+  const expectedLabel = labels.select + actor.name;
+  // The closed switcher exposes only its avatar. If another actor shares that
+  // asset, a failed Save or later actor change would pass the dispatch guard.
+  if (available.some(node => avatarKeys(node).includes(actor.avatar) &&
+      node.getAttribute('aria-label') !== expectedLabel)) return null;
+  const options = available.filter(node => {
     const keys = avatarKeys(node);
-    return actorVisible(node) && node.getAttribute('aria-label') === labels.select + actor.name &&
+    return node.getAttribute('aria-label') === expectedLabel &&
       keys.length === 1 && keys[0] === actor.avatar;
   });
   return options.length === 1 ? options[0] : null;

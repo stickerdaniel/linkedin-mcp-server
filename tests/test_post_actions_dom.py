@@ -237,14 +237,18 @@ def comment_thread(labels: Labels) -> str:
     """
     rows = ""
     for index in (1, 2):
+        reference = f"urn:li:comment:(ugcPost:{POST_ID},44556677{index}8)"
         rows += f"""
-    <article data-id="urn:li:comment:({POST_URN},44556677{index}8)">
-      <p>Existing comment {index}</p>
+    <article data-id="urn:li:comment:({POST_URN},44556677{index}8)" id="replaceableComment_{reference}">
+      <div componentkey="CommentComponentReference_{reference}">
+      <a href="/in/actor/"><img src="https://media.licdn.com/dms/image/v2/PERSON/profile-displayphoto/x">Actor</a>
+      <p data-testid="expandable-text-box">Existing comment {index}</p>
       <div class="comment-actions">
         <button type="button" aria-pressed="false" aria-label="{labels.react}"
           onclick="document.body.setAttribute('data-clicked','comment-react')"
           >{labels.like}</button>
         <button type="button" aria-label="{labels.reply}">{labels.reply}</button>
+      </div>
       </div>
     </article>
 """
@@ -1132,10 +1136,11 @@ class TestCountingRenderedText:
         async def read(page, html):
             root, _ = await _typed(page, html, "Well put, thanks")
             await root.evaluate(
-                "node => node.querySelector('.comments').insertAdjacentHTML("
-                "'beforeend',"
-                '\'<article data-id="urn:li:comment:x">'
-                "<p>Well put, thanks</p></article>')"
+                "(node, html) => node.querySelector('.comments').insertAdjacentHTML('beforeend', html)",
+                f'<article id="replaceableComment_urn:li:comment:(ugcPost:{POST_ID},998)">'
+                f'<div componentkey="CommentComponentReference_urn:li:comment:(ugcPost:{POST_ID},998)">'
+                '<a href="/in/actor/"><img src="https://media.licdn.com/dms/image/v2/PERSON/profile-displayphoto/x">Actor</a>'
+                '<p data-testid="expandable-text-box">Well put, thanks</p></div></article>',
             )
             return await page.evaluate(
                 COUNT_TEXT_UNITS_JS, {"root": root, "text": "Well put, thanks"}
