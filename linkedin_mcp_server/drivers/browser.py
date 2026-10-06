@@ -11,10 +11,8 @@ import logging
 import os
 import time
 from pathlib import Path
-from collections.abc import Coroutine, Sequence
+from collections.abc import Coroutine, Mapping, Sequence
 from typing import Any, TypeVar
-
-from patchright.async_api import Cookie
 
 from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
 from linkedin_mcp_server.core import (
@@ -360,7 +358,7 @@ async def _close_holding_back_cancels(browser: BrowserManager) -> tuple[bool, bo
     return await await_deferring_cancels(browser.close())
 
 
-def _jar_has_linkedin_session(cookies: Sequence[Cookie]) -> bool:
+def _jar_has_linkedin_session(cookies: Sequence[Mapping[str, Any]]) -> bool:
     """Whether *cookies* holds an ``li_at`` on LinkedIn's own domain."""
     for cookie in cookies:
         domain = cookie.get("domain") or ""
