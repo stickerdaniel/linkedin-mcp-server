@@ -1018,10 +1018,12 @@ class TestRefusing:
     def test_configuration_timeout_unlocks_the_inherited_handoff(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        from linkedin_mcp_server import daemon_lock, daemon_owner
+        from linkedin_mcp_server import daemon_descriptor, daemon_lock, daemon_owner
 
         if not daemon_lock._INHERITED_LOCKS_TRANSFER:
             pytest.skip("inherited lock handoff is POSIX-only")
+
+        monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
 
         events: list[str] = []
 

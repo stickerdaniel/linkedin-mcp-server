@@ -114,6 +114,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import socket
@@ -172,12 +173,25 @@ from differential.baseline import (
     interpreter_failures,
     stage_frozen_session,
 )
-from differential.events import EventLog, read_jsonl
+from differential.events import (
+    OUTPUT_FILES,
+    OWNER_LOG_FILE,
+    CappedOutput,
+    EventLog,
+    keep_capped,
+    read_jsonl,
+)
 from differential.fault_overlay import events as fault_events
 from differential.fault_overlay import (
     publish_activation,
     scenario_problems,
     selection_problems,
+)
+from differential.first_navigation import (
+    COOKIE_LINEAGE_FILE,
+    observing,
+    record_cookie_lineage,
+    record_origin,
 )
 from differential.host_comparison import ROW_H_R2, ROW_H_R3
 from differential.job_query import (
@@ -309,6 +323,7 @@ from differential.watcher import (
     invoked_module,
     possible_browser,
     process_user,
+    read_arguments,
     user_data_dir,
 )
 from linkedin_mcp_server import daemon_descriptor
@@ -1121,6 +1136,60 @@ def watcher_failures(
     return failures
 
 
+#: The driver's own line, as written when its stderr is not a terminal:
+#: ``toISOString()``, a space, the ``pw:browser`` channel, a space. Measured
+#: on both locked drivers. A server record is JSON and starts with ``{``, so
+#: the channel token has to be here and not merely somewhere in the line: a
+#: Chrome path can contain the words ``pw:browser``.
+_DRIVER_LINE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z pw:browser(?:\s|$)"
+)
+
+
+#: What the driver did with the browser, a few lines per launch. The text
+#: file keeps its head, so an exit that follows a storm of browser output is
+#: past the cap; these are what that exit has to leave in the event log.
+def driver_diagnostic(line: str) -> bool:
+    """Whether *line* is the driver's browser log rather than the server's.
+
+    The ``<launching>`` line names the browser cache. A cache directory called
+    ``login`` matches the loss notice (``session._LOSS``), so a lost session
+    the server never mentioned would read as one it announced.
+    """
+    return _DRIVER_LINE.match(line) is not None
+
+
+#: What the driver did with the browser, as it logs it: ``<launching>`` and
+#: ``[pid=N] <process did exit: ...>``, ``<gracefully close start>``,
+#: ``<kill>`` and ``<will force kill>``. The browser's own output is
+#: ``[pid=N][err]`` or ``[pid=N][out]`` and can quote the same words; that is
+#: chatter, one line per thing the browser prints, and it stays in the capped
+#: file. Measured in the locked drivers.
+_DRIVER_LIFECYCLE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z pw:browser "
+    r"(?:<launching> |\[pid=\d+\] <(?:"
+    r"process did exit|gracefully close start|will force kill|kill))"
+)
+
+
+def driver_lifecycle(line: str) -> bool:
+    """A driver line that says it launched, closed, killed or saw the exit."""
+    return _DRIVER_LIFECYCLE.match(line) is not None
+
+
+def note_server_output(session: Any, line: str) -> None:
+    """Remember *line* as what the server showed, unless the driver wrote it.
+
+    Both lists are what a row classifies (``user_lines`` for who was told,
+    ``stderr`` for the server's own reports). The line still goes to the
+    evidence file through the caller's own callback.
+    """
+    if driver_diagnostic(line):
+        return
+    session.stderr.append(line)
+    session.user_lines.append(line)
+
+
 # --- Host stub ---------------------------------------------------------------
 
 
@@ -1617,8 +1686,7 @@ async def run_host_session(
     session = HostSession()
 
     def remember(line: str) -> None:
-        session.stderr.append(line)
-        session.user_lines.append(line)
+        note_server_output(session, line)
         on_stderr(line)
 
     transport = HostQuitTransport(
@@ -2288,8 +2356,7 @@ async def run_http_host_session(
     session = HostSession(transport=STREAMABLE_HTTP)
 
     def remember(line: str) -> None:
-        session.stderr.append(line)
-        session.user_lines.append(line)
+        note_server_output(session, line)
         on_stderr(line)
 
     host = HttpHost(
@@ -2398,8 +2465,7 @@ async def run_stub_host_session(
     session = HostSession()
 
     def remember(line: str) -> None:
-        session.stderr.append(line)
-        session.user_lines.append(line)
+        note_server_output(session, line)
         on_stderr(line)
 
     host = StubHost(command, env=env, cwd=cwd, on_stderr=remember)
@@ -2613,6 +2679,33 @@ def exited_zombie(
     return threads_of(process) == 1
 
 
+def process_table(attrs: Sequence[str]) -> Iterator[Any]:
+    """``psutil.process_iter(attrs)``, every read judged as psutil judges it.
+
+    A refused read is ``None`` in ``info`` and a process gone is skipped,
+    with one difference: a command line, environment or executable that
+    psutil 7.2.2 on macOS fails to read with a ``SystemError`` is refused too
+    (``read_arguments``). psutil's own iteration ends at that error, and
+    the census with it, before any process is judged.
+    """
+    for process in psutil.process_iter():
+        info: dict[str, Any] = {}
+        try:
+            with process.oneshot():
+                for name in attrs:
+                    try:
+                        if name in ("cmdline", "environ", "exe"):
+                            info[name] = read_arguments(process, name)
+                        else:
+                            info[name] = getattr(process, name)()
+                    except (psutil.AccessDenied, psutil.ZombieProcess):
+                        info[name] = None
+        except psutil.NoSuchProcess:
+            continue
+        process.info = info
+        yield process
+
+
 def profile_census(
     account: ActorAccount,
     *,
@@ -2630,9 +2723,7 @@ def profile_census(
     directory = str(browser_dir) if browser_dir is not None else None
     census = ProfileCensus()
     try:
-        processes = list(
-            (process_iter or psutil.process_iter)(["cmdline", "exe", "status"])
-        )
+        processes = list((process_iter or process_table)(["cmdline", "exe", "status"]))
     except psutil.Error:
         return ProfileCensus(unresolved=[-1])
     for process in processes:
@@ -2667,11 +2758,30 @@ def _profile_processes(account: ActorAccount) -> list[Any]:
     return profile_census(account).processes
 
 
-def wait_for_no_browser(account: ActorAccount, seconds: float) -> list[int]:
-    """Wait for the profile's browser to be gone; the pids still there if not."""
+def wait_for_no_browser(
+    account: ActorAccount,
+    seconds: float,
+    *,
+    browser_dir: str | Path,
+    browser_exe: str | None = None,
+) -> list[int]:
+    """Wait for the profile's browser to be shown gone; the pids that keep it
+    from that if the wait ends first.
+
+    Shown gone only by a complete census: a process that could be the
+    browser and whose arguments cannot be read keeps the profile occupied
+    as surely as one running on it, so its pid (or -1 for a process table
+    that could not be read) is among those returned. The browser's directory
+    is what settles every other unreadable process of this user: without it
+    each could be the browser, and on macOS the setuid ``login`` of every
+    terminal session is one.
+    """
     deadline = time.monotonic() + seconds
     while True:
-        remaining = [process.pid for process in _profile_processes(account)]
+        census = profile_census(
+            account, browser_exe=browser_exe, browser_dir=browser_dir
+        )
+        remaining = [*census.pids, *census.unresolved]
         if not remaining or time.monotonic() >= deadline:
             return remaining
         time.sleep(0.2)
@@ -6906,7 +7016,11 @@ async def observe_preservation(
     )
     failures = [f"post-quit: {problem}" for problem in host_failures(session)]
     residual = await asyncio.to_thread(
-        wait_for_no_browser, account, _BROWSER_GONE_SECONDS
+        wait_for_no_browser,
+        account,
+        _BROWSER_GONE_SECONDS,
+        browser_dir=browsers,
+        browser_exe=chrome_path,
     )
     if residual:
         failures.append(f"post-quit: its browser outlived it: {residual}")
@@ -7052,8 +7166,29 @@ async def measure_host_quit_row(
     #: preservation session alike.
     runtime_settings = dict(lifecycle.runtime_environment or {})
 
+    #: Every line a host's server or a profile command wrote, whole, by actor
+    #: (``events.OUTPUT_FILES``). A line from anything but the row's own host
+    #: is prefixed with the host, phase or command the record names.
+    outputs = {
+        actor: CappedOutput(work_dir / name) for actor, name in OUTPUT_FILES.items()
+    }
+
     def emit(actor: str, kind: str, **fields: Any) -> None:
-        log.emit(experiment=experiment, row=row, actor=actor, kind=kind, **fields)
+        # The browser's own output is one line per thing it prints, and the
+        # event log keeps every record, so that chatter goes to the capped
+        # file only. A launch, exit, close or kill is a few lines, and it is
+        # the line a storm pushes past the cap. A server line is recorded as
+        # before.
+        line = fields.get("line")
+        diagnostic = (
+            kind == "user.output" and isinstance(line, str) and driver_diagnostic(line)
+        )
+        if not diagnostic or driver_lifecycle(line):
+            log.emit(experiment=experiment, row=row, actor=actor, kind=kind, **fields)
+        output = outputs.get(actor)
+        if kind == "user.output" and output is not None and isinstance(line, str):
+            label = fields.get("host") or fields.get("phase") or fields.get("command")
+            output.line(f"[{label}] {line}" if label else line)
 
     if runtime.frozen:
         identity = frozen_identity(runtime)
@@ -7070,39 +7205,89 @@ async def measure_host_quit_row(
     emit("harness", "row.identity", mode=mode, **identity)
 
     browsers = runtime.browsers
-    if runtime.frozen:
-        # Written here, validated and committed by the baseline's own code and
-        # browser, so the profile never meets a newer Chromium first.
-        staged = write_synthetic_cookie_file(portable_cookie_path(account.profile))
-        origin.accept_session(staged.li_at)
-        await asyncio.to_thread(
-            stage_frozen_session,
-            runtime,
-            account.profile,
-            {
-                **actor_environment(
-                    account,
-                    proxy.url,
-                    daemon=False,
-                    browsers=browsers,
-                    idle_timeout=idle_timeout,
-                ),
-                **runtime_settings,
-            },
-        )
-    else:
-        with process_environment(runtime_settings):
-            staged = await stage_signed_in_session(
-                account.profile,
-                accept=lambda session: origin.accept_session(session.li_at),
-            )
+    # From before the staging, whichever runtime stages: a first navigation
+    # that stalls there, a staging browser that goes, or a session that does
+    # not reach the row is visible only to observers that were already there
+    # (``first_navigation``). The frozen baseline drives its browser from its
+    # own interpreter, which records its navigation itself; the lifetimes are
+    # this process's descendants either way. No verdict reads any of it.
+    staging_marks = len(origin.requests), len(proxy.decisions)
+    navigation_file = None
+    try:
+        with observing(
+            work_dir,
+            profile=account.profile,
+            label="frozen-staging" if runtime.frozen else "candidate-staging",
+            in_process=not runtime.frozen,
+        ) as navigation_file:
+            if runtime.frozen:
+                # Written here, validated and committed by the baseline's own
+                # code and browser, so the profile never meets a newer
+                # Chromium first.
+                staged = write_synthetic_cookie_file(
+                    portable_cookie_path(account.profile)
+                )
+                origin.accept_session(staged.li_at)
+                await asyncio.to_thread(
+                    stage_frozen_session,
+                    runtime,
+                    account.profile,
+                    {
+                        **actor_environment(
+                            account,
+                            proxy.url,
+                            daemon=False,
+                            browsers=browsers,
+                            idle_timeout=idle_timeout,
+                        ),
+                        **runtime_settings,
+                    },
+                    diagnostics=navigation_file,
+                )
+            else:
+                with process_environment(runtime_settings):
+                    staged = await stage_signed_in_session(
+                        account.profile,
+                        accept=lambda session: origin.accept_session(session.li_at),
+                    )
+    finally:
+        if navigation_file is not None:
+            # Off the event loop: landing the file waits on the disc, and that
+            # wait must not freeze the row's other tasks. A failure to start
+            # the worker must not replace the staging error this finally runs
+            # after.
+            try:
+                await asyncio.to_thread(
+                    record_origin,
+                    navigation_file,
+                    origin.requests[staging_marks[0] :],
+                    proxy.decisions[staging_marks[1] :],
+                )
+            except Exception:
+                # The staging error, if there is one, is what the row reports.
+                pass
     # The staging browser has confirmed its close, but a root still on the
-    # profile when the watcher takes its baseline would count against O1.
+    # profile when the watcher takes its baseline would count against O1, and
+    # one the census cannot read could be that root. The executable is named
+    # only below; staging runs the runtime's browser, which lives in its
+    # browsers directory.
     lingering = await asyncio.to_thread(
-        wait_for_no_browser, account, _BROWSER_GONE_SECONDS
+        wait_for_no_browser, account, _BROWSER_GONE_SECONDS, browser_dir=browsers
     )
+    # What the staging left for the row's browser to reopen.
+    try:
+        await asyncio.to_thread(
+            record_cookie_lineage,
+            work_dir / COOKIE_LINEAGE_FILE,
+            point="after-staging",
+            profile=account.profile,
+            cookie_file=portable_cookie_path(account.profile),
+            expected_digest=staged.li_at_digest,
+        )
+    except Exception:
+        pass
     if lingering:
-        raise RuntimeError(f"the staging browser is still running: {lingering}")
+        raise RuntimeError(f"the staging browser is not shown gone: {lingering}")
     before = snapshot(account.profile, expected_digest=staged.li_at_digest)
     result.before = before
     emit("harness", "profile.snapshot", phase="before", **before.as_event_fields())
@@ -7899,6 +8084,8 @@ async def measure_host_quit_row(
                     account,
                     _BROWSER_GONE_SECONDS,
                     seconds=_BROWSER_GONE_SECONDS + 30.0,
+                    browser_dir=browsers,
+                    browser_exe=browser_exe,
                 )
                 census = await run_owned(
                     "the census after host B",
@@ -8507,6 +8694,8 @@ async def measure_host_quit_row(
                 account,
                 _BROWSER_GONE_SECONDS,
                 seconds=_BROWSER_GONE_SECONDS + 30.0,
+                browser_dir=browsers,
+                browser_exe=browser_exe,
             )
             census = await run_owned(
                 "the census after the loss",
@@ -8654,6 +8843,8 @@ async def measure_host_quit_row(
                 account,
                 seconds,
                 seconds=seconds + 30.0,
+                browser_dir=browsers,
+                browser_exe=browser_exe,
             )
         except Exception as exc:  # noqa: BLE001 - the reading's own evidence
             found["error"] = f"{type(exc).__name__}: {exc}"
@@ -9188,6 +9379,9 @@ async def measure_host_quit_row(
     #: What ended the row's try, if anything: the teardown raises a
     #: cancellation it held only when that is not already one.
     row_failure: BaseException | None = None
+    #: A cancellation that reached the after-row lineage read of a row that
+    #: had not failed, raised once the teardown is done.
+    read_cancelled: BaseException | None = None
     try:
         watcher.start()
         # After the watcher's baseline, so it reports the canaries' starts and
@@ -9398,13 +9592,17 @@ async def measure_host_quit_row(
                 reached(shim.reached_file),
             )
         residual = await asyncio.to_thread(
-            wait_for_no_browser, account, _BROWSER_GONE_SECONDS
+            wait_for_no_browser,
+            account,
+            _BROWSER_GONE_SECONDS,
+            browser_dir=browsers,
+            browser_exe=browser_exe,
         )
         if comparison is not None:
             # After the actors left by themselves and the passive wait above,
             # and before anything below can intervene. That wait's empty list
-            # counts only the processes it could read; the complete census
-            # this takes is what says the profile is empty.
+            # is its own; the census this takes is what the comparison
+            # records as the profile empty.
             await take_checkpoint(host_comparison.SETTLED)
         actors_ended = time.time()
         after = snapshot(account.profile, expected_digest=staged.li_at_digest)
@@ -9414,6 +9612,27 @@ async def measure_host_quit_row(
         row_failure = exc
         raise
     finally:
+        # Before the teardown releases anything. A row that failed after
+        # reopening the profile still needs the cookie counts; the success
+        # path used to be the only one that took them.
+        try:
+            await asyncio.to_thread(
+                record_cookie_lineage,
+                work_dir / COOKIE_LINEAGE_FILE,
+                point="after-row",
+                profile=account.profile,
+                cookie_file=portable_cookie_path(account.profile),
+                expected_digest=staged.li_at_digest,
+            )
+        except Exception:
+            # A diagnostic miss; the teardown goes on.
+            pass
+        except BaseException as exc:
+            # A cancellation of this read must not skip the releases below or
+            # replace the row's own error, nor be lost: a row that had not
+            # failed raises it once its teardown is done.
+            if row_failure is None:
+                read_cancelled = exc
         if comparison is not None:
             # From here on the harness acts: a checkpoint after this marker
             # could be reading its cleanup rather than the product.
@@ -9620,6 +9839,20 @@ async def measure_host_quit_row(
             )
         row_requests = list(origin.requests[request_mark:])
         row_decisions = list(proxy.decisions[decision_mark:])
+        # The owner's whole log, every owner of the row's in turn, taken last
+        # before the cleanup below removes the daemon directory it sits in.
+        # The event log has only its tail, and the browser's exit, crashed or
+        # killed, is near the start of a row. Nothing in the verdict reads it.
+        with contextlib.suppress(Exception):
+            from linkedin_mcp_server import daemon_owner
+
+            keep_capped(
+                Path(
+                    owner.get("log_path")
+                    or daemon_owner.daemon_log_path(account.auth_root)
+                ),
+                work_dir / OWNER_LOG_FILE,
+            )
         result.cleanup = retire_daemon_state(
             account, cleanup_owner if cleanup_owner is not None else identified
         )
@@ -9687,7 +9920,16 @@ async def measure_host_quit_row(
                     held.add_note(
                         f"held while the row's teardown ran after {row_failure!r}"
                     )
+                if read_cancelled is not None:
+                    held.add_note(
+                        f"the after-row lineage read was also cancelled: "
+                        f"{read_cancelled!r}"
+                    )
                 raise held
+        if read_cancelled is not None:
+            # Last, so H-R7's held cancellation is raised first and keeps a
+            # note of this one; either way the row does not go on to a verdict.
+            raise read_cancelled
 
     host = result.host
     assert host is not None

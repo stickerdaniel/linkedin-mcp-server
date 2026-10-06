@@ -9,7 +9,7 @@
   },
   "events": [],
   "result": {
-    "message": "Message must not contain control characters or line breaks.",
+    "message": "Message must not contain control characters other than line breaks.",
     "recipient_selected": false,
     "retry_safe": true,
     "sent": false,

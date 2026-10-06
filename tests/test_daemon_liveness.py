@@ -901,13 +901,18 @@ class TestARealOwnerGoingAway:
     """
 
     def test_an_idle_owner_exits(self, tmp_path):
+        import contextlib
         import json
         import os
+        import shutil
         import subprocess
         import sys
         import time as clock
 
+        import psutil
         from test_daemon_election import _REPO_ROOT, _alive, _stop
+
+        from linkedin_mcp_server.daemon_descriptor import daemon_dir
 
         profile = tmp_path / "state"
         profile.mkdir()
@@ -915,20 +920,28 @@ class TestARealOwnerGoingAway:
         # Short enough to watch, and comfortably longer than the startup it must
         # not count as quiet.
         idle = 4.0
-        started = subprocess.run(
-            [sys.executable, "-c", _ELECT_WITH_IDLE_TIMEOUT, str(profile), str(idle)],
-            capture_output=True,
-            text=True,
-            env={**os.environ, "PYTHONPATH": str(_REPO_ROOT)},
-            cwd=_REPO_ROOT,
-            timeout=180,
-        )
-        assert started.returncode == 0, started.stderr
-        result = json.loads(started.stdout.strip().splitlines()[-1])
-        owner = result["pid"]
-        assert isinstance(owner, int) and _alive(owner), result
-
+        owner: object = None
+        began = clock.time()
         try:
+            started = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    _ELECT_WITH_IDLE_TIMEOUT,
+                    str(profile),
+                    str(idle),
+                ],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PYTHONPATH": str(_REPO_ROOT)},
+                cwd=_REPO_ROOT,
+                timeout=180,
+            )
+            assert started.returncode == 0, started.stderr
+            result = json.loads(started.stdout.strip().splitlines()[-1])
+            owner = result["pid"]
+            assert isinstance(owner, int) and _alive(owner), result
+
             deadline = clock.monotonic() + idle * 8
             while clock.monotonic() < deadline and _alive(owner):
                 clock.sleep(0.25)
@@ -936,7 +949,37 @@ class TestARealOwnerGoingAway:
                 "an owner nobody called kept running past its idle timeout"
             )
         finally:
-            _stop(owner)
+            # The owner wrote under the account's real state root, which no
+            # redirection reaches, and an owner whose frontend failed before
+            # naming it may have too. Its descriptor names it then, published
+            # or still pending. Only a process started during this test is
+            # stopped, though: a descriptor left by an earlier run can name a
+            # pid the system has since handed to something else. The directory
+            # is keyed by this test's own auth root, so removing it touches
+            # nothing else, and it goes only once every owner is gone: removing
+            # a live owner's lock file would let a later election take it
+            # over, and Windows refuses to delete a file a dying process still
+            # holds open.
+            directory = daemon_dir(profile.parent)
+            pids = {owner} if isinstance(owner, int) else set()
+            for descriptor in directory.glob("*.json"):
+                with contextlib.suppress(OSError, ValueError):
+                    named = json.loads(descriptor.read_text()).get("pid")
+                    if isinstance(named, int):
+                        pids.add(named)
+            stopped = set()
+            for pid in pids:
+                with contextlib.suppress(psutil.Error):
+                    if psutil.Process(pid).create_time() >= began - 1:
+                        _stop(pid)
+                        stopped.add(pid)
+            gone_by = clock.monotonic() + 5
+            while clock.monotonic() < gone_by and any(map(_alive, stopped)):
+                clock.sleep(0.1)
+            survivors = [pid for pid in stopped if _alive(pid)]
+            assert not survivors, f"owners still running after a kill: {survivors}"
+            shutil.rmtree(directory, ignore_errors=True)
+            assert not directory.exists(), f"could not remove {directory}"
 
 
 class TestTheMarkerSurvivesTheRealClient:

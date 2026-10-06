@@ -26,7 +26,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Any, NoReturn, TypeVar
+from typing import Any, NoReturn, TextIO, TypeVar
 from urllib.parse import urlsplit
 
 from fastmcp import Context
@@ -2541,7 +2541,7 @@ async def _install_under_supervision(
         # message, which says what went wrong, and it is read before the scan
         # below so an unreadable tree cannot answer in its place. A breach then
         # beats success, because accepting returncode 0 is what records an
-        # oversized tree as ready.
+        # oversized tree as ready: one the scan finds, and one the watcher saw.
         if returncode != 0:
             raise BrowserSetupFailedError(
                 "\n".join(lines) or "Patchright Chromium browser setup failed."
@@ -2560,6 +2560,15 @@ async def _install_under_supervision(
             # breach into the cleanup below is not a missed one to warn about.
             bound_raised = True
             raise
+        # After the scan, so a breach the watcher reported while it ran counts
+        # too. The loop above stops reading the watcher once the process task
+        # is done, and the installer deleting its archive on the way out is
+        # exactly what makes the final tree fit again. A breach the watcher
+        # observed is not undone by that, and whether it landed a turn before
+        # the exit or in the same one must not decide the install.
+        if _installer_bound_breached(activity):
+            bound_raised = True
+            await activity
     finally:
         try:
             if activity is not None:
@@ -2760,14 +2769,24 @@ def _log_handlers_follow_the_live_region(
                 handler.setStream(stream)
 
 
-def _print_whatever_the_stream_takes(line: str) -> None:
-    """Print a line, replacing anything the stream cannot encode."""
-    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+def _print_whatever_the_stream_takes(
+    line: str, *, stream: TextIO | None = None
+) -> None:
+    """Print a line, replacing anything the stream cannot encode.
+
+    *stream* defaults to stdout as it is when called, not as it was at import.
+    """
+    target = sys.stdout if stream is None else stream
+    encoding = getattr(target, "encoding", None) or "utf-8"
     try:
         try:
-            print(line, flush=True)
+            print(line, file=target, flush=True)
         except UnicodeEncodeError:
-            print(line.encode(encoding, "replace").decode(encoding), flush=True)
+            print(
+                line.encode(encoding, "replace").decode(encoding),
+                file=target,
+                flush=True,
+            )
     except (OSError, ValueError):
         # A closed or broken stdout is not a reason to fail an install, and the
         # replacement attempt can meet the same closed pipe as the first.
@@ -3752,6 +3771,33 @@ async def _ensure_browser_installed(
     await _run_browser_setup(line_callback=line_callback)
 
 
+def _suspend_notice_stream() -> TextIO | None:
+    """Where to tell a terminal user that Ctrl+Z will not pause setup, if anywhere.
+
+    The installer runs outside the terminal's process group, so it survives
+    this process long enough to clean up after itself (#789). The same
+    detachment keeps the terminal's stop signal from reaching it: Ctrl+Z stops
+    the command and the download carries on. Forwarding the signal would have
+    to keep that containment intact, so the user is told instead (#792).
+
+    Only POSIX has job control, and only the foreground job of a terminal
+    receives Ctrl+Z, whichever standard descriptor names it: ``--status
+    </dev/null`` still stops on Ctrl+Z, measured on macOS. The notice goes to
+    an output that is that terminal, so ``--status > status.log`` says it on
+    stderr rather than into the file. With neither output on it, nobody would
+    read the line.
+    """
+    if os.name == "nt":
+        return None
+    for descriptor, stream in ((1, sys.stdout), (2, sys.stderr)):
+        try:
+            if os.isatty(descriptor) and os.tcgetpgrp(descriptor) == os.getpgrp():
+                return stream
+        except OSError:
+            continue
+    return None
+
+
 def ensure_browser_installed() -> None:
     """Install the Patchright Chromium browser for a CLI mode, if absent.
 
@@ -3781,6 +3827,11 @@ def ensure_browser_installed() -> None:
     # carries the encoding fallback, which the cross mark below needs on an
     # ascii terminal for the same reason.
     _print_whatever_the_stream_takes("   Installing Patchright Chromium browser...")
+    if (terminal := _suspend_notice_stream()) is not None:
+        _print_whatever_the_stream_takes(
+            "   Suspending this command (Ctrl+Z) does not pause the download.",
+            stream=terminal,
+        )
     try:
         with _cli_progress() as report:
             asyncio.run(_ensure_browser_installed(line_callback=report))
@@ -4087,6 +4138,7 @@ async def _try_auto_import_session(ctx: Context | None = None) -> bool:
     from linkedin_mcp_server.core.exceptions import (
         AuthenticationError,
         NetworkError,
+        OffLinkedInLandingError,
         ProxyConnectionError,
     )
     from linkedin_mcp_server.exceptions import (
@@ -4137,10 +4189,11 @@ async def _try_auto_import_session(ctx: Context | None = None) -> bool:
     except TimeoutError:
         logger.info("Auto-import timed out after 60s; falling back to manual login")
         return False
-    except ProxyConnectionError:
-        # Ahead of NetworkError, which it subclasses. A dead proxy is not a
-        # missing browser session: swallowing it here would hide the real cause
-        # and fall back to a manual login that has to fail the same way.
+    except (ProxyConnectionError, OffLinkedInLandingError):
+        # Ahead of NetworkError, which both subclass. A dead proxy, or a portal
+        # answering in LinkedIn's place, is not a missing browser session:
+        # swallowing it here would hide the real cause and fall back to a
+        # manual login that has to go through the same network.
         raise
     except (
         NoLinkedInSessionFoundError,
@@ -4178,6 +4231,7 @@ async def _start_login_if_needed(
     # bootstrap out of the config -> core import cycle.
     from linkedin_mcp_server.core.exceptions import (
         AccountRestrictedError,
+        OffLinkedInLandingError,
         ProxyConnectionError,
     )
 
@@ -4231,10 +4285,10 @@ async def _start_login_if_needed(
             await import_task
         except asyncio.CancelledError:
             raise
-        except ProxyConnectionError:
-            # The import itself re-raises this rather than reporting "no
-            # session"; swallowing it here would undo that and send the user
-            # into a manual login that has to fail through the same proxy.
+        except (ProxyConnectionError, OffLinkedInLandingError):
+            # The import itself re-raises these rather than reporting "no
+            # session"; swallowing them here would undo that and send the user
+            # into a manual login that has to go through the same network.
             raise
         except AccountRestrictedError:
             # For the same reason: the manual login would land on the page the

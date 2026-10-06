@@ -73,21 +73,21 @@
       "groupName": "ruff"
     },
     {
-      "description": "Agent guardrails: minor and patch automerge",
+      "description": "Post No Bills: minor and patch automerge",
       "matchManagers": ["github-actions"],
-      "matchPackageNames": ["stickerdaniel/agent-guardrails"],
+      "matchPackageNames": ["stickerdaniel/post-no-bills"],
       "matchUpdateTypes": ["minor", "patch"],
-      "groupName": "agent-guardrails",
-      "groupSlug": "agent-guardrails",
+      "groupName": "post-no-bills",
+      "groupSlug": "post-no-bills",
       "automerge": true
     },
     {
-      "description": "Agent guardrails: major and digest updates stay manual",
+      "description": "Post No Bills: major and digest updates stay manual",
       "matchManagers": ["github-actions"],
-      "matchPackageNames": ["stickerdaniel/agent-guardrails"],
+      "matchPackageNames": ["stickerdaniel/post-no-bills"],
       "matchUpdateTypes": ["major", "digest", "pin", "pinDigest"],
-      "groupName": "agent-guardrails manual",
-      "groupSlug": "agent-guardrails-manual",
+      "groupName": "post-no-bills manual",
+      "groupSlug": "post-no-bills-manual",
       "automerge": false
     }
   ]

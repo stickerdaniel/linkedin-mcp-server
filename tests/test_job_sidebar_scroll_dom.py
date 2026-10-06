@@ -11,14 +11,22 @@ installed; run locally after ``uv run patchright install chromium --no-shell``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from collections.abc import Callable
+from typing import cast
 
+import anyio
 import pytest
-from patchright.async_api import async_playwright
+from fastmcp import FastMCP
+from patchright.async_api import Page, async_playwright
 
 from linkedin_mcp_server.core.utils import _JOB_CARD_SELECTOR, scroll_job_sidebar
 from linkedin_mcp_server.linkedin.job_pages import JOB_IDS_JS
+from linkedin_mcp_server.sequential_tool_middleware import (
+    SequentialToolExecutionMiddleware,
+)
 
 
 async def job_ids(page, *, scoped: bool = False) -> list[str]:
@@ -712,6 +720,375 @@ class TestSidebarScroll:
         # 1.5s, having seen nothing and scrolled nothing.
         assert elapsed >= 0.9
         assert await rail_cards(dom_page) == 1
+
+    async def test_a_tied_ancestor_turning_scrollable_is_not_growth(self, dom_page):
+        """The rail held so far stays the rail while it still ties.
+
+        An ancestor that starts scrolling mid-wait holds every id the rail
+        holds, so it ties and, being outermost, wins the pick. It is also far
+        taller than the rail. Measuring it against the rail's height reads as
+        a batch while the real one is still in flight, which spends the last
+        scroll here and returns ten cards instead of fifteen.
+        """
+        await dom_page.set_content(
+            rail_with_a_late_tie(
+                """
+                document.getElementById('outer').style.cssText =
+                    'height:200px;overflow-y:auto';
+                """
+            )
+        )
+
+        await scroll_job_sidebar(dom_page, max_scrolls=2)
+
+        assert await rail_cards(dom_page) == 15
+
+    async def test_a_new_wrapper_around_the_rail_is_not_the_rail(self, dom_page):
+        """A tied scroller wrapped around the rail takes the rail's place.
+
+        It sits where the rail sat and holds every id the rail holds, so
+        anything that finds the rail by its position finds the wrapper, and
+        the wrapper's height reads as a batch.
+        """
+        await dom_page.set_content(
+            rail_with_a_late_tie(
+                """
+                const wrap = document.createElement('div');
+                wrap.style.cssText = 'height:200px;overflow-y:auto';
+                rail.replaceWith(wrap);
+                wrap.appendChild(rail);
+                const room = document.createElement('div');
+                room.style.height = '3000px';
+                wrap.appendChild(room);
+                """
+            )
+        )
+
+        await scroll_job_sidebar(dom_page, max_scrolls=2)
+
+        assert await rail_cards(dom_page) == 15
+
+    async def test_a_tied_sibling_inserted_before_the_rail_is_not_the_rail(
+        self, dom_page
+    ):
+        """A tied container inserted ahead of the rail takes its position.
+
+        It holds as many ids as the rail, all of them other jobs, and is far
+        taller, so a rail found by position becomes this container and its
+        height reads as a batch.
+        """
+        await dom_page.set_content(
+            rail_with_a_late_tie(
+                """
+                const pane = document.createElement('div');
+                pane.style.cssText = 'height:120px;overflow-y:scroll';
+                for (let i = 1; i <= n; i++) {
+                  const a = document.createElement('a');
+                  a.href = '/jobs/view/' + (999000 + i) + '/';
+                  a.style.cssText = 'display:block;height:40px';
+                  pane.appendChild(a);
+                }
+                const room = document.createElement('div');
+                room.style.height = '3000px';
+                pane.appendChild(room);
+                rail.before(pane);
+                """
+            )
+        )
+
+        await scroll_job_sidebar(dom_page, max_scrolls=2)
+
+        assert await rail_cards(dom_page) == 15
+
+
+def rail_with_a_late_tie(tie: str) -> str:
+    """A rail whose last batch is slow, with a tie made while it is in flight.
+
+    Five cards, a fast batch, then a 1.5s one. ``tie`` runs 300ms after the
+    scroll that asked for the slow batch, with ``rail`` and the card count
+    ``n`` in scope, and makes another container tie the rail. With
+    ``max_scrolls=2`` the call has no scroll to spare: reading the tie as a
+    batch returns before the real one lands, at ten cards.
+    """
+    return f"""
+    <body style="margin:0">
+      <div id="outer">
+        <div id="rail"
+             style="height:120px;overflow-y:scroll;overflow-anchor:none">
+          <div id="list"></div><div style="height:600px"></div>
+        </div>
+        <div style="height:3000px"></div>
+      </div>
+      <script>
+        const list = document.getElementById('list');
+        const rail = document.getElementById('rail');
+        let n = 0;
+        const add = (count) => {{
+          for (let i = 0; i < count; i++) {{
+            n++;
+            const a = document.createElement('a');
+            a.href = '/jobs/view/' + (1000 + n) + '/';
+            a.style.cssText = 'display:block;height:40px';
+            list.appendChild(a);
+          }}
+        }};
+        add(5);
+        let scrolls = 0;
+        let pending = false;
+        rail.addEventListener('scroll', () => {{
+          if (pending || n >= 15) return;
+          pending = true;
+          scrolls++;
+          if (scrolls === 2) {{
+            setTimeout(() => {{ {tie} }}, 300);
+          }}
+          setTimeout(() => {{ add(5); pending = false; }},
+                     scrolls === 1 ? 30 : 1500);
+        }});
+      </script>
+    </body>
+    """
+
+
+async def watch_rail(page) -> None:
+    """Count the rail's scroll events on the body, where every world reads it.
+
+    Scroll anchoring goes off first: a batch lands above the filler the rail
+    is scrolled to, the browser moves ``scrollTop`` to keep the filler in
+    view, and that scroll event asks the fixture for the next batch. The page
+    then loads itself to the end, and only the scrolls a caller issues may
+    count here.
+    """
+    await page.evaluate(
+        """() => {
+            const rail = document.getElementById('rail');
+            rail.style.overflowAnchor = 'none';
+            document.body.dataset.scrolls = '0';
+            rail.addEventListener('scroll', () => {
+                document.body.dataset.scrolls =
+                    String(Number(document.body.dataset.scrolls) + 1);
+            });
+        }"""
+    )
+
+
+async def rail_scrolls(page) -> int:
+    return int(await page.evaluate("document.body.dataset.scrolls"))
+
+
+async def wait_until(probe, *, timeout: float) -> None:
+    """Poll an async predicate, failing the test if it never holds."""
+    deadline = time.monotonic() + timeout
+    while not await probe():
+        assert time.monotonic() < deadline, "the page never got there"
+        await asyncio.sleep(0.05)
+
+
+class TestCancelledScroll:
+    """A cancelled call must leave nothing scrolling the page it shared.
+
+    The sequential tool middleware releases the page as soon as the call is
+    cancelled, and the next call reads it without navigating. The page has a
+    fast first batch, a slow second one that the cancel lands in the middle
+    of, and fast batches after it, so a scroll still running in the
+    page shows up both as a scroll event and as cards right after the slow
+    batch arrives.
+    """
+
+    PAGE = sidebar(total=40, batch=5, delays=[30, 1500, 30])
+
+    async def assert_nothing_scrolls_after(self, page, scrolls_at_cancel: int):
+        # The batch that was in flight still lands: the page asked for it
+        # before the cancel. Nothing may ask for the one after it.
+        async def landed() -> bool:
+            return await rail_cards(page) == 15
+
+        await wait_until(landed, timeout=5.0)
+        await asyncio.sleep(1.0)
+
+        assert await rail_scrolls(page) == scrolls_at_cancel
+        assert await rail_cards(page) == 15
+
+    async def test_task_cancel_stops_the_scroll(self, dom_page):
+        await dom_page.set_content(self.PAGE)
+        await watch_rail(dom_page)
+
+        async def second_round() -> bool:
+            # Two scrolls are two rounds: the slow batch is now in flight.
+            return await rail_scrolls(dom_page) >= 2
+
+        task = asyncio.create_task(scroll_job_sidebar(dom_page))
+        await wait_until(second_round, timeout=5.0)
+        await asyncio.sleep(0.3)
+        scrolls_at_cancel = await rail_scrolls(dom_page)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert await rail_cards(dom_page) == 10
+        await self.assert_nothing_scrolls_after(dom_page, scrolls_at_cancel)
+
+    async def test_a_tool_timeout_stops_the_scroll(self, dom_page):
+        """FastMCP bounds a tool with `anyio.fail_after`, not `Task.cancel`."""
+        await dom_page.set_content(self.PAGE)
+        await watch_rail(dom_page)
+
+        # Long after the fast first round, well before the slow batch lands.
+        with pytest.raises(TimeoutError):
+            with anyio.fail_after(0.8):
+                await scroll_job_sidebar(dom_page)
+        scrolls_at_cancel = await rail_scrolls(dom_page)
+
+        assert scrolls_at_cancel == 2
+        assert await rail_cards(dom_page) == 10
+        await self.assert_nothing_scrolls_after(dom_page, scrolls_at_cancel)
+
+
+class BusyRendererPage:
+    """The real page, except that the first scroll step queues behind a task.
+
+    A renderer busy with a long task holds every message sent to it, and a
+    cancel does not take one back out. The step is sent while a task of
+    ``busy_for()`` seconds is running, sized at that moment so that it can
+    outlast whatever cancels the call, and ``queued`` is set only once the
+    step has gone out, so a cancel after that lands on a step the page has
+    not run yet.
+    """
+
+    def __init__(self, page, busy_for: Callable[[], float] = lambda: 1.5) -> None:
+        self._page = page
+        self._busy_for = busy_for
+        self.queued = asyncio.Event()
+
+    def __getattr__(self, name):
+        return getattr(self._page, name)
+
+    async def evaluate(self, expression, arg=None):
+        if not (isinstance(arg, dict) and arg.get("scroll")) or self.queued.is_set():
+            return await self._page.evaluate(expression, arg)
+        await self._page.evaluate(
+            """(ms) => setTimeout(() => {
+                const end = performance.now() + ms;
+                while (performance.now() < end) {}
+            }, 0)""",
+            self._busy_for() * 1000,
+        )
+        await asyncio.sleep(0.05)
+        step = asyncio.ensure_future(self._page.evaluate(expression, arg))
+        await asyncio.sleep(0.05)
+        self.queued.set()
+        return await step
+
+
+async def until_queued(page: BusyRendererPage, call: asyncio.Task) -> None:
+    """Wait for the queued step, failing rather than hanging if it never comes.
+
+    The call can end first, cancelled before it scrolled at all, and then
+    nothing would ever set the event.
+    """
+    queued = asyncio.ensure_future(page.queued.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {queued, call}, timeout=10.0, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        queued.cancel()
+    if queued not in done:
+        call.cancel()
+        (outcome,) = await asyncio.gather(call, return_exceptions=True)
+        pytest.fail(f"the scroll step never went out; the call ended in {outcome!r}")
+
+
+async def record_scrolls(page) -> None:
+    """Stamp the wall clock of every ``scrollTop`` assignment on the body.
+
+    The assignment and not the scroll event, which fires a frame later and
+    could postdate a step that had finished. The setter is replaced in the
+    world `page.evaluate` runs in, which is the one the step runs in too.
+    """
+    await page.evaluate(
+        """() => {
+            const own = Object.getOwnPropertyDescriptor(
+                Element.prototype, 'scrollTop'
+            );
+            Object.defineProperty(Element.prototype, 'scrollTop', {
+                configurable: true,
+                get() { return own.get.call(this); },
+                set(value) {
+                    document.body.dataset.scrolledAt = String(Date.now());
+                    own.set.call(this, value);
+                },
+            });
+        }"""
+    )
+
+
+async def last_scroll_at(page) -> float:
+    stamp = await page.evaluate("document.body.dataset.scrolledAt")
+    assert stamp is not None, "the step never scrolled, so nothing was tested"
+    return float(stamp)
+
+
+class TestAScrollAlreadySent:
+    """A cancel arriving after a scroll was sent waits for that scroll.
+
+    Until the queued step runs, the page can still move after the call that
+    sent it has given the page to the next one. Waiting for it is the only
+    way to hand over a page that has stopped moving.
+    """
+
+    PAGE = sidebar(total=40, batch=5, delays=[30])
+
+    async def test_task_cancel_waits_for_the_queued_scroll(self, dom_page):
+        await dom_page.set_content(self.PAGE)
+        await record_scrolls(dom_page)
+        page = BusyRendererPage(dom_page)
+
+        task = asyncio.create_task(scroll_job_sidebar(cast(Page, page)))
+        await until_queued(page, task)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        returned_at = time.time() * 1000
+
+        assert await last_scroll_at(dom_page) <= returned_at
+
+    async def test_the_next_tool_gets_a_page_that_has_stopped(self, dom_page):
+        """Through the middleware, with FastMCP's own tool timeout."""
+        await dom_page.set_content(self.PAGE)
+        await record_scrolls(dom_page)
+        timeout = 2.0
+        times_out_at: list[float] = []
+        # The busy task runs a second past the tool timeout however long the
+        # browser took to reach the scroll, so the timeout always lands while
+        # the step is queued and no fixed window has to fit the round trips.
+        page = BusyRendererPage(
+            dom_page, busy_for=lambda: times_out_at[0] - time.monotonic() + 1.0
+        )
+        mcp = FastMCP("test")
+        mcp.add_middleware(SequentialToolExecutionMiddleware())
+        handed_over_at: list[float] = []
+
+        @mcp.tool(timeout=timeout)
+        async def search_jobs() -> dict[str, bool]:
+            times_out_at.append(time.monotonic() + timeout)
+            await scroll_job_sidebar(cast(Page, page))
+            return {"done": True}
+
+        @mcp.tool
+        async def next_tool() -> dict[str, bool]:
+            handed_over_at.append(time.time() * 1000)
+            return {"done": True}
+
+        search = asyncio.create_task(mcp.call_tool("search_jobs", {}))
+        await until_queued(page, search)
+        # Queued on the lock behind the search, which still holds it.
+        following = asyncio.create_task(mcp.call_tool("next_tool", {}))
+        with pytest.raises(Exception, match="timed out"):
+            await search
+        await following
+
+        assert await last_scroll_at(dom_page) <= handed_over_at[0]
 
 
 class TestRedesignedCards:

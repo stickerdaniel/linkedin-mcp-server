@@ -22,6 +22,7 @@ from linkedin_mcp_server.core.exceptions import (
     ElementNotFoundError,
     LinkedInOperationError,
     NetworkError,
+    OffLinkedInLandingError,
     PageReadError,
     ProfileNotFoundError,
     ProxyConnectionError,
@@ -254,6 +255,13 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
         # Ahead of NetworkError, which it subclasses. No issue diagnostics: a
         # proxy that is down or misconfigured is not a bug worth reporting.
         logger.warning("Proxy error%s: %s", ctx, exception)
+        raise ToolError(str(exception)) from exception
+
+    # Also ahead of NetworkError, whose generic text drops the one useful fact:
+    # where the browser landed. No issue diagnostics, following
+    # ProxyConnectionError: a portal on the user's network is not a bug.
+    elif isinstance(exception, OffLinkedInLandingError):
+        logger.warning("Navigation ended off LinkedIn%s: %s", ctx, exception)
         raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, NetworkError):

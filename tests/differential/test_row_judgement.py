@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1237,12 +1238,17 @@ def _chrome_on(profile: object) -> list[str]:
 
 
 def _failed_read_census(
-    case: str, *, row: str = KEY, alias: tuple[Path, Path] | None = None
+    case: str,
+    *,
+    row: str = KEY,
+    alias: tuple[Path, Path] | None = None,
+    refuse: Callable[[int], BaseException] = psutil.AccessDenied,
 ) -> dict:
     """The e1eh model: pid 70 is a browser root and pid 71 its renderer, both
     readable for two samples; pid 72 is a driver. At the third sample one
     lifetime's arguments are refused, as *case* says, and at the fourth
-    everything is gone. pid 1 is init and pid 10 the harness.
+    everything is gone. pid 1 is init and pid 10 the harness. *refuse* makes
+    the refusal of the root's and of a never-read process's arguments.
 
     pid 70 runs on the row's profile *row*, on ``OTHER`` for the
     ``other-profile`` cases, or through the link of *alias*, which points at
@@ -1281,7 +1287,7 @@ def _failed_read_census(
         case.startswith("parent-of")
     ):
         # The packet: read with its profile, one refused read, then gone.
-        table[70]["cmdline"] = psutil.AccessDenied(70)
+        table[70]["cmdline"] = refuse(70)
     children = {
         # Two processes with root arguments on the row's profile under pid 70:
         # if 70 now runs on another profile, they are two roots.
@@ -1314,7 +1320,7 @@ def _failed_read_census(
             "start": 7.0,
             "ppid": 10,
             "exe": BROWSER_EXE,
-            "cmdline": psutil.AccessDenied(73),
+            "cmdline": refuse(73),
         }
     elif case == "renderer":
         table[71]["cmdline"] = psutil.AccessDenied(71)
@@ -1350,9 +1356,14 @@ def _add_children(table: dict[int, dict[str, Any]], cmdlines: list) -> None:
 
 
 def _judged_failed_read(
-    profile, case: str, *, row: str = KEY, alias: tuple[Path, Path] | None = None
+    profile,
+    case: str,
+    *,
+    row: str = KEY,
+    alias: tuple[Path, Path] | None = None,
+    refuse: Callable[[int], BaseException] = psutil.AccessDenied,
 ):
-    census = _failed_read_census(case, row=row, alias=alias)
+    census = _failed_read_census(case, row=row, alias=alias, refuse=refuse)
     vector, failures = judge_row(
         dataclasses.replace(
             _healthy(profile),

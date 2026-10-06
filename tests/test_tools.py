@@ -34,6 +34,7 @@ def _make_mock_extractor(result: dict) -> MagicMock:
     mock.read_job = AsyncMock(return_value=result)
     mock.search_jobs = AsyncMock(return_value=result)
     mock.get_saved_jobs = AsyncMock(return_value=result)
+    mock.get_job_apply_url = AsyncMock(return_value=result)
     mock.search_people = AsyncMock(return_value=result)
     mock.get_sidebar_profiles = AsyncMock(return_value=result)
     mock.get_inbox = AsyncMock(return_value=result)
@@ -121,6 +122,12 @@ def serve_extractor(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], AsyncMoc
         (
             "job",
             "get_job_details",
+            {"job_id": "/feed/"},
+            "job_id is not a LinkedIn id",
+        ),
+        (
+            "job",
+            "get_job_apply_url",
             {"job_id": "/feed/"},
             "job_id is not a LinkedIn id",
         ),
@@ -264,6 +271,79 @@ async def test_valid_input_reaches_the_patched_readiness_call(
     ready.assert_awaited_once()
     assert ready.await_args is not None
     assert ready.await_args.kwargs == {"tool_name": tool_name}
+
+
+@pytest.mark.parametrize(
+    ("module_name", "tool_name", "method", "arguments"),
+    [
+        ("person", "get_person_profile", "read_person", {"linkedin_username": "a"}),
+        ("person", "get_my_profile", "get_my_profile", {}),
+        (
+            "person",
+            "connect_with_person",
+            "connect_with_person",
+            {"linkedin_username": "alice"},
+        ),
+        ("messaging", "get_inbox", "get_inbox", {}),
+        (
+            "messaging",
+            "get_conversation",
+            "get_conversation",
+            {"linkedin_username": "alice"},
+        ),
+        (
+            "messaging",
+            "search_conversations",
+            "search_conversations",
+            {"keywords": "hello"},
+        ),
+        ("feed", "get_feed", "extract_feed", {}),
+    ],
+)
+async def test_a_landing_off_linkedin_reaches_a_masked_client_by_name(
+    module_name, tool_name, method, arguments
+):
+    """The one useful fact, where the browser landed, survives the masking.
+
+    And the session stays: this is the network, so the recovery for an expired
+    session, which retires the profile and opens a login, must not run.
+    """
+    import importlib
+
+    from fastmcp.exceptions import ToolError
+
+    from linkedin_mcp_server.core.destination import raise_if_off_linkedin
+    from linkedin_mcp_server.core.exceptions import OffLinkedInLandingError
+
+    try:
+        raise_if_off_linkedin("https://portal.invalid/interstitial?token=s3cret")
+    except OffLinkedInLandingError as landed:
+        refusal = landed
+
+    module = importlib.import_module(f"linkedin_mcp_server.tools.{module_name}")
+    mcp = FastMCP("test", mask_error_details=True)
+    getattr(module, f"register_{module_name}_tools")(mcp)
+    extractor = _make_mock_extractor({})
+    setattr(extractor, method, AsyncMock(side_effect=refusal))
+
+    with (
+        patch(
+            f"linkedin_mcp_server.tools.{module_name}.get_ready_extractor",
+            AsyncMock(return_value=extractor),
+        ),
+        patch(
+            f"linkedin_mcp_server.tools.{module_name}.handle_auth_error",
+            new_callable=AsyncMock,
+        ) as relogin,
+        pytest.raises(ToolError) as excinfo,
+    ):
+        await mcp.call_tool(tool_name, arguments)
+
+    message = str(excinfo.value)
+    assert "https://portal.invalid" in message
+    assert "instead of LinkedIn" in message
+    assert "s3cret" not in message
+    relogin.assert_not_awaited()
 
 
 class TestPersonTool:
@@ -441,8 +521,12 @@ class TestPersonTool:
         from linkedin_mcp_server.core.exceptions import AuthenticationError
         from linkedin_mcp_server.exceptions import AuthenticationStartedError
 
+        # Live on purpose: a bare mock's ``is_closed()`` is truthy, which reads
+        # as a closed page and sends the call down the shutdown path instead of
+        # the auth failure this test is about.
         mock_browser = MagicMock()
-        mock_browser.page = MagicMock()
+        mock_browser.page.is_closed.return_value = False
+        mock_browser.context.browser.is_connected.return_value = True
         monkeypatch.setattr(
             "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
             AsyncMock(return_value=None),
@@ -729,8 +813,12 @@ class TestPersonTool:
         from linkedin_mcp_server.core.exceptions import AuthenticationError
         from linkedin_mcp_server.exceptions import AuthenticationStartedError
 
+        # Live on purpose: a bare mock's ``is_closed()`` is truthy, which reads
+        # as a closed page and sends the call down the shutdown path instead of
+        # the auth failure this test is about.
         mock_browser = MagicMock()
-        mock_browser.page = MagicMock()
+        mock_browser.page.is_closed.return_value = False
+        mock_browser.context.browser.is_connected.return_value = True
         monkeypatch.setattr(
             "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
             AsyncMock(return_value=None),
@@ -1109,6 +1197,24 @@ class TestJobTools:
         assert "pages_visited" not in result
         mock_extractor.read_job.assert_awaited_once_with("12345")
 
+    async def test_get_job_apply_url(self, mock_context, serve_extractor):
+        expected = {
+            "url": "https://www.linkedin.com/jobs/view/12345/",
+            "apply": {"type": "external", "url": "https://jobs.example.com/12345"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "get_job_apply_url")
+        result = await tool_fn("12345", mock_context)
+        assert result == expected
+        mock_extractor.get_job_apply_url.assert_awaited_once_with("12345")
+
     async def test_search_jobs(self, mock_context, serve_extractor):
         expected = {
             "url": "https://www.linkedin.com/jobs/search/?keywords=python",
@@ -1202,7 +1308,7 @@ class TestJobTools:
 
     async def test_get_saved_jobs(self, mock_context, serve_extractor):
         expected = {
-            "url": "https://www.linkedin.com/my-items/saved-jobs/",
+            "url": "https://www.linkedin.com/jobs-tracker/?stage=saved",
             "sections": {"saved_jobs": "Saved Job 1\nSaved Job 2"},
             "job_ids": ["111", "222"],
         }
@@ -1218,7 +1324,9 @@ class TestJobTools:
         result = await tool_fn(mock_context, max_pages=2)
         assert "saved_jobs" in result["sections"]
         assert result["job_ids"] == ["111", "222"]
-        mock_extractor.get_saved_jobs.assert_awaited_once_with(max_pages=2)
+        mock_extractor.get_saved_jobs.assert_awaited_once_with(
+            max_pages=2, stage="saved"
+        )
 
 
 class TestGetSidebarProfilesTool:
@@ -1631,7 +1739,7 @@ class TestMessagingTools:
             "connection request is accepted."
         ) in description
 
-    async def test_send_message_schema_explains_single_line_controls(self):
+    async def test_send_message_schema_explains_lines_and_controls(self):
         from linkedin_mcp_server.tools.messaging import register_messaging_tools
 
         mcp = FastMCP("test")
@@ -1641,8 +1749,11 @@ class TestMessagingTools:
         assert tool is not None
         message_schema = tool.parameters["properties"]["message"]
         assert " ".join(message_schema["description"].split()) == (
-            "Single-line message text to send. C0 control characters and DEL are "
-            "rejected, including CR, LF, and tab."
+            "Message text. LF, CRLF and CR all end a line; an empty line "
+            "separates paragraphs and is kept. Whitespace-only lines count as "
+            "empty, and leading and trailing whitespace of the whole message is "
+            "removed, as LinkedIn does when sending. Tab, other control "
+            "characters, DEL, U+0085, U+2028 and U+2029 are refused."
         )
 
     @pytest.mark.parametrize("message", ["", "   \t\n"], ids=["empty", "whitespace"])
@@ -1675,10 +1786,18 @@ class TestMessagingTools:
         assert result["retry_safe"] is True
         assert result["url"] == "https://www.linkedin.com/in/testuser/"
 
+    _REFUSED_CODEPOINTS = (
+        *(codepoint for codepoint in range(32) if codepoint not in (10, 13)),
+        127,
+        0x85,
+        0x2028,
+        0x2029,
+    )
+
     @pytest.mark.parametrize(
         "message",
-        [f"First{chr(codepoint)}Second" for codepoint in (*range(32), 127)],
-        ids=[f"U+{codepoint:04X}" for codepoint in (*range(32), 127)],
+        [f"First{chr(codepoint)}Second" for codepoint in _REFUSED_CODEPOINTS],
+        ids=[f"U+{codepoint:04X}" for codepoint in _REFUSED_CODEPOINTS],
     )
     async def test_send_message_refuses_controls_before_a_session(
         self, mock_context, message
@@ -1698,9 +1817,31 @@ class TestMessagingTools:
         ready.assert_not_awaited()
         assert result["status"] == "invalid_message"
         assert result["message"] == (
-            "Message must not contain control characters or line breaks."
+            "Message must not contain control characters other than line breaks."
         )
         assert result["retry_safe"] is True
+
+    async def test_send_message_forwards_line_breaks_unchanged(
+        self, mock_context, serve_extractor
+    ):
+        """The tool refuses but never rewrites; the sender normalizes."""
+        mock_extractor = _make_mock_extractor(
+            {"status": "sent", "sent": True, "retry_safe": False}
+        )
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "send_message")
+        result = await tool_fn("testuser", "First\r\nSecond", True, mock_context)
+
+        assert result["status"] == "sent"
+        mock_extractor.send_message.assert_awaited_once_with(
+            "testuser", "First\r\nSecond", confirm_send=True, profile_urn=None
+        )
 
     @pytest.mark.parametrize(
         "username",
@@ -1757,11 +1898,11 @@ class TestMessagingTools:
     ):
         """The last await can discard an answer that says a message went out.
 
-        `ctx.report_progress` is the final await inside FastMCP's
-        `anyio.fail_after()`, so a deadline landing there raises
-        `CancelledError` past `except Exception` and throws away the result
-        the send already produced. Nothing can hand it back afterwards, and
-        the log line is then the only record.
+        `ctx.report_progress` is the final await of the tool. The tool's own
+        deadline no longer reaches it (#889), but a cancellation from outside
+        still raises `CancelledError` past `except Exception` and throws away
+        the result the send already produced. Nothing can hand it back
+        afterwards, and the log line is then the only record.
 
         Silent where the result says a retry is safe: nothing was submitted,
         so there is no duplicate delivery to warn about. That is `retry_safe`
@@ -2319,6 +2460,7 @@ class TestToolTimeouts:
             "get_company_profile",
             "get_company_posts",
             "get_job_details",
+            "get_job_apply_url",
             "search_jobs",
             "get_saved_jobs",
             "get_inbox",
@@ -2352,6 +2494,7 @@ class TestToolTimeouts:
             "search_companies",
             "get_company_employees",
             "get_job_details",
+            "get_job_apply_url",
             "search_jobs",
             "get_saved_jobs",
             "get_inbox",

@@ -19,6 +19,7 @@ from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_er
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.linkedin.contracts import (
     SEND_INTERRUPTED_WARNING,
+    before_the_reply_deadline,
     refuse_an_invalid_message,
 )
 from linkedin_mcp_server.linkedin.identifiers import (
@@ -278,10 +279,18 @@ def register_messaging_tools(
         contradiction fails closed. No Voyager or other private API is used. This
         is a write operation when confirm_send is True.
 
+        ``thread_id`` is present only on ``sent``: the conversation the
+        confirmed message was observed in, or null when the page stayed on
+        the compose route. ``retry_safe`` stays the authority for whether a
+        retry is safe.
+
         Args:
             linkedin_username: LinkedIn username of the recipient; a full profile URL is accepted too
-            message: Single-line message text to send. C0 control characters and
-                DEL are rejected, including CR, LF, and tab.
+            message: Message text. LF, CRLF and CR all end a line; an empty line
+                separates paragraphs and is kept. Whitespace-only lines count as
+                empty, and leading and trailing whitespace of the whole message
+                is removed, as LinkedIn does when sending. Tab, other control
+                characters, DEL, U+0085, U+2028 and U+2029 are refused.
             confirm_send: Must be True to send the message
             ctx: FastMCP context for progress reporting
             profile_urn: Optional profile URN (e.g. ACoAAB...) to verify against
@@ -292,7 +301,8 @@ def register_messaging_tools(
 
         Returns:
             Dict with url, status, message, recipient_selected, sent, and
-            retry_safe. ``sent`` is true only after the thread shows the submitted
+            retry_safe. ``thread_id`` is present only on ``sent``. ``sent``
+            is true only after the thread shows the submitted
             text under a new server message ID (or its DOM node gains a
             different event ID); this does not claim delivery or read status.
             It is false both where nothing was submitted and
@@ -337,14 +347,19 @@ def register_messaging_tools(
             )
 
             try:
-                await ctx.report_progress(progress=100, total=100, message="Complete")
-            except BaseException:
                 # The send has already answered, and this notification is the
                 # last await inside FastMCP's `anyio.fail_after()`. A deadline
-                # landing here discards a result that may say the send was
-                # confirmed, and nothing can hand it back afterwards, so the
-                # log line is all that is left. Quiet where the result says a
-                # retry is safe, because then there is nothing to warn about.
+                # landing here would discard a result that may say the send was
+                # confirmed, so a notification that stalls gives up first.
+                with before_the_reply_deadline():
+                    await ctx.report_progress(
+                        progress=100, total=100, message="Complete"
+                    )
+            except BaseException:
+                # Cancellation from outside, such as a client that cancels,
+                # which nothing can answer, so the log line is all that is
+                # left. Quiet where the result says a retry is safe, because
+                # then there is nothing to warn about.
                 if result.get("retry_safe") is False:
                     logger.warning(SEND_INTERRUPTED_WARNING)
                 raise

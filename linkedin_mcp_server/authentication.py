@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 
 from linkedin_mcp_server.session_state import (
+    AuthStateIdentity,
     clear_auth_state as clear_all_auth_state,
     get_source_profile_dir,
     portable_cookie_path,
@@ -57,6 +58,10 @@ def get_authentication_source() -> bool:
     )
 
 
-def clear_auth_state(profile_dir: Path | None = None) -> bool:
+def clear_auth_state(
+    profile_dir: Path | None = None, *, confirmed: AuthStateIdentity | None = None
+) -> bool:
     """Clear source session artifacts and all derived runtime sessions."""
-    return clear_all_auth_state(profile_dir or get_source_profile_dir())
+    return clear_all_auth_state(
+        profile_dir or get_source_profile_dir(), confirmed=confirmed
+    )

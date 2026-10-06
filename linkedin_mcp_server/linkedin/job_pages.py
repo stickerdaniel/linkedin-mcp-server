@@ -34,7 +34,10 @@ from linkedin_mcp_server.linkedin.contracts import (
     ExtractedSection,
 )
 from linkedin_mcp_server.linkedin.job_policy import (
+    SAFETY_REDIRECT_PATH,
     SCROLL_DEADLINE_MAX,
+    ApplyType,
+    employer_apply_url,
     route,
     same_job_search,
 )
@@ -42,6 +45,7 @@ from linkedin_mcp_server.linkedin.link_metadata import build_references
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.linkedin.text import (
+    JobApplyTextTable,
     filter_linkedin_noise_lines,
     truncate_linkedin_noise,
 )
@@ -130,6 +134,96 @@ PROMOTED_JOB_IDS_JS = (
 }"""
 )
 
+# This posting's apply control and state, once they render. Easy Apply comes in
+# two shapes. The anchor into the posting's own `/apply/` route
+# (`<a href=".../jobs/view/<id>/apply/?openSDUIApplyFlow=true">`, measured on
+# 2026-09-14) is found by its URL, which the "More jobs" cards, each linking its
+# own posting, cannot match. The `<button>` with no href that replaced it
+# (measured on 2026-09-25) is found by its text, above the description only; the
+# cards below show the same words, as text inside their links.
+#
+# The external control is an `<a target="_blank">` into the off-site
+# interstitial, which names the employer's page in its href (measured on
+# 2026-09-19), so it is answered without a click. It and the state lines are
+# read above the description heading only: below it sit the "More jobs" cards,
+# each with an Apply of its own. Without the heading nothing is proven to be
+# this posting's, and the read answers `unknown`.
+#
+# On 2026-09-14 the external control was a `<button>` with no href, whose click
+# opened a "Share your profile?" dialog or a tab. LinkedIn counts that click as
+# an apply on the posting, and no posting has shown the button since, so it is
+# not read: a posting carrying it answers `unknown` and is never clicked.
+#
+# The heading is found by walking text nodes rather than asking every element
+# for its text. Both find it; the walk visits fewer nodes and copies none of
+# them, and `textContent` on every element of a posting copies that posting
+# once per level of nesting. That is worth the difference because the readiness
+# poll runs this program on every frame for up to ten seconds.
+APPLY_SIGNALS_JS = r"""(opts) => {
+    const {
+        applyPath, redirectPath, easyApplyLabel, externalLabel, descriptionHeadings,
+        closedLines, appliedPattern,
+    } = opts;
+    const main = document.querySelector('main');
+    if (!main) return null;
+    const pathOf = (anchor) => {
+        try {
+            return new URL(anchor.href).pathname.replace(/\/+$/, '');
+        } catch (error) {
+            return '';
+        }
+    };
+    const walk = document.createTreeWalker(main, NodeFilter.SHOW_TEXT);
+    let heading = null;
+    while (walk.nextNode()) {
+        if (descriptionHeadings.includes((walk.currentNode.nodeValue || '').trim())) {
+            heading = walk.currentNode;
+            break;
+        }
+    }
+    const above = (el) => Boolean(
+        heading && (heading.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING)
+    );
+    const lines = (main.innerText || '').split('\n').map((line) => line.trim());
+    const end = lines.findIndex((line) => descriptionHeadings.includes(line));
+    const top = end === -1 ? [] : lines.slice(0, end);
+    const applied = new RegExp(appliedPattern);
+    const anchors = [...main.querySelectorAll('a[href]')];
+    const link = anchors.find((anchor) => above(anchor)
+        && (anchor.innerText || '').trim() === externalLabel
+        && pathOf(anchor) === redirectPath);
+    return {
+        bounded: Boolean(heading),
+        easy_apply: anchors.some((anchor) => pathOf(anchor) === applyPath)
+            || [...main.querySelectorAll('button')].some((el) => above(el)
+                && (el.innerText || '').trim() === easyApplyLabel),
+        external_link: link ? link.href : null,
+        applied: top.some((line) => applied.test(line)),
+        closed: top.some((line) => closedLines.includes(line)),
+    };
+}"""
+
+# Ready once the description heading and a signal are both in. The Easy Apply
+# anchor is found without the heading (the button is not), but the applied and
+# closed lines are not, so a read that settled on the anchor alone could call
+# such a posting open.
+APPLY_READY_JS = (
+    "(opts) => {\n    const signals = (" + APPLY_SIGNALS_JS + ")(opts);\n"
+    "    return Boolean(signals && signals.bounded && (signals.easy_apply\n"
+    "        || signals.external_link || signals.applied || signals.closed));\n}"
+)
+
+# How long the apply control gets to render.
+_APPLY_READY_TIMEOUT = 10.0
+
+
+@dataclass(frozen=True, slots=True)
+class JobApplyRead:
+    """How one posting takes applications, and where the employer's form is."""
+
+    type: ApplyType
+    url: str | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class JobPageCapture:
@@ -207,6 +301,57 @@ class JobPageReader:
             scroll_seconds=scroll_seconds,
         )
 
+    async def read_apply_link(
+        self, url: str, job_id: str, text: JobApplyTextTable
+    ) -> JobApplyRead:
+        """Read how a posting takes applications, and an external one's address.
+
+        Nothing is clicked. An external Apply is a link whose href names the
+        employer's address; a posting whose Apply is anything else answers
+        `unknown`.
+
+        The employer's address is answered as LinkedIn gives it and never
+        loaded. It comes from whoever posted the job, and loading it would let
+        a stranger's link, or any redirect behind it, send a request from this
+        host to whatever the host can reach.
+        """
+        await self._navigator._navigate_to_page(url)
+        await self._session.check_rate_limit()
+        page = self._session.page
+        opts = {
+            "applyPath": f"/jobs/view/{job_id}/apply",
+            "redirectPath": SAFETY_REDIRECT_PATH,
+            "easyApplyLabel": text.easy_apply_label,
+            "externalLabel": text.external_apply_label,
+            "descriptionHeadings": list(text.description_headings),
+            "closedLines": list(text.closed_lines),
+            "appliedPattern": text.applied_pattern.pattern,
+        }
+        try:
+            await page.wait_for_function(
+                APPLY_READY_JS, arg=opts, timeout=_APPLY_READY_TIMEOUT * 1000
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("No apply control or posting state rendered on %s", url)
+
+        signals = await self._session.run_on_linkedin(APPLY_SIGNALS_JS, opts)
+        # Both states before any control, so a posting in either never reads
+        # as open.
+        if signals and signals["applied"]:
+            return JobApplyRead("applied")
+        if signals and signals["closed"]:
+            return JobApplyRead("closed")
+        if signals and signals["easy_apply"]:
+            return JobApplyRead("easy_apply")
+        if signals and signals["external_link"]:
+            return JobApplyRead(
+                "external", employer_apply_url(signals["external_link"])
+            )
+        # A barrier served in place of the posting renders none of the above
+        # either, and it needs the relogin path rather than a type.
+        await self._navigator._raise_if_auth_barrier(url)
+        return JobApplyRead("unknown")
+
     async def _extract_job_ids(self, *, scoped: bool = False) -> list[str]:
         """Extract unique job IDs from job card links on the current page.
 
@@ -217,7 +362,7 @@ class JobPageReader:
             scoped: Read only the results rail, chosen by the same rule the
                 sidebar scroll uses. Off for lists that have no rail.
         """
-        result = await self._session.page.evaluate(
+        result = await self._session.run_on_linkedin(
             JOB_IDS_JS, {"selector": _JOB_CARD_SELECTOR, "scoped": scoped}
         )
         if scoped and not result["scoped"]:
@@ -240,7 +385,7 @@ class JobPageReader:
         treating this as best effort cannot mistake a failed read for a page
         without promoted jobs.
         """
-        result = await self._session.page.evaluate(
+        result = await self._session.run_on_linkedin(
             PROMOTED_JOB_IDS_JS, {"selector": _JOB_CARD_SELECTOR, "label": label}
         )
         if not isinstance(result, list):
@@ -445,7 +590,7 @@ class JobPageReader:
         selector is the only reliable way to read it. Gracefully returns ``None`` if
         LinkedIn renames the class — pagination just falls back to ``max_pages``.
         """
-        text = await self._session.page.evaluate(
+        text = await self._session.run_on_linkedin(
             """() => {
                 const el = document.querySelector(
                     '.jobs-search-pagination__page-state'
@@ -613,7 +758,7 @@ class JobPageReader:
         ``None`` — pagination then falls back to ``max_pages`` and the
         no-new-ids early stop.
         """
-        value = await self._session.page.evaluate(
+        value = await self._session.run_on_linkedin(
             """() => {
                 const buttons = document.querySelectorAll(
                     'ul.artdeco-pagination__pages li button'

@@ -40,6 +40,10 @@
         "coroutine": true,
         "signature": "(self, limit: 'int' = 20) -> 'dict[str, Any]'"
       },
+      "get_job_apply_url": {
+        "coroutine": true,
+        "signature": "(self, job_id: 'str') -> 'dict[str, Any]'"
+      },
       "get_my_profile": {
         "coroutine": true,
         "signature": "(self, sections: 'set[str] | None' = None, callbacks: 'ProgressCallback | None' = None, max_scrolls: 'int | None' = None) -> 'dict[str, Any]'"
@@ -50,7 +54,7 @@
       },
       "get_saved_jobs": {
         "coroutine": true,
-        "signature": "(self, max_pages: 'int' = 3) -> 'dict[str, Any]'"
+        "signature": "(self, max_pages: 'int' = 3, stage: 'JobsTrackerStage' = 'saved') -> 'dict[str, Any]'"
       },
       "get_sidebar_profiles": {
         "coroutine": true,
@@ -100,6 +104,7 @@
       "get_company_employees",
       "get_conversation",
       "get_inbox",
+      "get_job_apply_url",
       "get_my_profile",
       "get_saved_jobs",
       "get_sidebar_profiles",
@@ -374,6 +379,25 @@
           "type": "object"
         }
       },
+      "get_job_apply_url": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "job_id": {
+              "description": "LinkedIn job ID (e.g., \"4252026496\", \"3856789012\")",
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "get_job_details": {
         "input": {
           "additionalProperties": false,
@@ -528,10 +552,21 @@
           "properties": {
             "max_pages": {
               "default": 3,
-              "description": "Maximum number of saved-jobs pages to load (1-10, default 3)",
+              "description": "Maximum number of tracker pages to load (1-10, default 3)",
               "maximum": 10,
               "minimum": 1,
               "type": "integer"
+            },
+            "stage": {
+              "default": "saved",
+              "description": "Tracker tab: saved (default), in_progress, applied or\narchived. applied lists Easy Apply submissions and external\napplications the user confirmed to LinkedIn.",
+              "enum": [
+                "saved",
+                "in_progress",
+                "applied",
+                "archived"
+              ],
+              "type": "string"
             }
           },
           "type": "object"
@@ -1003,7 +1038,7 @@
               "type": "string"
             },
             "message": {
-              "description": "Single-line message text to send. C0 control characters and\nDEL are rejected, including CR, LF, and tab.",
+              "description": "Message text. LF, CRLF and CR all end a line; an empty line\nseparates paragraphs and is kept. Whitespace-only lines count as\nempty, and leading and trailing whitespace of the whole message\nis removed, as LinkedIn does when sending. Tab, other control\ncharacters, DEL, U+0085, U+2028 and U+2029 are refused.",
               "type": "string"
             },
             "profile_urn": {

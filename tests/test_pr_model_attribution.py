@@ -1,4 +1,4 @@
-"""The consumer contract; rule and grammar tests live in agent-guardrails."""
+"""The consumer contract; rule and grammar tests live in post-no-bills."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import yaml
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "check-attribution.yml"
 _TEMPLATE = _REPO_ROOT / ".github" / "pull_request_template.md"
-_ACTION = "stickerdaniel/agent-guardrails"
+_ACTION = "stickerdaniel/post-no-bills"
 
 
 def _workflow() -> dict[str, Any]:
@@ -44,7 +44,7 @@ def test_workflow_checks_attribution_in_required_job() -> None:
     (step,) = job["steps"]
     assert set(step) == {"name", "uses", "with", "env"}
     assert re.fullmatch(rf"{re.escape(_ACTION)}@[0-9a-f]{{40}}", step["uses"])
-    assert step["with"] == {"require-model-attribution": True}
+    assert step["with"] == {"model-attribution": "host"}
     assert step["env"] == {
         "GUARDRAILS_WORKFLOW_REF": "${{ github.workflow_ref }}",
         "GUARDRAILS_WORKFLOW_SHA": "${{ github.workflow_sha }}",
@@ -64,9 +64,9 @@ def test_template_ends_with_editable_attribution_placeholder() -> None:
     lines = [
         line.strip() for line in _TEMPLATE.read_text().splitlines() if line.strip()
     ]
-    assert lines[-1] == "Generated with [model] for [job] in [harness]."
-    assert '"Generated with <model>" with or without a final period' in lines[-2]
-    assert "detailed form below, which requires its final period" in lines[-2]
+    assert lines[-1] == "Generated with [model] for [job] in [tool] via [host]."
+    assert "name the model, the job, the tool, and the host" in lines[-2]
+    assert "end with a period" in lines[-2]
     assert "coding-agent runtime" in lines[-2]
     assert "in Claude Code via T3 Code" in lines[-2]
 
@@ -78,10 +78,10 @@ def test_guardrails_updates_have_isolated_and_bounded_automerge_rules() -> None:
         assert rule["matchManagers"] == ["github-actions"]
         assert rule["matchPackageNames"] == [_ACTION]
     assert automatic["matchUpdateTypes"] == ["minor", "patch"]
-    assert automatic["groupName"] == "agent-guardrails"
-    assert automatic["groupSlug"] == "agent-guardrails"
+    assert automatic["groupName"] == "post-no-bills"
+    assert automatic["groupSlug"] == "post-no-bills"
     assert automatic["automerge"] is True
     assert manual["matchUpdateTypes"] == ["major", "digest", "pin", "pinDigest"]
-    assert manual["groupName"] == "agent-guardrails manual"
-    assert manual["groupSlug"] == "agent-guardrails-manual"
+    assert manual["groupName"] == "post-no-bills manual"
+    assert manual["groupSlug"] == "post-no-bills-manual"
     assert manual["automerge"] is False

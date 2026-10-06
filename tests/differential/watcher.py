@@ -163,7 +163,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Literal
 
 import psutil
 
@@ -180,6 +180,15 @@ SAMPLE_SECONDS = 0.05
 #: its own PEB command line is adversarial and is not a browser launch; it is
 #: outside this oracle.
 NO_EXEC = os.name == "nt"
+
+#: The pid the watcher never opens, on Windows only: pid 0 is the System Idle
+#: Process, which is never a browser and never recycled. psutil cannot read its
+#: times there, so its create time falls back to a snapshot of every process on
+#: the system (``NtQuerySystemInformation``). Each sample opens a fresh
+#: ``psutil.Process``, so no create time is cached and that system-wide query
+#: ran in every sample, where a loaded runner can stall it past the gap budget.
+#: Linux lists no pid 0, and macOS reads its ``kernel_task`` directly.
+IDLE_PID: int | None = 0 if os.name == "nt" else None
 
 #: The scheduling class the watcher asks for, on Windows only: POSIX lets an
 #: unprivileged process lower its priority but not raise it. A burst of process
@@ -483,6 +492,33 @@ def invoked_module(cmdline: Sequence[str]) -> str | None:
     return None
 
 
+def read_arguments(process: Any, field: Literal["cmdline", "environ", "exe"]) -> Any:
+    """``process.cmdline()``, ``process.environ()`` or ``process.exe()``, a
+    refusal raised as ``psutil.AccessDenied`` on every platform.
+
+    ``exe`` is here because psutil falls back to the command line when the
+    executable is refused or empty, and that read fails the same way.
+
+    psutil 7.2.2 on macOS raises a refused ``sysctl(KERN_PROCARGS2)`` that
+    reports errno 0 as a ``SystemError`` caused by the ``PermissionError`` it
+    meant: its C code sets that error and then returns success
+    (https://github.com/giampaolo/psutil/pull/2854, released only with 8.0.0).
+    Only that shape is converted; any other ``SystemError`` is a defect and
+    propagates. Done when the locked psutil contains that fix: then remove
+    this and call the method directly
+    (https://github.com/stickerdaniel/linkedin-mcp-server/issues/1216).
+    """
+    try:
+        return getattr(process, field)()
+    except SystemError as exc:
+        if not (
+            isinstance(exc.__cause__, PermissionError)
+            or isinstance(exc.__context__, PermissionError)
+        ):
+            raise
+        raise psutil.AccessDenied(process.pid, getattr(process, "_name", None)) from exc
+
+
 def read_launcher(process: Any) -> str | None:
     """The venv interpreter a process was started as, if it says so.
 
@@ -491,7 +527,7 @@ def read_launcher(process: Any) -> str | None:
     once per PID, create time and command line.
     """
     try:
-        value = process.environ().get(LAUNCHER_ENV)
+        value = read_arguments(process, "environ").get(LAUNCHER_ENV)
     except (psutil.Error, OSError, AttributeError):
         return None
     return value or None
@@ -505,7 +541,7 @@ def read_browser_marker(process: Any) -> str | None:
     product's guardian acts on. A failed read raises ``psutil.Error`` or
     ``OSError``: that is not knowing, and the caller asks again.
     """
-    value = process.environ().get(BROWSER_MARKER_ENV)
+    value = read_arguments(process, "environ").get(BROWSER_MARKER_ENV)
     if not value:
         return None
     return hashlib.sha256(value.encode()).hexdigest()[:16]
@@ -698,7 +734,8 @@ class Sampler:
     process table. *browser_exe* and *browser_dir* name what the row's browser
     runs. *user* is the harness's user, as *user_of* reports it. *no_exec*
     says whether a process's program is fixed for its lifetime, which is
-    Windows's by default and set in tests to model either platform. *pgid_of*
+    Windows's by default and set in tests to model either platform. *idle_pid*
+    is a listed pid that is skipped rather than opened (``IDLE_PID``). *pgid_of*
     reads a process's group, ``os.getpgid`` by default. *read_markers* says
     whether browser markers are read (``READ_MARKERS``). *timer* times each
     read and phase, ``time.perf_counter`` by default, and *cpu* is the
@@ -719,6 +756,7 @@ class Sampler:
         browser_exe: str | None = None,
         browser_dir: str | None = None,
         no_exec: bool = NO_EXEC,
+        idle_pid: int | None = IDLE_PID,
         pgid_of: Callable[[int], int | None] = posix_pgid,
         read_markers: bool = READ_MARKERS,
         timer: Callable[[], float] = time.perf_counter,
@@ -735,6 +773,7 @@ class Sampler:
         #: The process groups at the first sample.
         self.baseline_pgids: list[int] = []
         self.no_exec = no_exec
+        self.idle_pid = idle_pid
         self._pgid_of = pgid_of
         self.read_markers = read_markers
         self.own_pid = os.getpid() if own_pid is None else own_pid
@@ -1006,14 +1045,16 @@ class Sampler:
         except _UNREADABLE as exc:
             failures.append(f"ppid: {type(exc).__name__}")
         try:
-            exe = self._timed("exe", pid, process.exe)
+            exe = self._timed("exe", pid, lambda: read_arguments(process, "exe"))
             exe_read = True
         except _UNREADABLE as exc:
             failures.append(f"exe: {type(exc).__name__}")
         if not arguments:
             return ppid, exe, cmdline, failures, exe_read
         try:
-            cmdline = tuple(self._timed("cmdline", pid, process.cmdline))
+            cmdline = tuple(
+                self._timed("cmdline", pid, lambda: read_arguments(process, "cmdline"))
+            )
         except _UNREADABLE as exc:
             failures.append(f"cmdline: {type(exc).__name__}")
         return ppid, exe, cmdline, failures, exe_read
@@ -1028,7 +1069,10 @@ class Sampler:
         self.began_at = self._clock()
         self.last_pid_at_begin = self._in_phase("last_pid", self._last_pid)
         cpu["last_pid"] = self._cpu()
-        pids = self._in_phase("enumeration", lambda: list(self._pids()))
+        pids = self._in_phase(
+            "enumeration",
+            lambda: [pid for pid in self._pids() if pid != self.idle_pid],
+        )
         cpu["enumeration"] = self._cpu()
         self._slowest = None
         first = self._baseline is None

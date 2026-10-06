@@ -18,6 +18,7 @@ from __future__ import annotations
 import errno
 import io
 import json
+import math
 import os
 import re
 import subprocess
@@ -306,7 +307,17 @@ profile = os.environ["STAND_IN_PROFILE"]
 os.execv(sys.executable, [sys.executable, sys.argv[1], "--user-data-dir=" + profile])
 """
 
-_AFTER_EXEC = "import time\ntime.sleep(3)\n"
+# Browser-shaped until the test has seen the watcher record it, so a slow
+# sample on a loaded machine cannot miss a phase that ended on its own clock.
+_AFTER_EXEC = """
+import os
+import time
+
+release = os.environ["STAND_IN_RELEASE"]
+deadline = time.monotonic() + 30
+while not os.path.exists(release) and time.monotonic() < deadline:
+    time.sleep(0.05)
+"""
 
 
 def test_a_process_that_execs_into_a_browser_late_is_still_seen(tmp_path):
@@ -316,21 +327,44 @@ def test_a_process_that_execs_into_a_browser_late_is_still_seen(tmp_path):
     before, after = tmp_path / "before_exec.py", tmp_path / "after_exec.py"
     before.write_text(_DELAYED_EXEC)
     after.write_text(_AFTER_EXEC)
+    release = tmp_path / "release"
+    key = canonical_user_data_dir(str(profile))
     watcher = _start_watcher(tmp_path)
     try:
         stand_in = subprocess.Popen(
             [sys.executable, str(before), str(after)],
-            env={**os.environ, "STAND_IN_PROFILE": str(profile)},
+            env={
+                **os.environ,
+                "STAND_IN_PROFILE": str(profile),
+                "STAND_IN_RELEASE": str(release),
+            },
         )
         try:
+            # Not until the stand-in exits: on Windows the exec is a new
+            # process, and the one launched here ends as it starts.
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if any(
+                    r.get("actor") == "browser"
+                    and (
+                        f"--user-data-dir={profile}" in r.get("cmdline", "")
+                        or r.get("profile") == key
+                    )
+                    for r in read_jsonl(tmp_path / "watcher.jsonl")
+                ):
+                    break
+                time.sleep(0.05)
+            release.touch()
             stand_in.wait(timeout=30)
         finally:
+            # Released on every path: on Windows the exec'd process is not
+            # ``stand_in`` and would otherwise run on into other tests.
+            release.touch()
             if stand_in.poll() is None:
                 stand_in.kill()
     finally:
         records = _stop_watcher(tmp_path, watcher)
     (summary,) = [r for r in records if r["kind"] == "watcher.summary"]
-    key = canonical_user_data_dir(str(profile))
     assert summary["max_roots"].get(key) == 1, summary["max_roots"]
     # On Windows the exec is a new process whose parent is gone before it is
     # sampled, so it is not tied to the row and its arguments are withheld;
@@ -357,7 +391,7 @@ def test_a_watcher_that_stops_early_cannot_carry_o1(tmp_path):
     assert any("ended before" in failure for failure in failures)
 
 
-def test_a_watcher_stopped_on_request_after_the_actors_is_healthy(tmp_path):
+def test_a_watcher_stopped_on_request_after_the_actors_covers_them(tmp_path):
     watcher = _start_watcher(tmp_path)
     began = time.time()
     time.sleep(0.3)
@@ -366,10 +400,22 @@ def test_a_watcher_stopped_on_request_after_the_actors_is_healthy(tmp_path):
     (summary,) = [r for r in records if r["kind"] == "watcher.summary"]
     assert summary["observation_start"] <= began
     assert summary["observation_end"] >= ended
-    assert watcher_failures(summary, actors_began=began, actors_ended=ended) == []
-    # The evidence states what sampling cost on this machine.
+    # Coverage and the requested stop, not the gap: this test shares the
+    # machine with every other xdist worker and launches no browser, so a slow
+    # sample here says nothing about O1. The rows keep the 1.0s bound, and the
+    # summary tests further down hold that it rejects a gap.
+    assert (
+        watcher_failures(
+            summary, actors_began=began, actors_ended=ended, max_gap=math.inf
+        )
+        == []
+    )
+    # Costs use a monotonic clock; sample_log uses wall time. Check the
+    # published values here and their arithmetic with fixed durations below.
+    assert math.isfinite(summary["sample_seconds_mean"])
     assert summary["sample_seconds_mean"] > 0
-    assert summary["sample_seconds_p95"] >= summary["sample_seconds_mean"] * 0.5
+    assert math.isfinite(summary["sample_seconds_p95"])
+    assert summary["sample_seconds_p95"] >= 0
     assert summary["first_sample_cached"] > 0
     assert summary["reads_per_sample_max"] >= 1
     # Every sample is logged, and each event's time is a logged sample's end.
@@ -433,6 +479,9 @@ class _FakeProcess:
             raise opening
 
     def create_time(self):
+        if "start_seconds" in self._entry:
+            # A modelled slow read, as ``cmdline_seconds``.
+            self._entry["clock"]["now"] += self._entry["start_seconds"]
         return _field(self._entry, "start")
 
     def ppid(self):
@@ -492,6 +541,8 @@ def _sampler(
         # A POSIX process table unless a test models Windows: the same on
         # every host the suite runs on.
         no_exec=no_exec,
+        # pid 0 is the System Idle Process wherever the table models Windows.
+        idle_pid=0 if no_exec else None,
         # The modelled group, never the real one of a real pid.
         pgid_of=pgid_of
         or (lambda pid: _field({"pgid": (table.get(pid) or {}).get("pgid")}, "pgid")),
@@ -1059,9 +1110,20 @@ def test_the_summary_states_what_sampling_cost(no_exec):
         assert (stats["first_sample_cached"], stats["first_sample_watched"]) == (2, 1)
         # Every process in the first sample, then only the harness and 61.
         assert sampler.reads_per_sample == [4, 2, 2]
-    assert duration_stats([0.01, 0.02, 0.03]) == {
-        "sample_seconds_mean": 0.02,
-        "sample_seconds_p95": 0.03,
+
+
+@pytest.mark.parametrize(
+    ("durations", "mean", "p95"),
+    [
+        ([0.01, 0.02, 0.03], 0.02, 0.03),
+        ([0.0019] * 99 + [1.0019], 0.0119, 0.0019),
+    ],
+    ids=["uniform", "one-slow-sample"],
+)
+def test_sample_duration_statistics(durations, mean, p95):
+    assert duration_stats(durations) == {
+        "sample_seconds_mean": mean,
+        "sample_seconds_p95": p95,
     }
 
 
@@ -1979,6 +2041,83 @@ def test_a_gap_names_the_file_system_calls_it_overlapped():
         "stop-file checks took 0.0000s over 0 calls and one was still running "
         "after 1.2331s"
     ) in failure
+
+
+def test_on_windows_the_idle_process_does_not_hold_sampling():
+    """psutil answers pid 0's create time on Windows with a query of the whole
+    process table, modelled here as a stall over the gap budget every time."""
+    clock = {"now": 100.0}
+    table: dict[int, dict[str, Any]] = {
+        **_row_actor_table(),
+        80: {"start": 6.5, "ppid": 10, "exe": BROWSER_EXE, "cmdline": _chrome(PROFILE)},
+        0: {
+            "start": 0.0,
+            "ppid": 0,
+            "exe": "",
+            "cmdline": [],
+            "user": "NT AUTHORITY\\SYSTEM",
+            "start_seconds": _STALL,
+            "clock": clock,
+        },
+    }
+    samples = {"n": 0}
+    seen = threading.Event()
+
+    def pids() -> list[int]:
+        samples["n"] += 1
+        return list(table)
+
+    def now() -> float:
+        return clock["now"]
+
+    def stop_requested() -> bool:
+        if samples["n"] < 8:
+            return False
+        seen.set()
+        return True
+
+    def sleep(seconds: float) -> None:
+        clock["now"] += seconds
+        # The stop-file thread runs in real time, however late it is
+        # scheduled, while modelled time costs the loop nothing. Held here
+        # until that thread has seen the request, the loop does not spin
+        # through samples meanwhile.
+        if samples["n"] >= 8:
+            seen.wait(10)
+
+    sampler = _sampler(
+        table, root=10, no_exec=True, timer=now, clock=now, cpu=lambda: 0.0, pids=pids
+    )
+    tracker = Tracker()
+    loop = watcher.observe(
+        sampler,
+        tracker,
+        io.StringIO(),
+        stop_requested,
+        base={},
+        interval=_INTERVAL,
+        # Out of reach, so the stop always comes from the stop-file thread,
+        # as the row judgement requires.
+        deadline=math.inf,
+        timer=now,
+        monotonic=now,
+        wall=now,
+        sleep=sleep,
+        cpu=lambda: 0.0,
+        stop_poll=0.001,
+    )
+    summary: dict[str, Any] = {**loop, **sampler.stats()}
+    assert summary["max_gap_seconds"] < harness.MAX_WATCHER_GAP_SECONDS
+    assert (
+        watcher_failures(
+            summary,
+            actors_began=summary["observation_start"],
+            actors_ended=summary["observation_end"],
+        )
+        == []
+    )
+    # Still watching the row: its browser is the profile's one root.
+    assert tracker.max_roots == {canonical_user_data_dir(PROFILE): 1}
 
 
 # --- File-system calls stay off the sampling path ----------------------------------

@@ -1,11 +1,13 @@
 """Tests for the browser-UI message sender."""
 
 from contextlib import ExitStack
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncio
 import logging
 
+import anyio
 from patchright.async_api import Error as PatchrightError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -16,6 +18,7 @@ from linkedin_mcp_server.linkedin import message_sender as message_sender_module
 from linkedin_mcp_server.linkedin.message_sender import (
     MessageSender,
     _MESSAGE_COMPOSER_OWNER_JS,
+    _MESSAGE_COMPOSER_SUBMIT_READY_JS,
     _MESSAGE_CONFIRMATION_DISPOSE_JS,
     _MESSAGE_CONFIRMATION_PREPARE_JS,
     _MESSAGE_CONFIRMATION_READY_JS,
@@ -90,6 +93,13 @@ class TestMessageTargetUrls:
             ("https://www.linkedin.com/in/testuser/edit/intro/", None),
             ("https://www.linkedin.com/in/testuser%2Fedit/", None),
             ("https://www.linkedin.com/in/testuser/?trk=profile", None),
+            # The 2026 profile page lands on this flag; it is the only query allowed.
+            (
+                "https://www.linkedin.com/in/testuser/?isSelfProfile=false",
+                "/in/testuser/",
+            ),
+            ("https://www.linkedin.com/in/testuser/?isSelfProfile=true", None),
+            ("https://www.linkedin.com/in/testuser/?isSelfProfile=false&trk=x", None),
             ("https://www.linkedin.com/in/testuser/#details", None),
         ],
     )
@@ -181,6 +191,25 @@ class TestReadProfileMessageTarget:
         assert resolution.target.profile_path == "/in/canonical-user/"
         assert resolution.target.profile_urn == "ACoAAB"
 
+    @pytest.mark.parametrize("status", ["resolved", "unavailable"])
+    async def test_a_profile_that_became_a_portal_names_the_landing(
+        self, mock_page, status
+    ):
+        # Read as a failed recipient, the redirect would be hidden as a profile
+        # without a Message action.
+        from linkedin_mcp_server.core.exceptions import OffLinkedInLandingError
+
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "status": status,
+                "pageUrl": "https://portal.invalid/interstitial",
+                "composeHrefs": ["/messaging/compose/?recipient=ACoAAB"],
+            }
+        )
+
+        with pytest.raises(OffLinkedInLandingError, match="https://portal.invalid"):
+            await _sender(mock_page)._read_profile_message_target()
+
 
 class TestSendMessage:
     @pytest.mark.parametrize("message", ["", " \t\n"], ids=["empty", "whitespace"])
@@ -229,8 +258,8 @@ class TestSendMessage:
 
     @pytest.mark.parametrize(
         "message",
-        ["First\nSecond", "First\rSecond", "First\tSecond", "First\x7fSecond"],
-        ids=["newline", "carriage-return", "tab", "del"],
+        ["First\tSecond", "First\x7fSecond", "First\u2028Second"],
+        ids=["tab", "del", "line-separator"],
     )
     async def test_control_message_is_rejected_before_browser_interaction(
         self, mock_page, message
@@ -245,7 +274,7 @@ class TestSendMessage:
 
         assert result["status"] == "invalid_message"
         assert result["message"] == (
-            "Message must not contain control characters or line breaks."
+            "Message must not contain control characters other than line breaks."
         )
         assert result["retry_safe"] is True
         navigate.assert_not_awaited()
@@ -436,7 +465,7 @@ class TestSendMessage:
                 sender,
                 "_message_send_confirmed",
                 new_callable=AsyncMock,
-                return_value=True,
+                return_value=message_sender_module._SendConfirmation(thread_id=None),
             ),
         )
 
@@ -794,7 +823,7 @@ class TestSendMessage:
                 sender,
                 "_message_send_confirmed",
                 new_callable=AsyncMock,
-                return_value=True,
+                return_value=message_sender_module._SendConfirmation(thread_id=None),
             ),
         ):
             result = await sender.send_message("testuser", "Hello!", confirm_send=True)
@@ -946,12 +975,13 @@ class TestSendMessage:
             steps.append("submit")
             return "clicked"
 
-        async def confirmed(message, *, target, owner, confirmation):
+        async def confirmed(message, *, target, owner, confirmation, reply_deadline):
+            assert isinstance(reply_deadline, float)
             assert message == "Hello!"
             assert target == self._target()
             assert owner is mock_page.evaluate_handle.return_value
             steps.append(f"confirm:{confirmation}")
-            return True
+            return message_sender_module._SendConfirmation(thread_id=None)
 
         with (
             patches[1],
@@ -994,6 +1024,73 @@ class TestSendMessage:
             "submit",
             "confirm:confirmation-token",
         ]
+
+    async def test_every_step_receives_the_normalized_message(self, mock_page):
+        """The editor is written, checked and confirmed with one text."""
+        sender = _sender(mock_page)
+        patches = self._patch_to_composer(sender, mock_page)
+        owner = mock_page.evaluate_handle.return_value
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6] as write,
+            patches[7] as submit,
+            patches[8],
+            patches[9] as prepare,
+            patches[10] as confirmed,
+        ):
+            result = await sender.send_message(
+                "testuser", "First\r\n \r\nSecond\n", confirm_send=True
+            )
+
+        assert result["status"] == "sent"
+        normalized = "First\n\nSecond"
+        assert write.await_args.args[0] == normalized
+        assert prepare.await_args.args[0] == normalized
+        assert submit.await_args.args[0] == normalized
+        assert confirmed.await_args.args[0] == normalized
+        ready = [
+            call.args[1]["message"]
+            for call in owner.evaluate.await_args_list
+            if call.args[0] is _MESSAGE_COMPOSER_SUBMIT_READY_JS
+        ]
+        assert ready == [normalized]
+
+    async def test_pre_submit_cleanup_receives_the_normalized_message(self, mock_page):
+        sender = _sender(mock_page)
+        patches = self._patch_to_composer(sender, mock_page)
+        owner = mock_page.evaluate_handle.return_value
+        with (
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7] as submit,
+            patches[8],
+            patches[9],
+            patches[10],
+            patch.object(
+                sender,
+                "_wait_for_verified_submit",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                sender, "_cleanup_owned_message", new_callable=AsyncMock
+            ) as cleanup,
+        ):
+            result = await sender.send_message(
+                "testuser", "First\r\n \r\nSecond\n", confirm_send=True
+            )
+
+        assert result["status"] == "send_unavailable"
+        submit.assert_not_awaited()
+        cleanup.assert_awaited_once_with("First\n\nSecond", owner)
 
     async def test_interrupted_submission_is_not_a_failure(self, mock_page):
         """A click round trip can fail after dispatching the local event."""
@@ -1213,7 +1310,321 @@ class TestSendMessage:
             target=self._target(),
             owner=mock_page.evaluate_handle.return_value,
             confirmation=1,
+            reply_deadline=float("inf"),
         )
+
+
+async def _stall(*_args, **_kwargs):
+    await anyio.sleep_forever()
+
+
+class TestSendMessageDeadline:
+    """The tool's own deadline never takes the answer of a started send (#889).
+
+    Driven through the in-memory MCP client, because the deadline is FastMCP's
+    `anyio.fail_after()` around the tool, and what matters is what reaches the
+    caller once it fires.
+    """
+
+    _TOOL_TIMEOUT = 0.5
+
+    @staticmethod
+    async def _call(sender, monkeypatch):
+        from fastmcp import Client, FastMCP
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.messaging.get_ready_extractor",
+            AsyncMock(return_value=SimpleNamespace(send_message=sender.send_message)),
+        )
+        mcp = FastMCP("test")
+        register_messaging_tools(
+            mcp, tool_timeout=TestSendMessageDeadline._TOOL_TIMEOUT
+        )
+        async with Client(mcp) as client:
+            return await client.call_tool(
+                "send_message",
+                {
+                    "linkedin_username": "testuser",
+                    "message": "Hello!",
+                    "confirm_send": True,
+                },
+                raise_on_error=False,
+            )
+
+    @staticmethod
+    def _composer(stack, sender, mock_page):
+        patches = TestSendMessage._patch_to_composer(sender, mock_page)
+        # Index 8 replaces `asyncio.sleep` for the whole process, the MCP
+        # session included; the submit wait it exists for answers at once here.
+        for index in range(1, 6):
+            stack.enter_context(patches[index])
+        return SimpleNamespace(
+            write=stack.enter_context(patches[6]),
+            submit=stack.enter_context(patches[7]),
+            prepare=stack.enter_context(patches[9]),
+            confirmed=stack.enter_context(patches[10]),
+        )
+
+    @pytest.mark.parametrize("stage", ["dispatch", "confirmation"])
+    async def test_a_stalled_send_answers_unconfirmed(
+        self, mock_page, monkeypatch, stage
+    ):
+        sender = _sender(mock_page)
+        with ExitStack() as stack:
+            mocks = self._composer(stack, sender, mock_page)
+            if stage == "dispatch":
+                mocks.submit.side_effect = _stall
+            else:
+                mocks.confirmed.side_effect = _stall
+            result = await self._call(sender, monkeypatch)
+
+        assert result.is_error is False, result.content
+        assert result.structured_content is not None
+        assert result.structured_content["status"] == "send_unconfirmed"
+        assert result.structured_content["sent"] is False
+        assert result.structured_content["retry_safe"] is False
+        assert mocks.submit.call_count == 1
+
+    @pytest.mark.parametrize("stage", ["cleanup", "notification"])
+    async def test_a_stalled_ending_keeps_the_answer(
+        self, mock_page, monkeypatch, stage
+    ):
+        from fastmcp import Context
+
+        async def report_progress(self, progress, total=None, message=None):
+            if progress == 100:
+                await anyio.sleep_forever()
+
+        sender = _sender(mock_page)
+        with ExitStack() as stack:
+            mocks = self._composer(stack, sender, mock_page)
+            if stage == "cleanup":
+                mock_page.evaluate_handle.return_value.dispose = AsyncMock(
+                    side_effect=_stall
+                )
+            else:
+                stack.enter_context(
+                    patch.object(Context, "report_progress", report_progress)
+                )
+            result = await self._call(sender, monkeypatch)
+
+        assert result.is_error is False, result.content
+        assert result.structured_content is not None
+        assert result.structured_content["status"] == "sent"
+        assert result.structured_content["sent"] is True
+        assert mocks.submit.call_count == 1
+
+    @pytest.mark.parametrize("stage", ["writing", "budget-spent"])
+    async def test_a_deadline_before_dispatch_sends_nothing(
+        self, mock_page, monkeypatch, stage
+    ):
+        """Nothing left the composer, so the timeout error is the answer.
+
+        `budget-spent` ends preparation inside the reserve the send keeps for
+        its answer: there is still time before the deadline, but not enough
+        to confirm a click, so there is no click.
+        """
+
+        async def prepare(*_args, **_kwargs):
+            deadline = anyio.current_effective_deadline()
+            await anyio.sleep(deadline - anyio.current_time() - 0.02)
+            return "confirmation-token"
+
+        sender = _sender(mock_page)
+        with ExitStack() as stack:
+            mocks = self._composer(stack, sender, mock_page)
+            if stage == "writing":
+                mocks.write.side_effect = _stall
+            else:
+                mocks.prepare.side_effect = prepare
+            result = await self._call(sender, monkeypatch)
+
+        assert result.is_error is True
+        assert result.structured_content is None
+        mocks.submit.assert_not_called()
+
+    async def test_an_outside_cancellation_still_propagates(self, mock_page, caplog):
+        """A client that cancels gets no answer, so the cancellation goes on."""
+        sender = _sender(mock_page)
+        confirming = anyio.Event()
+
+        async def confirmed(*_args, **_kwargs):
+            confirming.set()
+            await anyio.sleep_forever()
+
+        async def send():
+            with anyio.fail_after(30):
+                await sender.send_message("testuser", "Hello!", confirm_send=True)
+
+        with ExitStack() as stack:
+            mocks = self._composer(stack, sender, mock_page)
+            mocks.confirmed.side_effect = confirmed
+            stack.enter_context(
+                caplog.at_level(
+                    logging.WARNING,
+                    logger="linkedin_mcp_server.linkedin.message_sender",
+                )
+            )
+            task = asyncio.create_task(send())
+            await confirming.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert mocks.submit.call_count == 1
+        warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("retry may deliver the message twice" in w for w in warnings)
+
+    async def test_a_stalled_snapshot_read_is_unconfirmed(self, mock_page, monkeypatch):
+        """The path is read after the click, so a stall there is unconfirmed."""
+        handle = MagicMock()
+        handle.json_value = AsyncMock(side_effect=_stall)
+        handle.dispose = AsyncMock()
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+        sender = _sender(mock_page)
+
+        async def confirmed(*args, **kwargs):
+            return await MessageSender._message_send_confirmed(sender, *args, **kwargs)
+
+        with ExitStack() as stack:
+            mocks = self._composer(stack, sender, mock_page)
+            mocks.confirmed.side_effect = confirmed
+            result = await self._call(sender, monkeypatch)
+
+        assert result.is_error is False, result.content
+        assert result.structured_content is not None
+        assert result.structured_content["status"] == "send_unconfirmed"
+        assert result.structured_content["sent"] is False
+        assert result.structured_content["retry_safe"] is False
+        assert "thread_id" not in result.structured_content
+        assert mocks.submit.call_count == 1
+        handle.dispose.assert_awaited()
+
+    async def test_a_stalled_read_and_disposal_stays_unconfirmed(
+        self, mock_page, monkeypatch
+    ):
+        """Disposal of a stalled read stays inside the tool deadline.
+
+        The read is cancelled by the send budget, and disposal then runs in
+        that cancelled scope. A bound taken there would outlast the deadline,
+        and the client would get a bare timeout instead of this answer.
+        """
+        handle = MagicMock()
+        handle.json_value = AsyncMock(side_effect=_stall)
+        handle.dispose = AsyncMock(side_effect=_stall)
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+        sender = _sender(mock_page)
+
+        async def confirmed(*args, **kwargs):
+            return await MessageSender._message_send_confirmed(sender, *args, **kwargs)
+
+        with ExitStack() as stack:
+            mocks = self._composer(stack, sender, mock_page)
+            mocks.confirmed.side_effect = confirmed
+            result = await self._call(sender, monkeypatch)
+
+        assert result.is_error is False, result.content
+        assert result.structured_content is not None
+        assert result.structured_content["status"] == "send_unconfirmed"
+        assert result.structured_content["retry_safe"] is False
+        assert "thread_id" not in result.structured_content
+        assert mocks.submit.call_count == 1
+
+    @pytest.mark.parametrize(
+        ("path", "thread_id"),
+        [("/messaging/thread/2-abc==/", "2-abc=="), ("/messaging/compose/", None)],
+    )
+    async def test_a_late_snapshot_keeps_the_thread_when_disposal_stalls(
+        self, mock_page, monkeypatch, path, thread_id
+    ):
+        """A snapshot taken just before the work deadline survives a stalled disposal.
+
+        Disposal has to finish inside the work budget the answer returns
+        through, not only inside the later tool deadline. A longer bound lets
+        that budget cancel the accepted result.
+        """
+
+        async def late_snapshot():
+            deadline = anyio.current_effective_deadline()
+            await anyio.sleep(max(0.0, deadline - anyio.current_time() - 0.02))
+            return {"path": path}
+
+        handle = MagicMock()
+        handle.json_value = AsyncMock(side_effect=late_snapshot)
+        handle.dispose = AsyncMock(side_effect=_stall)
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+        sender = _sender(mock_page)
+
+        async def confirmed(*args, **kwargs):
+            return await MessageSender._message_send_confirmed(sender, *args, **kwargs)
+
+        with ExitStack() as stack:
+            mocks = self._composer(stack, sender, mock_page)
+            mocks.confirmed.side_effect = confirmed
+            result = await self._call(sender, monkeypatch)
+
+        assert result.is_error is False, result.content
+        body = result.structured_content
+        assert body is not None
+        assert body["status"] == "sent"
+        assert body["sent"] is True
+        assert body["thread_id"] == thread_id
+        assert mocks.submit.call_count == 1
+
+    async def test_a_stalled_snapshot_disposal_keeps_the_thread(
+        self, mock_page, monkeypatch
+    ):
+        """Disposal runs out of time after the path is known, so the send stands."""
+        handle = MagicMock()
+        handle.json_value = AsyncMock(
+            return_value={"path": "/messaging/thread/2-abc==/"}
+        )
+        handle.dispose = AsyncMock(side_effect=_stall)
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+        sender = _sender(mock_page)
+
+        async def confirmed(*args, **kwargs):
+            return await MessageSender._message_send_confirmed(sender, *args, **kwargs)
+
+        with ExitStack() as stack:
+            mocks = self._composer(stack, sender, mock_page)
+            mocks.confirmed.side_effect = confirmed
+            result = await self._call(sender, monkeypatch)
+
+        assert result.is_error is False, result.content
+        body = result.structured_content
+        assert body is not None
+        assert body["status"] == "sent"
+        assert body["sent"] is True
+        assert body["thread_id"] == "2-abc=="
+        assert "2-abc==" not in body["url"]
+        assert mocks.submit.call_count == 1
+
+    async def test_a_refusal_omits_thread_id(self):
+        """A result that is not ``sent`` does not carry ``thread_id``."""
+        from fastmcp import Client, FastMCP
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "send_message",
+                {
+                    "linkedin_username": "testuser",
+                    "message": "   ",
+                    "confirm_send": True,
+                },
+                raise_on_error=False,
+            )
+
+        assert result.is_error is False, result.content
+        assert result.structured_content is not None
+        assert result.structured_content["status"] == "invalid_message"
+        assert "thread_id" not in result.structured_content
 
 
 class TestResolveMessageComposeBox:
@@ -1324,17 +1735,21 @@ class TestMessageConfirmation:
     async def test_confirmation_waits_for_the_exact_token(self, mock_page):
         sender = _sender(mock_page)
         target, owner = self._arguments()
-        mock_page.wait_for_function = AsyncMock(return_value=None)
-
-        assert (
-            await sender._message_send_confirmed(
-                "Hello!",
-                target=target,
-                owner=owner,
-                confirmation="confirmation-token",
-            )
-            is True
+        handle = MagicMock()
+        handle.json_value = AsyncMock(
+            return_value={"path": "/messaging/thread/2-abc==/"}
         )
+        handle.dispose = AsyncMock()
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+
+        assert await sender._message_send_confirmed(
+            "Hello!",
+            target=target,
+            owner=owner,
+            confirmation="confirmation-token",
+        ) == message_sender_module._SendConfirmation(thread_id="2-abc==")
+        handle.json_value.assert_awaited_once_with()
+        handle.dispose.assert_awaited_once_with()
         mock_page.wait_for_function.assert_awaited_once_with(
             _MESSAGE_CONFIRMATION_READY_JS,
             arg={
@@ -1366,7 +1781,104 @@ class TestMessageConfirmation:
                 owner=owner,
                 confirmation="confirmation-token",
             )
-            is False
+            is None
+        )
+
+    @pytest.mark.parametrize(
+        "snapshot",
+        [
+            None,
+            {"path": "/feed/"},
+            {"path": "/messaging/compose"},
+            {"path": "/messaging/thread/2-abc=="},
+            {"path": "/messaging/thread/2-abc==/", "ok": True},
+            {"path": 1},
+            {"confirmed": True},
+            "/messaging/thread/2-abc==/",
+        ],
+    )
+    async def test_a_snapshot_that_is_not_a_route_is_not_a_send(
+        self, mock_page, snapshot
+    ):
+        sender = _sender(mock_page)
+        target, owner = self._arguments()
+        handle = MagicMock()
+        handle.json_value = AsyncMock(return_value=snapshot)
+        handle.dispose = AsyncMock()
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+
+        assert (
+            await sender._message_send_confirmed(
+                "Hello!",
+                target=target,
+                owner=owner,
+                confirmation="confirmation-token",
+            )
+            is None
+        )
+        handle.dispose.assert_awaited_once_with()
+
+    async def test_a_snapshot_read_error_is_not_a_send(self, mock_page):
+        sender = _sender(mock_page)
+        target, owner = self._arguments()
+        handle = MagicMock()
+        handle.json_value = AsyncMock(side_effect=RuntimeError("gone"))
+        handle.dispose = AsyncMock()
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+
+        assert (
+            await sender._message_send_confirmed(
+                "Hello!",
+                target=target,
+                owner=owner,
+                confirmation="confirmation-token",
+            )
+            is None
+        )
+        handle.dispose.assert_awaited_once_with()
+
+    async def test_disposal_failure_keeps_the_thread(self, mock_page):
+        sender = _sender(mock_page)
+        target, owner = self._arguments()
+        handle = MagicMock()
+        handle.json_value = AsyncMock(
+            return_value={"path": "/messaging/thread/2-abc==/"}
+        )
+        handle.dispose = AsyncMock(side_effect=RuntimeError("closed"))
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+
+        assert await sender._message_send_confirmed(
+            "Hello!",
+            target=target,
+            owner=owner,
+            confirmation="confirmation-token",
+        ) == message_sender_module._SendConfirmation(thread_id="2-abc==")
+
+    async def test_disposal_stall_finishes_without_a_deadline(self, mock_page, caplog):
+        sender = _sender(mock_page)
+        target, owner = self._arguments()
+        handle = MagicMock()
+        handle.json_value = AsyncMock(return_value={"path": "/messaging/compose/"})
+        handle.dispose = AsyncMock(side_effect=_stall)
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+
+        with caplog.at_level(
+            logging.WARNING, logger="linkedin_mcp_server.linkedin.message_sender"
+        ):
+            confirmed = await asyncio.wait_for(
+                sender._message_send_confirmed(
+                    "Hello!",
+                    target=target,
+                    owner=owner,
+                    confirmation="confirmation-token",
+                ),
+                timeout=3,
+            )
+
+        assert confirmed == message_sender_module._SendConfirmation(thread_id=None)
+        assert any(
+            "Timed out releasing message confirmation snapshot" in record.message
+            for record in caplog.records
         )
 
     async def test_dispose_disconnects_the_owner_token(self, mock_page):

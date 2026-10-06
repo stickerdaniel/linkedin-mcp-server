@@ -23,11 +23,16 @@ from linkedin_mcp_server.linkedin.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     ExtractedSection,
 )
-from linkedin_mcp_server.linkedin.job_pages import JobPageCapture, JobPageReader
+from linkedin_mcp_server.linkedin.job_pages import (
+    JobApplyRead,
+    JobPageCapture,
+    JobPageReader,
+)
 from linkedin_mcp_server.linkedin.jobs import JobReader
 from linkedin_mcp_server.linkedin.link_metadata import Reference
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.session import PageSession
+from linkedin_mcp_server.linkedin.text import JOB_APPLY_EN_US
 from linkedin.support.navigation import navigate
 
 
@@ -121,6 +126,56 @@ class TestReadJob:
         assert result["sections"] == {}
         assert "references" not in result
 
+    @pytest.mark.parametrize(
+        ("state", "expected"),
+        [
+            ("Application status\nApplication submitted\n2 days ago", "applied"),
+            ("Applied 3 days ago", "applied"),
+            ("No longer accepting applications", "closed"),
+            ("Not currently accepting applications", "closed"),
+        ],
+    )
+    async def test_a_posting_state_is_read_above_the_description(
+        self, mock_page, state, expected
+    ):
+        reader = _reader(mock_page)
+        text = f"Applied AI Engineer\nAcme\n{state}\nAbout the job\nBuild agents."
+        with patch.object(
+            reader._capture,
+            "capture",
+            new_callable=AsyncMock,
+            return_value=extracted(text),
+        ):
+            result = await reader.read_job("12345")
+
+        assert result["apply"] == {"type": expected}
+        assert result["sections"]["job_posting"] == text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # Open: the title opens with "Applied", which is not a state line.
+            "Applied AI Engineer\nAcme\nApply\nAbout the job\nBuild agents.",
+            # The same words below the heading belong to the description or to
+            # a "More jobs" card.
+            "Engineer\nAbout the job\nApplied 3 days ago\n"
+            "No longer accepting applications",
+            # No heading, so no boundary to trust a line above.
+            "Engineer\nNo longer accepting applications\nBuild agents.",
+        ],
+    )
+    async def test_no_posting_state_is_claimed_without_one(self, mock_page, text):
+        reader = _reader(mock_page)
+        with patch.object(
+            reader._capture,
+            "capture",
+            new_callable=AsyncMock,
+            return_value=extracted(text),
+        ):
+            result = await reader.read_job("12345")
+
+        assert "apply" not in result
+
     async def test_jobs_a_posting_links_to_are_labelled_similar(self, mock_page):
         """The posting's own link and its "More jobs" cards are both jobs.
 
@@ -183,6 +238,57 @@ class TestReadJob:
 
         assert "job_posting" in result["sections"]
         assert "section_errors" not in result
+
+
+class TestGetJobApplyUrl:
+    URL = "https://www.linkedin.com/jobs/view/12345/"
+
+    @staticmethod
+    def _reading(reader, **kwargs):
+        return patch.object(
+            reader._pages, "read_apply_link", new_callable=AsyncMock, **kwargs
+        )
+
+    async def test_an_external_posting_answers_with_the_employer_link(self, mock_page):
+        reader = _reader(mock_page)
+        read = JobApplyRead("external", "https://jobs.example.com/1")
+        with self._reading(reader, return_value=read) as read_apply_link:
+            result = await reader.get_job_apply_url("12345")
+
+        read_apply_link.assert_awaited_once_with(self.URL, "12345", JOB_APPLY_EN_US)
+        assert result == {
+            "url": self.URL,
+            "apply": {"type": "external", "url": "https://jobs.example.com/1"},
+        }
+
+    async def test_a_posting_without_a_link_carries_its_type_alone(self, mock_page):
+        reader = _reader(mock_page)
+        with self._reading(reader, return_value=JobApplyRead("easy_apply")):
+            result = await reader.get_job_apply_url("12345")
+
+        assert result == {"url": self.URL, "apply": {"type": "easy_apply"}}
+
+    async def test_an_external_apply_that_led_nowhere_says_so(self, mock_page):
+        reader = _reader(mock_page)
+        with self._reading(reader, return_value=JobApplyRead("external")):
+            result = await reader.get_job_apply_url("12345")
+
+        assert result["apply"] == {"type": "external"}
+        assert result["section_errors"]["apply"]["error_type"] == "apply_link_missing"
+
+    async def test_a_failed_read_is_a_section_error_and_no_type(self, mock_page):
+        reader = _reader(mock_page)
+        with self._reading(reader, side_effect=RuntimeError("context destroyed")):
+            result = await reader.get_job_apply_url("12345")
+
+        assert "apply" not in result
+        assert "apply" in result["section_errors"]
+
+    async def test_an_expired_session_reaches_the_relogin_path(self, mock_page):
+        reader = _reader(mock_page)
+        with self._reading(reader, side_effect=AuthenticationError("expired")):
+            with pytest.raises(AuthenticationError):
+                await reader.get_job_apply_url("12345")
 
 
 class TestSearchJobs:
@@ -2194,6 +2300,128 @@ class TestSearchJobs:
         assert mock_promoted.await_count == 2
         assert "promoted_job_ids" not in result
 
+    async def test_reads_the_requested_stage(self, mock_page):
+        reader = _reader(mock_page)
+        urls_visited: list[str] = []
+        navigate = self._navigating(mock_page, [extracted("Applied Job 1")])
+
+        async def mock_extract(url, *args, **kwargs):
+            urls_visited.append(url)
+            return await navigate(url)
+
+        with (
+            patch.object(
+                reader._pages, "_extract_saved_jobs_page", side_effect=mock_extract
+            ),
+            patch.object(
+                reader._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ),
+            patch.object(
+                reader._pages,
+                "_get_total_list_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.linkedin.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await reader.get_saved_jobs(max_pages=1, stage="applied")
+
+        assert urls_visited == ["https://www.linkedin.com/jobs-tracker/?stage=applied"]
+        assert result["job_ids"] == ["111"]
+
+    async def test_a_dropped_stage_is_reported_not_returned(self, mock_page):
+        """A tracker that lost ``?stage=`` shows the saved tab.
+
+        Returning it would hand saved jobs back as applied ones.
+        """
+        reader = _reader(mock_page)
+        with (
+            patch.object(
+                reader._pages,
+                "_extract_saved_jobs_page",
+                side_effect=self._navigating(
+                    mock_page,
+                    [extracted("Saved Job 1")],
+                    lands_on="https://www.linkedin.com/jobs-tracker/",
+                ),
+            ),
+            patch.object(
+                reader._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ) as mock_ids,
+            patch.object(
+                reader._pages,
+                "_get_total_list_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch.object(
+                reader._navigator, "_raise_if_auth_barrier", new_callable=AsyncMock
+            ),
+            patch(
+                "linkedin_mcp_server.linkedin.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await reader.get_saved_jobs(max_pages=1, stage="applied")
+
+        assert result["job_ids"] == []
+        assert result["sections"] == {}
+        assert "saved_jobs" in result["section_errors"]
+        mock_ids.assert_not_awaited()
+
+    async def test_a_stage_lost_while_counting_pages_is_not_returned(self, mock_page):
+        """The page count is read after the landing check, and can move the page.
+
+        On page one there is no ``start`` for the offset check to fail on, so
+        only the stage says the saved tab is now the one being read.
+        """
+        reader = _reader(mock_page)
+
+        async def count_pages_and_move():
+            mock_page.url = "https://www.linkedin.com/jobs-tracker/"
+            return None
+
+        with (
+            patch.object(
+                reader._pages,
+                "_extract_saved_jobs_page",
+                side_effect=self._navigating(mock_page, [extracted("Applied Job 1")]),
+            ),
+            patch.object(
+                reader._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ) as mock_ids,
+            patch.object(
+                reader._pages,
+                "_get_total_list_pages",
+                side_effect=count_pages_and_move,
+            ),
+            patch.object(
+                reader._navigator, "_raise_if_auth_barrier", new_callable=AsyncMock
+            ),
+            patch(
+                "linkedin_mcp_server.linkedin.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await reader.get_saved_jobs(max_pages=1, stage="applied")
+
+        assert result["job_ids"] == []
+        assert result["sections"] == {}
+        assert "saved_jobs" in result["section_errors"]
+        mock_ids.assert_not_awaited()
+
     async def test_a_login_redirect_raises_an_auth_error(self, mock_page):
         """A login wall reached mid-search is an expired session.
 
@@ -2463,7 +2691,7 @@ class TestGetSavedJobs:
 
     @pytest.fixture(autouse=True)
     def _set_saved_jobs_url(self, mock_page):
-        mock_page.url = "https://www.linkedin.com/my-items/saved-jobs/"
+        mock_page.url = "https://www.linkedin.com/jobs-tracker/?stage=saved"
 
     @staticmethod
     def _navigating(mock_page, texts, *, lands_on=None):
@@ -2511,7 +2739,7 @@ class TestGetSavedJobs:
 
         assert result["job_ids"] == ["111", "222"]
         assert "saved_jobs" in result["sections"]
-        assert result["url"] == "https://www.linkedin.com/my-items/saved-jobs/"
+        assert result["url"] == "https://www.linkedin.com/jobs-tracker/?stage=saved"
 
     async def test_a_foreign_host_is_not_the_saved_jobs_list(self, mock_page):
         """A substring test accepts any origin serving this path.
@@ -2664,9 +2892,9 @@ class TestGetSavedJobs:
 
         assert result["job_ids"] == ["100", "200", "300", "400"]
         assert urls_visited == [
-            "https://www.linkedin.com/my-items/saved-jobs/",
-            "https://www.linkedin.com/my-items/saved-jobs/?start=10",
-            "https://www.linkedin.com/my-items/saved-jobs/?start=20",
+            "https://www.linkedin.com/jobs-tracker/?stage=saved",
+            "https://www.linkedin.com/jobs-tracker/?stage=saved&start=10",
+            "https://www.linkedin.com/jobs-tracker/?stage=saved&start=20",
         ]
 
     async def test_early_stop_no_new_ids(self, mock_page):
@@ -2965,14 +3193,11 @@ class TestGetSavedJobs:
         assert result["sections"]["saved_jobs"] == "first page"
         assert result["section_errors"]["saved_jobs"]["error_type"] == "rate_limit"
 
-    async def test_the_jobs_tracker_redirect_is_the_list(self, mock_page):
-        """LinkedIn answers the saved-jobs URL with a redirect now.
+    async def test_the_tracker_without_a_stage_is_the_saved_list(self, mock_page):
+        """``/jobs-tracker/`` with no ``?stage=`` shows the saved tab.
 
-        Measured on 2026-08-21 against an authenticated profile:
-        ``/my-items/saved-jobs/`` lands on ``/jobs-tracker/``, and the query
-        is dropped on the way, for ``?start=10`` as well. Refusing that
-        destination makes every call return an empty list for every account,
-        which is indistinguishable from having nothing saved.
+        Refusing it would return an empty list whenever LinkedIn drops the
+        parameter, which reads as having nothing saved.
         """
         mock_page.url = "https://www.linkedin.com/jobs-tracker/"
         reader = _reader(mock_page)

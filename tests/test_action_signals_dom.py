@@ -39,6 +39,7 @@ from typing import Any, cast
 import pytest
 from patchright.async_api import Page, async_playwright
 
+from linkedin_mcp_server.core.exceptions import OffLinkedInLandingError
 from linkedin_mcp_server.linkedin.connection import (
     ConnectionState,
     detect_connection_state,
@@ -414,6 +415,13 @@ async def dom_page():
         except Exception as exc:  # browser binary missing
             pytest.skip(f"chromium unavailable: {exc}")
         try:
+            # On a LinkedIn address, because the reads refuse any other
+            # page, and `set_content` keeps the address it replaces.
+            await page.route(
+                "https://www.linkedin.com/**",
+                lambda route: route.fulfill(content_type="text/html", body=""),
+            )
+            await page.goto("https://www.linkedin.com/in/testuser/")
             yield page
         finally:
             await browser.close()
@@ -591,4 +599,58 @@ class TestActionChoiceIsStructural:
             self_top_card,
             (False, None),
             lambda page, html: _click(page, html, OPEN_MORE_BUTTON_JS),
+        )
+
+
+PORTAL_URL = "https://portal.invalid/interstitial"
+
+
+async def _move_to_a_portal(page, html: str) -> None:
+    """Replace the profile with a portal page carrying the same controls.
+
+    What a forced navigation between the signal read and the click leaves:
+    the controls the read found, on another site's page.
+    """
+    await page.route(
+        "https://portal.invalid/**",
+        lambda route: route.fulfill(content_type="text/html", body=html),
+    )
+    await page.goto(PORTAL_URL)
+
+
+class TestAClickOnlyLandsOnLinkedIn:
+    """The read found the control on LinkedIn; the click must not follow a redirect."""
+
+    async def test_accept_is_not_clicked_on_a_portal(self, dom_page):
+        html = _page_html(incoming_top_card(ENGLISH))
+        actions = _actions(dom_page)
+        state = await _state(dom_page, incoming_top_card(ENGLISH))
+        assert state == "incoming_request"
+
+        await _move_to_a_portal(dom_page, html)
+
+        with pytest.raises(OffLinkedInLandingError, match="https://portal.invalid"):
+            await actions._click_incoming_accept()
+        assert (
+            await dom_page.evaluate("document.body.getAttribute('data-clicked')")
+            is None
+        )
+
+    async def test_the_more_menu_is_not_opened_on_a_portal(self, dom_page):
+        await _move_to_a_portal(dom_page, _page_html(follow_only_top_card(ENGLISH)))
+
+        with pytest.raises(OffLinkedInLandingError, match="https://portal.invalid"):
+            await _actions(dom_page)._open_more_menu()
+        assert (
+            await dom_page.evaluate("document.body.getAttribute('data-clicked')")
+            is None
+        )
+
+    async def test_accept_is_clicked_on_linkedin(self, dom_page):
+        await dom_page.set_content(_page_html(incoming_top_card(ENGLISH)))
+
+        assert await _actions(dom_page)._click_incoming_accept() is True
+        assert (
+            await dom_page.evaluate("document.body.getAttribute('data-clicked')")
+            == "first-labeled"
         )

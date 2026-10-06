@@ -9,25 +9,19 @@ on:
   # entirely for the stacks this repository's workflow produces.
   pull_request:
 
-# One run per pull request branch. Restacking a stacked pull request pushes
-# every branch in the stack, and without this every superseded push kept its
-# whole matrix alive to completion, Windows legs included. Those are the ones
-# that cost anything: macOS and Linux bill at zero here while Windows is the
-# entire spend.
-#
-# Pushes to main get a group of their own per run, never a shared one. A shared
-# group does not merely decline to cancel the running job; GitHub also evicts
-# whichever run is already waiting when a newer one arrives, so merging three
-# pull requests in quick succession would leave the middle commit with no CI
-# result at all. Keying on run_id makes every main run its own group, which is
-# the only arrangement where each commit on main keeps a result.
+# Cancel a run that a newer push to the same ref replaced. That includes main:
+# a commit merged in a burst can lose its run. Manual differential evidence is
+# a separate workflow, so a push here cannot cancel it.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
+# Every job has a bound well above its measured runtime. Without one a wedged
+# process holds its runner for the hosted limit of six hours.
 jobs:
   lint-and-check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -38,9 +32,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: |
-          uv sync
-          uv sync --group dev
+        run: uv sync --group dev
 
       - name: Run pre-commit hooks
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
@@ -51,6 +43,7 @@ jobs:
   dependency-review:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -88,9 +81,42 @@ jobs:
                   raise SystemExit("Dependency comparison returned snapshot warnings")
           PY
 
+  # Which optional matrices a pull request needs. Full history so the merge base
+  # of a stacked pull request, including a fork, is present. A git failure writes
+  # no output; `test` then fails closed.
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      matrices: ${{ steps.detect.outputs.matrices }}
+    steps:
+      - name: Checkout the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Detect changes that need optional matrices
+        id: detect
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/ci_changes.py
+
   windows-daemon:
     name: Windows daemon (Python ${{ matrix.python-version }})
+    # Pull requests only, and only when the diff can affect these tests. Main
+    # does not repeat the matrix. `test` rejects a skip when this was required.
+    needs: changes
+    if: >-
+      github.event_name == 'pull_request'
+      && needs.changes.result == 'success'
+      && needs.changes.outputs.matrices == 'required'
     runs-on: windows-latest
+    timeout-minutes: 15
     # FastMCP 4's camelCase read shims off for every test run, set before
     # Python starts so the settings fastmcp reads at import already see it.
     # tests/conftest.py sets the same for local runs, and
@@ -178,44 +204,17 @@ jobs:
 
       - run: uv cache prune --ci
 
-  # Branch protection on `main` requires `lint-and-check` and `test` only, and
-  # that list is a repository setting no workflow file can edit. So this job is
-  # where a contract that has to block a merge gets attached: it fails unless
-  # every job it names succeeded, which makes those jobs required without
-  # renaming anything. `if: always()` so a failure upstream still reaches the
-  # check below rather than skipping it, because a skipped required check is a
-  # green one.
-  test:
-    needs: [dependency-review, windows-daemon, platform-behaviour, differential-calls]
-    if: always()
+  # The full Linux suite, including coverage and the browser tests. It starts
+  # immediately: the optional matrices are not on its path. Native differential
+  # rows self-skip without LINKEDIN_MCP_DIFFERENTIAL_CI; that suite is manual.
+  linux:
+    name: Linux tests
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     # The camelCase read shims off, for the reason given at `windows-daemon`.
     env:
       FASTMCP_MCP_CAMELCASE_COMPAT: "false"
     steps:
-      # The review job is intentionally skipped for pushes to main. On pull
-      # requests it joins this existing required check instead of adding a new
-      # branch-protection context.
-      - name: Require dependency review on pull requests
-        if: github.event_name == 'pull_request'
-        run: test '${{ needs.dependency-review.result }}' = success
-
-      - name: Require the Windows daemon tests
-        run: test '${{ needs.windows-daemon.result }}' = success
-
-      # Real browser containment on Windows and macOS runs nowhere else: the
-      # POSIX environment marker and the Windows Job a Chromium joins are
-      # facts only those platforms can confirm, and the lease and owner-only
-      # storage are a different implementation on each. Reading the result of
-      # the whole matrix, so one red leg fails this.
-      - name: Require the platform behaviour tests
-        run: test '${{ needs.platform-behaviour.result }}' = success
-
-      # The call rows run in a job of their own on all four legs, for the
-      # same reason: one red leg fails this.
-      - name: Require the differential call rows
-        run: test '${{ needs.differential-calls.result }}' = success
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -224,10 +223,11 @@ jobs:
 
       - run: uv sync --group dev
 
-      # The browser is keyed on the resolved patchright version, because that
-      # is what decides which Chromium revision `install` fetches. Read from
-      # the synced environment rather than from `pyproject.toml`, which names
-      # a floor and not the version in use.
+      # The browser is keyed on the runner OS, architecture and resolved
+      # patchright version, because that is what decides which Chromium revision
+      # `install` fetches. The same key is used by the manual evidence workflow.
+      # Read from the synced environment rather than from `pyproject.toml`, which
+      # names a floor and not the version in use.
       - name: Resolve the patchright version
         id: patchright
         run: |
@@ -238,7 +238,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
-          key: ms-playwright-${{ runner.os }}-${{ steps.patchright.outputs.version }}
+          key: ms-playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.patchright.outputs.version }}
 
       # `--no-shell`, the same install the server performs: the headless shell
       # is a different product with no plugins and no `window.chrome`, and
@@ -277,176 +277,8 @@ jobs:
           DISPLAY: ":99"
         run: uv run pytest --cov --cov-report=term-missing -n auto --dist loadgroup -v -s
 
-      # Release gate 1 of the default-on contract
-      # (docs/decisions/2026-09-26-daemon-default-on-contract.md): does the
-      # bundled browser accept a synthetic www.linkedin.com whose CA only this
-      # runner trusts? After the suite, so nothing above runs with an extra root
-      # in the store. The CA's key never leaves the issuing process, the CA is
-      # name-constrained to the synthetic names, and it expires within a day.
-      - name: Issue the synthetic origin certificates
-        run: uv run python tests/differential/synthetic_origin.py "$RUNNER_TEMP/synthetic-origin"
-
-      # The runner account's NSS database, which is where Chromium on Linux
-      # reads locally trusted roots. `~/.pki/nssdb` rather than the newer
-      # `~/.local/share/pki/nssdb`: since M146 Chromium prefers the old path
-      # whenever that directory exists, and older builds read nothing else, so
-      # creating it settles which database both read. The same step maps the
-      # synthetic names to loopback in the hosts file, so a browser that
-      # stopped using the proxy would reach a closed local port rather than
-      # LinkedIn. The guard refuses any machine that is not a disposable
-      # GitHub-hosted runner, `act` included.
-      - name: Trust the synthetic CA and fence off the real names
-        timeout-minutes: 3
-        run: |
-          set -euo pipefail
-          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
-            echo "Refusing to change a trust store outside a disposable GitHub-hosted runner" >&2
-            exit 1
-          fi
-          if ! command -v certutil >/dev/null; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq libnss3-tools
-          fi
-          db="$HOME/.pki/nssdb"
-          mkdir -p "$db"
-          if [ ! -f "$db/cert9.db" ]; then
-            certutil -d "sql:$db" -N --empty-password
-          fi
-          certutil -d "sql:$db" -A -t "C,," -n "linkedin-mcp synthetic origin test CA" -i "$RUNNER_TEMP/synthetic-origin/ca.pem"
-          echo "Trust store: NSS sql:$db"
-          certutil -d "sql:$db" -L
-          hosts="$(printf '\n127.0.0.1 www.linkedin.com static.licdn.com synthetic-canary.test\n::1 www.linkedin.com static.licdn.com synthetic-canary.test\n')"
-          printf '%s\n' "$hosts" | sudo tee -a /etc/hosts >/dev/null
-          echo "Hosts file:"; cat /etc/hosts
-
-      # The only step that opts in. A pass says the synthetic names resolved to
-      # loopback for the system and for an unproxied browser, the proxy refused
-      # a name it does not route before www.linkedin.com was named, the feed
-      # loaded under this run's CA, and a CA nobody trusted was still refused.
-      - name: Load the synthetic origin through the proxy
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-        timeout-minutes: 10
-        run: uv run pytest -v -s -o faulthandler_timeout=120 tests/differential/test_synthetic_origin.py
-
-      # Row H-R1 of the differential harness: one host starts the server, calls
-      # one read tool and quits, run Direct (K1), through the shared owner (K3),
-      # and through the owner again (K0), then K3 is held to K1 on O1 and O4.
-      # After the feasibility row, whose pass is what says this runner's fence
-      # and trust hold, and opted in the same way.
-      - name: Compare Direct and daemon on one host start and quit
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
-        timeout-minutes: 20
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_host_quit_row.py
-
-      # The frozen baseline (tests/differential/baseline.py): the pinned
-      # pre-default-on revision in a worktree of its own, with its own
-      # `uv sync` venv (runtime dependencies only, from its own lock) and its
-      # own `patchright install` into a browser cache of its own, so none of it
-      # is this checkout's. Refused unless HEAD is the pin and the worktree is
-      # clean. The system libraries `--with-deps` installed above serve its
-      # Chromium too.
-      - name: Prepare the frozen baseline
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-        timeout-minutes: 15
-        run: uv run python tests/differential/baseline.py "$RUNNER_TEMP/differential-baseline"
-
-      # K1 frozen on H-R1, and H-R12 (custom browser) in K1 frozen, K2 and K3.
-      # Its own pytest run, so its packet is its own run directory next to the
-      # H-R1 one in the evidence upload below.
-      - name: Compare the frozen baseline and a custom browser
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 25
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_frozen_rows.py
-
-      # Rows H-R3, host quit with an idle browser, and H-R2, a second host
-      # while the first is open (tests/differential/host_comparison.py): H-R1's
-      # actions read at checkpoints around the quit, and a second host on the
-      # same profile between the first host's two reads. Each in K1 frozen, K3
-      # and K0, then K3 held to K1 and K0 to K3. After the frozen rows, whose
-      # baseline it reuses. Their actors idle out after 60s, not 20
-      # (harness.COMPARISON_IDLE_TIMEOUT_SECONDS), so an owner wait is bounded
-      # at 60 + 90. Six cells: four owners wait at most 4 x (60 + 90) = 600s,
-      # every cell ends with one passive browser wait (60) and H-R2 in Direct
-      # waits once more before A2, 7 x 60 = 420s; H-R2 in Direct also waits up
-      # to 25s for its second host's lease and launches three browsers. Those
-      # waits alone are 17 minutes, which left the 25 this step had for three
-      # cells too little; 45 leaves each cell about 4.5 minutes for staging,
-      # launches, reads and the preservation session beyond them. A cell that
-      # meets every bound at once does not fit, as in every other row's step,
-      # and fails.
-      - name: H-R3 and H-R2 host comparisons
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 45
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_host_comparison_rows.py
-
-      # The signal oracle for H-R6 (tests/differential/signals.py): strace,
-      # attached to the killed server or owner and its guardian. Ubuntu's
-      # default kernel.yama.ptrace_scope is 1, which lets a tracer attach only
-      # to its descendants, and strace is not an ancestor of the owner, so the
-      # oracle runs `sudo -n strace`. Only here, behind the trust step's guard.
-      # H-R6 requires it on Linux: an oracle that cannot attach fails the row.
-      - name: Install the signal oracle
-        timeout-minutes: 5
-        run: |
-          set -euo pipefail
-          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
-            echo "Refusing to trace processes outside a disposable GitHub-hosted runner" >&2
-            exit 1
-          fi
-          if ! command -v strace >/dev/null; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq strace
-          fi
-          strace -V | head -1
-          echo "kernel.yama.ptrace_scope: $(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)"
-          sudo -n true
-
-      # Row H-R6, owner killed: K1 frozen (the Direct server killed), K2 (the
-      # baseline owner killed, whose guardian must be seen killing the owner's
-      # group) and K3 (the candidate owner killed, drained and recovered).
-      - name: Kill the owner and the Direct server
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 25
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_killed_rows.py
-
-      # Row H-R7, a close the product cannot confirm: every actor starts from
-      # a fault overlay (tests/differential/fault_overlay.py) whose declared
-      # fault hands one selected drain's True back as False. K0 twice (the
-      # plain runtime and the inert overlay), then K1 frozen, K2 and K3 three
-      # times each, with the strace oracle above, then their composition with
-      # the source model. A product-free child killing its own group under
-      # this runner's strace calibrates K2's witness first.
-      - name: Leave a close unconfirmed
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 45
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_unconfirmed_close_row.py
-
-      # The row's evidence packet: events, counts, watcher output, failures
-      # and the runtime identity, and nothing else (``events.PUBLISHED_FILES``).
-      # The certificates sit in another directory and are never included.
-      # Always, so a red row keeps what made it red.
+      # Identity tests write first-navigation diagnostics here on GitHub
+      # Actions. Always, so a red run keeps them.
       - name: Keep the differential evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -467,25 +299,20 @@ jobs:
   # scheduling noise on top of that.
   platform-behaviour:
     name: Platform behaviour (${{ matrix.os }})
+    # Same gate as `windows-daemon`: relevant pull requests only, not main.
+    needs: changes
+    if: >-
+      github.event_name == 'pull_request'
+      && needs.changes.result == 'success'
+      && needs.changes.outputs.matrices == 'required'
     runs-on: ${{ matrix.os }}
     # The camelCase read shims off, for the reason given at `windows-daemon`.
     env:
       FASTMCP_MCP_CAMELCASE_COMPAT: "false"
-    # Long enough for a cold browser download and far short of the six hours
-    # a job without one is allowed to sit. These tests spawn real processes
-    # and wait on them, so a contract that stops holding turns into a wedged
-    # job rather than a red one, and a wedged job reads as work in progress
-    # for as long as anyone is willing to wait. Raised from 25 for the
-    # differential row at the end, whose own step bound is 20, and from 45
-    # for the frozen baseline after it: a second venv and browser download
-    # (bound 15) and five more native rows, three of them with an owner that
-    # leaves through its idle exit (bound 25), and from 75 for H-R6 after
-    # them: three more rows, two of them waiting out a recovered owner's idle
-    # exit (bound 25), and from 100 for H-R11 on Windows: two shim venvs and
-    # three rows, one waiting out a successor's idle exit (bound 25). Windows is
-    # the slowest leg. Raised from 125 for H-R7 on Linux arm64: two overlays
-    # and eleven rows (bound 45).
-    timeout-minutes: 170
+    # Cold browser download plus the platform contracts and the identity gate,
+    # measured at under nine minutes on every leg. Native differential rows are
+    # manual and are not part of this budget.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -546,12 +373,10 @@ jobs:
       # headless mode like Linux does; that is true of one case in that file
       # and says nothing about the rest of them.
       #
-      # Every leg blocks a merge, through `test` rather than by name. Branch
-      # protection requires `lint-and-check` and `test`, and `test` fails
-      # unless this whole matrix succeeded, so the required list stays as it is
-      # while a red leg here stops the merge. Before that it did not: this job
-      # held the only real browser containment run on Windows and macOS and
-      # nothing depended on it, so those contracts were advisory.
+      # When this matrix is required, a red leg fails `test`. Branch protection
+      # requires `lint-and-check` and `test` by those names. On main, and on a
+      # pull request whose diff does not need this matrix, the job is skipped
+      # and `test` requires that skip.
       #
       # `shell: bash` because one of the legs is Windows, where the default is
       # PowerShell and none of the syntax below means anything.
@@ -566,7 +391,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ matrix.browsers }}
-          key: ms-playwright-${{ matrix.os }}-${{ steps.patchright.outputs.version }}
+          key: ms-playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.patchright.outputs.version }}
 
       # `--with-deps` on Linux only. It is the platform where a missing
       # system library stops Chromium starting at all, and the runner image
@@ -612,194 +437,8 @@ jobs:
           DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
         run: uv run pytest tests/test_browser_identity.py
 
-      # The synthetic origin gate from the Ubuntu job, on every other browser
-      # build. Last, so the containment and identity tests above run against an
-      # unmodified trust store.
-      - name: Issue the synthetic origin certificates
-        shell: bash
-        run: uv run python tests/differential/synthetic_origin.py "$RUNNER_TEMP/synthetic-origin"
-
-      # One store per platform, the one the bundled browser reads locally
-      # trusted roots from. Linux: the runner account's NSS database, for the
-      # reason given in the Ubuntu job. macOS: the admin trust domain in the
-      # System keychain; the user domain asks for interactive authorisation,
-      # which a runner cannot give, and passwordless sudo is what lets the
-      # admin domain through. Windows: LocalMachine\Root; adding to the
-      # CurrentUser root store raises a confirmation dialog nobody is there to
-      # answer. The two machine-wide stores, and the hosts file, are acceptable
-      # only because the guard admits nothing but a disposable GitHub-hosted
-      # runner.
-      - name: Trust the synthetic CA and fence off the real names
-        timeout-minutes: 3
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
-            echo "Refusing to change a trust store outside a disposable GitHub-hosted runner" >&2
-            exit 1
-          fi
-          ca="$RUNNER_TEMP/synthetic-origin/ca.pem"
-          name="linkedin-mcp synthetic origin test CA"
-          case "$RUNNER_OS" in
-            Linux)
-              if ! command -v certutil >/dev/null; then
-                sudo apt-get update -qq
-                sudo apt-get install -y -qq libnss3-tools
-              fi
-              db="$HOME/.pki/nssdb"
-              mkdir -p "$db"
-              if [ ! -f "$db/cert9.db" ]; then
-                certutil -d "sql:$db" -N --empty-password
-              fi
-              certutil -d "sql:$db" -A -t "C,," -n "$name" -i "$ca"
-              echo "Trust store: NSS sql:$db"
-              certutil -d "sql:$db" -L
-              ;;
-            macOS)
-              sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$ca"
-              echo "Trust store: admin trust settings, /Library/Keychains/System.keychain"
-              security dump-trust-settings -d | grep -F -A4 "$name"
-              ;;
-            Windows)
-              certutil.exe -addstore -f Root "$(cygpath -w "$ca")"
-              echo "Trust store: LocalMachine\\Root"
-              certutil.exe -store Root "$name"
-              ;;
-            *)
-              echo "No trust step for $RUNNER_OS" >&2
-              exit 1
-              ;;
-          esac
-          # The fence from the Ubuntu job. Each platform's resolver caches, so
-          # each is flushed after the hosts file changes.
-          hosts="$(printf '\n127.0.0.1 www.linkedin.com static.licdn.com synthetic-canary.test\n::1 www.linkedin.com static.licdn.com synthetic-canary.test\n')"
-          case "$RUNNER_OS" in
-            Linux)
-              printf '%s\n' "$hosts" | sudo tee -a /etc/hosts >/dev/null
-              cat /etc/hosts
-              ;;
-            macOS)
-              printf '%s\n' "$hosts" | sudo tee -a /etc/hosts >/dev/null
-              sudo dscacheutil -flushcache
-              sudo killall -HUP mDNSResponder
-              cat /etc/hosts
-              ;;
-            Windows)
-              hosts_file=/c/Windows/System32/drivers/etc/hosts
-              printf '%s\n' "$hosts" >> "$hosts_file"
-              MSYS_NO_PATHCONV=1 ipconfig.exe /flushdns
-              cat "$hosts_file"
-              ;;
-          esac
-
-      - name: Load the synthetic origin through the proxy
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-        timeout-minutes: 10
-        run: uv run pytest -v -s -o faulthandler_timeout=120 tests/differential/test_synthetic_origin.py
-
-      # Row H-R1, as in the Ubuntu job.
-      - name: Compare Direct and daemon on one host start and quit
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
-        timeout-minutes: 20
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_host_quit_row.py
-
-      # The frozen baseline and its rows, as in the Ubuntu job.
-      - name: Prepare the frozen baseline
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-        timeout-minutes: 15
-        shell: bash
-        run: uv run python tests/differential/baseline.py "$RUNNER_TEMP/differential-baseline"
-
-      - name: Compare the frozen baseline and a custom browser
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 25
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_frozen_rows.py
-
-      # Rows H-R3 and H-R2, as in the Ubuntu job. Windows has no lock
-      # contender, so its lock state is recorded as unobserved and never
-      # credited, and its owner release gates are recorded: one may be missed
-      # by sampling, and a second one seen is an extra start attempt.
-      - name: H-R3 and H-R2 host comparisons
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 45
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_host_comparison_rows.py
-
-      # The signal oracle and row H-R6, as in the Ubuntu job. The oracle runs
-      # on Linux only, where H-R6 requires it; macOS and Windows record it as
-      # unavailable.
-      - name: Install the signal oracle
-        if: runner.os == 'Linux'
-        timeout-minutes: 5
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
-            echo "Refusing to trace processes outside a disposable GitHub-hosted runner" >&2
-            exit 1
-          fi
-          if ! command -v strace >/dev/null; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq strace
-          fi
-          strace -V | head -1
-          echo "kernel.yama.ptrace_scope: $(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)"
-          sudo -n true
-
-      - name: Kill the owner and the Direct server
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 25
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_killed_rows.py
-
-      # Row H-R11, a failed Job-membership query at a routine close, Windows
-      # only: K1 frozen, K2 (the baseline owner reaches the failed query in
-      # its close) and K3 (the candidate reaches it, stands down, and a
-      # successor serves), then their composition with the source model of
-      # the branch each routine takes. Each runs from a venv with one declared
-      # shim (tests/differential/job_query.py), whose hash the evidence
-      # records; no native evidence names the caller that ended an installer.
-      - name: Fail the drain's Job query
-        if: runner.os == 'Windows'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 25
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_failed_job_query_row.py
-
-      # Row H-R7, as in the Ubuntu job; here it is the arm64 leg's. macOS and
-      # Windows run it too, and every case is counted as skipped there.
-      - name: Leave a close unconfirmed
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 45
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_unconfirmed_close_row.py
-
-      # The row's evidence packet: events, counts, watcher output, failures
-      # and the runtime identity, and nothing else (``events.PUBLISHED_FILES``).
-      # The certificates sit in another directory and are never included.
-      # Always, so a red row keeps what made it red.
+      # Identity tests write first-navigation diagnostics here on GitHub
+      # Actions. Always, so a red run keeps them.
       - name: Keep the differential evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -811,660 +450,40 @@ jobs:
 
       - run: uv cache prune --ci
 
-  # Calls that lose their caller (tests/differential/call_loss.py), calls
-  # that race the owner's retirement (tests/differential/retirement_race.py),
-  # calls that lose the owner before or after dispatch
-  # (tests/differential/owner_loss.py), the profile commands beside a live
-  # owner (tests/differential/profile_commands.py), a sign-in staged at
-  # the origin (tests/differential/auth_repair.py), and configurations the
-  # daemon refuses and a rival owner of another configuration
-  # (tests/differential/eligibility_rows.py), in a job of their own rather than more steps in `platform-behaviour`,
-  # whose budget the rows before them already fill. Four legs: the Ubuntu x64
-  # job's platform and the three `platform-behaviour` runs on, each with its
-  # own browser build. The setup is the one the differential steps above
-  # need, copied step for step: the browser for the candidate and the frozen
-  # baseline, the run's certificates, the trust and the fence behind the
-  # disposable-runner guard, a display on Linux, and on Linux the signal
-  # oracle H-R5, H-R8 and H-R9 kill under. Serial, like every native row, and its evidence
-  # uploaded whatever happened, under names of its own.
-  differential-calls:
-    name: Differential calls (${{ matrix.os }}, ${{ matrix.rows }})
-    runs-on: ${{ matrix.os }}
-    # The camelCase read shims off, for the reason given at `windows-daemon`.
-    env:
-      FASTMCP_MCP_CAMELCASE_COMPAT: "false"
-    # Seven groups of rows per leg, so no job's bound comes near the hosted
-    # runner's six hours. The sum of a group's step bounds: 45 for a cold
-    # browser download for each runtime and the frozen baseline (bound 15),
-    # with room for Windows, the slowest leg, to sync and install twice; then
-    # `pipes` 30 for H-CAL and 45 for each of its two loss steps (165),
-    # `processes` 5 for the oracle and 45 for each of its three (185),
-    # `idle` 50 for each of the two H-R13 steps and 35 for each of the four
-    # turnover lanes (285), and `owner` 5 for the oracle, 40 for each of the
-    # three H-R8 lanes that kill, 45 for the stopped owner and 50 for H-R9
-    # (265), `commands` 30 for H-R10a's logout, 40 for its declined and
-    # no-terminal cells, 40 for H-R10b and 30 for H-R15 (185), `auth` 105
-    # for H-R16's cold and second-frontend cells, 60 for its failed login and
-    # 55 for H-R10a's login (265), and `eligibility` 55 for the daemon switched
-    # off, 30 for a container, 40 for HTTP, 80 for synced storage, 30 for
-    # unknown storage and 75 for H-R14 (355).
-    timeout-minutes: ${{ matrix.rows == 'pipes' && 165 || matrix.rows == 'processes' && 185 || matrix.rows == 'owner' && 265 || matrix.rows == 'commands' && 185 || matrix.rows == 'auth' && 265 || matrix.rows == 'eligibility' && 355 || 285 }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
-        # `pipes`: H-CAL and the two losses through the host's own pipes.
-        # `processes`: the losses that end a process, which the oracle traces.
-        # `idle`: the reads that race the owner's retirement, idle or asked
-        # for (tests/differential/retirement_race.py); nothing is killed.
-        # `owner`: the owner killed, stopped or answered for by a declared
-        # responder before a call, and killed after a message's dispatch
-        # (tests/differential/owner_loss.py).
-        # `commands`: --logout, --login, --import-from-browser and --status
-        # beside a live owner (tests/differential/profile_commands.py); on
-        # Windows only the cells on pipes run, the terminal ones are skips.
-        # `auth`: a sign-in staged at the origin, the product's own login
-        # completing it or not (tests/differential/auth_repair.py); headed,
-        # on the display started below on Linux and in the runner's own
-        # desktop session elsewhere.
-        # `eligibility`: configurations the daemon refuses, some with provider
-        # metadata planted for the cell and removed exactly, one cell at a
-        # time, and a rival owner of another configuration
-        # (tests/differential/eligibility_rows.py).
-        rows: [pipes, processes, idle, owner, commands, auth, eligibility]
-        include:
-          - os: ubuntu-latest
-            browsers: ~/.cache/ms-playwright
-          - os: ubuntu-24.04-arm
-            browsers: ~/.cache/ms-playwright
-          - os: macos-latest
-            browsers: ~/Library/Caches/ms-playwright
-          - os: windows-latest
-            browsers: ~\AppData\Local\ms-playwright
+  # Branch protection on `main` requires `lint-and-check` and `test` by those
+  # names. This job is that check and does not run the suite. `if: always()`
+  # so an upstream failure still reaches the decision; a skipped required check
+  # would be a green one. Linux must succeed. A pull request also needs
+  # dependency review and a successful path decision. Optional matrices must
+  # succeed when required and be skipped when not. Any other result fails.
+  test:
+    needs: [linux, dependency-review, changes, windows-daemon, platform-behaviour]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # The review job is skipped for pushes to main. On pull requests it joins
+      # this required check instead of adding a branch-protection context.
+      - name: Require dependency review on pull requests
+        if: github.event_name == 'pull_request'
+        run: test '${{ needs.dependency-review.result }}' = success
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-        with:
-          enable-cache: true
-
-      - run: uv sync --group dev
-
-      # As in `platform-behaviour`: the browser is keyed on the resolved
-      # patchright version, and `shell: bash` because one leg is Windows.
-      - name: Resolve the patchright version
-        id: patchright
-        shell: bash
-        run: |
-          version=$(uv run python -c 'from importlib.metadata import version; print(version("patchright"))')
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Restore the browser
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ matrix.browsers }}
-          key: ms-playwright-${{ matrix.os }}-${{ steps.patchright.outputs.version }}
-
-      # `--with-deps` on Linux only, for the reason given in `platform-behaviour`.
-      - name: Install the browser
-        run: uv run patchright install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium --no-shell
-
-      - name: Start a display
-        if: runner.os == 'Linux'
-        run: |
-          Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
-          for _ in $(seq 1 100); do
-            if [ -S /tmp/.X11-unix/X99 ]; then exit 0; fi
-            sleep 0.1
-          done
-          echo "Xvfb never created /tmp/.X11-unix/X99:" >&2
-          cat /tmp/xvfb.log >&2
-          exit 1
-
-      - name: Issue the synthetic origin certificates
-        shell: bash
-        run: uv run python tests/differential/synthetic_origin.py "$RUNNER_TEMP/synthetic-origin"
-
-      # The trust and fence step of `platform-behaviour`, unchanged: one store
-      # per platform, the hosts file, and the guard that admits nothing but a
-      # disposable GitHub-hosted runner.
-      - name: Trust the synthetic CA and fence off the real names
-        timeout-minutes: 3
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
-            echo "Refusing to change a trust store outside a disposable GitHub-hosted runner" >&2
-            exit 1
-          fi
-          ca="$RUNNER_TEMP/synthetic-origin/ca.pem"
-          name="linkedin-mcp synthetic origin test CA"
-          case "$RUNNER_OS" in
-            Linux)
-              if ! command -v certutil >/dev/null; then
-                sudo apt-get update -qq
-                sudo apt-get install -y -qq libnss3-tools
-              fi
-              db="$HOME/.pki/nssdb"
-              mkdir -p "$db"
-              if [ ! -f "$db/cert9.db" ]; then
-                certutil -d "sql:$db" -N --empty-password
-              fi
-              certutil -d "sql:$db" -A -t "C,," -n "$name" -i "$ca"
-              echo "Trust store: NSS sql:$db"
-              certutil -d "sql:$db" -L
-              ;;
-            macOS)
-              sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$ca"
-              echo "Trust store: admin trust settings, /Library/Keychains/System.keychain"
-              security dump-trust-settings -d | grep -F -A4 "$name"
-              ;;
-            Windows)
-              certutil.exe -addstore -f Root "$(cygpath -w "$ca")"
-              echo "Trust store: LocalMachine\\Root"
-              certutil.exe -store Root "$name"
-              ;;
-            *)
-              echo "No trust step for $RUNNER_OS" >&2
-              exit 1
-              ;;
-          esac
-          hosts="$(printf '\n127.0.0.1 www.linkedin.com static.licdn.com synthetic-canary.test\n::1 www.linkedin.com static.licdn.com synthetic-canary.test\n')"
-          case "$RUNNER_OS" in
-            Linux)
-              printf '%s\n' "$hosts" | sudo tee -a /etc/hosts >/dev/null
-              cat /etc/hosts
-              ;;
-            macOS)
-              printf '%s\n' "$hosts" | sudo tee -a /etc/hosts >/dev/null
-              sudo dscacheutil -flushcache
-              sudo killall -HUP mDNSResponder
-              cat /etc/hosts
-              ;;
-            Windows)
-              hosts_file=/c/Windows/System32/drivers/etc/hosts
-              printf '%s\n' "$hosts" >> "$hosts_file"
-              MSYS_NO_PATHCONV=1 ipconfig.exe /flushdns
-              cat "$hosts_file"
-              ;;
-          esac
-
-      - name: Prepare the frozen baseline
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-        timeout-minutes: 15
-        shell: bash
-        run: uv run python tests/differential/baseline.py "$RUNNER_TEMP/differential-baseline"
-
-      # Row H-CAL, an unfaulted person read through a held and released
-      # section page, in K1 frozen, K3 and K0 (K2 recorded not applicable).
-      # Every cell's actors idle out after 60s
-      # (call_loss.CALIBRATION_IDLE_TIMEOUT_SECONDS), so the two owner waits
-      # are bounded at 2 x (60 + 90) = 300s and the three passive browser
-      # waits at 3 x 60 = 180s: eight minutes. The held page is let go as
-      # soon as it entered, and the hold itself is bounded at 20s from entry
-      # (synthetic_origin.GATE_DEADLINE_SECONDS). 30 leaves each cell about
-      # seven minutes for staging, launches, the two reads, the quit and the
-      # preservation session beyond its waits.
-      - name: Hold and release a section of a person read
-        if: matrix.rows == 'pipes'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 30
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py -k "held_profile or held_read"
-
-      # The signal oracle, as in `platform-behaviour`: H-R5 kills the Direct
-      # server or the frontend, H-R8 and H-R9 the owner or the Direct server,
-      # and on Linux a row that kills an actor is held to a complete trace.
-      # macOS and Windows record it as unavailable.
-      - name: Install the signal oracle
-        if: runner.os == 'Linux' && (matrix.rows == 'processes' || matrix.rows == 'owner')
-        timeout-minutes: 5
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
-            echo "Refusing to trace processes outside a disposable GitHub-hosted runner" >&2
-            exit 1
-          fi
-          if ! command -v strace >/dev/null; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq strace
-          fi
-          strace -V | head -1
-          echo "kernel.yama.ptrace_scope: $(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)"
-          sudo -n true
-
-      # Rows H-R4 and H-R5: the same read lost once its held page entered,
-      # released 15s after that entry (call_loss.RELEASE_SECONDS), in K1
-      # frozen, K3 and K0 (K2 recorded not applicable), one step per row,
-      # chosen by keyword. Each cell adds to the calibration's seven minutes:
-      # the release and the 10s watch after it; the server's or frontend's
-      # own exit (bound 90s); in K1 the browser wait (60s), the census and
-      # the lease; in K3 and K0 the owner's idle exit (60 + 90s); the
-      # residual browser wait (60s); and a fresh host's start and read (two
-      # minutes). Three cells come to at most 42 minutes: 45 each.
-      - name: Lose the host mid-read by stdin EOF
-        if: matrix.rows == 'pipes'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 45
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py -k eof
-
-      - name: Lose the host mid-read by abrupt pipe loss
-        if: matrix.rows == 'pipes'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 45
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py -k pipe
-
-      - name: Kill the host process mid-read
-        if: matrix.rows == 'processes'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 45
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py -k host_killed
-
-      - name: Lose the host with two requests outstanding
-        if: matrix.rows == 'processes'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 45
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py -k two_requests
-
-      - name: Kill the server or frontend mid-read
-        if: matrix.rows == 'processes'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 45
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_call_loss_rows.py -k killed_mid_read
-
-      # Row H-R13: the read raced against the owner's idle exit, with its own
-      # 8s idle timeout (retirement_race.IDLE_RACE_TIMEOUT_SECONDS), in K1
-      # frozen, K3 and K0 (K2 recorded not applicable), one step per lane.
-      # Each cell is the calibration's seven minutes with an idle timeout of
-      # 8s instead of 60s, plus its own waits. Admission wins: the hold (at
-      # most 18s), the owner's or Direct's idle exit after the read (8 + 60s)
-      # and the browser after it (60s). Retirement wins: the idle line (8 +
-      # 60s), the owner's exit or the browser (60s), and the call through an
-      # election (bound 180s). Then the owner's or successor's own idle exit
-      # (8 + 90s) and the residual browser wait (60s). Three cells come to at
-      # most 45 minutes: 50 each.
-      - name: Race an admitted read against the idle exit
-        if: matrix.rows == 'idle'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 50
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_idle_race_rows.py -k admitted
-
-      - name: Call after the owner idled out
-        if: matrix.rows == 'idle'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 50
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_idle_race_rows.py -k idled_out
-
-      # The turnover lanes, daemon only: K3 and K0, with K1 a counted skip
-      # (a policy, not parity) and K2 recorded not applicable, in the
-      # calibration's 60s configuration. Each cell adds to the calibration's
-      # seven minutes: the stand-down and the reads through the drain (30s)
-      # or past it, each read bounded at 180s; the owner's stand-down (90s);
-      # where a successor served, its idle exit (60 + 90s); and the residual
-      # browser wait (60s). Two cells come to at most 30 minutes: 35 each.
-      # They do not discharge W6.
-      - name: Turn the owner over with held work inside the drain
-        if: matrix.rows == 'idle'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 35
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_idle_race_rows.py -k "turns_over and drain"
-
-      - name: Refuse new work after a turnover
-        if: matrix.rows == 'idle'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 35
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_idle_race_rows.py -k "turns_over and refused"
-
-      - name: Cut a read that outlasts the drain
-        if: matrix.rows == 'idle'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 35
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_idle_race_rows.py -k "turns_over and cut"
-
-      - name: Refuse a queued read as not run
-        if: matrix.rows == 'idle'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 35
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_idle_race_rows.py -k "turns_over and queued"
-
-      # Row H-R8: the owner out of service between two calls, in K1 frozen
-      # (the same requests through Direct, no hop), K3 and K0 (K2 recorded
-      # not applicable), one step per lane, in the calibration's 60s
-      # configuration. Each cell is the calibration's seven minutes plus its
-      # own waits: the kill and the owner's death (15s), the read through an
-      # election and a replay (bound 180s), the oracle's stop (30s), then the
-      # successor's own idle exit (60 + 90s) and the residual browser wait
-      # (60s). Three cells come to at most 37 minutes: 40 each. The stopped
-      # owner adds its declared 20s stop and a later read (another 180s
-      # bound) to K3 and K0, and runs nowhere on Windows (counted skips):
-      # 45. Retiring is H-R13's.
-      - name: Lose the owner before a call
-        if: matrix.rows == 'owner'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 40
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_loss_rows.py -k unreachable
-
-      - name: Stop the owner before a call
-        if: matrix.rows == 'owner'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 45
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_loss_rows.py -k stopped
-
-      - name: Answer the dead owner's preflight with 404
-        if: matrix.rows == 'owner'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 40
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_loss_rows.py -k responder_404
-
-      - name: Answer the dead owner's preflight with 500
-        if: matrix.rows == 'owner'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 40
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_loss_rows.py -k responder_500
-
-      # Row H-R9: a message's first navigation held, then the Direct server
-      # (K1 frozen) or the owner (K3, K0) killed. Each cell adds to the
-      # calibration's seven minutes: the message through an election (bound
-      # 180s), the release 15s after entry and the 10s watch; in K1 the
-      # guardian and browser settlement (60s each) and a fresh host's read
-      # (two minutes); in K3 and K0 a read through the successor (180s) and
-      # its idle exit (60 + 90s); the oracle's stop (30s) and the residual
-      # browser wait (60s). Three cells come to at most 47 minutes: 50.
-      - name: Lose the owner after a message's dispatch
-        if: matrix.rows == 'owner'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 50
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_loss_rows.py -k message
-
-      # Row H-R10a, a confirmed logout beside an idle owner, on a terminal:
-      # K1 frozen after its server settled, K3 retiring the owner, and K0 (K2
-      # recorded not applicable); counted skips on Windows, which has no
-      # pseudo-terminal. Each cell is the calibration's seven minutes and
-      # its own waits: the host's quit (90s), Direct's settlement (60s and a
-      # census) or a checkpoint (60s), the logout from its start (a prompt
-      # within 60s, then the product's own 60s wait for the profile and the
-      # clear, bound 90s) and the residual browser wait (60s); nothing is
-      # preserved after a clear. Three cells come to at most 27 minutes: 30.
-      - name: Log out beside an idle owner
-        if: matrix.rows == 'commands'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 30
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_profile_command_rows.py -k logout
-
-      # H-R10a's daemon cells, K3 and K0, K1 a counted skip: the retirement
-      # declined on a terminal (a skip on Windows), and no terminal at all, on
-      # pipes. Each adds to the calibration's seven minutes the host's quit
-      # (90s), two checkpoints (60s each), the logout (a prompt within 60s
-      # and the answer's end within 15s), the 5s watch, the owner's own idle
-      # exit (60 + 90s) and the residual browser wait (60s). Four cells come
-      # to at most 38 minutes: 40.
-      - name: Decline or lack a terminal beside an idle owner
-        if: matrix.rows == 'commands'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 40
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_profile_command_rows.py -k "decline or no_terminal"
-
-      # Row H-R10b: logout, login and import inside the three held sections
-      # of one read, K1 frozen, K3 and K0, counted skips on Windows. Each
-      # cell adds to the calibration's seven minutes three commands (a prompt
-      # within 60s, then at most 18s inside its hold), the read's end (120s),
-      # the owner's idle exit (60 + 90s) and the residual browser wait (60s).
-      # Three cells come to at most 39 minutes: 40.
-      - name: Run profile commands beside a busy owner
-        if: matrix.rows == 'commands'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 40
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_profile_command_rows.py -k busy
-
-      # Row H-R15: --status on pipes beside the open host's owner or Direct
-      # server, K1 frozen, K3 and K0, on every leg. Each cell adds to the
-      # calibration's seven minutes two checkpoints and two root readings
-      # (60s each), the status (90s) and a read, then the owner's idle exit
-      # (60 + 90s) and the residual browser wait (60s). Three cells come to
-      # at most 30 minutes: 30.
-      - name: Check the status beside a live owner
-        if: matrix.rows == 'commands'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 30
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_profile_command_rows.py -k status
-
-      # Row H-R16's cold repair and its second frontend, a sign-in staged at
-      # the origin: K1 frozen, K3 and K0 of the cold cell, K3 and K0 of the
-      # second (its K1 a counted skip). Each cell is the calibration's seven
-      # minutes and its own waits: the warm browser gone (60s), the login's
-      # first ask (120s), the read (150s), the completion (90s), the host's
-      # quit (90s), the owner's idle exit (60 + 90s) and the residual browser
-      # wait (60s), 19 minutes; the second frontend adds its host (240s), 23.
-      # Five cells come to at most 103 minutes: 105.
-      - name: Repair a lost session through the owner
-        if: matrix.rows == 'auth'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-          # The login is headed; only Linux has a display to name.
-          DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
-        timeout-minutes: 105
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_auth_repair_rows.py -k "cold or second"
-
-      # H-R16's failed login, never released: K1 frozen, K3 and K0. Each cell
-      # adds to the calibration's seven minutes the warm browser gone (60s),
-      # the first ask (120s), the read (150s), the login's own budget and its
-      # settlement (60 + 60s), the host's quit (90s), the owner's idle exit
-      # (60 + 90s) and the residual browser wait (60s), 20 minutes. Three
-      # cells come to at most 60 minutes: 60.
-      - name: Fail a login the origin never completes
-        if: matrix.rows == 'auth'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-          DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
-        timeout-minutes: 60
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_auth_repair_rows.py -k failed
-
-      # Row H-R10a's login on a terminal, K1 frozen after its server settled
-      # and K3 retiring the idle owner, and K0; counted skips on Windows, as
-      # are the response-loss and import lanes everywhere. Each cell adds to
-      # the calibration's seven minutes the host's quit (90s), Direct's
-      # settlement or a checkpoint (60s), the prompt (60s), a checkpoint
-      # (60s), the owner's exit (90s), the first ask (120s), the completion
-      # (90s), the command's end (25s) and the residual browser wait (60s),
-      # 18 minutes. Three cells come to at most 54 minutes: 55.
-      - name: Sign in again beside an idle owner
-        if: matrix.rows == 'auth'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-          DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
-        timeout-minutes: 55
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_auth_repair_rows.py -k "login or natively"
-
-      # The H-R12 remainder: each configuration the daemon refuses, K1 frozen
-      # Direct, K3 with the daemon enabled and K0 (K2 recorded not
-      # applicable), held to no coordination effect and a Direct read. Each
-      # cell is the calibration's seven minutes and its own waits: the storage
-      # reading (30s) and the residual browser wait (60s); nothing is an owner
-      # to idle out. Switched off by DAEMON_ENABLED=false and by --no-daemon:
-      # six cells come to at most 51 minutes: 55.
-      - name: Keep a switched-off daemon Direct
-        if: matrix.rows == 'eligibility'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 55
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_eligibility_rows.py -k "disabled_env or no_daemon"
-
-      # A container (LINKEDIN_MCP_CONTAINER=true, the session staged and
-      # preserved as the same runtime): three cells, at most 26 minutes: 30.
-      - name: Keep a container Direct
-        if: matrix.rows == 'eligibility'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 30
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_eligibility_rows.py -k container
-
-      # An HTTP server on a loopback port of its own, quit by its interrupt;
-      # counted skips on Windows. Each cell adds to the above the port's
-      # listening (bound 180s): three cells, at most 35 minutes: 40.
-      - name: Keep an HTTP server Direct
-        if: matrix.rows == 'eligibility'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 40
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_eligibility_rows.py -k http
-
-      # Synced storage: a Dropbox info.json naming the row's auth root, one
-      # naming the daemon state root, and on macOS a profile under
-      # ~/Library/CloudStorage (counted skips elsewhere), each planted for its
-      # cell only, refused where any provider configuration already is, and
-      # removed exactly. Nine cells come to at most 77 minutes: 80.
-      - name: Keep synced storage Direct
-        if: matrix.rows == 'eligibility'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 80
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_eligibility_rows.py -k "synced or cloud_storage"
-
-      # Unknown storage: a malformed Dropbox info.json, planted and removed
-      # the same way. Three cells, at most 26 minutes: 30.
-      - name: Keep unknown storage Direct
-        if: matrix.rows == 'eligibility'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 30
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_eligibility_rows.py -k unknown
-
-      # Row H-R14: host B with LOGIN_TIMEOUT one second apart while A is open,
-      # K1 frozen, K3 and K0. Each cell adds to the calibration's seven
-      # minutes the storage reading (30s), three owner readings (30s each),
-      # B's whole session (240s), the settlement before A2 (a 60s browser
-      # wait, a census and the lock, 60s each), A2 (180s), the owner's idle
-      # exit (120 + 90s) and the residual browser wait (60s), 24 minutes.
-      # Three cells come to at most 71 minutes: 75.
-      - name: Leave a differently configured owner alone
-        if: matrix.rows == 'eligibility'
-        env:
-          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
-          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
-          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
-          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 75
-        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_eligibility_rows.py -k rival
-
-      # The rows' evidence packet (``events.PUBLISHED_FILES``), under a name
-      # apart from the other jobs' packets. Always, so a red row keeps what
-      # made it red.
-      - name: Keep the differential call evidence
+      - name: Checkout the gate
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          name: differential-calls-evidence-${{ matrix.os }}-${{ matrix.rows }}
-          path: ${{ runner.temp }}/differential-calls-evidence
-          if-no-files-found: warn
-          retention-days: 14
+          persist-credentials: false
 
-      - run: uv cache prune --ci
+      - name: Require the expected results
+        if: always()
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          LINUX_RESULT: ${{ needs.linux.result }}
+          DEPENDENCY_REVIEW_RESULT: ${{ needs.dependency-review.result }}
+          DETECTION_RESULT: ${{ needs.changes.result }}
+          MATRICES: ${{ needs.changes.outputs.matrices }}
+          WINDOWS_DAEMON_RESULT: ${{ needs.windows-daemon.result }}
+          PLATFORM_BEHAVIOUR_RESULT: ${{ needs.platform-behaviour.result }}
+        run: python3 scripts/ci_gate.py
