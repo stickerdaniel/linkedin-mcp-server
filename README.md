@@ -9,9 +9,9 @@
   <a href="https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/LICENSE" target="_blank"><img src="https://img.shields.io/badge/License-Apache%202.0-%233fb950?labelColor=32383f" alt="License"></a>
 </p>
 
-An MCP server that connects AI assistants like Claude to LinkedIn through your own logged-in browser session. Look up profiles and companies, send messages, manage your inbox, or search for jobs. All browser actions run locally on your machine.
+Give your AI agents access to LinkedIn through your own browser session. Read profiles, research companies, find jobs, and manage conversations and connection requests.
 
-> This is an independent open-source project, not affiliated with, authorized by, endorsed by, or sponsored by LinkedIn or Microsoft. LinkedIn is a trademark of LinkedIn Corporation and is used here only to identify the service this software interacts with.
+> This is an independent open-source project, not affiliated with LinkedIn or Microsoft. LinkedIn is a trademark of LinkedIn Corporation, used here only to identify the service this software interacts with.
 
 <br/>
 <details open>
@@ -24,7 +24,7 @@ An MCP server that connects AI assistants like Claude to LinkedIn through your o
   </picture>
 </a>
 
-> Prefer not to run a server? [**Cadenza**](https://cadenza.page/?utm_source=github&utm_medium=readme&utm_campaign=oss_sponsor&utm_content=name) is the hosted LinkedIn MCP server for your agents, on web, desktop, and mobile, with 100+ actions across LinkedIn Classic, Sales Navigator, and Recruiter. You decide how many requests of each type it sends to your account per minute and per day.
+> Prefer not to run a server? [**Cadenza**](https://cadenza.page/?utm_source=github&utm_medium=readme&utm_campaign=oss_sponsor&utm_content=name) is the hosted LinkedIn MCP server for your agents, on web, desktop, and mobile, with 100+ actions across LinkedIn Classic, Sales Navigator, and Recruiter. Request limits are built in, with per-minute and daily budgets you can fine-tune for each action.
 
 Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https://cadenza.page/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=oss_sponsor&amp;utm_content=cta">Try Cadenza →</a>
 
@@ -55,26 +55,26 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 
 | Tool | Description |
 |------|-------------|
-| `get_person_profile` | Read profile sections such as experience, education, skills, projects and posts. |
-| `get_my_profile` | Read your own profile using the same selectable sections. |
-| `connect_with_person` | Send or accept a connection request, with an optional note. |
-| `get_sidebar_profiles` | Find recommended profile links in a person's sidebar. |
-| `get_inbox` | List recent messaging conversations from your LinkedIn inbox. |
-| `get_conversation` | Read a conversation by username or thread ID. |
-| `search_conversations` | Search messages by keyword across your conversations. |
-| `send_message` | Send after confirmation. Targeting a profile may start a separate DM instead of replying in a thread ([#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483)). |
-| `get_company_profile` | Read posts and jobs; about references can include a `company_urn` for the `currentCompany` search facet. |
-| `get_company_posts` | Read recent posts published on a company's LinkedIn page. |
-| `search_companies` | Find LinkedIn company profiles matching a keyword search. |
-| `get_company_employees` | List company employees, optionally filtered by keyword. |
-| `search_jobs` | Find LinkedIn job postings by keyword and location. |
-| `get_saved_jobs` | List the job postings you have saved on LinkedIn. |
-| `search_people` | Search by keyword, location, connection degree or company. |
-| `get_job_details` | Read the details of a LinkedIn job posting by its job ID. |
-| `get_job_apply_url` | Read how a posting takes applications and the employer's link. |
-| `get_feed` | Read recent home-feed posts, with links in `references`. |
-| `search_posts` | Search posts by keyword with optional recency filters; `references` contains unordered candidate post links. |
-| `close_session` | Close the active browser session and release its resources. |
+| `get_person_profile` | Read profile sections such as experience, education, skills, projects, and posts. |
+| `get_my_profile` | Read your own profile, with the same section selection as other profiles. |
+| `connect_with_person` | Send a connection request with an optional note, or accept an incoming one. |
+| `get_sidebar_profiles` | Find recommended profile links, including people you may know. |
+| `get_inbox` | List recent inbox conversations, with links to open individual threads. |
+| `get_conversation` | Read a conversation's messages using a LinkedIn username or thread ID. |
+| `search_conversations` | Search messages by keyword and return links to matching conversation threads. |
+| `send_message` | Send after confirmation; profile targets may open a new DM ([#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483)). |
+| `get_company_profile` | Read company information, with optional sections for posts and open jobs. |
+| `get_company_posts` | Read recent posts from a company's feed, with links to the original posts. |
+| `search_companies` | Find companies by keyword and return links to their LinkedIn profiles. |
+| `get_company_employees` | Find company employees, optionally filtered by name, title, or skill. |
+| `search_jobs` | Find job postings by keyword and location, with job IDs for reading details. |
+| `get_saved_jobs` | List your saved job postings, with job IDs for looking up their details. |
+| `search_people` | Find people by keyword, location, connection degree, and current company. |
+| `get_job_details` | Read a job posting's description, requirements, and company details. |
+| `get_job_apply_url` | Check whether a job uses Easy Apply or links to an employer's application. |
+| `get_feed` | Read recent posts from your home feed, with links to the original posts. |
+| `search_posts` | Search posts by keyword, optionally limited to the past day, week, or month. |
+| `close_session` | Close the shared browser session without deleting your saved login. |
 
 <br/>
 <br/>
