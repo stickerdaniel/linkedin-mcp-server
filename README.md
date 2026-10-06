@@ -37,7 +37,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
   </picture>
 </a>
 
-> For developers, our sponsor [**Unipile**](https://golink.onl/unipile-link) offers a fully managed LinkedIn API for Classic, Sales Navigator, and Recruiter. Add LinkedIn to your own app while Unipile takes care of auth, sessions, and infrastructure for you.
+> This MCP server is supported by [**Unipile**](https://golink.onl/unipile-link). Unipile is the fully managed cloud option for developers: a hosted LinkedIn API for Classic, Sales Navigator, and Recruiter that handles auth, sessions, and infrastructure for you.
 
 [Try Unipile free for 7 days →](https://golink.onl/unipile-free-trial)
 </details>
