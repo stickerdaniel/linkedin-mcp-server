@@ -9379,6 +9379,9 @@ async def measure_host_quit_row(
     #: What ended the row's try, if anything: the teardown raises a
     #: cancellation it held only when that is not already one.
     row_failure: BaseException | None = None
+    #: A cancellation that reached the after-row lineage read of a row that
+    #: had not failed, raised once the teardown is done.
+    read_cancelled: BaseException | None = None
     try:
         watcher.start()
         # After the watcher's baseline, so it reports the canaries' starts and
@@ -9621,10 +9624,15 @@ async def measure_host_quit_row(
                 cookie_file=portable_cookie_path(account.profile),
                 expected_digest=staged.li_at_digest,
             )
-        except BaseException:
-            # A diagnostic miss, including cancellation of this read, must not
-            # skip the releases below or replace the row's own error.
+        except Exception:
+            # A diagnostic miss; the teardown goes on.
             pass
+        except BaseException as exc:
+            # A cancellation of this read must not skip the releases below or
+            # replace the row's own error, nor be lost: a row that had not
+            # failed raises it once its teardown is done.
+            if row_failure is None:
+                read_cancelled = exc
         if comparison is not None:
             # From here on the harness acts: a checkpoint after this marker
             # could be reading its cleanup rather than the product.
@@ -9912,7 +9920,16 @@ async def measure_host_quit_row(
                     held.add_note(
                         f"held while the row's teardown ran after {row_failure!r}"
                     )
+                if read_cancelled is not None:
+                    held.add_note(
+                        f"the after-row lineage read was also cancelled: "
+                        f"{read_cancelled!r}"
+                    )
                 raise held
+        if read_cancelled is not None:
+            # Last, so H-R7's held cancellation is raised first and keeps a
+            # note of this one; either way the row does not go on to a verdict.
+            raise read_cancelled
 
     host = result.host
     assert host is not None

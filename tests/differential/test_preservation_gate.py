@@ -11,6 +11,7 @@ post-quit session was started.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import functools
@@ -1920,6 +1921,57 @@ async def test_a_watcher_that_never_started_still_has_its_helpers_ended(
     with pytest.raises(RuntimeError, match="no baseline"):
         await row(processes=[], summary={})
     assert _Helpers.stopped == 1
+
+
+def _hold_the_after_row_read(monkeypatch) -> tuple[asyncio.Event, threading.Event]:
+    """Keep the row's after-row lineage read in its thread until released, so
+    a cancellation lands while the row awaits it."""
+    loop = asyncio.get_running_loop()
+    entered, release = asyncio.Event(), threading.Event()
+
+    def read(path: Path, *, point: str, **kwargs: Any) -> None:
+        if point == "after-row":
+            loop.call_soon_threadsafe(entered.set)
+            release.wait(10)
+
+    monkeypatch.setattr(harness, "record_cookie_lineage", read)
+    return entered, release
+
+
+async def _cancelled_at_the_after_row_read(row, monkeypatch) -> asyncio.Task:
+    entered, release = _hold_the_after_row_read(monkeypatch)
+    task = asyncio.create_task(row(processes=[], summary={}))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        task.cancel()
+    finally:
+        release.set()
+    return task
+
+
+async def test_a_cancelled_after_row_read_cancels_the_row_after_its_teardown(
+    row, monkeypatch
+):
+    monkeypatch.setattr(harness, "Canaries", _Helpers)
+    monkeypatch.setattr(_Helpers, "stopped", 0)
+    task = await _cancelled_at_the_after_row_read(row, monkeypatch)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert _Helpers.stopped == 1
+    assert row.cleaned, "the owner's cleanup still ran"
+
+
+async def test_a_failed_row_keeps_its_error_over_a_cancelled_after_row_read(
+    row, monkeypatch
+):
+    class Failing(_Watcher):
+        def start(self):
+            raise RuntimeError("no baseline")
+
+    monkeypatch.setattr(harness, "Watcher", Failing)
+    task = await _cancelled_at_the_after_row_read(row, monkeypatch)
+    with pytest.raises(RuntimeError, match="no baseline"):
+        await task
 
 
 # --- What the actors wrote, kept whole ----------------------------------------
