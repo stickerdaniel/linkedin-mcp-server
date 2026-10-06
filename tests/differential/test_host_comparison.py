@@ -2802,13 +2802,10 @@ def _direct_second(row, monkeypatch, tmp_path):  # noqa: F811 - the imported fix
             id="failed-census",
         ),
         pytest.param(
-            lambda scene, mp: (
-                mp.setattr(harness, "_BROWSER_GONE_SECONDS", 0.2),
-                setattr(
-                    scene,
-                    "census_after_b",
-                    lambda: harness.ProfileCensus(processes=[SimpleNamespace(pid=900)]),
-                ),
+            lambda scene, mp: setattr(
+                scene,
+                "census_after_b",
+                lambda: harness.ProfileCensus(processes=[SimpleNamespace(pid=900)]),
             ),
             "host B's browser is not shown gone",
             id="residual-browser",

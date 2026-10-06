@@ -247,6 +247,16 @@ def row(tmp_path, monkeypatch, profile):
     monkeypatch.setattr(harness, "observe_preservation", preservation)
     monkeypatch.setattr(harness, "harness_user", lambda: ME)
     monkeypatch.setattr(harness, "process_user", lambda process: process.user)
+    # Nothing changes a modelled process table while the row waits on it, so
+    # the first census is the answer every later sample would give: take it
+    # instead of sampling until the native deadline. A row whose census never
+    # settles would otherwise spend that whole minute on it.
+    wait_for_no_browser = harness.wait_for_no_browser
+    monkeypatch.setattr(
+        harness,
+        "wait_for_no_browser",
+        lambda account, _seconds, **census: wait_for_no_browser(account, 0.0, **census),
+    )
 
     # A frozen runtime's identity, staging and browser, asked of no interpreter.
     monkeypatch.setattr(harness, "frozen_identity", lambda runtime: {})
