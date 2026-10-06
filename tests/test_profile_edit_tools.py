@@ -9,7 +9,7 @@ import pytest
 from fastmcp import FastMCP
 
 from linkedin_mcp_server.tools.profile_edit import register_profile_edit_tools
-from profile_edit_fakes import FakeEditor
+from profile_edit_fakes import FakeEditor, FakePosition
 
 READY = "linkedin_mcp_server.tools.profile_edit.get_ready_profile_editor"
 
@@ -27,6 +27,44 @@ async def call(mcp: FastMCP, name: str, args: dict) -> dict:
     result = await mcp.call_tool(name, args)
     assert result.structured_content is not None
     return result.structured_content
+
+
+async def test_structured_editing_reads_preserve_values_and_targets(mcp):
+    description = "First paragraph.\n\nSecond paragraph."
+    ed = FakeEditor(
+        about=description,
+        positions=[
+            FakePosition(
+                "position-42", "Engineer", "Example Ltd", "2021 - 2024", description
+            )
+        ],
+        skills=["TypeScript", "Python"],
+    )
+    with patch(READY, AsyncMock(return_value=ed)):
+        profile = await call(mcp, "get_my_editable_profile", {})
+        listed = await call(mcp, "get_my_experience", {})
+        position = await call(mcp, "get_my_experience", {"experienceId": "position-42"})
+        skills = await call(mcp, "get_my_skills", {})
+
+    assert profile["url"] == "https://www.linkedin.com/in/jane/"
+    assert profile["headline"] == "Senior Software Developer"
+    assert profile["about"] == description
+    assert profile["limits"] == {"headline": 220, "about": 2600}
+    assert profile["experiences"][0]["id"] == "position-42"
+    assert listed["experiences"][0]["id"] == "position-42"
+    assert position["experience"]["id"] == "position-42"
+    assert position["experience"]["title"] == "Engineer"
+    assert position["experience"]["description"] == description
+    assert position["experience"]["limits"] == {"title": 100, "description": 2000}
+    assert (
+        profile["skills"]
+        == skills["skills"]
+        == [
+            {"name": "TypeScript", "position": 1},
+            {"name": "Python", "position": 2},
+        ]
+    )
+    assert ed.writes == []
 
 
 async def test_only_apply_is_marked_as_modifying_external_state(mcp):

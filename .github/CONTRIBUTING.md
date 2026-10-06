@@ -57,7 +57,7 @@ LinkedIn is used in many languages, so never tell connection state, buttons or a
 
 ### Return format
 
-Every tool that reads LinkedIn returns `{"url": str, "sections": {name: raw_text}}`. `sections` is the main payload. A tool may add:
+Section-reading tools return `{"url": str, "sections": {name: raw_text}}`. `sections` is the main payload. The three own-profile editing reads (`get_my_editable_profile`, `get_my_experience`, `get_my_skills`) instead return structured editable values, position ids, skill order and form limits under the [structured editing read contract](../docs/decisions/2026-10-06-structured-editing-reads.md). This exception does not extend to other reading tools, including `get_my_profile`. Section-reading tools may add:
 
 - `references`: `{section: [{kind, url, text?, context?, value?}]}`, compact links to people, companies and posts. LinkedIn URLs are relative paths to save tokens.
 - `section_errors`: `{section: {error_type, error_message, ...}}` for a problem with one section, reported without failing the whole call.

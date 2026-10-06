@@ -151,6 +151,12 @@ several seconds to open, type, save and re-read.
 
 The existing `get_my_profile` (raw section text) is unchanged.
 
+The three editing-read tools above deliberately return structured fields rather
+than raw `sections` text. Their narrow exception to the section-reading return
+format is defined in the [structured editing read contract](decisions/2026-10-06-structured-editing-reads.md).
+Use the returned position ids and form values when proposing changes; do not
+reconstruct them from rendered profile text.
+
 ### Proposing changes
 
 ```json

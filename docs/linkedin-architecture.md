@@ -37,7 +37,7 @@ a page-owning collaborator.
 | `person` | `PersonReader` | `page-owning` |
 | `posts` | `PostSearch` | `browser-free` |
 | `profile_editor` | `ProfileEditor` | `page-owning` |
-| `profile_page` | `MessageTarget`, `MessageTargetResolution`, `ProfilePageReader`, `ReadMessageTarget` | `page-owning` |
+| `profile_page` | `MessageTarget`, `MessageTargetResolution`, `ProfilePageReader`, `ReadMessageTarget` | `browser-free` |
 | `profile_selectors` | `ABOUT`, `DEFAULT_LOCALE`, `DESCRIBE_DIALOG_JS`, `DIALOG`, `DIALOG_HAS`, `EXPERIENCE_COMPANY`, `EXPERIENCE_DESCRIPTION`, `EXPERIENCE_EDIT_HREF`, `EXPERIENCE_TITLE`, `FORM_ERROR`, `FieldSpec`, `HEADINGS`, `HEADLINE`, `LABELS`, `LINKEDIN`, `LIST_ITEMS_JS`, `LOCATION`, `NOTIFY_SWITCH`, `OWN_PROFILE_URL`, `RICH_TEXT`, `SAVE_BUTTON`, `SCROLL_LAST_ITEM_JS`, `SKILL_EDIT_HREF`, `SKILL_FILTER_BUTTONS`, `SKILL_INPUT`, `STATED_MAX`, `TYPEAHEAD_OPTION`, `VANITY_FROM_URL`, `about_form_urls()`, `experience_form_url()`, `experience_list_url()`, `intro_form_url()`, `new_skill_form_url()`, `profile_url()`, `skill_form_url()`, `skills_list_url()` | `browser-free` |
 | `search_urls` | `CONTENT_DATE_POSTED_MAP`, `EXPERIENCE_LEVEL_MAP`, `JOB_DATE_POSTED_MAP`, `JOB_TYPE_MAP`, `NETWORK_TOKENS`, `SORT_BY_MAP`, `WORK_TYPE_MAP`, `build_company_search_url()`, `build_content_search_url()`, `build_job_search_url()`, `build_people_search_url()` | `browser-free` |
 | `session` | `NAV_DELAY`, `PageSession` | `page-owning` |
