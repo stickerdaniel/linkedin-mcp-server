@@ -33,6 +33,13 @@ def _sender(page) -> MessageSender:
 
 
 class TestMessageTargetUrls:
+    @pytest.mark.parametrize("path", ["/messaging/compose/", "/messaging/thread/new/"])
+    def test_compose_confirmation_has_no_thread_id(self, path):
+        confirmation = message_sender_module._confirmation_from_snapshot({"path": path})
+
+        assert confirmation is not None
+        assert confirmation.thread_id is None
+
     @pytest.mark.parametrize(
         ("url", "expected"),
         [

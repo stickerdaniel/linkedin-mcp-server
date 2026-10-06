@@ -342,6 +342,8 @@ def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
         return "feed_post", f"/feed/update/{match.group(1)}/"
 
     if match := _MESSAGING_THREAD_PATH_RE.match(path):
+        if unquote(match.group(1)) == "new":
+            return None
         return "conversation", f"/messaging/thread/{match.group(1)}/"
 
     return None
