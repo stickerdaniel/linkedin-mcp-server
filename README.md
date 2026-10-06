@@ -59,9 +59,9 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `get_my_profile` | Read your own profile, with the same section selection as other profiles. |
 | `connect_with_person` | Send a connection request with an optional note, or accept an incoming one. |
 | `get_sidebar_profiles` | Find recommended profile links, including people you may know. |
-| `get_inbox` | List recent inbox conversations, with up to 50 conversations per call. |
+| `get_inbox` | List recent inbox conversations, with links to open individual threads. |
 | `get_conversation` | Read a conversation's messages using a LinkedIn username or thread ID. |
-| `search_conversations` | Search messages by keyword and collect up to 50 matching thread references. |
+| `search_conversations` | Search messages by keyword and return links to matching conversation threads. |
 | `send_message` | Send after confirmation. Targeting a profile may start a separate DM instead of replying in a thread ([#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483)). |
 | `get_company_profile` | Read company information, with optional sections for posts and open jobs. |
 | `get_company_posts` | Read recent posts from a company's feed, with links to the original posts. |
