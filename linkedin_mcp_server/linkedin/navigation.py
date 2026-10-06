@@ -20,6 +20,8 @@ from linkedin_mcp_server.core.destination import (
 )
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.core.proxy_errors import (
+    NAVIGATION_BUDGET_MS,
+    goto_reporting_proxy_errors,
     raise_if_proxy_error,
     redact_proxy_credentials,
     redacted_copy,
@@ -178,7 +180,22 @@ class PageNavigator:
                 extra={"target_url": url, "wait_until": wait_until},
             )
             try:
-                await page.goto(url, wait_until=wait_until, timeout=30000)
+                # A scripted page records the timeout it was given and does not
+                # enforce it. Only Patchright's clock starts at the call, which
+                # is the clock that expires before a cold browser sends.
+                if type(page).__module__.startswith("patchright."):
+                    await goto_reporting_proxy_errors(
+                        page,
+                        url,
+                        wait_until=wait_until,
+                        timeout=NAVIGATION_BUDGET_MS,
+                    )
+                else:
+                    await page.goto(
+                        url,
+                        wait_until=wait_until,
+                        timeout=NAVIGATION_BUDGET_MS,
+                    )
                 await stabilize_navigation(f"goto {url}", logger)
                 await record_page_trace(
                     page,

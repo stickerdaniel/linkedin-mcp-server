@@ -379,12 +379,14 @@ def _issued_cookie(value: str) -> str:
 # --- Holding one request -------------------------------------------------------
 
 #: How long a held request may wait, counted from its entry into the gate.
-#: Below both limits a held request meets: the product's navigation timeout
-#: (``page.goto(..., timeout=30000)`` in ``linkedin.navigation``) and this
-#: module's proxy relay, which ends a tunnel idle for ``_RELAY_IDLE_SECONDS``
-#: (30). A held request sends nothing through its tunnel, so a hold of 30 s
-#: would be cut by the relay rather than ended by the gate; 20 leaves the
-#: answer ten seconds to arrive.
+#: Below both limits a held request meets, both counted from that request and
+#: not from the ``goto`` call: the product's navigation budget
+#: (``NAVIGATION_BUDGET_MS``, 30s, in ``core.proxy_errors``) and this module's
+#: proxy relay, which ends a tunnel idle for ``_RELAY_IDLE_SECONDS`` (30). A
+#: held request sends nothing through its tunnel, so a hold of 30 s would be
+#: cut by the relay rather than ended by the gate; 20 leaves the answer ten
+#: seconds to arrive. The time a fresh browser spends before it sends the
+#: request is not part of either limit.
 GATE_DEADLINE_SECONDS = 20.0
 #: How often a held request looks for its peer having gone.
 _PEER_POLL_SECONDS = 0.05
