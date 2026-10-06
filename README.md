@@ -71,6 +71,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `get_saved_jobs` | List the job postings you have saved on LinkedIn. |
 | `search_people` | Search by keyword, location, connection degree or company. |
 | `get_job_details` | Read the details of a LinkedIn job posting by its job ID. |
+| `get_job_apply_url` | Check whether a job uses Easy Apply or links to an employer's application. |
 | `get_feed` | Read recent home-feed posts, with links in `references`. |
 | `search_posts` | Search posts by keyword with optional recency filters; `references` contains unordered candidate post links. |
 | `get_my_editable_profile` | Read your own headline, about, experiences (with stable ids), skills and limits as structured fields. |
