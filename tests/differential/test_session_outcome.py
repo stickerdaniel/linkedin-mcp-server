@@ -8,13 +8,19 @@ read as retained.
 
 from __future__ import annotations
 
+import io
 import json
+import logging
 import os
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from differential import harness
+from linkedin_mcp_server import browser_launch
+from linkedin_mcp_server.logging_config import MCPJSONFormatter
 from differential.session import (
     CALLER,
     CLEARED_BY_USER,
@@ -390,6 +396,56 @@ def test_no_session_to_begin_with_is_uncertain(tmp_path):
 )
 def test_only_a_notice_announces_a_loss(lines, announced):
     assert announces_loss(lines) is announced
+
+
+def test_a_driver_launch_through_a_login_cache_does_not_announce_the_loss(signed_in):
+    # Measured from both locked drivers: the ``<launching>`` line names the
+    # browser cache, and a cache directory called ``login`` matches the loss
+    # notice. The line is the driver's, so it is kept out of what the row
+    # classifies; the same words from the server would still announce.
+    profile, staged = signed_in
+    before = _read(profile, staged)
+    launch = (
+        "2026-10-05T09:27:25.691Z pw:browser <launching> "
+        "/cache/login/browsers/chromium-1243/chrome-mac-arm64/Google Chrome "
+        "for Testing.app/Contents/MacOS/Google Chrome for Testing "
+        "--disable-sync --user-data-dir=/profile"
+    )
+    assert announces_loss([launch]) is True
+    heard = SimpleNamespace(stderr=[], user_lines=[])
+    harness.note_server_output(heard, launch)
+    assert launch not in heard.user_lines
+    assert launch not in heard.stderr
+    assert r17_outcome(before, before, heard.user_lines, post_quit=False) == LOST_SILENT
+    harness.note_server_output(heard, _NOTICE)
+    assert r17_outcome(before, before, heard.user_lines, post_quit=False) == (
+        LOST_ANNOUNCED
+    )
+
+
+def test_a_server_record_that_mentions_the_channel_is_still_the_servers(monkeypatch):
+    # The words ``pw:browser`` in a Chrome path are the server's own INFO
+    # record, from ``describe_launch`` through the JSON formatter. The driver
+    # writes its channel at the start of the line, after its timestamp.
+    captured = io.StringIO()
+    handler = logging.StreamHandler(captured)
+    handler.setFormatter(MCPJSONFormatter())
+    logger = browser_launch.logger
+    monkeypatch.setattr(logger, "level", logging.INFO)
+    logger.addHandler(handler)
+    try:
+        browser_launch.describe_launch(
+            {"executable_path": ("/Applications/Chrome pw:browser stable.app/Chrome")}
+        )
+    finally:
+        logger.removeHandler(handler)
+    line = captured.getvalue().strip()
+    assert json.loads(line)["message"].startswith("Using custom Chrome path: ")
+    heard = SimpleNamespace(stderr=[], user_lines=[])
+    harness.note_server_output(heard, line)
+    assert harness.driver_diagnostic(line) is False
+    assert heard.stderr == [line]
+    assert heard.user_lines == [line]
 
 
 #: The product's own success lines, as it prints or logs them.
