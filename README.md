@@ -9,7 +9,7 @@
   <a href="https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/LICENSE" target="_blank"><img src="https://img.shields.io/badge/License-Apache%202.0-%233fb950?labelColor=32383f" alt="License"></a>
 </p>
 
-An MCP server that connects AI assistants like Claude to LinkedIn through your own logged-in browser session. Look up profiles and companies, send messages, manage your inbox, or search for jobs. All browser actions run locally on your machine.
+Give your AI agents access to LinkedIn through your own browser session. Read profiles, research companies, find jobs, and manage conversations and connection requests.
 
 > This is an independent open-source project, not affiliated with, authorized by, endorsed by, or sponsored by LinkedIn or Microsoft. LinkedIn is a trademark of LinkedIn Corporation and is used here only to identify the service this software interacts with.
 
@@ -37,7 +37,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
   </picture>
 </a>
 
-> This MCP server is supported by [**Unipile**](https://golink.onl/unipile-link). Unipile is the fully managed cloud option for developers: a hosted LinkedIn API for Classic, Sales Navigator, and Recruiter that handles auth, sessions, and infrastructure for you.
+> For developers, our sponsor [**Unipile**](https://golink.onl/unipile-link) offers a fully managed LinkedIn API for Classic, Sales Navigator, and Recruiter. Add LinkedIn to your own app while Unipile takes care of auth, sessions, and infrastructure for you.
 
 [Try Unipile free for 7 days →](https://golink.onl/unipile-free-trial)
 </details>
@@ -55,26 +55,26 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 
 | Tool | Description |
 |------|-------------|
-| `get_person_profile` | Read profile sections such as experience, education, skills, projects and posts. |
-| `get_my_profile` | Read your own profile using the same selectable sections. |
+| `get_person_profile` | Read selected profile sections, including experience, skills, and posts. |
+| `get_my_profile` | Read your own profile with the same section selection. |
 | `connect_with_person` | Send or accept a connection request, with an optional note. |
-| `get_sidebar_profiles` | Find recommended profile links in a person's sidebar. |
-| `get_inbox` | List recent messaging conversations from your LinkedIn inbox. |
+| `get_sidebar_profiles` | Find people recommended alongside a profile. |
+| `get_inbox` | List recent inbox conversations. |
 | `get_conversation` | Read a conversation by username or thread ID. |
-| `search_conversations` | Search messages by keyword across your conversations. |
+| `search_conversations` | Search messages by keyword. |
 | `send_message` | Send after confirmation. Targeting a profile may start a separate DM instead of replying in a thread ([#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483)). |
-| `get_company_profile` | Read posts and jobs; about references can include a `company_urn` for the `currentCompany` search facet. |
-| `get_company_posts` | Read recent posts published on a company's LinkedIn page. |
-| `search_companies` | Find LinkedIn company profiles matching a keyword search. |
+| `get_company_profile` | Read company information, posts, and jobs. |
+| `get_company_posts` | Read recent company posts. |
+| `search_companies` | Find companies by keyword. |
 | `get_company_employees` | List company employees, optionally filtered by keyword. |
-| `search_jobs` | Find LinkedIn job postings by keyword and location. |
-| `get_saved_jobs` | List the job postings you have saved on LinkedIn. |
+| `search_jobs` | Find jobs by keyword and location. |
+| `get_saved_jobs` | List your saved jobs. |
 | `search_people` | Search by keyword, location, connection degree or company. |
-| `get_job_details` | Read the details of a LinkedIn job posting by its job ID. |
-| `get_job_apply_url` | Read how a posting takes applications and the employer's link. |
-| `get_feed` | Read recent home-feed posts, with links in `references`. |
-| `search_posts` | Search posts by keyword with optional recency filters; `references` contains unordered candidate post links. |
-| `close_session` | Close the active browser session and release its resources. |
+| `get_job_details` | Read a job posting's details. |
+| `get_job_apply_url` | Check how to apply and get the employer's application link. |
+| `get_feed` | Read recent posts from your home feed. |
+| `search_posts` | Search posts by keyword and recency. |
+| `close_session` | Close the browser session and release resources. |
 
 <br/>
 <br/>
