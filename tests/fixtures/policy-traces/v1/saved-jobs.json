@@ -23,7 +23,7 @@
     {
       "call": "get_saved_jobs",
       "extra": {
-        "target_url": "https://www.linkedin.com/my-items/saved-jobs/",
+        "target_url": "https://www.linkedin.com/jobs-tracker/?stage=saved",
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
@@ -34,14 +34,14 @@
       "call": "get_saved_jobs",
       "kind": "navigate",
       "landed_url": "https://www.linkedin.com/jobs-tracker/",
-      "requested_url": "https://www.linkedin.com/my-items/saved-jobs/",
+      "requested_url": "https://www.linkedin.com/jobs-tracker/?stage=saved",
       "section": "saved_jobs",
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
     {
       "call": "get_saved_jobs",
-      "description": "goto https://www.linkedin.com/my-items/saved-jobs/",
+      "description": "goto https://www.linkedin.com/jobs-tracker/?stage=saved",
       "kind": "boundary.stabilize",
       "result": null,
       "section": "saved_jobs"
@@ -49,7 +49,7 @@
     {
       "call": "get_saved_jobs",
       "extra": {
-        "target_url": "https://www.linkedin.com/my-items/saved-jobs/",
+        "target_url": "https://www.linkedin.com/jobs-tracker/?stage=saved",
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
@@ -172,7 +172,7 @@
     {
       "call": "get_saved_jobs",
       "extra": {
-        "target_url": "https://www.linkedin.com/my-items/saved-jobs/?start=10",
+        "target_url": "https://www.linkedin.com/jobs-tracker/?stage=saved&start=10",
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
@@ -182,15 +182,15 @@
     {
       "call": "get_saved_jobs",
       "kind": "navigate",
-      "landed_url": "https://www.linkedin.com/my-items/saved-jobs/?start=10",
-      "requested_url": "https://www.linkedin.com/my-items/saved-jobs/?start=10",
+      "landed_url": "https://www.linkedin.com/jobs-tracker/?stage=saved&start=10",
+      "requested_url": "https://www.linkedin.com/jobs-tracker/?stage=saved&start=10",
       "section": "saved_jobs",
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
     {
       "call": "get_saved_jobs",
-      "description": "goto https://www.linkedin.com/my-items/saved-jobs/?start=10",
+      "description": "goto https://www.linkedin.com/jobs-tracker/?stage=saved&start=10",
       "kind": "boundary.stabilize",
       "result": null,
       "section": "saved_jobs"
@@ -198,7 +198,7 @@
     {
       "call": "get_saved_jobs",
       "extra": {
-        "target_url": "https://www.linkedin.com/my-items/saved-jobs/?start=10",
+        "target_url": "https://www.linkedin.com/jobs-tracker/?stage=saved&start=10",
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
@@ -412,7 +412,7 @@
     "sections": {
       "saved_jobs": "Saved jobs page one\n---\nSaved jobs page two"
     },
-    "url": "https://www.linkedin.com/my-items/saved-jobs/"
+    "url": "https://www.linkedin.com/jobs-tracker/?stage=saved"
   },
   "scenario": "get_saved_jobs__redirect_caps_and_upgrade",
   "schema_version": 1
