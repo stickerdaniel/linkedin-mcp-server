@@ -139,8 +139,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Section-reading tools return: `{url, sections: {name: raw_text}}`.
 
-The only structured reading exceptions are `get_my_editable_profile`,
-`get_my_experience`, and `get_my_skills`, for own-profile editing.
+The structured own-profile editing reads are `get_my_editable_profile`,
+`get_my_experience`, and `get_my_skills`.
 Follow their [return contract](docs/decisions/2026-10-06-structured-editing-reads.md).
 
 Optional additional keys:

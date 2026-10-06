@@ -4,7 +4,7 @@
 - Supersedes: none
 
 The raw section-text return contract applies to section-reading tools. The only
-structured reading exceptions are `get_my_editable_profile`, `get_my_experience`
+structured own-profile editing reads are `get_my_editable_profile`, `get_my_experience`
 and `get_my_skills`, which support editing the signed-in member's own profile.
 `get_my_profile` and every other section-reading tool retain their existing
 `{url, sections: {name: raw_text}}` contract.
