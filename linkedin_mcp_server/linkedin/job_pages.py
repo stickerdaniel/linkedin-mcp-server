@@ -203,9 +203,10 @@ APPLY_SIGNALS_JS = r"""(opts) => {
     };
 }"""
 
-# Ready once the description heading and a signal are both in. Easy Apply is
-# found without the heading, but the applied and closed lines are not, so a
-# read that settled on the anchor alone could call such a posting open.
+# Ready once the description heading and a signal are both in. The Easy Apply
+# anchor is found without the heading (the button is not), but the applied and
+# closed lines are not, so a read that settled on the anchor alone could call
+# such a posting open.
 APPLY_READY_JS = (
     "(opts) => {\n    const signals = (" + APPLY_SIGNALS_JS + ")(opts);\n"
     "    return Boolean(signals && signals.bounded && (signals.easy_apply\n"
