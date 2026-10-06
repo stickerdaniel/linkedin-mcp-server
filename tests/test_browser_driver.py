@@ -60,6 +60,10 @@ def _make_mock_browser() -> MagicMock:
     locator.count = AsyncMock(return_value=0)
     browser.page.locator = MagicMock(return_value=locator)
     browser.import_cookies = AsyncMock(return_value=False)
+    # A store that still holds the session, so startup must not import over it.
+    browser.context.cookies = AsyncMock(
+        return_value=[{"name": "li_at", "value": "present", "domain": ".linkedin.com"}]
+    )
     browser.export_cookies = AsyncMock(return_value=False)
     browser.export_storage_state = AsyncMock(return_value=True)
     return browser
@@ -156,6 +160,56 @@ async def test_same_runtime_uses_source_profile(tmp_path):
     ctor.assert_called_once()
     assert ctor.call_args.kwargs["user_data_dir"] == tmp_path / "profile"
     source_browser.import_cookies.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_same_runtime_restores_a_store_that_opened_empty(tmp_path):
+    """The portable file is loaded before anything navigates.
+
+    A hot cookie-store journal rolls back on the next open. The jar is then
+    empty while ``cookies.json`` still holds the session, and the first
+    navigation is what would be exported back over that file.
+    """
+    profile_dir = _write_source_state(tmp_path, runtime_id="windows-amd64-host")
+    source_browser = _make_mock_browser()
+    order: list[str] = []
+
+    async def read_cookies() -> list[dict[str, str]]:
+        order.append("cookies")
+        return []
+
+    async def import_cookies(path: object, preset_name: str | None = None) -> bool:
+        order.append("import")
+        assert path == portable_cookie_path(profile_dir)
+        assert preset_name is None
+        return True
+
+    async def goto(*args: object, **kwargs: object) -> None:
+        order.append("goto")
+
+    source_browser.context.cookies = read_cookies
+    source_browser.import_cookies = import_cookies
+    source_browser.page.goto = goto
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="windows-amd64-host",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=source_browser,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        result = await get_or_create_browser()
+
+    assert result is source_browser
+    assert order.index("import") < order.index("goto")
 
 
 @pytest.mark.asyncio
