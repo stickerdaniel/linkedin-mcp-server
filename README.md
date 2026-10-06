@@ -55,26 +55,26 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 
 | Tool | Description |
 |------|-------------|
-| `get_person_profile` | Read selected profile sections, including experience, skills, and posts. |
-| `get_my_profile` | Read your own profile with the same section selection. |
-| `connect_with_person` | Send or accept a connection request, with an optional note. |
-| `get_sidebar_profiles` | Find people recommended alongside a profile. |
-| `get_inbox` | List recent inbox conversations. |
-| `get_conversation` | Read a conversation by username or thread ID. |
-| `search_conversations` | Search messages by keyword. |
+| `get_person_profile` | Read profile sections such as experience, education, skills, projects, and posts. |
+| `get_my_profile` | Read your own profile, with the same section selection as other profiles. |
+| `connect_with_person` | Send a connection request with an optional note, or accept an incoming one. |
+| `get_sidebar_profiles` | Find recommended profile links, including people you may know. |
+| `get_inbox` | List recent inbox conversations, with up to 50 conversations per call. |
+| `get_conversation` | Read a conversation's messages using a LinkedIn username or thread ID. |
+| `search_conversations` | Search messages by keyword and collect up to 50 matching thread references. |
 | `send_message` | Send after confirmation. Targeting a profile may start a separate DM instead of replying in a thread ([#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483)). |
-| `get_company_profile` | Read company information, posts, and jobs. |
-| `get_company_posts` | Read recent company posts. |
-| `search_companies` | Find companies by keyword. |
-| `get_company_employees` | List company employees, optionally filtered by keyword. |
-| `search_jobs` | Find jobs by keyword and location. |
-| `get_saved_jobs` | List your saved jobs. |
-| `search_people` | Search by keyword, location, connection degree or company. |
-| `get_job_details` | Read a job posting's details. |
-| `get_job_apply_url` | Check how to apply and get the employer's application link. |
-| `get_feed` | Read recent posts from your home feed. |
-| `search_posts` | Search posts by keyword and recency. |
-| `close_session` | Close the browser session and release resources. |
+| `get_company_profile` | Read company information, with optional sections for posts and open jobs. |
+| `get_company_posts` | Read recent posts from a company's feed, with links to the original posts. |
+| `search_companies` | Find companies by keyword and return links to their LinkedIn profiles. |
+| `get_company_employees` | Find company employees, optionally filtered by name, title, or skill. |
+| `search_jobs` | Find job postings by keyword and location, with job IDs for reading details. |
+| `get_saved_jobs` | List your saved job postings, with job IDs for looking up their details. |
+| `search_people` | Find people by keyword, location, connection degree, and current company. |
+| `get_job_details` | Read a job posting's description, requirements, and company details. |
+| `get_job_apply_url` | Check whether a job uses Easy Apply or links to an employer's application. |
+| `get_feed` | Read recent posts from your home feed, with links to the original posts. |
+| `search_posts` | Search posts by keyword, optionally limited to the past day, week, or month. |
+| `close_session` | Close the shared browser session without deleting your saved login. |
 
 <br/>
 <br/>
