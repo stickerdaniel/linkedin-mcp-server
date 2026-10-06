@@ -14,6 +14,7 @@ from typing import Annotated, Any, Literal
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
+import anyio
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
@@ -22,6 +23,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.linkedin.contracts import (
     FilterValidationError,
     POST_ACTION_INTERRUPTED_WARNING,
+    before_the_reply_deadline,
     refuse_invalid_post_text,
 )
 from linkedin_mcp_server.linkedin.identifiers import (
@@ -168,6 +170,7 @@ def register_post_tools(
             is false can remove a reaction that did land.
         """
         try:
+            reply_deadline = anyio.current_time() + tool_timeout
             post = normalize_post_reference(post)
             actor = normalize_actor_reference(actor)
             extractor = await get_ready_extractor(ctx, tool_name="react_to_post")
@@ -180,7 +183,12 @@ def register_post_tools(
             )
 
             try:
-                await ctx.report_progress(progress=100, total=100, message="Complete")
+                with before_the_reply_deadline(
+                    max(0.0, reply_deadline - anyio.current_time()) / 2
+                ):
+                    await ctx.report_progress(
+                        progress=100, total=100, message="Complete"
+                    )
             except BaseException:
                 if result.get("retry_safe") is False:
                     logger.warning(POST_ACTION_INTERRUPTED_WARNING)
@@ -244,6 +252,7 @@ def register_post_tools(
             retrying while it is false can publish the comment twice.
         """
         try:
+            reply_deadline = anyio.current_time() + tool_timeout
             actor = normalize_actor_reference(actor)
             # Answered before a session is acquired, for the reason
             # send_message gives: caller-owned text needs no browser, and
@@ -274,13 +283,15 @@ def register_post_tools(
             )
 
             try:
-                await ctx.report_progress(progress=100, total=100, message="Complete")
+                with before_the_reply_deadline(
+                    max(0.0, reply_deadline - anyio.current_time()) / 2
+                ):
+                    await ctx.report_progress(
+                        progress=100, total=100, message="Complete"
+                    )
             except BaseException:
-                # Same last-await hazard send_message documents: this
-                # notification is the final await inside FastMCP's
-                # `anyio.fail_after()`, and a deadline landing here discards a
-                # result that may say the comment was published. Quiet when the
-                # result says a retry is safe.
+                # External cancellation can still interrupt the completed
+                # answer. Quiet when the result says a retry is safe.
                 if result.get("retry_safe") is False:
                     logger.warning(POST_ACTION_INTERRUPTED_WARNING)
                 raise
@@ -357,6 +368,7 @@ def register_post_tools(
         before retrying, including after an interrupted call.
         """
         try:
+            reply_deadline = anyio.current_time() + tool_timeout
             post = normalize_post_reference(post)
             comment_reference = normalize_comment_reference(comment_reference)
             actor = normalize_actor_reference(actor)
@@ -373,7 +385,12 @@ def register_post_tools(
                 mention_parent_author=mention_parent_author,
             )
             try:
-                await ctx.report_progress(progress=100, total=100, message="Complete")
+                with before_the_reply_deadline(
+                    max(0.0, reply_deadline - anyio.current_time()) / 2
+                ):
+                    await ctx.report_progress(
+                        progress=100, total=100, message="Complete"
+                    )
             except BaseException:
                 if result.get("retry_safe") is False:
                     logger.warning(POST_ACTION_INTERRUPTED_WARNING)

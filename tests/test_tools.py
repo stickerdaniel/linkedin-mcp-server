@@ -4,6 +4,7 @@ from typing import Any, Callable, Coroutine, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import anyio
 from fastmcp import FastMCP
 from fastmcp.tools import FunctionTool
 
@@ -781,7 +782,7 @@ class TestPersonTool:
         expected = {
             "url": "https://www.linkedin.com/in/test-user/",
             "status": "custom_note_limit_reached",
-            "message": "WysyÅ‚aj nieograniczonÄ… liczbÄ™ spersonalizowanych zaproszeÅ„ dziÄ™ki Premium",
+            "message": "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium",
             "note_sent": False,
         }
         mock_extractor = _make_mock_extractor(expected)
@@ -802,7 +803,7 @@ class TestPersonTool:
         assert result["status"] == "custom_note_limit_reached"
         assert (
             result["message"]
-            == "WysyÅ‚aj nieograniczonÄ… liczbÄ™ spersonalizowanych zaproszeÅ„ dziÄ™ki Premium"
+            == "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium"
         )
         assert result["note_sent"] is False
         mock_extractor.connect_with_person.assert_awaited_once_with(
@@ -2669,3 +2670,66 @@ async def test_reply_invalid_text_never_acquires_session(mock_context, serve_ext
     )
     assert result["acted"] is False
     ready.assert_not_awaited()
+
+
+_POST_WRITE_ARGUMENTS = [
+    ("react_to_post", {"post": "urn:li:activity:123", "actor": "/in/actor/"}),
+    (
+        "comment_on_post",
+        {"post": "urn:li:activity:123", "actor": "/in/actor/", "comment": "Hello"},
+    ),
+    (
+        "reply_to_comment",
+        {
+            "post": "urn:li:activity:123",
+            "actor": "/in/actor/",
+            "comment_reference": "urn:li:comment:(activity:123,4)",
+            "reply": "Hello",
+        },
+    ),
+]
+
+
+@pytest.mark.parametrize("tool_name,arguments", _POST_WRITE_ARGUMENTS)
+async def test_post_completion_progress_cannot_discard_completed_result(
+    mock_context, serve_extractor, tool_name, arguments
+):
+    from linkedin_mcp_server.tools.post import register_post_tools
+
+    expected = {"status": "confirmed", "acted": True, "retry_safe": False}
+    extractor = _make_mock_extractor(expected)
+    serve_extractor(extractor)
+
+    async def progress(*, progress, **kwargs):
+        if progress == 100:
+            await anyio.sleep_forever()
+
+    mock_context.report_progress = AsyncMock(side_effect=progress)
+    mcp = FastMCP("post-completion-budget")
+    register_post_tools(mcp, tool_timeout=0.4)
+    tool_fn = await get_tool_fn(mcp, tool_name)
+    with anyio.fail_after(0.6):
+        assert await tool_fn(ctx=mock_context, **arguments) is expected
+    getattr(extractor, tool_name).assert_awaited_once()
+
+
+@pytest.mark.parametrize("tool_name,arguments", _POST_WRITE_ARGUMENTS)
+async def test_post_completion_external_cancel_still_propagates(
+    mock_context, serve_extractor, caplog, tool_name, arguments
+):
+    from linkedin_mcp_server.tools.post import register_post_tools
+    from linkedin_mcp_server.linkedin.contracts import POST_ACTION_INTERRUPTED_WARNING
+
+    serve_extractor(_make_mock_extractor({"acted": True, "retry_safe": False}))
+
+    async def progress(*, progress, **kwargs):
+        if progress == 100:
+            raise asyncio.CancelledError
+
+    mock_context.report_progress = AsyncMock(side_effect=progress)
+    mcp = FastMCP("post-completion-cancel")
+    register_post_tools(mcp)
+    tool_fn = await get_tool_fn(mcp, tool_name)
+    with pytest.raises(asyncio.CancelledError):
+        await tool_fn(ctx=mock_context, **arguments)
+    assert POST_ACTION_INTERRUPTED_WARNING in caplog.text

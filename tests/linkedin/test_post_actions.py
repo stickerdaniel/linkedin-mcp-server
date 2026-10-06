@@ -130,6 +130,10 @@ class FakeEditor:
         self.drops = drops
         self.text = ""
         self.clicked = False
+        self.disposed = False
+
+    async def dispose(self) -> None:
+        self.disposed = True
 
     async def click(self) -> None:
         self.clicked = True

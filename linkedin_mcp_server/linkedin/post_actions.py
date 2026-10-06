@@ -14,6 +14,7 @@ import asyncio
 import logging
 import json
 import re
+import anyio
 
 from patchright.async_api import ElementHandle
 
@@ -24,6 +25,7 @@ from linkedin_mcp_server.core.destination import (
 
 from linkedin_mcp_server.linkedin.contracts import (
     POST_ACTION_INTERRUPTED_WARNING,
+    before_the_reply_deadline,
     post_action_result,
     refuse_invalid_post_text,
 )
@@ -77,6 +79,7 @@ _BAR_BUTTONS_MAX = 8
 # a missing or ambiguous target never turns into a publication retry.
 _POST_READY_TIMEOUT = 10.0
 _EDITOR_TIMEOUT = 5000
+_EDITOR_CLEANUP_TIMEOUT_SECONDS = 1.0
 # How long a submitted comment has to show up in the DOM.
 _CONFIRM_TIMEOUT = 12000
 _CONFIRM_POLL = 0.25
@@ -1508,63 +1511,86 @@ class PostActions:
         editor_arguments: dict[str, Any] = {"scope": root}
         if preserve_mention:
             editor_arguments["allowPreparedMention"] = True
-        pinned = await page.evaluate_handle(PIN_EDITOR_JS, arg=editor_arguments)
-        status = str(await (await pinned.get_property("status")).json_value())
-        editor = (await pinned.get_property("editor")).as_element()
-        await pinned.dispose()
-        if status != "pinned" or editor is None:
-            return post_action_result(
-                permalink,
-                "draft_present" if status == "draft_present" else "write_failed",
-                "The editor contains a draft or cannot be identified; nothing was typed.",
-            )
-        typed = await self._type_text(
-            editor, text, author=author, preserve_mention=preserve_mention
-        )
-        if typed != "typed":
-            return post_action_result(
-                permalink,
-                "mention_unavailable"
-                if typed == "mention_unavailable"
-                else "write_failed",
-                "The editor could not hold the exact text; nothing was submitted. "
-                "Any changed draft was preserved for inspection.",
-            )
-        text = final_text
-        # An evaluate can dispatch its click before its response is lost.
-        # From this point exceptions cannot safely be retried as failed writes.
+        editor = None
+        submission_attempted = False
         try:
-            submitted = await self._submit_editor(root, text)
-            if submitted != "submitted":
-                if submitted in ("no_submit_control", "ambiguous_submit"):
-                    await self._session.run_on_linkedin(
-                        CLEAR_EDITOR_JS, {"editor": editor}
-                    )
+            pinned = await page.evaluate_handle(PIN_EDITOR_JS, arg=editor_arguments)
+            status = str(await (await pinned.get_property("status")).json_value())
+            editor = (await pinned.get_property("editor")).as_element()
+            await pinned.dispose()
+            if status != "pinned" or editor is None:
                 return post_action_result(
                     permalink,
-                    "submit_unavailable",
-                    "The owned editor had no unambiguous submit control; nothing was submitted.",
+                    "draft_present" if status == "draft_present" else "write_failed",
+                    "The editor contains a draft or cannot be identified; nothing was typed.",
                 )
-            return await self._confirm_text(
-                root,
-                permalink,
-                text,
-                baseline=baseline,
-                success_status=success_status,
-                unconfirmed_status=unconfirmed_status,
-                noun=noun,
+            typed = await self._type_text(
+                editor, text, author=author, preserve_mention=preserve_mention
             )
-        except Exception:
-            logger.warning(POST_ACTION_INTERRUPTED_WARNING, exc_info=True)
-            return post_action_result(
-                permalink,
-                unconfirmed_status,
-                f"The {noun} may have been published. Check the thread before retrying.",
-                retry_safe=False,
-            )
-        except BaseException:
-            logger.warning(POST_ACTION_INTERRUPTED_WARNING)
-            raise
+            if typed != "typed":
+                return post_action_result(
+                    permalink,
+                    "mention_unavailable"
+                    if typed == "mention_unavailable"
+                    else "write_failed",
+                    "The editor could not hold the exact text; nothing was submitted. "
+                    "Any changed draft was preserved for inspection.",
+                )
+            text = final_text
+            # An evaluate can dispatch its click before its response is lost.
+            # From this point exceptions cannot safely be retried as failed writes.
+            submission_attempted = True
+            try:
+                submitted = await self._submit_editor(root, text)
+                if submitted != "submitted":
+                    if submitted in ("no_submit_control", "ambiguous_submit"):
+                        await self._session.run_on_linkedin(
+                            CLEAR_EDITOR_JS, {"editor": editor}
+                        )
+                    return post_action_result(
+                        permalink,
+                        "submit_unavailable",
+                        "The owned editor had no unambiguous submit control; nothing was submitted.",
+                    )
+                return await self._confirm_text(
+                    root,
+                    permalink,
+                    text,
+                    baseline=baseline,
+                    success_status=success_status,
+                    unconfirmed_status=unconfirmed_status,
+                    noun=noun,
+                )
+            except Exception:
+                logger.warning(POST_ACTION_INTERRUPTED_WARNING, exc_info=True)
+                return post_action_result(
+                    permalink,
+                    unconfirmed_status,
+                    f"The {noun} may have been published. Check the thread before retrying.",
+                    retry_safe=False,
+                )
+            except BaseException:
+                logger.warning(POST_ACTION_INTERRUPTED_WARNING)
+                raise
+        finally:
+            if editor is not None:
+                try:
+                    with before_the_reply_deadline(
+                        _EDITOR_CLEANUP_TIMEOUT_SECONDS, shield=True
+                    ) as cleanup:
+                        try:
+                            await editor.dispose()
+                        except Exception:
+                            logger.debug(
+                                "Could not release post editor handle", exc_info=True
+                            )
+                    if cleanup.cancel_called:
+                        logger.warning("Timed out releasing post editor handle")
+                    await anyio.lowlevel.checkpoint()
+                except BaseException:
+                    if submission_attempted:
+                        logger.warning(POST_ACTION_INTERRUPTED_WARNING)
+                    raise
 
     async def _type_text(
         self,
