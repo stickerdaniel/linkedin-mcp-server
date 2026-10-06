@@ -1,0 +1,16 @@
+{
+  "call": {
+    "arguments": {
+      "max_comments": 0,
+      "post": "/feed/update/urn:li:activity:123/"
+    },
+    "method": "get_post_comments"
+  },
+  "events": [],
+  "result": {
+    "error_message": "max_comments must be an integer from 1 to 50",
+    "error_type": "ValueError"
+  },
+  "scenario": "get_post_comments__invalid_input",
+  "schema_version": 1
+}

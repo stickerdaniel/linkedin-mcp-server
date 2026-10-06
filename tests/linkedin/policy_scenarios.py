@@ -1094,6 +1094,10 @@ async def _facade_contract_trace() -> dict[str, Any]:
 
 
 TOOL_FACADE_METHODS = {
+    "get_post_comments",
+    "reply_to_comment",
+    "react_to_post",
+    "comment_on_post",
     "connect_with_person",
     "extract_feed",
     "extract_page",
@@ -1120,6 +1124,16 @@ COMPATIBILITY_METHODS = {"get_page_text", "click_button_by_text"}
 async def build_policy_traces() -> dict[str, dict[str, Any]]:
     traces = {
         "facade-contract.json": await _facade_contract_trace(),
+        "post-comments-invalid-limit.json": await _post_action_refusal_scenario(
+            "get_post_comments"
+        ),
+        "post-reply-refused.json": await _post_action_refusal_scenario(
+            "reply_to_comment"
+        ),
+        "post-react-refused.json": await _post_action_refusal_scenario("react_to_post"),
+        "post-comment-refused.json": await _post_action_refusal_scenario(
+            "comment_on_post"
+        ),
         "generic-ordinary.json": await _generic_capture_scenario(
             "extract_page__ordinary", "https://www.linkedin.com/in/ada-lovelace/"
         ),
@@ -1234,3 +1248,38 @@ def policy_trace_diff(
             )
         )
     return "".join(chunks)
+
+
+async def _post_action_refusal_scenario(method: str) -> dict[str, Any]:
+    """Invalid write requests must return before navigation or actor selection."""
+    recorder = TraceRecorder(method + "__invalid_input", _COMMON_ALLOWED)
+    page = _page(recorder)
+    extractor = _extractor(page)
+    arguments: dict[str, Any] = {
+        "post": "/feed/update/urn:li:activity:123/",
+        "actor": "/in/ada/",
+    }
+    if method == "get_post_comments":
+        arguments.pop("actor")
+        arguments["max_comments"] = 0
+        try:
+            await extractor.get_post_comments(**arguments)
+        except ValueError as error:
+            result = {"error_type": type(error).__name__, "error_message": str(error)}
+        else:
+            raise AssertionError("invalid comment limit was accepted")
+    elif method == "react_to_post":
+        arguments["reaction"] = "unsupported"
+        result = await extractor.react_to_post(**arguments)
+    elif method == "reply_to_comment":
+        arguments.update(
+            comment_reference="urn:li:comment:(activity:123,4)",
+            reply=" ",
+            confirm_reply=True,
+        )
+        result = await extractor.reply_to_comment(**arguments)
+    else:
+        arguments["comment"] = " "
+        result = await extractor.comment_on_post(**arguments)
+    page.assert_clean()
+    return recorder.trace({"method": method, "arguments": arguments}, result)

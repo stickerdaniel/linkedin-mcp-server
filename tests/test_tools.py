@@ -44,6 +44,10 @@ def _make_mock_extractor(result: dict) -> MagicMock:
     mock.get_my_profile = AsyncMock(return_value=result)
     mock.search_companies = AsyncMock(return_value=result)
     mock.search_posts = AsyncMock(return_value=result)
+    mock.react_to_post = AsyncMock(return_value=result)
+    mock.comment_on_post = AsyncMock(return_value=result)
+    mock.get_post_comments = AsyncMock(return_value=result)
+    mock.reply_to_comment = AsyncMock(return_value=result)
     mock.get_company_employees = AsyncMock(return_value=result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
@@ -777,7 +781,7 @@ class TestPersonTool:
         expected = {
             "url": "https://www.linkedin.com/in/test-user/",
             "status": "custom_note_limit_reached",
-            "message": "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium",
+            "message": "WysyÅ‚aj nieograniczonÄ… liczbÄ™ spersonalizowanych zaproszeÅ„ dziÄ™ki Premium",
             "note_sent": False,
         }
         mock_extractor = _make_mock_extractor(expected)
@@ -798,7 +802,7 @@ class TestPersonTool:
         assert result["status"] == "custom_note_limit_reached"
         assert (
             result["message"]
-            == "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium"
+            == "WysyÅ‚aj nieograniczonÄ… liczbÄ™ spersonalizowanych zaproszeÅ„ dziÄ™ki Premium"
         )
         assert result["note_sent"] is False
         mock_extractor.connect_with_person.assert_awaited_once_with(
@@ -2469,6 +2473,10 @@ class TestToolTimeouts:
             "send_message",
             "get_feed",
             "search_posts",
+            "react_to_post",
+            "comment_on_post",
+            "get_post_comments",
+            "reply_to_comment",
             "close_session",
         )
 
@@ -2503,6 +2511,10 @@ class TestToolTimeouts:
             "send_message",
             "get_feed",
             "search_posts",
+            "react_to_post",
+            "comment_on_post",
+            "get_post_comments",
+            "reply_to_comment",
             "close_session",
         )
 
@@ -2510,3 +2522,150 @@ class TestToolTimeouts:
             tool = await mcp.get_tool(name)
             assert tool is not None
             assert tool.timeout == DEFAULT_TOOL_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize(
+    "tool_name,args,forwarded",
+    [
+        (
+            "react_to_post",
+            {
+                "post": "urn:li:activity:123",
+                "actor": "https://www.linkedin.com/in/actor/",
+                "confirm_reaction": True,
+            },
+            {"actor": "/in/actor/", "reaction": "like", "confirm_reaction": True},
+        ),
+        (
+            "comment_on_post",
+            {
+                "post": "urn:li:activity:123",
+                "actor": "https://www.linkedin.com/company/example/",
+                "comment": "Thank you",
+                "confirm_comment": True,
+                "mention_author": True,
+            },
+            {
+                "actor": "/company/example/",
+                "confirm_comment": True,
+                "mention_author": True,
+            },
+        ),
+    ],
+)
+async def test_engagement_tools_forward_explicit_actor_and_confirmation(
+    mock_context, serve_extractor, tool_name, args, forwarded
+):
+    from linkedin_mcp_server.tools.post import register_post_tools
+
+    expected = {"status": "commented", "acted": True, "retry_safe": False}
+    extractor = _make_mock_extractor(expected)
+    serve_extractor(extractor)
+    mcp = FastMCP("engagement-test")
+    register_post_tools(mcp)
+    fn = await get_tool_fn(mcp, tool_name)
+    assert await fn(ctx=mock_context, **args) is expected
+    positional = (
+        ("urn:li:activity:123", "Thank you")
+        if tool_name == "comment_on_post"
+        else ("https://www.linkedin.com/feed/update/urn:li:activity:123/",)
+    )
+    getattr(extractor, tool_name).assert_awaited_once_with(*positional, **forwarded)
+    tool = await mcp.get_tool(tool_name)
+    assert tool is not None
+    properties = tool.parameters["properties"]
+    assert "actor" in tool.parameters["required"]
+    assert (
+        properties[
+            "confirm_reaction" if tool_name == "react_to_post" else "confirm_comment"
+        ]["default"]
+        is False
+    )
+
+
+async def test_comment_invalid_text_does_not_acquire_session(
+    mock_context, serve_extractor
+):
+    from linkedin_mcp_server.tools.post import register_post_tools
+
+    ready = serve_extractor(_make_mock_extractor({}))
+    mcp = FastMCP("engagement-test")
+    register_post_tools(mcp)
+    fn = await get_tool_fn(mcp, "comment_on_post")
+    result = await fn(
+        "urn:li:activity:123", "", "/in/actor/", mock_context, confirm_comment=True
+    )
+    assert result["acted"] is False
+    ready.assert_not_awaited()
+
+
+async def test_reply_tool_forwards_parent_actor_and_flags(
+    mock_context, serve_extractor
+):
+    from linkedin_mcp_server.tools.post import register_post_tools
+
+    result = {"status": "replied", "acted": True, "retry_safe": False}
+    extractor = _make_mock_extractor(result)
+    serve_extractor(extractor)
+    mcp = FastMCP("reply-test")
+    register_post_tools(mcp)
+    fn = await get_tool_fn(mcp, "reply_to_comment")
+    reference = "urn:li:comment:(activity:123,4)"
+    assert (
+        await fn(
+            "urn:li:activity:123",
+            reference,
+            "Exact reply",
+            "https://www.linkedin.com/company/example/",
+            mock_context,
+            confirm_reply=True,
+            mention_parent_author=True,
+        )
+        is result
+    )
+    extractor.reply_to_comment.assert_awaited_once_with(
+        "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+        reference,
+        "Exact reply",
+        actor="/company/example/",
+        confirm_reply=True,
+        mention_parent_author=True,
+    )
+    tool = await mcp.get_tool("reply_to_comment")
+    assert tool is not None
+    assert tool.parameters["properties"]["confirm_reply"]["default"] is False
+    assert tool.parameters["properties"]["mention_parent_author"]["default"] is False
+
+
+async def test_comment_discovery_tool_forwards_cap(mock_context, serve_extractor):
+    from linkedin_mcp_server.tools.post import register_post_tools
+
+    result = {"url": "post", "sections": {"comments": "A comment"}}
+    extractor = _make_mock_extractor(result)
+    serve_extractor(extractor)
+    mcp = FastMCP("comments-test")
+    register_post_tools(mcp)
+    fn = await get_tool_fn(mcp, "get_post_comments")
+    assert await fn("urn:li:activity:123", mock_context, max_comments=7) is result
+    extractor.get_post_comments.assert_awaited_once_with(
+        "https://www.linkedin.com/feed/update/urn:li:activity:123/", max_comments=7
+    )
+
+
+async def test_reply_invalid_text_never_acquires_session(mock_context, serve_extractor):
+    from linkedin_mcp_server.tools.post import register_post_tools
+
+    ready = serve_extractor(_make_mock_extractor({}))
+    mcp = FastMCP("reply-test")
+    register_post_tools(mcp)
+    fn = await get_tool_fn(mcp, "reply_to_comment")
+    result = await fn(
+        "urn:li:activity:123",
+        "urn:li:comment:(activity:123,4)",
+        "",
+        "/in/actor/",
+        mock_context,
+        confirm_reply=True,
+    )
+    assert result["acted"] is False
+    ready.assert_not_awaited()

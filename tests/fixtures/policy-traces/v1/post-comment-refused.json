@@ -1,0 +1,20 @@
+{
+  "call": {
+    "arguments": {
+      "actor": "/in/ada/",
+      "comment": " ",
+      "post": "/feed/update/urn:li:activity:123/"
+    },
+    "method": "comment_on_post"
+  },
+  "events": [],
+  "result": {
+    "acted": false,
+    "message": "comment must contain non-whitespace characters.",
+    "retry_safe": true,
+    "status": "invalid_text",
+    "url": "https://www.linkedin.com/feed/update/urn:li:activity:123/"
+  },
+  "scenario": "comment_on_post__invalid_input",
+  "schema_version": 1
+}

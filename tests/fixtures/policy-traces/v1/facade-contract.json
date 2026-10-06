@@ -16,6 +16,10 @@
         "coroutine": true,
         "signature": "(self, text: 'str', *, scope: 'str' = 'main', timeout: 'int' = 5000) -> 'bool'"
       },
+      "comment_on_post": {
+        "coroutine": true,
+        "signature": "(self, post: 'str', comment: 'str', *, actor: 'str', confirm_comment: 'bool' = False, mention_author: 'bool' = False) -> 'dict[str, Any]'"
+      },
       "connect_with_person": {
         "coroutine": true,
         "signature": "(self, username: 'str', *, note: 'str | None' = None) -> 'dict[str, Any]'"
@@ -52,6 +56,10 @@
         "coroutine": true,
         "signature": "(self) -> 'str'"
       },
+      "get_post_comments": {
+        "coroutine": true,
+        "signature": "(self, post: 'str', *, max_comments: 'int' = 20) -> 'dict[str, Any]'"
+      },
       "get_saved_jobs": {
         "coroutine": true,
         "signature": "(self, max_pages: 'int' = 3, stage: 'JobsTrackerStage' = 'saved') -> 'dict[str, Any]'"
@@ -59,6 +67,10 @@
       "get_sidebar_profiles": {
         "coroutine": true,
         "signature": "(self, username: 'str') -> 'dict[str, Any]'"
+      },
+      "react_to_post": {
+        "coroutine": true,
+        "signature": "(self, post: 'str', *, actor: 'str', reaction: 'str' = 'like', confirm_reaction: 'bool' = False) -> 'dict[str, Any]'"
       },
       "read_company": {
         "coroutine": true,
@@ -71,6 +83,10 @@
       "read_person": {
         "coroutine": true,
         "signature": "(self, username: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None, max_scrolls: 'int | None' = None, *, main_profile_already_loaded: 'bool' = False, allow_self_alias: 'bool' = False) -> 'dict[str, Any]'"
+      },
+      "reply_to_comment": {
+        "coroutine": true,
+        "signature": "(self, post: 'str', comment_reference: 'str', reply: 'str', *, actor: 'str', confirm_reply: 'bool' = False, mention_parent_author: 'bool' = False) -> 'dict[str, Any]'"
       },
       "search_companies": {
         "coroutine": true,
@@ -98,6 +114,7 @@
       }
     },
     "tool_methods": [
+      "comment_on_post",
       "connect_with_person",
       "extract_feed",
       "extract_page",
@@ -106,11 +123,14 @@
       "get_inbox",
       "get_job_apply_url",
       "get_my_profile",
+      "get_post_comments",
       "get_saved_jobs",
       "get_sidebar_profiles",
+      "react_to_post",
       "read_company",
       "read_job",
       "read_person",
+      "reply_to_comment",
       "search_companies",
       "search_conversations",
       "search_jobs",
@@ -123,6 +143,45 @@
         "input": {
           "additionalProperties": false,
           "properties": {},
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "comment_on_post": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "actor": {
+              "description": "Exact personal /in/<member>/ or authorized /company/<company>/ URL.",
+              "type": "string"
+            },
+            "comment": {
+              "description": "Text to publish. Newlines are allowed; every other control\ncharacter is rejected before a browser is touched.",
+              "type": "string"
+            },
+            "confirm_comment": {
+              "default": false,
+              "description": "Must be True to publish the comment",
+              "type": "boolean"
+            },
+            "mention_author": {
+              "default": false,
+              "description": "Prefix a verified rich mention of the post author.\nRefuses when the author or suggestion cannot be identified.",
+              "type": "boolean"
+            },
+            "post": {
+              "description": "Permalink of one post, in either shape ``references`` returns\nfor ``kind: \"feed_post\"``. See react_to_post for the accepted\nforms.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "post",
+            "comment",
+            "actor"
+          ],
           "type": "object"
         },
         "output": {
@@ -457,6 +516,30 @@
           "type": "object"
         }
       },
+      "get_post_comments": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "max_comments": {
+              "default": 20,
+              "maximum": 50,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "post": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "post"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "get_saved_jobs": {
         "input": {
           "additionalProperties": false,
@@ -498,6 +581,79 @@
           },
           "required": [
             "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "react_to_post": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "actor": {
+              "description": "Exact personal /in/<member>/ or authorized /company/<company>/ URL.",
+              "type": "string"
+            },
+            "confirm_reaction": {
+              "default": false,
+              "description": "Must be True to add a reaction; defaults to False.",
+              "type": "boolean"
+            },
+            "post": {
+              "description": "Permalink of one post, in either shape ``references`` returns\nfor ``kind: \"feed_post\"`` — ``/feed/update/<urn>/`` or\n``/posts/<slug>``. An absolute URL on any locale subdomain and a\nbare ``urn:li:{ugcPost,share,activity}:<id>`` are accepted too.",
+              "type": "string"
+            },
+            "reaction": {
+              "const": "like",
+              "default": "like",
+              "description": "Only \"like\" is supported; other reaction types are refused.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "post",
+            "actor"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "reply_to_comment": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "actor": {
+              "type": "string"
+            },
+            "comment_reference": {
+              "type": "string"
+            },
+            "confirm_reply": {
+              "default": false,
+              "type": "boolean"
+            },
+            "mention_parent_author": {
+              "default": false,
+              "type": "boolean"
+            },
+            "post": {
+              "type": "string"
+            },
+            "reply": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "post",
+            "comment_reference",
+            "reply",
+            "actor"
           ],
           "type": "object"
         },

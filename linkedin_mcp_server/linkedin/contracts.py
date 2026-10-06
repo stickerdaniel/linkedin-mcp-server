@@ -215,3 +215,64 @@ class FilterValidationError(ValueError):
     letting the MCP tool wrapper catch this case precisely and surface the
     actionable message past ``mask_error_details``.
     """
+
+
+POST_ACTION_INTERRUPTED_WARNING = (
+    "A post action was interrupted while in flight. The outcome is unknown; "
+    "open the post before retrying, as a retry may publish it twice."
+)
+
+
+def post_action_result(
+    url: str,
+    status: str,
+    message: str,
+    *,
+    acted: bool = False,
+    retry_safe: bool = True,
+    reaction: str | None = None,
+) -> dict[str, Any]:
+    """Build a structured response for a like or comment attempt.
+
+    ``acted`` carries the same narrow meaning ``sent`` carries above: the
+    structural transition this server looks for was observed, not that LinkedIn
+    accepted, kept or showed the action to anybody. ``retry_safe`` is the field
+    a caller should key a retry on, and it is false from the moment a click that
+    could land is dispatched. An uncertain public write must be inspected
+    before retrying.
+
+    ``reaction`` is present only for a react, naming the reaction that was
+    asked for. It is the request, not a reading of what LinkedIn recorded.
+    """
+    result: dict[str, Any] = {
+        "url": url,
+        "status": status,
+        "message": message,
+        "acted": acted,
+        "retry_safe": retry_safe,
+    }
+    if reaction is not None:
+        result["reaction"] = reaction
+    return result
+
+
+def refuse_invalid_post_text(
+    post_url: str, text: str, *, field: str
+) -> dict[str, Any] | None:
+    """Return the browser-free refusal for invalid comment text.
+
+    A comment may contain newlines, which the editor receives as Shift+Enter
+    rather than the Enter key that can submit a draft. Every other C0 control
+    and DEL stays refused before a browser is touched.
+    """
+    reason = None
+    if not text.strip():
+        reason = f"{field} must contain non-whitespace characters."
+    elif any(
+        (ord(character) < 32 and character != "\n") or ord(character) == 127
+        for character in text
+    ):
+        reason = f"{field} must not contain control characters. A newline is allowed."
+    if reason is None:
+        return None
+    return post_action_result(post_url, "invalid_text", reason)

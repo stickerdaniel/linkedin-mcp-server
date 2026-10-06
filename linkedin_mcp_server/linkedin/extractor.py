@@ -25,6 +25,7 @@ from linkedin_mcp_server.linkedin.message_sender import MessageSender
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.person import PersonReader
 from linkedin_mcp_server.linkedin.posts import PostSearch
+from linkedin_mcp_server.linkedin.post_actions import PostActions
 from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
 from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.linkedin.text import (
@@ -66,6 +67,7 @@ class LinkedInExtractor:
         job_pages = JobPageReader(session, navigator, content)
         self._jobs = JobReader(navigator, capture, job_pages)
         self._posts = PostSearch(capture)
+        self._post_actions = PostActions(session, navigator)
         self._conversations = ConversationReader(
             session, navigator, content, profile_page
         )
@@ -262,4 +264,63 @@ class LinkedInExtractor:
             message,
             confirm_send=confirm_send,
             profile_urn=profile_urn,
+        )
+
+    async def react_to_post(
+        self,
+        post: str,
+        *,
+        actor: str,
+        reaction: str = "like",
+        confirm_reaction: bool = False,
+    ) -> dict[str, Any]:
+        """Add a confirmed reaction to one post."""
+        return await self._post_actions.react_to_post(
+            post, actor=actor, reaction=reaction, confirm_reaction=confirm_reaction
+        )
+
+    async def comment_on_post(
+        self,
+        post: str,
+        comment: str,
+        *,
+        actor: str,
+        confirm_comment: bool = False,
+        mention_author: bool = False,
+    ) -> dict[str, Any]:
+        """Publish a confirmed comment on one post."""
+        return await self._post_actions.comment_on_post(
+            post,
+            comment,
+            actor=actor,
+            confirm_comment=confirm_comment,
+            mention_author=mention_author,
+        )
+
+    async def get_post_comments(
+        self, post: str, *, max_comments: int = 20
+    ) -> dict[str, Any]:
+        """Read currently rendered comment bodies and exact references."""
+        return await self._post_actions.get_post_comments(
+            post, max_comments=max_comments
+        )
+
+    async def reply_to_comment(
+        self,
+        post: str,
+        comment_reference: str,
+        reply: str,
+        *,
+        actor: str,
+        confirm_reply: bool = False,
+        mention_parent_author: bool = False,
+    ) -> dict[str, Any]:
+        """Publish a confirmed reply to one exact rendered comment."""
+        return await self._post_actions.reply_to_comment(
+            post,
+            comment_reference,
+            reply,
+            actor=actor,
+            confirm_reply=confirm_reply,
+            mention_parent_author=mention_parent_author,
         )
