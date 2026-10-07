@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import builtins
 import hashlib
 import json
 import os
@@ -1326,7 +1327,14 @@ def _alias_problems(text: str) -> list[str]:
 #: ``CLOSE_PATH``, its code is not compared here. The names the driver takes
 #: from ``linkedin_mcp_server.core`` are functions that package re-exports.
 #: And a name built at run time (``globals()["close_" + suffix]``) reaches
-#: nothing; only a literal string is followed.
+#: nothing; only a literal string is followed. A name inside a dropped def's
+#: annotation is only looked up, though a ``typing`` form such as
+#: ``Optional[X]``, or a union, may hash or compare it, which runs a metaclass
+#: hook ``X`` already has. And the exemption for builtins and the standard
+#: library trusts their objects as the interpreter provides them: a statement
+#: that stores another object in one (``asyncio.x = Hook``, an entry in
+#: ``sys.modules``) is compared like any other, but a dropped def whose
+#: annotation later reaches that object through it is not.
 #:
 #: Every other file is compared whole (None). The core is nearly all
 #: ``BrowserManager``, whose close reaches the rest of the class by
@@ -1448,8 +1456,10 @@ def close_path_slice(text: str, roots: Sequence[str] | None) -> str:
 
     *roots* None is the whole file, as ``close_path_code`` reads it. Otherwise
     the whole file less what provably does nothing until something calls it:
-    a plain module-level ``def`` (``_inert_def``) that no kept code names,
-    and a name a ``from`` import binds that no kept code names. Everything
+    a plain module-level ``def`` that no kept code names, whose defaults are
+    constants and whose annotations subscript, ``|`` or take attributes of
+    builtins and the standard library only (``_inert_def``), and a name a
+    ``from`` import binds that no kept code names. Everything
     else runs at import or may, so it is kept and its names followed: every
     import statement, with its module, even when none of its names is used;
     an assignment of any target, a class, an ``if`` or ``try``, a call, a
@@ -1485,8 +1495,13 @@ def _close_slice(body: list[ast.stmt], roots: Sequence[str]) -> list[ast.stmt]:
     aliases: dict[str, list[tuple[int, int]]] = {}
     kept: set[int] = set()
     taken: dict[int, set[int]] = {}
+    stdlib = _stdlib_names(body)
     for index, node in enumerate(body):
-        if isinstance(node, _DEFS) and _inert_def(node) and not _dunder(node.name):
+        if (
+            isinstance(node, _DEFS)
+            and _inert_def(node, stdlib)
+            and not _dunder(node.name)
+        ):
             defs.setdefault(node.name, []).append(index)
             bound.add(node.name)
         elif isinstance(node, ast.ImportFrom) and not (
@@ -1537,8 +1552,14 @@ def _dunder(name: str) -> bool:
     return len(name) > 4 and name.startswith("__") and name.endswith("__")
 
 
-#: What an annotation may hold and still evaluate without effect: names,
-#: attributes, subscripts, unions and constants. A call is not among them.
+#: What an annotation may hold at all: names, attributes, subscripts, unions
+#: and constants. A call is not among them. Even these call a hook when the
+#: module is imported, since nothing here postpones annotations: ``X[...]``
+#: calls ``X.__class_getitem__`` or its metaclass's ``__getitem__``, ``A | B``
+#: calls ``__or__`` and ``__ror__``, and ``m.X`` may call a module
+#: ``__getattr__``. So ``_inert_def`` also needs whatever a subscript, a ``|``
+#: or an attribute is applied to to be a builtin or the standard library's
+#: (``_stdlib_names``), whose hooks come with the interpreter.
 _INERT_ANNOTATION = (
     ast.Name,
     ast.Attribute,
@@ -1552,11 +1573,16 @@ _INERT_ANNOTATION = (
 )
 
 
-def _inert_def(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+def _inert_def(
+    node: ast.FunctionDef | ast.AsyncFunctionDef, stdlib: frozenset[str]
+) -> bool:
     """Whether defining *node* runs nothing: no decorator, constant defaults,
-    and annotations that only name things. Evaluated when the module is
-    imported, every one of those can install a hook; a body cannot until it
-    is called."""
+    and annotations of ``_INERT_ANNOTATION`` parts whose every subscript,
+    ``|`` operand and attribute applies to an object of *stdlib*
+    (``_stdlib_receiver``, ``_stdlib_operand``). Evaluated when the module is imported, every one of
+    those can install a hook; a body cannot until it is called. A name
+    inside a subscript, as ``Page`` in ``dict[str, Page]``, is only looked
+    up."""
     if node.decorator_list:
         return False
     arguments = node.args
@@ -1573,11 +1599,82 @@ def _inert_def(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     annotations = [a.annotation for a in every if a is not None and a.annotation]
     if node.returns is not None:
         annotations.append(node.returns)
-    return all(
-        isinstance(sub, _INERT_ANNOTATION)
-        for annotation in annotations
-        for sub in ast.walk(annotation)
-    )
+    for sub in (sub for a in annotations for sub in ast.walk(a)):
+        if not isinstance(sub, _INERT_ANNOTATION):
+            return False
+        if isinstance(sub, (ast.Subscript, ast.Attribute)):
+            if not _stdlib_receiver(sub.value, stdlib):
+                return False
+        elif isinstance(sub, ast.BinOp):
+            if not (
+                _stdlib_operand(sub.left, stdlib) and _stdlib_operand(sub.right, stdlib)
+            ):
+                return False
+    return True
+
+
+def _stdlib_receiver(node: ast.expr, stdlib: frozenset[str]) -> bool:
+    """Whether *node* is a builtin or the standard library's own object: a
+    name of *stdlib* or an attribute chain on one. Never a subscript's
+    result: a generic alias carries its arguments, and those can be any
+    object (``dict[str, X].__args__[1]`` is ``X``)."""
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return isinstance(node, ast.Name) and node.id in stdlib
+
+
+def _stdlib_operand(node: ast.expr, stdlib: frozenset[str]) -> bool:
+    """Whether a ``|`` operand's hooks are a builtin's or the standard
+    library's: a ``_stdlib_receiver``, None, a generic alias of one such as
+    ``dict[str, int]``, or a union of those."""
+    if isinstance(node, ast.Constant):
+        return node.value is None
+    if isinstance(node, ast.Subscript):
+        return _stdlib_receiver(node.value, stdlib)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        return _stdlib_operand(node.left, stdlib) and _stdlib_operand(
+            node.right, stdlib
+        )
+    return _stdlib_receiver(node, stdlib)
+
+
+def _stdlib_names(body: list[ast.stmt]) -> frozenset[str]:
+    """The module-level names of *body* that hold a builtin or the standard
+    library's: a builtin no statement rebinds, and a name only a top-level
+    import from the standard library binds. A name bound anywhere else, as
+    ``dict = Hook`` or ``class Any: ...``, is not, and a star import from
+    outside the standard library, at any depth, leaves none, since it may
+    rebind any."""
+    if any(
+        isinstance(sub, ast.ImportFrom)
+        and not _stdlib_from(sub)
+        and any(a.name == "*" for a in sub.names)
+        for node in body
+        for sub in ast.walk(node)
+    ):
+        return frozenset()
+    imported: set[str] = set()
+    other: set[str] = set()
+    for node in body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname or alias.name.partition(".")[0]
+                (imported if _stdlib_module(alias.name) else other).add(name)
+        elif isinstance(node, ast.ImportFrom):
+            stdlib = _stdlib_from(node)
+            for alias in node.names:
+                (imported if stdlib else other).add(alias.asname or alias.name)
+        else:
+            other |= _bound_names(node)
+    return frozenset((imported | set(dir(builtins))) - other)
+
+
+def _stdlib_from(node: ast.ImportFrom) -> bool:
+    return node.level == 0 and _stdlib_module(node.module or "")
+
+
+def _stdlib_module(module: str) -> bool:
+    return module.partition(".")[0] in sys.stdlib_module_names
 
 
 def _named(node: ast.AST) -> list[str]:
@@ -1609,6 +1706,10 @@ def _bound_names(node: ast.stmt) -> set[str]:
         elif isinstance(sub, ast.alias):
             bound.add(sub.asname or sub.name.partition(".")[0])
         elif isinstance(sub, (ast.MatchAs, ast.MatchStar)) and sub.name:
+            bound.add(sub.name)
+        elif isinstance(sub, ast.MatchMapping) and sub.rest:
+            bound.add(sub.rest)
+        elif isinstance(sub, ast.ExceptHandler) and sub.name:
             bound.add(sub.name)
     return bound
 

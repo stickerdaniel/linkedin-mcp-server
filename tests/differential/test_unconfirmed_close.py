@@ -1572,6 +1572,73 @@ def test_a_definition_the_close_never_calls_that_runs_at_import_fails_the_model(
         assert any(CLOSE_PATH[1] in p for p in _close_path_model(changed).problems)
 
 
+#: A class whose subscription or union replaces the close, on both sides, so
+#: only the annotation that runs the hook differs.
+_ANNOTATION_HOOK = """
+
+async def _fast_close_for_registration(self):
+    return True
+
+
+class _Installs(type):
+    def __getitem__(cls, item):
+        BrowserManager.close = _fast_close_for_registration
+        return cls
+
+    def __or__(cls, other):
+        BrowserManager.close = _fast_close_for_registration
+        return cls
+
+    def __ror__(cls, other):
+        BrowserManager.close = _fast_close_for_registration
+        return cls
+
+
+class Hook(metaclass=_Installs):
+    pass
+"""
+
+
+def _annotated(returns: str) -> str:
+    """A def nothing calls, whose return annotation still runs at import."""
+    return f"\n\ndef _unused() -> {returns}:\n    return None\n"
+
+
+@pytest.mark.parametrize(
+    "returns",
+    ["Hook[int]", "Hook | None", "None | Hook", "dict[str, Hook].__args__[1][int]"],
+)
+def test_an_annotation_that_runs_a_compared_hook_fails_the_model(returns):
+    hooked = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8") + _ANNOTATION_HOOK
+    model = _close_path_model(hooked, candidate_driver=hooked + _annotated(returns))
+    assert any(CLOSE_PATH[1] in p for p in model.problems)
+
+
+@pytest.mark.parametrize(
+    "returns", ["dict[str, Any]", "asyncio.Task[None] | None", "Path | None"]
+)
+def test_an_annotation_on_the_standard_library_passes_the_model(returns):
+    driver = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8")
+    model = _close_path_model(driver, candidate_driver=driver + _annotated(returns))
+    assert model.problems == ()
+
+
+@pytest.mark.parametrize(
+    ("rebound", "returns"),
+    [
+        ("dict = Hook\n", "dict[str, int]"),
+        ("class Any(Hook):\n    pass\n", "Any[int]"),
+        ("match {int: Hook}:\n    case {**dict}:\n        pass\n", "dict[int] | None"),
+        ("if True:\n    from linkedin_mcp_server.core import *\n", "dict[int]"),
+    ],
+)
+def test_a_rebound_standard_name_in_an_annotation_fails_the_model(rebound, returns):
+    driver = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8")
+    hooked = driver + _ANNOTATION_HOOK + "\n\n" + rebound
+    model = _close_path_model(hooked, candidate_driver=hooked + _annotated(returns))
+    assert any(CLOSE_PATH[1] in p for p in model.problems)
+
+
 def test_a_hook_on_the_manager_that_no_name_reaches_fails_the_model():
     core = (_REPO / CLOSE_PATH[0]).read_text(encoding="utf-8")
     hooked = _changed(
