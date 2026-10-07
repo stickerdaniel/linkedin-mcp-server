@@ -80,8 +80,11 @@ jobs:
     # 55 for H-R10a's login (265), and `eligibility` 55 for the daemon switched
     # off, 30 for a container, 40 for HTTP, 80 for synced storage, 30 for
     # unknown storage and 75 for H-R14 (355).
-    # `native` is the rows previously appended to Linux and platform (170).
-    timeout-minutes: ${{ matrix.rows == 'native' && 170 || matrix.rows == 'pipes' && 165 || matrix.rows == 'processes' && 185 || matrix.rows == 'owner' && 265 || matrix.rows == 'commands' && 185 || matrix.rows == 'auth' && 265 || matrix.rows == 'eligibility' && 355 || 285 }}
+    # `native` takes 10 for the synthetic origin, 20 for H-R1, 5 for the
+    # oracle on Linux, 25 for a custom browser, 45 for H-R3 and H-R2, 25 for
+    # the killed owner, 25 for the failed Job query on Windows and 45 for the
+    # unconfirmed close (240, from Windows, its largest leg).
+    timeout-minutes: ${{ matrix.rows == 'native' && 240 || matrix.rows == 'pipes' && 165 || matrix.rows == 'processes' && 185 || matrix.rows == 'owner' && 265 || matrix.rows == 'commands' && 185 || matrix.rows == 'auth' && 265 || matrix.rows == 'eligibility' && 355 || 285 }}
     strategy:
       fail-fast: false
       matrix:
