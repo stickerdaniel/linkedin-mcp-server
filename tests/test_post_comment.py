@@ -13,6 +13,12 @@ class TestPostCommentNormalization(unittest.TestCase):
     def test_normalize_activity_url(self):
         url = "https://www.linkedin.com/posts/kevinlehtiniitty_everyone-budgets-for-the-integration-when-activity-7498363673741209600-sC_A"
         normalized = self.post_search.normalize_post_url(url)
+        # Full post URLs are preserved directly to avoid breaking share or custom slug routes
+        self.assertEqual(normalized, url)
+
+    def test_normalize_activity_slug_fragment(self):
+        slug = "activity-7498363673741209600"
+        normalized = self.post_search.normalize_post_url(slug)
         self.assertEqual(
             normalized,
             "https://www.linkedin.com/feed/update/urn:li:activity:7498363673741209600/",

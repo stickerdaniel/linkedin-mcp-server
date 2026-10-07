@@ -39,11 +39,16 @@ class PostSearch:
     def normalize_post_url(self, post_permalink: str) -> str:
         """Resolve a post permalink, activity URN, or slug to a canonical URL."""
         permalink = post_permalink.strip()
+        # If already a full post URL, preserve it directly to prevent breaking share/slug routes
+        if permalink.startswith("https://www.linkedin.com/posts/") or permalink.startswith("http://www.linkedin.com/posts/"):
+            return permalink
         m = re.search(r"activity[-:]([0-9]+)", permalink)
         if m:
             return f"https://www.linkedin.com/feed/update/urn:li:activity:{m.group(1)}/"
         if permalink.startswith("http://") or permalink.startswith("https://"):
             return permalink
+        if permalink.startswith("/posts/"):
+            return f"https://www.linkedin.com{permalink}"
         if permalink.startswith("/"):
             return f"https://www.linkedin.com{permalink}"
         return f"https://www.linkedin.com/posts/{permalink}"
