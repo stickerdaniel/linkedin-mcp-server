@@ -1643,7 +1643,16 @@ def _stdlib_names(body: list[ast.stmt]) -> frozenset[str]:
     library's: a builtin no statement rebinds, and a name only a top-level
     import from the standard library binds. A name bound anywhere else, as
     ``dict = Hook`` or ``class Any: ...``, is not, and a star import from
-    outside the standard library leaves none, since it may rebind any."""
+    outside the standard library, at any depth, leaves none, since it may
+    rebind any."""
+    if any(
+        isinstance(sub, ast.ImportFrom)
+        and not _stdlib_from(sub)
+        and any(a.name == "*" for a in sub.names)
+        for node in body
+        for sub in ast.walk(node)
+    ):
+        return frozenset()
     imported: set[str] = set()
     other: set[str] = set()
     for node in body:
@@ -1652,14 +1661,16 @@ def _stdlib_names(body: list[ast.stmt]) -> frozenset[str]:
                 name = alias.asname or alias.name.partition(".")[0]
                 (imported if _stdlib_module(alias.name) else other).add(name)
         elif isinstance(node, ast.ImportFrom):
-            stdlib = node.level == 0 and _stdlib_module(node.module or "")
-            if not stdlib and any(a.name == "*" for a in node.names):
-                return frozenset()
+            stdlib = _stdlib_from(node)
             for alias in node.names:
                 (imported if stdlib else other).add(alias.asname or alias.name)
         else:
             other |= _bound_names(node)
     return frozenset((imported | set(dir(builtins))) - other)
+
+
+def _stdlib_from(node: ast.ImportFrom) -> bool:
+    return node.level == 0 and _stdlib_module(node.module or "")
 
 
 def _stdlib_module(module: str) -> bool:

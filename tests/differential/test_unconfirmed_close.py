@@ -1589,6 +1589,10 @@ class _Installs(type):
         BrowserManager.close = _fast_close_for_registration
         return cls
 
+    def __ror__(cls, other):
+        BrowserManager.close = _fast_close_for_registration
+        return cls
+
 
 class Hook(metaclass=_Installs):
     pass
@@ -1625,6 +1629,7 @@ def test_an_annotation_on_the_standard_library_passes_the_model(returns):
         ("dict = Hook\n", "dict[str, int]"),
         ("class Any(Hook):\n    pass\n", "Any[int]"),
         ("match {int: Hook}:\n    case {**dict}:\n        pass\n", "dict[int] | None"),
+        ("if True:\n    from linkedin_mcp_server.core import *\n", "dict[int]"),
     ],
 )
 def test_a_rebound_standard_name_in_an_annotation_fails_the_model(rebound, returns):
