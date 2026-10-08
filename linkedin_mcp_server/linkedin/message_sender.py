@@ -732,9 +732,9 @@ _MESSAGE_CONFIRMATION_READY_JS = (
         // new thread, whose pane holds that one message; a pane with other
         // messages there is some other conversation, and so is one whose
         // header does not link the recipient.
-        // Both arms. The shape is the one messageRoute admits for a thread.
+        // Both arms exclude the new-message composer from thread identity.
         const threadRoute = path =>
-            /^\/messaging\/thread\/[A-Za-z0-9_=-]+\/$/.test(path);
+            /^\/messaging\/thread\/(?!new\/)[A-Za-z0-9_=-]+\/$/.test(path);
         const routeContinues = marker => {
             const startPath = marker?.getAttribute('data-linkedin-mcp-route') || '';
             return !threadRoute(startPath) || window.location.pathname === startPath;
@@ -746,7 +746,7 @@ _MESSAGE_CONFIRMATION_READY_JS = (
         const admittedTransition = (marker, scope) => {
             const startPath = marker?.getAttribute('data-linkedin-mcp-route') || '';
             const path = window.location.pathname;
-            if (!path.startsWith('/messaging/thread/') || threadRoute(startPath)) {
+            if (!threadRoute(path) || threadRoute(startPath)) {
                 return true;
             }
             const visibleItems = Array.from(
@@ -1257,7 +1257,7 @@ def _confirmation_from_snapshot(snapshot: Any) -> _SendConfirmation | None:
     ):
         return None
     path = snapshot["path"]
-    if path == "/messaging/compose/":
+    if path in {"/messaging/compose/", "/messaging/thread/new/"}:
         return _SendConfirmation(thread_id=None)
     if _MESSAGE_THREAD_PATH_RE.fullmatch(path) is None:
         return None

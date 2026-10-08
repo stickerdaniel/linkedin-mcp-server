@@ -2,6 +2,8 @@
 
 from urllib.parse import quote
 
+import pytest
+
 from linkedin_mcp_server.linkedin.fields import COMPANY_SECTIONS, PERSON_SECTIONS
 from linkedin_mcp_server.linkedin.link_metadata import (
     _REFERENCE_CAPS,
@@ -956,6 +958,30 @@ class TestClassifyLink:
             "https://www.linkedin.com/messaging/thread/2-abc123/?focusedMsgUrn=xyz"
         )
         assert result == ("conversation", "/messaging/thread/2-abc123/")
+
+    @pytest.mark.parametrize("section", ["inbox", "search_results"])
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/messaging/thread/new/",
+            "/messaging/thread/new",
+            "/messaging/thread/new/?recipient=ACoAAB",
+            "/messaging/thread/%6Eew/#draft",
+        ],
+    )
+    def test_compose_link_is_not_a_conversation(self, section, path):
+        references = build_references(
+            [
+                {"href": f"https://www.linkedin.com{path}", "text": "New message"},
+                {
+                    "href": "https://www.linkedin.com/messaging/thread/new-existing/",
+                    "text": "Ada",
+                },
+            ],
+            section,
+        )
+
+        assert [ref["url"] for ref in references] == ["/messaging/thread/new-existing/"]
 
     def test_inbox_references_include_threads(self):
         references = build_references(

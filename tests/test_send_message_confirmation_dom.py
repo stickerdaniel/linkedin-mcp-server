@@ -1953,6 +1953,7 @@ _ROUTE_ARMS = ["opaque", "server"]
 _OPEN_THREAD = "/messaging/thread/2-open==/"
 _OTHER_THREAD = "/messaging/thread/2-other==/"
 _COMPOSE_PATH = "/messaging/compose/?recipient=ACoAAB"
+_COMPOSE_PATHS = [_COMPOSE_PATH, "/messaging/thread/new/"]
 
 
 class TestConfirmationThread:
@@ -1977,10 +1978,13 @@ class TestConfirmationThread:
         assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
 
     @pytest.mark.parametrize("arm", _ROUTE_ARMS)
-    async def test_leaving_a_thread_for_compose_does_not_confirm(self, dom_page, arm):
+    @pytest.mark.parametrize("compose_path", _COMPOSE_PATHS)
+    async def test_leaving_a_thread_for_compose_does_not_confirm(
+        self, dom_page, arm, compose_path
+    ):
         result = await send(
             dom_page,
-            acknowledging_page(arm, start=_OPEN_THREAD, leave_to=_COMPOSE_PATH),
+            acknowledging_page(arm, start=_OPEN_THREAD, leave_to=compose_path),
         )
 
         assert _unconfirmed(result), result
@@ -1988,16 +1992,33 @@ class TestConfirmationThread:
         assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
 
     @pytest.mark.parametrize("arm", _ROUTE_ARMS)
-    async def test_compose_staying_on_compose_has_no_thread(self, dom_page, arm):
-        result = await send(dom_page, acknowledging_page(arm))
+    @pytest.mark.parametrize("compose_path", _COMPOSE_PATHS)
+    async def test_compose_staying_on_compose_has_no_thread(
+        self, dom_page, arm, compose_path
+    ):
+        result = await send(dom_page, acknowledging_page(arm, start=compose_path))
 
         assert _sent(result), result
         assert result["thread_id"] is None
 
-    async def test_compose_opening_a_thread_reports_that_thread(self, dom_page):
+    @pytest.mark.parametrize("arm", _ROUTE_ARMS)
+    async def test_compose_redirect_to_new_has_no_thread(self, dom_page, arm):
+        result = await send(
+            dom_page,
+            acknowledging_page(arm, leave_to="/messaging/thread/new/"),
+        )
+
+        assert _sent(result), result
+        assert result["thread_id"] is None
+
+    @pytest.mark.parametrize("compose_path", _COMPOSE_PATHS)
+    async def test_compose_opening_a_thread_reports_that_thread(
+        self, dom_page, compose_path
+    ):
         html = compose_page(
             PANE_REMOUNT_SEND_JS + "remountTo('/messaging/thread/2-abc==/', "
             "['urn:li:msg_message:(self,server-first)']);"
+            f"history.replaceState({{}}, '', {json.dumps(compose_path)});"
         )
 
         result = await send(dom_page, html)

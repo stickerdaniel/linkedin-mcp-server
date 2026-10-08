@@ -477,7 +477,13 @@ def normalize_job_id(value: str) -> str:
 
 def normalize_thread_id(value: str) -> str:
     """The id for a conversation, from the id or from a reference to it."""
-    return normalize_opaque_id(value, field="thread_id", route=_THREAD_ROUTE)
+    thread_id = normalize_opaque_id(value, field="thread_id", route=_THREAD_ROUTE)
+    if thread_id == "new":
+        raise InvalidReferenceError(
+            "thread_id refers to the new-message composer, not a conversation. "
+            "Pass an existing conversation's thread id."
+        )
+    return thread_id
 
 
 def normalize_profile_urn(value: str) -> str:

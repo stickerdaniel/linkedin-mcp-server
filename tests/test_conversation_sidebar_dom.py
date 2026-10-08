@@ -911,6 +911,39 @@ class TestThreadOwnershipAgainstRealDom:
         assert attributed(outcome) == []
         assert stop_of(outcome) == ("Select conversation with A", 0)
 
+    @pytest.mark.parametrize(
+        "dest",
+        [
+            "/messaging/thread/new/",
+            "/messaging/thread/new?recipient=A",
+            "/messaging/thread/%6Eew/",
+        ],
+    )
+    async def test_compose_destination_is_not_attributed_to_a_row(self, dom_page, dest):
+        await serve(
+            dom_page,
+            phased_sidebar([row("A", dest=dest), row("B")]),
+            start=COMPOSE_URL,
+        )
+
+        outcome = await scan(dom_page)
+
+        assert attributed(outcome) == []
+        assert stop_of(outcome) == ("Select conversation with A", 0)
+        assert await clicked(dom_page) == ["A"]
+
+    async def test_compose_start_has_no_existing_thread(self, dom_page):
+        await serve(
+            dom_page,
+            phased_sidebar([row("A")]),
+            start=f"{ORIGIN}/messaging/thread/new/",
+        )
+
+        outcome = await scan(dom_page)
+
+        assert outcome.start_thread_id is None
+        assert attributed(outcome) == [("A", "A")]
+
     async def test_a_real_thread_with_a_query_or_hash_is_accepted(self, dom_page):
         await serve(
             dom_page,

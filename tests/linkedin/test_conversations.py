@@ -1319,6 +1319,27 @@ class TestGetInbox:
 
 
 class TestGetConversation:
+    @pytest.mark.parametrize(
+        "thread_id",
+        [
+            "new",
+            "/messaging/thread/new/",
+            "https://www.linkedin.com/messaging/thread/new/?recipient=ACoAAB",
+            "/messaging/thread/%6Eew/",
+        ],
+    )
+    async def test_compose_thread_is_rejected_before_navigation(
+        self, mock_page, thread_id
+    ):
+        reader = _reader(mock_page)
+        with patch.object(
+            PageNavigator, "_navigate_to_page", new_callable=AsyncMock
+        ) as nav:
+            with pytest.raises(InvalidReferenceError, match="new-message composer"):
+                await reader.get_conversation(thread_id=thread_id)
+
+        nav.assert_not_awaited()
+
     async def test_returns_conversation_by_thread_id(self, mock_page):
         reader = _reader(mock_page)
         nav_mock = AsyncMock()
