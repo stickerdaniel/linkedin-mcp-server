@@ -43,6 +43,7 @@ from linkedin_mcp_server.process_tree import (
 )
 
 from .exceptions import NetworkError, ProxyConnectionError
+from .throttle import watch_responses
 
 logger = logging.getLogger(__name__)
 
@@ -554,6 +555,11 @@ class BrowserManager:
                 self._page = await open_hidden_page(self._context, startup)
             else:
                 self._page = startup
+
+            # Before anything navigates: a status nobody was listening for is
+            # gone, and the first navigation is the one that most often
+            # arrives throttled.
+            watch_responses(self._page)
 
             logger.info("Browser context and page ready")
 
