@@ -91,6 +91,9 @@ class SequentialToolExecutionMiddleware(Middleware):
     ) -> ToolResult:
         """Run the tool while this process owns the browser profile."""
         # Imported here so the module stays importable without the driver.
+        # `core.throttle` needs no driver itself, but reaching it runs
+        # `core/__init__`, which imports patchright.
+        from linkedin_mcp_server.core.throttle import reset_throttle_record
         from linkedin_mcp_server.drivers.browser import (
             note_activity,
             note_call_started,
@@ -136,6 +139,10 @@ class SequentialToolExecutionMiddleware(Middleware):
             # close it out from under this call. Inside the try so the finally
             # always balances it, including if the call is cancelled.
             note_call_started()
+            # Evidence is per call: the throttled requests of the call before
+            # this one would otherwise be offered as the diagnosis of a
+            # failure they had nothing to do with.
+            reset_throttle_record()
             return await call_next(context)
         finally:
             hold_seconds = time.perf_counter() - hold_started
