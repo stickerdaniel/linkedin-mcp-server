@@ -7,7 +7,9 @@ the status is the whole point: nothing else in the server reads one.
 from __future__ import annotations
 
 import traceback
+from collections.abc import Callable
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -30,16 +32,28 @@ def response(
     headers: dict[str, str] | None = None,
 ) -> SimpleNamespace:
     """A stand-in for the Playwright ``Response`` handed to the listener."""
-    return SimpleNamespace(status=status, url=url, headers=headers or {})
+    return SimpleNamespace(
+        status=status, url=url, headers=headers or {}, request=Request()
+    )
+
+
+class Request:
+    """A stand-in for a Playwright ``Request``, weak-referenceable like one."""
+
+
+def handlers() -> dict[str, Callable[[Any], None]]:
+    """Watch a fresh page and return its listeners by event name."""
+    page = MagicMock()
+    watch_responses(page)
+    return {call.args[0]: call.args[1] for call in page.on.call_args_list}
 
 
 def record(*responses: SimpleNamespace) -> None:
-    """Feed responses to the page listener the way Playwright would."""
-    page = MagicMock()
-    watch_responses(page)
-    handler = page.on.call_args[0][1]
+    """Feed requests and their responses to the listeners as Playwright would."""
+    listeners = handlers()
     for item in responses:
-        handler(item)
+        listeners["request"](item.request)
+        listeners["response"](item)
 
 
 class TestWhatTheListenerRecords:
@@ -104,7 +118,33 @@ class TestWhatTheListenerRecords:
         watch_responses(page)
         watch_responses(page)
 
-        assert page.on.call_count == 1
+        assert [call.args[0] for call in page.on.call_args_list] == [
+            "request",
+            "response",
+        ]
+
+    def test_another_hosts_refusal_is_not_linkedins(self):
+        # A proxy or captive portal answering 429 is not LinkedIn asking for a
+        # wait, and the sentence would say it was.
+        record(
+            response(429, "https://portal.example/blocked"),
+            response(429, "https://linkedin.com.evil.test/voyager/api/x"),
+        )
+
+        assert throttled_count() == 0
+
+    def test_a_request_the_previous_call_sent_is_not_this_calls(self):
+        # Answered after the next call reset the record. Without the tag, the
+        # previous call's refusal would explain this call's failure.
+        listeners = handlers()
+        late = response(429, "https://www.linkedin.com/voyager/api/messaging/x")
+        listeners["request"](late.request)
+
+        reset_throttle_record()
+        listeners["response"](late)
+
+        assert throttled_count() == 0
+        assert throttle_evidence() is None
 
 
 class TestTheEvidenceSentence:
@@ -153,6 +193,18 @@ class TestTheEvidenceSentence:
         assert evidence is not None
         assert "31 requests" in evidence
         assert "/voyager/api/latest" in evidence
+
+    def test_a_status_first_seen_past_the_sample_cap_is_named(self):
+        record(
+            *(
+                response(429, f"https://www.linkedin.com/voyager/api/old{n}")
+                for n in range(25)
+            ),
+            response(999, "https://www.linkedin.com/voyager/api/latest"),
+        )
+
+        evidence = throttle_evidence()
+        assert evidence is not None and "HTTP 429 and HTTP 999" in evidence
 
 
 class TestTheClientIsToldAboutThrottling:

@@ -16,7 +16,9 @@ calling tool", so the client is told nothing and the failure reads as a
 parser bug.
 
 So the statuses are recorded by a listener on the page (`core/throttle.py`),
-installed at browser start and cleared as each tool call starts. When the call
+installed at browser start and cleared as each tool call starts. Only LinkedIn's
+own hosts count, since a proxy's 429 is not LinkedIn asking for a wait, and a
+response counts only for the call that sent its request. When the call
 fails anyway, `raise_tool_error` appends one sentence: the statuses, how many
 requests, the latest path without its query, and `Retry-After` when LinkedIn
 sent a number. An unclassified failure becomes a `ToolError` carrying that

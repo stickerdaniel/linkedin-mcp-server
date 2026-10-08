@@ -378,7 +378,7 @@ class TestTheWindowlessLaunchEndToEnd:
         hidden = [page for page in pages if page.url.startswith("about:blank#")]
         assert len(hidden) == 1
         assert manager.page is hidden[0]
-        assert [event for event, _ in hidden[0].listeners] == ["response"]
+        assert [event for event, _ in hidden[0].listeners] == ["request", "response"]
 
     async def test_detached_groups_are_retained_before_page_setup(
         self, tmp_path, monkeypatch
