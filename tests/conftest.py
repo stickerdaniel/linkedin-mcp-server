@@ -1,5 +1,6 @@
 import os
 import sys
+from pathlib import Path
 
 # FastMCP 4 bridges camelCase reads on MCP SDK models (`result.isError`) with
 # deprecation shims that this switch turns off. The suite runs with them off,
@@ -243,7 +244,9 @@ def no_owner_on_the_real_profile(monkeypatch):
             ("profile", config.browser.user_data_dir),
         ):
             resolved = os.path.realpath(os.path.expanduser(str(path)))
-            if os.path.commonpath([resolved, _REAL_STATE_ROOT]) == _REAL_STATE_ROOT:
+            # Not `os.path.commonpath`, which raises on Windows when the two
+            # sit on different drives, as with `--basetemp=D:\\pytest`.
+            if Path(resolved).is_relative_to(_REAL_STATE_ROOT):
                 refused.append(f"{what} at {resolved}")
                 raise RuntimeError(f"refused to start an owner with {refused[-1]}")
         return spawn(auth_root, config, *args, **kwargs)
