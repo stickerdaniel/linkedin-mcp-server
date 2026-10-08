@@ -1117,11 +1117,13 @@ class TestExtractSearchPage:
         assert capture.scroll_seconds == 5.0
 
     async def test_navigation_and_scroll_answer_to_the_page_deadline(self, mock_page):
-        """The deadline reaches `goto`, and the scroll gets what it left.
+        """The deadline reaches `goto`, and the scroll gets what is left of it.
 
         The scroll deadline is worked out before navigating. A `goto` that
-        spends 2.5s of the 4s left would otherwise leave the scroll the whole
-        twelve seconds it was handed, on a budget that has already run out.
+        spends 2.5s of the 4s left, and a `<main>` wait that spends another
+        second, would otherwise leave the scroll the whole twelve seconds it
+        was handed, on a budget that has already run out. Capped after `goto`
+        and not after the wait, the scroll still got 1.5s with 0.5s left.
         """
 
         class Clock:
@@ -1144,6 +1146,10 @@ class TestExtractSearchPage:
             scrolled.append(kwargs.get("deadline"))
             return False
 
+        async def wait_for_main(selector):
+            clock.now += 1.0
+
+        mock_page.wait_for_selector = AsyncMock(side_effect=wait_for_main)
         reader = _reader(mock_page)
         with (
             patch.object(job_pages_module, "time", clock),
@@ -1180,7 +1186,7 @@ class TestExtractSearchPage:
             )
 
         assert navigated == [14.0]
-        assert scrolled == [1.5]
+        assert scrolled == [0.5]
 
     @pytest.mark.parametrize(("left", "attempts"), [(11.0, 1), (12.0, 2)])
     async def test_the_retry_starts_only_when_backoff_and_a_page_fit(

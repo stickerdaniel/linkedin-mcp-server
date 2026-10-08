@@ -490,12 +490,6 @@ class JobPageReader:
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll sidebar, and extract innerText."""
         await self._navigator._navigate_to_page(url, deadline=page_deadline)
-        if page_deadline is not None:
-            # The scroll deadline was worked out before navigating, and a slow
-            # `goto` spends time it does not know about.
-            scroll_deadline = min(
-                scroll_deadline, max(0.0, page_deadline - time.monotonic())
-            )
         await detect_rate_limit(self._session.page)
         # Above the selector wait and the modal close, so the window this
         # opens covers everything read from here on. Taken between them, a
@@ -537,6 +531,14 @@ class JobPageReader:
         with self._navigator._watching_navigations() as hops:
             if main_found:
                 scroll_started = time.monotonic()
+                if page_deadline is not None:
+                    # The scroll deadline was worked out before navigating.
+                    # A slow `goto`, the `<main>` wait and the modal close all
+                    # spend time it does not know about, and the scroll's own
+                    # clock only starts when it is called.
+                    scroll_deadline = min(
+                        scroll_deadline, max(0.0, page_deadline - scroll_started)
+                    )
                 try:
                     moved = await scroll_job_sidebar(
                         self._session.page, deadline=scroll_deadline
