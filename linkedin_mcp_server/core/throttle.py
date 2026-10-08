@@ -31,7 +31,9 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
-from weakref import WeakSet
+from weakref import WeakKeyDictionary, WeakSet
+
+from .destination import is_linkedin_landing
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +55,15 @@ class ThrottleHit:
 
 _hits: list[ThrottleHit] = []
 _latest: ThrottleHit | None = None
+_statuses: set[int] = set()
 _count: int = 0
 _watched: WeakSet[Any] = WeakSet()
+
+# Which call each request was sent during. The record is cleared as a call
+# starts, but a request the previous call sent can still be answered after
+# that, and its refusal is no evidence about the call that is running now.
+_call: int = 0
+_sent_during: WeakKeyDictionary[Any, int] = WeakKeyDictionary()
 
 
 def watch_responses(page: Any) -> None:
@@ -67,15 +76,18 @@ def watch_responses(page: Any) -> None:
         # A page that cannot be weak-referenced is still worth watching; the
         # only cost of registering twice is a doubled count.
         logger.debug("Page is not weak-referenceable; watching it anyway")
+    page.on("request", _note_request)
     page.on("response", _record)
 
 
 def reset_throttle_record() -> None:
     """Forget the previous call's evidence. Called as a tool call starts."""
-    global _count, _latest
+    global _call, _count, _latest
+    _call += 1
     _count = 0
     _latest = None
     _hits.clear()
+    _statuses.clear()
 
 
 def throttled_count() -> int:
@@ -89,9 +101,7 @@ def throttle_evidence() -> str | None:
     if last is None:
         return None
 
-    statuses = " and ".join(
-        f"HTTP {status}" for status in sorted({h.status for h in _hits})
-    )
+    statuses = " and ".join(f"HTTP {status}" for status in sorted(_statuses))
     asked = (
         f" LinkedIn asked for {last.retry_after} seconds."
         if last.retry_after is not None
@@ -132,6 +142,25 @@ def _retry_after(response: Any) -> int | None:
     return seconds if seconds >= 0 else None
 
 
+def _note_request(request: Any) -> None:
+    """Tag a request with the call it was sent during. Never raises."""
+    try:
+        _sent_during[request] = _call
+    except TypeError:
+        # Not weak-referenceable: its response is then taken as this call's,
+        # which is what every response was before requests were tagged.
+        pass
+
+
+def _sent_before_this_call(response: Any) -> bool:
+    """Whether the response answers a request an earlier call sent."""
+    try:
+        sent = _sent_during.get(response.request)
+    except TypeError:
+        return False
+    return sent is not None and sent != _call
+
+
 def _record(response: Any) -> None:
     """Note one response. Registered on the page; never raises into Playwright."""
     global _count, _latest
@@ -140,14 +169,18 @@ def _record(response: Any) -> None:
         status = int(response.status)
         if status not in THROTTLED_STATUSES:
             return
-        hit = ThrottleHit(
-            status=status, url=str(response.url), retry_after=_retry_after(response)
-        )
+        url = str(response.url)
+        # Another host's 429 is no word from LinkedIn: a proxy or captive
+        # portal answering for it would be misreported as LinkedIn's wait.
+        if not is_linkedin_landing(url) or _sent_before_this_call(response):
+            return
+        hit = ThrottleHit(status=status, url=url, retry_after=_retry_after(response))
     except Exception:
         logger.debug("Could not read a response status", exc_info=True)
         return
 
     _count += 1
     _latest = hit
+    _statuses.add(status)
     if len(_hits) < _SAMPLE_LIMIT:
         _hits.append(hit)
