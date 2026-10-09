@@ -566,8 +566,11 @@ class TestRefusing:
         from linkedin_mcp_server import daemon_owner
         from linkedin_mcp_server.process_control import ControlListener
 
+        def refuse_lock(*_args):
+            raise OSError("lock unavailable")
+
+        monkeypatch.setattr(daemon_owner, "_take_lock", refuse_lock)
         visible = AppConfig()
-        visible.browser.user_data_dir = "~/p/profile"
         visible.browser.headless = False
 
         original = browser_module.current_headless()
@@ -591,10 +594,9 @@ class TestRefusing:
             + "\n"
         )
         try:
-            # It gets as far as taking the lock, which fails on the deliberately
-            # invalid descriptor and is reported rather than raised. That is
-            # well past the point where the browser mode is settled.
-            assert daemon_owner.main(["--lock-fd", "-1"]) == 1
+            # The lock failure is reported rather than raised, without creating
+            # account state. The browser mode must already be settled by then.
+            assert daemon_owner.main([]) == 1
 
             assert browser_module.current_headless() is False, (
                 "the owner ignored the browser mode it was handed"

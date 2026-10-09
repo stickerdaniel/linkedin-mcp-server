@@ -479,8 +479,8 @@ class TestTheRoleAsProcessState:
 
         Driven rather than read: an earlier version of this asserted on the source
         text of `main`, which stayed green when the call was made unreachable. The
-        child opens its log before taking the lock, so that boundary records the
-        role before its expected startup failure is translated into a verdict.
+        child opens its log after taking the lock, so an inert held lock lets
+        that boundary record the role without touching the account's state.
         """
         from linkedin_mcp_server import daemon_config, daemon_owner
         from linkedin_mcp_server.config.schema import AppConfig
@@ -500,6 +500,7 @@ class TestTheRoleAsProcessState:
             lambda: daemon_config.OwnerHandover(AppConfig(), "0123456789abcdef" * 4),
         )
         monkeypatch.setattr(daemon_owner, "set_headless", lambda _headless: None)
+        monkeypatch.setattr(daemon_owner, "_take_lock", lambda *_args: MagicMock())
         monkeypatch.setattr(daemon_owner, "_attach_daemon_log", at_checkpoint)
         monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
         monkeypatch.setattr(
