@@ -986,6 +986,8 @@ def _run_protection_steps(
         ".github/mcp/server.json",
         "plugins/linkedin-mcp-server/.codex-plugin/plugin.json",
         "plugins/linkedin-mcp-server/.claude-plugin/plugin.json",
+        "plugins/linkedin-mcp-server/.cursor-plugin/plugin.json",
+)
         "plugins/linkedin-mcp-server/.mcp.json",
     )
     for name in files:
