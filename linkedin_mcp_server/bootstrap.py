@@ -396,6 +396,7 @@ def reset_bootstrap_for_testing() -> None:
     """Reset bootstrap singleton state for test isolation."""
     global _state, _lock, _AUTO_IMPORT_ANNOUNCED
     global _auth_quiescent, _auth_quiescent_generation
+    global _env_import_lock, _env_import_error
     for task in (
         _state.setup_task,
         _state.cache_report_task,
@@ -407,6 +408,9 @@ def reset_bootstrap_for_testing() -> None:
     _state = BootstrapState()
     _lock = asyncio.Lock()
     _AUTO_IMPORT_ANNOUNCED = False
+    _env_import_lock = asyncio.Lock()
+    _env_import_error = None
+    _env_import_tried.clear()
     _state.login_supersedes = UNGUARDED
     _auth_quiescent = False
     _auth_quiescent_generation = None
@@ -3946,6 +3950,9 @@ async def ensure_tool_ready_or_raise(
     _raise_if_auth_quiescent()
 
     if get_runtime_policy() == RuntimePolicy.DOCKER:
+        # The image ships its browser, so the cookie hand-over can run before the
+        # missing-session check instead of after a setup step Docker skips.
+        await _import_env_cookies_if_configured(ctx)
         _raise_if_docker_auth_missing()
         return
 
@@ -3954,14 +3961,22 @@ async def ensure_tool_ready_or_raise(
         # background install is irrelevant; jump straight to the auth gate.
         _state.setup_state = SetupState.READY
         _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
+        await _import_env_cookies_if_configured(ctx)
         if _auth_ready():
             _state.auth_state = AuthState.READY
             return
+        _raise_if_env_cookie_login_failed()
         await _start_login_if_needed(ctx, superseded_by=current_login_generation())
         return
 
     await start_background_browser_setup_if_needed()
     await _refresh_background_task_state()
+    if _state.setup_state is not SetupState.READY:
+        await _wait_for_browser_setup_inline(tool_name, ctx)
+        await _refresh_background_task_state()
+        detail = _consume_background_setup_failure()
+        if detail is not None:
+            raise BrowserSetupFailedError(detail)
     if _state.setup_state is not SetupState.READY:
         if ctx is not None:
             await ctx.report_progress(
@@ -3979,9 +3994,11 @@ async def ensure_tool_ready_or_raise(
             "again in a minute or two."
         )
 
+    await _import_env_cookies_if_configured(ctx)
     if _auth_ready():
         _state.auth_state = AuthState.READY
         return
+    _raise_if_env_cookie_login_failed()
 
     # The generation goes with it, because this call has just looked: whatever is
     # on disk now is what it found wanting. A login started automatically by a
@@ -3991,13 +4008,94 @@ async def ensure_tool_ready_or_raise(
     await _start_login_if_needed(ctx, superseded_by=current_login_generation())
 
 
+SETUP_WAIT_ENV = "LINKEDIN_SETUP_WAIT"
+#: Inline wait used when the session arrives through LINKEDIN_COOKIES. Such hosts
+#: (Obot, serverless gateways) often start a fresh process for every tool call and
+#: stop it as soon as the call answers, so a background download that the call
+#: does not wait for dies with the process and never completes. Kept below the
+#: 180 s default tool timeout with room for the cookie validation that follows.
+_DEFAULT_ENV_COOKIE_SETUP_WAIT_SECONDS = 90.0
+_SETUP_WAIT_PROGRESS_INTERVAL_SECONDS = 10.0
+
+
+def _setup_inline_wait_seconds() -> float:
+    """How long a tool call waits for the background browser setup, in seconds.
+
+    ``LINKEDIN_SETUP_WAIT`` sets it explicitly (0 disables). Otherwise it is 0,
+    the long-standing "answer at once and retry" behaviour, unless the session is
+    handed over through LINKEDIN_COOKIES, which marks an unattended host.
+    """
+    raw = (os.environ.get(SETUP_WAIT_ENV) or "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid %s=%r; expected seconds", SETUP_WAIT_ENV, raw
+            )
+        else:
+            if value == value and value >= 0 and value != float("inf"):
+                return value
+            logger.warning(
+                "Ignoring invalid %s=%r; expected seconds", SETUP_WAIT_ENV, raw
+            )
+
+    from linkedin_mcp_server.browser_import.env_cookies import (
+        env_cookie_input_configured,
+    )
+
+    return (
+        _DEFAULT_ENV_COOKIE_SETUP_WAIT_SECONDS if env_cookie_input_configured() else 0.0
+    )
+
+
+async def _wait_for_browser_setup_inline(tool_name: str, ctx: Context | None) -> None:
+    """Hold the call while the shared setup task runs, without ever cancelling it.
+
+    Returns when the task finishes or the budget runs out; the caller re-reads
+    the state either way. Progress is reported periodically so clients that
+    reset their timeout on progress keep the call open.
+    """
+    budget = _setup_inline_wait_seconds()
+    task = _state.setup_task
+    if budget <= 0 or task is None or task.done():
+        return
+    logger.info(
+        "Waiting up to %.0f s for the Patchright Chromium download to finish", budget
+    )
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget
+    while not task.done():
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            logger.info("Browser setup still running after %.0f s", budget)
+            return
+        # asyncio.wait leaves the task running on timeout, unlike wait_for.
+        await asyncio.wait(
+            {task}, timeout=min(remaining, _SETUP_WAIT_PROGRESS_INTERVAL_SECONDS)
+        )
+        if ctx is not None and not task.done():
+            elapsed = budget - max(deadline - loop.time(), 0.0)
+            try:
+                await ctx.report_progress(
+                    progress=min(5 + int(elapsed / budget * 40), 45),
+                    total=100,
+                    message=f"{tool_name}: downloading the Chromium browser (first run)",
+                )
+            except Exception:  # noqa: BLE001 - progress is best effort
+                logger.debug("progress report failed", exc_info=True)
+
+
 def _raise_if_docker_auth_missing() -> None:
     if _auth_ready():
         return
+    if _env_import_error is not None:
+        raise DockerHostLoginRequiredError(_env_import_error)
     raise DockerHostLoginRequiredError(
         "No valid LinkedIn session is available in Docker. Create one with "
         "the explicit --login --login-viewer Docker command, or run --login "
-        "on the host, then retry this tool."
+        "on the host, then retry this tool. "
+        f"{DOCKER_COOKIE_HINT}"
     )
 
 
@@ -4204,6 +4302,276 @@ async def _try_auto_import_session(ctx: Context | None = None) -> bool:
     ) as exc:
         logger.info("Auto-import unavailable; falling back to manual login: %s", exc)
         return False
+    finally:
+        set_headless(prev_headless)
+
+
+DOCKER_COOKIE_HINT = (
+    "Where neither is possible (a cloud MCP host), set LINKEDIN_COOKIES to the "
+    "cookies of a signed-in LinkedIn browser tab instead."
+)
+
+_ENV_COOKIE_MARKER = "env-cookies.json"
+_ENV_IMPORT_TIMEOUT_SECONDS = 90.0
+
+#: Serializes the cookie hand-over so concurrent first calls run it once.
+_env_import_lock = asyncio.Lock()
+#: Fingerprints already tried by this process. A rejected session is not retried
+#: on every tool call; changing the variable and restarting is what retries it.
+_env_import_tried: set[str] = set()
+#: Why the last hand-over failed, surfaced instead of the generic Docker message.
+_env_import_error: str | None = None
+
+
+def _env_cookie_marker_path(profile_dir: Path) -> Path:
+    return auth_root_dir(profile_dir) / _ENV_COOKIE_MARKER
+
+
+_ENV_COOKIE_REJECTED = "env-cookies-rejected.json"
+
+
+def _env_cookie_rejected_path(profile_dir: Path) -> Path:
+    return auth_root_dir(profile_dir) / _ENV_COOKIE_REJECTED
+
+
+def _read_env_cookie_rejection(profile_dir: Path, fingerprint: str) -> str | None:
+    """The stored reason LinkedIn rejected exactly this session, if it did.
+
+    Hosts such as Obot start a new process for every tool call, so the
+    in-process memory of a rejection is gone by the next call. Without this
+    file every call would validate the same dead cookies against LinkedIn
+    again, which costs ten seconds a call and looks like a bot to LinkedIn.
+    """
+    try:
+        data = json.loads(_env_cookie_rejected_path(profile_dir).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("fingerprint") != fingerprint:
+        return None
+    error = data.get("error")
+    return error if isinstance(error, str) and error else None
+
+
+def _write_env_cookie_rejection(
+    profile_dir: Path, fingerprint: str, error: str
+) -> None:
+    try:
+        secure_write_text(
+            _env_cookie_rejected_path(profile_dir),
+            json.dumps(
+                {"fingerprint": fingerprint, "error": error, "at": utcnow_iso()},
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+    except OSError:
+        logger.debug("Could not record the rejected cookie hand-over", exc_info=True)
+
+
+def _raise_if_env_cookie_login_failed() -> None:
+    """Report a failed cookie hand-over instead of opening a login window.
+
+    A host that sets LINKEDIN_COOKIES has said how it signs in; falling through
+    to the interactive login would answer with "a login window is open" on a
+    machine with no screen and nobody to use it.
+    """
+    from linkedin_mcp_server.browser_import.env_cookies import (
+        env_cookie_input_configured,
+    )
+
+    if not env_cookie_input_configured():
+        return
+    raise AuthenticationBootstrapFailedError(
+        _env_import_error
+        or "Could not sign in with the cookies in LINKEDIN_COOKIES. Export "
+        "fresh cookies from a signed-in LinkedIn tab and restart the server."
+    )
+
+
+def _read_env_cookie_marker(profile_dir: Path) -> str | None:
+    """The fingerprint of the env session last committed to *profile_dir*."""
+    try:
+        data = json.loads(_env_cookie_marker_path(profile_dir).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    state = load_source_state(profile_dir)
+    # Only valid for the session generation it was written with: a later
+    # --login replaces the session, and the marker must not vouch for it.
+    if state is None or data.get("login_generation") != state.login_generation:
+        return None
+    fingerprint = data.get("fingerprint")
+    return fingerprint if isinstance(fingerprint, str) else None
+
+
+def _write_env_cookie_marker(profile_dir: Path, fingerprint: str) -> None:
+    state = load_source_state(profile_dir)
+    payload = {
+        "fingerprint": fingerprint,
+        "login_generation": None if state is None else state.login_generation,
+        "imported_at": utcnow_iso(),
+    }
+    secure_write_text(
+        _env_cookie_marker_path(profile_dir),
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+    )
+
+
+async def _import_env_cookies_if_configured(ctx: Context | None = None) -> None:
+    """Seed the session from LINKEDIN_COOKIES / LINKEDIN_COOKIES_FILE.
+
+    This is the login path for hosts where the server cannot reach a signed-in
+    browser or show a login window: cloud MCP gateways such as Obot, Kubernetes,
+    or a plain ``docker run`` without a mounted session. The user exports the
+    cookies of a signed-in linkedin.com tab once and hands them over through the
+    environment; this proves them against ``/feed/`` and stores them exactly
+    where ``--login`` would, so every later call uses the normal session path.
+
+    The variable is the source of truth while it is set: a different ``li_at``
+    replaces the stored session, the same one is not imported twice. A session
+    LinkedIn rejects leaves any previous session in place and is not retried by
+    this process. Never raises for a rejected or failed import; the gate that
+    follows reports the missing session with the reason kept here.
+    """
+    global _env_import_error
+
+    from linkedin_mcp_server.browser_import.env_cookies import (
+        COOKIES_ENV,
+        COOKIES_FILE_ENV,
+        cookie_fingerprint,
+        env_cookie_input_configured,
+        load_env_cookies,
+    )
+    from linkedin_mcp_server.exceptions import InvalidCookieInputError
+
+    if not env_cookie_input_configured():
+        return
+    if process_role() is ServerRole.OWNER:
+        # Importing rotates the profile; the owner leaves that to the frontend,
+        # for the same reason it never auto-imports (see _auto_import_allowed).
+        return
+
+    profile_dir = get_profile_dir()
+    try:
+        cookies = load_env_cookies()
+    except InvalidCookieInputError as exc:
+        _env_import_error = str(exc)
+        if _auth_ready(profile_dir):
+            logger.warning(
+                "Ignoring the cookie hand-over and keeping the stored session: %s", exc
+            )
+            return
+        logger.warning("%s", exc)
+        return
+    if not cookies:
+        return
+
+    fingerprint = cookie_fingerprint(cookies)
+    if _auth_ready(profile_dir) and _read_env_cookie_marker(profile_dir) == fingerprint:
+        return
+    if fingerprint in _env_import_tried:
+        return
+    rejected = _read_env_cookie_rejection(profile_dir, fingerprint)
+    if rejected is not None:
+        _env_import_tried.add(fingerprint)
+        _env_import_error = rejected
+        logger.info("Skipping cookies LinkedIn already rejected: %s", rejected)
+        return
+
+    async with _env_import_lock:
+        # Re-checked under the lock: a concurrent first call may have finished it.
+        if fingerprint in _env_import_tried:
+            return
+        _env_import_tried.add(fingerprint)
+        source = (
+            COOKIES_FILE_ENV
+            if (os.environ.get(COOKIES_FILE_ENV) or "").strip()
+            else COOKIES_ENV
+        )
+        _env_import_error = None
+        message = f"Signing in to LinkedIn with the cookies from {source}."
+        logger.info(message)
+        if ctx is not None:
+            try:
+                await ctx.info(message)
+            except Exception:  # noqa: BLE001 - a notice must not block the import
+                logger.debug("ctx.info notice failed", exc_info=True)
+
+        accepted = await _run_env_cookie_import(cookies, source, profile_dir)
+        if accepted:
+            _write_env_cookie_marker(profile_dir, fingerprint)
+            _env_cookie_rejected_path(profile_dir).unlink(missing_ok=True)
+            _state.auth_state = AuthState.READY
+            _state.last_error = None
+            logger.info("LinkedIn session from %s is stored and ready", source)
+        elif accepted is False:
+            # Only a verdict from LinkedIn is remembered across processes; a
+            # timeout or a network failure is retried by the next call.
+            _env_import_error = (
+                f"LinkedIn did not accept the session in {source}: the cookies "
+                "may belong to a signed-out or expired login, or LinkedIn asked "
+                "for a security check. Sign in to LinkedIn in your browser and "
+                f"put fresh cookies into {source}; a server that keeps running "
+                "picks them up after a restart."
+            )
+        if not accepted:
+            logger.warning("%s", _env_import_error)
+        if accepted is False and _env_import_error:
+            _write_env_cookie_rejection(profile_dir, fingerprint, _env_import_error)
+        elif accepted is None:
+            # Let the next call try again instead of remembering a transient
+            # failure as if it were LinkedIn's answer.
+            _env_import_tried.discard(fingerprint)
+
+
+async def _run_env_cookie_import(
+    cookies: list[Any], source: str, profile_dir: Path
+) -> bool | None:
+    """Run the validated import headless and bounded.
+
+    ``True``: accepted and stored. ``False``: LinkedIn rejected the session.
+    ``None``: the attempt failed for another reason (timeout, browser error),
+    with the reason in ``_env_import_error``.
+    """
+    global _env_import_error
+
+    # Lazy, like the browser import: tests patch it on the orchestrate module.
+    from linkedin_mcp_server.browser_import.orchestrate import (
+        import_session_from_cookies,
+    )
+    from linkedin_mcp_server.core.exceptions import (
+        AccountRestrictedError,
+        ProxyConnectionError,
+    )
+    from linkedin_mcp_server.exceptions import LinkedInMCPError
+
+    await close_browser()
+    prev_headless = current_headless()
+    set_headless(True)  # nobody is there to see a window
+    try:
+        return await asyncio.wait_for(
+            import_session_from_cookies(
+                cookies,
+                user_data_dir=profile_dir,
+                source_label=source,
+                superseded_by=current_login_generation(),
+            ),
+            timeout=_ENV_IMPORT_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        _env_import_error = (
+            f"Validating the session from {source} did not finish within "
+            f"{int(_ENV_IMPORT_TIMEOUT_SECONDS)} seconds. Check that the server "
+            "can reach linkedin.com, then call the tool again."
+        )
+        return None
+    except (ProxyConnectionError, AccountRestrictedError):
+        raise
+    except LinkedInMCPError as exc:
+        _env_import_error = f"Could not sign in with {source}: {exc}"
+        return None
     finally:
         set_headless(prev_headless)
 
