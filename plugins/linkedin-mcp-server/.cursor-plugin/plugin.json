@@ -1,0 +1,21 @@
+{
+  "name": "linkedin-mcp-server",
+  "version": "4.26.2",
+  "description": "Research LinkedIn through a local, browser-backed MCP server.",
+  "author": {
+    "name": "Daniel Sticker",
+    "email": "daniel@sticker.name"
+  },
+  "homepage": "https://github.com/stickerdaniel/linkedin-mcp-server",
+  "repository": "https://github.com/stickerdaniel/linkedin-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "linkedin",
+    "mcp",
+    "jobs",
+    "recruiting"
+  ],
+  "logo": "assets/icon.svg",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}
