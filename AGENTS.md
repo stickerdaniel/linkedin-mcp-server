@@ -154,6 +154,7 @@ Optional additional keys:
 
 ## Tests
 
+- Tests must write artifacts only to temporary directories, including in subprocesses.
 - **Tautologies.** Assert an observable contract independent of the
   implementation. Before committing a test, mutate the covered behaviour
   to introduce a plausible regression and watch that test fail. Reject
