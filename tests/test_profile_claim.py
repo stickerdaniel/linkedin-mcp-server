@@ -136,23 +136,24 @@ class TestTheDefaultRootNeedsNoMarker:
     stand on its own.
     """
 
-    def test_it_is_accepted_with_no_marker_at_all(self, tmp_path, monkeypatch):
+    @pytest.fixture(autouse=True)
+    def _temporary_home(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+    def test_it_is_accepted_with_no_marker_at_all(self):
         default = default_profile_dir()
 
         assert require_profile_claim(default) == default
         assert not claim_path(default).exists()
 
-    def test_a_marker_from_another_machine_does_not_stop_it(
-        self, tmp_path, monkeypatch
-    ):
+    def test_a_marker_from_another_machine_does_not_stop_it(self):
         """The container case, which is the reason the rule exists.
 
         A mounted volume arrives carrying whatever the host wrote, and that path
         can never equal the container's own. Without the default rule this is a
         mismatch and the container is refused on the volume it was given.
         """
-        monkeypatch.setenv("HOME", str(tmp_path))
         default = default_profile_dir()
         _write_marker(
             default,
@@ -165,7 +166,7 @@ class TestTheDefaultRootNeedsNoMarker:
         assert ensure_profile_claim(default) == default
         assert require_profile_claim(default) == default
 
-    def test_it_leaves_that_marker_exactly_as_it_found_it(self, tmp_path, monkeypatch):
+    def test_it_leaves_that_marker_exactly_as_it_found_it(self):
         """Rewriting it would break the operator who mounts a custom host root.
 
         The container would stamp its own path over the host's, and the next
@@ -173,7 +174,6 @@ class TestTheDefaultRootNeedsNoMarker:
         Since the default is recognised without a marker, there is nothing to
         write.
         """
-        monkeypatch.setenv("HOME", str(tmp_path))
         default = default_profile_dir()
         marker = _write_marker(
             default,
@@ -185,9 +185,8 @@ class TestTheDefaultRootNeedsNoMarker:
 
         assert marker.read_text() == before
 
-    def test_an_occupied_default_root_is_still_ours(self, tmp_path, monkeypatch):
+    def test_an_occupied_default_root_is_still_ours(self):
         """The browser cache and the session both live here; neither disqualifies it."""
-        monkeypatch.setenv("HOME", str(tmp_path))
         default = default_profile_dir()
         default.parent.mkdir(parents=True)
         (default.parent / "browsers").mkdir()

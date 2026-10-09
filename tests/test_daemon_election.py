@@ -6001,11 +6001,9 @@ class TestRealOwner:
         from linkedin_mcp_server.server import ServerRole, create_mcp_server
 
         profile = real_state_root
-        # The browser cache is keyed to the auth root, and the fixture's is empty,
-        # so without this the owner answers "still downloading Chromium" and never
-        # reaches the auth gate at all. Symlinked rather than copied: it is about a
-        # gigabyte, and nothing here launches a browser.
-        _borrow_the_browser_cache(profile)
+        # Readiness must pass before the auth gate, but nothing here launches a
+        # browser. Keep both completion markers and metadata in the temporary root.
+        _prepare_browser_cache(profile)
 
         result = _run_frontend(profile)
         try:
@@ -9628,22 +9626,22 @@ class TestOutcome:
         assert not absent.worth_connecting
 
 
-def _borrow_the_browser_cache(profile: Path) -> None:
-    """Point an isolated auth root at the account's real browser cache.
+def _prepare_browser_cache(profile: Path) -> None:
+    """Satisfy the readiness gate without borrowing or installing a browser."""
+    from test_bootstrap import _materialize_install, _write_metadata
 
-    The cache lives under the auth root (``bootstrap.browsers_path``), so an
-    isolated root looks like a fresh install and the readiness gate reports a
-    download in progress before anything about authentication is decided. A
-    symlink is enough: these tests read the gate's verdict and never launch
-    Chromium.
+    from linkedin_mcp_server import bootstrap
 
-    Skips the test rather than downloading one, because a test that pulls a
-    gigabyte on a cold machine is a test nobody runs.
-    """
-    real = Path.home() / ".linkedin-mcp" / "patchright-browsers"
-    if not real.is_dir():
-        pytest.skip("no patchright browser cache to borrow")
-    (profile.parent / "patchright-browsers").symlink_to(real)
+    targets = bootstrap._patchright_install_targets()
+    assert targets is not None
+    cache = profile.parent / "patchright-browsers"
+    _materialize_install(cache, [f"chromium-{targets['chromium-']}"])
+    _write_metadata(
+        profile.parent / "browser-install.json",
+        cache,
+        patchright_version=bootstrap._patchright_pkg_version(),
+        installed_targets={"chromium-": True, "chromium_headless_shell-": False},
+    )
 
 
 class TestTheHandshakeFrameIsNotPlatformTranslated:
