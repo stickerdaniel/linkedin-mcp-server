@@ -276,14 +276,20 @@ jobs:
         run: |
           set -e
           python3 - "$VERSION" <<'PY'
+          import base64
           import json
+          import re
           import sys
           from pathlib import Path
 
           version = sys.argv[1]
+          deeplink_prefix = (
+              "cursor://anysphere.cursor-deeplink/mcp/install?name=linkedin&config="
+          )
           manifest_paths = (
               Path("plugins/linkedin-mcp-server/.codex-plugin/plugin.json"),
               Path("plugins/linkedin-mcp-server/.claude-plugin/plugin.json"),
+              Path("plugins/linkedin-mcp-server/.cursor-plugin/plugin.json"),
           )
           mcp_path = Path("plugins/linkedin-mcp-server/.mcp.json")
 
@@ -312,8 +318,50 @@ jobs:
               json.dumps(mcp, indent=2, ensure_ascii=False) + "\n",
               encoding="utf-8",
           )
+
+          readme_path = Path("README.md")
+          readme = readme_path.read_text(encoding="utf-8")
+          config_b64 = base64.b64encode(
+              json.dumps(
+                  {"linkedin": mcp["mcpServers"]["linkedin"]},
+                  separators=(",", ":"),
+              ).encode("utf-8")
+          ).decode("ascii")
+          deeplink = f"{deeplink_prefix}{config_b64}"
+          deeplink_matches = list(
+              re.finditer(
+                  re.escape(deeplink_prefix) + r"[A-Za-z0-9+/=]+",
+                  readme,
+              )
+          )
+          if len(deeplink_matches) != 1:
+              raise SystemExit(
+                  "README must contain exactly one Cursor MCP install deeplink"
+              )
+          match = deeplink_matches[0]
+          readme = readme[: match.start()] + deeplink + readme[match.end() :]
+
+          manual_marker = "**Manual `mcp.json`:**"
+          manual_idx = readme.find(manual_marker)
+          if manual_idx == -1:
+              raise SystemExit("README is missing the Cursor manual mcp.json section")
+          manual_tail = readme[manual_idx:]
+          package_match = re.search(
+              r"mcp-server-linkedin@[^\s\"]+",
+              manual_tail,
+          )
+          if package_match is None:
+              raise SystemExit(
+                  "README manual mcp.json example is missing a versioned package arg"
+              )
+          readme = (
+              readme[: manual_idx + package_match.start()]
+              + f"mcp-server-linkedin@{version}"
+              + readme[manual_idx + package_match.end() :]
+          )
+          readme_path.write_text(readme, encoding="utf-8")
           PY
-          echo "✅ Updated the Codex and Claude Code plugins to version $VERSION"
+          echo "✅ Updated the Codex, Claude Code, and Cursor plugins to version $VERSION"
 
       # The rewrites above are text edits that report success whatever they
       # matched, so this asks every file that carries the version what it now
@@ -328,12 +376,17 @@ jobs:
           docker compose -f docker-compose.yml config --no-interpolate \
             --format json > /tmp/compose.json
           python3 - "$VERSION" <<'PY'
+          import base64
           import json
+          import re
           import sys
           import tomllib
           from pathlib import Path
 
           version = sys.argv[1]
+          deeplink_prefix = (
+              "cursor://anysphere.cursor-deeplink/mcp/install?name=linkedin&config="
+          )
           server = json.loads(Path(".github/mcp/server.json").read_text(encoding="utf-8"))
           manifest = json.loads(Path("manifest.json").read_text(encoding="utf-8"))
           plugin = json.loads(
@@ -344,6 +397,11 @@ jobs:
           claude_plugin = json.loads(
               Path(
                   "plugins/linkedin-mcp-server/.claude-plugin/plugin.json"
+              ).read_text(encoding="utf-8")
+          )
+          cursor_plugin = json.loads(
+              Path(
+                  "plugins/linkedin-mcp-server/.cursor-plugin/plugin.json"
               ).read_text(encoding="utf-8")
           )
           plugin_mcp = json.loads(
@@ -400,12 +458,39 @@ jobs:
               "docker-compose.yml": [tag(image) for image in images],
               "Codex plugin": [plugin["version"]],
               "Claude Code plugin": [claude_plugin["version"]],
+              "Cursor plugin": [cursor_plugin["version"]],
               "Codex plugin MCP": [
                   value.removeprefix("mcp-server-linkedin@")
                   for value in plugin_mcp["mcpServers"]["linkedin"]["args"]
                   if value.startswith("mcp-server-linkedin@")
               ],
           }
+          readme = Path("README.md").read_text(encoding="utf-8")
+          deeplink_match = re.search(
+              re.escape(deeplink_prefix) + r"([A-Za-z0-9+/=]+)",
+              readme,
+          )
+          if deeplink_match is None:
+              raise SystemExit("README is missing the Cursor MCP install deeplink")
+          decoded = json.loads(base64.b64decode(deeplink_match.group(1)))
+          found["README Cursor deeplink"] = [
+              value.removeprefix("mcp-server-linkedin@")
+              for value in decoded["linkedin"]["args"]
+              if value.startswith("mcp-server-linkedin@")
+          ]
+          manual_marker = "**Manual `mcp.json`:**"
+          manual_idx = readme.find(manual_marker)
+          if manual_idx == -1:
+              raise SystemExit("README is missing the Cursor manual mcp.json section")
+          manual_package = re.search(
+              r"mcp-server-linkedin@([^\s\"]+)",
+              readme[manual_idx:],
+          )
+          if manual_package is None:
+              raise SystemExit(
+                  "README manual mcp.json example is missing a versioned package arg"
+              )
+          found["README Cursor manual example"] = [manual_package.group(1)]
           for site, values in found.items():
               if not values:
                   raise SystemExit(f"{site}: no version found; the rewrite missed it")
@@ -444,8 +529,10 @@ jobs:
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add manifest.json docker-compose.yml .github/mcp/server.json \
+            README.md \
             plugins/linkedin-mcp-server/.codex-plugin/plugin.json \
             plugins/linkedin-mcp-server/.claude-plugin/plugin.json \
+            plugins/linkedin-mcp-server/.cursor-plugin/plugin.json \
             plugins/linkedin-mcp-server/.mcp.json
           if git diff --staged --quiet; then
             echo "ℹ️ No changes to commit"
