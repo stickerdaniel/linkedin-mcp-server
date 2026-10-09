@@ -159,7 +159,8 @@ async def test_tool_schema_trace_keeps_people_boundary_coercion_and_inventory():
         "tool_schemas"
     ]
 
-    assert len(schemas) == 20
+    # 19 extractor-backed tools plus the 7 own-profile editing tools.
+    assert len(schemas) == 26
     network = schemas["search_people"]["input"]["properties"]["network"]
     assert network["anyOf"] == [
         {"items": {"type": "string"}, "type": "array"},

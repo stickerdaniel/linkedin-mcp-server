@@ -8,6 +8,7 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 
 - **Profile Access**: Get detailed LinkedIn profile information including experience, education, skills, projects, certifications, and more
 - **Own Profile**: Fetch the authenticated user's own profile to give agents self-context
+- **Own Profile Editing**: Read your own headline, About, experiences and skills as structured fields, propose changes as a reviewable diff, and apply them only with `confirm: true` while `MCP_LINKEDIN_WRITE_ENABLED=true`; each field is re-read and verified ([guide](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/docs/profile-editing.md))
 - **Profile Connections**: Send connection requests or accept incoming ones, with optional notes
 - **Sidebar Profiles**: Extract profile URLs from the sidebar recommendation sections on a profile page ("More profiles for you", "Explore premium profiles", "People you may know")
 - **Messaging**: List the inbox, read a conversation by username or thread ID, search messages by keyword, and compose/send a new message with explicit confirmation (profile-based send may open a separate DM rather than reply in an existing thread)
@@ -146,6 +147,8 @@ Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSO
 | `PROXY_PASSWORD` | - | Password for the proxy. Env-only, since command-line arguments are readable by every user on the machine. Chromium cannot authenticate to a SOCKS proxy, so credentials need an `http(s)` endpoint. |
 | `PROXY_BYPASS` | - | Comma-separated hosts to reach directly instead of through the proxy |
 | `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION` | `false` | Experimental: keep the container's derived profile across restarts instead of rebuilding it on each start |
+| `MCP_LINKEDIN_WRITE_ENABLED` | `false` | Allow `apply_profile_changes` to write approved changes to your own profile. Each apply still needs `confirm: true`. |
+| `LINKEDIN_PROFILE_EDITS_DIR` | `~/.linkedin-mcp/profile-edits` | Where profile change sets, pre-apply snapshots and the audit log are kept. Mount it to keep them across container restarts. |
 | `LINKEDIN_TRACE_MODE` | `on_error` | Trace retention: `on_error` keeps artifacts only from failed runs, `always` keeps every run, `off` keeps none |
 
 **Example with custom timeouts (macOS / Linux):**

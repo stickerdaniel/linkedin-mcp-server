@@ -3,6 +3,46 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "actions",
+          "profile-edit"
+        ]
+      }
+    },
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true
+    },
+    "description": "Applies a previously created and explicitly approved change set to the authenticated user's own LinkedIn profile. This modifies external state.\n\nCall only after the user has seen the preview and said to apply it.\nRequires confirm=true and a server started with\nMCP_LINKEDIN_WRITE_ENABLED=true. Applies exactly the stored changes,\none field at a time, re-reading each from LinkedIn to verify it; a\nfield counts as done only when the saved value is observed. Refuses a\nchange set that is not pending (each is applied at most once) or whose\nprofile changed since it was proposed (STALE_CHANGE_SET). Stops at the\nfirst failure and reports PARTIAL_FAILURE with per-field results; it\nnever retries a failed write and never rolls back automatically.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "changeSetId": {
+          "description": "id returned by propose_profile_changes",
+          "type": "string"
+        },
+        "confirm": {
+          "default": false,
+          "description": "must be true; the user's explicit approval",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "changeSetId"
+      ],
+      "type": "object"
+    },
+    "name": "apply_profile_changes",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Apply Profile Changes"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "session"
         ]
       }
@@ -68,6 +108,40 @@
       "type": "object"
     },
     "title": "Connect With Person"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "profile-edit"
+        ]
+      }
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Discard a pending change set so it can never be applied. Does not modify LinkedIn.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "changeSetId": {
+          "description": "id returned by propose_profile_changes",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeSetId"
+      ],
+      "type": "object"
+    },
+    "name": "discard_profile_changes",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Discard Profile Changes"
   },
   {
     "_meta": {
@@ -397,6 +471,71 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "person",
+          "profile-edit"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read your own profile as structured, editable fields. Read-only.\n\nReturns name, headline, location, about, experiences (each with a\nstable experienceId taken from LinkedIn's position id), skills with\ntheir order, and the character limits LinkedIn's forms enforce.\nHeadline and about come from LinkedIn's edit forms, so they are exact.\nUse this before propose_profile_changes. For the raw text of profile\nsections use get_my_profile instead.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_my_editable_profile",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get My Editable Profile"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "person",
+          "profile-edit"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read your experience entries. Read-only.\n\nWithout experienceId: every position with its experienceId and display\nfields. With experienceId: that position's exact title and full\ndescription from its edit form, plus their character limits.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "experienceId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional id from this tool or get_my_editable_profile"
+        }
+      },
+      "type": "object"
+    },
+    "name": "get_my_experience",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get My Experience"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "person"
         ]
       }
@@ -444,6 +583,32 @@
       "type": "object"
     },
     "title": "Get My Profile"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "person",
+          "profile-edit"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read your skills in LinkedIn's order. Read-only.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_my_skills",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get My Skills"
   },
   {
     "_meta": {
@@ -580,6 +745,220 @@
       "type": "object"
     },
     "title": "Get Sidebar Profiles"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "profile-edit"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Show a change set's exact before/after values. Does not modify LinkedIn.\n\nRe-reads the targeted fields: if anything changed since the proposal\n(for example an edit made by hand on linkedin.com), returns\nSTALE_CHANGE_SET with the changed fields and the change set can no\nlonger be applied; propose again.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "changeSetId": {
+          "description": "id returned by propose_profile_changes",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeSetId"
+      ],
+      "type": "object"
+    },
+    "name": "preview_profile_changes",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Preview Profile Changes"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "profile-edit"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Creates a previewable profile change set. Does not modify LinkedIn.\n\nReads the current values of the targeted fields, validates every\nrequested value (including LinkedIn's character limits; over-long text\nis refused, never truncated), and stores a change set with before and\nafter values and a fingerprint of the profile it was planned against.\nShow the returned diff to the user. Nothing is applied until the user\napproves and apply_profile_changes is called with confirm=true.\n\nOnly send values the user has written or approved. This tool carries\ncontent; it must not be used to invent jobs, employers, dates,\nqualifications, skills or achievements. Supported: headline, about,\ntitle and description of an existing experience, adding and removing\nskills. Anything else returns UNSUPPORTED_FIELD.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "changes": {
+          "additionalProperties": true,
+          "description": "headline, about, experiences [{experienceId | match, title,\ndescription}], skills {add, remove}",
+          "properties": {
+            "about": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "experiences": {
+              "items": {
+                "additionalProperties": true,
+                "properties": {
+                  "description": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "New description, as approved by the user."
+                  },
+                  "experienceId": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "id from get_my_experience. Preferred over match."
+                  },
+                  "match": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": true,
+                        "properties": {
+                          "company": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "default": null
+                          },
+                          "startDate": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "default": null,
+                            "description": "Text from the date range, e.g. 'Jan 2021' or '2021'."
+                          },
+                          "title": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "default": null
+                          }
+                        },
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Used only when experienceId is absent; must match exactly one experience."
+                  },
+                  "title": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "New job title, as approved by the user."
+                  }
+                },
+                "type": "object"
+              },
+              "maxItems": 20,
+              "type": "array"
+            },
+            "headline": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "skills": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "properties": {
+                    "add": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 20,
+                      "type": "array"
+                    },
+                    "remove": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 20,
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "changes"
+      ],
+      "type": "object"
+    },
+    "name": "propose_profile_changes",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Propose Profile Changes"
   },
   {
     "_meta": {

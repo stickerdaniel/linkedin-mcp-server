@@ -124,6 +124,34 @@
       "description": "Search LinkedIn posts/content globally by keyword (the 'Posts' tab) with an optional recency filter (past-24h/past-week/past-month); returns unordered candidate permalinks in references"
     },
     {
+      "name": "get_my_editable_profile",
+      "description": "Read your own profile as structured editable fields (headline, about, experiences with stable ids, skills, limits). Read-only"
+    },
+    {
+      "name": "get_my_experience",
+      "description": "Read your experience entries, or one entry's exact title and description. Read-only"
+    },
+    {
+      "name": "get_my_skills",
+      "description": "Read your skills in LinkedIn's order. Read-only"
+    },
+    {
+      "name": "propose_profile_changes",
+      "description": "Create a previewable change set for your own profile with an exact diff. Does not modify LinkedIn"
+    },
+    {
+      "name": "preview_profile_changes",
+      "description": "Show a change set's before/after values and whether the profile changed since it was proposed. Does not modify LinkedIn"
+    },
+    {
+      "name": "apply_profile_changes",
+      "description": "Apply an explicitly approved change set to your own LinkedIn profile and verify each field. Modifies LinkedIn; needs confirm=true and MCP_LINKEDIN_WRITE_ENABLED=true"
+    },
+    {
+      "name": "discard_profile_changes",
+      "description": "Discard a pending change set so it can never be applied"
+    },
+    {
       "name": "close_session",
       "description": "Properly close browser session and clean up resources"
     }
