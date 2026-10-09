@@ -442,7 +442,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "ℹ️ No changes to commit"
           else
-            git commit -m "chore: sync versioned files to v$VERSION [skip ci]"
+            git commit -m "chore(release): Sync versioned files to v$VERSION [skip ci]"
             git push origin main
             echo "✅ Committed version updates"
           fi
