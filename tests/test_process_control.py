@@ -869,8 +869,14 @@ class TestOwnerFinalization:
         monkeypatch: pytest.MonkeyPatch,
         listener: ControlListener,
     ):
-        from linkedin_mcp_server import daemon_config, daemon_lock, daemon_owner
+        from linkedin_mcp_server import (
+            daemon_config,
+            daemon_descriptor,
+            daemon_lock,
+            daemon_owner,
+        )
 
+        monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
         profile = tmp_path / "profile"
         profile.mkdir()
         config = AppConfig()
