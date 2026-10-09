@@ -272,7 +272,7 @@ jobs:
           PY
           echo "✅ Updated server.json to version $VERSION"
 
-      - name: Update Codex plugin version
+      - name: Update Codex and Cursor plugin versions
         run: |
           set -e
           python3 - "$VERSION" <<'PY'
@@ -281,13 +281,19 @@ jobs:
           from pathlib import Path
 
           version = sys.argv[1]
-          manifest_path = Path(
+          codex_manifest_path = Path(
               "plugins/linkedin-mcp-server/.codex-plugin/plugin.json"
+          )
+          cursor_manifest_path = Path(
+              "plugins/linkedin-mcp-server/.cursor-plugin/plugin.json"
           )
           mcp_path = Path("plugins/linkedin-mcp-server/.mcp.json")
 
-          plugin = json.loads(manifest_path.read_text(encoding="utf-8"))
-          plugin["version"] = version
+          codex_plugin = json.loads(codex_manifest_path.read_text(encoding="utf-8"))
+          codex_plugin["version"] = version
+
+          cursor_plugin = json.loads(cursor_manifest_path.read_text(encoding="utf-8"))
+          cursor_plugin["version"] = version
 
           mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
           args = mcp["mcpServers"]["linkedin"]["args"]
@@ -298,13 +304,17 @@ jobs:
           ]
           if len(package_args) != 1:
               raise SystemExit(
-                  "Codex plugin must contain exactly one versioned "
+                  "plugin MCP config must contain exactly one versioned "
                   "mcp-server-linkedin package argument"
               )
           args[package_args[0]] = f"mcp-server-linkedin@{version}"
 
-          manifest_path.write_text(
-              json.dumps(plugin, indent=2, ensure_ascii=False) + "\n",
+          codex_manifest_path.write_text(
+              json.dumps(codex_plugin, indent=2, ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+          cursor_manifest_path.write_text(
+              json.dumps(cursor_plugin, indent=2, ensure_ascii=False) + "\n",
               encoding="utf-8",
           )
           mcp_path.write_text(
@@ -312,7 +322,7 @@ jobs:
               encoding="utf-8",
           )
           PY
-          echo "✅ Updated Codex plugin to version $VERSION"
+          echo "✅ Updated Codex and Cursor plugins to version $VERSION"
 
       # The rewrites above are text edits that report success whatever they
       # matched, so this asks every file that carries the version what it now
@@ -335,9 +345,14 @@ jobs:
           version = sys.argv[1]
           server = json.loads(Path(".github/mcp/server.json").read_text(encoding="utf-8"))
           manifest = json.loads(Path("manifest.json").read_text(encoding="utf-8"))
-          plugin = json.loads(
+          codex_plugin = json.loads(
               Path(
                   "plugins/linkedin-mcp-server/.codex-plugin/plugin.json"
+              ).read_text(encoding="utf-8")
+          )
+          cursor_plugin = json.loads(
+              Path(
+                  "plugins/linkedin-mcp-server/.cursor-plugin/plugin.json"
               ).read_text(encoding="utf-8")
           )
           plugin_mcp = json.loads(
@@ -392,7 +407,8 @@ jobs:
                   if p["registryType"] == "oci"
               ],
               "docker-compose.yml": [tag(image) for image in images],
-              "Codex plugin": [plugin["version"]],
+              "Codex plugin": [codex_plugin["version"]],
+              "Cursor plugin": [cursor_plugin["version"]],
               "Codex plugin MCP": [
                   value.removeprefix("mcp-server-linkedin@")
                   for value in plugin_mcp["mcpServers"]["linkedin"]["args"]
@@ -438,6 +454,7 @@ jobs:
           git config --local user.name "github-actions[bot]"
           git add manifest.json docker-compose.yml .github/mcp/server.json \
             plugins/linkedin-mcp-server/.codex-plugin/plugin.json \
+            plugins/linkedin-mcp-server/.cursor-plugin/plugin.json \
             plugins/linkedin-mcp-server/.mcp.json
           if git diff --staged --quiet; then
             echo "ℹ️ No changes to commit"
