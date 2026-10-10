@@ -271,7 +271,7 @@ can ask for that.
 
 ## Commit Messages
 
-- Follow conventional commits: `type(scope): subject`
+- Follow conventional commits: `type(scope): Subject`
 - Types: feat, fix, docs, style, refactor, test, chore, perf, ci
 - Subject: capitalized, imperative, under 50 chars
 

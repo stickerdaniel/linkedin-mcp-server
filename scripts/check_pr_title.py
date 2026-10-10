@@ -40,8 +40,8 @@ LONG_SUBJECT = f"PR title subject must be under {SUBJECT_LIMIT} characters."
 RENOVATE = {"login": "renovate[bot]", "type": "Bot"}
 
 HINT = (
-    "Expected: type: subject, type(scope): subject, type!: subject, or "
-    "type(scope)!: subject. Allowed types: " + ", ".join(ALLOWED_TYPES) + ". "
+    "Expected: type: Subject, type(scope): Subject, type!: Subject, or "
+    "type(scope)!: Subject. Allowed types: " + ", ".join(ALLOWED_TYPES) + ". "
     f"The subject starts with a capital letter and stays under {SUBJECT_LIMIT} "
     "characters."
 )
