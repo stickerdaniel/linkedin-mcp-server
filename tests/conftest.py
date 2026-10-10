@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 from pathlib import Path
 
 # FastMCP 4 bridges camelCase reads on MCP SDK models (`result.isError`) with
@@ -211,6 +212,112 @@ def isolate_profile_dir(ignore_the_developers_environment, tmp_path, monkeypatch
     return fake_profile
 
 
+def _is_differential_row(request: pytest.FixtureRequest) -> bool:
+    """Whether this is a release-gate row of the differential harness.
+
+    Those keep the account's real daemon state root on purpose: the decision
+    record of 2026-09-26 makes it part of what the gate measures, and the frozen
+    baseline those rows run predates the variable below.
+    """
+    return request.node.get_closest_marker("differential_row") is not None
+
+
+@pytest.fixture(scope="session")
+def real_daemon_state_root() -> Path | None:
+    """The daemon state root of the account running the suite, if it has one."""
+    from linkedin_mcp_server import daemon_descriptor
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.delenv(daemon_descriptor.TEST_ACCOUNT_HOME_ENV, raising=False)
+        try:
+            return daemon_descriptor.daemon_state_root()
+        except daemon_descriptor.DescriptorError:
+            return None
+
+
+#: What the teardown report checks for one test: the real root, the test's
+#: ``tmp_path``, and when the test started.
+_DAEMON_STATE_CHECK = pytest.StashKey[tuple[Path, Path, float]]()
+
+#: Filesystems that store whole seconds round a write down, so a write just
+#: after a test started can carry a stamp just before it.
+_TIMESTAMP_SLACK_SECONDS = 2.0
+
+
+@pytest.fixture(autouse=True)
+def isolate_daemon_state(
+    ignore_the_developers_environment,
+    real_daemon_state_root,
+    request,
+    tmp_path,
+    tmp_path_factory,
+    monkeypatch,
+):
+    """Give every process a test starts a temporary account home for daemon state.
+
+    ``daemon_descriptor._account_home`` ignores ``HOME`` by design, and an owner
+    is started by production code, so no in-process patch reaches it. The
+    variable does: frontends inherit it from the test, and the owner from its
+    frontend. Takes the clearing fixture as an argument for the reason
+    ``isolate_profile_dir`` gives, since the clearing deletes this variable too.
+
+    Outside ``tmp_path``, so tests that list their own directory see only what
+    they made, and created by ``harden_directory`` rather than ``mkdir``: on
+    Windows the daemon refuses a home whose access list is still inherited.
+    """
+    if _is_differential_row(request):
+        return
+    from linkedin_mcp_server.daemon_descriptor import TEST_ACCOUNT_HOME_ENV
+    from linkedin_mcp_server.private_state import harden_directory
+
+    home = tmp_path_factory.mktemp("account") / "home"
+    harden_directory(home)
+    monkeypatch.setenv(TEST_ACCOUNT_HOME_ENV, str(home))
+    if real_daemon_state_root is not None:
+        request.node.stash[_DAEMON_STATE_CHECK] = (
+            real_daemon_state_root,
+            tmp_path,
+            time.time() - _TIMESTAMP_SLACK_SECONDS,
+        )
+
+
+def _daemon_state_on_the_real_root(item: pytest.Item) -> str | None:
+    """Say where a process this test started wrote daemon state under the real root.
+
+    Looked up the way the state is keyed: every directory under ``tmp_path`` may
+    be an auth root, and its key is checked under the real root. A directory
+    found there counts only if something in it changed during the test. The key
+    is an inode, and inodes of deleted temporary directories come back, so keys
+    left by earlier runs can match a directory this test just made.
+
+    Asked from outside every process, so a child that lost the variable is
+    caught the same way as code that stopped reading it.
+    """
+    check = item.stash.get(_DAEMON_STATE_CHECK, None)
+    if check is None:
+        return None
+    root, tmp_path, since = check
+    from linkedin_mcp_server.daemon_descriptor import DescriptorError, _daemon_dir_name
+
+    written: list[str] = []
+    for directory, _dirs, _files in os.walk(tmp_path):
+        try:
+            state = root / _daemon_dir_name(Path(directory))
+            stamps = [entry.lstat() for entry in (state, *state.iterdir())]
+        except (OSError, DescriptorError):
+            continue
+        if any(max(s.st_mtime, s.st_ctime) >= since for s in stamps):
+            written.append(str(state))
+    if not written:
+        return None
+    return (
+        f"{item.nodeid} started a process that wrote daemon state under the "
+        f"real {root}: {', '.join(written)}. Start children with the inherited "
+        f"environment, which carries the temporary account home "
+        f"`isolate_daemon_state` sets."
+    )
+
+
 #: The real state root, read before any test can move ``HOME``.
 _REAL_STATE_ROOT = os.path.realpath(os.path.expanduser("~/.linkedin-mcp"))
 
@@ -285,7 +392,11 @@ def mock_context():
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
-    """Fail a test that leaves ``sys.stdout`` or ``sys.stderr`` unusable.
+    """Fail a test that leaves a stream unusable or daemon state on the real root.
+
+    The daemon state check is ``_daemon_state_on_the_real_root``. It runs here
+    because only here are the test's own patches undone: one that replaces
+    ``os.walk`` or ``Path.exists`` would otherwise blind or hang the lookup.
 
     A test that closes one of them breaks every test that runs after it in the
     same process, and the traceback lands on the innocent one. The failure
@@ -324,3 +435,7 @@ def pytest_runtest_makereport(item, call):
                 f"that also monkeypatches sys.{name} is the usual cause."
             )
             return
+    if written := _daemon_state_on_the_real_root(item):
+        result = report.get_result()
+        result.outcome = "failed"
+        result.longrepr = written

@@ -1,12 +1,13 @@
 """The harness core: account boundary, watcher, host stub, and row H-R1.
 
 **Account boundary.** Spawned actors use the account's *real* daemon state
-root, because ``daemon_descriptor._account_home`` ignores ``HOME`` on purpose
-and the owner is started by production code that has nowhere to inject a
-redirection. What keeps them off the user's state is the key: the daemon
-directory is a hash of the auth root, and every row's auth root is a fresh
-temporary directory, so cleanup has one exact target (``daemon_dir``). This is
-the policy of ``real_state_root`` in ``tests/test_daemon_election.py``.
+root, as the gate in ``docs/decisions/2026-09-26-daemon-default-on-contract.md``
+specifies, and the frozen baseline has no other root to use. The rest of the
+suite gives its processes a temporary account home instead
+(``isolate_daemon_state`` in ``tests/conftest.py``), which the rows opt out of.
+What keeps them off the user's state is the key: the daemon directory is a hash
+of the auth root, and every row's auth root is a fresh temporary directory, so
+cleanup has one exact target (``daemon_dir``).
 
 The one auth root no row may ever use is the user's, ``~/.linkedin-mcp``.
 ``claim_account`` refuses it, and anything that contains it or sits inside it,

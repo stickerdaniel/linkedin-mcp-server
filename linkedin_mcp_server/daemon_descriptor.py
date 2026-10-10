@@ -216,8 +216,19 @@ def _number(raw: Mapping[Any, Any], name: str, *, default: int | None = None) ->
     return value
 
 
+#: The account home the test suite gives every process a test starts, the
+#: detached owner included, which no in-process patch can reach. A variable of
+#: this project's own and never ``HOME``: launchers rewrite ``HOME`` and
+#: ``USERPROFILE`` for one process, which is why :func:`_account_home` ignores
+#: them, and nothing but ``tests/conftest.py`` sets this one. The owner inherits
+#: it from the frontend that starts it, so the two still agree on one root.
+TEST_ACCOUNT_HOME_ENV = "LINKEDIN_MCP_TEST_ACCOUNT_HOME"
+
+
 def _account_home() -> Path:
-    """Return the operating system account's home, ignoring process overrides."""
+    """Return the operating system account's home, ignoring ``HOME`` overrides."""
+    if test_home := os.environ.get(TEST_ACCOUNT_HOME_ENV):
+        return _usable_home(test_home)
     if os.name == "nt":  # pragma: no cover - exercised on the Windows CI runner
         import ctypes
         from ctypes import wintypes
@@ -252,7 +263,11 @@ def _account_home() -> Path:
         raise DescriptorError(
             "The operating system could not identify the current account's home directory"
         ) from exc
+    return _usable_home(entry)
 
+
+def _usable_home(entry: str) -> Path:
+    """Check a home directory before daemon state is keyed under it."""
     # An empty or relative entry is not an answer. Path("") is ".", so two
     # processes of one account started from different working directories would
     # key their state under different roots and each elect its own owner.
@@ -276,8 +291,9 @@ def _account_home() -> Path:
     # Resolved, not merely checked for links. A home reached through a symlink
     # is an ordinary layout on POSIX, and refusing it would refuse a working
     # machine. What matters is that every process agrees, which resolving gives
-    # and an is_symlink() refusal does not.
-    return home.resolve()
+    # and an is_symlink() refusal does not. Windows inspects every component
+    # before following it instead (``daemon_state_root``).
+    return home if os.name == "nt" else home.resolve()
 
 
 def daemon_state_root() -> Path:

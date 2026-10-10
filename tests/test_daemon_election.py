@@ -123,15 +123,14 @@ def _outcome(task: Any) -> str:
 def _isolate_daemon_state(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
-    """Keep in-process tests off the account's real daemon state.
+    """Give in-process tests their own account home and a fixed runtime.
 
-    Skipped for the tests that spawn real owners. Those cannot use a redirected
-    root, because the owner is started by production code and derives its own
-    state from the account rather than from anything a test can hand it. They
-    take the ``real_state_root`` fixture instead, which isolates by auth root
-    and cleans up after itself.
+    Skipped for the tests that spawn real owners. These patches reach only this
+    interpreter, and those tests must agree with their children, which take
+    their home from ``isolate_daemon_state`` and their runtime from the build.
+    They take the ``owner_profile`` fixture instead.
     """
-    if "real_state_root" in request.fixturenames:
+    if "owner_profile" in request.fixturenames:
         return
     home = tmp_path / "home"
     # Hardened rather than merely created, because on Windows this stands in
@@ -1796,21 +1795,11 @@ time.sleep(30)
 
 
 @pytest.fixture
-def real_state_root(tmp_path: Path):
-    """Let the spawned processes use the account's real daemon state root.
+def owner_profile(tmp_path: Path):
+    """A profile for the tests whose owner production code starts.
 
-    The unit tests above redirect that root, and the process tests cannot:
-    ``_account_home`` reads the account's passwd entry and deliberately ignores
-    ``HOME`` (``daemon_descriptor.py:161-190``), precisely so that a launcher
-    overriding the environment for one process cannot split an account's
-    election in two. The owner is started by production code, so there is
-    nowhere to inject a redirection into it, and faking one would test a path
-    users never take.
-
-    So these run against the real root, keyed by a unique auth root under
-    ``tmp_path``. The daemon directory is a hash of that auth root, so nothing
-    here can collide with the user's own state or with a parallel test, and the
-    same derivation gives cleanup an exact target.
+    The owner keeps its state under the temporary account home that
+    ``isolate_daemon_state`` hands every process, as do the frontends here.
     """
     profile = tmp_path / "auth" / "profile"
     profile.mkdir(parents=True, exist_ok=True)
@@ -1818,19 +1807,12 @@ def real_state_root(tmp_path: Path):
 
     # Owners are detached, so an assertion that fails before its stop() would
     # otherwise leave a server running against the developer's machine.
-    directory = daemon_descriptor_module.daemon_dir(profile.parent)
-    descriptor = daemon_descriptor_module.descriptor_path(profile.parent)
     try:
         published = daemon_descriptor_module.read(profile.parent)
     except Exception:
         published = None
     if published is not None:
         _stop(published.pid)
-    if directory.exists():
-        import shutil
-
-        shutil.rmtree(directory, ignore_errors=True)
-    assert not descriptor.exists()
 
 
 def _run_frontend(profile: Path) -> dict[str, object]:
@@ -5225,8 +5207,8 @@ class TestRealOwner:
     stays in one interpreter. Each spawn starts the full server graph.
     """
 
-    def test_an_owner_is_started_and_answers(self, real_state_root: Path):
-        profile = real_state_root
+    def test_an_owner_is_started_and_answers(self, owner_profile: Path):
+        profile = owner_profile
 
         result = _run_frontend(profile)
         try:
@@ -5238,7 +5220,7 @@ class TestRealOwner:
 
     @_POSIX_ONLY
     def test_a_paused_owner_is_waited_for_rather_than_written_off(
-        self, real_state_root: Path
+        self, owner_profile: Path
     ):
         """The reported bug, against a real owner over real loopback.
 
@@ -5254,7 +5236,7 @@ class TestRealOwner:
         The issue reproduced this by timing a stop against the post-start ping,
         which is the same condition arrived at by luck.
         """
-        profile = real_state_root
+        profile = owner_profile
 
         first = _run_frontend(profile)
         owner = first["pid"]
@@ -5276,15 +5258,13 @@ class TestRealOwner:
             _resume(owner)
             _stop(owner)
 
-    def test_the_frontend_lets_go_of_the_lock_it_handed_over(
-        self, real_state_root: Path
-    ):
+    def test_the_frontend_lets_go_of_the_lock_it_handed_over(self, owner_profile: Path):
         # The load-bearing one. Both descriptors refer to one locked open file
         # description, so a frontend that kept its copy would keep the daemon
         # lock alive after the owner died. Every recovery afterwards would
         # be locked out by a process that is not the owner and does not know it
         # holds anything.
-        profile = real_state_root
+        profile = owner_profile
 
         result = _run_frontend(profile)
         try:
@@ -5295,7 +5275,7 @@ class TestRealOwner:
             _stop(result.get("pid"))
 
     def test_the_lock_frees_while_the_frontend_is_still_running(
-        self, real_state_root: Path
+        self, owner_profile: Path
     ):
         # The one that actually proves the release, and the reason it has to be
         # written this way. Both descriptors refer to one locked open file
@@ -5309,7 +5289,7 @@ class TestRealOwner:
         # client stayed connected. That is a wedge with no visible cause.
         import json
 
-        profile = real_state_root
+        profile = owner_profile
         auth_root = profile.parent
 
         frontend = subprocess.Popen(
@@ -5344,11 +5324,11 @@ class TestRealOwner:
             frontend.kill()
             frontend.wait(timeout=30)
 
-    def test_the_lock_frees_when_the_owner_dies(self, real_state_root: Path):
+    def test_the_lock_frees_when_the_owner_dies(self, owner_profile: Path):
         # The other half of the same property. The frontend has exited by now,
         # so if it had leaked its copy the lock would still be held here even
         # though the owner is gone. Measured at 10 ms on this tree.
-        profile = real_state_root
+        profile = owner_profile
         auth_root = profile.parent
 
         result = _run_frontend(profile)
@@ -5369,10 +5349,10 @@ class TestRealOwner:
         assert freed, "the daemon lock outlived the owner that held it"
 
     def test_a_second_frontend_attaches_instead_of_starting_another_owner(
-        self, real_state_root: Path
+        self, owner_profile: Path
     ):
         # The point of the whole feature: one browser, however many clients.
-        profile = real_state_root
+        profile = owner_profile
 
         first = _run_frontend(profile)
         try:
@@ -5385,11 +5365,11 @@ class TestRealOwner:
         finally:
             _stop(first.get("pid"))
 
-    def test_a_crashed_owner_is_replaced(self, real_state_root: Path):
+    def test_a_crashed_owner_is_replaced(self, owner_profile: Path):
         # The descriptor survives the process that wrote it, so the next client
         # must prove the endpoint before trusting it and elect a replacement
         # when it does not answer.
-        profile = real_state_root
+        profile = owner_profile
 
         first = _run_frontend(profile)
         dead = first["pid"]
@@ -5411,7 +5391,7 @@ class TestRealOwner:
 
     @_POSIX_ONLY
     def test_a_child_that_dies_after_taking_the_lock_leaves_it_free(
-        self, real_state_root: Path, tmp_path: Path
+        self, owner_profile: Path, tmp_path: Path
     ):
         child = tmp_path / "lock_taking_child.py"
         marker = tmp_path / "locked"
@@ -5428,7 +5408,7 @@ class TestRealOwner:
             "raise SystemExit(7)\n"
         )
 
-        profile = real_state_root
+        profile = owner_profile
         auth_root = profile.parent
         frontend = (
             "import sys\n"
@@ -5475,11 +5455,11 @@ class TestRealOwner:
         finally:
             _stop(recovered.get("pid"))
 
-    def test_launch_barrier_timeout_exits_without_electing(self, real_state_root: Path):
+    def test_launch_barrier_timeout_exits_without_electing(self, owner_profile: Path):
         # Mutation target: drop the ``if not go.exists(): raise SystemExit``
         # in ``_INSPECT_OWNER`` and this fails — the child would call
         # ``obtain_owner`` and print an attachable result instead of exiting.
-        profile = real_state_root
+        profile = owner_profile
         ready_dir = profile.parent / "launch-barrier-timeout"
         ready_dir.mkdir()
         child = subprocess.run(
@@ -5512,7 +5492,7 @@ class TestRealOwner:
 
     @pytest.mark.parametrize("failure", ["spawn", "barrier"])
     def test_launch_barrier_failure_collects_started_frontends(
-        self, real_state_root: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+        self, owner_profile: Path, monkeypatch: pytest.MonkeyPatch, failure: str
     ):
         popen = subprocess.Popen
         running: list[subprocess.Popen[str]] = []
@@ -5559,7 +5539,7 @@ class TestRealOwner:
         try:
             with pytest.raises(error, match=message):
                 self.test_many_clients_starting_at_once_elect_exactly_one_owner(
-                    real_state_root
+                    owner_profile
                 )
 
             assert len(running) == (2 if failure == "spawn" else 8)
@@ -5568,12 +5548,12 @@ class TestRealOwner:
                 assert child.returncode is not None, "frontend was not collected"
                 assert child.stdout is not None and child.stdout.closed
                 assert child.stderr is not None and child.stderr.closed
-            assert not (real_state_root.parent / "launch-barrier" / "go").exists()
+            assert not (owner_profile.parent / "launch-barrier" / "go").exists()
         finally:
             _reap_frontends(running)
 
     def test_timed_out_communicate_preserves_owner_cleanup(
-        self, real_state_root: Path, monkeypatch: pytest.MonkeyPatch
+        self, owner_profile: Path, monkeypatch: pytest.MonkeyPatch
     ):
         popen = subprocess.Popen
         stop = _stop
@@ -5630,10 +5610,7 @@ class TestRealOwner:
                 assert timeout is not None
                 deadline = time.monotonic() + 30
                 while time.monotonic() < deadline:
-                    if (
-                        daemon_descriptor_module.read(real_state_root.parent)
-                        is not None
-                    ):
+                    if daemon_descriptor_module.read(owner_profile.parent) is not None:
                         break
                     time.sleep(0.01)
                 else:
@@ -5654,7 +5631,7 @@ class TestRealOwner:
         try:
             with pytest.raises(subprocess.TimeoutExpired):
                 self.test_many_clients_starting_at_once_elect_exactly_one_owner(
-                    real_state_root
+                    owner_profile
                 )
 
             assert len(running) == 8
@@ -5669,7 +5646,7 @@ class TestRealOwner:
                 stop(pid)
 
     def test_many_clients_starting_at_once_elect_exactly_one_owner(
-        self, real_state_root: Path
+        self, owner_profile: Path
     ):
         # The property the whole feature is for, under the condition that
         # actually produces races: several MCP clients launching together, each
@@ -5680,7 +5657,7 @@ class TestRealOwner:
         # single-frontend tests cannot see it, because nothing contends there.
         import json
 
-        profile = real_state_root
+        profile = owner_profile
         clients = 8
         # Shared start barrier: every frontend announces ready, then all
         # release together. A 50ms stagger would avoid the empty-directory
@@ -5747,7 +5724,7 @@ class TestRealOwner:
                     _stop(published.pid)
 
     @_POSIX_ONLY
-    def test_the_owner_outlives_the_client_that_started_it(self, real_state_root: Path):
+    def test_the_owner_outlives_the_client_that_started_it(self, owner_profile: Path):
         # The premise of the whole feature. An owner that died with its first
         # client would give every later client a cold start plus a fresh
         # ``/feed/`` validation, which is the traffic this exists to remove.
@@ -5758,7 +5735,7 @@ class TestRealOwner:
         # the owner in a group of its own.
         import json
 
-        profile = real_state_root
+        profile = owner_profile
 
         frontend = subprocess.Popen(
             [sys.executable, "-c", _LINGERING_FRONTEND, str(profile)],
@@ -5790,7 +5767,7 @@ class TestRealOwner:
                 frontend.kill()
                 frontend.wait(timeout=30)
 
-    def test_an_older_owner_hands_over_to_a_newer_build(self, real_state_root: Path):
+    def test_an_older_owner_hands_over_to_a_newer_build(self, owner_profile: Path):
         # The turnover, end to end against a live owner rather than a mock. Both
         # halves have to hold: the old process actually exits, and a replacement
         # is elected. Getting only the first is worse than doing nothing, and it
@@ -5805,7 +5782,7 @@ class TestRealOwner:
         # every other respect and the process behind it is genuinely serving.
         import json
 
-        profile = real_state_root
+        profile = owner_profile
         auth_root = profile.parent
 
         first = _run_frontend(profile)
@@ -5843,7 +5820,7 @@ class TestRealOwner:
             _stop(second.get("pid"))
             _stop(old_pid)
 
-    def test_the_owner_requires_its_token(self, real_state_root: Path):
+    def test_the_owner_requires_its_token(self, owner_profile: Path):
         # The endpoint is loopback, which every process on the machine can
         # reach, and a website the user merely visits can reach through their
         # own browser. The token is what stands between that and a logged-in
@@ -5853,7 +5830,7 @@ class TestRealOwner:
         from fastmcp import Client
         from fastmcp.client.transports import StreamableHttpTransport
 
-        profile = real_state_root
+        profile = owner_profile
         result = _run_frontend(profile)
         url = result["url"]
         assert isinstance(url, str)
@@ -5871,11 +5848,11 @@ class TestRealOwner:
         finally:
             _stop(result.get("pid"))
 
-    def test_current_and_predecessor_tokens_stay_on_disk(self, real_state_root: Path):
+    def test_current_and_predecessor_tokens_stay_on_disk(self, owner_profile: Path):
         # Cleanup runs before replacement, so the currently canonical token must
         # remain attachable if this startup fails. A successful replacement leaves
         # that predecessor beside the new generation and removes anything older.
-        profile = real_state_root
+        profile = owner_profile
         auth_root = profile.parent
 
         first = _run_frontend(profile)
@@ -5912,7 +5889,7 @@ class TestRealOwner:
             _stop(second.get("pid"))
 
     def test_a_proxy_serves_the_real_owners_tools_over_loopback(
-        self, real_state_root: Path
+        self, owner_profile: Path
     ):
         """The whole feature, end to end, in the only test that proves it.
 
@@ -5933,7 +5910,7 @@ class TestRealOwner:
         from linkedin_mcp_server.daemon import look_up_owner
         from linkedin_mcp_server.server import ServerRole, create_mcp_server
 
-        profile = real_state_root
+        profile = owner_profile
         result = _run_frontend(profile)
         try:
             assert result["state"] == OwnerState.ATTACHABLE.value, result
@@ -5974,7 +5951,7 @@ class TestRealOwner:
         finally:
             _stop(result.get("pid"))
 
-    def test_a_real_owner_asks_the_client_to_sign_in(self, real_state_root: Path):
+    def test_a_real_owner_asks_the_client_to_sign_in(self, owner_profile: Path):
         """The auth marker, over a real socket, from a real detached owner.
 
         Everything else about the marker runs in memory. This is the one that
@@ -6000,7 +5977,7 @@ class TestRealOwner:
         )
         from linkedin_mcp_server.server import ServerRole, create_mcp_server
 
-        profile = real_state_root
+        profile = owner_profile
         # Readiness must pass before the auth gate, but nothing here launches a
         # browser. Keep both completion markers and metadata in the temporary root.
         _prepare_browser_cache(profile)
@@ -6076,7 +6053,7 @@ class TestRealOwner:
             _stop(result.get("pid"))
 
     def test_a_proxy_refuses_an_owner_it_has_the_wrong_token_for(
-        self, real_state_root: Path, monkeypatch: pytest.MonkeyPatch
+        self, owner_profile: Path, monkeypatch: pytest.MonkeyPatch
     ):
         """The credential is load-bearing, not decoration.
 
@@ -6110,7 +6087,7 @@ class TestRealOwner:
 
         monkeypatch.setattr(daemon_proxy, "unreachable_owner_in", recording)
 
-        profile = real_state_root
+        profile = owner_profile
         result = _run_frontend(profile)
         try:
             lookup = look_up_owner(profile.parent, profile, _config(profile))
