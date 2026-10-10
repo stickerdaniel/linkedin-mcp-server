@@ -208,12 +208,19 @@ async def _stop_goto(goto: asyncio.Future[Any]) -> None:
     await asyncio.shield(asyncio.gather(goto, return_exceptions=True))
 
 
-async def _goto_within_budget(page: Any, url: str, **kwargs: Any) -> Any:
+async def _goto_within_budget(
+    page: Any, url: str, *, overall_timeout: float | None = None, **kwargs: Any
+) -> Any:
     """``page.goto``, with :data:`NAVIGATION_BUDGET_MS` starting at the request.
 
     A caller that passes ``timeout`` sets that budget. ``0`` keeps Patchright's
     meaning, no limit. A page that cannot report its requests is unchanged:
     the driver's own clock applies, which is the only clock it has.
+
+    ``overall_timeout`` bounds the whole call, from here, wait for the request
+    included. A caller with a deadline of its own needs it: the two budgets
+    above run one after the other, so ``timeout`` alone lets a request that is
+    slow to leave spend its startup wait on top of the time that was left.
     """
     caller_set_timeout = "timeout" in kwargs
     timeout = kwargs.pop("timeout", None)
@@ -226,7 +233,12 @@ async def _goto_within_budget(page: Any, url: str, **kwargs: Any) -> Any:
     if timeout == 0:
         return await page.goto(url, timeout=0, **kwargs)
 
-    sent: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    startup_ms: float = STARTUP_BUDGET_MS
+    if overall_timeout is not None:
+        startup_ms = min(startup_ms, overall_timeout)
+    sent: asyncio.Future[None] = loop.create_future()
 
     def on_request(request: Any) -> None:
         if sent.done() or not _is_main_frame_navigation(page, request):
@@ -240,17 +252,20 @@ async def _goto_within_budget(page: Any, url: str, **kwargs: Any) -> Any:
     try:
         await asyncio.wait(
             {goto, sent},
-            timeout=STARTUP_BUDGET_MS / 1000,
+            timeout=startup_ms / 1000,
             return_when=asyncio.FIRST_COMPLETED,
         )
         if not goto.done() and not sent.done():
             await _stop_goto(goto)
             raise PlaywrightTimeoutError(
-                f"Page.goto: Timeout {STARTUP_BUDGET_MS:g}ms exceeded before "
+                f"Page.goto: Timeout {startup_ms:g}ms exceeded before "
                 "the request was sent."
             )
         if goto.done():
             return await goto
+        if overall_timeout is not None:
+            spent_ms = (loop.time() - started) * 1000
+            timeout = max(0.0, min(timeout, overall_timeout - spent_ms))
         try:
             return await asyncio.wait_for(asyncio.shield(goto), timeout / 1000)
         except TimeoutError:

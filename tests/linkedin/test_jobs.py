@@ -1605,6 +1605,57 @@ class TestSearchJobs:
         assert len(seen) == 6
         assert result["job_ids"] == [jid for page in pages[:6] for jid in page]
 
+    async def test_every_page_is_handed_the_end_of_the_budget(self, mock_page):
+        """The prediction admits a page; the deadline is what bounds it.
+
+        An admitted page otherwise runs to its own timeouts, `goto` alone 30s,
+        and a page that overruns the reserve has the tool cancelled with every
+        page before it discarded. The same absolute end for every page, taken
+        from when the search started rather than when the page did.
+        """
+
+        class Clock:
+            def __init__(self) -> None:
+                self.now = 7.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = Clock()
+        reader = _reader(mock_page)
+        seen: list[float | None] = []
+
+        async def read_page(url, section_name, page_deadline=None, **kwargs):
+            seen.append(page_deadline)
+            navigate(mock_page, url)
+            clock.now += 6.5
+            return captured(mock_page, extracted("Job results"))
+
+        with (
+            patch.object(jobs_module, "time", clock),
+            patch.object(reader._pages, "_extract_search_page", side_effect=read_page),
+            patch.object(
+                reader._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=[["1", "2"], ["3", "4"]],
+            ),
+            patch.object(
+                reader._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.linkedin.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            # A 40s budget from t=7.
+            await reader.search_jobs("python", max_pages=2, tool_timeout=50)
+
+        assert seen == [47.0, 47.0]
+
     async def test_zero_max_pages_fetches_nothing(self, mock_page):
         """max_pages=0 should fetch zero pages (validation at tool boundary)."""
         reader = _reader(mock_page)

@@ -274,6 +274,35 @@ class TestNavigationBudget:
                 page, "https://www.linkedin.com/feed/", timeout=100
             )
 
+    async def test_an_overall_timeout_bounds_the_wait_for_the_request(self):
+        """A caller with 0.1s left does not wait the startup budget for a request."""
+        page = _ClockPage([(2.0, _Request())], finish_after=0.01)
+        with pytest.raises(PlaywrightTimeoutError, match="before the request was sent"):
+            await asyncio.wait_for(
+                goto_reporting_proxy_errors(
+                    page,
+                    "https://www.linkedin.com/feed/",
+                    timeout=100,
+                    overall_timeout=100,
+                ),
+                1.0,
+            )
+
+    async def test_an_overall_timeout_bounds_the_answer_after_a_late_request(self):
+        """The wait for the request comes out of what the answer may take.
+
+        Sent at 0.15s and answered 0.1s later, inside its own 0.2s budget but
+        past the 0.2s the caller had in all.
+        """
+        page = _ClockPage([(0.15, _Request())], finish_after=0.1)
+        with pytest.raises(PlaywrightTimeoutError, match="after the request was sent"):
+            await goto_reporting_proxy_errors(
+                page,
+                "https://www.linkedin.com/feed/",
+                timeout=200,
+                overall_timeout=200,
+            )
+
     async def test_a_subresource_does_not_start_the_budget(self):
         page = _ClockPage(
             [

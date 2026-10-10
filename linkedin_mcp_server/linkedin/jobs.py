@@ -300,9 +300,8 @@ class JobReader:
             # per-page cap is twelve seconds and the whole search gets
             # `tool_timeout` times the fraction above, so a caller passing ten
             # seconds had the first scroll alone allowed to outlast the call
-            # and take every page gathered with it. Scrolling is the one part
-            # already told how long it may run, so it is the one part this can
-            # bound without handing the budget down into navigation.
+            # and take every page gathered with it. Navigation and the
+            # rate-limit retry are handed the budget's end below.
             scroll_deadline = min(
                 SCROLL_DEADLINE_MAX,
                 scroll_budget_left,
@@ -314,6 +313,7 @@ class JobReader:
                     url,
                     section_name="search_results",
                     scroll_deadline=scroll_deadline,
+                    page_deadline=started + budget,
                 )
                 extracted = capture.section
                 slowest_page = max(slowest_page, time.monotonic() - page_started)

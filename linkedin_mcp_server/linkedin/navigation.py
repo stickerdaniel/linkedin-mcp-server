@@ -65,6 +65,9 @@ class PageNavigator:
     # renders after it commits, and an account picker was measured 200ms behind
     # its own navigation, so a page judged on arrival is judged empty.
     _DOCUMENT_READY_TIMEOUT = 5.0
+    # The `goto` timeout every navigation without a deadline keeps. A deadline
+    # can only shorten it.
+    _GOTO_TIMEOUT_MS = NAVIGATION_BUDGET_MS
 
     def __init__(self, session: PageSession):
         self._session = session
@@ -151,9 +154,24 @@ class PageNavigator:
         *,
         wait_until: WaitUntil = "domcontentloaded",
         allow_remember_me: bool = True,
+        deadline: float | None = None,
     ) -> None:
-        """Navigate to a LinkedIn page and fail fast on auth barriers."""
+        """Navigate to a LinkedIn page and fail fast on auth barriers.
+
+        ``deadline`` is an absolute reading of the session clock. The timeout
+        is worked out from it here, per call, and the remember-me retry below
+        is handed the deadline rather than the timeout: a relative figure
+        carried into the retry lets a first attempt that timed out spend the
+        same allowance a second time.
+        """
         page = self._session.page
+        timeout_ms: float = self._GOTO_TIMEOUT_MS
+        overall_ms: float | None = None
+        if deadline is not None:
+            left_ms = (deadline - self._session.monotonic()) * 1000
+            # Never zero, which Playwright reads as no timeout at all.
+            timeout_ms = max(1.0, min(timeout_ms, left_ms))
+            overall_ms = timeout_ms
         hops: list[str] = []
         listener_registered = False
 
@@ -182,19 +200,22 @@ class PageNavigator:
             try:
                 # A scripted page records the timeout it was given and does not
                 # enforce it. Only Patchright's clock starts at the call, which
-                # is the clock that expires before a cold browser sends.
+                # is the clock that expires before a cold browser sends. A
+                # deadline bounds the wait for the request as well, which
+                # the wrapper otherwise runs ahead of the timeout.
                 if type(page).__module__.startswith("patchright."):
                     await goto_reporting_proxy_errors(
                         page,
                         url,
                         wait_until=wait_until,
-                        timeout=NAVIGATION_BUDGET_MS,
+                        timeout=timeout_ms,
+                        overall_timeout=overall_ms,
                     )
                 else:
                     await page.goto(
                         url,
                         wait_until=wait_until,
-                        timeout=NAVIGATION_BUDGET_MS,
+                        timeout=timeout_ms,
                     )
                 await stabilize_navigation(f"goto {url}", logger)
                 await record_page_trace(
@@ -239,6 +260,7 @@ class PageNavigator:
                         url,
                         wait_until=wait_until,
                         allow_remember_me=False,
+                        deadline=deadline,
                     )
                     return
                 await record_page_trace(
@@ -291,6 +313,7 @@ class PageNavigator:
                     url,
                     wait_until=wait_until,
                     allow_remember_me=False,
+                    deadline=deadline,
                 )
                 return
 
@@ -312,10 +335,12 @@ class PageNavigator:
         finally:
             unregister_navigation_listener()
 
-    async def _navigate_to_page(self, url: str) -> None:
+    async def _navigate_to_page(
+        self, url: str, *, deadline: float | None = None
+    ) -> None:
         """Navigate to a LinkedIn page and fail fast on auth barriers."""
         logger.debug("_navigate_to_page: target=%s", url)
-        await self._goto_with_auth_checks(url)
+        await self._goto_with_auth_checks(url, deadline=deadline)
 
     @contextmanager
     def _watching_navigations(self) -> Iterator[list[str]]:
