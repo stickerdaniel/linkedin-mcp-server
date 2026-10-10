@@ -13,7 +13,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from check_pr_title import _TITLE, validate_title
+from check_pr_title import _TITLE, is_renovate, validate_title
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PYPROJECT = _REPO_ROOT / "pyproject.toml"
@@ -21,12 +21,6 @@ _PYPROJECT = _REPO_ROOT / "pyproject.toml"
 # The fragment directory's own documentation, which towncrier also skips.
 _README = "README.md"
 
-# Renovate's account, which needs no fragment of its own. A `[bot]` login is
-# reserved for GitHub Apps, so no user account can claim it. Renovate cannot
-# write a fragment, and one pushed onto its branch stops it updating the pull
-# request. A dependency update users will notice gets its sentence from
-# whoever merges it. The fragments it does carry are still checked.
-_EXEMPT_AUTHOR = {"login": "renovate[bot]", "type": "Bot"}
 
 INVALID_PR_DATA = "Unable to read current pull request data."
 INVALID_FILES_DATA = "Unable to read the pull request's changed files."
@@ -84,11 +78,11 @@ def _load_pr(path: Path) -> tuple[int, str, int, bool]:
         raise _InputError
     if not _is_int(changed_files) or changed_files < 0:
         raise _InputError
-    user = data.get("user")
-    exempt = isinstance(user, dict) and all(
-        user.get(key) == value for key, value in _EXEMPT_AUTHOR.items()
-    )
-    return number, title, changed_files, exempt
+    # Renovate needs no fragment of its own. It cannot write one, and one
+    # pushed onto its branch stops it updating the pull request. A dependency
+    # update users will notice gets its sentence from whoever merges it. The
+    # fragments it does carry are still checked.
+    return number, title, changed_files, is_renovate(data.get("user"))
 
 
 def _load_files(path: Path) -> list[dict[str, Any]]:

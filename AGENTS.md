@@ -273,7 +273,7 @@ can ask for that.
 
 - Follow conventional commits: `type(scope): subject`
 - Types: feat, fix, docs, style, refactor, test, chore, perf, ci
-- Keep subject <50 chars, imperative mood
+- Subject: capitalized, imperative, under 50 chars
 
 ## Development Workflow
 
