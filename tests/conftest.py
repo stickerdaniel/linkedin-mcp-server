@@ -1,6 +1,8 @@
+import hashlib
 import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 # FastMCP 4 bridges camelCase reads on MCP SDK models (`result.isError`) with
@@ -235,13 +237,61 @@ def real_daemon_state_root() -> Path | None:
             return None
 
 
-#: What the teardown report checks for one test: the real root, the test's
-#: ``tmp_path``, and when the test started.
-_DAEMON_STATE_CHECK = pytest.StashKey[tuple[Path, Path, float]]()
+#: Captured at import. The directory walk runs in a fixture teardown, where the
+#: test's own patches are still in force, and one that replaces ``os.walk`` or
+#: ``os.scandir`` would otherwise blind it, or hang it.
+_lstat = os.lstat
+_listdir = os.listdir
+_scandir = os.scandir
 
-#: Filesystems that store whole seconds round a write down, so a write just
-#: after a test started can carry a stamp just before it.
-_TIMESTAMP_SLACK_SECONDS = 2.0
+
+@dataclass(frozen=True)
+class _DaemonStateCheck:
+    """What the teardown report needs to judge one test's daemon state."""
+
+    root: Path
+    #: The entries under ``root`` before the test, and when it started.
+    before: frozenset[str]
+    started_ns: int
+    #: The state directory names of every directory the test left in ``tmp_path``.
+    keys: frozenset[str]
+
+
+_DAEMON_STATE_CHECK = pytest.StashKey[_DaemonStateCheck]()
+
+
+def _entries(root: Path) -> frozenset[str]:
+    try:
+        return frozenset(_listdir(root))
+    except FileNotFoundError:
+        return frozenset()
+
+
+def _state_keys(top: Path) -> frozenset[str]:
+    """The daemon state directory name of *top* and of every directory below it.
+
+    Derived as ``daemon_descriptor._auth_root_identity`` keys an auth root, by
+    device and inode. Restated rather than called, because that function
+    creates what is missing and goes through ``Path`` methods a test may have
+    replaced; ``tests/test_daemon_state_guard.py`` fails if the two disagree.
+    """
+    keys: set[str] = set()
+    pending = [os.fspath(top)]
+    while pending:
+        path = pending.pop()
+        try:
+            info = _lstat(path)
+            with _scandir(path) as entries:
+                pending.extend(
+                    entry.path
+                    for entry in entries
+                    if entry.is_dir(follow_symlinks=False)
+                )
+        except OSError:
+            continue
+        identity = f"inode\0{info.st_dev}\0{info.st_ino}".encode("ascii")
+        keys.add(hashlib.sha256(identity).hexdigest())
+    return frozenset(keys)
 
 
 @pytest.fixture(autouse=True)
@@ -264,8 +314,13 @@ def isolate_daemon_state(
     Outside ``tmp_path``, so tests that list their own directory see only what
     they made, and created by ``harden_directory`` rather than ``mkdir``: on
     Windows the daemon refuses a home whose access list is still inherited.
+
+    Also records what ``_daemon_state_on_the_real_root`` checks. The keys are
+    read in this teardown because it runs before ``tmp_path``'s own, which
+    deletes a passing test's directory under ``tmp_path_retention_policy=failed``.
     """
     if _is_differential_row(request):
+        yield
         return
     from linkedin_mcp_server.daemon_descriptor import TEST_ACCOUNT_HOME_ENV
     from linkedin_mcp_server.private_state import harden_directory
@@ -273,47 +328,53 @@ def isolate_daemon_state(
     home = tmp_path_factory.mktemp("account") / "home"
     harden_directory(home)
     monkeypatch.setenv(TEST_ACCOUNT_HOME_ENV, str(home))
-    if real_daemon_state_root is not None:
-        request.node.stash[_DAEMON_STATE_CHECK] = (
-            real_daemon_state_root,
-            tmp_path,
-            time.time() - _TIMESTAMP_SLACK_SECONDS,
-        )
+    if real_daemon_state_root is None:
+        yield
+        return
+    before = _entries(real_daemon_state_root)
+    started_ns = time.time_ns()
+    yield
+    request.node.stash[_DAEMON_STATE_CHECK] = _DaemonStateCheck(
+        real_daemon_state_root, before, started_ns, _state_keys(tmp_path)
+    )
 
 
 def _daemon_state_on_the_real_root(item: pytest.Item) -> str | None:
     """Say where a process this test started wrote daemon state under the real root.
 
-    Looked up the way the state is keyed: every directory under ``tmp_path`` may
-    be an auth root, and its key is checked under the real root. A directory
-    found there counts only if something in it changed during the test. The key
-    is an inode, and inodes of deleted temporary directories come back, so keys
-    left by earlier runs can match a directory this test just made.
+    Looked up the way the state is keyed: every directory the test left in
+    ``tmp_path`` may be an auth root, and its key is checked under the real
+    root. A key that was not there before the test was written by it. One that
+    was is left over from an earlier run whose directory had the same inode,
+    which deleted temporary directories hand on, and counts only if something
+    in it changed after the test started.
 
     Asked from outside every process, so a child that lost the variable is
-    caught the same way as code that stopped reading it.
+    caught the same way as code that stopped reading it. An auth root the test
+    deleted before its teardown has no key left to look up.
     """
     check = item.stash.get(_DAEMON_STATE_CHECK, None)
     if check is None:
         return None
-    root, tmp_path, since = check
-    from linkedin_mcp_server.daemon_descriptor import DescriptorError, _daemon_dir_name
-
     written: list[str] = []
-    for directory, _dirs, _files in os.walk(tmp_path):
+    for key in sorted(check.keys):
+        state = check.root / key
         try:
-            state = root / _daemon_dir_name(Path(directory))
-            stamps = [entry.lstat() for entry in (state, *state.iterdir())]
-        except (OSError, DescriptorError):
+            stamps = [_lstat(state)]
+            with _scandir(state) as entries:
+                stamps.extend(_lstat(entry.path) for entry in entries)
+        except OSError:
             continue
-        if any(max(s.st_mtime, s.st_ctime) >= since for s in stamps):
+        if key not in check.before or any(
+            max(s.st_mtime_ns, s.st_ctime_ns) >= check.started_ns for s in stamps
+        ):
             written.append(str(state))
     if not written:
         return None
     return (
         f"{item.nodeid} started a process that wrote daemon state under the "
-        f"real {root}: {', '.join(written)}. Start children with the inherited "
-        f"environment, which carries the temporary account home "
+        f"real {check.root}: {', '.join(written)}. Start children with the "
+        f"inherited environment, which carries the temporary account home "
         f"`isolate_daemon_state` sets."
     )
 
