@@ -459,7 +459,7 @@ def test_invalid_cli_input_emits_one_safe_error_annotation(title: str) -> None:
 
     assert result.returncode != 0
     assert sum(line.startswith("::error::") for line in output.splitlines()) == 1
-    assert "Expected: type: subject" in output
+    assert "Expected: type: Subject" in output
     assert title not in output
     assert "::warning::" not in output
 
