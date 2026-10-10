@@ -1,0 +1,17 @@
+{
+  "name": "linkedin-mcp-server",
+  "owner": {
+    "name": "Daniel Sticker",
+    "email": "daniel@sticker.name"
+  },
+  "metadata": {
+    "description": "LinkedIn MCP server for Cursor"
+  },
+  "plugins": [
+    {
+      "name": "linkedin-mcp-server",
+      "source": "plugins/linkedin-mcp-server",
+      "description": "Research profiles, companies, jobs, posts, and messages through your own LinkedIn session."
+    }
+  ]
+}

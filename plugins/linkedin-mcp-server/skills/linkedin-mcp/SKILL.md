@@ -15,9 +15,9 @@ work, health checks, or background maintenance.
 - Treat profile, company, job, post, feed, and message results as live LinkedIn
   evidence. Distinguish retrieved facts from inference.
 - Keep searches and result pages modest. Do not collect data in bulk or spam.
-- Never enable the plugin or its MCP server, edit Codex configuration, or start
-  a login flow merely because LinkedIn might be useful. If either component is
-  disabled, explain that state and stop.
+- Never enable the plugin or its MCP server, edit the host's plugin configuration,
+  or start a login flow merely because LinkedIn might be useful. If either
+  component is disabled, explain that state and stop.
 - `send_message` and `connect_with_person` are write actions. Use them only when
   the user explicitly authorizes the exact recipient and action. Confirm the
   final message or connection note unless the user has already supplied it.

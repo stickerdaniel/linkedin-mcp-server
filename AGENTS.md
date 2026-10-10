@@ -222,7 +222,7 @@ gt create -m "chore(release): Bump version to X.Y.Z"
 gt submit                        # merge PR to trigger release workflow
 ```
 
-The CI release workflow automatically updates `manifest.json`, `docker-compose.yml` and `.github/mcp/server.json` with the new version. Do not update them manually.
+The CI release workflow automatically updates `manifest.json`, `docker-compose.yml`, `.github/mcp/server.json`, and the Codex and Cursor plugin manifests under `plugins/linkedin-mcp-server/` (including the shared `.mcp.json`). Do not update them manually. Update the Cursor one-click install link and manual `mcp.json` example in `README.md` when the pinned package version changes.
 
 After the workflow completes, file a PR against
 [`docker/mcp-registry`](https://github.com/docker/mcp-registry) updating
@@ -238,6 +238,8 @@ this server no longer has, and `USER_AGENT` now refuses to start
 (`config/loaders.py`). It needs the session directory as a mount instead. Docker
 validates a changed entry by pulling the image and listing its tools over stdio,
 so the tag it moves to has to be a release where that works.
+
+**Cursor Marketplace:** after the plugin is on `main`, submit this public repository at [cursor.com/marketplace/publish](https://cursor.com/marketplace/publish). Review is manual; the checklist is in [Cursor's plugin reference](https://cursor.com/docs/reference/plugins) (kebab-case name, relative paths, committed logo, README, local install verified).
 
 `.github/mcp/server.json` is a different registry: the official one at
 `registry.modelcontextprotocol.io`, which is a service reached through
