@@ -250,11 +250,13 @@ class _DaemonStateCheck:
     """What the teardown report needs to judge one test's daemon state."""
 
     root: Path
-    #: The entries under ``root`` before the test, and when it started.
-    before: frozenset[str]
     started_ns: int
     #: The state directory names of every directory the test left in ``tmp_path``.
     keys: frozenset[str]
+    #: Those of ``keys`` that were already under ``root`` before the test. Only
+    #: these, never the whole listing: pytest keeps every item until the session
+    #: ends, and a developer's root can hold thousands of entries.
+    stale: frozenset[str]
 
 
 _DAEMON_STATE_CHECK = pytest.StashKey[_DaemonStateCheck]()
@@ -334,8 +336,9 @@ def isolate_daemon_state(
     before = _entries(real_daemon_state_root)
     started_ns = time.time_ns()
     yield
+    keys = _state_keys(tmp_path)
     request.node.stash[_DAEMON_STATE_CHECK] = _DaemonStateCheck(
-        real_daemon_state_root, before, started_ns, _state_keys(tmp_path)
+        real_daemon_state_root, started_ns, keys, keys & before
     )
 
 
@@ -365,7 +368,7 @@ def _daemon_state_on_the_real_root(item: pytest.Item) -> str | None:
                 stamps.extend(_lstat(entry.path) for entry in entries)
         except OSError:
             continue
-        if key not in check.before or any(
+        if key not in check.stale or any(
             max(s.st_mtime_ns, s.st_ctime_ns) >= check.started_ns for s in stamps
         ):
             written.append(str(state))
@@ -455,9 +458,10 @@ def mock_context():
 def pytest_runtest_makereport(item, call):
     """Fail a test that leaves a stream unusable or daemon state on the real root.
 
-    The daemon state check is ``_daemon_state_on_the_real_root``. It runs here
-    because only here are the test's own patches undone: one that replaces
-    ``os.walk`` or ``Path.exists`` would otherwise blind or hang the lookup.
+    The daemon state check is ``_daemon_state_on_the_real_root``, over what
+    ``isolate_daemon_state`` recorded in its teardown. It reports here, after
+    every fixture has torn down, so state a process wrote while a fixture was
+    stopping it still counts.
 
     A test that closes one of them breaks every test that runs after it in the
     same process, and the traceback lands on the innocent one. The failure
