@@ -57,6 +57,9 @@ __all__ = [
     "normalize_person_identifier",
     "normalize_profile_urn",
     "normalize_thread_id",
+    "normalize_post_reference",
+    "normalize_actor_reference",
+    "normalize_comment_reference",
     "person_profile_url",
 ]
 
@@ -496,3 +499,127 @@ def normalize_profile_urn(value: str) -> str:
             "result returned it, with no URL, path or query around it."
         )
     return value
+
+
+_POST_URN_KINDS = ("ugcPost", "share", "activity")
+
+
+_POST_URN = re.compile(
+    r"^urn:li:(?P<kind>" + "|".join(_POST_URN_KINDS) + r"):(?P<id>[0-9]+)$",
+    re.IGNORECASE,
+)
+
+
+_POST_SLUG = re.compile(
+    r"^[A-Za-z0-9_-]+-(?:" + "|".join(_POST_URN_KINDS) + r")-[0-9]+-[A-Za-z0-9_-]+$",
+    re.IGNORECASE,
+)
+
+
+_POST_UPDATE_ROUTE = ("feed", "update")
+
+
+_POST_SLUG_ROUTE = "posts"
+
+
+def _canonical_post_urn(value: str) -> str | None:
+    """A post entity URN in LinkedIn's own casing, or ``None``."""
+    match = _POST_URN.match(value)
+    if match is None:
+        return None
+    kind = next(
+        known
+        for known in _POST_URN_KINDS
+        if known.lower() == match.group("kind").lower()
+    )
+    return f"urn:li:{kind}:{match.group('id')}"
+
+
+def normalize_post_reference(value: str) -> str:
+    """The absolute permalink for a post, from a reference of any shape.
+
+    Returns a URL rather than an identifier, which is where this parts company
+    with its siblings above. A post has no single id to return: the two forms
+    ``references`` emits are not interchangeable and neither can be derived
+    from the other. ``/feed/update/urn:li:ugcPost:123/`` carries the entity URN
+    with no author, and ``/posts/<author>_<words>-ugcPost-123-<hash>`` carries
+    an author segment and a hash that LinkedIn issued and nothing here can
+    reconstruct. So each is canonicalized in place, and the caller navigates to
+    whichever it was given. ``build_feed_references`` documents the same
+    polymorphism from the producing side.
+
+    Accepted: either relative path as printed in ``references``, either as an
+    absolute URL on any locale subdomain, and a bare ``urn:li:{ugcPost,share,
+    activity}:<id>`` for a caller holding only the URN.
+
+    Idempotent, so passing a previous return value back through is harmless.
+
+    Raises:
+        InvalidReferenceError: when the value cannot name a post. Refusing here
+            costs nothing, where acting on a guess is a public write on
+            somebody else's content.
+    """
+    value = value.strip()
+    if not value:
+        raise InvalidReferenceError(
+            "Missing post (a LinkedIn post permalink, as returned in "
+            'references, for example "/feed/update/urn:li:ugcPost:123/" or '
+            '"/posts/name_words-ugcPost-123-abcd").'
+        )
+
+    # A bare URN is not a URL and must be judged before the URL branch, which
+    # would read `urn:li:ugcPost:123` as a scheme it does not serve.
+    if urn := _canonical_post_urn(value):
+        return f"https://www.linkedin.com/feed/update/{quote(urn, safe=':')}/"
+
+    segments = _linkedin_segments(value, want="post permalink")
+    if segments is None:
+        raise InvalidReferenceError(
+            "That is not a LinkedIn post reference. Pass a post permalink as "
+            'returned in references (kind "feed_post"), for example '
+            '"/feed/update/urn:li:ugcPost:123/" or '
+            '"/posts/name_words-ugcPost-123-abcd".'
+        )
+
+    route = [segment.lower() for segment in segments[: len(_POST_UPDATE_ROUTE)]]
+    if route == list(_POST_UPDATE_ROUTE) and len(segments) > len(_POST_UPDATE_ROUTE):
+        candidate = _usable(segments[len(_POST_UPDATE_ROUTE)])
+        if candidate is not None and (urn := _canonical_post_urn(candidate)):
+            return f"https://www.linkedin.com/feed/update/{quote(urn, safe=':')}/"
+
+    if segments and segments[0].lower() == _POST_SLUG_ROUTE and len(segments) > 1:
+        slug = _identifier(segments[1])
+        if slug is not None and _POST_SLUG.match(slug):
+            return f"https://www.linkedin.com/posts/{quote(slug, safe='')}"
+
+    raise InvalidReferenceError(
+        "That is a LinkedIn link but not a post permalink. Pass the "
+        "/feed/update/<urn>/ or /posts/<slug> URL for one post, as returned "
+        'in references (kind "feed_post").'
+    )
+
+
+def normalize_actor_reference(value: str) -> str:
+    """Require an explicit member or company URL for the acting identity."""
+    segments = _linkedin_segments(value.strip(), want="actor profile or company URL")
+    if segments and segments[0] == "in":
+        return f"/in/{quote(normalize_person_identifier(value), safe='')}/"
+    if segments and segments[0] == "company":
+        return f"/company/{quote(normalize_company_identifier(value), safe='')}/"
+    raise InvalidReferenceError(
+        "actor must be the exact /in/<member>/ or /company/<company>/ URL to act as. "
+        "Use get_my_profile to obtain your personal profile URL."
+    )
+
+
+def normalize_comment_reference(value: str) -> str:
+    """Accept an exact rendered comment URN, never an index or text match."""
+    reference = value.strip()
+    if re.fullmatch(
+        r"urn:li:comment:\((?:activity|ugcPost|share):[0-9]+,[0-9]+\)", reference
+    ):
+        return reference
+    raise InvalidReferenceError(
+        "Pass the exact comment reference from get_post_comments, for example "
+        "urn:li:comment:(activity:123,456). A post URL or numeric comment index is not enough."
+    )

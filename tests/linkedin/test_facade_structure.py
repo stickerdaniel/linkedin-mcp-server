@@ -30,6 +30,10 @@ FACADE_PACKAGE_IMPORTERS = {
 }
 
 PUBLIC_SIGNATURES = {
+    "get_post_comments": "(self, post: 'str', *, max_comments: 'int' = 20) -> 'dict[str, Any]'",
+    "reply_to_comment": "(self, post: 'str', comment_reference: 'str', reply: 'str', *, actor: 'str', confirm_reply: 'bool' = False, mention_parent_author: 'bool' = False) -> 'dict[str, Any]'",
+    "react_to_post": "(self, post: 'str', *, actor: 'str', reaction: 'str' = 'like', confirm_reaction: 'bool' = False) -> 'dict[str, Any]'",
+    "comment_on_post": "(self, post: 'str', comment: 'str', *, actor: 'str', confirm_comment: 'bool' = False, mention_author: 'bool' = False) -> 'dict[str, Any]'",
     "click_button_by_text": "(self, text: 'str', *, scope: 'str' = 'main', timeout: 'int' = 5000) -> 'bool'",
     "connect_with_person": "(self, username: 'str', *, note: 'str | None' = None) -> 'dict[str, Any]'",
     "extract_feed": "(self, num_posts: 'int' = 10) -> 'ExtractedSection'",
@@ -54,6 +58,10 @@ PUBLIC_SIGNATURES = {
 }
 
 DELEGATES = {
+    "get_post_comments": ("_post_actions", "get_post_comments"),
+    "reply_to_comment": ("_post_actions", "reply_to_comment"),
+    "react_to_post": ("_post_actions", "react_to_post"),
+    "comment_on_post": ("_post_actions", "comment_on_post"),
     "click_button_by_text": ("_content", "click_button_by_text"),
     "connect_with_person": ("_connection", "connect_with_person"),
     "extract_feed": ("_feed", "extract_feed"),
@@ -78,6 +86,10 @@ DELEGATES = {
 }
 
 DELEGATE_CALLS = {
+    "get_post_comments": "self._post_actions.get_post_comments(post, max_comments=max_comments)",
+    "reply_to_comment": "self._post_actions.reply_to_comment(post, comment_reference, reply, actor=actor, confirm_reply=confirm_reply, mention_parent_author=mention_parent_author)",
+    "react_to_post": "self._post_actions.react_to_post(post, actor=actor, reaction=reaction, confirm_reaction=confirm_reaction)",
+    "comment_on_post": "self._post_actions.comment_on_post(post, comment, actor=actor, confirm_comment=confirm_comment, mention_author=mention_author)",
     "click_button_by_text": "self._content.click_button_by_text(text, scope=scope, timeout=timeout)",
     "connect_with_person": "self._connection.connect_with_person(username, note=note)",
     "extract_feed": "self._feed.extract_feed(num_posts)",
@@ -102,6 +114,7 @@ DELEGATE_CALLS = {
 }
 
 FACADE_STATE = {
+    "_post_actions",
     "_capture",
     "_company",
     "_connection",

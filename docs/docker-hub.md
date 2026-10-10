@@ -186,7 +186,30 @@ Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSO
 }
 ```
 
+- Post likes and comments support an explicit personal profile or authorized
+  company `actor` URL, with separate confirmation flags that default to false.
+  Comments can optionally mention their verified author.
+  Unknown actor or page layouts refuse; ambiguous outcomes return `retry_safe=false`.
+
 ## Repository
 
 - **Source**: <https://github.com/stickerdaniel/linkedin-mcp-server>
 - **License**: Apache 2.0
+
+
+Comment thread tools:
+
+- `get_post_comments`: read up to 50 currently rendered bodies and exact comment
+  URNs; hidden replies and pagination are outside this bounded read.
+- `reply_to_comment`: target an exact reference value as a verified personal or
+  authorized company actor. Defaults to `confirm_reply=False`; this opens the
+  composer and LinkedIn may insert an automatic mention draft, but nothing is
+  typed or published. Confirmed replies clear that automatic mention by default;
+  `mention_parent_author=True` preserves its verified rich token instead.
+
+The English SDUI reply adapter requires the exact parent, newly opened composer,
+matching local actor avatar, and a bounded sibling segment. Nested replies work
+only where that same structure is exposed. Unknown or ambiguous layouts refuse.
+Discovery URLs identify the post, not a comment permalink; parent relationships
+are reported only when rendered ancestry proves them. Check the thread before
+retrying any uncertain publication (`retry_safe=False` or an interrupted call).
