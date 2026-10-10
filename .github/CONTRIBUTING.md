@@ -147,7 +147,7 @@ uv run pre-commit run --all-files   # ruff, ty and both generated-file checks
 1. Link the issue the change belongs to, or open one as described at the top.
 2. Branch from `main` as `feature/<issue>-<short-description>` or `fix/<issue>-<short-description>`.
 3. Implement the change with tests and docs, following the checklists above.
-4. Open the PR as a draft. Title it as a [conventional commit](https://www.conventionalcommits.org/), `type(scope): subject`, with an imperative subject under 50 characters. PRs are squash-merged, so the title becomes the commit subject on `main` and the commits inside the PR are only for review.
+4. Open the PR as a draft. Title it as a [conventional commit](https://www.conventionalcommits.org/), `type(scope): subject`, with a capitalized, imperative subject under 50 characters. PRs are squash-merged, so the title becomes the commit subject on `main` and the commits inside the PR are only for review.
 5. Finish the attribution line at the end of the PR template. CI fails until the last line is `Generated with <model> for <job> in <tool> via <host>.` The job is what the model did, such as implementation or review. The tool is the coding-agent runtime, such as Claude Code or Codex CLI. The host is the app that ran it, such as T3 Code.
 6. Add a changelog fragment if the PR needs one (see below).
 7. Mark the PR ready for review. AI agents review it first, then a maintainer.

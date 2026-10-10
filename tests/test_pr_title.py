@@ -26,9 +26,13 @@ INVALID_PR_DATA = cast(str, _VALIDATOR.INVALID_PR_DATA)
 INVALID_SCOPE = cast(str, _VALIDATOR.INVALID_SCOPE)
 INVALID_SHAPE = cast(str, _VALIDATOR.INVALID_SHAPE)
 INVALID_SUBJECT = cast(str, _VALIDATOR.INVALID_SUBJECT)
+LONG_SUBJECT = cast(str, _VALIDATOR.LONG_SUBJECT)
+LOWERCASE_SUBJECT = cast(str, _VALIDATOR.LOWERCASE_SUBJECT)
+RENOVATE = cast(dict[str, str], _VALIDATOR.RENOVATE)
 UNSAFE_CHARACTER = cast(str, _VALIDATOR.UNSAFE_CHARACTER)
 UNSUPPORTED_TYPE = cast(str, _VALIDATOR.UNSUPPORTED_TYPE)
 validate_title = cast(Callable[[str], str | None], _VALIDATOR.validate_title)
+validate_style = cast(Callable[[str], str | None], _VALIDATOR.validate_style)
 
 _CHECK_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "check-pr-title.yml"
 _LABEL_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "label-pr.yml"
@@ -261,6 +265,71 @@ def test_unicode_and_internal_punctuation_are_accepted(title: str) -> None:
     assert validate_title(title) is None
 
 
+@pytest.mark.parametrize(
+    ("title", "diagnostic"),
+    [
+        ("fix: Keep this one", None),
+        ("fix: keep this one", LOWERCASE_SUBJECT),
+        ("fix(tools): `get_feed` keeps its cap", None),
+        ("fix: 2 retries are enough", None),
+        ("fix: Ünïcode capitals count", None),
+        ("fix: " + "A" * 49, None),
+        ("fix: " + "A" * 50, LONG_SUBJECT),
+    ],
+)
+def test_style_requires_capital_and_short_subject(
+    title: str, diagnostic: str | None
+) -> None:
+    assert validate_title(title) is None
+    assert validate_style(title) == diagnostic
+
+
+def _pr_json(tmp_path: Path, title: str, user: object) -> Path:
+    path = tmp_path / "pull-request.json"
+    path.write_text(json.dumps({"title": title, "user": user}), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize(
+    "title", ["chore(deps): lock file maintenance", "chore(deps): " + "a" * 60]
+)
+def test_cli_holds_renovate_to_the_shape_only(tmp_path: Path, title: str) -> None:
+    renovate = _run_cli(None, _pr_json(tmp_path, title, RENOVATE))
+    assert renovate.returncode == 0, renovate.stdout
+
+    person = _run_cli(None, _pr_json(tmp_path, title, {"login": "a", "type": "User"}))
+    assert person.returncode == 1
+    assert person.stdout.startswith(f"::error::{validate_style(title)}\n")
+
+
+@pytest.mark.parametrize(
+    "user",
+    [
+        {"login": "renovate[bot]", "type": "User"},
+        {"login": "renovate", "type": "Bot"},
+        None,
+    ],
+)
+def test_cli_style_exemption_needs_the_renovate_app(
+    tmp_path: Path, user: object
+) -> None:
+    title = "chore(deps): lock file maintenance"
+    result = _run_cli(None, _pr_json(tmp_path, title, user))
+    assert result.stdout.startswith(f"::error::{LOWERCASE_SUBJECT}\n")
+
+
+def test_cli_still_checks_renovate_shape(tmp_path: Path) -> None:
+    title = "build(deps): Update ruff"
+    result = _run_cli(None, _pr_json(tmp_path, title, RENOVATE))
+    assert result.stdout.startswith(f"::error::{UNSUPPORTED_TYPE}\n")
+
+
+def test_cli_env_title_is_style_checked() -> None:
+    result = _run_cli("fix: lowercase subject")
+    assert result.returncode == 1
+    assert result.stdout.startswith(f"::error::{LOWERCASE_SUBJECT}\n")
+
+
 def _run_cli(
     title: str | None, pr_json: Path | None = None
 ) -> subprocess.CompletedProcess[str]:
@@ -294,12 +363,13 @@ def _label_workflow_script() -> str:
 
 
 def _run_label_workflow(
-    tmp_path: Path, title: str, attached: set[str]
+    tmp_path: Path, title: str, attached: set[str], user: object = None
 ) -> tuple[subprocess.CompletedProcess[str], set[str], list[list[str]]]:
     state_path = tmp_path / "labels.json"
     calls_path = tmp_path / "calls.jsonl"
     state_path.write_text(
-        json.dumps({"title": title, "labels": sorted(attached)}), encoding="utf-8"
+        json.dumps({"title": title, "labels": sorted(attached), "user": user}),
+        encoding="utf-8",
     )
     bin_path = tmp_path / "bin"
     bin_path.mkdir()
@@ -318,7 +388,7 @@ args = sys.argv[1:]
 if args[:3] == ["api", "--method", "GET"]:
     endpoint = args[-1]
     if "/pulls/" in endpoint:
-        print(json.dumps({"title": state["title"]}))
+        print(json.dumps({"title": state["title"], "user": state["user"]}))
     elif "/issues/" in endpoint:
         print(json.dumps([[{"name": label} for label in state["labels"]]]))
     else:
@@ -544,27 +614,32 @@ def test_label_workflow_matches_breaking_marker_without_normalizing() -> None:
 
 
 @pytest.mark.parametrize(
-    ("title", "expected_label"),
+    ("title", "expected_label", "user"),
     [
-        ("refactor: Keep internals tidy", "refactoring"),
-        ("refactor(config)!: Change configuration", "breaking-change"),
-        ("feat!: Replace the public contract", "breaking-change"),
-        ("fix(deps): update all major dependencies (major)", "dependencies"),
-        ("chore(deps): lock file maintenance", "dependencies"),
-        ("fix(deps)!: Drop the old runtime", "breaking-change"),
-        ("fix(deps-dev): Keep the scope exact", "bug"),
-        ("feat(deps): Add a dependency-backed feature", "enhancement"),
+        ("refactor: Keep internals tidy", "refactoring", None),
+        ("refactor(config)!: Change configuration", "breaking-change", None),
+        ("feat!: Replace the public contract", "breaking-change", None),
+        (
+            "fix(deps): update all major dependencies (major)",
+            "dependencies",
+            RENOVATE,
+        ),
+        ("chore(deps): lock file maintenance", "dependencies", RENOVATE),
+        ("fix(deps)!: Drop the old runtime", "breaking-change", None),
+        ("fix(deps-dev): Keep the scope exact", "bug", None),
+        ("feat(deps): Add a dependency-backed feature", "enhancement", None),
     ],
 )
 def test_pr_title_label_lifecycle(
     tmp_path: Path,
     title: str,
     expected_label: str,
+    user: object,
 ) -> None:
     assert validate_title(title) is None
     attached = (_DERIVED_LABELS - {expected_label}) | {"triage"}
 
-    result, final_labels, calls = _run_label_workflow(tmp_path, title, attached)
+    result, final_labels, calls = _run_label_workflow(tmp_path, title, attached, user)
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert final_labels == {expected_label, "triage"}
@@ -574,7 +649,7 @@ def test_pr_title_label_lifecycle(
     idempotent_path = tmp_path / "idempotent"
     idempotent_path.mkdir()
     rerun, rerun_labels, rerun_calls = _run_label_workflow(
-        idempotent_path, title, final_labels
+        idempotent_path, title, final_labels, user
     )
     assert rerun.returncode == 0, rerun.stdout + rerun.stderr
     assert rerun_labels == final_labels
