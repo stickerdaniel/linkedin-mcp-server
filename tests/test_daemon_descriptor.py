@@ -1405,6 +1405,7 @@ class TestStateLocation:
         monkeypatch.setattr(
             daemon_descriptor_module, "_account_home", _REAL_ACCOUNT_HOME
         )
+        monkeypatch.delenv(daemon_descriptor_module.TEST_ACCOUNT_HOME_ENV)
         auth_root = tmp_path / "shared-parent"
         auth_root.mkdir()
         before = daemon_dir(auth_root)
@@ -1468,6 +1469,7 @@ class TestStateLocation:
         monkeypatch.setattr(
             daemon_descriptor_module, "_account_home", _REAL_ACCOUNT_HOME
         )
+        monkeypatch.delenv(daemon_descriptor_module.TEST_ACCOUNT_HOME_ENV)
         monkeypatch.setattr(os, "getuid", lambda: 424242, raising=False)
 
         import pwd
@@ -1491,6 +1493,7 @@ class TestStateLocation:
         monkeypatch.setattr(
             daemon_descriptor_module, "_account_home", _REAL_ACCOUNT_HOME
         )
+        monkeypatch.delenv(daemon_descriptor_module.TEST_ACCOUNT_HOME_ENV)
         monkeypatch.setattr(os, "getuid", lambda: 424242, raising=False)
 
         import pwd

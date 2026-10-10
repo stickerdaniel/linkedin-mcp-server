@@ -904,7 +904,6 @@ class TestARealOwnerGoingAway:
         import contextlib
         import json
         import os
-        import shutil
         import subprocess
         import sys
         import time as clock
@@ -949,17 +948,11 @@ class TestARealOwnerGoingAway:
                 "an owner nobody called kept running past its idle timeout"
             )
         finally:
-            # The owner wrote under the account's real state root, which no
-            # redirection reaches, and an owner whose frontend failed before
-            # naming it may have too. Its descriptor names it then, published
-            # or still pending. Only a process started during this test is
-            # stopped, though: a descriptor left by an earlier run can name a
-            # pid the system has since handed to something else. The directory
-            # is keyed by this test's own auth root, so removing it touches
-            # nothing else, and it goes only once every owner is gone: removing
-            # a live owner's lock file would let a later election take it
-            # over, and Windows refuses to delete a file a dying process still
-            # holds open.
+            # An owner whose frontend failed before naming it may still be
+            # running. Its descriptor names it then, published or still
+            # pending. Only a process started during this test is stopped,
+            # though: an owner that already exited may have handed its pid to
+            # something else.
             directory = daemon_dir(profile.parent)
             pids = {owner} if isinstance(owner, int) else set()
             for descriptor in directory.glob("*.json"):
@@ -978,8 +971,6 @@ class TestARealOwnerGoingAway:
                 clock.sleep(0.1)
             survivors = [pid for pid in stopped if _alive(pid)]
             assert not survivors, f"owners still running after a kill: {survivors}"
-            shutil.rmtree(directory, ignore_errors=True)
-            assert not directory.exists(), f"could not remove {directory}"
 
 
 class TestTheMarkerSurvivesTheRealClient:
