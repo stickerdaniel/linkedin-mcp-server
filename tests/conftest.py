@@ -23,6 +23,7 @@ def reset_singletons():
     """Reset global state for test isolation."""
     from linkedin_mcp_server.bootstrap import reset_bootstrap_for_testing
     from linkedin_mcp_server.config import reset_config
+    from linkedin_mcp_server.core.throttle import reset_throttle_record
     from linkedin_mcp_server.daemon_descriptor import (
         reset_daemon_descriptor_for_testing,
     )
@@ -44,6 +45,10 @@ def reset_singletons():
     reset_browser_for_testing()
     reset_leases_for_testing()
     reset_config()
+    # A throttled response one test planted is offered as the diagnosis of the
+    # next test's failure otherwise: the record is process state, and the
+    # middleware that clears it per call runs in almost none of these tests.
+    reset_throttle_record()
     # Every test that builds a server records a role, and the auth gates read it
     # from process state. Left standing, one OWNER would refuse logins in every
     # test after it, in a suite where most never mention a role.
@@ -65,6 +70,7 @@ def reset_singletons():
     # own bookkeeping first rather than yanked out from under it.
     reset_leases_for_testing()
     reset_config()
+    reset_throttle_record()
     reset_process_role_for_testing()
     reset_liveness_for_testing()
     teardown_trace_logging(keep_traces=True)
