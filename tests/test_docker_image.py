@@ -518,16 +518,19 @@ def test_the_built_project_records_the_pinned_backend() -> None:
             timeout=300,
             check=True,
         )
-        # Corrupt every hash and repeat the install off the stage that just
-        # ran it. A build reading the constraint file cannot get past this; one
-        # ignoring it finishes exactly as before.
+        # Replace every hash with a well-formed wrong one and repeat the install
+        # off the stage that just ran it. A build reading the constraint file
+        # cannot get past this; one ignoring it finishes exactly as before. The
+        # digest keeps its 64 characters because uv 0.13 rejects a malformed
+        # one before comparing anything.
         # Not `-q`: the reason has to be readable. Without the build log, any
         # failure at all would satisfy this, including a typo in the `sed`.
         tampered = subprocess.run(
             [docker, "build", "--progress", "plain", "-f", "-", str(_REPO_ROOT)],
             input=(
                 f"FROM {tag}\n"
-                "RUN sed -i s/--hash=sha256:/--hash=sha256:0/g "
+                "RUN sed -i -E "
+                f"'s/--hash=sha256:[0-9a-f]{{64}}/--hash=sha256:{'0' * 64}/g' "
                 "requirements/build-constraints.txt\n"
                 f"{_PROJECT_INSTALL} --force-reinstall\n"
             ),
