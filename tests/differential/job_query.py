@@ -20,14 +20,14 @@ would alter its handle table and keep the installer's Job alive.
 **Two logger events.** The same shim is also a declared, test-only observer
 of exactly two logger events: ``core.close`` logging that the drain did not
 prove the launch gone (its consumption of the drain's False, logged for no
-exception), and the owner's ``Standing down: %s``. A filter on each of the
-two loggers matches the logger's name and the record's exact message
-template, and returns True whatever happens, so no record, handler or call
-changes; a record of it carries the process's pid, its own creation time and
-a monotonic reading. The daemon log is one file per auth root, shared by
-every owner generation, so only this tells which lifetime reached that call
-(review e1ey, E1EY-02). It says the call was reached, not that anything was
-written to the log.
+exception), and the owner's ``Standing down: %s``. A filter on each logger
+that logs one, the owner's under either build's module name, matches the
+logger's name and the record's exact message template, and returns True
+whatever happens, so no record, handler or call changes; a record of it
+carries the process's pid, its own creation time and a monotonic reading. The
+daemon log is one file per auth root, shared by every owner generation, so
+only this tells which lifetime reached that call (review e1ey, E1EY-02). It
+says the call was reached, not that anything was written to the log.
 
 **Positive evidence only.** A record says that one planted failure, or one of
 the two events, was reached by that lifetime, then. It certifies that
@@ -123,13 +123,19 @@ import time
 
 _RECORD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "h-r11-reached.jsonl")
 _MODULE = "linkedin_mcp_server.process_tree"
+#: The owner module as this checkout names it, and as the frozen baseline did
+#: before the daemon became a package: a row runs either build.
+_OWNER_MODULES = (
+    "linkedin_mcp_server.daemon.owner",
+    "linkedin_mcp_server.daemon_owner",
+)
 #: The two logger events observed, by logger name and exact message template:
 #: core.close consuming the drain's False, and the owner's stand-down.
 _EVENTS = {
     ("linkedin_mcp_server.core.browser",
      "Browser processes from this launch are still running after close, so the "
      "shutdown stays unconfirmed."): "consumed-false",
-    ("linkedin_mcp_server.daemon_owner", "Standing down: %s"): "stand-down",
+    **{(owner, "Standing down: %s"): "stand-down" for owner in _OWNER_MODULES},
 }
 
 
@@ -181,7 +187,7 @@ def install(win32job, error, identity, record=_RECORD, created=None):
 def witness(logging, record=_RECORD, created=None):
     """Observe the two logger events in _EVENTS; the doubles call this too.
 
-    A filter on each of the two loggers, matching the record's logger name and
+    A filter on each logger in _EVENTS, matching the record's logger name and
     its exact message template, never the formatted text. It returns True
     whatever happens, so the record, its handlers and the call go on exactly
     as without it; a failure while recording only loses the evidence. A record
@@ -194,8 +200,8 @@ def witness(logging, record=_RECORD, created=None):
             name = entry.name
             if name == "__main__":
                 spec = getattr(sys.modules.get("__main__"), "__spec__", None)
-                if getattr(spec, "name", None) == "linkedin_mcp_server.daemon_owner":
-                    name = "linkedin_mcp_server.daemon_owner"
+                if getattr(spec, "name", None) in _OWNER_MODULES:
+                    name = spec.name
             event = _EVENTS.get((name, entry.msg))
             if event is not None:
                 args = entry.args if isinstance(entry.args, tuple) else ()

@@ -41,7 +41,8 @@ from differential import test_watcher as watcher_tests
 from differential.test_row_judgement import _healthy
 from differential.test_watcher import GRAMMAR, _shape
 from differential.watcher import OWNER_MODULE
-from linkedin_mcp_server import daemon_descriptor, process_tree
+from linkedin_mcp_server import process_tree
+from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
 
 # The row entry with every launch replaced, and its staged profile.
 row = gate.row
@@ -361,7 +362,7 @@ async def test_an_ineligible_row_never_reads_daemon_state_into_being(
 ):
     """The first E1d run's H-R12 K3 failure: the harness made the directory.
 
-    ``daemon_descriptor.read`` prepares the daemon directory before it reads.
+    ``daemon.descriptor.read`` prepares the daemon directory before it reads.
     Called on a row that must stay Direct, it created the state the row is
     then failed for. It may be called only once a descriptor exists.
     """

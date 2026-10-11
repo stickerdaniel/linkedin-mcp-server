@@ -52,6 +52,15 @@ from differential.watcher import (
 WATCHER = Path(__file__).with_name("watcher.py")
 PROFILE = "/tmp/differential-profile"
 
+#: The owner module as each build in a row names it: the frozen baseline's flat
+#: module, and this checkout's package. Spelled out rather than imported, so a
+#: dropped spelling in the observers cannot hide behind the same constant.
+OWNER_SPELLINGS = pytest.mark.parametrize(
+    "owner",
+    ["linkedin_mcp_server.daemon_owner", "linkedin_mcp_server.daemon.owner"],
+    ids=["baseline", "candidate"],
+)
+
 
 def _browser(pid: int, ppid: int, *extra: str, profile: str = PROFILE, start=1.0):
     return record(
@@ -155,6 +164,32 @@ def test_starts_and_exits_are_keyed_by_create_time():
 )
 def test_actors_are_named_from_the_command_line(cmdline, actor):
     assert classify(ProcessRecord(1, 0, 0.0, None, tuple(cmdline))) == actor
+
+
+@OWNER_SPELLINGS
+def test_every_owner_observer_recognises_either_builds_owner(owner):
+    """The watcher's actor, the row's owner launches, its release gate and its
+    owner lifetimes all name an owner under either build's module name."""
+    python = "/venv/bin/python"
+    command = [python, "-P", "-m", owner, "--job-name", "Local\\j"]
+    gate = harness.gate_script(harness.REPO_ROOT)
+    gate_command = [python, "-I", "-S", "-u", str(gate), "ab" * 32, "--", *command]
+    started = {
+        "kind": "process.start",
+        "actor": "owner",
+        "pid": 77,
+        "ppid": 1,
+        "start_identity": 5.0,
+        "in_row": True,
+        "t": 5.0,
+        "cmdline": command,
+    }
+
+    assert classify(ProcessRecord(77, 1, 5.0, None, tuple(command))) == "owner"
+    assert harness.owner_launches([started]) == [77]
+    assert harness.owner_gate(gate_command, [gate])
+    owners, _ = harness.launch_lifetimes([started], [gate])
+    assert [lifetime[:2] for lifetime in owners] == [[77, 5.0]]
 
 
 def _stand_in_browser(profile: Path) -> subprocess.Popen[bytes]:
@@ -1359,14 +1394,15 @@ def test_only_a_row_server_or_owner_is_asked_for_its_environment(ppid, cmdline):
     assert sampler.sample()[2].launcher is None
 
 
-def test_a_row_owner_records_its_launcher():
+@OWNER_SPELLINGS
+def test_a_row_owner_records_its_launcher(owner):
     table = _row_table()
     sampler, tracker = _sampler(table), Tracker()
     _observe(sampler, tracker, 0.0)
     table[2] = {
         "start": 2.0,
         "ppid": 1,
-        "cmdline": [FRAMEWORK_PYTHON, "-P", "-m", "linkedin_mcp_server.daemon_owner"],
+        "cmdline": [FRAMEWORK_PYTHON, "-P", "-m", owner],
         "environ": {"__PYVENV_LAUNCHER__": BASELINE_VENV_PYTHON},
     }
     _observe(sampler, tracker, 1.0)

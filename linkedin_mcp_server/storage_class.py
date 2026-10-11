@@ -254,7 +254,7 @@ def _absolute(value: str) -> Path | None:
 def _known_folder(csidl: int) -> str | None:  # pragma: no cover - Windows only
     """Ask Windows for one of the current account's folders, or None.
 
-    The same call ``daemon_descriptor._account_home`` makes, for a different
+    The same call ``daemon.descriptor._account_home`` makes, for a different
     folder. None on any failure: the caller decides what not knowing means.
     """
     if sys.platform != "win32":

@@ -7,8 +7,8 @@ session against ``/feed/``. One long-lived owner removes that traffic entirely.
 
 This module is only the discovery half: it answers "is there an owner I should
 be talking to, and may I trust it with a token". Electing one and spawning it
-live in :mod:`linkedin_mcp_server.daemon_election`, and forwarding to what it
-returns in :mod:`linkedin_mcp_server.daemon_proxy`.
+live in :mod:`linkedin_mcp_server.daemon.election`, and forwarding to what it
+returns in :mod:`linkedin_mcp_server.daemon.proxy`.
 
 Finding an owner takes a wait rather than a single read, because the interesting
 case is neither "an owner exists" nor "none does", but the window in between. An
@@ -45,9 +45,10 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from linkedin_mcp_server import daemon_descriptor, storage_class
+from linkedin_mcp_server import storage_class
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.daemon_descriptor import DaemonDescriptor, DescriptorError
+from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
+from linkedin_mcp_server.daemon.descriptor import DaemonDescriptor, DescriptorError
 from linkedin_mcp_server.session_state import auth_root_dir, canonical, get_runtime_id
 from linkedin_mcp_server.storage_class import StorageClass
 
@@ -142,7 +143,7 @@ class Attachment:
     #: runtime and token all passed, and the owner still may not run a tool for
     #: this client. It comes only with an ``INCOMPATIBLE`` lookup, so it can ask
     #: for turnover or be probed for liveness, and every consumer that would
-    #: dispatch a call refuses it (``daemon_proxy``).
+    #: dispatch a call refuses it (``daemon.proxy``).
     control_only: bool = False
 
 
@@ -383,7 +384,7 @@ def look_up_owner(
     *ignore_instances* names generations the caller has already judged unusable,
     and it exists because ``ATTACHABLE`` alone made this function return
     instantly on a file the caller was going to throw away. Only the caller can
-    know that: burial lives in :mod:`linkedin_mcp_server.daemon_election` and is
+    know that: burial lives in :mod:`linkedin_mcp_server.daemon.election` and is
     established by connecting, which nothing here does. Without it a caller that
     asked for a wait got none, and its own retry loop spun through the whole
     backoff at read speed, starting a descriptor inspection thread and touching

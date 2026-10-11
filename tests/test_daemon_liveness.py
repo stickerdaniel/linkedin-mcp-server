@@ -14,8 +14,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from linkedin_mcp_server.daemon_descriptor import PROTOCOL_VERSION
-from linkedin_mcp_server.daemon_liveness import (
+from linkedin_mcp_server.daemon.descriptor import PROTOCOL_VERSION
+from linkedin_mcp_server.daemon.liveness import (
     CALL_HEADER,
     EXPIRY_SECONDS,
     HEARTBEAT_SECONDS,
@@ -146,8 +146,8 @@ class TestCountingWhoIsWaiting:
         # every ordinary scan looks like a stall and nothing is ever expired.
         # Below the poll it is not a smaller margin, it is the feature switched
         # off, and nothing else here would notice.
-        from linkedin_mcp_server.daemon_liveness import _STALL_SECONDS
-        from linkedin_mcp_server.daemon_owner import _STAND_DOWN_POLL_SECONDS
+        from linkedin_mcp_server.daemon.liveness import _STALL_SECONDS
+        from linkedin_mcp_server.daemon.owner import _STAND_DOWN_POLL_SECONDS
 
         assert _STALL_SECONDS > _STAND_DOWN_POLL_SECONDS * 5
 
@@ -183,7 +183,7 @@ class TestTheOwnerSideMiddleware:
         # A call the owner cannot identify is one it cannot cancel once its
         # client goes. Refused, and refused before it is counted: an unmarked
         # call is neither work nor a reason to stay.
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         self._headers(monkeypatch, headers)
         liveness = daemon_liveness.get_liveness()
@@ -212,7 +212,7 @@ class TestTheOwnerSideMiddleware:
         assert liveness._waiting == {}
 
     async def test_a_marked_call_is_watched_while_it_runs(self, monkeypatch):
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         marker = new_call_id()
         self._headers(monkeypatch, {CALL_HEADER: marker})
@@ -234,7 +234,7 @@ class TestTheOwnerSideMiddleware:
         assert marker not in liveness._waiting
 
     async def test_a_marked_call_is_released_when_it_fails(self, monkeypatch):
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         marker = new_call_id()
         self._headers(monkeypatch, {CALL_HEADER: marker})
@@ -252,7 +252,7 @@ class TestTheOwnerSideMiddleware:
     async def test_an_abandoned_call_is_stopped_and_says_so(self, monkeypatch):
         from fastmcp.exceptions import ToolError
 
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         marker = new_call_id()
         self._headers(monkeypatch, {CALL_HEADER: marker})
@@ -324,7 +324,7 @@ class TestTheFrontendSide:
         """
         import httpx2
 
-        from linkedin_mcp_server.daemon_proxy import FrontendCallHeartbeatMiddleware
+        from linkedin_mcp_server.daemon.proxy import FrontendCallHeartbeatMiddleware
 
         middleware = FrontendCallHeartbeatMiddleware(backend)
 
@@ -369,7 +369,7 @@ class TestTheFrontendSide:
         # The reverse of what protocol 1 promised. A 404 used to be an owner
         # from before heartbeats and was served unheard; now it is not an owner
         # of this protocol at all, and a call it ran could never be cancelled.
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             OwnerFailure,
             OwnerUnreachableError,
         )
@@ -420,7 +420,7 @@ class TestTheFrontendSide:
     async def test_no_marker_is_left_behind_afterwards(self, tmp_path: Path):
         # A leaked context variable would stamp the next unrelated operation,
         # including a listing, with a call identifier that is over.
-        from linkedin_mcp_server.daemon_proxy import _call_being_made
+        from linkedin_mcp_server.daemon.proxy import _call_being_made
 
         backend = self._backend(tmp_path)
         middleware = self._middleware(backend, [])
@@ -438,12 +438,12 @@ class TestTheFrontendSide:
     def quick_cadence(self, monkeypatch):
         """Beat every 50ms instead of every two seconds.
 
-        Patched in `daemon_proxy`'s own namespace, which is where
+        Patched in `daemon.proxy`'s own namespace, which is where
         `_keep_saying` reads it. Without this a test would have to outlast a
         real period to see anything at all, and one that waits less than a
         period proves nothing: it stays green with the cancellation removed.
         """
-        monkeypatch.setattr("linkedin_mcp_server.daemon_proxy.HEARTBEAT_SECONDS", 0.05)
+        monkeypatch.setattr("linkedin_mcp_server.daemon.proxy.HEARTBEAT_SECONDS", 0.05)
         return 0.05
 
     @pytest.mark.parametrize("outcome", ["succeeds", "fails", "is cancelled"])
@@ -547,7 +547,7 @@ class _nothing_raised:
 class TestTheRouteOnARealOwner:
     """The heartbeat as an actual HTTP request against the owner's own app.
 
-    Built the way `daemon_owner._build_server` builds it, because the thing
+    Built the way `daemon.owner._build_server` builds it, because the thing
     under test is a custom route and those are mounted *outside* the
     authentication middleware. Measured on 3.4.4 and recorded next to the
     stand-down route: an unauthenticated POST to a custom path is served. Every
@@ -560,7 +560,7 @@ class TestTheRouteOnARealOwner:
 
     @staticmethod
     def _owner_app(token: str, host: str, port: int):
-        from linkedin_mcp_server.daemon_owner import create_owner_server
+        from linkedin_mcp_server.daemon.owner import create_owner_server
         from linkedin_mcp_server.config.schema import AppConfig
 
         return create_owner_server(
@@ -577,7 +577,7 @@ class TestTheRouteOnARealOwner:
         real process also runs a lifespan that opens Chromium, and a route test
         has no business starting a browser.
         """
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         port = 51234
         server = self._owner_app(self.TOKEN, self.HOST, port)
@@ -593,7 +593,7 @@ class TestTheRouteOnARealOwner:
     ) -> int:
         import httpx2
 
-        from linkedin_mcp_server.daemon_liveness import HEARTBEAT_PATH
+        from linkedin_mcp_server.daemon.liveness import HEARTBEAT_PATH
 
         headers = {}
         if token is not None:
@@ -651,8 +651,8 @@ class TestTheOwnersOwnLoop:
     """
 
     async def test_the_serving_loop_expires_abandoned_calls(self):
-        from linkedin_mcp_server import daemon_liveness
-        from linkedin_mcp_server.daemon_owner import _serve_until_stopped
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
+        from linkedin_mcp_server.daemon.owner import _serve_until_stopped
 
         liveness = daemon_liveness.get_liveness()
         marker = new_call_id()
@@ -682,7 +682,7 @@ class TestGoingAwayWhenNobodyNeedsIt:
     @staticmethod
     async def _run_loop(idle_timeout: float, *, ticks: float = 0.4) -> bool:
         """Run the owner's loop briefly. True if it decided to exit."""
-        from linkedin_mcp_server.daemon_owner import _serve_until_stopped
+        from linkedin_mcp_server.daemon.owner import _serve_until_stopped
 
         server = MagicMock()
         server.should_exit = False
@@ -699,7 +699,7 @@ class TestGoingAwayWhenNobodyNeedsIt:
         # going live would leave an owner that was started and then never used
         # running forever, which is the commonest way to reach this state: an
         # election starts one, and the frontend that asked dies before calling.
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         liveness = daemon_liveness.get_liveness()
         liveness.the_endpoint_is_live()
@@ -708,7 +708,8 @@ class TestGoingAwayWhenNobodyNeedsIt:
         assert await self._run_loop(idle_timeout=5.0) is True
 
     async def test_browser_setup_in_progress_holds_the_owner_open(self):
-        from linkedin_mcp_server import bootstrap, daemon_liveness
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         liveness = daemon_liveness.get_liveness()
         liveness.the_endpoint_is_live()
@@ -737,7 +738,9 @@ class TestGoingAwayWhenNobodyNeedsIt:
         # owner, which starts setup over and hides the diagnostic again. And a
         # failure nobody ever comes back for must not pin the owner forever,
         # which is what makes the grace bounded rather than a second wedge.
-        from linkedin_mcp_server import bootstrap, daemon_liveness, daemon_owner
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
+        from linkedin_mcp_server.daemon import owner as daemon_owner
 
         grace = 1.0
         monkeypatch.setattr(daemon_owner, "_SETUP_FAILURE_RETRY_GRACE_SECONDS", grace)
@@ -773,7 +776,7 @@ class TestGoingAwayWhenNobodyNeedsIt:
         # The clock has not started. An owner spends its first seconds importing
         # and launching Chromium, and a short timeout would otherwise fire
         # during startup, before the frontend that asked for it could call.
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         assert daemon_liveness.get_liveness().quiet_for() is None
         assert await self._run_loop(idle_timeout=0.05) is False
@@ -786,7 +789,7 @@ class TestGoingAwayWhenNobodyNeedsIt:
         # green when the middleware stopped counting calls at all, which is the
         # whole thing it exists to catch. Only marked calls are left to count:
         # an unmarked one is refused before it is admitted.
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         headers = {CALL_HEADER: new_call_id()}
         monkeypatch.setattr(
@@ -820,7 +823,7 @@ class TestGoingAwayWhenNobodyNeedsIt:
             call.cancel()
 
     async def test_the_clock_restarts_when_a_call_ends(self):
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         liveness = daemon_liveness.get_liveness()
         liveness.the_endpoint_is_live()
@@ -836,7 +839,7 @@ class TestGoingAwayWhenNobodyNeedsIt:
         assert await self._run_loop(idle_timeout=5.0) is False
 
     async def test_the_clock_restarts_when_background_activity_finishes(self):
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         liveness = daemon_liveness.get_liveness()
         liveness.the_endpoint_is_live()
@@ -851,7 +854,7 @@ class TestGoingAwayWhenNobodyNeedsIt:
     async def test_a_zero_timeout_keeps_the_owner_forever(self):
         # The documented way to switch it off, and the same value that already
         # disables the browser's own idle close.
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         liveness = daemon_liveness.get_liveness()
         liveness.the_endpoint_is_live()
@@ -872,7 +875,7 @@ import sys
 from pathlib import Path
 
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.daemon_election import obtain_owner
+from linkedin_mcp_server.daemon.election import obtain_owner
 from linkedin_mcp_server.profile_claim import ensure_profile_claim
 
 profile = Path(sys.argv[1])
@@ -913,7 +916,7 @@ class TestARealOwnerGoingAway:
         import psutil
         from test_daemon_election import _REPO_ROOT, _alive, _stop
 
-        from linkedin_mcp_server.daemon_descriptor import daemon_dir
+        from linkedin_mcp_server.daemon.descriptor import daemon_dir
 
         profile = tmp_path / "state"
         profile.mkdir()
@@ -986,7 +989,7 @@ class TestTheMarkerSurvivesTheRealClient:
     """
 
     def test_the_owners_client_factory_keeps_the_call_header(self):
-        from linkedin_mcp_server.daemon_owner import direct_async_http_client
+        from linkedin_mcp_server.daemon.owner import direct_async_http_client
 
         marker = new_call_id()
         client = direct_async_http_client(headers={CALL_HEADER: marker})
@@ -996,7 +999,7 @@ class TestTheMarkerSurvivesTheRealClient:
     async def test_the_header_reaches_the_wire(self):
         import httpx2
 
-        from linkedin_mcp_server.daemon_owner import direct_async_http_client
+        from linkedin_mcp_server.daemon.owner import direct_async_http_client
 
         marker = new_call_id()
         seen: dict[str, str] = {}
@@ -1066,7 +1069,7 @@ class TestTellingShutdownFromAbandonment:
         # and before that reaches the child the expiry scan removes the entry and
         # cancels the same child. Reading only "the child was cancelled and its
         # entry is gone" then reports a shutdown as an abandoned call.
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         marker = new_call_id()
         monkeypatch.setattr(
@@ -1110,8 +1113,8 @@ class TestAnAbandonedCallStillExpiresUnderTheLoop:
     """
 
     async def test_a_call_that_goes_quiet_is_cancelled_by_the_running_loop(self):
-        from linkedin_mcp_server import daemon_liveness
-        from linkedin_mcp_server.daemon_owner import _serve_until_stopped
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
+        from linkedin_mcp_server.daemon.owner import _serve_until_stopped
 
         liveness = daemon_liveness.get_liveness()
         marker = new_call_id()
@@ -1167,7 +1170,7 @@ def _call_context() -> Any:
 
 
 def _refused_as_retiring(result: Any, instance: str | None) -> bool:
-    from linkedin_mcp_server.daemon_liveness import REFUSAL_KEY
+    from linkedin_mcp_server.daemon.liveness import REFUSAL_KEY
 
     return getattr(result, "is_error", False) is True and (result.meta or {}).get(
         REFUSAL_KEY
@@ -1185,7 +1188,7 @@ class TestAdmissionAndRetirementAreOneDecision:
     async def test_a_call_admitted_first_makes_retirement_see_busy(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         _mark_calls(monkeypatch)
         liveness = daemon_liveness.get_liveness()
@@ -1216,7 +1219,7 @@ class TestAdmissionAndRetirementAreOneDecision:
         # Driven through the real serializing middleware, so a refused call
         # that still reached anything below admission would be seen taking the
         # lock or the profile lease.
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
         from linkedin_mcp_server.sequential_tool_middleware import (
             SequentialToolExecutionMiddleware,
         )
@@ -1261,7 +1264,7 @@ class TestAdmissionAndRetirementAreOneDecision:
     ):
         # Already in HTTP handling, with its task scheduled, but not yet at the
         # admission check when the owner decides to go.
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         _mark_calls(monkeypatch)
         liveness = daemon_liveness.get_liveness()
@@ -1289,7 +1292,7 @@ class TestAdmissionAndRetirementAreOneDecision:
         # Queued behind another call on the serializing lock, it holds no
         # browser yet. Idle would be the wrong answer: it was admitted, and its
         # client is waiting for it.
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
         from linkedin_mcp_server.profile_lease import get_profile_lease
         from linkedin_mcp_server.sequential_tool_middleware import (
             SequentialToolExecutionMiddleware,
@@ -1338,8 +1341,8 @@ class TestAdmissionAndRetirementAreOneDecision:
         closed admission; with any `await` between them it is admitted by an
         owner that has already decided to exit.
         """
-        from linkedin_mcp_server import daemon_liveness
-        from linkedin_mcp_server.daemon_owner import _serve_until_stopped
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
+        from linkedin_mcp_server.daemon.owner import _serve_until_stopped
 
         _mark_calls(monkeypatch)
         liveness = daemon_liveness.get_liveness()
@@ -1383,7 +1386,7 @@ class TestAdmissionAndRetirementAreOneDecision:
         assert _refused_as_retiring(result, None)
 
     async def test_retirement_never_resets(self, monkeypatch: pytest.MonkeyPatch):
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         liveness = daemon_liveness.get_liveness()
         liveness.retire("turnover")
@@ -1412,8 +1415,8 @@ class TestEveryWayOutClosesAdmission:
         return server, asyncio.create_task(serves())
 
     async def test_idle(self):
-        from linkedin_mcp_server import daemon_liveness
-        from linkedin_mcp_server.daemon_owner import _serve_until_stopped
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
+        from linkedin_mcp_server.daemon.owner import _serve_until_stopped
 
         liveness = daemon_liveness.get_liveness()
         liveness.the_endpoint_is_live()
@@ -1426,8 +1429,8 @@ class TestEveryWayOutClosesAdmission:
         assert liveness.retire_reason == "idle"
 
     async def test_turnover(self):
-        from linkedin_mcp_server import daemon_liveness
-        from linkedin_mcp_server.daemon_owner import _serve_until_stopped
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
+        from linkedin_mcp_server.daemon.owner import _serve_until_stopped
 
         liveness = daemon_liveness.get_liveness()
         server, serving = self._stopped_server()
@@ -1438,7 +1441,8 @@ class TestEveryWayOutClosesAdmission:
         assert liveness.retire_reason == "turnover"
 
     async def test_wedged(self, monkeypatch: pytest.MonkeyPatch):
-        from linkedin_mcp_server import daemon_liveness, daemon_owner
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
+        from linkedin_mcp_server.daemon import owner as daemon_owner
 
         monkeypatch.setattr(
             daemon_owner, "stand_down_reason", lambda: "the browser cannot be driven"
@@ -1452,7 +1456,8 @@ class TestEveryWayOutClosesAdmission:
         assert liveness.retire_reason == "wedged"
 
     def test_uncertain_publication(self, monkeypatch: pytest.MonkeyPatch):
-        from linkedin_mcp_server import daemon_liveness, daemon_owner
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
+        from linkedin_mcp_server.daemon import owner as daemon_owner
 
         class Exited(BaseException):
             pass
@@ -1474,8 +1479,8 @@ class TestStandingDownForANewerBuild:
     async def test_an_admitted_call_finishes_before_the_owner_stops(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        from linkedin_mcp_server import daemon_liveness
-        from linkedin_mcp_server.daemon_owner import _serve_until_stopped
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
+        from linkedin_mcp_server.daemon.owner import _serve_until_stopped
 
         _mark_calls(monkeypatch)
         liveness = daemon_liveness.get_liveness()
@@ -1525,7 +1530,8 @@ class TestStandingDownForANewerBuild:
         drain, so the call never reaches its tool body; otherwise the body
         starts and never finishes.
         """
-        from linkedin_mcp_server import daemon_liveness, daemon_owner
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
+        from linkedin_mcp_server.daemon import owner as daemon_owner
         from linkedin_mcp_server.profile_lease import get_profile_lease
         from linkedin_mcp_server.sequential_tool_middleware import (
             SequentialToolExecutionMiddleware,
@@ -1603,7 +1609,7 @@ class TestStandingDownForANewerBuild:
         # LinkedIn to look for an effect that cannot exist, and forbid a retry
         # that is safe. It gets the signed retiring refusal instead, which a
         # frontend reads as not sent and may repeat on a replacement.
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         daemon_liveness.get_liveness().serving_as("the-owner")
         result, ran = await self._cut_at_the_end_of_the_drain(
@@ -1623,7 +1629,7 @@ class TestTheControlRoutes:
 
     def _app(self, stand_down: Any = None) -> Any:
         from linkedin_mcp_server.config.schema import AppConfig
-        from linkedin_mcp_server.daemon_owner import create_owner_server
+        from linkedin_mcp_server.daemon.owner import create_owner_server
 
         return create_owner_server(
             config=AppConfig(),
@@ -1643,8 +1649,8 @@ class TestTheControlRoutes:
         )
 
     async def test_a_retiring_owner_answers_an_unknown_call_with_a_signed_409(self):
-        from linkedin_mcp_server import daemon_liveness
-        from linkedin_mcp_server.daemon_liveness import HEARTBEAT_PATH
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
+        from linkedin_mcp_server.daemon.liveness import HEARTBEAT_PATH
 
         liveness = daemon_liveness.get_liveness()
         liveness.serving_as("the-owner")
@@ -1682,7 +1688,7 @@ class TestTheControlRoutes:
         )
 
     async def _stand_down(self, app: Any, body: Any = None) -> Any:
-        from linkedin_mcp_server.daemon_owner import STAND_DOWN_PATH
+        from linkedin_mcp_server.daemon.owner import STAND_DOWN_PATH
 
         async with self._client(app) as client:
             return await client.post(
@@ -1763,7 +1769,7 @@ class TestTheControlRoutes:
         # Only the exact version 1 request names a mode. Anything else, the
         # bodyless request earlier releases sent included, is refused before
         # any retirement state moves.
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         liveness = daemon_liveness.get_liveness()
         liveness.serving_as("the-owner")
@@ -1784,7 +1790,7 @@ class TestTheControlRoutes:
     ):
         # The request a newer build sends. It does not ask whether anyone is
         # using the owner: the turnover drains them, so even a busy owner goes.
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         liveness = daemon_liveness.get_liveness()
         liveness.serving_as("the-owner")
@@ -1802,7 +1808,7 @@ class TestTheControlRoutes:
     async def test_an_idle_owner_retires_on_the_idle_only_request(self):
         # Retirement and turnover both, in the request: a call arriving after
         # the reply is refused, and the loop stands down on its next tick.
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         liveness = daemon_liveness.get_liveness()
         liveness.serving_as("the-owner")
@@ -1832,7 +1838,8 @@ class TestTheControlRoutes:
     async def test_a_busy_owner_refuses_and_changes_nothing(
         self, busy_with: str, monkeypatch: pytest.MonkeyPatch
     ):
-        from linkedin_mcp_server import daemon_liveness, daemon_owner
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
+        from linkedin_mcp_server.daemon import owner as daemon_owner
 
         liveness = daemon_liveness.get_liveness()
         liveness.serving_as("the-owner")
@@ -1866,7 +1873,7 @@ class TestTheControlRoutes:
         # Retiring for another reason, a turnover here, with a call it is still
         # draining. The user agreed only to retiring an owner nobody is using,
         # so this is a refusal, not an acknowledgement of someone else's exit.
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         liveness = daemon_liveness.get_liveness()
         liveness.serving_as("the-owner")
@@ -1889,7 +1896,7 @@ class TestTheControlRoutes:
         # work. With nothing awaited between that look and the retirement it
         # arrives to a retiring owner and is refused; with anything awaited in
         # between it would be admitted by an owner that then says it is idle.
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         liveness = daemon_liveness.get_liveness()
         liveness.serving_as("the-owner")
@@ -1924,7 +1931,7 @@ class TestTheControlRoutes:
         # still arriving: a decision taken on the first part would read a body
         # that has not finished as absent, and one taken before the call would
         # retire an owner that is now busy.
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         liveness = daemon_liveness.get_liveness()
         liveness.serving_as("the-owner")
@@ -1957,13 +1964,13 @@ class TestTheLastCheckBeforeBrowserWork:
     """After every wait a call can spend queued, and before the browser."""
 
     def test_a_direct_server_never_asks(self):
-        from linkedin_mcp_server.daemon_liveness import abandoned_before_browser_work
+        from linkedin_mcp_server.daemon.liveness import abandoned_before_browser_work
 
         assert abandoned_before_browser_work() is False
 
     async def test_a_call_id_the_tracker_does_not_know_is_abandoned(self):
         # Not a fresh heartbeat: an absent entry was expired, or never admitted.
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         async def ask() -> bool:
             daemon_liveness._current_call.set(new_call_id())
@@ -1972,7 +1979,7 @@ class TestTheLastCheckBeforeBrowserWork:
         assert await asyncio.create_task(ask()) is True
 
     async def test_an_entry_past_the_expiry_is_abandoned_before_the_scan(self):
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         liveness = daemon_liveness.get_liveness()
         fresh, stale = new_call_id(), new_call_id()
@@ -2002,7 +2009,7 @@ class TestTheLastCheckBeforeBrowserWork:
         """
         from fastmcp.exceptions import ToolError
 
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
         from linkedin_mcp_server.drivers import browser
         from linkedin_mcp_server.profile_lease import get_profile_lease
         from linkedin_mcp_server.sequential_tool_middleware import (
@@ -2054,7 +2061,7 @@ class TestTheLastCheckBeforeBrowserWork:
     async def test_a_call_cancelled_while_queued_takes_no_lease(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
-        from linkedin_mcp_server import daemon_liveness
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
         from linkedin_mcp_server.profile_lease import get_profile_lease
         from linkedin_mcp_server.sequential_tool_middleware import (
             SequentialToolExecutionMiddleware,

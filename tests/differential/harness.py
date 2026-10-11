@@ -320,7 +320,7 @@ from differential.unconfirmed_close import _ended as _popen_ended
 from differential.unconfirmed_close import POST_SETTLEMENT as R7_POST_SETTLEMENT
 from differential.watcher import (
     LAUNCHER_ENV,
-    OWNER_MODULE,
+    OWNER_MODULES,
     SERVER_MODULE,
     USER_DATA_DIR_FLAG,
     another_user,
@@ -332,10 +332,10 @@ from differential.watcher import (
     read_arguments,
     user_data_dir,
 )
-from linkedin_mcp_server import daemon_descriptor
+from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
 from linkedin_mcp_server.config.loaders import EnvironmentKeys
-from linkedin_mcp_server.daemon_auth import MARKER_KEY as AUTH_MARKER_KEY
-from linkedin_mcp_server.daemon_liveness import REFUSAL_KEY
+from linkedin_mcp_server.daemon.auth_repair import MARKER_KEY as AUTH_MARKER_KEY
+from linkedin_mcp_server.daemon.liveness import REFUSAL_KEY
 from linkedin_mcp_server.session_state import portable_cookie_path
 
 REAL_AUTH_ROOT_NAME = ".linkedin-mcp"
@@ -3510,7 +3510,7 @@ def owner_launches(observed: Iterable[dict[str, Any]]) -> list[int]:
             if record.get("kind") in ("process.start", "process.update")
             and record.get("in_row") is True
             and isinstance(record.get("cmdline"), list)
-            and invoked_module(record["cmdline"]) == OWNER_MODULE
+            and invoked_module(record["cmdline"]) in OWNER_MODULES
         }
     )
 
@@ -3537,12 +3537,12 @@ def owner_gate(cmdline: Sequence[str], gates: Sequence[Path]) -> bool:
 
     Exactly what ``process_tree.windows_gate_command`` builds around the
     owner: ``<python> -I -S -u <runtime>/linkedin_mcp_server/process_gate.py
-    <nonce> -- <python> ... -m linkedin_mcp_server.daemon_owner ...``, with
+    <nonce> -- <python> ... -m linkedin_mcp_server.daemon.owner ...``, with
     the gate one of *gates* after resolution, the nonce the 64 hex digits
-    ``process_gate`` accepts, and the target running the owner module by the
-    interpreter's own option grammar. The gate holds the owner until the
-    frontend releases it, so it shows an owner start was attempted, not that
-    owner code ran.
+    ``process_gate`` accepts, and the target running either build's owner
+    module (``OWNER_MODULES``) by the interpreter's own option grammar. The
+    gate holds the owner until the frontend releases it, so it shows an owner
+    start was attempted, not that owner code ran.
     """
     command = list(cmdline)
     if len(command) < 8 or command[1:4] != _GATE_FLAGS:
@@ -3554,7 +3554,7 @@ def owner_gate(cmdline: Sequence[str], gates: Sequence[Path]) -> bool:
         return False
     if command[6] != "--":
         return False
-    return invoked_module(command[7:]) == OWNER_MODULE
+    return invoked_module(command[7:]) in OWNER_MODULES
 
 
 def owner_gates(observed: Iterable[dict[str, Any]], gates: Sequence[Path]) -> list[int]:
@@ -3663,7 +3663,7 @@ def launch_lifetimes(
     """
 
     def kind(cmdline: Sequence[str]) -> str | None:
-        if invoked_module(cmdline) == OWNER_MODULE:
+        if invoked_module(cmdline) in OWNER_MODULES:
             return "owner"
         if owner_gate(cmdline, gates):
             return "gate"
@@ -5646,8 +5646,8 @@ def ask_to_stand_down(
 ) -> dict[str, Any]:
     """Ask the identified owner to stand down, as a newer build does.
 
-    The product's own request (``daemon_election._ask_to_stand_down``): a POST
-    to ``daemon_owner.STAND_DOWN_PATH`` with the row runtime's turnover body
+    The product's own request (``daemon.election._ask_to_stand_down``): a POST
+    to ``daemon.owner.STAND_DOWN_PATH`` with the row runtime's turnover body
     (``DaemonStateLayout.stand_down_body``), with the bearer token read from the
     row's own auth root, through the owner's loopback client. Sent only when
     the descriptor still names the owner the row identified, so the request
@@ -5656,7 +5656,7 @@ def ask_to_stand_down(
     """
     from urllib.parse import urlsplit, urlunsplit
 
-    from linkedin_mcp_server import daemon_owner
+    from linkedin_mcp_server.daemon import owner as daemon_owner
 
     found: dict[str, Any] = {
         "addressed": False,
@@ -7611,7 +7611,7 @@ async def measure_host_quit_row(
     async def find_the_owner() -> None:
         nonlocal identified
         # A Direct server publishes nothing; a descriptor here would be one.
-        # Only looked at, never read into being: ``daemon_descriptor.read``
+        # Only looked at, never read into being: ``daemon.descriptor.read``
         # prepares the daemon directory before it reads, so calling it on a
         # row that must leave no daemon state would create that state itself.
         owner["descriptor_present"] = account.layout.descriptor_path(

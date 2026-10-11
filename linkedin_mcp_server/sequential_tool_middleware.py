@@ -13,7 +13,7 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
 from linkedin_mcp_server.config import get_config
-from linkedin_mcp_server.daemon_liveness import (
+from linkedin_mcp_server.daemon.liveness import (
     abandoned_before_browser_work,
     abandoned_call_error,
     browser_work_begins,

@@ -19,7 +19,7 @@ from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.daemon_proxy import DaemonProxyBackend
+from linkedin_mcp_server.daemon.proxy import DaemonProxyBackend
 from linkedin_mcp_server.server import ServerRole, create_mcp_server
 from linkedin_mcp_server.server_role import (
     RoleAlreadyClaimedError,
@@ -93,9 +93,9 @@ def _no_replacement_to_find(
     start one, so it is stood in, and the account home is redirected in case
     anything still reaches for daemon state there.
     """
-    from linkedin_mcp_server import daemon_descriptor
-    from linkedin_mcp_server.daemon import OwnerLookup, OwnerState
-    from linkedin_mcp_server.daemon_election import ElectionOutcome
+    from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
+    from linkedin_mcp_server.daemon.discovery import OwnerLookup, OwnerState
+    from linkedin_mcp_server.daemon.election import ElectionOutcome
 
     def nobody(*_args: object, **_kwargs: object) -> ElectionOutcome:
         return ElectionOutcome(
@@ -105,7 +105,7 @@ def _no_replacement_to_find(
 
     monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
     monkeypatch.setattr(
-        "linkedin_mcp_server.daemon_election.obtain_owner", elect or nobody
+        "linkedin_mcp_server.daemon.election.obtain_owner", elect or nobody
     )
 
 
@@ -142,7 +142,7 @@ def _proxy_to(monkeypatch: pytest.MonkeyPatch, owner: FastMCP, **kwargs) -> Fast
     """
     import httpx2
 
-    from linkedin_mcp_server.daemon_proxy import FrontendCallHeartbeatMiddleware
+    from linkedin_mcp_server.daemon.proxy import FrontendCallHeartbeatMiddleware
 
     async def beat(_attachment: object, _call_id: str) -> httpx2.Response:
         return httpx2.Response(200, json={"watched": False})
@@ -482,7 +482,8 @@ class TestTheRoleAsProcessState:
         child opens its log after taking the lock, so an inert held lock lets
         that boundary record the role without touching the account's state.
         """
-        from linkedin_mcp_server import daemon_config, daemon_owner
+        from linkedin_mcp_server.daemon import config as daemon_config
+        from linkedin_mcp_server.daemon import owner as daemon_owner
         from linkedin_mcp_server.config.schema import AppConfig
 
         class Checkpoint(BaseException):
@@ -520,7 +521,7 @@ class TestTheRoleAsProcessState:
     def test_the_windows_owner_verifies_membership_before_reading_config(
         self, monkeypatch
     ):
-        from linkedin_mcp_server import daemon_owner
+        from linkedin_mcp_server.daemon import owner as daemon_owner
 
         class Checkpoint(BaseException):
             pass
@@ -702,8 +703,8 @@ class TestProxyRole:
         # Recovery found an owner and the listing was repeated against it, which
         # is the one repeat a listing gets. That one failing as well is the same
         # news for the client: nobody is left to answer.
-        from linkedin_mcp_server.daemon import OwnerLookup, OwnerState
-        from linkedin_mcp_server.daemon_election import ElectionOutcome
+        from linkedin_mcp_server.daemon.discovery import OwnerLookup, OwnerState
+        from linkedin_mcp_server.daemon.election import ElectionOutcome
 
         replacement = _a_dead_attachment(port=2)
         repeated: list[object] = []
@@ -751,7 +752,7 @@ class TestProxyRole:
         if preflight_answers:
             import httpx2
 
-            from linkedin_mcp_server.daemon_proxy import (
+            from linkedin_mcp_server.daemon.proxy import (
                 FrontendCallHeartbeatMiddleware,
             )
 

@@ -551,7 +551,7 @@ def test_facade_ast_guards_reject_representative_mutations(mutate, guard):
         ),
         (
             Path("linkedin_mcp_server/linkedin/content.py"),
-            "from linkedin_mcp_server.daemon_owner import owner\n",
+            "from linkedin_mcp_server.daemon.owner import owner\n",
         ),
         (
             Path("linkedin_mcp_server/linkedin/content.py"),

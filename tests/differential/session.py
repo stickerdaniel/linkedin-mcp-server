@@ -166,9 +166,9 @@ _LOSS = re.compile(
 
 #: A report of a successful sign-in. It matches the loss table's words, and it
 #: is the opposite of a loss notice, so it is judged first. The later entries
-#: are the product's own: ``daemon_auth`` after a repair (``The sign-in
+#: are the product's own: ``daemon.auth_repair`` after a repair (``The sign-in
 #: finished``, ``Signed in; ...``), a peer's session found in place
-#: (``daemon_auth``, ``setup``, ``session_state``, ``error_handler``,
+#: (``daemon.auth_repair``, ``setup``, ``session_state``, ``error_handler``,
 #: ``browser_import``), and ``core.auth`` once a manual login has its cookie.
 _SUCCESS = re.compile(
     r"\bsuccessfully (?:signed|logged) in\b"

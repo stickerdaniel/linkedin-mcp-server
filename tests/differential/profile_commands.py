@@ -236,7 +236,7 @@ IMPORTED = "Imported and validated LinkedIn session"
 #: A command that had to install its browser first: not what is judged here.
 INSTALLING = "Installing Patchright Chromium browser"
 
-#: The owner's own lines (``daemon_owner``), in its log.
+#: The owner's own lines (``daemon.owner``), in its log.
 STANDING_DOWN_LINE = "A profile command asked for the browser; standing down"
 IDLE_EXIT_LINE = "Nothing has needed the browser in"
 

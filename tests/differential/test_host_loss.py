@@ -90,6 +90,7 @@ from differential.test_preservation_gate import (  # noqa: F401 - fixtures
     profile,
 )
 from differential.test_row_judgement import _healthy
+from differential.watcher import OWNER_MODULE
 
 MS = 1_000_000
 S = 1_000 * MS
@@ -1509,7 +1510,7 @@ class _LossScene(_CalibrationScene):
                     "pid": 42,
                     "ppid": 7,
                     "start_identity": 42.0,
-                    "cmdline": ["python", "-m", harness.OWNER_MODULE],
+                    "cmdline": ["python", "-m", OWNER_MODULE],
                 }
             ],
         )

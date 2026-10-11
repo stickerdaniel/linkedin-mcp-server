@@ -142,8 +142,8 @@ from linkedin_mcp_server.core.auth import (
     wait_for_manual_login,
 )
 from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.daemon_auth import MARKER_KEY
-from linkedin_mcp_server.daemon_liveness import HEARTBEAT_PATH
+from linkedin_mcp_server.daemon.auth_repair import MARKER_KEY
+from linkedin_mcp_server.daemon.liveness import HEARTBEAT_PATH
 from linkedin_mcp_server.session_state import (
     QUARANTINE_PREFIX,
     portable_cookie_path,
@@ -2702,7 +2702,7 @@ async def test_only_the_owner_s_wait_for_the_profile_shows_the_second_read_there
     from test_daemon_proxy import _attachment, _backend, _reach_owners_in_process
 
     from linkedin_mcp_server import sequential_tool_middleware as sequential
-    from linkedin_mcp_server.daemon_proxy import FrontendCallHeartbeatMiddleware
+    from linkedin_mcp_server.daemon.proxy import FrontendCallHeartbeatMiddleware
     from linkedin_mcp_server.server import create_mcp_server
     from linkedin_mcp_server.server_role import ServerRole
 

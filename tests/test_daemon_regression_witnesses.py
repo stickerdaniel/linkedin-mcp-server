@@ -32,12 +32,12 @@ import pytest
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
 
-import linkedin_mcp_server.daemon_owner as daemon_owner
+import linkedin_mcp_server.daemon.owner as daemon_owner
 import linkedin_mcp_server.process_tree as process_tree
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.daemon import daemon_would_be_used
-from linkedin_mcp_server.daemon_liveness import OwnerCallLivenessMiddleware
-from linkedin_mcp_server.daemon_proxy import (
+from linkedin_mcp_server.daemon.discovery import daemon_would_be_used
+from linkedin_mcp_server.daemon.liveness import OwnerCallLivenessMiddleware
+from linkedin_mcp_server.daemon.proxy import (
     FrontendCallHeartbeatMiddleware,
     OwnerUnreachableError,
 )
@@ -363,7 +363,8 @@ def test_a_custom_browser_keeps_the_direct_server(
     real directories are, a storage refusal must not stand in for this one.
     """
     monkeypatch.setattr(
-        "linkedin_mcp_server.daemon.get_runtime_id", lambda: "linux-amd64-host"
+        "linkedin_mcp_server.daemon.discovery.get_runtime_id",
+        lambda: "linux-amd64-host",
     )
     monkeypatch.setattr(
         "linkedin_mcp_server.storage_class.classify",

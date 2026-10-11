@@ -1164,7 +1164,7 @@ async def _run_background_browser_setup(deadline_at: float | None = None) -> Non
     finally:
         checked.set()
         if process_role() is ServerRole.OWNER:
-            from linkedin_mcp_server.daemon_liveness import get_liveness
+            from linkedin_mcp_server.daemon.liveness import get_liveness
 
             get_liveness().background_activity_finished()
 

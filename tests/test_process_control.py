@@ -26,9 +26,10 @@ from typing import Any, cast
 
 import pytest
 
-from linkedin_mcp_server import daemon_election, process_control
+from linkedin_mcp_server.daemon import election as daemon_election
+from linkedin_mcp_server.daemon import process_control
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.process_control import ControlListener
+from linkedin_mcp_server.daemon.process_control import ControlListener
 
 _NONCE = "0123456789abcdef" * 4
 _OTHER_NONCE = "fedcba9876543210" * 4
@@ -856,7 +857,7 @@ class TestCloseUnderABlockedRead:
 class TestOwnerFinalization:
     """What the owner's ``finally`` owes the next election.
 
-    ``daemon_owner.main`` closes its control channel before it releases the
+    ``daemon.owner.main`` closes its control channel before it releases the
     daemon lock. That order is deliberate, and it means a close that does not
     return is a lock that is never released: the process has already decided it
     is not going to serve, and every later election contends with a corpse that
@@ -869,12 +870,10 @@ class TestOwnerFinalization:
         monkeypatch: pytest.MonkeyPatch,
         listener: ControlListener,
     ):
-        from linkedin_mcp_server import (
-            daemon_config,
-            daemon_descriptor,
-            daemon_lock,
-            daemon_owner,
-        )
+        from linkedin_mcp_server.daemon import config as daemon_config
+        from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
+        from linkedin_mcp_server.daemon import lock as daemon_lock
+        from linkedin_mcp_server.daemon import owner as daemon_owner
 
         monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
         profile = tmp_path / "profile"

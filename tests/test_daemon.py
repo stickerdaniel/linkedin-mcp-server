@@ -16,17 +16,17 @@ from pathlib import Path
 
 import pytest
 
-import linkedin_mcp_server.daemon as daemon_module
-import linkedin_mcp_server.daemon_descriptor as daemon_descriptor_module
+import linkedin_mcp_server.daemon.discovery as daemon_module
+import linkedin_mcp_server.daemon.descriptor as daemon_descriptor_module
 import linkedin_mcp_server.storage_class as storage_class_module
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.daemon import (
+from linkedin_mcp_server.daemon.discovery import (
     Mismatch,
     OwnerState,
     daemon_would_be_used,
     look_up_owner,
 )
-from linkedin_mcp_server.daemon_descriptor import (
+from linkedin_mcp_server.daemon.descriptor import (
     DescriptorError,
     build,
     descriptor_path,
@@ -36,7 +36,7 @@ from linkedin_mcp_server.daemon_descriptor import (
     read,
     token_path,
 )
-from linkedin_mcp_server.daemon_lock import DaemonLock
+from linkedin_mcp_server.daemon.lock import DaemonLock
 from linkedin_mcp_server.session_state import canonical
 from linkedin_mcp_server.storage_class import Classification, StorageClass
 
@@ -362,7 +362,7 @@ class TestAnOwnerOfAnotherProtocol:
         profile = tmp_path / "profile"
         token = _publish_owner(tmp_path, profile, host="198.51.100.7")
 
-        with caplog.at_level("DEBUG", logger="linkedin_mcp_server.daemon"):
+        with caplog.at_level("DEBUG", logger="linkedin_mcp_server.daemon.discovery"):
             assert look_up_owner(tmp_path, profile, _config(profile)).attachment is None
 
         # Refused for the right reason, and it says so: a silent None here
@@ -730,7 +730,7 @@ class TestTellingTheRefusalsApart:
         _publish_owner(tmp_path, profile)
         descriptor_path(tmp_path).write_text("{not json", encoding="utf-8")
 
-        with caplog.at_level("INFO", logger="linkedin_mcp_server.daemon"):
+        with caplog.at_level("INFO", logger="linkedin_mcp_server.daemon.discovery"):
             look_up_owner(tmp_path, profile, _config(profile)).attachment
 
         assert "untrusted" in caplog.text
@@ -756,7 +756,7 @@ class TestWhetherTheDaemonAppliesAtAll:
         config = AppConfig()
         config.server.daemon_enabled = True
         monkeypatch.setattr(
-            "linkedin_mcp_server.daemon.get_runtime_id",
+            "linkedin_mcp_server.daemon.discovery.get_runtime_id",
             lambda: "linux-amd64-host",
         )
         _storage_is(monkeypatch, lambda _path: StorageClass.LOCAL)
@@ -769,11 +769,11 @@ class TestWhetherTheDaemonAppliesAtAll:
         config = AppConfig()
         config.server.daemon_enabled = True
         monkeypatch.setattr(
-            "linkedin_mcp_server.daemon.get_runtime_id",
+            "linkedin_mcp_server.daemon.discovery.get_runtime_id",
             lambda: "docker-amd64-container",
         )
 
-        with caplog.at_level("WARNING", logger="linkedin_mcp_server.daemon"):
+        with caplog.at_level("WARNING", logger="linkedin_mcp_server.daemon.discovery"):
             applies = daemon_would_be_used(config)
 
         assert applies is False
@@ -786,11 +786,11 @@ class TestWhetherTheDaemonAppliesAtAll:
         config.server.daemon_enabled = True
         config.server.transport = "streamable-http"
         monkeypatch.setattr(
-            "linkedin_mcp_server.daemon.get_runtime_id",
+            "linkedin_mcp_server.daemon.discovery.get_runtime_id",
             lambda: "docker-arm64-container",
         )
 
-        with caplog.at_level("WARNING", logger="linkedin_mcp_server.daemon"):
+        with caplog.at_level("WARNING", logger="linkedin_mcp_server.daemon.discovery"):
             applies = daemon_would_be_used(config)
 
         assert applies is False
@@ -814,8 +814,8 @@ def _storage_is(
 @pytest.fixture
 def coordination(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Every daemon coordination effect, recorded and refused if it runs."""
-    import linkedin_mcp_server.daemon_election as daemon_election_module
-    import linkedin_mcp_server.daemon_lock as daemon_lock_module
+    import linkedin_mcp_server.daemon.election as daemon_election_module
+    import linkedin_mcp_server.daemon.lock as daemon_lock_module
 
     touched: list[str] = []
 

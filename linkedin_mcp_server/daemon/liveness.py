@@ -8,13 +8,13 @@ because a call it is already running looks exactly like one somebody wants.
 
 So the frontend says so, repeatedly, for as long as it is still waiting, and the
 owner cancels what nobody is waiting for. Kept in its own module rather than in
-``daemon_owner`` or ``server`` because both ends need the same names and those
+``daemon.owner`` or ``server`` because both ends need the same names and those
 two must not import each other.
 
 **Every call is marked, or it does not run.** A call the owner cannot identify
 is a call it cannot cancel, so the owner refuses one that arrives without a
 marker, and the frontend never forwards a call whose heartbeat preflight failed.
-Both halves are part of the tool protocol (``daemon_descriptor.PROTOCOL_VERSION``),
+Both halves are part of the tool protocol (``daemon.descriptor.PROTOCOL_VERSION``),
 so a pair that does not share it never shares tools: a mismatched owner is only
 ever asked to stand down.
 
@@ -41,7 +41,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
-from linkedin_mcp_server.daemon_descriptor import PROTOCOL_VERSION
+from linkedin_mcp_server.daemon.descriptor import PROTOCOL_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ _T = TypeVar("_T")
 HEARTBEAT_PATH = "/control/heartbeat"
 
 #: Where an owner's refusal travels on an error result, beside the auth marker
-#: ``daemon_auth`` uses. Namespaced for the same reason: a key a future fastmcp
+#: ``daemon.auth_repair`` uses. Namespaced for the same reason: a key a future fastmcp
 #: might add cannot shadow it.
 REFUSAL_KEY = "linkedin.dev/daemon"
 
@@ -106,7 +106,7 @@ CALL_HEADER = "x-linkedin-mcp-call"
 
 #: Version prefix on the header value. Versioned so an owner meeting a shape it
 #: does not know can ignore it rather than half-read it, which is the same rule
-#: `daemon_auth` applies to markers travelling the other way.
+#: `daemon.auth_repair` applies to markers travelling the other way.
 _MARKER_PREFIX = "v1."
 
 #: A call id is this many hex characters after the prefix. Bounded and checked,
@@ -520,7 +520,7 @@ def _refusal(kind: str, message: str) -> ToolResult:
     Signed with the protocol and this owner's instance, so a frontend accepts
     it only from the owner it dispatched to. ``is_error`` stays true so a
     client that reads no metadata still sees a failure rather than a success
-    carrying no data, which is how ``daemon_auth`` marks its own refusals.
+    carrying no data, which is how ``daemon.auth_repair`` marks its own refusals.
     """
     return ToolResult(
         content=[mt.TextContent(type="text", text=message)],

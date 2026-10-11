@@ -23,7 +23,7 @@ reconstructed values decide which browser opens against a logged-in session.
 
 Commit authorization travels on a separate loopback channel named here, so the
 configuration pipe closes as soon as the record is written. See
-:mod:`linkedin_mcp_server.process_control`.
+:mod:`linkedin_mcp_server.daemon.process_control`.
 """
 
 from __future__ import annotations

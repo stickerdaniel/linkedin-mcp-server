@@ -142,7 +142,7 @@ IDLE_RACE_TIMEOUT_SECONDS = 8.0
 #: The turnover lanes keep the calibration's configuration.
 TURNOVER_IDLE_TIMEOUT_SECONDS = CALIBRATION_IDLE_TIMEOUT_SECONDS
 #: The owner's connection grace on shutdown, uvicorn's
-#: ``timeout_graceful_shutdown`` as ``daemon_owner.create_owner_server`` sets
+#: ``timeout_graceful_shutdown`` as ``daemon.owner.create_owner_server`` sets
 #: it. An idle exit that ignored a call in flight would cut it by then.
 OWNER_GRACE_SECONDS = 5.0
 #: How far past the idle threshold and the grace the admission hold lasts.
@@ -162,7 +162,7 @@ CALL_END_SECONDS = 180.0
 START_TOLERANCE_SECONDS = 1.0
 
 #: The contract's drain: how long admitted calls may run after a turnover
-#: (``daemon_owner._TURNOVER_DRAIN_SECONDS``).
+#: (``daemon.owner._TURNOVER_DRAIN_SECONDS``).
 TURNOVER_DRAIN_SECONDS = 30.0
 #: How long the owner is given, from the stand-down's answer, to be gone:
 #: the drain, the owner's bounded stop (30 s) and as much again.
@@ -226,7 +226,7 @@ W6_NOT_DISCHARGED = (
     "of an older-protocol owner stays W6"
 )
 
-#: What the owner logs as it idles out (``daemon_owner``), and what Direct
+#: What the owner logs as it idles out (``daemon.owner``), and what Direct
 #: logs as it closes an idle browser (``drivers.browser``).
 OWNER_IDLE_LINE = "Nothing has needed the browser in"
 DIRECT_IDLE_LINE = "Closing idle browser after"
@@ -235,7 +235,7 @@ TURNOVER_LINE = "A newer build asked for the browser; standing down"
 CUT_COUNT = re.compile(r"Requested stand-down cancellation of (\d+) pending call")
 CUT_CALL_LINE = "Cutting off call"
 
-#: Each attempt the frontend reports (``daemon_proxy``), by the start of its
+#: Each attempt the frontend reports (``daemon.proxy``), by the start of its
 #: line, and the attempt it is (``events.ATTEMPTS``).
 _ATTEMPT_LINES = (
     ("The shared browser owner refused the call preflight", "preflight"),
@@ -951,7 +951,7 @@ def _successor_problems(
     if len(mine) != 1:
         found.append("the successor is not an owner the row was seen to launch")
     # While the retiring owner still holds the lock, the election starts
-    # candidates on its backoff (``daemon_election._owner_start_delay_after``)
+    # candidates on its backoff (``daemon.election._owner_start_delay_after``)
     # and each one that cannot take the lock exits. Those are the election
     # doing its job; any other launch besides the successor that is not shown
     # to have read nothing is a second owner the row cannot account for.

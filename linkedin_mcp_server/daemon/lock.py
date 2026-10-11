@@ -49,7 +49,7 @@ import weakref
 from pathlib import Path
 from types import TracebackType
 
-from linkedin_mcp_server.daemon_descriptor import (
+from linkedin_mcp_server.daemon.descriptor import (
     daemon_dir,
     prepare_daemon_state,
 )

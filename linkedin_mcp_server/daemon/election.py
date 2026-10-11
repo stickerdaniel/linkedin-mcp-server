@@ -1,7 +1,7 @@
 """Getting an owner started, from the side of the process that wants one.
 
-The counterpart to :mod:`linkedin_mcp_server.daemon`, which only reads. This is
-where a process acts: it starts a detached owner and waits for the endpoint to
+The counterpart to :mod:`linkedin_mcp_server.daemon.discovery`, which only reads.
+This is where a process acts: it starts a detached owner and waits for the endpoint to
 exist. It never becomes the owner itself, because it cannot: ``cli_main`` runs
 the stdio server blocking, so a process that served the owner's HTTP could not
 also serve its own client.
@@ -32,24 +32,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, TypeVar, cast
 
-from linkedin_mcp_server import (
-    __version__,
-    daemon as daemon_discovery,
-    daemon_config,
-    daemon_descriptor,
-    daemon_owner,
-    daemon_version,
-)
+from linkedin_mcp_server import __version__
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.daemon import (
+from linkedin_mcp_server.daemon import config as daemon_config
+from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
+from linkedin_mcp_server.daemon import discovery as daemon_discovery
+from linkedin_mcp_server.daemon import owner as daemon_owner
+from linkedin_mcp_server.daemon import version as daemon_version
+from linkedin_mcp_server.daemon.discovery import (
     Attachment,
     OwnerLookup,
     OwnerState,
     _DescriptorInspector,
     _DescriptorReadTimeout,
 )
-from linkedin_mcp_server.daemon_lock import DaemonLockError
-from linkedin_mcp_server.process_control import ControlListener
+from linkedin_mcp_server.daemon.lock import DaemonLockError
+from linkedin_mcp_server.daemon.process_control import ControlListener
 from linkedin_mcp_server.process_protocol import new_nonce, read_authenticated_status
 from linkedin_mcp_server.process_tree import (
     ProcessTreeError,
@@ -377,8 +375,8 @@ def _live_lookup(
     """Find an owner and prove it answers, or report it as leftovers.
 
     The one place ``ATTACHABLE`` is turned from a claim about a file into a
-    claim about a process. Everything in :mod:`linkedin_mcp_server.daemon` reads
-    disk; this connects.
+    claim about a process. Everything in
+    :mod:`linkedin_mcp_server.daemon.discovery` reads disk; this connects.
 
     A descriptor that fails the probe is downgraded rather than deleted, and the
     distinction matters: a live owner this client merely cannot reach right now
@@ -677,7 +675,7 @@ def _ask_to_stand_down(attachment: Attachment) -> None:
 
     A turnover request addressed to the instance the descriptor names, through
     the one route and request version every owner keeps
-    (``daemon_owner.STAND_DOWN_PATH``), whatever its tool protocol.
+    (``daemon.owner.STAND_DOWN_PATH``), whatever its tool protocol.
     """
 
     descriptor = attachment.descriptor
@@ -1622,7 +1620,7 @@ def _spawn_command(*, job_name: str | None = None) -> list[str]:
     ``-I``, ``-s`` or ``-E`` mode would restore startup code it refused before the
     configuration secrets cross stdin. The child environment drops ``PYTHONPATH``
     separately, so a workspace cannot put a shadow
-    ``linkedin_mcp_server/daemon_owner.py`` back in front and receive the
+    ``linkedin_mcp_server/daemon/owner.py`` back in front and receive the
     configuration secrets.
     """
     interpreter_flags: list[str] = []
@@ -1641,7 +1639,7 @@ def _spawn_command(*, job_name: str | None = None) -> list[str]:
         *interpreter_flags,
         "-P",
         "-m",
-        "linkedin_mcp_server.daemon_owner",
+        "linkedin_mcp_server.daemon.owner",
     ]
     if job_name is not None:
         command += ["--job-name", job_name]
@@ -1665,7 +1663,7 @@ _SECRETS_TO_DROP = ("PROXY_PASSWORD", "PROXY_USERNAME", "PROXY_SERVER")
 def _owner_environment() -> dict[str, str]:
     """The environment to start the owner in, minus what it must not keep.
 
-    ``daemon_config`` hands the configuration over on standard input precisely
+    ``daemon.config`` hands the configuration over on standard input precisely
     so that a password does not sit in a readable environment. That is only half
     the job while the child inherits the frontend's environment unchanged: the
     documented way to configure a proxy is ``PROXY_PASSWORD``
@@ -1673,7 +1671,7 @@ def _owner_environment() -> dict[str, str]:
     as long as it runs, which is far longer than the process it came from.
 
     Dropped rather than emptied. An empty ``PROXY_USERNAME`` is meaningful to
-    the configuration parser (``daemon_descriptor.py:480``), and the owner is
+    the configuration parser (``daemon/descriptor.py:480``), and the owner is
     told the real values through the channel that was built for them.
     """
     environment = dict(os.environ)

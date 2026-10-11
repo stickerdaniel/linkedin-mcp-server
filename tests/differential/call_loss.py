@@ -562,7 +562,7 @@ SERVER_EXIT_SECONDS = 90.0
 HOT_REUSE_WINDOW_SECONDS = 45.0
 
 #: What the owner logs when it cancels a call nobody waited for
-#: (``daemon_liveness``). Positive evidence of expiry; its absence is not
+#: (``daemon.liveness``). Positive evidence of expiry; its absence is not
 #: evidence of anything, since whether the log keeps INFO is a setting.
 EXPIRY_LINE = "Nobody has waited for call"
 CAUSE_EXPIRY = "expiry"

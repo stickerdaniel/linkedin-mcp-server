@@ -89,19 +89,19 @@ SCHEMA_VERSION = 1
 #:
 #: The call marker is mandatory in both directions: a frontend never forwards a
 #: call it could not mark, and an owner refuses one that arrives without a
-#: marker (:mod:`linkedin_mcp_server.daemon_liveness`).
+#: marker (:mod:`linkedin_mcp_server.daemon.liveness`).
 #:
 #: A bump does not make an older owner unreadable, and that is what lets it be
 #: bumped at all. :func:`read` parses a descriptor from any protocol at or above
 #: :data:`CONTROL_FLOOR_PROTOCOL` and leaves the comparison to the caller, which
 #: may then use it for control and never for a tool call
-#: (``daemon.Attachment.control_only``). An owner nobody can read is an owner
+#: (``daemon.discovery.Attachment.control_only``). An owner nobody can read is an owner
 #: nobody can ask to stand down.
 PROTOCOL_VERSION = 1
 
 #: The oldest tool protocol whose owner this build can still ask to stand down.
 #: Every protocol in this namespace accepts the same stand-down request
-#: (``daemon_owner.STAND_DOWN_PATH``), so the floor is the first one.
+#: (``daemon.owner.STAND_DOWN_PATH``), so the floor is the first one.
 CONTROL_FLOOR_PROTOCOL = 1
 
 _DESCRIPTOR_FILE = "daemon.json"
@@ -1152,7 +1152,7 @@ def _decode_descriptor(path: Path, raw: str) -> DaemonDescriptor:
     file format, so a mismatch means fields this client cannot read. A protocol
     mismatch is a file this client reads perfectly well, naming an owner it may
     only ask to stand down, and that distinction is the caller's to draw
-    (``daemon._inspect``). Everything else ``from_mapping`` checks still holds
+    (``daemon.discovery._inspect``). Everything else ``from_mapping`` checks still holds
     for it: field types, the instance identifier and a local endpoint.
     """
     try:

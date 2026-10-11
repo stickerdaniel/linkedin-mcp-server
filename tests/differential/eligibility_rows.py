@@ -104,7 +104,7 @@ from differential.retirement_race import (
 )
 from differential.synthetic_origin import ALLOWED_HOSTS, person_path
 from linkedin_mcp_server.config.loaders import EnvironmentKeys
-from linkedin_mcp_server.daemon import DirectFallback
+from linkedin_mcp_server.daemon.discovery import DirectFallback
 
 if TYPE_CHECKING:
     from differential.harness import CoordinationSeams, RowContext
@@ -337,10 +337,11 @@ def owner_lines(lines: Sequence[str]) -> dict[str, int]:
 
 def storage_reading(profile: Path) -> dict[str, Any]:
     """The product's own classification of the three roots it asks about
-    before it shares a browser (``daemon._storage_refusal``): the profile,
+    before it shares a browser (``daemon.discovery._storage_refusal``): the profile,
     the directory holding it, and the daemon state root. Reads, creates
     nothing; each as its class and reason, which name no path."""
-    from linkedin_mcp_server import daemon_descriptor, storage_class
+    from linkedin_mcp_server import storage_class
+    from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
     from linkedin_mcp_server.session_state import auth_root_dir, canonical
 
     resolved = canonical(profile)

@@ -13,9 +13,9 @@ from pathlib import Path
 import pytest
 
 from differential.daemon_state import BASELINE_LAYOUT, CANDIDATE_LAYOUT
-from linkedin_mcp_server import daemon_descriptor
+from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.daemon_descriptor import DaemonDescriptor, DescriptorError
+from linkedin_mcp_server.daemon.descriptor import DaemonDescriptor, DescriptorError
 
 
 def _home() -> Path:

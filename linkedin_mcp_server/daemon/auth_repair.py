@@ -121,7 +121,7 @@ MARKER_KEY = "linkedin.dev/auth"
 #:
 #: Only forward tolerance is needed, and that asymmetry is deliberate rather than
 #: lucky. An *older* frontend attaches to a newer owner on purpose
-#: (``daemon_version.Skew.SERVICEABLE``), so it will meet markers from builds it
+#: (``daemon.version.Skew.SERVICEABLE``), so it will meet markers from builds it
 #: does not know and has to ignore them. The reverse cannot arise: a newer
 #: frontend asks an older owner to stand down and elects a replacement, so it
 #: never talks to an owner that predates a version it understands.
@@ -321,7 +321,7 @@ class FrontendAuthRepairMiddleware(Middleware):
             # showed why. Bounding it locally left the owner finishing the
             # mutation after the frontend had reported failure: cancellation is
             # not forwarded across the hop, which
-            # `daemon_proxy._TIMEOUT_MARGIN_SECONDS` already records. Measured
+            # `daemon.proxy._TIMEOUT_MARGIN_SECONDS` already records. Measured
             # over a real loopback owner, the client was answered at 0.66s with
             # an error and the effect landed 0.7s later. Removing the bound only
             # moved the deadline: an MCP client that gives up on its own call
@@ -340,7 +340,7 @@ class FrontendAuthRepairMiddleware(Middleware):
         # Read-only, so bounded by what is left of this call rather than given a
         # fresh budget. Nothing below this middleware bounds the whole path: the
         # forwarded call has its own deadline per hop
-        # (`daemon_proxy.create_proxy_provider`), so the first call, the wait and
+        # (`daemon.proxy.create_proxy_provider`), so the first call, the wait and
         # the replay each stay inside one while their sum stays inside nothing.
         # Measured shape: a sign-in finishing near the end of the wait, followed
         # by a replay taking a full budget of its own, put the client past its
@@ -376,7 +376,7 @@ async def a_repeat_could_change_something(
     """Whether running this tool again could repeat an effect on LinkedIn.
 
     Public because two middlewares need the same answer: this module replays a
-    call after signing in, and ``daemon_proxy`` replays one after electing a
+    call after signing in, and ``daemon.proxy`` replays one after electing a
     replacement owner. One rule, in one place, so the two cannot drift apart in
     the unsafe direction.
 

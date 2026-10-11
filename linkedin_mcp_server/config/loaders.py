@@ -100,7 +100,7 @@ def credential_free_url(value: str) -> str:
 # The second sentence about a running server is not padding. A shared owner
 # started by an older version carries its user agent in the configuration
 # fingerprint, and a client of this version can only compute ``None`` because
-# the setting is refused here. ``daemon.py`` rejects a fingerprint mismatch
+# the setting is refused here. ``daemon/discovery.py`` rejects a fingerprint mismatch
 # before it ever compares package versions, so that owner can no longer be
 # asked to stand down: it keeps running and keeps the profile. Removing the
 # setting is therefore only half the fix, and the other half is invisible

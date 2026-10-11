@@ -26,10 +26,10 @@ def reset_singletons():
     """Reset global state for test isolation."""
     from linkedin_mcp_server.bootstrap import reset_bootstrap_for_testing
     from linkedin_mcp_server.config import reset_config
-    from linkedin_mcp_server.daemon_descriptor import (
+    from linkedin_mcp_server.daemon.descriptor import (
         reset_daemon_descriptor_for_testing,
     )
-    from linkedin_mcp_server.daemon_liveness import reset_liveness_for_testing
+    from linkedin_mcp_server.daemon.liveness import reset_liveness_for_testing
     from linkedin_mcp_server.debug_trace import reset_trace_state_for_testing
     from linkedin_mcp_server.logging_config import teardown_trace_logging
     from linkedin_mcp_server.drivers.browser import reset_browser_for_testing
@@ -227,7 +227,7 @@ def _is_differential_row(request: pytest.FixtureRequest) -> bool:
 @pytest.fixture(scope="session")
 def real_daemon_state_root() -> Path | None:
     """The daemon state root of the account running the suite, if it has one."""
-    from linkedin_mcp_server import daemon_descriptor
+    from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
 
     with pytest.MonkeyPatch.context() as patch:
         patch.delenv(daemon_descriptor.TEST_ACCOUNT_HOME_ENV, raising=False)
@@ -272,7 +272,7 @@ def _entries(root: Path) -> frozenset[str]:
 def _state_keys(top: Path) -> frozenset[str]:
     """The daemon state directory name of *top* and of every directory below it.
 
-    Derived as ``daemon_descriptor._auth_root_identity`` keys an auth root, by
+    Derived as ``daemon.descriptor._auth_root_identity`` keys an auth root, by
     device and inode. Restated rather than called, because that function
     creates what is missing and goes through ``Path`` methods a test may have
     replaced; ``tests/test_daemon_state_guard.py`` fails if the two disagree.
@@ -307,7 +307,7 @@ def isolate_daemon_state(
 ):
     """Give every process a test starts a temporary account home for daemon state.
 
-    ``daemon_descriptor._account_home`` ignores ``HOME`` by design, and an owner
+    ``daemon.descriptor._account_home`` ignores ``HOME`` by design, and an owner
     is started by production code, so no in-process patch reaches it. The
     variable does: frontends inherit it from the test, and the owner from its
     frontend. Takes the clearing fixture as an argument for the reason
@@ -324,7 +324,7 @@ def isolate_daemon_state(
     if _is_differential_row(request):
         yield
         return
-    from linkedin_mcp_server.daemon_descriptor import TEST_ACCOUNT_HOME_ENV
+    from linkedin_mcp_server.daemon.descriptor import TEST_ACCOUNT_HOME_ENV
     from linkedin_mcp_server.private_state import harden_directory
 
     home = tmp_path_factory.mktemp("account") / "home"
@@ -404,7 +404,7 @@ def no_owner_on_the_real_profile(monkeypatch):
     as raised: the election runs in a worker thread whose caller turns any
     failure into "no owner", so a raise alone could pass unseen.
     """
-    from linkedin_mcp_server import daemon_election
+    from linkedin_mcp_server.daemon import election as daemon_election
 
     spawn = daemon_election._spawn
     refused: list[str] = []
@@ -427,7 +427,7 @@ def no_owner_on_the_real_profile(monkeypatch):
     if refused:
         pytest.fail(
             f"A test tried to start an owner with its {refused[0]}, under the "
-            f"real {_REAL_STATE_ROOT}. Stub `daemon_election.obtain_owner`, or "
+            f"real {_REAL_STATE_ROOT}. Stub `daemon.election.obtain_owner`, or "
             "elect with a configuration whose user_data_dir is under tmp_path."
         )
 

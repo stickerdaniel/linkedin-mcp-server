@@ -38,7 +38,7 @@ from differential.synthetic_origin import (
     SyntheticOrigin,
     issue_certificates,
 )
-from linkedin_mcp_server import daemon_descriptor
+from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
 
 
 @pytest.fixture

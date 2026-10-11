@@ -18,9 +18,9 @@ from typing import Any, cast
 
 import pytest
 
-from linkedin_mcp_server import daemon_config
+from linkedin_mcp_server.daemon import config as daemon_config
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.daemon_descriptor import config_fingerprint
+from linkedin_mcp_server.daemon.descriptor import config_fingerprint
 
 _NONCE = "0123456789abcdef" * 4
 _CONTROL = daemon_config.ControlEndpoint("127.0.0.1", 54321)
@@ -37,7 +37,7 @@ class _AttachedControl:
 
 
 def _attach_without_a_parent(monkeypatch: pytest.MonkeyPatch) -> None:
-    from linkedin_mcp_server import process_control
+    from linkedin_mcp_server.daemon import process_control
 
     monkeypatch.setattr(
         process_control, "attach", lambda *_args, **_kwargs: _AttachedControl()
@@ -212,7 +212,8 @@ class TestDaemonLogState:
     def test_fresh_log_state_is_private_under_umask_zero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        from linkedin_mcp_server import daemon_descriptor, daemon_owner
+        from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
+        from linkedin_mcp_server.daemon import owner as daemon_owner
 
         monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
         monkeypatch.setattr(daemon_owner.os, "dup2", lambda *args: None)
@@ -238,7 +239,8 @@ class TestDaemonLogState:
     def test_log_file_uses_the_private_file_acl(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        from linkedin_mcp_server import daemon_descriptor, daemon_owner
+        from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
+        from linkedin_mcp_server.daemon import owner as daemon_owner
         from linkedin_mcp_server.windows_acl import describe_dacl
 
         monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
@@ -259,7 +261,7 @@ class TestDaemonLogState:
     def test_windows_log_is_hardened_before_publication(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        from linkedin_mcp_server import daemon_owner
+        from linkedin_mcp_server.daemon import owner as daemon_owner
 
         log_path = tmp_path / "daemon.log"
         hardened: list[Path] = []
@@ -294,7 +296,7 @@ class TestDaemonLogState:
         below fails, and withdrawing the path then unlinks a log that is
         already being written to.
         """
-        from linkedin_mcp_server import daemon_owner
+        from linkedin_mcp_server.daemon import owner as daemon_owner
         from linkedin_mcp_server.private_state import PrivateStateError
 
         log_path = tmp_path / "daemon.log"
@@ -320,7 +322,8 @@ class TestDaemonLogState:
         can tell. The file was opened owner-only, so leaving it costs nothing
         and the next attachment hardens it through the existing-file path.
         """
-        from linkedin_mcp_server import daemon_descriptor, daemon_owner
+        from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
+        from linkedin_mcp_server.daemon import owner as daemon_owner
         from linkedin_mcp_server.private_state import PrivateStateError
 
         monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
@@ -347,7 +350,8 @@ class TestDaemonLogState:
         its own failure unlinks the log the candidate that went on to win the
         daemon lock is already writing to.
         """
-        from linkedin_mcp_server import daemon_descriptor, daemon_owner
+        from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
+        from linkedin_mcp_server.daemon import owner as daemon_owner
         from linkedin_mcp_server.private_state import PrivateStateError
 
         monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
@@ -388,7 +392,8 @@ class TestDaemonLogState:
     def test_a_planted_log_symlink_is_refused_before_open(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        from linkedin_mcp_server import daemon_descriptor, daemon_owner
+        from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
+        from linkedin_mcp_server.daemon import owner as daemon_owner
         from linkedin_mcp_server.private_state import PrivateStateError
 
         monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
@@ -410,7 +415,8 @@ class TestDaemonLogState:
     def test_an_existing_regular_log_is_hardened_before_append(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        from linkedin_mcp_server import daemon_descriptor, daemon_owner
+        from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
+        from linkedin_mcp_server.daemon import owner as daemon_owner
 
         monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
         monkeypatch.setattr(daemon_owner.os, "dup2", lambda *args: None)
@@ -536,8 +542,8 @@ class TestRefusing:
         import sys
 
         import linkedin_mcp_server.drivers.browser as browser_module
-        from linkedin_mcp_server import daemon_owner
-        from linkedin_mcp_server.process_control import ControlListener
+        from linkedin_mcp_server.daemon import owner as daemon_owner
+        from linkedin_mcp_server.daemon.process_control import ControlListener
 
         def refuse_lock(*_args):
             raise OSError("lock unavailable")
@@ -580,7 +586,7 @@ class TestRefusing:
             browser_module.set_headless(original)
 
     def test_owner_verdict_carries_the_handed_over_nonce(self):
-        from linkedin_mcp_server import daemon_owner
+        from linkedin_mcp_server.daemon import owner as daemon_owner
 
         class RecordingStream:
             def __init__(self) -> None:
@@ -611,7 +617,7 @@ class TestRefusing:
         # Startup output can already contain status-shaped lines. Until the
         # configuration yields the post-spawn nonce, the owner has no frame it can
         # authenticate, so failure is represented by a fixed diagnostic and EOF.
-        from linkedin_mcp_server import daemon_owner
+        from linkedin_mcp_server.daemon import owner as daemon_owner
 
         events: list[str] = []
 
@@ -665,7 +671,7 @@ class TestRefusing:
         stage: str,
         code: str,
     ):
-        from linkedin_mcp_server import daemon_owner
+        from linkedin_mcp_server.daemon import owner as daemon_owner
 
         events: list[str] = []
         config = AppConfig()
@@ -749,7 +755,8 @@ class TestRefusing:
         # configuration was refused.
         import io
 
-        from linkedin_mcp_server import daemon_owner, process_control
+        from linkedin_mcp_server.daemon import owner as daemon_owner
+        from linkedin_mcp_server.daemon import process_control
 
         events: list[str] = []
         payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
@@ -805,8 +812,8 @@ class TestRefusing:
     def test_a_lock_failure_is_reported_before_the_daemon_log(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        from linkedin_mcp_server import daemon_owner
-        from linkedin_mcp_server.daemon_lock import DaemonLockError
+        from linkedin_mcp_server.daemon import owner as daemon_owner
+        from linkedin_mcp_server.daemon.lock import DaemonLockError
 
         events: list[str] = []
         config = AppConfig()
@@ -880,7 +887,7 @@ class TestRefusing:
     def test_attached_bootstrap_reports_the_stage_before_the_versioned_hint(
         self, tmp_path: Path
     ):
-        from linkedin_mcp_server import daemon_owner
+        from linkedin_mcp_server.daemon import owner as daemon_owner
 
         class RecordingStream:
             def __init__(self) -> None:
@@ -912,7 +919,7 @@ class TestRefusing:
     def test_lock_loser_retries_without_attaching_the_log(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        from linkedin_mcp_server import daemon_owner
+        from linkedin_mcp_server.daemon import owner as daemon_owner
 
         events: list[str] = []
         config = AppConfig()
@@ -973,7 +980,7 @@ class TestRefusing:
         import threading
         import time
 
-        from linkedin_mcp_server import daemon_owner
+        from linkedin_mcp_server.daemon import owner as daemon_owner
 
         release = threading.Event()
 
@@ -1003,7 +1010,7 @@ class TestRefusing:
         import io
         import sys
 
-        from linkedin_mcp_server import daemon_owner
+        from linkedin_mcp_server.daemon import owner as daemon_owner
 
         original = sys.stdin
         sys.stdin = io.StringIO("   \n")

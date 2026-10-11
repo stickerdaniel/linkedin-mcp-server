@@ -32,7 +32,7 @@ from linkedin_mcp_server.drivers.browser import (
     close_browser,
     watch_for_handoff_requests,
 )
-from linkedin_mcp_server.daemon_auth import (
+from linkedin_mcp_server.daemon.auth_repair import (
     FrontendAuthRepairMiddleware,
     OwnerAuthSignalMiddleware,
 )
@@ -54,7 +54,7 @@ from linkedin_mcp_server.tools.person import register_person_tools
 from linkedin_mcp_server.tools.post import register_post_tools
 
 if TYPE_CHECKING:
-    from linkedin_mcp_server.daemon_proxy import DaemonProxyBackend
+    from linkedin_mcp_server.daemon.proxy import DaemonProxyBackend
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +229,7 @@ def create_mcp_server(
         # waiting its turn is the commonest way to end up with work nobody
         # wants. Inside, a call would only become cancellable once it already
         # had the browser.
-        from linkedin_mcp_server.daemon_liveness import OwnerCallLivenessMiddleware
+        from linkedin_mcp_server.daemon.liveness import OwnerCallLivenessMiddleware
 
         mcp.add_middleware(OwnerCallLivenessMiddleware())
     # The other half, and only ever on the process that has a user in front of it.
@@ -246,7 +246,7 @@ def create_mcp_server(
         # their own liveness wrapper, rather than one wrapper around the pair.
         # The other way round, an owner that departed between the two would leave
         # the replay unrecoverable.
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             FrontendCallHeartbeatMiddleware,
             FrontendOwnerRecoveryMiddleware,
         )
@@ -272,7 +272,7 @@ def create_mcp_server(
         mcp.add_middleware(UpdateNoticeMiddleware())
 
     if proxy_backend is not None:
-        from linkedin_mcp_server.daemon_proxy import create_proxy_provider
+        from linkedin_mcp_server.daemon.proxy import create_proxy_provider
 
         mcp.add_provider(
             create_proxy_provider(proxy_backend, tool_timeout=tool_timeout)

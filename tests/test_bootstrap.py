@@ -1264,8 +1264,10 @@ class TestSetupGate:
         exits between the two calls, and the retry then reaches a fresh owner
         that starts setup over instead of reporting what went wrong.
         """
-        from linkedin_mcp_server import bootstrap, daemon_liveness, daemon_owner
-        from linkedin_mcp_server.daemon_owner import _serve_until_stopped
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
+        from linkedin_mcp_server.daemon import owner as daemon_owner
+        from linkedin_mcp_server.daemon.owner import _serve_until_stopped
         from linkedin_mcp_server.exceptions import BrowserSetupFailedError
         from linkedin_mcp_server.server_role import ServerRole
 
@@ -1794,7 +1796,8 @@ class TestTwoStageInstall:
     async def test_owner_idle_hold_ends_after_the_lifetime_failure(
         self, isolate_profile_dir, monkeypatch
     ):
-        from linkedin_mcp_server import bootstrap, daemon_liveness
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
         from linkedin_mcp_server.exceptions import BrowserSetupFailedError
         from linkedin_mcp_server.server_role import ServerRole
 
@@ -1846,7 +1849,8 @@ class TestTwoStageInstall:
     async def test_owner_setup_completion_resets_the_idle_clock(
         self, isolate_profile_dir, monkeypatch
     ):
-        from linkedin_mcp_server import bootstrap, daemon_liveness
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
         from linkedin_mcp_server.server_role import ServerRole
 
         async def setup(**_kwargs: object) -> None:
@@ -1865,7 +1869,8 @@ class TestTwoStageInstall:
     async def test_ready_owner_setup_resets_the_idle_clock(
         self, isolate_profile_dir, monkeypatch
     ):
-        from linkedin_mcp_server import bootstrap, daemon_liveness
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
         from linkedin_mcp_server.server_role import ServerRole
 
         liveness = MagicMock()
@@ -1880,7 +1885,8 @@ class TestTwoStageInstall:
     async def test_failed_owner_setup_resets_the_idle_clock(
         self, isolate_profile_dir, monkeypatch
     ):
-        from linkedin_mcp_server import bootstrap, daemon_liveness
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
         from linkedin_mcp_server.server_role import ServerRole
 
         async def setup(**_kwargs: object) -> None:

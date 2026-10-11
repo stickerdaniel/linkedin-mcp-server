@@ -1927,7 +1927,7 @@ class TestACancelWaitsForTheProfile:
 class TestTheCallerSeesAnOrdinaryFailure:
     async def test_through_the_mcp_boundary(self, driver):
         """An error result like any other, then a working call after it."""
-        from linkedin_mcp_server.daemon_auth import (
+        from linkedin_mcp_server.daemon.auth_repair import (
             MARKER_KEY,
             OwnerAuthSignalMiddleware,
         )
@@ -1974,7 +1974,7 @@ class TestTheCallerSeesAnOrdinaryFailure:
         from mcp import types as mt
         from fastmcp.server.middleware import MiddlewareContext
 
-        from linkedin_mcp_server.daemon_proxy import FrontendOwnerRecoveryMiddleware
+        from linkedin_mcp_server.daemon.proxy import FrontendOwnerRecoveryMiddleware
 
         manager, lease = await _cached_with_a_call_reference(driver)
         manager.page_closed = True
