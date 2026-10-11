@@ -4336,9 +4336,8 @@ class TestAForwardedCallThroughTheRealOwner:
         assert [body["value"] for body in bodies] == ["first", "second"]
         for body in bodies:
             assert body["version"] == HOP_PROTOCOL_VERSION, body
-            assert body["session"] is not None, body
-        # Each call on a hop of its own, never a session shared between them.
-        assert bodies[0]["session"] != bodies[1]["session"], bodies
+            # A stateless era: no session the owner could hold between calls.
+            assert body["session"] is None, body
         # Each body ran under the call id its own preflight named, two calls
         # two ids, and each tool request left carrying it, already claimed.
         first_call, second_call = (body["call"] for body in bodies)

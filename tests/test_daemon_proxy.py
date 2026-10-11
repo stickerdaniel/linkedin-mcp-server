@@ -25,7 +25,7 @@ from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
-from owner_hop import Forward, Interceptor, method_of
+from owner_hop import Forward, Interceptor, hop_of, method_of
 from owner_hop import reach_owners_in_process as _reach_owners_in_process
 
 from linkedin_mcp_server.config.schema import AppConfig
@@ -106,7 +106,7 @@ def _forwarding(backend: DaemonProxyBackend, *, timeout: float = 5.0) -> FastMCP
     return proxy
 
 
-class _GoesAwayAfterInitialize(Interceptor):
+class _GoesAwayAfterNegotiating(Interceptor):
     """An owner that answers the negotiation and is gone before the next request.
 
     The window that neither the connect nor the tool call can see: the hop was
@@ -200,9 +200,10 @@ class TestReachingTheOwner:
     async def test_every_operation_opens_a_hop_of_its_own(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        # A shared session would be reused after the owner it was opened
+        # A shared connection would be reused after the owner it was opened
         # against had gone, and an upgrade replaces the owner under a running
-        # frontend. Each operation negotiates afresh and closes what it opened.
+        # frontend. Each operation negotiates afresh, and leaves nothing open
+        # behind it: every exchange is one POST.
         owner = _OwnerOverHttp()
         _reach_owners_in_process(monkeypatch, lambda _url: httpx2.MockTransport(owner))
         forwarder = OwnerForwarder(
@@ -212,8 +213,13 @@ class TestReachingTheOwner:
         await forwarder.list_tools()
         await forwarder.call("send_connection_request", {})
 
-        assert owner.methods == ["initialize", "tools/list", "initialize", "tools/call"]
-        assert [r.method for r in owner.requests].count("DELETE") == 2
+        assert owner.methods == [
+            "server/discover",
+            "tools/list",
+            "server/discover",
+            "tools/call",
+        ]
+        assert [r.method for r in owner.requests] == ["POST"] * 4
 
 
 class TestCallingTheOwner:
@@ -335,23 +341,22 @@ class TestCallingTheOwner:
 
 
 class _GoneAfterTheCall(Interceptor):
-    """An owner that refuses every request made on a session after its tool call."""
+    """An owner that refuses every request made after its tool call."""
 
     def __init__(self, owner: FastMCP) -> None:
         super().__init__(owner)
-        self.called: set[str] = set()
+        self.called = False
         self.refused: list[str | None] = []
 
     async def handle(
         self, message: dict[str, Any] | None, request: httpx2.Request, forward: Forward
     ) -> httpx2.Response:
-        session = request.headers.get("mcp-session-id")
         method = method_of(message)
-        if message is not None and session in self.called:
+        if message is not None and self.called:
             self.refused.append(method)
             raise httpx2.ConnectError("the owner left after answering the call")
         if method == "tools/call":
-            self.called.add(session or "")
+            self.called = True
         return await forward()
 
 
@@ -380,7 +385,7 @@ class TestKeepingTheTokenOffTheNetwork:
         ).list_tools()
 
         assert [tool.name for tool in listed] == ["send_connection_request"]
-        assert owner.methods == ["initialize", "tools/list"]
+        assert owner.methods == ["server/discover", "tools/list"]
 
 
 class TestTheForwardingDeadline:
@@ -1519,24 +1524,24 @@ class _DiesAsTheCallsHopCloses(Interceptor):
 
 
 class _DiscoveryFailsAfterMutation(Interceptor):
-    """An owner that answers a call, then cannot answer a listing on its session."""
+    """An owner that answers a call, then cannot answer a listing on its hop."""
 
     def __init__(self, owner: FastMCP) -> None:
         super().__init__(owner)
-        self.called: set[str] = set()
+        self.called: set[int] = set()
         self.discovery_attempts = 0
 
     async def handle(
         self, message: dict[str, Any] | None, request: httpx2.Request, forward: Forward
     ) -> httpx2.Response:
-        # Only the session that made the call loses its owner. The lookup in
+        # Only the hop that made the call loses its owner. The lookup in
         # front of the call has a hop of its own, and that one is not what
         # this is about.
-        session = request.headers.get("mcp-session-id", "")
+        hop = hop_of(request)
         method = method_of(message)
         if method == "tools/call":
-            self.called.add(session)
-        elif method == "tools/list" and session in self.called:
+            self.called.add(hop)
+        elif method == "tools/list" and hop in self.called:
             self.discovery_attempts += 1
             raise httpx2.ConnectError("the owner left after answering the call")
         return await forward()
@@ -1673,18 +1678,18 @@ class TestRecoveringThroughTheWholeProxy:
         assert before.discovery_attempts == 0
         assert before.called, "the call never reached the owner under test"
 
-    async def test_an_owner_that_dies_after_the_handshake_is_still_recovered(
+    async def test_an_owner_that_dies_after_the_negotiation_is_still_recovered(
         self, monkeypatch: pytest.MonkeyPatch, _upgraded
     ):
         """The boundary neither the connect nor the call can see.
 
         The listing runs inside a connection that was established, so a departure
-        between the initialize and the list request raises out of neither. Every
+        between the negotiation and the list request raises out of neither. Every
         other recovery test kills the owner earlier and passes with the listing
         boundaries unwrapped.
         """
         backend, elected, _replacement, elections = _upgraded
-        dying = _GoesAwayAfterInitialize(self._owner())
+        dying = _GoesAwayAfterNegotiating(self._owner())
         after = self._owner("the_replacements_tool")
         _reach_owners_in_process(
             monkeypatch,
@@ -3143,7 +3148,7 @@ class _HeldAtConnect(Interceptor):
     async def handle(
         self, message: dict[str, Any] | None, request: httpx2.Request, forward: Forward
     ) -> httpx2.Response:
-        if method_of(message) == "initialize":
+        if method_of(message) == "server/discover":
             self.reached.set()
             await self.release.wait()
         return await forward()
@@ -3234,7 +3239,7 @@ class TestBurialAfterTheLastCheck:
     async def test_a_burial_during_client_setup_stops_the_send(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        # The call is bound and its client is being initialized when another
+        # The call is bound and its client is negotiating when another
         # call writes the owner off. The client is real and the owner is an
         # in-process server, so a request that got through would run its tool.
         from linkedin_mcp_server.daemon.proxy import (
@@ -3273,6 +3278,41 @@ class TestBurialAfterTheLastCheck:
         assert ran == []
         assert refused.value.nothing_was_sent is True
         assert refused.value.instance_id == attachment.descriptor.instance_id
+        assert refused.value.classification is OwnerFailure.RETIRING
+
+    async def test_a_burial_before_the_negotiation_sends_it_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The owner is written off as the hop opens its transport, before the
+        # negotiation goes out: not even that reaches it.
+        from linkedin_mcp_server.daemon import forwarder as forwarder_module
+        from linkedin_mcp_server.daemon.proxy import OwnerFailure, OwnerUnreachableError
+
+        owner = FastMCP("owner")
+        reached = _RecordsRequests(owner)
+        _reach_owners_in_process(monkeypatch, lambda _url: reached)
+        attachment = _attachment(tmp_path)
+        backend = _backend(attachment, tmp_path)
+        routed = forwarder_module.owner_transport
+        loop = asyncio.get_running_loop()
+
+        def opened() -> httpx2.AsyncBaseTransport:
+            loop.call_soon(
+                backend.note_failure,
+                attachment.descriptor.instance_id,
+                OwnerFailure.RETIRING,
+            )
+            return routed()
+
+        monkeypatch.setattr(forwarder_module, "owner_transport", opened)
+
+        with pytest.raises(OwnerUnreachableError) as refused:
+            await OwnerForwarder(backend, timeout=5.0).call(
+                "send_connection_request", {}
+            )
+
+        assert reached.requests == []
+        assert refused.value.nothing_was_sent is True
         assert refused.value.classification is OwnerFailure.RETIRING
 
     async def test_a_request_already_sent_keeps_its_owner_and_its_heartbeats(
@@ -3374,7 +3414,7 @@ class TestTheSendBoundary:
                 forward: Forward,
             ) -> httpx2.Response:
                 response = await forward()
-                if buried and method_of(message) == "initialize":
+                if buried and method_of(message) == "server/discover":
                     loop.call_soon(
                         backend.note_failure,
                         old.descriptor.instance_id,
@@ -3565,9 +3605,9 @@ class TestTheDispatchRecord:
         assert result.is_error is False
         assert binding.dispatch.state is Dispatch.ANSWERED
         assert witness.seen == [
-            ("initialize", Dispatch.UNSENT),
+            ("server/discover", Dispatch.UNSENT),
             ("tools/list", Dispatch.UNSENT),
-            ("initialize", Dispatch.UNSENT),
+            ("server/discover", Dispatch.UNSENT),
             ("tools/call", Dispatch.POSSIBLY_SENT),
         ]
 
@@ -3767,6 +3807,50 @@ def _refused(_body: dict[str, Any]) -> NoReturn:
     raise httpx2.ConnectError("the owner's port refused the connection")
 
 
+def _no_such_method(body: dict[str, Any]) -> httpx2.Response:
+    """The owner's own unknown-method answer, at the status this era maps it to."""
+    error = {"code": mt.METHOD_NOT_FOUND, "message": "Method not found"}
+    return httpx2.Response(
+        404, json={"jsonrpc": "2.0", "id": body["id"], "error": error}
+    )
+
+
+def _discovered_as(*versions: str) -> Callable[[dict[str, Any]], httpx2.Response]:
+    """A ``server/discover`` result listing *versions*, whatever was proposed."""
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        result = {
+            "ttlMs": 0,
+            "cacheScope": "private",
+            "resultType": "complete",
+            "supportedVersions": list(versions),
+            "capabilities": {"tools": {"listChanged": False}},
+        }
+        return httpx2.Response(
+            200, json={"jsonrpc": "2.0", "id": body["id"], "result": result}
+        )
+
+    return answer
+
+
+def _unsupported_version(
+    body: dict[str, Any], proposed: str, served: tuple[str, ...]
+) -> httpx2.Response:
+    """A FastMCP owner's answer to ``server/discover`` at a version it does not serve."""
+    return httpx2.Response(
+        400,
+        json={
+            "jsonrpc": "2.0",
+            "id": body["id"],
+            "error": {
+                "code": mt.UNSUPPORTED_PROTOCOL_VERSION,
+                "message": "Unsupported protocol version",
+                "data": {"supported": list(served), "requested": proposed},
+            },
+        },
+    )
+
+
 class _OwnerOverHttp:
     """An owner at the far end of the SDK's own HTTP client, answering by hand.
 
@@ -3779,23 +3863,21 @@ class _OwnerOverHttp:
     handling. Losing a real owner process is witnessed by the loopback owners
     in ``tests/test_daemon_election.py``.
 
-    *effects* counts the tool calls this owner ran. *session* decides whether
-    the initialize hands out a session id, which is what decides whether the
-    SDK reads a 404 as a lost session or as an unknown method. *version* is
-    the protocol version it answers ``initialize`` with, the requested one when
-    not given. *methods* is every JSON-RPC request that arrived, in order.
+    *effects* counts the tool calls this owner ran. *versions* are the protocol
+    versions it serves; ``server/discover`` proposing any other is refused the
+    way a real owner refuses it. *methods* is every JSON-RPC request that
+    arrived, in order. The answers are a FastMCP owner's on the 2026-07-28
+    wire, trimmed: each request one POST, no session id.
     """
 
     def __init__(
         self,
         *,
         fail: dict[str, Callable[[dict[str, Any]], Any]] | None = None,
-        session: bool = True,
-        version: str | None = None,
+        versions: tuple[str, ...] = (HOP_PROTOCOL_VERSION,),
     ) -> None:
         self.fail = dict(fail or {})
-        self.session = session
-        self.version = version
+        self.versions = versions
         self.effects = 0
         self.requests: list[httpx2.Request] = []
         self.methods: list[str] = []
@@ -3809,8 +3891,6 @@ class _OwnerOverHttp:
         self.requests.append(request)
         if request.url.path == HEARTBEAT_PATH:
             return httpx2.Response(200, json={"watched": False})
-        if request.method == "DELETE":
-            return httpx2.Response(200)
         if request.method != "POST":
             return httpx2.Response(405)
         body = json.loads(request.content)
@@ -3829,33 +3909,33 @@ class _OwnerOverHttp:
     def answer(self, body: dict[str, Any]) -> httpx2.Response:
         """What a healthy owner sends back for *body*."""
         method = body["method"]
-        headers: dict[str, str] = {}
-        if method == "initialize":
-            result: dict[str, Any] = {
-                "protocolVersion": self.version or body["params"]["protocolVersion"],
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "owner", "version": "1"},
-            }
-            if self.session:
-                headers["mcp-session-id"] = "owner-session"
-        elif method == "tools/list":
+        if method == "server/discover":
+            proposed = body["params"]["_meta"][mt.PROTOCOL_VERSION_META_KEY]
+            if proposed not in self.versions:
+                return _unsupported_version(body, proposed, self.versions)
+            return _discovered_as(*self.versions)(body)
+        if method == "tools/list":
             tool = {
                 "name": "send_connection_request",
                 "inputSchema": {"type": "object"},
             }
-            result = {"tools": [tool]}
+            result: dict[str, Any] = {
+                "ttlMs": 0,
+                "cacheScope": "private",
+                "resultType": "complete",
+                "tools": [tool],
+            }
         elif method == "tools/call":
             self.effects += 1
-            result = {"content": [{"type": "text", "text": "sent"}]}
+            result = {
+                "content": [{"type": "text", "text": "sent"}],
+                "isError": False,
+                "resultType": "complete",
+            }
         else:
-            error = {"code": mt.METHOD_NOT_FOUND, "message": "Method not found"}
-            return httpx2.Response(
-                200, json={"jsonrpc": "2.0", "id": body["id"], "error": error}
-            )
+            return _no_such_method(body)
         return httpx2.Response(
-            200,
-            json={"jsonrpc": "2.0", "id": body["id"], "result": result},
-            headers=headers,
+            200, json={"jsonrpc": "2.0", "id": body["id"], "result": result}
         )
 
     def after_running(
@@ -3923,17 +4003,13 @@ class TestTheSdksOwnHttpErrors:
         monkeypatch: pytest.MonkeyPatch,
         phase: str,
         respond: Callable[[dict[str, Any]], Any],
-        *,
-        session: bool = True,
     ) -> tuple[BaseException, _OwnerOverHttp]:
         methods = {
-            "entry": ("initialize",),
+            "entry": ("server/discover",),
             "list": ("tools/list",),
             "call": ("tools/call",),
         }
-        owner = _OwnerOverHttp(
-            fail=dict.fromkeys(methods[phase], respond), session=session
-        )
+        owner = _OwnerOverHttp(fail=dict.fromkeys(methods[phase], respond))
         _serve_over_http(monkeypatch, lambda _address: owner)
         forwarder = OwnerForwarder(
             _backend(_attachment(tmp_path), tmp_path), timeout=2.0
@@ -3972,34 +4048,24 @@ class TestTheSdksOwnHttpErrors:
         assert failure.nothing_was_sent is (phase != "call")
         assert owner.effects == 0
 
-    @pytest.mark.parametrize("phase", ["list", "call"])
-    @pytest.mark.parametrize(
-        ("session", "written"),
-        [(True, "Session terminated"), (False, "Not Found")],
-        ids=["with a session", "before a session"],
-    )
-    async def test_a_404_is_a_stand_in_with_a_session_and_without(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        phase: str,
-        session: bool,
-        written: str,
+    @pytest.mark.parametrize("phase", ["entry", "list", "call"])
+    async def test_a_bare_404_is_a_stand_in_and_not_an_unknown_method(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
     ):
-        """The same status, two stand-ins, and neither is the owner's answer.
+        """A 404 without a JSON-RPC body is the SDK's, whatever its code says.
 
-        With a session the SDK writes ``INVALID_REQUEST`` "Session terminated";
-        without one, ``METHOD_NOT_FOUND`` "Not Found", whose code is also how a
-        server says it has no listing of a kind.
+        This era has no session, so the SDK writes ``METHOD_NOT_FOUND`` "Not
+        Found" for it: the code a server uses to say it has no listing of a
+        kind, and the one that refuses the hop's version at entry.
         """
         from linkedin_mcp_server.daemon.forwarder import OwnerUnreachableError
 
         failure, _owner = await self._fail_at(
-            tmp_path, monkeypatch, phase, _STAND_INS["404"], session=session
+            tmp_path, monkeypatch, phase, _STAND_INS["404"]
         )
 
         assert isinstance(failure, OwnerUnreachableError), failure
-        assert str(failure.__cause__) == written
+        assert str(failure.__cause__) == "Not Found"
 
     @pytest.mark.parametrize("phase", ["entry", "list", "call"])
     async def test_a_real_refusal_in_an_error_status_is_the_owners_answer(
@@ -4083,7 +4149,14 @@ class TestTheHopsProtocolVersion:
     async def test_the_hop_asks_for_the_pinned_version_and_speaks_it(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        owner = _OwnerOverHttp()
+        # The owner also serves an era newer than the pin, and so does the SDK
+        # the frontend runs, as a fresh `uvx` resolve may bring one: the SDK
+        # adopts the newest era both sides list. The hop still speaks the pin.
+        import mcp.client.session as sdk_session
+
+        newer = (*sdk_session.MODERN_PROTOCOL_VERSIONS, "2099-01-01")
+        monkeypatch.setattr(sdk_session, "MODERN_PROTOCOL_VERSIONS", newer)
+        owner = _OwnerOverHttp(versions=(HOP_PROTOCOL_VERSION, "2099-01-01"))
         _serve_over_http(monkeypatch, lambda _address: owner)
 
         result = await OwnerForwarder(
@@ -4091,27 +4164,58 @@ class TestTheHopsProtocolVersion:
         ).call("send_connection_request", {})
 
         assert result.is_error is False
-        assert owner.methods == ["initialize", "tools/call"]
-        (initialize,) = [b for b in owner.bodies if b.get("method") == "initialize"]
-        assert initialize["params"]["protocolVersion"] == HOP_PROTOCOL_VERSION
-        assert HOP_PROTOCOL_VERSION == "2025-11-25"
+        assert owner.methods == ["server/discover", "tools/call"]
+        (discover,) = [b for b in owner.bodies if b.get("method") == "server/discover"]
+        proposed = discover["params"]["_meta"][mt.PROTOCOL_VERSION_META_KEY]
+        assert proposed == HOP_PROTOCOL_VERSION == "2026-07-28"
         (call,) = [r for r in owner.requests if b'"tools/call"' in r.content]
         assert call.headers["mcp-protocol-version"] == HOP_PROTOCOL_VERSION
+        sent = json.loads(call.content)["params"]["_meta"]
+        assert sent[mt.PROTOCOL_VERSION_META_KEY] == HOP_PROTOCOL_VERSION
         assert owner.effects == 1
 
-    @pytest.mark.parametrize("answered", ["2025-06-18", "2026-07-28"])
-    async def test_another_negotiated_version_is_refused(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answered: str
+    @pytest.mark.parametrize(
+        "refusing",
+        [
+            pytest.param(
+                lambda: _OwnerOverHttp(versions=("2025-06-18",)), id="2025-06-18"
+            ),
+            pytest.param(
+                lambda: _OwnerOverHttp(versions=("2025-11-25",)), id="2025-11-25"
+            ),
+            # An owner that has no `server/discover` at all.
+            pytest.param(
+                lambda: _OwnerOverHttp(fail={"server/discover": _no_such_method}),
+                id="no discover",
+            ),
+            # Not an answer a FastMCP owner gives, which refuses a version it
+            # does not serve; the hop does not take the version on trust.
+            pytest.param(
+                lambda: _OwnerOverHttp(
+                    fail={"server/discover": _discovered_as("2025-11-25")}
+                ),
+                id="listed without it",
+            ),
+        ],
+    )
+    async def test_an_owner_without_the_pinned_version_is_refused(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        refusing: Callable[[], _OwnerOverHttp],
     ):
-        """An owner that answers another version is not spoken to at all.
+        """An owner that does not serve the pinned version is not spoken to.
 
-        Not even the initialized notification follows, and no tool request:
-        the refusal comes before anything the owner could act on, so the call
-        says nothing was sent.
+        No tool request follows: the refusal comes before anything the owner
+        could act on, so the call says nothing was sent, and it is a failure
+        to reach the owner rather than an answer the caller is handed.
         """
-        from linkedin_mcp_server.daemon.forwarder import OwnerUnreachableError
+        from linkedin_mcp_server.daemon.forwarder import (
+            OwnerUnreachableError,
+            _HopVersionRefused,
+        )
 
-        owner = _OwnerOverHttp(version=answered)
+        owner = refusing()
         _serve_over_http(monkeypatch, lambda _address: owner)
 
         with pytest.raises(OwnerUnreachableError) as refused:
@@ -4120,8 +4224,8 @@ class TestTheHopsProtocolVersion:
             ).call("send_connection_request", {})
 
         assert refused.value.nothing_was_sent is True
-        assert answered in str(refused.value)
-        assert [b.get("method") for b in owner.bodies] == ["initialize"]
+        assert isinstance(refused.value.__cause__, _HopVersionRefused)
+        assert owner.methods == ["server/discover"]
         assert owner.effects == 0
 
     async def test_an_owner_with_no_way_in_is_not_entered(
@@ -4129,7 +4233,7 @@ class TestTheHopsProtocolVersion:
     ):
         from linkedin_mcp_server.daemon.forwarder import OwnerUnreachableError
 
-        owner = _OwnerOverHttp(fail={"initialize": _STAND_INS["500"]})
+        owner = _OwnerOverHttp(fail={"server/discover": _STAND_INS["500"]})
         _serve_over_http(monkeypatch, lambda _address: owner)
 
         with pytest.raises(OwnerUnreachableError) as failed:
@@ -4138,7 +4242,7 @@ class TestTheHopsProtocolVersion:
             ).call("send_connection_request", {})
 
         assert failed.value.nothing_was_sent is True
-        assert owner.methods == ["initialize"]
+        assert owner.methods == ["server/discover"]
         assert owner.effects == 0
 
     async def test_an_unsupported_listing_is_an_empty_answer(
@@ -4222,7 +4326,7 @@ class TestWhatTheOwnerDidBeforeItWentAway:
 
         def gone_after_the_lookup(body: dict[str, Any]) -> httpx2.Response:
             del original.fail["tools/list"]
-            original.fail["initialize"] = _refused
+            original.fail["server/discover"] = _refused
             return original.answer(body)
 
         original.fail["tools/list"] = gone_after_the_lookup
@@ -4318,10 +4422,8 @@ class TestTheHeadersTheOwnerReceives:
             if r.headers.get(CALL_HEADER) == call.headers[CALL_HEADER]
         ]
         assert any(b'"tools/list"' in content for content in named), named
-        # The version the hop spoke, as the owner sees it on the request, and
-        # the session the negotiation handed out.
+        # The version the hop spoke, as the owner sees it on the request.
         assert call.headers["mcp-protocol-version"] == HOP_PROTOCOL_VERSION
-        assert call.headers["mcp-session-id"] == "owner-session"
 
 
 #: A stand-in owner process: a real HTTP server with the owner's bearer check

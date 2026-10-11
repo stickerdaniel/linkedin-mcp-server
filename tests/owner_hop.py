@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import itertools
 import json
 from collections.abc import Awaitable, Callable
 from types import TracebackType
@@ -31,6 +32,10 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 #: Names the in-process owner a request is for, between the router and the
 #: app it dispatches to. Removed before the owner sees the request.
 _OWNER_KEY = b"x-owner-under-test"
+
+#: The request extension :func:`hop_of` reads, set as an interceptor is reached.
+_HOP_KEY = "owner_hop.hop"
+_HOP_NUMBERS = itertools.count()
 
 Forward = Callable[[], Awaitable[httpx2.Response]]
 
@@ -57,6 +62,14 @@ class Interceptor:
         *methods* is every JSON-RPC method that hop posted here, in order. An
         exception raised here leaves the hop's HTTP client as it closes.
         """
+
+
+def hop_of(request: httpx2.Request) -> int:
+    """Which hop *request* travelled on, the same number for every request of one.
+
+    The hop's era has no session id to tell two hops apart by.
+    """
+    return request.extensions[_HOP_KEY]
 
 
 def method_of(message: dict[str, Any] | None) -> str | None:
@@ -111,6 +124,7 @@ class _Routed(httpx2.AsyncBaseTransport):
     """One hop's transport: each request goes to whatever serves its URL."""
 
     def __init__(self, owner_at: Callable[[str], Any], hosts: _Hosts) -> None:
+        self.number = next(_HOP_NUMBERS)
         self.owner_at = owner_at
         self.hosts = hosts
         self.apps: dict[bytes, ASGIApp] = {}
@@ -152,6 +166,7 @@ class _Routed(httpx2.AsyncBaseTransport):
             method = method_of(message)
             if method is not None:
                 methods.append(method)
+            request.extensions = {**request.extensions, _HOP_KEY: self.number}
             owner = reached.owner
             return await reached.handle(
                 message, request, lambda: self._to(owner, request)

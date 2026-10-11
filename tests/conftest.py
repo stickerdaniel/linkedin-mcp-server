@@ -74,28 +74,6 @@ def reset_singletons():
     reset_trace_state_for_testing()
 
 
-@pytest.fixture(autouse=True)
-def sse_streams_outlive_an_earlier_servers_shutdown(monkeypatch):
-    """Clear sse-starlette's shutdown flag, which latches for the whole process.
-
-    The MCP SDK serves a 2025-11-25 session's streams through sse-starlette's
-    ``EventSourceResponse``. Its shutdown watcher polls the uvicorn server that
-    holds SIGTERM every half second and, once that server says ``should_exit``,
-    sets ``AppStatus.should_exit`` on the class, where nothing clears it. Every
-    stream any later server opens in this process then ends at once, without
-    its response, and a frontend reads that as its owner going away.
-
-    A test that runs an owner in-process and stops it sets the flag whenever
-    its shutdown outlasts one poll. Measured: a second-long shutdown in
-    ``TestAForwardedCallThroughTheRealOwner`` fails the next test's first call
-    exactly as Windows CI did, on macOS. A process that serves once, which is
-    every production owner, never reaches a second server.
-    """
-    from sse_starlette.sse import AppStatus
-
-    monkeypatch.setattr(AppStatus, "should_exit", False)
-
-
 #: The browser cache the run was started with, read before any test can write
 #: the variable.
 _INHERITED_BROWSERS_PATH = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")

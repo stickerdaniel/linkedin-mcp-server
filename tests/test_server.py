@@ -275,11 +275,8 @@ class TestToolContract:
 
         assert await _wire_tools(proxy, mode, protocol) == recorded
         assert hop, "the proxy never reached its owner"
-        # The initialize asks for the version in its body; every request after
-        # it names the version the hop speaks.
-        assert {v for method, v in hop if method != "initialize"} == {
-            HOP_PROTOCOL_VERSION
-        }, hop
+        # Every request names the version the hop speaks, the negotiation too.
+        assert {v for _method, v in hop} == {HOP_PROTOCOL_VERSION}, hop
 
 
 class TestServerRoles:

@@ -19,6 +19,7 @@ from __future__ import annotations
 import ast
 import base64
 import importlib.util
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -245,6 +246,42 @@ class TestWhatAClientReads:
             if isinstance(data, dict)
         ] == [("info", "reading", {"page": 1})]
 
+    async def test_a_host_that_never_asks_for_log_levels_still_gets_the_logs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A handshake-era host, which names no log level on its requests.
+
+        The hop's era sends a request's logs only when that request asks for
+        them, and this host's requests carry nothing to forward that would.
+        """
+        from fastmcp.client.transports import FastMCPTransport
+
+        owner = FastMCP("owner")
+
+        @owner.tool(name="get_feed")
+        async def get_feed(ctx: Context) -> str:
+            await ctx.warning("slow page", extra={"page": 2})
+            return "read"
+
+        reach_owners_in_process(monkeypatch, lambda _url: owner)
+        logs: list[tuple[str, Any]] = []
+
+        async def on_log(params: mt.LoggingMessageNotificationParams) -> None:
+            logs.append((params.level, params.data))
+
+        async with FastMCPTransport(_proxy(tmp_path)).connect_session(
+            logging_callback=on_log, log_level=None
+        ) as session:
+            await session.initialize()
+            result = await session.call_tool("get_feed", {})
+
+        assert result.is_error is False
+        assert [
+            (level, data.get("msg"), data.get("extra"))
+            for level, data in logs
+            if isinstance(data, dict)
+        ] == [("warning", "slow page", {"page": 2})]
+
 
 class _RecordsHeaders(Interceptor):
     """Every request that reached the owner: its JSON-RPC method and headers."""
@@ -293,11 +330,14 @@ class TestTheCallHeader:
         ids = []
         for requests in (first, second):
             seen = [(verb, method) for verb, method, _ in requests]
-            # Two hops, the lookup's and the call's, each from its
-            # negotiation to its DELETE.
-            assert ("POST", "tools/list") in seen, seen
-            assert ("POST", "tools/call") in seen, seen
-            assert seen.count(("DELETE", None)) == 2, seen
+            # Two hops, the lookup's and the call's, each with its own
+            # negotiation.
+            assert seen == [
+                ("POST", "server/discover"),
+                ("POST", "tools/list"),
+                ("POST", "server/discover"),
+                ("POST", "tools/call"),
+            ], seen
             named = {headers.get(CALL_HEADER) for _, _, headers in requests}
             (call_id,) = named
             assert call_id, seen
@@ -369,6 +409,59 @@ class TestHowFarTheRequestGot:
             await forwarder.call("send_message", {"message": "hi"})
 
         assert binding.dispatch.state is Dispatch.ANSWERED
+
+    async def test_an_answer_cut_off_before_its_end_is_not_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The owner's whole answer is on the stream except the blank line that
+        # ends its event, and then the stream ends. The SDK discards an
+        # unterminated event, so the caller never got an answer.
+        from linkedin_mcp_server.daemon.core.call import Dispatch
+        from linkedin_mcp_server.daemon.forwarder import (
+            OwnerUnreachableError,
+            bound_to,
+        )
+
+        class _CutOff(Interceptor):
+            async def handle(
+                self,
+                message: dict[str, Any] | None,
+                request: httpx2.Request,
+                forward: Forward,
+            ) -> httpx2.Response:
+                if method_of(message) != "tools/call" or message is None:
+                    return await forward()
+                answer = {
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "result": {"content": [], "isError": False},
+                }
+
+                class Unterminated(httpx2.AsyncByteStream):
+                    async def __aiter__(self):
+                        yield f"event: message\ndata: {json.dumps(answer)}\n".encode()
+
+                return httpx2.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    stream=Unterminated(),
+                )
+
+        owner = FastMCP("owner")
+
+        @owner.tool(name="send_message")
+        async def send_message(message: str) -> str:
+            return message
+
+        cut = _CutOff(owner)
+        reach_owners_in_process(monkeypatch, lambda _url: cut)
+        forwarder, binding = self._bound(tmp_path)
+
+        with bound_to(binding), pytest.raises(OwnerUnreachableError) as failed:
+            await forwarder.call("send_message", {"message": "hi"})
+
+        assert failed.value.nothing_was_sent is False
+        assert binding.dispatch.state is Dispatch.POSSIBLY_SENT
 
     def test_the_record_never_moves_back(self):
         from linkedin_mcp_server.daemon.core.call import Dispatch

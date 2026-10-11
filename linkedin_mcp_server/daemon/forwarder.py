@@ -15,10 +15,11 @@ client, session and negotiation against the owner the backend names at that
 moment, and closes them afterwards. A shared session would outlive the owner it
 was opened against, and an upgrade replaces the owner under a running frontend.
 
-**The hop speaks one protocol version** (:data:`HOP_PROTOCOL_VERSION`), sent
-with the ``initialize`` request and checked against the answer. The external
-host still negotiates any version with the frontend's own server; only this
-internal hop is pinned, so an SDK upgrade cannot move it silently.
+**The hop speaks one protocol version** (:data:`HOP_PROTOCOL_VERSION`),
+proposed with ``server/discover`` and checked against the versions the owner
+lists. The external host still negotiates any version with the frontend's own
+server; only this internal hop is pinned, so an SDK upgrade cannot move it
+silently.
 
 **What the caller is told depends on how far the tool request got**, and that
 is read off the wire rather than off an exception. :class:`DispatchRecord` only
@@ -85,10 +86,19 @@ _ResultT = TypeVar("_ResultT", bound="BaseModel")
 
 #: The one MCP protocol version the frontend speaks to its owner. A literal
 #: rather than the SDK's latest, so a dependency upgrade cannot change it.
-HOP_PROTOCOL_VERSION = "2025-11-25"
+#:
+#: The stateless 2026-07-28 era, which is what the owner served frontends
+#: before the hop was pinned. Each request is one POST, answered by the SDK's
+#: single-exchange handler (`mcp/server/_streamable_http_modern.py`), and a
+#: caller that gives up aborts that POST. The handshake eras instead serve
+#: their streams through sse-starlette, which sets a process-wide flag once
+#: any uvicorn server in the process starts shutting down and then ends every
+#: stream it serves without its answer. An owner standing down would lose the
+#: answers it had just cut its calls off with, ahead of uvicorn's grace.
+HOP_PROTOCOL_VERSION = "2026-07-28"
 
-#: How long a caller that gave up waits for its hop to tell the owner so: the
-#: SDK's `notifications/cancelled` and the session's DELETE, both on loopback.
+#: How long a caller that gave up waits for its hop to close. On this era that
+#: is the SDK aborting the request's own POST, on loopback.
 _ABANDON_SECONDS = 2.0
 
 #: Who the frontend says it is to the owner.
@@ -477,9 +487,9 @@ class _WatchedTransport(httpx2.AsyncBaseTransport):
 class _HopSession(ClientSession):
     """The owner session, which notes the tool request as it enters the SDK.
 
-    ``send_request`` is where every request enters the SDK, the tool request
-    included, with no await in front of it. *hop* is attached once the session
-    exists and is this class's own attribute.
+    ``send_request`` is where every request after the negotiation enters the
+    SDK, the tool request included, with no await in front of it. *hop* is
+    attached once the session exists and is this class's own attribute.
     """
 
     hop: _Hop | None = None
@@ -556,28 +566,42 @@ class _Hop:
 
 
 class _HopVersionRefused(RuntimeError):
-    """The owner negotiated a protocol version other than the pinned one."""
+    """The owner does not serve the pinned protocol version."""
 
 
-async def _pin(session: _HopSession) -> None:
-    """Negotiate :data:`HOP_PROTOCOL_VERSION`, and nothing else, with the owner."""
-    result = await session.send_request(
-        mt.InitializeRequest(
-            params=mt.InitializeRequestParams(
-                protocol_version=HOP_PROTOCOL_VERSION,
-                capabilities=mt.ClientCapabilities(),
-                client_info=_CLIENT_INFO,
-            )
-        ),
-        mt.InitializeResult,
-    )
-    if result.protocol_version != HOP_PROTOCOL_VERSION:
+#: What an owner answers `server/discover` with when it does not serve the
+#: proposed version: the method unknown to it, or the version.
+_NOT_SERVED = frozenset({mt.METHOD_NOT_FOUND, mt.UNSUPPORTED_PROTOCOL_VERSION})
+
+
+async def _pin(session: _HopSession, hop: _Hop) -> None:
+    """Settle on :data:`HOP_PROTOCOL_VERSION`, and nothing else, with the owner.
+
+    Proposed with ``server/discover``, which sends nothing a tool could act
+    on, and adopted only as that one version even when the owner lists newer
+    ones beside it.
+    """
+    # `send_discover` does not pass through `send_request`, so the check that
+    # every other request gets there is made here.
+    hop.refuse_if_written_off()
+    try:
+        raw = await session.send_discover(HOP_PROTOCOL_VERSION)
+    except MCPError as refused:
+        if refused.code in _NOT_SERVED and hop.wire.answered_with(refused):
+            raise _HopVersionRefused(
+                f"The shared browser owner does not serve protocol "
+                f"{HOP_PROTOCOL_VERSION!r}: {refused}"
+            ) from refused
+        raise
+    result = mt.DiscoverResult.model_validate(raw)
+    if HOP_PROTOCOL_VERSION not in result.supported_versions:
         raise _HopVersionRefused(
-            f"The shared browser owner answered protocol {result.protocol_version!r}, "
-            f"not {HOP_PROTOCOL_VERSION!r}"
+            f"The shared browser owner serves protocols "
+            f"{result.supported_versions!r}, not {HOP_PROTOCOL_VERSION!r}"
         )
-    session.adopt(result)
-    await session.send_notification(mt.InitializedNotification())
+    session.adopt(
+        result.model_copy(update={"supported_versions": [HOP_PROTOCOL_VERSION]})
+    )
 
 
 @dataclass
@@ -769,11 +793,12 @@ class OwnerForwarder(Provider):
         headers["Authorization"] = f"Bearer {attachment.token}"
         # A task of its own, so that a caller giving up reaches the hop once.
         # The caller's cancellation is level-triggered (an anyio scope keeps
-        # cancelling every await inside it), and inside it the SDK's own way of
-        # abandoning a request could not finish: its `notifications/cancelled`
-        # and the session's DELETE were cut off before they left, and the owner
-        # kept a queued call admitted until its heartbeats expired. Delivered
-        # once to a task outside that scope, both go out as the SDK intends.
+        # cancelling every await inside it). Delivered once to a task outside
+        # that scope, the hop's teardown runs to its end. On this era the owner
+        # learns of it either way: abandoning a request closes its POST, which
+        # needs nothing sent. The handshake eras needed the task, because there
+        # abandoning took a `notifications/cancelled` and a DELETE, which the
+        # caller's scope kept from getting out.
         # The task inherits this context, the call binding with it.
         running = asyncio.ensure_future(
             self._hop(hop, headers, operation, logging_callback)
@@ -819,11 +844,15 @@ class OwnerForwarder(Provider):
                     read_timeout_seconds=self.timeout,
                     logging_callback=logging_callback,
                     client_info=_CLIENT_INFO,
+                    # This era sends a request's log messages only when the
+                    # request asks for them. A call whose caller named a level
+                    # forwards that one; any other asks for every level.
+                    log_level="debug" if logging_callback is not None else None,
                 ) as session,
             ):
                 session.hop = hop
                 try:
-                    await _pin(session)
+                    await _pin(session, hop)
                     decided = _Decided(value=await operation(session))
                 except Exception as failed:
                     decided = _Decided(error=failed)
