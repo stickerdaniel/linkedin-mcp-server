@@ -30,11 +30,13 @@ this protocol number and the frontend's own build identity
 none of that, an earlier owner that reads its standard input to end of file
 included, never sees it: it is stopped when the frontend's wait runs out.
 
-**The frontend may kill the child until it writes COMMIT, and never after.**
-From the first byte of COMMIT the frame may have arrived, the child may already
-own itself (on Windows it adopts its own Job before publishing) and its
-descriptor may be canonical, so only the lock holder can settle publication. End
-of file on the child's standard input before COMMIT is the abort.
+**The frontend may kill the child until it writes COMMIT.** From the first
+byte of COMMIT the frame may have arrived, the child may already own itself (on
+Windows it adopts its own Job before publishing) and its descriptor may be
+canonical, so only the lock holder can settle publication. After that only an
+authenticated VERDICT saying the child did not publish permits a kill; silence
+or a malformed verdict does not. End of file on the child's standard input
+before COMMIT is the abort.
 
 **The sync line.** Interpreter startup hooks (a ``.pth`` file, a
 ``sitecustomize``) run before the owner can claim its standard output, and may
@@ -234,7 +236,9 @@ def expect(content: object, kind: str, *, nonce: str | None) -> dict[str, object
         raise ProtocolError("A startup frame carries no configuration object")
     if "instance" in content and not _instance_id(content["instance"]):
         raise ProtocolError("A startup frame names no instance")
-    if "status" in content and content["status"] not in VERDICTS:
+    if "status" in content and (
+        not isinstance(content["status"], str) or content["status"] not in VERDICTS
+    ):
         raise ProtocolError("A startup frame names an unknown verdict")
     return content
 

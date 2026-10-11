@@ -1232,8 +1232,12 @@ def _spawn(
             return _Started.NO
         except Exception:
             logger.warning("The daemon prepared unusable startup state", exc_info=True)
-            verdict = _await_committed(channel, timeout=_FAILURE_VERDICT_SECONDS)
-            stop_child()
+            # No COMMIT was sent, so the child is killed however its verdict
+            # reads; a handler that raised here would leave it holding the lock.
+            try:
+                verdict = _await_committed(channel, timeout=_FAILURE_VERDICT_SECONDS)
+            finally:
+                stop_child()
             return _Started.RETRY if verdict is _Started.RETRY else _Started.ABORTED
         except BaseException:
             stop_child()

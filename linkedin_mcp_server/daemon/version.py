@@ -76,6 +76,11 @@ def installed_build_identity() -> str:
     import linkedin_mcp_server
 
     root = Path(linkedin_mcp_server.__file__).resolve().parent
+    if not root.is_dir():
+        # Imported from an archive. A walk would find nothing and give every
+        # such build the digest of no files, so two different builds would
+        # match. Refused, which keeps this process on Direct.
+        raise NotADirectoryError(f"The package is not a directory: {root}")
     files = sorted(
         (path.relative_to(root).as_posix(), path)
         for path in root.rglob("*")

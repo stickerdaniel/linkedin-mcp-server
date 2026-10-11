@@ -3201,6 +3201,27 @@ class TestAtomicStartupCommit:
         assert child.killed
         assert events == ["discard"]
 
+    def test_a_malformed_verdict_after_unusable_state_still_stops_the_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The child prepared, validation failed, and its verdict is not even a
+        # string. No COMMIT went out, so it must not keep the daemon lock.
+        def missing(*args: object, **kwargs: object) -> None:
+            raise FileNotFoundError("prepared generation expired")
+
+        outcome, child, events = self._spawn(
+            tmp_path,
+            monkeypatch,
+            validate=missing,
+            final=cast(Any, ["retry"]),
+        )
+
+        assert outcome is election_module._Started.ABORTED
+        assert child.killed
+        assert startup.COMMIT not in [
+            frame["type"] for frame in _frames_in(child.input.written)
+        ]
+
     def test_only_the_lock_holding_child_commits(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

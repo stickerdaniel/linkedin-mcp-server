@@ -27,6 +27,7 @@ from test_daemon_config import _Frontend, _greeting
 import linkedin_mcp_server
 import linkedin_mcp_server.daemon.descriptor as daemon_descriptor
 import linkedin_mcp_server.daemon.election as election_module
+import zipfile
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon import config as daemon_config
 from linkedin_mcp_server.daemon import startup
@@ -153,6 +154,7 @@ class TestFraming:
             startup.message(startup.ACK, _NONCE, protocol=5, build="b", extra=1),
             startup.message(startup.COMMIT, _NONCE, instance="two words"),
             startup.message(startup.VERDICT, _NONCE, status="ready"),
+            startup.message(startup.VERDICT, _NONCE, status=["committed"]),
             startup.message(startup.CONFIG, _NONCE, config=[1]),
         ],
         ids=[
@@ -163,6 +165,7 @@ class TestFraming:
             "extra-field",
             "spaced-instance",
             "unknown-verdict",
+            "unhashable-verdict",
             "config-not-object",
         ],
     )
@@ -787,6 +790,22 @@ class TestBuildIdentity:
         change(package)
 
         assert daemon_version.installed_build_identity() != before
+
+    def test_a_package_imported_from_an_archive_has_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        archive = tmp_path / "build.pyz"
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("linkedin_mcp_server/__init__.py", "")
+            bundle.writestr("linkedin_mcp_server/daemon/owner.py", "SERVE = True\n")
+        monkeypatch.setattr(
+            linkedin_mcp_server,
+            "__file__",
+            str(archive / "linkedin_mcp_server" / "__init__.py"),
+        )
+
+        with pytest.raises(OSError):
+            daemon_version.installed_build_identity()
 
     def test_bytecode_caches_do_not(self, package: Path):
         before = daemon_version.installed_build_identity()
