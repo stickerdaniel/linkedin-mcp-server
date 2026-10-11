@@ -233,7 +233,7 @@ async def test_an_election_and_a_replay_read_from_the_frontends_lines(
     from linkedin_mcp_server.daemon.election import ElectionOutcome
     from linkedin_mcp_server.daemon.proxy import (
         DaemonProxyBackend,
-        FrontendOwnerRecoveryMiddleware,
+        FrontendCallMiddleware,
         OwnerUnreachableError,
     )
 
@@ -265,7 +265,7 @@ async def test_an_election_and_a_replay_read_from_the_frontends_lines(
         return "read"
 
     with caplog.at_level(logging.INFO, logger="linkedin_mcp_server.daemon.proxy"):
-        answer = await FrontendOwnerRecoveryMiddleware(backend).on_call_tool(
+        answer = await FrontendCallMiddleware(backend, budget=30.0).on_call_tool(
             MagicMock(), cast(Any, call_next)
         )
     assert answer == "read"

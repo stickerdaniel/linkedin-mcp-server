@@ -1,0 +1,38 @@
+# The decision cores are pure: time, identifiers and I/O reach them as event
+# values, and a shell outside this package carries out every effect. This bans
+# the obvious ways to break that. A guard against accident, not a proof.
+#
+# `extend` keeps every root rule. A ruff.toml here without it would replace the
+# root configuration for this directory and drop them silently.
+extend = "../../../pyproject.toml"
+
+[lint]
+# PTH123 for a bare `open(...)`, which banned-api cannot see: it matches imports
+# and qualified names, and a builtin call is neither.
+extend-select = ["TID251", "PTH123"]
+
+[lint.flake8-tidy-imports.banned-api]
+"asyncio".msg = "The core does not await. Name the work as an effect."
+"os".msg = "The core does no I/O. Name the work as an effect."
+"subprocess".msg = "The core does no I/O. Name the work as an effect."
+"socket".msg = "The core does no I/O. Name the work as an effect."
+"time".msg = "Time reaches the core as an event value."
+"uuid".msg = "Identifiers reach the core as event values."
+"pathlib".msg = "The core does no I/O. Name the work as an effect."
+"httpx".msg = "The core does no I/O. Name the work as an effect."
+"httpx2".msg = "The core does no I/O. Name the work as an effect."
+"builtins.open".msg = "The core does no I/O. Name the work as an effect."
+"io.open".msg = "The core does no I/O. Name the work as an effect."
+# Every daemon module outside `core`, one by one: banning the package would ban
+# the cores' imports of each other too. A new adapter module belongs here.
+"linkedin_mcp_server.daemon.auth_repair".msg = "Adapters import the core, never the reverse."
+"linkedin_mcp_server.daemon.config".msg = "Adapters import the core, never the reverse."
+"linkedin_mcp_server.daemon.descriptor".msg = "Adapters import the core, never the reverse."
+"linkedin_mcp_server.daemon.discovery".msg = "Adapters import the core, never the reverse."
+"linkedin_mcp_server.daemon.election".msg = "Adapters import the core, never the reverse."
+"linkedin_mcp_server.daemon.liveness".msg = "Adapters import the core, never the reverse."
+"linkedin_mcp_server.daemon.lock".msg = "Adapters import the core, never the reverse."
+"linkedin_mcp_server.daemon.owner".msg = "Adapters import the core, never the reverse."
+"linkedin_mcp_server.daemon.proxy".msg = "Adapters import the core, never the reverse."
+"linkedin_mcp_server.daemon.startup".msg = "Adapters import the core, never the reverse."
+"linkedin_mcp_server.daemon.version".msg = "Adapters import the core, never the reverse."

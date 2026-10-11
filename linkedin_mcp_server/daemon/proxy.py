@@ -57,8 +57,11 @@ from fastmcp.utilities.timeout import normalize_timeout_to_seconds
 from mcp import ClientSession, MCPError
 from opentelemetry.trace import Status, StatusCode
 
+from linkedin_mcp_server.config.schema import AUTH_REPAIR_LOGIN_WAIT_FRACTION
+from linkedin_mcp_server.daemon import auth_repair
 from linkedin_mcp_server.daemon import owner as daemon_owner
 from linkedin_mcp_server.daemon.auth_repair import a_repeat_could_change_something
+from linkedin_mcp_server.daemon.core import call as call_core
 from linkedin_mcp_server.daemon.descriptor import PROTOCOL_VERSION
 from linkedin_mcp_server.daemon.liveness import (
     CALL_HEADER,
@@ -185,20 +188,40 @@ _call_being_made: contextvars.ContextVar[_CallBinding | None] = contextvars.Cont
     "linkedin_mcp_call", default=None
 )
 
-#: Added to the owner's tool timeout to get the frontend's deadline. The owner is
-#: the one that should report a timed-out tool, so the frontend has to outlast it;
-#: an equal value races the owner's own error response and turns a diagnosable
-#: "tool timed out" into a transport failure.
+#: The dispatch record of the attempt :class:`FrontendCallMiddleware` is making,
+#: handed in to the binding the heartbeat middleware makes for it. Read back when
+#: the call's deadline cuts the attempt off, because only the session's own claim
+#: says whether the tool request had left by then.
+_attempt_dispatch: contextvars.ContextVar[_Dispatch | None] = contextvars.ContextVar(
+    "linkedin_mcp_attempt", default=None
+)
+
+#: Added to the owner's tool timeout to get the frontend's deadlines: each hop's,
+#: and the whole call's (:func:`call_budget`). The owner is the one that should
+#: report a timed-out tool, so the frontend has to outlast it; an equal value
+#: races the owner's own error response and turns a diagnosable "tool timed out"
+#: into a transport failure.
 #:
-#: It does **not** bound a queued call, and no value derived from the tool timeout
-#: could. The owner serializes in middleware, and a tool's timeout only starts
-#: once the middleware lets it through — measured: a tool declared with a one
-#: second timeout, queued two seconds behind another call, succeeded after 2.02s.
-#: So under real concurrency this deadline can expire while the call is still
-#: waiting its turn, and because cancellation is not forwarded, the owner may go
-#: on reading afterwards. That is the orphaned call #606 names, and the heartbeat
-#: is what will bound it.
+#: It does not make room for a queued call, and no value derived from the tool
+#: timeout could. The owner serializes in middleware, and a tool's timeout only
+#: starts once the middleware lets it through — measured: a tool declared with a
+#: one second timeout, queued two seconds behind another call, succeeded after
+#: 2.02s. So under real concurrency the call's deadline can pass while it is
+#: still waiting its turn. The frontend then stops waiting and stops its
+#: heartbeats, and the owner cancels the call once they have expired.
 _TIMEOUT_MARGIN_SECONDS = 30.0
+
+
+def call_budget(tool_timeout: float) -> float:
+    """The seconds one forwarded call may take, from its arrival at the frontend.
+
+    The tool timeout a client configured, plus :data:`_TIMEOUT_MARGIN_SECONDS`:
+    the bound a first attempt's hop always had, now covering everything else
+    the call waits on too (``daemon.core.call``). No setting of its own, because
+    ``TOOL_TIMEOUT`` already says how long a call may take.
+    """
+    return tool_timeout + _TIMEOUT_MARGIN_SECONDS
+
 
 #: The provider's component cache, switched off. FastMCP's default is 300
 #: seconds and this module used to take it, on the stated grounds that an owner's
@@ -1236,46 +1259,93 @@ def _owner_lost_from_a_call() -> ToolError:
     return ToolError(_OWNER_LOST)
 
 
-class FrontendOwnerRecoveryMiddleware(Middleware):
-    """Find a replacement owner when this one is gone, and repeat what is safe.
+@dataclass(frozen=True)
+class _Lost:
+    """An owner failure as the call core carries it, opaquely.
 
-    Installed only on a proxy, and after the auth-repair middleware so that one
-    stays outermost: a call and the replay a sign-in triggers each get their own
-    liveness wrapper, rather than one wrapper around both.
-
-    Discovery is covered as well as calling, and it is the half a client hits
-    first: many list before they call. A recovery that only covered
-    ``tools/call`` would leave a client whose owner died unable to list, and
-    therefore unable to make the call that would have triggered the recovery:
-    dead in exactly the way this exists to prevent.
-
-    All four listings, not only tools, although this role serves nothing but
-    tools. A client's opening exchange asks for resources and prompts too, the
-    provider is asked in order to answer "none", and with
-    ``provider_error_strategy = "raise"`` a departed owner turns that answer into
-    an error the user sees.
-
-    Reads and renders are left out, and the reason is a fact about this
-    repository rather than about the protocol: no owner here registers a resource
-    or a prompt, so the listings in front of them find nothing and a client
-    cannot reach ``resources/read`` or ``prompts/get`` at all. The day one is
-    registered, ``read_resource_mcp`` and ``get_prompt_mcp`` need the same
-    treatment as the listings, along with ``on_read_resource`` and
-    ``on_get_prompt`` here.
-
-    **What one tool call can cost, counted.** This middleware makes at most two
-    attempts per invocation. Each attempt is one
-    heartbeat preflight and at most one dispatch; only the first attempt's
-    failure recovers, joining at most :data:`_ELECTIONS_PER_RECOVERY`
-    elections, and the second's is recorded without electing. The auth-repair
-    middleware outside invokes this at most twice per client call, once and one
-    read-only replay. So one client call is at most four preflights, four
-    dispatches and four election joins, and never a third dispatch from one
-    invocation.
+    *caught* is what the attempt raised, kept so a report is chained from the
+    whole failure; *failure* is the tag found inside it.
     """
 
-    def __init__(self, backend: DaemonProxyBackend) -> None:
+    caught: Exception
+    failure: OwnerUnreachableError
+
+
+class _OutOfTime(Exception):
+    """The call's deadline ended a wait, as opposed to the wait failing."""
+
+
+async def _by[T](deadline: float, awaitable: Awaitable[T]) -> T:
+    """Await *awaitable* until *deadline* on the loop's clock, at the latest.
+
+    Raises :class:`_OutOfTime` only for this deadline. A ``TimeoutError`` of
+    the awaitable's own is its failure and leaves as it is.
+    """
+    try:
+        async with asyncio.timeout_at(deadline) as limit:
+            return await awaitable
+    except TimeoutError:
+        if limit.expired():
+            raise _OutOfTime from None
+        raise
+
+
+#: Sign-ins started for a call that may stop waiting for them. A login is the
+#: profile's, not the call's, so a call that runs out of time leaves it running;
+#: held here so a task nobody awaits any more is not collected while it runs.
+_SIGN_INS: set[asyncio.Task[Any]] = set()
+
+
+class FrontendCallMiddleware(Middleware):
+    """Carry one tool call through to an answer, as ``daemon.core.call`` decides.
+
+    The shell around the call core, and the outer of the two middlewares a
+    proxy installs. The core decides; this runs each effect and feeds the
+    completion back: an attempt is ``call_next``, which enters
+    :class:`FrontendCallHeartbeatMiddleware` and the provider below it; a
+    recovery is the backend's one election; a classification is the tool's
+    annotations; a repair and a sign-in wait are ``daemon.auth_repair``'s.
+
+    **One deadline per call** (:func:`call_budget`, from arrival here). Every
+    wait above is cut there at the latest. Two of them are shared, and the
+    deadline ends only this call's wait for them, never the work: the
+    election is shielded inside :meth:`DaemonProxyBackend.recover`, and a
+    sign-in runs as a task of its own (:data:`_SIGN_INS`). A forwarded request
+    that is cut is this call's own and is cancelled, which ends its heartbeats
+    so the owner cancels it in turn.
+
+    **What one tool call can cost, counted.** An invocation is at most two
+    attempts, each one heartbeat preflight and at most one dispatch, and one
+    recovery joining at most :data:`_ELECTIONS_PER_RECOVERY` elections; the
+    second attempt's failure is recorded without electing. A sign-in adds at
+    most one read-only replay, a second invocation. So one client call is at
+    most four preflights, four dispatches and four election joins, all inside
+    one deadline.
+
+    Discovery is covered here as well, and it is the half a client hits first:
+    many list before they call. A recovery that only covered ``tools/call``
+    would leave a client whose owner died unable to list, and therefore unable
+    to make the call that would have triggered the recovery. All four listings,
+    not only tools, although this role serves nothing but tools: a client's
+    opening exchange asks for resources and prompts too, and with
+    ``provider_error_strategy = "raise"`` a departed owner turns that answer
+    into an error the user sees. Reads and renders are left out because no
+    owner here registers a resource or a prompt; the day one is registered,
+    ``read_resource_mcp`` and ``get_prompt_mcp`` need the same treatment as the
+    listings, along with ``on_read_resource`` and ``on_get_prompt`` here.
+    """
+
+    def __init__(self, backend: DaemonProxyBackend, *, budget: float) -> None:
+        """*budget* is the seconds a call may take from its arrival here.
+
+        Taken as an argument rather than read from the configuration singleton,
+        because the two can disagree: ``create_mcp_server`` is handed the tool
+        timeout every tool it registers gets, and a server built directly may
+        never have installed a configuration at all. Measured that way once, a
+        1.2-second call budgeted itself 149.8 seconds from the singleton's default.
+        """
         self._backend = backend
+        self._budget = budget
 
     async def _repeat_the_listing(
         self, context: MiddlewareContext[Any], call_next: CallNext[Any, Any]
@@ -1329,10 +1399,176 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
     ) -> Any:
         return await self._repeat_the_listing(context, call_next)
 
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        loop = asyncio.get_running_loop()
+        call, effects = call_core.arrive(
+            now=loop.time(),
+            budget=self._budget,
+            sign_in_share=AUTH_REPAIR_LOGIN_WAIT_FRACTION,
+        )
+        while True:
+            waiting: call_core.Effect | None = None
+            for effect in effects:
+                if isinstance(effect, call_core.Bury):
+                    # Synchronously, before anything awaits: a burial must be
+                    # part of every decision made after it, this call's retry
+                    # and every other call's included.
+                    lost = cast(_Lost, effect.failure).failure
+                    self._backend.note_failure(lost.instance_id, lost.classification)
+                elif isinstance(effect, call_core.TERMINAL):
+                    return self._finish(context, effect)
+                else:
+                    waiting = effect
+            if waiting is None:
+                raise AssertionError(
+                    f"the call core left the call waiting on {effects}"
+                )
+            event = await self._carry_out(waiting, call.deadline, context, call_next)
+            call, effects = call_core.on_event(call, event)
+
+    async def _carry_out(
+        self,
+        effect: call_core.Effect,
+        deadline: float,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> call_core.Event:
+        """Run one effect until it completes or *deadline*, and say which."""
+        loop = asyncio.get_running_loop()
+        try:
+            match effect:
+                case call_core.Attempt(op=op, kind=kind):
+                    if kind is call_core.AttemptKind.RETRY:
+                        logger.info(
+                            "Attached to a replacement owner; running the call again"
+                        )
+                    elif kind is call_core.AttemptKind.REPLAY:
+                        logger.info("Signed in; running the call again")
+                    return await self._attempt(op, deadline, context, call_next)
+                case call_core.Recover(op=op, owner=owner, failure=failure):
+                    found = await _by(
+                        deadline,
+                        self._backend.recover(
+                            owner,
+                            classification=cast(_Lost, failure).failure.classification,
+                        ),
+                    )
+                    return call_core.Recovered(op, loop.time(), found is not None)
+                case call_core.Classify(op=op):
+                    # A fresh forwarded listing with the component cache off
+                    # (`_NO_COMPONENT_CACHE`), and the call's own, so it is cut
+                    # at the deadline like any other wait of this call's. It
+                    # catches its own failures and answers `True`, the cautious
+                    # side.
+                    could_change = await _by(
+                        deadline, a_repeat_could_change_something(context)
+                    )
+                    return call_core.Classified(op, loop.time(), could_change)
+                case call_core.RepairAuth(op=op, reason=reason, generation=generation):
+                    # A task of its own, shielded: the login belongs to the
+                    # profile, and a call that stops waiting must not cancel
+                    # one somebody may be typing into.
+                    task = asyncio.ensure_future(
+                        auth_repair.start_sign_in(reason, generation)
+                    )
+                    _SIGN_INS.add(task)
+                    task.add_done_callback(_SIGN_INS.discard)
+                    repaired, error = await _by(deadline, asyncio.shield(task))
+                    return call_core.Repaired(op, loop.time(), repaired, error)
+                case call_core.WaitForSignIn(op=op, until=until):
+                    signed_in, error = await _by(
+                        deadline,
+                        auth_repair.wait_for_sign_in(max(0.0, until - loop.time())),
+                    )
+                    return call_core.SignedIn(op, loop.time(), signed_in, error)
+        except _OutOfTime:
+            return call_core.Expired(_op_of(effect), loop.time())
+        raise AssertionError(f"not an effect that waits: {effect!r}")
+
+    async def _attempt(
+        self,
+        op: int,
+        deadline: float,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> call_core.Event:
+        """One attempt, through the heartbeat middleware and the provider.
+
+        The attempt's dispatch record is handed in so the binding made below
+        writes to it. When the deadline cuts the attempt off, that record is
+        the only proof of whether its tool request had left.
+        """
+        loop = asyncio.get_running_loop()
+        record = _Dispatch()
+        handed_in = _attempt_dispatch.set(record)
+        try:
+            result = await _by(deadline, call_next(context))
+        except _OutOfTime:
+            return call_core.Expired(op, loop.time(), request_left=record.sent)
+        except Exception as exc:
+            failure = unreachable_owner_in(exc)
+            if failure is None:
+                return call_core.Raised(op, loop.time(), exc)
+            return call_core.OwnerLost(
+                op,
+                loop.time(),
+                owner=failure.instance_id,
+                nothing_was_sent=failure.nothing_was_sent,
+                failure=_Lost(exc, failure),
+            )
+        finally:
+            _attempt_dispatch.reset(handed_in)
+        return call_core.Answered(
+            op, loop.time(), result, auth=auth_repair.auth_request(result)
+        )
+
+    def _finish(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        effect: call_core.Effect,
+    ) -> ToolResult:
+        """Give the client the answer the call core ended the call with."""
+        match effect:
+            case call_core.Return(result=result, because=because):
+                auth_repair.say_why(because)
+                return cast(ToolResult, result)
+            case call_core.ReportUnknown(failure=failure, expired=expired):
+                if expired:
+                    logger.info(
+                        "The call ran out of time after its request may have "
+                        "reached the owner; reporting an unknown outcome"
+                    )
+                    reason = (
+                        f"it did not answer within this call's "
+                        f"{self._budget:g}-second limit"
+                    )
+                else:
+                    logger.info(
+                        "Owner lost mid-call; reporting an unknown outcome rather "
+                        "than repeating a call that could change something"
+                    )
+                    reason = str(cast(_Lost, failure).failure)
+                return self._report_an_unknown_outcome(context, reason)
+            case call_core.ReportLost(failure=failure, expired=expired):
+                if expired:
+                    logger.info("The call ran out of time before any owner took it")
+                if failure is None:
+                    raise _owner_lost_from_a_call()
+                raise _owner_lost_from_a_call() from cast(_Lost, failure).caught
+            case call_core.Reraise(error=error):
+                raise error
+            case call_core.ReportRestricted(error=error):
+                return auth_repair.restricted_answer(error)
+        raise AssertionError(f"not an effect that ends a call: {effect!r}")
+
     def _report_an_unknown_outcome(
         self,
         context: MiddlewareContext[mt.CallToolRequestParams],
-        failure: OwnerUnreachableError,
+        reason: str,
     ) -> ToolResult:
         """Say that nobody here knows whether the call acted.
 
@@ -1367,129 +1603,20 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
         validating it. A success-shaped dict would be checked against the schema
         of whichever tool was called, and this one is a stand-in for all of them.
         """
-        logger.info(
-            "Owner lost mid-call; reporting an unknown outcome rather "
-            "than repeating a call that could change something"
-        )
-        answer = unknown_outcome(tool=context.message.name, reason=str(failure))
+        answer = unknown_outcome(tool=context.message.name, reason=reason)
         return ToolResult(
             content=[mt.TextContent(type="text", text=answer["message"])],
             structured_content=answer,
             is_error=True,
         )
 
-    async def on_call_tool(
-        self,
-        context: MiddlewareContext[mt.CallToolRequestParams],
-        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
-    ) -> ToolResult:
-        try:
-            return await call_next(context)
-        except Exception as exc:
-            failure = unreachable_owner_in(exc)
-            if failure is None:
-                raise
 
-            # Before deciding whether to repeat anything: a replacement is worth
-            # having for the *next* call even when this one cannot be repeated.
-            # The classification goes with it, so an owner that refused the call
-            # is written off before any election is joined.
-            replacement = await self._backend.recover(
-                failure.instance_id, classification=failure.classification
-            )
-
-            # Asked before the replacement is looked at, because the answer does
-            # not depend on it: whether the departed owner already acted is
-            # unknown either way, and an election that found nobody makes it no
-            # more knowable. The cost of the new order is that
-            # `a_repeat_could_change_something` now also runs when the election
-            # failed; it catches its own exceptions and answers `True`, so a
-            # lookup against a dead backend lands on the cautious side.
-            #
-            # Not bounded by the owner's tool timeout, which bounds the forwarded
-            # call that has already failed and never enclosed this middleware.
-            # Several separate budgets do bound it: the lookup goes through
-            # `fastmcp.get_tool`, and with the component cache off
-            # (`_NO_COMPONENT_CACHE`) that is a fresh forwarded listing carrying
-            # the client's own deadline (`create_proxy_provider`, `tool_timeout +
-            # _TIMEOUT_MARGIN_SECONDS`), after a `recover` above that may already
-            # have spent `daemon.election.DEFAULT_ELECTION_SECONDS`. And a
-            # cancellation is not one of the exceptions that lands on the
-            # cautious side: `CancelledError` is a `BaseException`, so it passes
-            # that `except Exception` and leaves through here, which is what
-            # should happen to it.
-            #
-            # Kept rather than dropped, because the second `except` below needs
-            # the same answer and by then there is nobody left to give it. It
-            # stays `None` when the short-circuit means the question was never
-            # put, which is the one case with nothing to remember.
-            could_change_something: bool | None = None
-            if not failure.nothing_was_sent:
-                could_change_something = await a_repeat_could_change_something(context)
-                if could_change_something:
-                    return self._report_an_unknown_outcome(context, failure)
-
-            if replacement is None:
-                # Only now, after the unknown outcome above had its chance: a
-                # call that may have acted keeps that answer, and this one is
-                # for a call that was never sent or could not have changed
-                # anything.
-                raise _owner_lost_from_a_call() from exc
-
-            logger.info("Attached to a replacement owner; running the call again")
-            try:
-                return await call_next(context)
-            except Exception as again:
-                # The replacement can go away exactly like the first owner, and
-                # by then the repeat may have acted: it was made only because
-                # nothing left this process the first time, which says nothing
-                # about the second. Left to escape, it reaches the client as
-                # `Error calling tool 'send_message'` and nothing else, which is
-                # the #891 damage one round later — a client told nothing repeats
-                # a message that may already be delivered.
-                #
-                # Classified again rather than attempted again. Exactly two
-                # attempts: no recursion here and no second `recover`, because a
-                # third attempt would be a guess about an owner that has now
-                # failed twice, and the question it raises — whether the second
-                # attempt acted — is the one nothing here can answer.
-                #
-                # Recorded, though, without electing: an owner the repeat found
-                # retiring or wrong must not receive the next call either, and
-                # the next call's own recovery is what finds a replacement.
-                repeat = unreachable_owner_in(again)
-                if repeat is not None:
-                    self._backend.note_failure(
-                        repeat.instance_id, repeat.classification
-                    )
-                if repeat is not None and not repeat.nothing_was_sent:
-                    # The answer the first attempt already has, rather than the
-                    # same question put to an owner that has just died. Both
-                    # readings are about one tool and the tool did not change;
-                    # what changed is who is left to answer. The lookup goes
-                    # through `fastmcp.get_tool`, which with the component cache
-                    # off is a forwarded listing against exactly that departed
-                    # owner, so it raises and `a_repeat_could_change_something`
-                    # answers `True` on the cautious side. Caution about a
-                    # question already answered is not caution: it turns a read
-                    # repeated *because* the first lookup called it read-only
-                    # into an `outcome_unknown` carrying `retry_safe: False`,
-                    # which sends the user to look on LinkedIn for an effect a
-                    # read cannot have had.
-                    if could_change_something is None:
-                        # Nothing was remembered, because the first pass
-                        # short-circuited on `nothing_was_sent` and never asked.
-                        # Here the lookup is the only source there is, and its
-                        # failing open is still the right side to fail on: an
-                        # unreadable annotation is not a promise of safety.
-                        could_change_something = await a_repeat_could_change_something(
-                            context
-                        )
-                    if could_change_something:
-                        return self._report_an_unknown_outcome(context, repeat)
-                if repeat is None:
-                    raise
-                raise _owner_lost_from_a_call() from again
+def _op_of(effect: call_core.Effect) -> int:
+    """The operation a waiting effect is, for the completion that answers it."""
+    op = getattr(effect, "op", None)
+    if not isinstance(op, int):
+        raise AssertionError(f"not an effect that waits: {effect!r}")
+    return op
 
 
 class _NotAnOwnerAnswer(Exception):
@@ -1602,9 +1729,9 @@ class FrontendCallHeartbeatMiddleware(Middleware):
     an owner that answered the call itself with its signed refusal: the tool
     never ran, and recovery may repeat it.
 
-    Innermost of the three a proxy installs, and that is what makes a replay
-    behave: the recovery middleware sits outside, so a call it runs again enters
-    here a second time and gets its own identifier and its own heartbeats
+    Inner of the two a proxy installs, and that is what makes a repeat behave:
+    :class:`FrontendCallMiddleware` sits outside, so every attempt it makes
+    enters here afresh and gets its own identifier and its own heartbeats
     against whichever owner it is now talking to.
     """
 
@@ -1633,7 +1760,12 @@ class FrontendCallHeartbeatMiddleware(Middleware):
         self._backend.refuse_if_written_off(attachment)
 
         beating = asyncio.create_task(self._keep_saying(attachment, call_id))
-        marked = _call_being_made.set(_CallBinding(call_id, attachment))
+        dispatch = _attempt_dispatch.get()
+        marked = _call_being_made.set(
+            _CallBinding(
+                call_id, attachment, dispatch if dispatch is not None else _Dispatch()
+            )
+        )
         try:
             result = await call_next(context)
         finally:

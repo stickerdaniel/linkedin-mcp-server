@@ -1974,7 +1974,7 @@ class TestTheCallerSeesAnOrdinaryFailure:
         from mcp import types as mt
         from fastmcp.server.middleware import MiddlewareContext
 
-        from linkedin_mcp_server.daemon.proxy import FrontendOwnerRecoveryMiddleware
+        from linkedin_mcp_server.daemon.proxy import FrontendCallMiddleware
 
         manager, lease = await _cached_with_a_call_reference(driver)
         manager.page_closed = True
@@ -1997,7 +1997,7 @@ class TestTheCallerSeesAnOrdinaryFailure:
             method="tools/call",
         )
         with pytest.raises(ToolError) as relayed:
-            await FrontendOwnerRecoveryMiddleware(backend).on_call_tool(
+            await FrontendCallMiddleware(backend, budget=30.0).on_call_tool(
                 context, forward
             )
 

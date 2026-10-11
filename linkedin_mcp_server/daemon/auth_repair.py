@@ -43,20 +43,15 @@ one ``except`` clause.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
 from typing import Any
 
 import mcp.types as mt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
-from linkedin_mcp_server.config.schema import (
-    AUTH_REPAIR_LOGIN_WAIT_FRACTION,
-    DEFAULT_TOOL_TIMEOUT_SECONDS,
-)
 from linkedin_mcp_server.core.exceptions import AccountRestrictedError
+from linkedin_mcp_server.daemon.core.call import AuthRequest, Because, Repair, SignIn
 from linkedin_mcp_server.session_state import PeerSessionInPlaceError
 from linkedin_mcp_server.exceptions import (
     AuthenticationInProgressError,
@@ -66,49 +61,6 @@ from linkedin_mcp_server.exceptions import (
 )
 
 logger = logging.getLogger(__name__)
-
-#: The least a replay is given, so that a call which has spent nearly all of its
-#: budget still makes a real attempt rather than failing on a zero deadline for a
-#: session that now exists. Itself capped by the budget below: as a flat floor it
-#: overran, giving a 1-second call a 5-second replay.
-_MINIMUM_REPLAY_SECONDS = 5.0
-
-
-def _how_long_to_wait_for_the_sign_in(budget: float, already_spent: float) -> float:
-    """How much of this call is left to spend waiting for the login.
-
-    A fraction of *budget* rather than a fixed number of seconds, because the
-    bound that matters is the call this is spent inside: a fixed 150 seconds was
-    measured to outlive its own call once ``TOOL_TIMEOUT`` was lowered, replacing
-    a readable answer with a bare timeout.
-
-    *already_spent* is subtracted rather than ignored, and measuring caught that
-    too: the fraction alone still overran, because the owner call and the inline
-    login wait had gone before this is reached, and both come out of the same
-    budget. Never negative, so an already-overrun call skips the wait and answers
-    rather than waiting on a deadline that has passed. Zero still reaches the
-    readiness check below it, which is what notices a login that finished in
-    exactly this race.
-    """
-    return max(0.0, budget * AUTH_REPAIR_LOGIN_WAIT_FRACTION - already_spent)
-
-
-def _what_is_left_of_this_call(budget: float, already_spent: float) -> float:
-    """How much of the client's deadline a read-only replay may still use.
-
-    The whole budget rather than the fraction above: waiting deliberately leaves
-    a share for this, and by here that share is whatever has not been spent. A
-    floor keeps a call that has already overrun from being handed a zero or
-    negative deadline, which would fail the replay before it started for a
-    session that now exists.
-
-    The floor is itself capped by the budget, because a floor that outlives its
-    own call is the very overrun this function exists to prevent: measured at
-    ``tool_timeout_seconds=1.0`` with 0.9s spent, a flat floor allowed 5 seconds.
-    Only reached for read-only tools, where an abandoned replay costs a wasted
-    page load; anything that changes something is never timed out here.
-    """
-    return min(budget, max(_MINIMUM_REPLAY_SECONDS, budget - already_spent))
 
 
 #: Namespaced so a future fastmcp key cannot shadow it. Measured: a custom key
@@ -222,141 +174,142 @@ def _browser_still_holds_the_profile() -> bool:
         return True
 
 
-class FrontendAuthRepairMiddleware(Middleware):
-    """Sign in on the owner's behalf, then run the call again when that is safe.
+# --- The frontend's half ---------------------------------------------------------
+#
+# What a frontend does with the marker is decided in `daemon.core.call`, which
+# owns every wait a call makes under one deadline, and carried out by
+# `daemon.proxy.FrontendCallMiddleware`. What stays here is the auth knowledge
+# those two need: reading a marker, starting a sign-in and waiting for it, and the
+# words a client gets.
 
-    Installed only on a proxy. It is the process an MCP client spawned, so it has
-    somewhere to put a login window, and it is the only process in the picture
-    that does.
+
+def auth_request(result: object) -> AuthRequest | None:
+    """The owner's request to sign in on *result*, if it carries one this reads."""
+    if not isinstance(result, ToolResult):
+        return None
+    marker = _readable_marker(result)
+    if marker is None:
+        return None
+    return AuthRequest(
+        reason=marker["reason"],
+        replayable=marker["replayable"],
+        browser_open=marker["browser_open"],
+        generation=marker["generation"],
+    )
+
+
+async def start_sign_in(
+    reason: str, generation: str | None
+) -> tuple[Repair, BaseException | None]:
+    """Start the repair a marker asked for, and say how starting it ended.
+
+    Never raises an ``Exception``: every outcome is an answer the call core acts
+    on, and the caller may have stopped waiting for it by the time it arrives.
     """
-
-    def __init__(self, *, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> None:
-        """*tool_timeout* is the deadline a client's call is answered within.
-
-        Taken as an argument rather than read from the configuration singleton,
-        because the two can disagree. ``create_mcp_server`` is handed the budget
-        every tool it registers gets, and a server built directly rather than by
-        ``cli_main`` may never have installed a configuration at all: measured
-        at ``tool_timeout=1.2`` with none installed, this budgeted itself 149.8
-        seconds of a 1.2-second call from the singleton's default.
-        """
-        self._tool_timeout = tool_timeout
-
-    async def on_call_tool(
-        self,
-        context: MiddlewareContext[mt.CallToolRequestParams],
-        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
-    ) -> ToolResult:
-        began = time.monotonic()
-        result = await call_next(context)
-        marker = _readable_marker(result)
-        if marker is None:
-            return result
-
-        if marker["browser_open"]:
-            # The owner's Chromium may still hold the profile, so a login would
-            # fail on a lease it cannot take. Passing the failure through leaves
-            # the owner's own wording, which says to retry, and by the next call
-            # the close will have been confirmed or the owner restarted.
-            logger.warning(
-                "The shared browser has not released the profile yet; not "
-                "signing in on this call"
-            )
-            return result
-
-        try:
-            await _repair_auth_locally(marker["reason"], marker["generation"])
-        except PeerSessionInPlaceError:
-            # Not a failure: another client signed in while this one was asking
-            # to, so the session the call needs already exists. Treating it as a
-            # failed repair would refuse the replay and send the user back for a
-            # retry that was not needed.
-            logger.info("Another client already signed in; using its session")
-        except AccountRestrictedError as exc:
-            return _restricted(exc)
-        except (AuthenticationStartedError, AuthenticationInProgressError):
-            # Also not a failure, and the one that mattered most. Both functions
-            # behind `_repair_auth_locally` report a *started* login by raising,
-            # while the window is still open and nobody has typed anything yet.
-            # Read as a failure, every repair this middleware exists to perform
-            # was abandoned one step before it worked: measured on the stale path
-            # with a login that finished successfully, the owner was called once
-            # and the client still got the error. The missing path did the same
-            # as soon as signing in took longer than the inline budget, which is
-            # every login a person actually performs.
-            #
-            # So wait the login out here. This is the process that has somewhere
-            # to show it, and the client is waiting on this one call.
-            left = _how_long_to_wait_for_the_sign_in(
-                self._tool_timeout, time.monotonic() - began
-            )
-            try:
-                signed_in = await _wait_for_the_sign_in(left)
-            except AccountRestrictedError as exc:
-                return _restricted(exc)
-            if not signed_in:
-                logger.info("The sign-in did not finish in time; not replaying")
-                return result
-            logger.info("The sign-in finished")
-        except Exception:
-            # The login path reports itself through its own exceptions, which the
-            # tool layer turns into readable messages. Whatever happened, the
-            # owner's failure is still the honest answer to this call.
-            logger.warning("Signing in for the shared browser failed", exc_info=True)
-            return result
-
-        if not marker["replayable"]:
-            # Work had already happened on the owner when it failed, and some of
-            # these tools send messages and connection requests. Running it again
-            # could repeat that, so the client is told to decide.
-            logger.info("Signed in; not repeating a call that had already started")
-            return result
-
-        if await a_repeat_could_change_something(context):
-            # Repaired, but not run again. The auth is fixed and the next call
-            # will work; what this one gets is the owner's own message, which
-            # already says to retry.
-            #
-            # An auto-replay cannot be made safe here, and two rounds of trying
-            # showed why. Bounding it locally left the owner finishing the
-            # mutation after the frontend had reported failure: cancellation is
-            # not forwarded across the hop, which
-            # `daemon.proxy._TIMEOUT_MARGIN_SECONDS` already records. Measured
-            # over a real loopback owner, the client was answered at 0.66s with
-            # an error and the effect landed 0.7s later. Removing the bound only
-            # moved the deadline: an MCP client that gives up on its own call
-            # produces exactly the same orphan, measured as effects `['sent']`
-            # after the cancel and `['sent', 'sent']` after the retry.
-            #
-            # Nothing this process can do closes that, because the deadline that
-            # matters belongs to a client it does not control. So the decision
-            # goes where the information is: the user knows whether the message
-            # was sent, and asking costs one retry, while guessing wrong sends it
-            # twice. Read-only tools keep the replay, which is where it pays.
-            logger.info("Signed in; not repeating a call that could change something")
-            return result
-
-        logger.info("Signed in; running the call again")
-        # Read-only, so bounded by what is left of this call rather than given a
-        # fresh budget. Nothing below this middleware bounds the whole path: the
-        # forwarded call has its own deadline per hop
-        # (`daemon.proxy.create_proxy_provider`), so the first call, the wait and
-        # the replay each stay inside one while their sum stays inside nothing.
-        # Measured shape: a sign-in finishing near the end of the wait, followed
-        # by a replay taking a full budget of its own, put the client past its
-        # deadline with the answer already in hand. An abandoned read costs a
-        # wasted page load and nothing else.
-        remaining = _what_is_left_of_this_call(
-            self._tool_timeout, time.monotonic() - began
-        )
-        try:
-            return await asyncio.wait_for(call_next(context), timeout=remaining)
-        except (TimeoutError, asyncio.TimeoutError):
-            logger.info("The replayed call ran out of time; reporting the failure")
-            return result
+    try:
+        await _repair_auth_locally(reason, generation)
+    except PeerSessionInPlaceError:
+        # Not a failure: another client signed in while this one was asking to,
+        # so the session the call needs already exists. Treating it as a failed
+        # repair would refuse the replay and send the user back for a retry that
+        # was not needed.
+        logger.info("Another client already signed in; using its session")
+    except AccountRestrictedError as exc:
+        return Repair.RESTRICTED, exc
+    except (AuthenticationStartedError, AuthenticationInProgressError):
+        # Also not a failure, and the one that mattered most. Both functions
+        # behind `_repair_auth_locally` report a *started* login by raising,
+        # while the window is still open and nobody has typed anything yet. Read
+        # as a failure, every repair this exists to perform was abandoned one step
+        # before it worked: measured on the stale path with a login that finished
+        # successfully, the owner was called once and the client still got the
+        # error. The missing path did the same as soon as signing in took longer
+        # than the inline budget, which is every login a person actually performs.
+        return Repair.STARTED, None
+    except Exception as exc:
+        # The login path reports itself through its own exceptions, which the
+        # tool layer turns into readable messages. Whatever happened, the owner's
+        # failure is still the honest answer to this call.
+        logger.warning("Signing in for the shared browser failed", exc_info=True)
+        return Repair.FAILED, exc
+    return Repair.READY, None
 
 
-def _restricted(exc: AccountRestrictedError) -> ToolResult:
+async def wait_for_sign_in(timeout: float) -> tuple[SignIn, BaseException | None]:
+    """Wait up to *timeout* for the login this process started.
+
+    Zero still reaches the readiness check, which is what notices a login that
+    finished in exactly the race between starting it and waiting for it.
+    """
+    try:
+        signed_in = await _wait_for_the_sign_in(timeout)
+    except AccountRestrictedError as exc:
+        return SignIn.RESTRICTED, exc
+    if not signed_in:
+        return SignIn.NOT_YET, None
+    logger.info("The sign-in finished")
+    return SignIn.SIGNED_IN, None
+
+
+#: What the log says when a call ends on the owner's own answer after it asked
+#: for a sign-in. The differential rows read these lines, so they are kept as
+#: they were when this module decided them itself.
+_KEPT_THE_OWNERS_ANSWER = {
+    Because.PROFILE_HELD: (
+        logging.WARNING,
+        "The shared browser has not released the profile yet; not signing in "
+        "on this call",
+    ),
+    Because.SIGN_IN_UNFINISHED: (
+        logging.INFO,
+        "The sign-in did not finish in time; not replaying",
+    ),
+    Because.NOT_REPLAYABLE: (
+        logging.INFO,
+        "Signed in; not repeating a call that had already started",
+    ),
+    Because.COULD_CHANGE: (
+        logging.INFO,
+        "Signed in; not repeating a call that could change something",
+    ),
+    Because.REPLAY_EXPIRED: (
+        logging.INFO,
+        "The replayed call ran out of time; reporting the failure",
+    ),
+    Because.EXPIRED: (
+        logging.INFO,
+        "The call ran out of time before it could run again; reporting the "
+        "owner's answer",
+    ),
+}
+
+
+def say_why(because: Because) -> None:
+    """Log why a call ended on the answer it already had.
+
+    The reasons themselves are the call core's. Two are worth spelling out,
+    because both look like a missed chance:
+
+    * ``PROFILE_HELD``: the owner's Chromium may still hold the profile, so a
+      login would fail on a lease it cannot take. The owner's own wording says
+      to retry, and by the next call the close will have been confirmed.
+    * ``COULD_CHANGE``: repaired, not run again. An auto-replay cannot be made
+      safe here, and two rounds of trying showed why. Bounding it locally left
+      the owner finishing the mutation after the frontend had reported failure,
+      because cancellation is not forwarded across the hop: measured over a
+      real loopback owner, the client was answered at 0.66s with an error and
+      the effect landed 0.7s later. Removing the bound only moved the deadline:
+      an MCP client that gives up on its own call produces the same orphan,
+      measured as effects ``['sent']`` after the cancel and ``['sent', 'sent']``
+      after the retry. So the user decides, who knows whether the message was
+      sent: asking costs one retry, while guessing wrong sends it twice.
+    """
+    line = _KEPT_THE_OWNERS_ANSWER.get(because)
+    if line is not None:
+        logger.log(*line)
+
+
+def restricted_answer(exc: BaseException | None) -> ToolResult:
     """The client's answer once LinkedIn has refused the account.
 
     In place of the owner's result, whose wording asks for a retry that would
@@ -375,10 +328,10 @@ async def a_repeat_could_change_something(
 ) -> bool:
     """Whether running this tool again could repeat an effect on LinkedIn.
 
-    Public because two middlewares need the same answer: this module replays a
-    call after signing in, and ``daemon.proxy`` replays one after electing a
-    replacement owner. One rule, in one place, so the two cannot drift apart in
-    the unsafe direction.
+    Public because two replays need the same answer: one after signing in, and
+    one after electing a replacement owner. ``daemon.proxy`` asks it for both,
+    whenever the call core asks for a classification. One rule, in one place, so
+    the two cannot drift apart in the unsafe direction.
 
     Read from the tool's own annotations, which survive the hop
     (``ProxyProvider`` copies them), rather than from a list of names kept here:

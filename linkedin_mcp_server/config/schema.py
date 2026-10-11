@@ -53,7 +53,8 @@ BROWSER_HANDOFF_MARGIN_SECONDS: float = 3.0
 PROFILE_HANDOVER_WAIT_SECONDS: float = 60.0
 
 # What fraction of a tool call a frontend may spend waiting for the sign-in it
-# started, before answering without it.
+# started, before answering without it. The fraction is of the call's whole
+# budget (``daemon.proxy.call_budget``), counted from the call's arrival.
 #
 # A fraction rather than a number of seconds, because the bound that matters is
 # the call this wait is spent inside, and ``tool_timeout_seconds`` is something

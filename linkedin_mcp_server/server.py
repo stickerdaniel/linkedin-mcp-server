@@ -32,10 +32,7 @@ from linkedin_mcp_server.drivers.browser import (
     close_browser,
     watch_for_handoff_requests,
 )
-from linkedin_mcp_server.daemon.auth_repair import (
-    FrontendAuthRepairMiddleware,
-    OwnerAuthSignalMiddleware,
-)
+from linkedin_mcp_server.daemon.auth_repair import OwnerAuthSignalMiddleware
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
@@ -234,29 +231,24 @@ def create_mcp_server(
         mcp.add_middleware(OwnerCallLivenessMiddleware())
     # The other half, and only ever on the process that has a user in front of it.
     if role is ServerRole.PROXY:
-        # Handed the same budget every tool here is given, rather than reading it
-        # from the configuration singleton. The two agree for a server `cli_main`
-        # built, which loaded that configuration first, and need not for one
-        # constructed directly: measured at `tool_timeout=1.2` with no
-        # configuration installed, the repair budgeted itself 149.8 seconds of a
-        # 1.2-second call from the singleton's default.
-        mcp.add_middleware(FrontendAuthRepairMiddleware(tool_timeout=tool_timeout))
-        # After the repair, which keeps that one outermost. The order decides how
-        # the two compose: a call and the replay a sign-in triggers each get
-        # their own liveness wrapper, rather than one wrapper around the pair.
-        # The other way round, an owner that departed between the two would leave
-        # the replay unrecoverable.
         from linkedin_mcp_server.daemon.proxy import (
             FrontendCallHeartbeatMiddleware,
-            FrontendOwnerRecoveryMiddleware,
+            FrontendCallMiddleware,
+            call_budget,
         )
 
         assert proxy_backend is not None  # the role check above established it
-        mcp.add_middleware(FrontendOwnerRecoveryMiddleware(proxy_backend))
-        # Innermost of the three, which is what makes a replay behave: a call the
-        # recovery middleware runs again enters here a second time and gets its
-        # own identifier and its own heartbeats, against whichever owner it is
-        # talking to now.
+        # Budgeted from the timeout every tool here is given, rather than from
+        # the configuration singleton. The two agree for a server `cli_main`
+        # built, which loaded that configuration first, and need not for one
+        # constructed directly.
+        mcp.add_middleware(
+            FrontendCallMiddleware(proxy_backend, budget=call_budget(tool_timeout))
+        )
+        # Inside the call's own middleware, which is what makes a repeat behave:
+        # every attempt it makes, a retry or the replay after a sign-in, enters
+        # here afresh and gets its own identifier and its own heartbeats,
+        # against whichever owner it is talking to now.
         mcp.add_middleware(FrontendCallHeartbeatMiddleware(proxy_backend))
     # Profile ownership belongs to whoever launches Chromium. A process that
     # only forwards calls must not take the lease: it would either block itself

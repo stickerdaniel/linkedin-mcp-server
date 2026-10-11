@@ -185,10 +185,11 @@ K1_NOT_APPLICABLE = {
 #: account chooser, then the cookie it finds at once), and short enough that
 #: a login never released fails inside the row.
 LOGIN_TIMEOUT_SECONDS = 60.0
-#: The tool budget (``TOOL_TIMEOUT``). The frontend waits five sixths of it,
-#: less what the call spent, for the login it started
-#: (``AUTH_REPAIR_LOGIN_WAIT_FRACTION``): 100 s, above a completed login and
-#: below the client's own 240 s call bound (``harness._CALL_SECONDS``).
+#: The tool budget (``TOOL_TIMEOUT``). A frontend call's deadline is this plus
+#: a 30 s margin from its arrival, and it waits for the login it started until
+#: five sixths of that (``AUTH_REPAIR_LOGIN_WAIT_FRACTION``): 125 s, above a
+#: completed login, with the whole call inside 150 s and so below the client's
+#: own 240 s call bound (``harness._CALL_SECONDS``).
 TOOL_TIMEOUT_SECONDS = 120.0
 #: The inline wait a missing session's login is given (``LOGIN_INLINE_WAIT``).
 LOGIN_INLINE_WAIT_SECONDS = 10.0

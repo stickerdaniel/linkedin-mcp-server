@@ -1192,7 +1192,7 @@ class TestRepeatingOnlyWhatIsSafe:
         raised bare.
         """
         from linkedin_mcp_server.daemon.proxy import (
-            FrontendOwnerRecoveryMiddleware,
+            FrontendCallMiddleware,
             OwnerUnreachableError,
         )
 
@@ -1223,7 +1223,7 @@ class TestRepeatingOnlyWhatIsSafe:
                 )
             return "the result"
 
-        middleware = FrontendOwnerRecoveryMiddleware(backend)
+        middleware = FrontendCallMiddleware(backend, budget=30.0)
         try:
             answer = await middleware.on_call_tool(context, call_next)  # ty: ignore
         except Exception as escaped:
@@ -1566,7 +1566,7 @@ class TestRepeatingOnlyWhatIsSafe:
         the masking below and the SDK above leave the reason readable.
         """
         from linkedin_mcp_server.daemon.proxy import (
-            FrontendOwnerRecoveryMiddleware,
+            FrontendCallMiddleware,
             OwnerUnreachableError,
         )
 
@@ -1582,7 +1582,7 @@ class TestRepeatingOnlyWhatIsSafe:
                 cause=httpx2.ConnectError("gone"),
             )
 
-        middleware = FrontendOwnerRecoveryMiddleware(backend)
+        middleware = FrontendCallMiddleware(backend, budget=30.0)
         with pytest.raises(ToolError, match="could not reach a new one"):
             await middleware.on_call_tool(
                 self._context(read_only=True),
@@ -1594,7 +1594,7 @@ class TestRepeatingOnlyWhatIsSafe:
     async def test_a_failure_from_something_else_is_left_alone(self, _recovering):
         # Only an unreachable owner is this middleware's business. Swallowing or
         # retrying anything else would hide a real tool error behind a recovery.
-        from linkedin_mcp_server.daemon.proxy import FrontendOwnerRecoveryMiddleware
+        from linkedin_mcp_server.daemon.proxy import FrontendCallMiddleware
 
         backend, _failed = _recovering
         attempts = 0
@@ -1604,7 +1604,7 @@ class TestRepeatingOnlyWhatIsSafe:
             attempts += 1
             raise ValueError("the tool itself failed")
 
-        middleware = FrontendOwnerRecoveryMiddleware(backend)
+        middleware = FrontendCallMiddleware(backend, budget=30.0)
         with pytest.raises(ValueError, match="the tool itself failed"):
             await middleware.on_call_tool(
                 self._context(read_only=True),
@@ -2551,7 +2551,7 @@ class TestThePreflightDecides:
         """
         from linkedin_mcp_server.daemon.proxy import (
             FrontendCallHeartbeatMiddleware,
-            FrontendOwnerRecoveryMiddleware,
+            FrontendCallMiddleware,
             _call_being_made,
         )
 
@@ -2584,7 +2584,7 @@ class TestThePreflightDecides:
         async def inner(context: Any) -> Any:
             return await heartbeat.on_call_tool(context, dispatch)  # ty: ignore
 
-        result = await FrontendOwnerRecoveryMiddleware(backend).on_call_tool(
+        result = await FrontendCallMiddleware(backend, budget=30.0).on_call_tool(
             self._context(),
             inner,
         )
@@ -2851,7 +2851,7 @@ class TestWritingAnOwnerOff:
         # The second failure is not recovered from, but what it learned about
         # the replacement is not thrown away either.
         from linkedin_mcp_server.daemon.proxy import (
-            FrontendOwnerRecoveryMiddleware,
+            FrontendCallMiddleware,
             OwnerFailure,
             OwnerUnreachableError,
         )
@@ -2881,7 +2881,7 @@ class TestWritingAnOwnerOff:
             )
 
         with pytest.raises(ToolError, match="could not reach a new one"):
-            await FrontendOwnerRecoveryMiddleware(backend).on_call_tool(
+            await FrontendCallMiddleware(backend, budget=30.0).on_call_tool(
                 MagicMock(),
                 call_next,  # ty: ignore
             )
@@ -2955,12 +2955,12 @@ class TestControlOnlyNeverRunsATool:
 
 
 class TestWhatOneCallCanCost:
-    """The composed bound, counted through the three middlewares a proxy installs.
+    """The composed bound, counted through the two middlewares a proxy installs.
 
-    Auth repair outermost, then recovery, then the heartbeat. The longest
-    sequence that can still end: the first invocation fails once and is
-    recovered, its repeat comes back asking for a sign-in, and the read-only
-    replay fails twice. Every preflight, dispatch and election is counted
+    The call's own outermost, then the heartbeat. The longest sequence that
+    can still end: the first invocation fails once and is recovered, its
+    repeat comes back asking for a sign-in, and the read-only replay fails
+    twice. Every preflight, dispatch and election is counted
     separately. The bound is at most four preflights, four dispatches and four
     election joins; fewer elections run when no burial news arrives while one
     is in flight, or when flights are shared.
@@ -2970,14 +2970,10 @@ class TestWhatOneCallCanCost:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         from linkedin_mcp_server.daemon import auth_repair as daemon_auth
-        from linkedin_mcp_server.daemon.auth_repair import (
-            MARKER_KEY,
-            MARKER_VERSION,
-            FrontendAuthRepairMiddleware,
-        )
+        from linkedin_mcp_server.daemon.auth_repair import MARKER_KEY, MARKER_VERSION
         from linkedin_mcp_server.daemon.proxy import (
             FrontendCallHeartbeatMiddleware,
-            FrontendOwnerRecoveryMiddleware,
+            FrontendCallMiddleware,
             OwnerUnreachableError,
             _call_being_made,
         )
@@ -3033,13 +3029,8 @@ class TestWhatOneCallCanCost:
                 cause=httpx2.ConnectError("gone"),
             )
 
-        recovery = FrontendOwnerRecoveryMiddleware(backend)
-
         async def through_the_heartbeat(context: Any) -> Any:
             return await heartbeat.on_call_tool(context, dispatch)  # ty: ignore
-
-        async def through_recovery(context: Any) -> Any:
-            return await recovery.on_call_tool(context, through_the_heartbeat)
 
         tool = MagicMock()
         tool.annotations = MagicMock(read_only_hint=True)
@@ -3048,9 +3039,9 @@ class TestWhatOneCallCanCost:
         context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
 
         with pytest.raises(ToolError, match="could not reach a new one"):
-            await FrontendAuthRepairMiddleware(tool_timeout=30.0).on_call_tool(
+            await FrontendCallMiddleware(backend, budget=30.0).on_call_tool(
                 context,
-                through_recovery,
+                through_the_heartbeat,
             )
 
         assert len(preflights) == 4
@@ -3070,14 +3061,10 @@ class TestWhatOneCallCanCost:
         would deliver another call's burial while the election runs.
         """
         from linkedin_mcp_server.daemon import auth_repair as daemon_auth
-        from linkedin_mcp_server.daemon.auth_repair import (
-            MARKER_KEY,
-            MARKER_VERSION,
-            FrontendAuthRepairMiddleware,
-        )
+        from linkedin_mcp_server.daemon.auth_repair import MARKER_KEY, MARKER_VERSION
         from linkedin_mcp_server.daemon.proxy import (
             FrontendCallHeartbeatMiddleware,
-            FrontendOwnerRecoveryMiddleware,
+            FrontendCallMiddleware,
             OwnerFailure,
             OwnerUnreachableError,
             _call_being_made,
@@ -3152,13 +3139,8 @@ class TestWhatOneCallCanCost:
                 cause=httpx2.ConnectError("gone"),
             )
 
-        recovery = FrontendOwnerRecoveryMiddleware(backend)
-
         async def through_the_heartbeat(context: Any) -> Any:
             return await heartbeat.on_call_tool(context, dispatch)  # ty: ignore
-
-        async def through_recovery(context: Any) -> Any:
-            return await recovery.on_call_tool(context, through_the_heartbeat)
 
         tool = MagicMock()
         tool.annotations = MagicMock(read_only_hint=True)
@@ -3167,9 +3149,9 @@ class TestWhatOneCallCanCost:
         context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
 
         with pytest.raises(ToolError, match="could not reach a new one"):
-            await FrontendAuthRepairMiddleware(tool_timeout=30.0).on_call_tool(
+            await FrontendCallMiddleware(backend, budget=30.0).on_call_tool(
                 context,
-                through_recovery,
+                through_the_heartbeat,
             )
 
         assert len(preflights) == 4
@@ -3178,6 +3160,263 @@ class TestWhatOneCallCanCost:
         assert dispatches == preflights
         # No dispatch went to an owner already written off when it was sent.
         assert written_off_at_dispatch == [False] * 4
+
+
+class _HeldElection:
+    """An election that runs until a test lets it finish, counted.
+
+    Runs in the worker thread `DaemonProxyBackend.recover` hands it to, so a
+    caller that stops waiting cannot stop it either, which is the property the
+    tests below lean on.
+    """
+
+    def __init__(self, found: Attachment) -> None:
+        self.found = found
+        self.started = 0
+        self.finished = 0
+        self.release = threading.Event()
+
+    def __call__(self, *_args: Any, **_kwargs: Any) -> Any:
+        self.started += 1
+        self.release.wait(timeout=30)
+        self.finished += 1
+        return _elected(self.found)
+
+
+class TestOneDeadlinePerCall:
+    """A call's wait ends at one deadline, counted from its arrival.
+
+    Whatever it is waiting on at the time: here, a recovery that cannot finish
+    inside the budget. The call is answered by then, with the answer its
+    dispatch state allows, while the election goes on for whoever needs it next.
+    """
+
+    #: The budget these calls get, from `tool_timeout` with the margin zeroed.
+    BUDGET = 1.0
+    #: How late an answer may be and still count as on time. Generous, because
+    #: what it separates is the budget from the election's thirty seconds.
+    SLACK = 2.0
+
+    @pytest.fixture(autouse=True)
+    def _no_margin(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon.proxy._TIMEOUT_MARGIN_SECONDS", 0.0
+        )
+
+    @classmethod
+    def _proxy(cls, backend: DaemonProxyBackend) -> FastMCP:
+        from linkedin_mcp_server.server import create_mcp_server
+        from linkedin_mcp_server.server_role import ServerRole
+
+        return create_mcp_server(
+            role=ServerRole.PROXY, proxy_backend=backend, tool_timeout=cls.BUDGET
+        )
+
+    @staticmethod
+    async def _let_it_finish(backend: DaemonProxyBackend, election: _HeldElection):
+        election.release.set()
+        flight = backend._electing
+        if flight is not None:
+            await flight.task
+
+    async def test_a_call_that_never_left_is_told_so_within_its_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        gone = _attachment(tmp_path)
+        backend = _backend(gone, tmp_path)
+        election = _HeldElection(_attachment(tmp_path, port=gone.descriptor.port + 1))
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon.election.obtain_owner", election
+        )
+        # Nothing answers anywhere: the preflight is refused, so nothing is sent.
+        _reach_owners_in_process(monkeypatch, lambda _url: None)
+        loop = asyncio.get_running_loop()
+
+        try:
+            async with Client(self._proxy(backend)) as client:
+                began = loop.time()
+                result = await client.call_tool(
+                    "send_connection_request", {}, raise_on_error=False
+                )
+                took = loop.time() - began
+            still_electing = election.finished == 0
+        finally:
+            await self._let_it_finish(backend, election)
+
+        assert result.is_error is True
+        assert result.structured_content is None, (
+            "a call never sent was reported unknown"
+        )
+        assert "could not reach a new one" in result.content[0].text
+        assert took < self.BUDGET + self.SLACK, f"answered after {took:.2f}s"
+        assert still_electing, "the call waited for the election to end"
+        assert election.started == 1
+
+    async def test_a_call_that_may_have_run_is_unknown_within_its_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        original = _OwnerOverHttp()
+        original.fail["tools/call"] = original.after_running(_STAND_INS["500"])
+        replacement = _OwnerOverHttp()
+        elected = _attachment(tmp_path)
+        standby = _attachment(tmp_path, port=elected.descriptor.port + 1)
+        election = _HeldElection(standby)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon.election.obtain_owner", election
+        )
+        owners = {_address(elected): original, _address(standby): replacement}
+        _serve_over_http(monkeypatch, owners.__getitem__)
+        backend = _backend(elected, tmp_path)
+        loop = asyncio.get_running_loop()
+
+        try:
+            async with Client(self._proxy(backend)) as client:
+                began = loop.time()
+                result = await client.call_tool(
+                    "send_connection_request", {}, raise_on_error=False
+                )
+                took = loop.time() - began
+            still_electing = election.finished == 0
+        finally:
+            await self._let_it_finish(backend, election)
+
+        assert original.effects == 1
+        assert replacement.effects == 0, "a call that had run was sent again"
+        assert result.is_error is True
+        assert result.structured_content is not None
+        assert result.structured_content["status"] == "outcome_unknown"
+        assert result.structured_content["retry_safe"] is False
+        assert took < self.BUDGET + self.SLACK, f"answered after {took:.2f}s"
+        assert still_electing, "the call waited for the election to end"
+
+    async def test_a_request_the_deadline_cuts_off_is_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The owner took the request and is still running it at the deadline.
+
+        Only the session's claim says the request left; the owner said
+        nothing. The call is told the outcome is unknown, never that it was not
+        sent, and a slow owner is not a lost one: nobody is elected.
+        """
+        running = asyncio.Event()
+        owner = FastMCP("owner")
+
+        @owner.tool(name="send_connection_request")
+        async def send() -> str:
+            running.set()
+            await asyncio.Event().wait()
+            return "never"
+
+        _reach_owners_in_process(monkeypatch, lambda _url: owner)
+        elections: list[str] = []
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon.election.obtain_owner",
+            lambda *_a, **_k: elections.append("elected"),
+        )
+        backend = _backend(_attachment(tmp_path), tmp_path)
+        loop = asyncio.get_running_loop()
+
+        async with Client(self._proxy(backend)) as client:
+            began = loop.time()
+            result = await client.call_tool(
+                "send_connection_request", {}, raise_on_error=False
+            )
+            took = loop.time() - began
+
+        assert running.is_set(), "the request never reached the owner"
+        assert result.is_error is True
+        assert result.structured_content is not None
+        assert result.structured_content["status"] == "outcome_unknown"
+        assert took < self.BUDGET + self.SLACK, f"answered after {took:.2f}s"
+        assert elections == []
+
+    async def test_one_caller_leaves_while_the_election_it_started_goes_on(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Three callers, one election, and each told what fits how far it got.
+
+        The first starts the election and runs out of time inside it. The
+        second joins while the first is still waiting, the third only after it
+        has gone. Leaving must not cancel the election or clear it, or the
+        third would start a second one; and the election's late answer must
+        still serve the two that stayed.
+        """
+        from linkedin_mcp_server.daemon.proxy import (
+            FrontendCallMiddleware,
+            OwnerUnreachableError,
+        )
+
+        gone = _attachment(tmp_path)
+        replacement = _attachment(tmp_path, port=gone.descriptor.port + 1)
+        backend = _backend(gone, tmp_path)
+        election = _HeldElection(replacement)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon.election.obtain_owner", election
+        )
+        failed_on_the_old_owner: list[str] = []
+
+        def caller(name: str, *, sent: bool, read_only: bool) -> Any:
+            tool = MagicMock()
+            tool.annotations = MagicMock(read_only_hint=read_only)
+            context = MagicMock()
+            context.message.name = name
+            context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
+            attempts = 0
+
+            async def call_next(_context: Any) -> Any:
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    failed_on_the_old_owner.append(name)
+                    raise OwnerUnreachableError(
+                        instance_id=gone.descriptor.instance_id,
+                        nothing_was_sent=not sent,
+                        cause=httpx2.ConnectError("gone"),
+                    )
+                return f"{name} on the replacement"
+
+            return context, call_next
+
+        async def call(budget: float, name: str, **how: bool) -> Any:
+            context, call_next = caller(name, **how)
+            try:
+                return await FrontendCallMiddleware(
+                    backend, budget=budget
+                ).on_call_tool(context, call_next)
+            except Exception as escaped:
+                return _Escaped(escaped)
+
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        try:
+            first = asyncio.create_task(call(0.5, "first", sent=False, read_only=False))
+            await _until_true(lambda: election.started == 1)
+            second = asyncio.create_task(
+                call(30.0, "second", sent=False, read_only=False)
+            )
+            await _until_true(lambda: "second" in failed_on_the_old_owner)
+            first_answer = await asyncio.wait_for(first, timeout=5)
+            first_took = loop.time() - began
+            third = asyncio.create_task(call(30.0, "third", sent=True, read_only=False))
+            await _until_true(lambda: "third" in failed_on_the_old_owner)
+            assert election.finished == 0, "the election ended before the test let it"
+            election.release.set()
+            second_answer, third_answer = await asyncio.wait_for(
+                asyncio.gather(second, third), timeout=10
+            )
+        finally:
+            election.release.set()
+
+        assert election.started == 1, "a caller that left let a second election start"
+        assert isinstance(first_answer, _Escaped)
+        assert isinstance(first_answer.error, ToolError)
+        assert "could not reach a new one" in str(first_answer.error)
+        assert first_took < 0.5 + self.SLACK, f"the first waited {first_took:.2f}s"
+        assert second_answer == "second on the replacement"
+        assert third_answer.structured_content["status"] == "outcome_unknown"
+        assert backend.attachment.descriptor.instance_id == (
+            replacement.descriptor.instance_id
+        )
 
 
 class _HeldAtConnect(FastMCPTransport):
@@ -3226,7 +3465,7 @@ class TestBurialAfterTheLastCheck:
         from linkedin_mcp_server.daemon import election as daemon_election
         from linkedin_mcp_server.daemon.proxy import (
             FrontendCallHeartbeatMiddleware,
-            FrontendOwnerRecoveryMiddleware,
+            FrontendCallMiddleware,
             OwnerFailure,
             OwnerUnreachableError,
             _call_being_made,
@@ -3268,7 +3507,7 @@ class TestBurialAfterTheLastCheck:
             return await second.on_call_tool(context, dispatch)  # ty: ignore
 
         with patch.object(daemon_election, "obtain_owner", return_value=_elected(new)):
-            await FrontendOwnerRecoveryMiddleware(backend).on_call_tool(
+            await FrontendCallMiddleware(backend, budget=30.0).on_call_tool(
                 self._context(),
                 inner,
             )

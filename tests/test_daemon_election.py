@@ -5168,11 +5168,8 @@ class TestRealOwner:
         from fastmcp import Client
 
         from linkedin_mcp_server.daemon.discovery import look_up_owner
-        from linkedin_mcp_server.daemon.auth_repair import (
-            MARKER_KEY,
-            MARKER_VERSION,
-            FrontendAuthRepairMiddleware,
-        )
+        from linkedin_mcp_server.daemon.auth_repair import MARKER_KEY, MARKER_VERSION
+        from linkedin_mcp_server.daemon.proxy import FrontendCallMiddleware
         from linkedin_mcp_server.server import ServerRole, create_mcp_server
 
         profile = owner_profile
@@ -5190,16 +5187,15 @@ class TestRealOwner:
                 role=ServerRole.PROXY,
                 proxy_backend=_proxy_backend_for(lookup.attachment),
             )
-            # The repair middleware is removed rather than never added, because
-            # `create_mcp_server` installs it for every proxy and that is correct:
-            # a real frontend consumes this marker, opens a login window and waits
-            # out the login timeout. Removing it is what lets the marker be
-            # observed at all, and it is the reason this test asserts what the
-            # owner *sends* rather than what a client finally sees.
+            # The call middleware, which repairs, is removed rather than never
+            # added, because `create_mcp_server` installs it for every proxy and
+            # that is correct: a real frontend consumes this marker, opens a
+            # login window and waits out the login timeout. Removing it is what
+            # lets the marker be observed at all, and it is the reason this test
+            # asserts what the owner *sends* rather than what a client finally
+            # sees.
             proxy.middleware[:] = [
-                m
-                for m in proxy.middleware
-                if not isinstance(m, FrontendAuthRepairMiddleware)
+                m for m in proxy.middleware if not isinstance(m, FrontendCallMiddleware)
             ]
 
             async def call_it():
