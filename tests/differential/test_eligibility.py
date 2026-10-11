@@ -29,7 +29,7 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -249,7 +249,7 @@ def test_a_container_is_refused_in_the_line_the_cell_expects(monkeypatch, caplog
     ],
 )
 def test_a_rival_left_alone_says_so_in_the_line_counted_as_its_fallback(
-    reach, line, kind, caplog
+    reach, line, kind, caplog, tmp_path
 ):
     """The election's own decision on a same-build owner of another
     configuration, as it logs it."""
@@ -260,7 +260,8 @@ def test_a_rival_left_alone_says_so_in_the_line_counted_as_its_fallback(
         OwnerLookup,
         OwnerState,
     )
-    from linkedin_mcp_server.daemon.election import Reach, _decide_control_only
+    from linkedin_mcp_server.config.schema import AppConfig
+    from linkedin_mcp_server.daemon.election import Reach, _live_lookup
 
     attachment = Attachment(
         descriptor=SimpleNamespace(  # ty: ignore[invalid-argument-type]
@@ -269,12 +270,20 @@ def test_a_rival_left_alone_says_so_in_the_line_counted_as_its_fallback(
         token="t",
         control_only=True,
     )
+    rival = OwnerLookup(
+        state=OwnerState.INCOMPATIBLE,
+        attachment=attachment,
+        mismatch=Mismatch.CONFIGURATION,
+    )
+    inspector = SimpleNamespace(inspect_until=lambda timeout: rival)
     with caplog.at_level(logging.INFO, logger="linkedin_mcp_server.daemon.election"):
-        found, asked, _ = _decide_control_only(
-            OwnerLookup(state=OwnerState.INCOMPATIBLE, mismatch=Mismatch.CONFIGURATION),
-            attachment,
+        found, asked, _ = _live_lookup(
+            tmp_path,
+            tmp_path / "profile",
+            AppConfig(),
             lambda _attachment, _timeout: getattr(Reach, reach),
             set(),
+            inspector=cast(Any, inspector),
             may_ask_for_turnover=True,
             deadline=time.monotonic() + 5.0,
         )

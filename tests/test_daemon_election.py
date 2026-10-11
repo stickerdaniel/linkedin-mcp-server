@@ -40,12 +40,13 @@ import linkedin_mcp_server.daemon.discovery as daemon_module
 import linkedin_mcp_server.daemon.config as daemon_config
 import linkedin_mcp_server.daemon.descriptor as daemon_descriptor_module
 import linkedin_mcp_server.daemon.election as election_module
+from linkedin_mcp_server.daemon.core import election as election_core
 import linkedin_mcp_server.daemon.owner as daemon_owner
 from linkedin_mcp_server import __version__
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon.discovery import Attachment, OwnerLookup, OwnerState
+from linkedin_mcp_server.daemon.core.spawn import Attempt, Started
 from linkedin_mcp_server.daemon.election import (
-    _Attempt,
     ElectionOutcome,
     Reach,
     obtain_owner,
@@ -436,7 +437,7 @@ class TestLiveness:
         # A real start would key its state under the account's own home, out of
         # this test's reach. Failing it leaves the dead endpoint the only one.
         monkeypatch.setattr(
-            election_module, "_start_owner", lambda *a, **k: _Attempt.FAILED
+            election_module, "_start_owner", lambda *a, **k: Attempt.FAILED
         )
 
         probes: list[Attachment] = []
@@ -591,7 +592,7 @@ class TestSilenceIsNotDeath:
         monkeypatch.setattr(
             election_module,
             "_start_owner",
-            lambda *a, **k: election_module._Attempt.CONTENDED,
+            lambda *a, **k: Attempt.CONTENDED,
         )
         outcome = obtain_owner(
             auth_root,
@@ -654,7 +655,7 @@ class TestSilenceIsNotDeath:
         # A real start would key its state under the account's own home, out of
         # this test's reach. Failing it leaves the buried endpoint the only one.
         monkeypatch.setattr(
-            election_module, "_start_owner", lambda *a, **k: _Attempt.FAILED
+            election_module, "_start_owner", lambda *a, **k: Attempt.FAILED
         )
 
         probes: list[Attachment] = []
@@ -695,7 +696,7 @@ class TestSilenceIsNotDeath:
         # for it under the account's own home, find none, and leave its state
         # there instead.
         monkeypatch.setattr(
-            election_module, "_start_owner", lambda *a, **k: _Attempt.CONTENDED
+            election_module, "_start_owner", lambda *a, **k: Attempt.CONTENDED
         )
         try:
             began = time.monotonic()
@@ -762,7 +763,7 @@ class TestRetryPacing:
         monkeypatch.setattr(daemon_module, "_inspect", inspect)
         monkeypatch.setattr(election_module, "_live_lookup", live_lookup)
         monkeypatch.setattr(
-            election_module, "_start_owner", lambda *a, **k: _Attempt.FAILED
+            election_module, "_start_owner", lambda *a, **k: Attempt.FAILED
         )
         # One start, then nothing but backoff for the rest of the budget. That
         # window is where the spin lived: no start is due, so every pass through
@@ -822,7 +823,7 @@ class TestRetryPacing:
             paced.set()
             time.sleep(seconds)
 
-        def replace_after_burial(*_args: object, **_kwargs: object) -> _Attempt:
+        def replace_after_burial(*_args: object, **_kwargs: object) -> Attempt:
             # Stands in for the owner a real start would have produced: the
             # descriptor is replaced once the loop is inside its paced wait, so
             # the wait's first read cannot be what finds it.
@@ -836,7 +837,7 @@ class TestRetryPacing:
             publisher = threading.Thread(target=publish_later, daemon=True)
             publishers.append(publisher)
             publisher.start()
-            return _Attempt.FAILED
+            return Attempt.FAILED
 
         seen: list[str] = []
 
@@ -887,11 +888,12 @@ class TestRetryPacing:
 
 class TestFailingFast:
     def test_owner_start_backoff_begins_after_the_initial_burst(self):
-        delay = election_module._OWNER_START_RETRY_SECONDS
+        pacing = election_module._pacing()
+        delay = pacing.first_delay
         delays: list[float] = []
 
         for starts in range(1, 7):
-            delay = election_module._owner_start_delay_after(starts, delay)
+            delay = election_core.start_delay_after(starts, delay, pacing)
             delays.append(delay)
 
         assert delays == [0.5, 0.5, 1.0, 2.0, 4.0, 8.0]
@@ -908,10 +910,10 @@ class TestFailingFast:
 
         attempts = 0
 
-        def fail(*args: object, **kwargs: object) -> _Attempt:
+        def fail(*args: object, **kwargs: object) -> Attempt:
             nonlocal attempts
             attempts += 1
-            return _Attempt.FAILED
+            return Attempt.FAILED
 
         monkeypatch.setattr(election_module, "_start_owner", fail)
         monkeypatch.setattr(election_module, "_OWNER_START_BURST", 1)
@@ -957,7 +959,7 @@ class TestFailingFast:
 
         attempts = 0
 
-        def refuse(*args: object, **kwargs: object) -> _Attempt:
+        def refuse(*args: object, **kwargs: object) -> Attempt:
             nonlocal attempts
             attempts += 1
             raise refusal
@@ -1005,7 +1007,7 @@ class TestFailingFast:
         monkeypatch.setattr(daemon_module, "_inspect", inspect)
         monkeypatch.setattr(daemon_module, "_DESCRIPTOR_READ_SECONDS", 0.01)
         monkeypatch.setattr(
-            election_module, "_start_owner", lambda *a, **k: _Attempt.FAILED
+            election_module, "_start_owner", lambda *a, **k: Attempt.FAILED
         )
         try:
             outcome = obtain_owner(
@@ -1076,12 +1078,12 @@ class TestFailingFast:
             started_profile: Path,
             started_config: AppConfig,
             **_kwargs: object,
-        ) -> _Attempt:
+        ) -> Attempt:
             assert first_read_started.is_set()
             _publish_stale_owner(auth_root, started_profile, started_config)
             release_first_read.set()
             assert first_read_returned.wait(timeout=1.0)
-            return _Attempt.ABORTED
+            return Attempt.ABORTED
 
         monkeypatch.setattr(daemon_module, "_inspect", inspect)
         monkeypatch.setattr(daemon_module, "_DESCRIPTOR_READ_SECONDS", 0.01)
@@ -1153,10 +1155,10 @@ class TestFailingFast:
             started_profile: Path,
             started_config: AppConfig,
             **_kwargs: object,
-        ) -> _Attempt:
+        ) -> Attempt:
             _publish_stale_owner(auth_root, started_profile, started_config)
             published.set()
-            return _Attempt.STARTED
+            return Attempt.STARTED
 
         monkeypatch.setattr(daemon_module, "_inspect", inspect)
         monkeypatch.setattr(
@@ -1215,14 +1217,14 @@ class TestFailingFast:
             *,
             timeout: float,
             inspector: object,
-        ) -> _Attempt:
+        ) -> Attempt:
             contender = DaemonLock(auth_root)
             if not contender.try_acquire():
-                return _Attempt.CONTENDED
+                return Attempt.CONTENDED
             took_over.append(time.monotonic())
             _publish_stale_owner(auth_root, profile, config)
             contender.release()
-            return _Attempt.STARTED
+            return Attempt.STARTED
 
         monkeypatch.setattr(election_module, "_start_owner", contend)
 
@@ -1401,7 +1403,7 @@ class TestFailingFast:
             # Reported as a failure, not as "somebody is starting". A child that
             # never took its configuration is not coming up, and it may already
             # hold the lock, so it is stopped rather than left alone.
-            assert attempt is _Attempt.FAILED
+            assert attempt is Attempt.FAILED
 
             # And the lock is free. This is the half that matters:
             # measured with the child merely abandoned, the lock stayed held
@@ -1510,7 +1512,7 @@ class TestFailingFast:
             attempt = election_module._start_owner(
                 auth_root, profile, config, timeout=5.0
             )
-            assert attempt is _Attempt.FAILED
+            assert attempt is Attempt.FAILED
             assert [child.returncode for child in children] == [-signal.SIGKILL], (
                 "the child was left alive after reporting startup failure"
             )
@@ -1560,7 +1562,7 @@ class TestFailingFast:
             attempt = election_module._start_owner(
                 auth_root, profile, config, timeout=5.0
             )
-            assert attempt is _Attempt.FAILED
+            assert attempt is Attempt.FAILED
             assert children
             assert pid_file.exists(), "the child never reached its grandchild spawn"
             assert not process_group_exists(children[0].pid)
@@ -1609,7 +1611,7 @@ class TestFailingFast:
         elapsed = time.monotonic() - began
 
         try:
-            assert attempt is _Attempt.FAILED
+            assert attempt is Attempt.FAILED
 
             # The half that matters. Nothing in production kills this child for
             # us, which is exactly what the old teardown was standing in for.
@@ -1663,10 +1665,10 @@ class TestFailingFast:
         auth_root = profile.parent
         attempts = 0
 
-        def contended(*args: object, **kwargs: object) -> _Attempt:
+        def contended(*args: object, **kwargs: object) -> Attempt:
             nonlocal attempts
             attempts += 1
-            return _Attempt.CONTENDED
+            return Attempt.CONTENDED
 
         monkeypatch.setattr(election_module, "_start_owner", contended)
 
@@ -2079,10 +2081,10 @@ class TestWindowsAtomicOwnerHandoff:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         *,
-        committed: election_module._Started,
+        committed: Started,
         validation_error: BaseException | None = None,
-        settlement: election_module._Started | None = None,
-    ) -> tuple[election_module._Started, list[str]]:
+        settlement: Started | None = None,
+    ) -> tuple[Started, list[str]]:
         profile = _profile(tmp_path)
         config = _config(profile)
         instance_id = new_instance_id()
@@ -2206,9 +2208,7 @@ class TestWindowsAtomicOwnerHandoff:
         def await_committed(channel: object, *, timeout: float) -> object:
             assert isinstance(channel, _Channel)
             events.append(
-                startup.COMMITTED
-                if committed is election_module._Started.YES
-                else committed.value
+                startup.COMMITTED if committed is Started.YES else committed.value
             )
             return committed
 
@@ -2254,11 +2254,9 @@ class TestWindowsAtomicOwnerHandoff:
     def test_success_closes_only_after_the_committed_verdict(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        outcome, events = self._run(
-            tmp_path, monkeypatch, committed=election_module._Started.YES
-        )
+        outcome, events = self._run(tmp_path, monkeypatch, committed=Started.YES)
 
-        assert outcome is election_module._Started.YES
+        assert outcome is Started.YES
         assert events == [
             "create-job",
             "build-gate",
@@ -2323,10 +2321,10 @@ class TestWindowsAtomicOwnerHandoff:
     @pytest.mark.parametrize(
         ("committed", "settlement", "tail"),
         [
-            (election_module._Started.UNCERTAIN, None, ["uncertain"]),
+            (Started.UNCERTAIN, None, ["uncertain"]),
             (
-                election_module._Started.STILL_TRYING,
-                election_module._Started.UNCERTAIN,
+                Started.STILL_TRYING,
+                Started.UNCERTAIN,
                 ["still_trying", "settle"],
             ),
         ],
@@ -2335,8 +2333,8 @@ class TestWindowsAtomicOwnerHandoff:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        committed: election_module._Started,
-        settlement: election_module._Started | None,
+        committed: Started,
+        settlement: Started | None,
         tail: list[str],
     ):
         outcome, events = self._run(
@@ -2346,7 +2344,7 @@ class TestWindowsAtomicOwnerHandoff:
             settlement=settlement,
         )
 
-        assert outcome is election_module._Started.UNCERTAIN
+        assert outcome is Started.UNCERTAIN
         assert events[-(len(tail) + 1) :] == [*tail, "close-parent-job"]
         assert "drain-job" not in events
 
@@ -2452,11 +2450,11 @@ class TestWindowsAtomicOwnerHandoff:
         outcome, events = self._run(
             tmp_path,
             monkeypatch,
-            committed=election_module._Started.NO,
+            committed=Started.NO,
             validation_error=TimeoutError(),
         )
 
-        assert outcome is election_module._Started.NO
+        assert outcome is Started.NO
         assert events[-5:] == [
             "terminate-job",
             "wait-child",
@@ -2469,11 +2467,9 @@ class TestWindowsAtomicOwnerHandoff:
     def test_adoption_failure_verdict_drains_the_job(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        outcome, events = self._run(
-            tmp_path, monkeypatch, committed=election_module._Started.ABORTED
-        )
+        outcome, events = self._run(tmp_path, monkeypatch, committed=Started.ABORTED)
 
-        assert outcome is election_module._Started.ABORTED
+        assert outcome is Started.ABORTED
         assert events[-5:] == [
             "aborted",
             "terminate-job",
@@ -2974,7 +2970,7 @@ class TestAtomicStartupCommit:
 
         outcome = election_module._spawn(profile.parent, config, timeout=1.0)
 
-        assert outcome is election_module._Started.NO
+        assert outcome is Started.NO
         assert child.killed
 
     @pytest.mark.parametrize("failure", [TimeoutError(), BrokenPipeError()])
@@ -3002,7 +2998,7 @@ class TestAtomicStartupCommit:
 
         outcome = election_module._spawn(profile.parent, _config(profile), timeout=1.0)
 
-        assert outcome is election_module._Started.NO
+        assert outcome is Started.NO
         assert child.killed
         assert discarded == [instance_id]
 
@@ -3028,7 +3024,7 @@ class TestAtomicStartupCommit:
 
         outcome = election_module._spawn(profile.parent, _config(profile), timeout=1.0)
 
-        assert outcome is election_module._Started.RETRY
+        assert outcome is Started.RETRY
         assert child.killed
 
     def test_interrupt_before_prepared_stops_the_lock_holder(
@@ -3071,7 +3067,7 @@ class TestAtomicStartupCommit:
             validate=reject,
         )
 
-        assert outcome is election_module._Started.ABORTED
+        assert outcome is Started.ABORTED
         assert child.killed
         assert events == ["discard"]
 
@@ -3178,7 +3174,7 @@ class TestAtomicStartupCommit:
             validate=lambda *a, **k: None,
         )
 
-        assert outcome is election_module._Started.NO
+        assert outcome is Started.NO
         assert child.killed
         assert startup.COMMIT not in [
             frame["type"] for frame in _frames_in(child.input.written)
@@ -3198,7 +3194,7 @@ class TestAtomicStartupCommit:
             final="retry",
         )
 
-        assert outcome is election_module._Started.RETRY
+        assert outcome is Started.RETRY
         assert child.killed
         assert events == ["discard"]
 
@@ -3217,7 +3213,7 @@ class TestAtomicStartupCommit:
             final=cast(Any, ["retry"]),
         )
 
-        assert outcome is election_module._Started.ABORTED
+        assert outcome is Started.ABORTED
         assert child.killed
         assert startup.COMMIT not in [
             frame["type"] for frame in _frames_in(child.input.written)
@@ -3232,7 +3228,7 @@ class TestAtomicStartupCommit:
             validate=lambda *a, **k: None,
         )
 
-        assert outcome is election_module._Started.YES
+        assert outcome is Started.YES
         # The whole exchange, in order and authenticated: the greeting, the
         # configuration only after the ACK, and the COMMIT naming the generation
         # this child prepared and nothing else.
@@ -3262,7 +3258,7 @@ class TestAtomicStartupCommit:
             on_spawned=lambda: events.append("released"),
         )
 
-        assert outcome is election_module._Started.YES
+        assert outcome is Started.YES
         assert not child.killed
 
     def test_uncertain_child_verdict_keeps_the_lock_holder_alive(
@@ -3280,7 +3276,7 @@ class TestAtomicStartupCommit:
             final="uncertain",
         )
 
-        assert outcome is election_module._Started.UNCERTAIN
+        assert outcome is Started.UNCERTAIN
         assert not child.killed
         assert events == []
 
@@ -3294,7 +3290,7 @@ class TestAtomicStartupCommit:
             final="retry",
         )
 
-        assert outcome is election_module._Started.RETRY
+        assert outcome is Started.RETRY
         assert child.killed
         assert events == []
 
@@ -3308,7 +3304,7 @@ class TestAtomicStartupCommit:
             final="aborted",
         )
 
-        assert outcome is election_module._Started.ABORTED
+        assert outcome is Started.ABORTED
         assert child.killed
         assert events == []
 
@@ -3327,7 +3323,7 @@ class TestAtomicStartupCommit:
             inspector: object,
         ) -> object:
             calls.append(auth_root)
-            return election_module._Started.YES
+            return Started.YES
 
         monkeypatch.setattr(election_module, "_spawn", spawn)
         monkeypatch.setattr(
@@ -3346,7 +3342,7 @@ class TestAtomicStartupCommit:
             profile.parent, profile, _config(profile), timeout=1.0
         )
 
-        assert outcome is election_module._Attempt.STARTED
+        assert outcome is Attempt.STARTED
         assert calls == [profile.parent]
 
     @_POSIX_ONLY
@@ -3401,7 +3397,7 @@ class TestAtomicStartupCommit:
                 auth_root, profile, _config(profile), timeout=5.0
             )
 
-            assert outcome is election_module._Attempt.FAILED
+            assert outcome is Attempt.FAILED
             assert log_path.is_file(), "the child did not attach its diagnostic log"
             assert repr(str(log_path)) in caplog.text
         finally:
@@ -3463,7 +3459,7 @@ class TestAtomicStartupCommit:
                 auth_root, profile, _config(profile), timeout=5.0
             )
 
-            assert outcome is election_module._Attempt.ABORTED
+            assert outcome is Attempt.ABORTED
             assert marker.read_text() == "opening"
             assert all(child.returncode is not None for child in children)
             assert log_path.is_fifo(), "the child replaced the planted log entry"
@@ -3484,14 +3480,14 @@ class TestAtomicStartupCommit:
         monkeypatch.setattr(
             election_module,
             "_spawn",
-            lambda *a, **k: election_module._Started.RETRY,
+            lambda *a, **k: Started.RETRY,
         )
 
         outcome = election_module._start_contending_for_the_lock(
             tmp_path, _config(_profile(tmp_path)), timeout=1.0
         )
 
-        assert outcome is election_module._Attempt.CONTENDED
+        assert outcome is Attempt.CONTENDED
 
     def test_aborted_windows_winner_is_a_terminal_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3501,14 +3497,14 @@ class TestAtomicStartupCommit:
         monkeypatch.setattr(
             election_module,
             "_spawn",
-            lambda *a, **k: election_module._Started.ABORTED,
+            lambda *a, **k: Started.ABORTED,
         )
 
         assert (
             election_module._start_contending_for_the_lock(
                 profile.parent, config, timeout=1.0
             )
-            is election_module._Attempt.ABORTED
+            is Attempt.ABORTED
         )
 
     def test_aborted_owner_start_does_not_retry_for_the_election_budget(
@@ -3525,7 +3521,7 @@ class TestAtomicStartupCommit:
             "_start_owner",
             lambda *args, **kwargs: (
                 starts.append(True),
-                election_module._Attempt.ABORTED,
+                Attempt.ABORTED,
             )[1],
         )
         monkeypatch.setattr(
@@ -3563,7 +3559,7 @@ class TestAtomicStartupCommit:
             validate=lambda *a, **k: None,
         )
 
-        assert outcome is election_module._Started.UNCERTAIN
+        assert outcome is Started.UNCERTAIN
         assert not child.killed
         # Closed by the writer thread that took it, and gone from ``Popen``
         # so nothing on the frontend's deadline path can close it a second
@@ -3633,7 +3629,7 @@ class TestAtomicStartupCommit:
 
         outcome = election_module._spawn(profile.parent, config, timeout=1.0)
 
-        assert outcome is election_module._Started.YES
+        assert outcome is Started.YES
         assert not child.killed
 
     def test_dead_child_with_stale_canonical_state_stays_uncertain(
@@ -3655,7 +3651,7 @@ class TestAtomicStartupCommit:
             tmp_path, instance_id, cast(Any, child), timeout=1.0
         )
 
-        assert outcome is election_module._Started.UNCERTAIN
+        assert outcome is Started.UNCERTAIN
 
     def test_unreadable_canonical_state_keeps_a_dead_generation_uncertain(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3680,7 +3676,7 @@ class TestAtomicStartupCommit:
             tmp_path, instance_id, cast(Any, child), timeout=1.0
         )
 
-        assert outcome is election_module._Started.UNCERTAIN
+        assert outcome is Started.UNCERTAIN
 
     def test_canonical_settlement_read_is_bounded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3943,7 +3939,7 @@ class TestAtomicStartupCommit:
             assert not spawner.is_alive(), (
                 "the frontend was pinned by a startup write that never returned"
             )
-            assert finished == [election_module._Started.NO]
+            assert finished == [Started.NO]
             # The stop ran, was bounded, and left the child alive: exactly the
             # state in which nothing may close that stream from here.
             assert child.kills == 1
@@ -3996,7 +3992,7 @@ class TestAtomicStartupCommit:
             tmp_path, monkeypatch, validate=lambda *a, **k: None
         )
 
-        assert outcome is election_module._Started.YES
+        assert outcome is Started.YES
         assert events == []
         assert len(owner_jobs) == 1
         job = owner_jobs[0]
@@ -4039,7 +4035,7 @@ class TestAtomicStartupCommit:
             tmp_path, monkeypatch, validate=lambda *a, **k: None
         )
 
-        assert outcome is election_module._Started.YES
+        assert outcome is Started.YES
         assert len(owner_jobs) == 1
         assert not isinstance(owner_jobs[0], process_tree_module.WindowsJob)
         with pytest.raises(
@@ -5908,14 +5904,12 @@ class TestBudgets:
             timeouts["config"] = timeout
             _Clock.now += handover_time
 
-        def await_prepared(
-            channel: object, *, timeout: float
-        ) -> election_module._Started:
+        def await_prepared(channel: object, *, timeout: float) -> Started:
             assert isinstance(channel, _Channel)
             timeouts["prepared"] = timeout
             # A verdict that ends the attempt here, so only the shared budget
             # up to the prepared wait is under test.
-            return election_module._Started.RETRY
+            return Started.RETRY
 
         monkeypatch.setattr(
             election_module,
@@ -5955,7 +5949,7 @@ class TestBudgets:
 
         verdict = election_module._spawn(profile.parent, config, timeout=budget)
 
-        assert verdict is election_module._Started.RETRY
+        assert verdict is Started.RETRY
         assert spawn_kwargs["creationflags"] == (0x7 if platform == "nt" else 0)
         assert timeouts == pytest.approx(
             {
@@ -8179,12 +8173,12 @@ class TestPublishingLast:
 
 
 class TestElectionSettlement:
-    @pytest.mark.parametrize("failure", [_Attempt.ABORTED, OSError("spawn failed")])
+    @pytest.mark.parametrize("failure", [Attempt.ABORTED, OSError("spawn failed")])
     def test_terminal_local_result_observes_a_concurrent_winner(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        failure: _Attempt | OSError,
+        failure: Attempt | OSError,
     ):
         profile = _profile(tmp_path)
         config = _config(profile)
@@ -8202,7 +8196,7 @@ class TestElectionSettlement:
             def inspect_until(self, *, timeout: float) -> OwnerLookup:
                 return daemon_module._inspect(profile.parent, profile, config)
 
-        def finish(*args: object, **kwargs: object) -> _Attempt:
+        def finish(*args: object, **kwargs: object) -> Attempt:
             published.append(_publish_stale_owner(profile.parent, profile, config))
             if isinstance(failure, OSError):
                 raise failure
@@ -8233,12 +8227,12 @@ class TestElectionSettlement:
         assert outcome.worth_connecting
         assert probed == published
 
-    @pytest.mark.parametrize("failure", [_Attempt.ABORTED, OSError("spawn failed")])
+    @pytest.mark.parametrize("failure", [Attempt.ABORTED, OSError("spawn failed")])
     def test_early_terminal_local_result_gets_only_one_settlement_budget(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        failure: _Attempt | OSError,
+        failure: Attempt | OSError,
     ):
         profile = _profile(tmp_path)
         clock = [0.0]
@@ -8253,7 +8247,7 @@ class TestElectionSettlement:
             def inspect_until(self, *, timeout: float) -> OwnerLookup:
                 return OwnerLookup(state=OwnerState.ABSENT)
 
-        def finish(*args: object, **kwargs: object) -> _Attempt:
+        def finish(*args: object, **kwargs: object) -> Attempt:
             if isinstance(failure, OSError):
                 raise failure
             return failure
@@ -8280,12 +8274,12 @@ class TestElectionSettlement:
         assert not outcome.worth_connecting
         assert 1.9 <= clock[0] <= 2.01, clock[0]
 
-    @pytest.mark.parametrize("failure", [_Attempt.ABORTED, OSError("spawn failed")])
+    @pytest.mark.parametrize("failure", [Attempt.ABORTED, OSError("spawn failed")])
     def test_early_terminal_local_result_observes_winner_within_short_window(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        failure: _Attempt | OSError,
+        failure: Attempt | OSError,
     ):
         profile = _profile(tmp_path)
         config = _config(profile)
@@ -8305,7 +8299,7 @@ class TestElectionSettlement:
                     return winner
                 return OwnerLookup(state=OwnerState.ABSENT)
 
-        def finish(*args: object, **kwargs: object) -> _Attempt:
+        def finish(*args: object, **kwargs: object) -> Attempt:
             if isinstance(failure, OSError):
                 raise failure
             return failure
@@ -8353,9 +8347,9 @@ class TestElectionSettlement:
                     return winner
                 return OwnerLookup(state=OwnerState.ABSENT)
 
-        def exhaust_active_budget(*args: object, **kwargs: object) -> _Attempt:
+        def exhaust_active_budget(*args: object, **kwargs: object) -> Attempt:
             clock[0] = 90.0
-            return _Attempt.CONTENDED
+            return Attempt.CONTENDED
 
         monkeypatch.setattr(election_module, "_IS_WINDOWS", False)
         monkeypatch.setattr(election_module, "_DescriptorInspector", Inspector)
@@ -8473,7 +8467,7 @@ class TestElectionSettlement:
 
         monkeypatch.setattr(election_module, "_DescriptorInspector", build_inspector)
         monkeypatch.setattr(
-            election_module, "_start_owner", lambda *a, **k: _Attempt.CONTENDED
+            election_module, "_start_owner", lambda *a, **k: Attempt.CONTENDED
         )
         obtain_owner(
             profile.parent,
@@ -8504,7 +8498,7 @@ class TestElectionSettlement:
         monkeypatch.setattr(daemon_module, "_inspect", inspect)
         monkeypatch.setattr(daemon_module, "_DESCRIPTOR_READ_SECONDS", 0.005)
         monkeypatch.setattr(
-            election_module, "_start_owner", lambda *a, **k: _Attempt.CONTENDED
+            election_module, "_start_owner", lambda *a, **k: Attempt.CONTENDED
         )
         try:
             outcome = obtain_owner(
@@ -8625,16 +8619,25 @@ class TestElectionSettlement:
         assert not outcome.worth_connecting
 
     @pytest.mark.parametrize("stage", ["loop", "lookup", "start", "paced"])
-    def test_each_active_deadline_exit_settles_once(
+    def test_each_active_deadline_exit_settles_until_the_global_deadline(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         stage: str,
     ):
+        """Wherever the active budget runs out, the quiet tail follows it.
+
+        Observed through a clock only reads and sleeps move: the tail keeps
+        reading after the active deadline, starts nothing, and ends the election
+        at the global settlement deadline, neither sooner nor later.
+        """
         profile = _profile(tmp_path)
         clock = [1.0 if stage == "loop" else 0.0]
-        reads = 0
-        settlements = 0
+        # The active deadline is one second after entry and the tail ends one
+        # second after that. Every stage but "loop" jumps the clock to it.
+        active_until = clock[0] + 1.0 if stage == "loop" else 1.0
+        reads: list[float] = []
+        late_starts: list[float] = []
 
         class Inspector:
             def __init__(self, *args: object, **kwargs: object) -> None:
@@ -8644,23 +8647,19 @@ class TestElectionSettlement:
                 return None
 
             def inspect_until(self, *, timeout: float) -> OwnerLookup:
-                nonlocal reads
-                reads += 1
-                if stage == "lookup" and reads == 1:
+                reads.append(clock[0])
+                if stage == "lookup" and len(reads) == 1:
                     clock[0] = 1.0
-                if stage == "paced" and reads == 2:
+                if stage == "paced" and len(reads) == 2:
                     clock[0] = 1.0
                 return OwnerLookup(state=OwnerState.ABSENT)
 
-        def start(*args: object, **kwargs: object) -> _Attempt:
+        def start(*args: object, **kwargs: object) -> Attempt:
+            if clock[0] >= active_until:
+                late_starts.append(clock[0])
             if stage == "start":
                 clock[0] = 1.0
-            return _Attempt.CONTENDED
-
-        def settle(*args: object, **kwargs: object) -> ElectionOutcome:
-            nonlocal settlements
-            settlements += 1
-            return ElectionOutcome(cast(OwnerLookup, kwargs["last_lookup"]))
+            return Attempt.CONTENDED
 
         monkeypatch.setattr(election_module.time, "monotonic", lambda: clock[0])
         monkeypatch.setattr(
@@ -8671,9 +8670,8 @@ class TestElectionSettlement:
         monkeypatch.setattr(election_module, "_IS_WINDOWS", False)
         monkeypatch.setattr(election_module, "_DescriptorInspector", Inspector)
         monkeypatch.setattr(election_module, "_start_owner", start)
-        monkeypatch.setattr(election_module, "_settle_owner", settle)
 
-        obtain_owner(
+        outcome = obtain_owner(
             profile.parent,
             profile,
             _config(profile),
@@ -8682,7 +8680,12 @@ class TestElectionSettlement:
             connect=lambda attachment, timeout: Reach.REFUSED,
         )
 
-        assert settlements == 1
+        assert not outcome.worth_connecting
+        assert not late_starts, f"started after the active deadline at {late_starts}"
+        tail_until = active_until + 1.0
+        assert any(active_until <= at < tail_until for at in reads), "no tail reads"
+        assert all(at < tail_until for at in reads), f"read past the tail: {reads}"
+        assert clock[0] == pytest.approx(tail_until)
 
 
 class TestOwnerBootstrapOrdering:
@@ -8960,9 +8963,9 @@ class TestAnOwnerThisBuildMayOnlyControl:
             lambda attachment: asked.append(attachment.descriptor.instance_id),
         )
 
-        def start(*_args: object, **_kwargs: object) -> _Attempt:
+        def start(*_args: object, **_kwargs: object) -> Attempt:
             contended.append("the lock")
-            return _Attempt.CONTENDED
+            return Attempt.CONTENDED
 
         monkeypatch.setattr(election_module, "_start_owner", start)
 

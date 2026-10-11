@@ -460,3 +460,20 @@ def test_every_schedule_of_one_call_keeps_the_contract():
         # changed something.
         if isinstance(ending, core.ReportUnknown) and not ending.expired:
             assert may_have_acted and not said_read_only, where
+
+
+# --- Which owner a call talks to ---------------------------------------------------
+
+
+@pytest.mark.parametrize("sent", [False, True], ids=["unsent", "sent"])
+def test_a_written_off_owner_gets_nothing_new_until_the_call_may_have_left(
+    sent: bool,
+):
+    written_off = {"A": "retiring"}
+
+    refusal = core.binding_refusal("A", written_off=written_off, sent=sent)
+
+    # Before anything left, the reason it was given up on; after, the call keeps
+    # the owner running it, whatever was learned about that owner since.
+    assert refusal == (None if sent else "retiring")
+    assert core.binding_refusal("B", written_off=written_off, sent=sent) is None

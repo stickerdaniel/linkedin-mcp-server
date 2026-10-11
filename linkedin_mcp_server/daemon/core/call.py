@@ -26,6 +26,10 @@ read-only; the read-only answer is looked up once per invocation, after the
 recovery. After a sign-in the call runs again only when the owner said nothing
 had run and the tool is read-only. Everything else is reported.
 
+**A call keeps its owner once a request may have left.** Until then a
+written-off owner is refused at every point a request could still be stopped
+(:func:`binding_refusal`).
+
 **What an expired call is told depends on how far it got.** With an answer in
 hand, that answer. With a request that may have reached an owner,
 ``outcome_unknown``. Only a call that provably sent nothing is told it was not
@@ -35,7 +39,7 @@ sent.
 from __future__ import annotations
 
 import enum
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 
 
@@ -357,6 +361,26 @@ _EXPECTED: dict[Phase, tuple[type, ...]] = {
     Phase.REPAIRING: (Repaired, Expired),
     Phase.SIGNING_IN: (SignedIn, Expired),
 }
+
+
+def binding_refusal[R](
+    owner: str, *, written_off: Mapping[str, R], sent: bool
+) -> R | None:
+    """Why no new request may go to *owner* now, or ``None`` to let it go.
+
+    One rule for every point a call's owner is asked about: when a new call
+    picks the current owner, after its preflight's await, when its hop opens and
+    before each request on it. An owner written off gets nothing new, whatever
+    it answered before. Once a request of the call may have left (*sent*), the
+    call keeps its owner whatever is learned about it later: moving its
+    heartbeats would get it cancelled by the owner running it.
+
+    *written_off* maps each owner this process gave up on to why, which is what
+    a refusal names.
+    """
+    if sent:
+        return None
+    return written_off.get(owner)
 
 
 def arrive(

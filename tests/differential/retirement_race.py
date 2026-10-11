@@ -951,7 +951,7 @@ def _successor_problems(
     if len(mine) != 1:
         found.append("the successor is not an owner the row was seen to launch")
     # While the retiring owner still holds the lock, the election starts
-    # candidates on its backoff (``daemon.election._owner_start_delay_after``)
+    # candidates on its backoff (``daemon.core.election.start_delay_after``)
     # and each one that cannot take the lock exits. Those are the election
     # doing its job; any other launch besides the successor that is not shown
     # to have read nothing is a second owner the row cannot account for.

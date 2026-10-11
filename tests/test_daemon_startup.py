@@ -32,7 +32,8 @@ from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon import config as daemon_config
 from linkedin_mcp_server.daemon import startup
 from linkedin_mcp_server.daemon import version as daemon_version
-from linkedin_mcp_server.daemon.election import _Started, obtain_owner
+from linkedin_mcp_server.daemon.core.spawn import Started
+from linkedin_mcp_server.daemon.election import obtain_owner
 
 _NONCE = "0123456789abcdef" * 4
 _OTHER_NONCE = "fedcba9876543210" * 4
@@ -620,7 +621,7 @@ class TestARealChildIsRefused:
         finally:
             stand_ins.stop()
 
-        assert outcome is _Started.NO
+        assert outcome is Started.NO
         assert elapsed < self._PROMPT, (
             f"a {fault} frame was waited out for {elapsed:.1f}s instead of refused"
         )
@@ -647,7 +648,7 @@ class TestARealChildIsRefused:
         finally:
             stand_ins.stop()
 
-        assert outcome is _Started.NO
+        assert outcome is Started.NO
         assert stand_ins.received() == ([startup.HELLO] if mode == "eof-reader" else [])
         assert b"the-proxy-password" not in stand_ins.raw_received()
 
@@ -736,7 +737,7 @@ class TestRefusedBeforeSpawning:
 
         assert (
             election_module._spawn(profile.parent, _config(profile), timeout=5.0)
-            is _Started.ABORTED
+            is Started.ABORTED
         )
 
     def test_a_configuration_too_large_for_one_frame_spawns_nothing(
@@ -749,7 +750,7 @@ class TestRefusedBeforeSpawning:
 
         assert (
             election_module._spawn(profile.parent, config, timeout=5.0)
-            is _Started.ABORTED
+            is Started.ABORTED
         )
 
 
