@@ -500,7 +500,7 @@ class FrontendCallMiddleware(Middleware):
         1.2-second call budgeted itself 149.8 seconds from the singleton's default.
         """
         self._proxy_backend = backend
-        self._budget = budget
+        self._call_budget = budget
 
     async def _repeat_the_listing(
         self, context: MiddlewareContext[Any], call_next: CallNext[Any, Any]
@@ -562,7 +562,7 @@ class FrontendCallMiddleware(Middleware):
         loop = asyncio.get_running_loop()
         call, effects = call_core.arrive(
             now=loop.time(),
-            budget=self._budget,
+            budget=self._call_budget,
             sign_in_share=AUTH_REPAIR_LOGIN_WAIT_FRACTION,
         )
         while True:
@@ -713,7 +713,7 @@ class FrontendCallMiddleware(Middleware):
                     )
                     reason = (
                         f"it did not answer within this call's "
-                        f"{self._budget:g}-second limit"
+                        f"{self._call_budget:g}-second limit"
                     )
                 else:
                     logger.info(
