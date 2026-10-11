@@ -20,6 +20,7 @@ import contextlib
 import importlib
 import io
 import json
+import logging
 import math
 import os
 import signal
@@ -31,7 +32,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import pytest
 
@@ -4051,16 +4052,15 @@ class TestAtomicStartupCommit:
 
 @pytest.mark.slow
 class TestAForwardedCallThroughTheRealOwner:
-    """A forwarded call on the 2026-07-28 era, through the owner's real HTTP server.
+    """A forwarded call on the hop's pinned version, through the real owner server.
 
     The owner is ``daemon.owner.create_owner_server`` on loopback in this
     process: its token check, the call admission that wants every call marked,
     the sequential middleware and the profile lease are all production's. What
     is stood in is the browser (lifespan and the bookkeeping around a call) and
-    the owner's tools: it gets one synthetic tool, which takes an argument
-    because the owner's own argument check lists its tools before dispatching a
-    2026-07-28 call and skips that for a call with no arguments. The frontend
-    in front of it is the production proxy, over a real socket. No browser, no
+    the owner's tools: it gets one synthetic tool, which takes an argument so
+    the owner has one to check. The frontend in front of it is the production
+    proxy, over a real socket. No browser, no
     profile contents and no account state are used; the profile is an empty
     directory this test claims.
     """
@@ -4081,10 +4081,9 @@ class TestAForwardedCallThroughTheRealOwner:
         from linkedin_mcp_server import update_check
         from linkedin_mcp_server.config import set_config
         from linkedin_mcp_server.daemon.liveness import CALL_HEADER, get_liveness
-        from linkedin_mcp_server.daemon.proxy import (
-            FrontendCallHeartbeatMiddleware,
-            _call_being_made,
-        )
+        from linkedin_mcp_server.daemon.core.call import Dispatch
+        from linkedin_mcp_server.daemon.forwarder import _call_being_made
+        from linkedin_mcp_server.daemon.proxy import FrontendCallHeartbeatMiddleware
         from linkedin_mcp_server.drivers import browser
         from linkedin_mcp_server.profile_claim import ensure_profile_claim
         from linkedin_mcp_server.profile_lease import get_profile_lease
@@ -4127,9 +4126,20 @@ class TestAForwardedCallThroughTheRealOwner:
         monkeypatch.setattr(update_check, "refresh_latest_version", nothing)
         monkeypatch.setattr(update_check, "pending_update_notice", lambda: None)
         elections: list[object] = []
-        monkeypatch.setattr(
-            election_module, "obtain_owner", lambda *_a, **_k: elections.append(1)
-        )
+
+        def no_election_expected(*_a: Any, **_k: Any) -> NoReturn:
+            # Raised rather than returning a stand-in: the proxy logs a failed
+            # election and reports the owner lost, so a call that wrongly
+            # recovers ends with that answer instead of a stub's AttributeError.
+            elections.append(1)
+            raise RuntimeError("this test's owner was taken for lost")
+
+        monkeypatch.setattr(election_module, "obtain_owner", no_election_expected)
+        # Why a call was taken for an owner loss, in the captured log of a
+        # failing run: the loss with its cause, and a hop's closing failures.
+        daemon_logger = logging.getLogger("linkedin_mcp_server.daemon")
+        logged_from = daemon_logger.level
+        daemon_logger.setLevel(logging.DEBUG)
 
         held, release = asyncio.Event(), asyncio.Event()
         bodies: list[dict[str, Any]] = []
@@ -4142,7 +4152,7 @@ class TestAForwardedCallThroughTheRealOwner:
                 listed = await call_next(context)
                 # Recorded once the listing has completed, not when it began.
                 listings.append(
-                    {"method": headers.get("mcp-method"), "while_held": while_held}
+                    {"bound": CALL_HEADER in headers, "while_held": while_held}
                 )
                 return listed
 
@@ -4156,14 +4166,12 @@ class TestAForwardedCallThroughTheRealOwner:
                     name="hold_the_browser", annotations={"destructiveHint": True}
                 )
                 async def hold_the_browser(value: str) -> dict[str, str]:
-                    headers = get_http_headers()
+                    headers = get_http_headers(include={"mcp-session-id"})
                     bodies.append(
                         {
                             "value": value,
                             "call": headers.get(CALL_HEADER),
                             "version": headers.get("mcp-protocol-version"),
-                            "method": headers.get("mcp-method"),
-                            "name": headers.get("mcp-name"),
                             "session": headers.get("mcp-session-id"),
                         }
                     )
@@ -4180,7 +4188,8 @@ class TestAForwardedCallThroughTheRealOwner:
         )
 
         # What the frontend marked each call with, at its preflight and as the
-        # tool request leaves, with the bound call's claim at that moment.
+        # tool request leaves, with whether the bound call's dispatch record
+        # already said it may have left at that moment.
         preflights: list[str] = []
         beat = FrontendCallHeartbeatMiddleware._beat
 
@@ -4201,7 +4210,8 @@ class TestAForwardedCallThroughTheRealOwner:
                     (
                         request.headers.get(CALL_HEADER),
                         None if bound is None else bound.call_id,
-                        bound is not None and bound.dispatch.sent,
+                        bound is not None
+                        and bound.dispatch.state is Dispatch.POSSIBLY_SENT,
                     )
                 )
 
@@ -4255,6 +4265,13 @@ class TestAForwardedCallThroughTheRealOwner:
             server.should_exit = True
             await asyncio.wait_for(serving, timeout=10)
             listener.close()
+            daemon_logger.setLevel(logged_from)
+
+    @staticmethod
+    async def _held_by(first: asyncio.Task[Any], owner: Any) -> None:
+        """Wait until the first call holds the browser, or say how it ended."""
+        await _until(lambda: owner.held.is_set() or first.done(), seconds=10)
+        assert owner.held.is_set(), f"the first call never ran: {_outcome(first)}"
 
     async def test_a_forwarded_call_is_routed_admitted_and_kept_in_turn(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4262,6 +4279,7 @@ class TestAForwardedCallThroughTheRealOwner:
         from fastmcp import Client
         from fastmcp.client.transports import StreamableHttpTransport
 
+        from linkedin_mcp_server.daemon.forwarder import HOP_PROTOCOL_VERSION
         from linkedin_mcp_server.daemon.liveness import (
             REFUSAL_KEY,
             UNMARKED_CALL,
@@ -4274,7 +4292,7 @@ class TestAForwardedCallThroughTheRealOwner:
                     client.call_tool("hold_the_browser", {"value": "first"})
                 )
                 owner.calls.append(first)
-                await asyncio.wait_for(owner.held.wait(), timeout=10)
+                await self._held_by(first, owner)
                 second = asyncio.create_task(
                     client.call_tool("hold_the_browser", {"value": "second"})
                 )
@@ -4284,14 +4302,14 @@ class TestAForwardedCallThroughTheRealOwner:
                     seconds=10,
                 )
                 # The second call was admitted while the first holds the lease,
-                # after the owner's own schema listing for it had completed, and
-                # its body waits its turn.
+                # after the listing its own lookup made had completed, and its
+                # body waits its turn: a listing never queues behind a call.
                 assert not second.done(), _outcome(second)
                 assert get_liveness().calls_in_flight() == 2
                 assert [body["value"] for body in owner.bodies] == ["first"]
-                assert {"method": "tools/call", "while_held": True} in (
+                assert {"bound": True, "while_held": True} in owner.listings, (
                     owner.listings
-                ), owner.listings
+                )
                 owner.release.set()
                 answers = await asyncio.wait_for(asyncio.gather(first, second), 10)
 
@@ -4317,9 +4335,8 @@ class TestAForwardedCallThroughTheRealOwner:
         bodies = owner.bodies
         assert [body["value"] for body in bodies] == ["first", "second"]
         for body in bodies:
-            assert body["version"] == "2026-07-28", body
-            assert body["method"] == "tools/call", body
-            assert body["name"] == "hold_the_browser", body
+            assert body["version"] == HOP_PROTOCOL_VERSION, body
+            # A stateless era: no session the owner could hold between calls.
             assert body["session"] is None, body
         # Each body ran under the call id its own preflight named, two calls
         # two ids, and each tool request left carrying it, already claimed.
@@ -4358,7 +4375,7 @@ class TestAForwardedCallThroughTheRealOwner:
                     client.call_tool("hold_the_browser", {"value": "first"})
                 )
                 owner.calls.append(first)
-                await asyncio.wait_for(owner.held.wait(), timeout=10)
+                await self._held_by(first, owner)
                 second = asyncio.create_task(
                     client.call_tool("hold_the_browser", {"value": "second"})
                 )

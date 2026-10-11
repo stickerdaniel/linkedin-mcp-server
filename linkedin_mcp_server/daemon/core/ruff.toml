@@ -30,6 +30,7 @@ extend-select = ["TID251", "PTH123"]
 "linkedin_mcp_server.daemon.descriptor".msg = "Adapters import the core, never the reverse."
 "linkedin_mcp_server.daemon.discovery".msg = "Adapters import the core, never the reverse."
 "linkedin_mcp_server.daemon.election".msg = "Adapters import the core, never the reverse."
+"linkedin_mcp_server.daemon.forwarder".msg = "Adapters import the core, never the reverse."
 "linkedin_mcp_server.daemon.liveness".msg = "Adapters import the core, never the reverse."
 "linkedin_mcp_server.daemon.lock".msg = "Adapters import the core, never the reverse."
 "linkedin_mcp_server.daemon.owner".msg = "Adapters import the core, never the reverse."

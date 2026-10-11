@@ -9,7 +9,7 @@ lose the signal or act on it wrongly.
 from __future__ import annotations
 
 import asyncio
-
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import mcp.types as mt
@@ -17,7 +17,6 @@ import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware
-from fastmcp.server.providers.proxy import ProxyClient, ProxyProvider
 from fastmcp.tools import ToolResult
 
 from linkedin_mcp_server.daemon import auth_repair as daemon_auth
@@ -26,6 +25,7 @@ from linkedin_mcp_server.daemon.auth_repair import (
     MARKER_VERSION,
     OwnerAuthSignalMiddleware,
 )
+from linkedin_mcp_server.daemon.forwarder import OwnerForwarder
 from linkedin_mcp_server.daemon.proxy import FrontendCallMiddleware
 from linkedin_mcp_server.core.exceptions import AccountRestrictedError
 from linkedin_mcp_server.error_handler import raise_tool_error
@@ -66,19 +66,41 @@ def _owner_that_fails_with(
     return owner, calls
 
 
+#: The owner each frontend built here forwards to, by the address it was given.
+_OWNERS: dict[str, FastMCP] = {}
+_HOME: list[Path] = []
+
+
+@pytest.fixture(autouse=True)
+def _owners_in_process(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Reach every owner a frontend here forwards to in process, over the real hop."""
+    from owner_hop import reach_owners_in_process
+
+    _OWNERS.clear()
+    _HOME[:] = [tmp_path]
+    reach_owners_in_process(monkeypatch, _OWNERS.get)
+    yield
+    _OWNERS.clear()
+    _HOME.clear()
+
+
 def _proxy_to(
     owner: FastMCP, *, repairing: bool = True, budget: float = 30.0
 ) -> FastMCP:
-    """A frontend forwarding to *owner* in memory, wired as production does.
+    """A frontend forwarding to *owner* in process, wired as production does.
 
     *budget* is the call's one deadline, handed to the middleware the way
     ``create_mcp_server`` does rather than left to the configuration: a test that
     set only the config would be measuring a number the production path never
-    reads. The backend is never asked for anything here, because the in-memory
-    owner never goes away.
+    reads. The middleware's backend is never asked for anything here, because
+    the in-process owner never goes away.
     """
+    from test_daemon_proxy import _attachment, _backend
+
+    attachment = _attachment(_HOME[0], port=52000 + len(_OWNERS))
+    _OWNERS[attachment.descriptor.url] = owner
     front = FastMCP("front", mask_error_details=True)
-    front.add_provider(ProxyProvider(lambda: ProxyClient(owner)))
+    front.add_provider(OwnerForwarder(_backend(attachment, _HOME[0]), timeout=30.0))
     if repairing:
         front.add_middleware(FrontendCallMiddleware(MagicMock(), budget=budget))
     return front

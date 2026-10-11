@@ -264,10 +264,13 @@ def create_mcp_server(
         mcp.add_middleware(UpdateNoticeMiddleware())
 
     if proxy_backend is not None:
-        from linkedin_mcp_server.daemon.proxy import create_proxy_provider
+        from linkedin_mcp_server.daemon.forwarder import OwnerForwarder
+        from linkedin_mcp_server.daemon.proxy import call_budget
 
+        # Each request on the hop gets the call's whole budget, so the owner,
+        # whose own tool timeout is shorter, reports a tool that timed out.
         mcp.add_provider(
-            create_proxy_provider(proxy_backend, tool_timeout=tool_timeout)
+            OwnerForwarder(proxy_backend, timeout=call_budget(tool_timeout))
         )
         # Not the default, which is "warn": a failing provider is logged and
         # skipped, and for a server whose *only* provider this is, that turns a
