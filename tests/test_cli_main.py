@@ -1403,11 +1403,7 @@ class _Owner:
             (
                 "POST",
                 STAND_DOWN_PATH,
-                {
-                    "only_if_idle": True,
-                    "protocol": _protocol(),
-                    "instance": self.instance,
-                },
+                {"version": 1, "mode": "idle_only", "instance": self.instance},
             )
         ]
 
@@ -1422,8 +1418,8 @@ class TestRetiringASharedBrowser:
     """--logout, --login and --import-from-browser under a shared browser.
 
     The contract: ask only after the user confirms, retire only an owner with
-    nothing in flight or queued, never fall back to the unconditional
-    stand-down, never describe a request that may have been sent as unsent,
+    nothing in flight or queued, never fall back to a turnover, never
+    describe a request that may have been sent as unsent,
     and change the profile only once its lease is held.
     """
 
@@ -1629,7 +1625,7 @@ class TestRetiringASharedBrowser:
         owner = self._owner()
         path = daemon_descriptor.descriptor_path(auth_root_dir(self.profile))
         raw = json.loads(path.read_text())
-        raw["protocol_version"] = _protocol() - 1
+        raw["protocol_version"] = _protocol() + 1
         path.write_text(json.dumps(raw))
         prompts = self._answers("y")
 

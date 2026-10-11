@@ -53,7 +53,6 @@ import os
 import secrets
 import socket
 import stat
-import tempfile
 import unicodedata
 import uuid
 from collections.abc import Mapping
@@ -79,7 +78,7 @@ from linkedin_mcp_server.private_state import (
 
 #: Bumped when the shape below changes incompatibly. A client that does not
 #: recognise the value refuses rather than guessing at fields it cannot read.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 1
 
 #: Bumped when the daemon's tool protocol changes incompatibly: the call
 #: metadata, the heartbeat contract, or the ping contract. Compatibility keys on
@@ -88,24 +87,21 @@ SCHEMA_VERSION = 2
 #: mean a manual shutdown after almost every release, which is precisely the
 #: friction the daemon exists to remove.
 #:
-#: 2 makes the call marker mandatory in both directions: a frontend never
-#: forwards a call it could not mark, and an owner refuses one that arrives
-#: without a marker (:mod:`linkedin_mcp_server.daemon_liveness`). A version-1
-#: owner runs unmarked calls to completion, so the two cannot share tools.
+#: The call marker is mandatory in both directions: a frontend never forwards a
+#: call it could not mark, and an owner refuses one that arrives without a
+#: marker (:mod:`linkedin_mcp_server.daemon_liveness`).
 #:
 #: A bump does not make an older owner unreadable, and that is what lets it be
 #: bumped at all. :func:`read` parses a descriptor from any protocol at or above
 #: :data:`CONTROL_FLOOR_PROTOCOL` and leaves the comparison to the caller, which
 #: may then use it for control and never for a tool call
 #: (``daemon.Attachment.control_only``). An owner nobody can read is an owner
-#: nobody can ask to stand down, and the turnover an upgrade depends on would
-#: otherwise break for every owner already installed.
-PROTOCOL_VERSION = 2
+#: nobody can ask to stand down.
+PROTOCOL_VERSION = 1
 
-#: The oldest tool protocol whose stand-down route and bearer check this build
-#: can still use. That route is the control floor: it is frozen across tool
-#: protocol changes and moves only with :data:`SCHEMA_VERSION`, so a descriptor
-#: below this names an owner this client could not even ask to leave.
+#: The oldest tool protocol whose owner this build can still ask to stand down.
+#: Every protocol in this namespace accepts the same stand-down request
+#: (``daemon_owner.STAND_DOWN_PATH``), so the floor is the first one.
 CONTROL_FLOOR_PROTOCOL = 1
 
 _DESCRIPTOR_FILE = "daemon.json"
@@ -113,27 +109,17 @@ _PENDING_DESCRIPTOR_PREFIX = "pending-"
 _DAEMON_DIR = "daemon"
 
 
-def _application_state_dir(platform_name: str) -> str:
-    """Select the state namespace whose creation contract this platform meets."""
-    if platform_name == "nt":
-        # This namespace has only ever been created with Python 3.12.4+'s
-        # restricted creation DACL. Reusing the legacy namespace would leave
-        # already-open handles from a formerly permissive root effective after
-        # any path-based ACL repair.
-        return ".mcp-server-linkedin-v2"
-    return ".mcp-server-linkedin"
-
-
-_APPLICATION_STATE_DIR = _application_state_dir(os.name)
-_LEGACY_WINDOWS_STATE_DIR = ".mcp-server-linkedin"
-_LEGACY_WINDOWS_TOMBSTONE = b"mcp-server-linkedin-v2\n"
+#: The account-level namespace every daemon of this account shares. Earlier
+#: releases kept their daemon state under ``.mcp-server-linkedin`` and, on
+#: Windows, ``.mcp-server-linkedin-v2``. This build never reads, creates or
+#: removes either, so an owner left running by one of them shares no
+#: coordination state with this one; the profile lease still keeps the two off
+#: one browser. On Windows this namespace is only ever created through
+#: ``harden_directory_entry``, with Python 3.12.4+'s restricted creation DACL,
+#: so no handle opened under a formerly permissive root can reach it.
+_APPLICATION_STATE_DIR = ".linkedin-mcp-daemon"
 _WINDOWS = os.name == "nt"
 _windows_account_home_pins: dict[str, tuple[tuple[int, int], tuple[Any, ...]]] = {}
-
-#: Whether this process has seen the legacy exclusion object exist. Set once the
-#: tombstone is published or verified, and never cleared, because the object it
-#: records is a file on disk rather than anything held in this process.
-_windows_exclusion_established: bool = False
 
 # Enough that guessing is not a strategy. Read straight from the OS source.
 _TOKEN_BYTES = 32
@@ -492,86 +478,6 @@ def daemon_dir(auth_root: Path) -> Path:
     return daemon_state_root() / _daemon_dir_name(auth_root)
 
 
-def _legacy_migration_error(legacy: Path) -> PrivateStateError:
-    return PrivateStateError(
-        f"Legacy Windows daemon state still exists at {legacy}. Stop every "
-        "mcp-server-linkedin process, remove that directory, and restart the MCP "
-        "host before using the new private state namespace."
-    )
-
-
-def _verify_legacy_tombstone(legacy: Path) -> None:
-    harden_file(legacy)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    descriptor = os.open(legacy, flags)
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise _legacy_migration_error(legacy)
-        marker = os.read(descriptor, len(_LEGACY_WINDOWS_TOMBSTONE) + 1)
-    finally:
-        os.close(descriptor)
-    if marker != _LEGACY_WINDOWS_TOMBSTONE:
-        raise _legacy_migration_error(legacy)
-
-
-def _legacy_windows_tombstone_exists(home: Path) -> bool:
-    legacy = home / _LEGACY_WINDOWS_STATE_DIR
-    try:
-        legacy.lstat()
-    except FileNotFoundError:
-        return False
-    try:
-        _verify_legacy_tombstone(legacy)
-    except (OSError, PrivateStateError) as exc:
-        raise _legacy_migration_error(legacy) from exc
-    return True
-
-
-def _ensure_legacy_windows_tombstone(home: Path, staging_root: Path) -> None:
-    """Publish a complete private exclusion object for every pre-v2 release."""
-    legacy = home / _LEGACY_WINDOWS_STATE_DIR
-    if _legacy_windows_tombstone_exists(home):
-        return
-
-    descriptor, staged_name = tempfile.mkstemp(
-        prefix=".legacy-exclusion-", dir=staging_root
-    )
-    staged = Path(staged_name)
-    published = False
-    try:
-        try:
-            remaining = memoryview(_LEGACY_WINDOWS_TOMBSTONE)
-            while remaining:
-                written = os.write(descriptor, remaining)
-                if written <= 0:
-                    raise OSError("legacy exclusion marker write made no progress")
-                remaining = remaining[written:]
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-
-        harden_created_file(staged)
-        try:
-            staged.rename(legacy)
-        except FileExistsError:
-            try:
-                _verify_legacy_tombstone(legacy)
-            except (OSError, PrivateStateError) as exc:
-                raise _legacy_migration_error(legacy) from exc
-            return
-        published = True
-        _verify_legacy_tombstone(legacy)
-    finally:
-        # Only a staged marker is withdrawn. Once the rename lands, another
-        # startup can read this inode and record that the exclusion exists, and
-        # withdrawing it then leaves that process trusting a file this one took
-        # away. A marker a later start cannot verify is refused there, which is
-        # a decision that process gets to make with the object in front of it.
-        if not published:
-            with contextlib.suppress(OSError):
-                staged.unlink()
-
-
 def _windows_directory_identity(path: Path) -> tuple[int, int]:
     entry = path.lstat()
     attributes = getattr(entry, "st_file_attributes", None)
@@ -640,27 +546,8 @@ def _pin_windows_account_home(home: Path) -> None:
         raise
 
 
-def windows_exclusion_established() -> bool:
-    """Whether the legacy Windows namespace is already excluded on this account.
-
-    The exclusion is one file, ``.mcp-server-linkedin``, standing where every
-    pre-v2 release would otherwise create its state directory. Publishing it is
-    what stops a predecessor from taking that name, and until it exists a
-    predecessor started now can take it permanently: v2 then refuses to run
-    beside it, and the frontends of the day cannot see it at all.
-
-    So this is the question a caller asks before doing anything that could start
-    such a predecessor. It answers about this process's own knowledge, which is
-    all it can honestly answer: another process may have published the tombstone
-    a moment ago, and a false here only costs a wait.
-    """
-    return _windows_exclusion_established
-
-
 def reset_daemon_descriptor_for_testing() -> None:
     """Release process-lifetime Windows pins between isolated tests."""
-    global _windows_exclusion_established
-    _windows_exclusion_established = False
     if not _windows_account_home_pins:
         return
     from linkedin_mcp_server.windows_acl import close_directory_pin
@@ -682,7 +569,6 @@ def prepare_daemon_state(auth_root: Path) -> Path:
     its own right. Files inside are hardened separately before their contents or
     locking semantics are used.
     """
-    global _windows_exclusion_established
     root = daemon_state_root()
     if _WINDOWS:
         home = _account_home()
@@ -693,15 +579,7 @@ def prepare_daemon_state(auth_root: Path) -> Path:
         if os.name == "nt":
             _pin_windows_account_home(home)
         verify_children_cannot_be_replaced(home)
-        legacy_exists = _legacy_windows_tombstone_exists(home)
-        application_root = home / _APPLICATION_STATE_DIR
-        harden_directory_entry(application_root)
-        if not legacy_exists:
-            _ensure_legacy_windows_tombstone(home, application_root)
-        # Recorded here rather than at the end, because this is the line the
-        # tombstone is known to exist at. What follows hardens directories and
-        # can fail on its own without putting the exclusion back in doubt.
-        _windows_exclusion_established = True
+        harden_directory_entry(home / _APPLICATION_STATE_DIR)
         harden_directory_entry(root)
     else:
         harden_directory(root)

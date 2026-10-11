@@ -233,7 +233,7 @@ class TestLookingForAnOwnerToRetire:
         _publish_owner(tmp_path, profile)
         _rewrite_published(
             tmp_path,
-            protocol_version=daemon_descriptor_module.PROTOCOL_VERSION - 1,
+            protocol_version=daemon_descriptor_module.PROTOCOL_VERSION + 1,
         )
 
         lookup = look_up_owner(tmp_path, profile, _config(profile), for_retirement=True)
@@ -272,15 +272,12 @@ class TestAnOwnerOfAnotherProtocol:
     to leave, and every check that makes a pair trustworthy still runs on it.
     """
 
-    @pytest.mark.parametrize("offset", [-1, 1], ids=["older", "newer"])
-    def test_it_comes_back_proved_but_for_control_only(
-        self, tmp_path: Path, offset: int
-    ):
+    def test_it_comes_back_proved_but_for_control_only(self, tmp_path: Path):
         profile = tmp_path / "profile"
         token = _publish_owner(tmp_path, profile)
         _rewrite_published(
             tmp_path,
-            protocol_version=daemon_descriptor_module.PROTOCOL_VERSION + offset,
+            protocol_version=daemon_descriptor_module.PROTOCOL_VERSION + 1,
         )
 
         lookup = look_up_owner(tmp_path, profile, _config(profile))
@@ -299,7 +296,7 @@ class TestAnOwnerOfAnotherProtocol:
         _publish_owner(tmp_path, profile)
         _rewrite_published(
             tmp_path,
-            protocol_version=daemon_descriptor_module.PROTOCOL_VERSION - 1,
+            protocol_version=daemon_descriptor_module.PROTOCOL_VERSION + 1,
         )
         published = read(tmp_path)
         assert published is not None
@@ -319,7 +316,7 @@ class TestAnOwnerOfAnotherProtocol:
         _publish_owner(tmp_path, theirs, config=_config(ours))
         _rewrite_published(
             tmp_path,
-            protocol_version=daemon_descriptor_module.PROTOCOL_VERSION - 1,
+            protocol_version=daemon_descriptor_module.PROTOCOL_VERSION + 1,
         )
 
         lookup = look_up_owner(tmp_path, ours, _config(ours))

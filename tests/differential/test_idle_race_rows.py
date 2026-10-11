@@ -19,7 +19,7 @@ K1 on O1 to O4 (``compare_to_direct``) from two valid records
 are printed from each record (``retirement_race.idle_margins``).
 
 **Turnover lanes**, daemon only: the row asks the identified owner to stand
-down with the product's bodyless request, then judges the drain, new work
+down with the product's turnover request, then judges the drain, new work
 refused, a read cut past the drain and a queued read cut before it began
 (``retirement_race.turnover_problems``). K3 and K0 run; K1 is a counted skip
 with the contract's reason, a policy and not parity

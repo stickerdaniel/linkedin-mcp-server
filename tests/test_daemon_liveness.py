@@ -31,15 +31,17 @@ def _last_heard(liveness: CallLiveness, call_id: str, seconds_ago: float) -> Non
     liveness._waiting[call_id].last_heard -= seconds_ago
 
 
-def _idle_only_body(*, drop: str | None = None, **changes: Any) -> bytes:
-    """The idle-only retirement body for the owner "the-owner", as changed."""
+def _stand_down_body(
+    mode: object = "idle_only", *, drop: str | None = None, **changes: Any
+) -> bytes:
+    """A version 1 stand-down request for the owner "the-owner", as changed.
+
+    Spelled out rather than built by the product, because this is the wire
+    format a later release sends to retire this one.
+    """
     import json
 
-    body: dict[str, Any] = {
-        "only_if_idle": True,
-        "protocol": PROTOCOL_VERSION,
-        "instance": "the-owner",
-    }
+    body: dict[str, Any] = {"version": 1, "mode": mode, "instance": "the-owner"}
     body.update(changes)
     if drop is not None:
         del body[drop]
@@ -1692,29 +1694,37 @@ class TestTheControlRoutes:
     @pytest.mark.parametrize(
         "body",
         [
-            b'{"only_if_idle": true}',
+            None,
+            b"",
+            b'{"mode": "turnover"}',
             b"{}",
             b"not json",
             b" ",
             b"\xff\xfe",
             b"[]",
             b"null",
-            b'"only_if_idle"',
-            _idle_only_body(only_if_idle=False),
-            _idle_only_body(only_if_idle=1),
-            _idle_only_body(protocol=True),
-            _idle_only_body(protocol=str(PROTOCOL_VERSION)),
-            _idle_only_body(protocol=PROTOCOL_VERSION - 1),
-            _idle_only_body(protocol=PROTOCOL_VERSION + 1),
-            _idle_only_body(instance="another-owner"),
-            _idle_only_body(instance=7),
-            _idle_only_body(instance=None),
-            _idle_only_body(force=True),
-            _idle_only_body(drop="instance"),
-            _idle_only_body(drop="protocol"),
+            b'"turnover"',
+            _stand_down_body("force"),
+            _stand_down_body(None),
+            _stand_down_body(["turnover"]),
+            _stand_down_body(version=True),
+            _stand_down_body(version="1"),
+            _stand_down_body(version=1.0),
+            _stand_down_body(version=0),
+            _stand_down_body(version=2),
+            _stand_down_body(instance="another-owner"),
+            _stand_down_body(instance=7),
+            _stand_down_body(instance=None),
+            _stand_down_body(force=True),
+            _stand_down_body(protocol=PROTOCOL_VERSION),
+            _stand_down_body(drop="instance"),
+            _stand_down_body(drop="version"),
+            _stand_down_body(drop="mode"),
         ],
         ids=[
-            "idle only alone",
+            "no body",
+            "empty body",
+            "mode alone",
             "empty object",
             "malformed",
             "whitespace",
@@ -1722,25 +1732,30 @@ class TestTheControlRoutes:
             "array",
             "null",
             "string",
-            "only_if_idle false",
-            "only_if_idle as number",
-            "protocol as bool",
-            "protocol as text",
-            "older protocol",
-            "newer protocol",
+            "unknown mode",
+            "mode null",
+            "mode as array",
+            "version as bool",
+            "version as text",
+            "version as float",
+            "version 0",
+            "version 2",
             "another instance",
             "instance as number",
             "instance null",
             "an extra key",
+            "a tool protocol too",
             "no instance",
-            "no protocol",
+            "no version",
+            "no mode",
         ],
     )
-    async def test_a_stand_down_with_any_other_body_changes_nothing(self, body: bytes):
-        # Only the absent body is the unconditional stand-down, and only the
-        # exact idle-only body is the other request. Everything else is refused
-        # before any retirement state moves, and a failed request must never
-        # become the unconditional one.
+    async def test_a_stand_down_with_any_other_body_changes_nothing(
+        self, body: bytes | None
+    ):
+        # Only the exact version 1 request names a mode. Anything else, the
+        # bodyless request earlier releases sent included, is refused before
+        # any retirement state moves.
         from linkedin_mcp_server import daemon_liveness
 
         liveness = daemon_liveness.get_liveness()
@@ -1751,9 +1766,31 @@ class TestTheControlRoutes:
         response = await self._stand_down(app, body)
 
         assert response.status_code == 400
+        assert response.json() == {"error": "unsupported stand-down request"}
         assert asked == []
         assert liveness.retiring is False
         assert liveness.retire_reason is None
+
+    @pytest.mark.parametrize("busy", [False, True], ids=["idle", "busy"])
+    async def test_a_turnover_request_stands_down_whatever_is_in_flight(
+        self, busy: bool
+    ):
+        # The request a newer build sends. It does not ask whether anyone is
+        # using the owner: the turnover drains them, so even a busy owner goes.
+        from linkedin_mcp_server import daemon_liveness
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.serving_as("the-owner")
+        if busy:
+            liveness.call_started()
+        asked: list[str] = []
+        app = self._app(stand_down=lambda: asked.append("asked"))
+
+        response = await self._stand_down(app, _stand_down_body("turnover"))
+
+        assert response.status_code == 200
+        assert response.json() == {"standing_down": True, "instance": "the-owner"}
+        assert asked == ["asked"]
 
     async def test_an_idle_owner_retires_on_the_idle_only_request(self):
         # Retirement and turnover both, in the request: a call arriving after
@@ -1765,7 +1802,7 @@ class TestTheControlRoutes:
         asked: list[str] = []
         app = self._app(stand_down=lambda: asked.append("asked"))
 
-        response = await self._stand_down(app, _idle_only_body())
+        response = await self._stand_down(app, _stand_down_body())
 
         assert response.status_code == 200
         assert response.json() == {
@@ -1804,7 +1841,7 @@ class TestTheControlRoutes:
         asked: list[str] = []
         app = self._app(stand_down=lambda: asked.append("asked"))
 
-        response = await self._stand_down(app, _idle_only_body())
+        response = await self._stand_down(app, _stand_down_body())
 
         assert response.status_code == 409
         assert response.json() == {"standing_down": False, "busy": True}
@@ -1831,7 +1868,7 @@ class TestTheControlRoutes:
         asked: list[str] = []
         app = self._app(stand_down=lambda: asked.append("asked"))
 
-        response = await self._stand_down(app, _idle_only_body())
+        response = await self._stand_down(app, _stand_down_body())
 
         assert response.status_code == 409
         assert response.json() == {"standing_down": False, "busy": True}
@@ -1866,7 +1903,7 @@ class TestTheControlRoutes:
 
         monkeypatch.setattr(liveness, "busy", busy)
 
-        response = await self._stand_down(app, _idle_only_body())
+        response = await self._stand_down(app, _stand_down_body())
         await asyncio.sleep(0)
 
         assert admitted, "the arriving call never ran"
@@ -1888,7 +1925,7 @@ class TestTheControlRoutes:
         app = self._app(stand_down=lambda: asked.append("asked"))
         arrived = asyncio.Event()
         more = asyncio.Event()
-        whole = _idle_only_body()
+        whole = _stand_down_body()
 
         async def body() -> Any:
             yield b""
@@ -1907,20 +1944,6 @@ class TestTheControlRoutes:
         assert response.status_code == 409
         assert asked == []
         assert liveness.retiring is False
-
-    async def test_a_stand_down_without_a_body_is_the_unconditional_one(self):
-        from linkedin_mcp_server.daemon_owner import STAND_DOWN_PATH
-
-        asked: list[str] = []
-        app = self._app(stand_down=lambda: asked.append("asked"))
-
-        async with self._client(app) as client:
-            response = await client.post(
-                STAND_DOWN_PATH, headers={"Authorization": f"Bearer {self.TOKEN}"}
-            )
-
-        assert response.status_code == 200
-        assert asked == ["asked"]
 
 
 class TestTheLastCheckBeforeBrowserWork:

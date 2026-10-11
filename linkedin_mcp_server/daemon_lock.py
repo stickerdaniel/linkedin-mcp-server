@@ -34,11 +34,10 @@ Two things it must never do, both of which cost the lock silently:
   file, and leaving it unqualified invites conclusions the measurement does not
   support.
 
-Handing a held lock to another process works only on POSIX. Measured on
-Windows: a child that inherited the handle through the documented mechanism did
+The owner takes the lock itself, on every platform. A held lock is never handed
+to another process: measured on Windows, a child that inherited the handle did
 not hold the lock once the parent had closed its handles and exited, in 20 of 20
-runs. The two platforms genuinely differ here, so startup has to differ with
-them rather than share one path that is only true on one of them.
+runs.
 """
 
 from __future__ import annotations
@@ -65,25 +64,6 @@ from linkedin_mcp_server.profile_lease import (
 logger = logging.getLogger(__name__)
 
 _DAEMON_LOCK_FILE = "daemon.lock"
-
-#: Whether a held lock can be handed to another process by letting it inherit
-#: the descriptor. True on POSIX, where the lock belongs to the open file
-#: description that every copy shares.
-#:
-#: False on Windows, and this is measured rather than assumed. On a Windows
-#: runner, a child that received the handle through the documented
-#: ``STARTUPINFO`` handle list and kept it open did not hold the lock once the
-#: parent had closed its handles and exited: a third process acquired the byte
-#: range in 20 of 20 runs. Within one process a duplicate does keep the lock
-#: alive, which is why this is easy to get wrong from a single-process test.
-#: So on Windows the elected process has to take the lock itself rather than be
-#: handed one.
-#:
-#: The measurement closed and exited together, so it does not say which of the
-#: two released the region. That distinction would matter for a design that
-#: kept the electing process alive as a lock broker; it does not matter for
-#: this one, where the elector always exits.
-_INHERITED_LOCKS_TRANSFER = os.name != "nt"
 
 
 class DaemonLockError(RuntimeError):
@@ -230,10 +210,9 @@ class DaemonLock:
         """Give up the lock by closing our descriptor, never by unlocking it.
 
         Closing drops only this descriptor; the lock survives in any copy a
-        owner inherited. Unlocking would release it for all of them at
-        once, so an owner that had already adopted the handoff would lose
-        the lock without anything saying so, and the next client would elect a
-        second owner against a live browser.
+        child inherited across a fork. Unlocking would release it for all of
+        them at once, so the lock would be gone without anything saying so,
+        and the next client would elect a second owner against a live browser.
         """
         self._discard_if_forked()
         if self._fd is None:
@@ -262,155 +241,6 @@ class DaemonLock:
         if fd is not None:
             with contextlib.suppress(OSError):
                 os.close(fd)
-
-    def inheritable_copy(self) -> int:
-        """Duplicate the descriptor so a launched owner can inherit it.
-
-        POSIX only, and refused elsewhere rather than quietly returning
-        something that does not mean what it says.
-
-        The original is opened close-on-exec, so it would not survive the exec
-        that starts the owner. Handing over a duplicate rather than
-        releasing and letting the owner take the lock itself is what closes
-        the window in between, during which another client would see a free lock
-        and elect a second owner.
-
-        The caller closes the copy once the owner confirms it has it.
-        """
-        if not _INHERITED_LOCKS_TRANSFER:
-            raise DaemonLockError(
-                "Handing a held lock to another process is a POSIX mechanism. "
-                "On this platform the owner has to take the lock itself."
-            )
-        if self._fd is None:
-            raise DaemonLockError("Cannot hand over a lock this process does not hold")
-        duplicate = os.dup(self._fd)
-        try:
-            os.set_inheritable(duplicate, True)
-        except OSError:
-            # The duplicate already shares the kernel lock, so leaking it here
-            # would hold the lock for this process's whole life with nothing
-            # left to release it: release() closes the original and the lock
-            # survives in the copy. Measured with the call made to fail: the
-            # daemon still read as running after release, and no other process
-            # could take over.
-            os.close(duplicate)
-            raise
-        return duplicate
-
-    def adopt(self, fd: int) -> None:
-        """Take ownership of an inherited locked descriptor.
-
-        POSIX only, like its counterpart, and for the measured reason above.
-        Called by an owner that was launched holding a copy.
-
-        Adoption is the one path that would otherwise take a caller's word for
-        what it was handed, so the descriptor is checked to be this lock's own
-        file and then asked for the lock. Measured with neither check: a
-        descriptor belonging to another auth root was adopted without complaint,
-        so this process reported owning a browser nobody had elected it for
-        while another process took the real lock unopposed. An unlocked
-        descriptor for the right file did the same.
-
-        Asking for the lock is not a second acquisition. A process that already
-        holds it is granted it again against its own open file description, so
-        a genuine handover passes untouched; a descriptor that turns out to hold
-        nothing is turned into a real acquisition rather than a false claim.
-        Either way exactly one process ends up holding it, which is the whole
-        point of the exercise.
-        """
-        if not _INHERITED_LOCKS_TRANSFER:
-            raise DaemonLockError(
-                "An inherited lock cannot be adopted on this platform. "
-                "The owner has to take the lock itself."
-            )
-        self._discard_if_forked()
-        if self._fd is not None:
-            raise DaemonLockError("This process already holds the daemon lock")
-
-        directory = prepare_daemon_state(self._auth_root)
-        self._path = directory / _DAEMON_LOCK_FILE
-        _harden_existing_lock(self._path)
-        try:
-            inherited = os.fstat(fd)
-        except OSError as exc:
-            raise DaemonLockError(
-                f"The inherited descriptor cannot be used: {exc}"
-            ) from exc
-        try:
-            expected = self._path.stat()
-        except OSError as exc:
-            raise DaemonLockError(
-                f"There is no lock file at {self._path} for the inherited "
-                f"descriptor to belong to"
-            ) from exc
-        if (inherited.st_dev, inherited.st_ino) != (expected.st_dev, expected.st_ino):
-            raise DaemonLockError(
-                "The inherited descriptor is not this auth root's lock file. "
-                "Adopting it would report ownership of a browser this process "
-                "was never elected to hold."
-            )
-        # A descriptor for the right file that holds no lock is the same
-        # mistake wearing the right name: another process would take the lock
-        # while this one believed it already had it. Asking for the lock here
-        # is not acquiring it twice, because on POSIX a process that already
-        # holds it is granted it again against its own open file description.
-        if not try_lock(fd, exclusive=True):
-            raise DaemonLockError(
-                "The inherited descriptor does not hold the daemon lock, so "
-                "adopting it would leave the browser unowned."
-            )
-        # Compared again now that the lock is held, because the check above
-        # happened before it. Anything that replaces the file in between leaves
-        # this holding a lock on an inode the path no longer names, while the
-        # live path sits free for somebody else to take, which is two owners.
-        #
-        # By identity rather than link count. A count catches an unlink and
-        # misses a rename, where the inode keeps its one link and the name now
-        # refers to something else. Measured with a rename plus recreate: the
-        # count test passed and a contender locked the live path alongside the
-        # adopter. ``acquire_locked_fd`` makes the same comparison and retries;
-        # adoption cannot re-lock a descriptor another process opened, so it
-        # refuses instead.
-        if not is_still_at(fd, self._path):
-            raise DaemonLockError(
-                "The lock file was replaced while the inherited descriptor was "
-                "being adopted, so it now locks an inode nothing refers to. "
-                "Start the owner again."
-            )
-        # Made non-inheritable again straight away. It was marked inheritable
-        # for exactly one launch, and leaving it that way would let any later
-        # child that inherits descriptors, a Chromium among them, keep the lock
-        # alive after this process exits. Measured: an unrelated child did
-        # exactly that, and every client afterwards saw a daemon that was no
-        # longer there.
-        try:
-            os.set_inheritable(fd, False)
-        except OSError as exc:
-            # The lock is held through this descriptor by now, and nothing has
-            # recorded that yet, so failing here without closing it would leave
-            # it held with no object able to release it: measured, a contender
-            # could not take the lock afterwards and only a manual close freed
-            # it. Closing gives the lock up, which is the honest outcome of an
-            # adoption that did not complete.
-            #
-            # A failing close is logged rather than retried, and does not leave
-            # the descriptor behind. Linux and the BSDs release it early in the
-            # call and only then do the work that can fail, so the fd is gone
-            # whatever the return says; retrying would close whichever
-            # descriptor has since taken that number. POSIX.1-2024 standardised
-            # the opposite for EINTR, which Linux does not implement.
-            try:
-                os.close(fd)
-            except OSError:
-                logger.debug("Closing the adopted descriptor failed", exc_info=True)
-            raise DaemonLockError(
-                f"The inherited descriptor could not be taken over: {exc}"
-            ) from exc
-        self._fd = fd
-        self._owner_pid = os.getpid()
-        _held_locks.add(self)
-        logger.debug("Adopted an inherited daemon lock for %s", self._auth_root)
 
     def hold(self) -> _DaemonLockScope:
         """Take the lock for a scope, raising when another process holds it."""

@@ -32,7 +32,7 @@ and the warm-up's end against the read's.
   K1: the browser idled closed and the next call reopens it.
 
 **Turnover** (daemon only): the row sends the owner the authenticated
-stand-down with no body, the legacy unconditional form a newer build uses,
+turnover request a newer build uses (``daemon_state.DaemonStateLayout``),
 reading the token from the row's own auth root and never recording it. Its
 30 s drain and unknown-outcome answer are the contract's policy, so K1 is
 recorded not applicable (``K1_NOT_APPLICABLE``). These lanes turn over an

@@ -1,35 +1,22 @@
 """The parent-owned channel that authorizes one owner's publication.
 
-The configuration pipe cannot also carry the commit record, and the reason is a
-rollback rather than an upgrade. ``@latest`` is the documented install, so a
-long-running frontend can start an owner from a package that was replaced on
-disk while it ran, and every owner older than the commit boundary frames its
-configuration by reading standard input to end of file. A parent that holds that
-pipe open for its own commit record then waits for a verdict from a child that is
-waiting for the parent to close. Neither side is wrong and neither side moves:
-the frontend spends its whole election budget, kills the child, and starts an
-identical one on the next pass.
-
-So the configuration pipe is closed as soon as the record is written, which is
-the framing every predecessor already expects, and authorization moves here.
+The configuration pipe is closed as soon as its one record is written, and the
+commit record travels here instead.
 
 A loopback rendezvous rather than an inherited descriptor, because an inherited
 one cannot reach the child on both platforms. ``pass_fds`` is POSIX only, and the
 Windows owner is started behind :mod:`linkedin_mcp_server.process_gate`, which
-forwards the three standard handles and nothing else. Teaching the gate to
-forward a fourth would not help either: under a rollback the gate comes off the
-same replaced package as the owner, so the version that would forward it is
-exactly the version that is not running. Loopback needs no cooperation from
-anything in between, and both ends already depend on it, since loopback is how a
-frontend talks to the owner it elected.
+forwards the three standard handles and nothing else. Loopback needs no
+cooperation from anything in between, and both ends already depend on it, since
+loopback is how a frontend talks to the owner it elected.
 
 The channel is authenticated in both directions by the post-spawn handshake
 nonce, the same token that authenticates the startup verdict. It is handed over
 on the private configuration pipe after the child exists, so no other process on
 this machine has seen it: a stranger that reaches the port cannot present it, and
-a commit record that does not carry it is not the parent's. Closing is the abort,
-exactly as closing the configuration pipe used to be. A parent that goes away
-without committing leaves the child reading end of file.
+a commit record that does not carry it is not the parent's. Closing is the
+abort: a parent that goes away without committing leaves the child reading end
+of file.
 """
 
 from __future__ import annotations

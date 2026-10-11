@@ -26,6 +26,24 @@ _NONCE = "0123456789abcdef" * 4
 _CONTROL = daemon_config.ControlEndpoint("127.0.0.1", 54321)
 
 
+class _AttachedControl:
+    """A control channel the owner attached to, for tests that stop before commit."""
+
+    def readline(self) -> str:
+        return ""
+
+    def close(self) -> None:
+        pass
+
+
+def _attach_without_a_parent(monkeypatch: pytest.MonkeyPatch) -> None:
+    from linkedin_mcp_server import process_control
+
+    monkeypatch.setattr(
+        process_control, "attach", lambda *_args, **_kwargs: _AttachedControl()
+    )
+
+
 def _config(**browser: object) -> AppConfig:
     config = AppConfig()
     config.browser.user_data_dir = "~/somewhere/profile"
@@ -67,21 +85,20 @@ class TestRoundTrip:
 
         assert handover.handshake_nonce == _NONCE
         assert handover.config.browser.headless is False
-        assert handover.startup_protocol == daemon_config.STARTUP_PROTOCOL_VERSION
 
-    def test_missing_startup_protocol_means_the_predecessor_frontend(self):
+    def test_a_record_without_a_startup_protocol_is_refused(self):
+        # What a released frontend from before startup versions wrote. This
+        # owner shares no startup protocol with it and refuses before any state.
         payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
         payload.pop("startup_protocol")
-        payload.pop("control_host")
-        payload.pop("control_port")
 
-        handover = daemon_config.decode_handover(json.dumps(payload))
+        with pytest.raises(ValueError, match="startup protocol"):
+            daemon_config.decode_handover(json.dumps(payload))
 
-        assert handover.startup_protocol == 1
-        assert handover.control is None
-
-    @pytest.mark.parametrize("value", [True, 0, 4, "2"])
-    def test_unknown_startup_protocol_is_refused(self, value: object):
+    @pytest.mark.parametrize("value", [True, 0, 1, 2, 3, 5, "4", 4.0, None])
+    def test_any_other_startup_protocol_is_refused(self, value: object):
+        # 1 to 3 are what released frontends sent. A bool is an int in Python,
+        # so ``True`` is refused by type, not by value.
         payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
         payload["startup_protocol"] = value
 
@@ -89,11 +106,10 @@ class TestRoundTrip:
             daemon_config.decode_handover(json.dumps(payload))
 
     def test_the_current_record_names_the_control_rendezvous(self):
-        handover = daemon_config.decode_handover(
-            daemon_config.encode_handover(_config(), _NONCE, _CONTROL)
-        )
+        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
+        handover = daemon_config.decode_handover(json.dumps(payload))
 
-        assert handover.startup_protocol == 3
+        assert payload["startup_protocol"] == daemon_config.STARTUP_PROTOCOL_VERSION
         assert handover.control == _CONTROL
 
     def test_a_current_record_without_a_rendezvous_is_refused(self):
@@ -112,49 +128,6 @@ class TestRoundTrip:
 
         with pytest.raises(ValueError, match="control port"):
             daemon_config.decode_handover(json.dumps(payload))
-
-    @pytest.mark.parametrize("protocol", [1, 2])
-    def test_an_older_protocol_may_not_name_a_rendezvous(self, protocol: int):
-        # A frontend on either predecessor protocol never listens, so a record
-        # naming one did not come from a frontend that would answer it.
-        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
-        payload["startup_protocol"] = protocol
-
-        with pytest.raises(ValueError, match="control channel"):
-            daemon_config.decode_handover(json.dumps(payload))
-
-    def test_the_pipe_commit_protocol_still_decodes(self):
-        # The version between the two: commit authorization on the configuration
-        # pipe. An owner from this build can still be started by a frontend that
-        # speaks it, which is the rollback case in the other direction.
-        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
-        payload["startup_protocol"] = 2
-        del payload["control_host"], payload["control_port"]
-
-        handover = daemon_config.decode_handover(json.dumps(payload))
-
-        assert handover.startup_protocol == 2
-        assert handover.control is None
-        assert daemon_config.authorizes_commit(handover.startup_protocol)
-
-    def test_only_the_predecessor_protocol_publishes_unauthorized(self):
-        assert not daemon_config.authorizes_commit(1)
-        assert daemon_config.authorizes_commit(2)
-        assert daemon_config.authorizes_commit(3)
-
-    def test_the_rendezvous_stays_outside_the_sections_a_predecessor_parses(self):
-        # What makes a current record readable by an owner that has never heard
-        # of a control channel. Every version of the decoder reads ``browser``
-        # and ``server`` by name and refuses an unknown setting *inside* them,
-        # while ignoring top-level names it does not know.
-        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
-
-        assert {"control_host", "control_port", "startup_protocol"} <= set(payload)
-        assert not {"control_host", "control_port"} & set(payload["browser"])
-        assert not {"control_host", "control_port"} & set(payload["server"])
-        # And the predecessor's own reconstruction, which reads exactly these
-        # three names, still finds everything it needs.
-        assert {"browser", "server", "handshake_nonce"} <= set(payload)
 
     def test_owner_handover_requires_a_valid_nonce(self):
         with pytest.raises(ValueError, match="handshake nonce"):
@@ -725,18 +698,14 @@ class TestRefusing:
         monkeypatch.setattr(
             daemon_owner,
             "_read_handover",
-            lambda: daemon_config.OwnerHandover(config, _NONCE),
+            lambda: daemon_config.OwnerHandover(config, _NONCE, _CONTROL),
         )
         monkeypatch.setattr(
             daemon_owner.logger,
             "exception",
             lambda *_args, **_kwargs: pytest.fail("pre-log failure used logging"),
         )
-        monkeypatch.setattr(
-            daemon_owner,
-            "_abandon_inherited_lock",
-            lambda fd: events.append(f"unlocked:{fd}"),
-        )
+        _attach_without_a_parent(monkeypatch)
         if stage == "state":
 
             class UnresolvablePath:
@@ -747,16 +716,16 @@ class TestRefusing:
                     raise OSError("profile state is unavailable")
 
             monkeypatch.setattr(daemon_owner, "Path", lambda _value: UnresolvablePath())
-            expected = ["unlocked:123", f"diagnostic:{code}", "aborted"]
+            expected = [f"diagnostic:{code}", "aborted"]
         else:
 
-            class AdoptedLock:
+            class HeldLock:
                 def release(self) -> None:
                     events.append("released")
 
             monkeypatch.setattr(daemon_owner, "auth_root_dir", lambda profile: tmp_path)
             monkeypatch.setattr(
-                daemon_owner, "_take_lock", lambda auth_root, fd: AdoptedLock()
+                daemon_owner, "_take_lock", lambda auth_root: HeldLock()
             )
             monkeypatch.setattr(
                 daemon_owner,
@@ -767,17 +736,27 @@ class TestRefusing:
             )
             expected = [f"diagnostic:{code}", "aborted", "released"]
 
-        assert daemon_owner.main(["--lock-fd", "123"]) == 1
+        assert daemon_owner.main([]) == 1
         assert events == expected
 
-    def test_predecessor_windows_frontend_is_refused_before_state_access(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("startup_protocol", [None, 1, 2, 3])
+    def test_a_handover_without_the_current_startup_protocol_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, startup_protocol: int | None
     ):
-        from linkedin_mcp_server import daemon_owner
+        # What a released frontend writes when it starts this owner from a
+        # package replaced under it: no version, or one of 1 to 3. The owner
+        # refuses it before any state is touched, and says only that its
+        # configuration was refused.
+        import io
+
+        from linkedin_mcp_server import daemon_owner, process_control
 
         events: list[str] = []
-        config = AppConfig()
-        config.browser.user_data_dir = str(tmp_path / "profile")
+        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
+        if startup_protocol is None:
+            del payload["startup_protocol"]
+        else:
+            payload["startup_protocol"] = startup_protocol
 
         class RecordingBootstrap:
             def __init__(self, _stream: object) -> None:
@@ -789,41 +768,41 @@ class TestRefusing:
             def close(self) -> None:
                 pass
 
-        class RecordingHandshake:
-            def __init__(self, _stream: object, _nonce: str) -> None:
-                pass
-
-            def fail(self) -> None:
-                events.append("failed")
-
+        class RecordingStream:
             def close(self) -> None:
                 events.append("closed")
 
-        monkeypatch.setattr(daemon_owner, "_IS_WINDOWS", True)
         monkeypatch.setattr(daemon_owner, "_BootstrapDiagnostics", RecordingBootstrap)
-        monkeypatch.setattr(daemon_owner, "_Handshake", RecordingHandshake)
         monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
-        monkeypatch.setattr(daemon_owner, "_claim_handshake_stream", lambda: None)
         monkeypatch.setattr(
-            daemon_owner,
-            "_read_handover",
-            lambda: daemon_config.OwnerHandover(config, _NONCE, startup_protocol=1),
+            daemon_owner, "_claim_handshake_stream", lambda: RecordingStream()
         )
-        monkeypatch.setattr(daemon_owner, "auth_root_dir", lambda _profile: tmp_path)
+        monkeypatch.setattr(
+            daemon_owner.sys, "stdin", io.StringIO(json.dumps(payload) + "\n")
+        )
         monkeypatch.setattr(
             daemon_owner,
-            "_attach_daemon_log",
-            lambda _auth_root: pytest.fail("predecessor reached the v2 state root"),
+            "auth_root_dir",
+            lambda _profile: pytest.fail("a refused handover resolved profile state"),
+        )
+        monkeypatch.setattr(
+            process_control,
+            "attach",
+            lambda *_args, **_kwargs: pytest.fail("a refused handover attached"),
+        )
+        monkeypatch.setattr(
+            daemon_owner,
+            "_take_lock",
+            lambda _auth_root: pytest.fail("a refused handover took the lock"),
         )
 
         assert daemon_owner.main([]) == 1
         assert events == [
-            f"diagnostic:{daemon_owner.BOOTSTRAP_STATE}",
-            "failed",
+            f"diagnostic:{daemon_owner.BOOTSTRAP_CONFIGURATION}",
             "closed",
         ]
 
-    def test_lock_adoption_failure_unlocks_the_inherited_handoff(
+    def test_a_lock_failure_is_reported_before_the_daemon_log(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         from linkedin_mcp_server import daemon_owner
@@ -863,8 +842,9 @@ class TestRefusing:
         monkeypatch.setattr(
             daemon_owner,
             "_read_handover",
-            lambda: daemon_config.OwnerHandover(config, _NONCE),
+            lambda: daemon_config.OwnerHandover(config, _NONCE, _CONTROL),
         )
+        _attach_without_a_parent(monkeypatch)
         monkeypatch.setattr(daemon_owner, "auth_root_dir", lambda profile: tmp_path)
         monkeypatch.setattr(
             daemon_owner,
@@ -879,12 +859,7 @@ class TestRefusing:
         monkeypatch.setattr(
             daemon_owner,
             "_take_lock",
-            lambda *args: (_ for _ in ()).throw(DaemonLockError("cannot adopt")),
-        )
-        monkeypatch.setattr(
-            daemon_owner,
-            "_abandon_inherited_lock",
-            lambda fd: events.append(f"unlocked:{fd}"),
+            lambda *args: (_ for _ in ()).throw(DaemonLockError("lock unusable")),
         )
         monkeypatch.setattr(
             daemon_owner.logger,
@@ -894,16 +869,15 @@ class TestRefusing:
             ),
         )
 
-        assert daemon_owner.main(["--lock-fd", "123"]) == 1
+        assert daemon_owner.main([]) == 1
         assert events == [
             f"diagnostic:{daemon_owner.BOOTSTRAP_LOCK}",
             "aborted",
             "bootstrap-closed",
             "handshake-closed",
-            "unlocked:123",
         ]
 
-    def test_attached_bootstrap_keeps_legacy_record_before_versioned_hint(
+    def test_attached_bootstrap_reports_the_stage_before_the_versioned_hint(
         self, tmp_path: Path
     ):
         from linkedin_mcp_server import daemon_owner
@@ -974,8 +948,9 @@ class TestRefusing:
         monkeypatch.setattr(
             daemon_owner,
             "_read_handover",
-            lambda: daemon_config.OwnerHandover(config, _NONCE),
+            lambda: daemon_config.OwnerHandover(config, _NONCE, _CONTROL),
         )
+        _attach_without_a_parent(monkeypatch)
         monkeypatch.setattr(daemon_owner, "auth_root_dir", lambda profile: tmp_path)
         monkeypatch.setattr(
             daemon_owner,
@@ -1016,60 +991,6 @@ class TestRefusing:
             release.set()
 
         assert time.monotonic() - started < 1.0
-
-    def test_configuration_timeout_unlocks_the_inherited_handoff(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        from linkedin_mcp_server import daemon_descriptor, daemon_lock, daemon_owner
-
-        if not daemon_lock._INHERITED_LOCKS_TRANSFER:
-            pytest.skip("inherited lock handoff is POSIX-only")
-
-        monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
-
-        events: list[str] = []
-
-        class RecordingBootstrap:
-            def __init__(self, _stream: object) -> None:
-                pass
-
-            def report(self, code: str) -> None:
-                events.append(f"diagnostic:{code}")
-
-            def close(self) -> None:
-                pass
-
-        class RecordingStream:
-            def close(self) -> None:
-                events.append("closed")
-
-        parent = daemon_lock.DaemonLock(tmp_path)
-        assert parent.try_acquire()
-        inherited = parent.inheritable_copy()
-        monkeypatch.setattr(daemon_owner, "_BootstrapDiagnostics", RecordingBootstrap)
-        monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
-        monkeypatch.setattr(
-            daemon_owner, "_claim_handshake_stream", lambda: RecordingStream()
-        )
-        monkeypatch.setattr(
-            daemon_owner,
-            "_read_handover",
-            lambda: (_ for _ in ()).throw(TimeoutError("starter suspended")),
-        )
-
-        try:
-            assert daemon_owner.main(["--lock-fd", str(inherited)]) == 1
-
-            contender = daemon_lock.DaemonLock(tmp_path)
-            assert contender.try_acquire()
-            contender.release()
-        finally:
-            parent.release()
-
-        assert events == [
-            f"diagnostic:{daemon_owner.BOOTSTRAP_CONFIGURATION}",
-            "closed",
-        ]
 
     def test_the_owner_refuses_to_start_without_a_configuration(self):
         # The owner reads its settings from standard input and must not fall

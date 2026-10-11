@@ -300,7 +300,7 @@ def _ask_to_retire(attachment: "Attachment") -> bool:
     """Send the idle-only retirement and act on the answer.
 
     Idle-only, and never anything else: a failure here is reported, not retried
-    as the unconditional stand-down, which would cut off another client's call.
+    as a turnover, which would cut off another client's call.
     An interrupt is left to the caller's ``_reporting_a_confirmed_retirement``,
     which covers reading the reply as well as sending the request.
     """
@@ -318,7 +318,9 @@ def _ask_to_retire(attachment: "Attachment") -> bool:
             response = client.post(
                 url,
                 headers={"Authorization": f"Bearer {attachment.token}"},
-                json=daemon_owner.idle_only_request(instance),
+                json=daemon_owner.stand_down_request(
+                    instance, mode=daemon_owner.STAND_DOWN_IDLE_ONLY
+                ),
             )
     except (httpx2.ConnectError, httpx2.ConnectTimeout):
         # No connection was made, so this request was not delivered. That is
@@ -686,16 +688,14 @@ def _obtain_shared_owner(config: AppConfig) -> "DaemonProxyBackend | None":
     (``drivers/browser.watch_for_handoff_requests``). The daemon lock decides who
     *owns* the browser; the lease decides who is driving it right now.
 
-    That safety net carries more weight on Windows than elsewhere, which is worth
-    knowing before the flag becomes the default. A frontend there takes no lock
-    at all and starts a child that competes for one
-    (``daemon_election._start_contending_for_the_lock``), so a local spawn
-    failure is indistinguishable from a rival owner that holds the lock and has
-    not published yet: ``obtain_owner`` returns at once and this process falls
-    back while an owner may in fact be coming up. On POSIX the equivalent
-    outcomes are terminal, because the frontend held the lock itself. Windows
-    already carries platform gaps that gate the default flip, and this is one of
-    them.
+    That safety net carries weight on every platform, which is worth knowing
+    before the flag becomes the default. A frontend takes no lock itself: it
+    starts a child that competes for one
+    (``daemon_election._start_contending_for_the_lock``), and only the child that
+    wins holds it and publishes. A local spawn failure is therefore
+    indistinguishable from a rival owner that holds the lock and has not
+    published yet, so this process can fall back while an owner is in fact
+    coming up.
     """
     from linkedin_mcp_server.daemon import daemon_would_be_used
 

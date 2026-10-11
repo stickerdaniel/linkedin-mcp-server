@@ -2646,7 +2646,7 @@ class TestAnOwnersOwnRefusal:
             lambda instance: _signed_refusal(
                 "retiring",
                 instance,
-                protocol=daemon_descriptor.PROTOCOL_VERSION - 1,
+                protocol=daemon_descriptor.PROTOCOL_VERSION + 1,
             ),
             lambda instance: _signed_refusal("some_new_refusal", instance),
             lambda instance: ToolResult(
@@ -2658,7 +2658,7 @@ class TestAnOwnersOwnRefusal:
         ids=[
             "another owner",
             "a boolean protocol",
-            "an older protocol",
+            "another protocol",
             "an unknown kind",
             "not an error",
         ],

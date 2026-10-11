@@ -501,7 +501,7 @@ class TestPreparedCommit:
         profile = tmp_path / "profile"
         descriptor = replace(
             _descriptor(tmp_path, token, profile=profile),
-            protocol_version=PROTOCOL_VERSION - 1,
+            protocol_version=PROTOCOL_VERSION + 1,
         )
         prepare(tmp_path, descriptor, token)
 
@@ -841,15 +841,52 @@ class TestEndpointUrl:
 
 
 class TestStateLocation:
-    def test_windows_uses_a_fresh_state_namespace(self):
-        assert (
-            daemon_descriptor_module._application_state_dir("nt")
-            == ".mcp-server-linkedin-v2"
+    #: Where earlier releases kept daemon state: every platform, and Windows.
+    _EARLIER_NAMESPACES = (".mcp-server-linkedin", ".mcp-server-linkedin-v2")
+
+    def test_state_lives_in_a_namespace_no_release_used(self, tmp_path: Path):
+        root = daemon_descriptor_module.daemon_state_root()
+
+        assert root.relative_to(tmp_path.resolve()).parts == (
+            ".linkedin-mcp-daemon",
+            "daemon",
         )
-        assert (
-            daemon_descriptor_module._application_state_dir("posix")
-            == ".mcp-server-linkedin"
-        )
+        assert root.parent.name not in self._EARLIER_NAMESPACES
+
+    @pytest.mark.parametrize("windows", [False, True], ids=["native", "windows"])
+    def test_earlier_namespaces_are_neither_created_nor_touched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, windows: bool
+    ):
+        # An owner from an earlier release may still be running out of either
+        # one. This build shares no coordination state with it, so it must not
+        # read, create, replace or remove anything there.
+        if windows:
+            from linkedin_mcp_server import windows_acl
+
+            monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+            monkeypatch.setattr(
+                windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+            )
+            _stub_windows_hardening(monkeypatch)
+        earlier = tmp_path / self._EARLIER_NAMESPACES[0]
+        (earlier / "daemon").mkdir(parents=True)
+        marker = earlier / "daemon" / "daemon.json"
+        marker.write_text("an earlier owner's descriptor")
+        before = marker.stat()
+        auth_root = tmp_path / "auth"
+        profile = auth_root / "profile"
+
+        prepare_daemon_state(auth_root)
+        token = new_token()
+        publish(auth_root, _descriptor(tmp_path, token, profile=profile), token)
+        assert read(auth_root) is not None
+
+        assert marker.read_text() == "an earlier owner's descriptor"
+        after = marker.stat()
+        assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+        assert sorted(entry.name for entry in earlier.iterdir()) == ["daemon"]
+        assert not (tmp_path / self._EARLIER_NAMESPACES[1]).exists()
+        assert (tmp_path / ".linkedin-mcp-daemon" / "daemon").is_dir()
 
     def test_windows_account_home_pin_retains_every_replaceable_component(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -943,11 +980,6 @@ class TestStateLocation:
         from linkedin_mcp_server import windows_acl
 
         monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
-        monkeypatch.setattr(
-            daemon_descriptor_module,
-            "_APPLICATION_STATE_DIR",
-            ".mcp-server-linkedin-v2",
-        )
 
         def refuse(_path: Path) -> None:
             raise PrivateStateError("unsafe home")
@@ -957,308 +989,7 @@ class TestStateLocation:
         with pytest.raises(PrivateStateError, match="unsafe home"):
             prepare_daemon_state(tmp_path / "auth")
 
-        assert not (tmp_path / ".mcp-server-linkedin").exists()
-        assert not (tmp_path / ".mcp-server-linkedin-v2").exists()
-
-    def test_windows_refuses_legacy_state_before_creating_the_new_namespace(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        legacy = tmp_path / ".mcp-server-linkedin"
-        legacy.mkdir()
-        marker = legacy / "legacy-marker"
-        marker.write_text("untouched")
-        from linkedin_mcp_server import windows_acl
-
-        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
-        monkeypatch.setattr(
-            daemon_descriptor_module,
-            "_APPLICATION_STATE_DIR",
-            ".mcp-server-linkedin-v2",
-        )
-        monkeypatch.setattr(
-            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
-        )
-
-        with pytest.raises(PrivateStateError, match="Stop every mcp-server-linkedin"):
-            prepare_daemon_state(tmp_path / "auth")
-
-        assert not (tmp_path / ".mcp-server-linkedin-v2").exists()
-        assert marker.read_text() == "untouched"
-
-    @windows_only
-    def test_windows_does_not_reuse_legacy_state(self, tmp_path: Path):
-        legacy = tmp_path / ".mcp-server-linkedin"
-        legacy.mkdir()
-
-        with pytest.raises(PrivateStateError, match="Legacy Windows daemon state"):
-            prepare_daemon_state(tmp_path / "auth")
-
-        assert not (tmp_path / ".mcp-server-linkedin-v2").exists()
-
-    def test_windows_tombstone_blocks_an_old_namespace_from_reappearing(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        from linkedin_mcp_server import windows_acl
-        from linkedin_mcp_server.common_utils import secure_mkdir
-
-        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
-        monkeypatch.setattr(
-            daemon_descriptor_module,
-            "_APPLICATION_STATE_DIR",
-            ".mcp-server-linkedin-v2",
-        )
-        monkeypatch.setattr(
-            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
-        )
-        _stub_windows_hardening(monkeypatch)
-
-        first = prepare_daemon_state(tmp_path / "auth")
-        second = prepare_daemon_state(tmp_path / "auth")
-        legacy = tmp_path / ".mcp-server-linkedin"
-
-        assert first == second
-        assert legacy.read_bytes() == daemon_descriptor_module._LEGACY_WINDOWS_TOMBSTONE
-        # Windows reports a path whose parent is a file as ERROR_PATH_NOT_FOUND
-        # rather than as a directory error, so the exception differs while the
-        # refusal this asserts is the same on both.
-        refusals = (
-            (NotADirectoryError, FileNotFoundError)
-            if os.name == "nt"
-            else NotADirectoryError
-        )
-        with pytest.raises(refusals):
-            secure_mkdir(legacy / "daemon")
-
-    def test_windows_records_the_exclusion_only_once_it_exists(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        # The question the election asks before it may start a child, so the
-        # answer has to follow the file rather than the intention to write it.
-        # Yes before the tombstone lands puts the whole guard back where it was.
-        from linkedin_mcp_server import windows_acl
-
-        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
-        monkeypatch.setattr(
-            daemon_descriptor_module,
-            "_APPLICATION_STATE_DIR",
-            ".mcp-server-linkedin-v2",
-        )
-        monkeypatch.setattr(
-            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
-        )
-        _stub_windows_hardening(monkeypatch)
-        observed: list[bool] = []
-        real_ensure = daemon_descriptor_module._ensure_legacy_windows_tombstone
-
-        def ensure(home: Path, staging_root: Path) -> None:
-            observed.append(daemon_descriptor_module.windows_exclusion_established())
-            real_ensure(home, staging_root)
-
-        monkeypatch.setattr(
-            daemon_descriptor_module, "_ensure_legacy_windows_tombstone", ensure
-        )
-
-        assert not daemon_descriptor_module.windows_exclusion_established()
-
-        prepare_daemon_state(tmp_path / "auth")
-
-        assert observed == [False], "and not while the file was still being written"
-        assert daemon_descriptor_module.windows_exclusion_established()
-        assert (tmp_path / ".mcp-server-linkedin").is_file()
-
-    def test_windows_claims_no_exclusion_while_legacy_state_stands(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        # The permanent migration error. Nothing was excluded, and saying so is
-        # what lets a caller tell this apart from a namespace it may build on.
-        from linkedin_mcp_server import windows_acl
-
-        (tmp_path / ".mcp-server-linkedin").mkdir()
-        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
-        monkeypatch.setattr(
-            daemon_descriptor_module,
-            "_APPLICATION_STATE_DIR",
-            ".mcp-server-linkedin-v2",
-        )
-        monkeypatch.setattr(
-            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
-        )
-
-        with pytest.raises(PrivateStateError, match="Stop every mcp-server-linkedin"):
-            prepare_daemon_state(tmp_path / "auth")
-
-        assert not daemon_descriptor_module.windows_exclusion_established()
-
-    @posix_only
-    def test_no_exclusion_is_claimed_off_windows(self, tmp_path: Path):
-        # There is no second namespace to exclude anywhere else, so the answer
-        # stays no and the election's wait for it never applies.
-        prepare_daemon_state(tmp_path / "auth")
-
-        assert not daemon_descriptor_module.windows_exclusion_established()
-
-    def test_windows_tombstone_is_hardened_before_publication(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        from linkedin_mcp_server import windows_acl
-
-        legacy = tmp_path / ".mcp-server-linkedin"
-        application = tmp_path / ".mcp-server-linkedin-v2"
-        hardened: list[Path] = []
-        real_harden = daemon_descriptor_module.harden_created_file
-
-        def harden(staged: Path) -> None:
-            assert staged.parent == application
-            assert staged != legacy
-            assert not legacy.exists()
-            hardened.append(staged)
-            real_harden(staged)
-
-        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
-        monkeypatch.setattr(
-            daemon_descriptor_module,
-            "_APPLICATION_STATE_DIR",
-            application.name,
-        )
-        monkeypatch.setattr(
-            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
-        )
-        _stub_windows_hardening(monkeypatch)
-        monkeypatch.setattr(daemon_descriptor_module, "harden_created_file", harden)
-
-        prepare_daemon_state(tmp_path / "auth")
-
-        assert len(hardened) == 1
-        assert not hardened[0].exists()
-        assert legacy.read_bytes() == daemon_descriptor_module._LEGACY_WINDOWS_TOMBSTONE
-
-    def test_windows_removes_a_fresh_tombstone_when_hardening_fails(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        from linkedin_mcp_server import windows_acl
-
-        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
-        monkeypatch.setattr(
-            daemon_descriptor_module,
-            "_APPLICATION_STATE_DIR",
-            ".mcp-server-linkedin-v2",
-        )
-        monkeypatch.setattr(
-            daemon_descriptor_module, "_pin_windows_account_home", lambda _path: None
-        )
-        monkeypatch.setattr(
-            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
-        )
-        monkeypatch.setattr(
-            daemon_descriptor_module,
-            "harden_created_file",
-            lambda _path: (_ for _ in ()).throw(PrivateStateError("ACL failure")),
-        )
-
-        with pytest.raises(PrivateStateError, match="ACL failure"):
-            prepare_daemon_state(tmp_path / "auth")
-
-        assert not (tmp_path / ".mcp-server-linkedin").exists()
-
-    def test_a_tombstone_from_this_release_is_accepted_by_the_next(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        """The bytes on disk outlive the constant that wrote them.
-
-        Written literally rather than through the constant, because a test that
-        writes what it reads passes whatever the marker is changed to, while a
-        machine upgrading over one from this release does not.
-        """
-        from linkedin_mcp_server import windows_acl
-
-        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
-        monkeypatch.setattr(
-            daemon_descriptor_module,
-            "_APPLICATION_STATE_DIR",
-            ".mcp-server-linkedin-v2",
-        )
-        monkeypatch.setattr(
-            daemon_descriptor_module, "_pin_windows_account_home", lambda _path: None
-        )
-        monkeypatch.setattr(
-            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
-        )
-        _stub_windows_hardening(monkeypatch)
-        legacy = tmp_path / ".mcp-server-linkedin"
-        legacy.write_bytes(b"mcp-server-linkedin-v2\n")
-        legacy.chmod(0o600)
-        before = legacy.stat().st_ino
-
-        prepare_daemon_state(tmp_path / "auth")
-
-        assert legacy.stat().st_ino == before, "it was accepted, not replaced"
-        assert daemon_descriptor_module.windows_exclusion_established()
-
-    def test_windows_keeps_a_tombstone_it_could_not_verify(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        """Publication hands the marker over, so this start stops owning it.
-
-        Another start can already have read this inode and recorded that the
-        exclusion exists. Withdrawing it leaves that process trusting a file
-        this one removed, while the marker itself is something every later
-        start verifies for itself anyway.
-        """
-        from linkedin_mcp_server import windows_acl
-
-        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
-        monkeypatch.setattr(
-            daemon_descriptor_module,
-            "_APPLICATION_STATE_DIR",
-            ".mcp-server-linkedin-v2",
-        )
-        monkeypatch.setattr(
-            daemon_descriptor_module, "_pin_windows_account_home", lambda _path: None
-        )
-        monkeypatch.setattr(
-            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
-        )
-        legacy = tmp_path / ".mcp-server-linkedin"
-
-        def refuse(path: Path) -> None:
-            assert path == legacy, "only the published marker is verified here"
-            raise PrivateStateError("unreadable marker")
-
-        monkeypatch.setattr(
-            daemon_descriptor_module, "_verify_legacy_tombstone", refuse
-        )
-
-        with pytest.raises(PrivateStateError, match="unreadable marker"):
-            prepare_daemon_state(tmp_path / "auth")
-
-        assert legacy.read_bytes() == (
-            daemon_descriptor_module._LEGACY_WINDOWS_TOMBSTONE
-        )
-        assert not list(
-            (tmp_path / ".mcp-server-linkedin-v2").glob(".legacy-exclusion-*")
-        ), "and only the staged marker was withdrawn"
-
-    def test_windows_refuses_an_invalid_legacy_tombstone(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        from linkedin_mcp_server import windows_acl
-
-        legacy = tmp_path / ".mcp-server-linkedin"
-        legacy.write_text("foreign marker")
-        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
-        monkeypatch.setattr(
-            daemon_descriptor_module,
-            "_APPLICATION_STATE_DIR",
-            ".mcp-server-linkedin-v2",
-        )
-        monkeypatch.setattr(
-            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
-        )
-
-        with pytest.raises(PrivateStateError, match="Legacy Windows daemon state"):
-            prepare_daemon_state(tmp_path / "auth")
-
-        assert not (tmp_path / ".mcp-server-linkedin-v2").exists()
+        assert not (tmp_path / daemon_descriptor_module._APPLICATION_STATE_DIR).exists()
 
     @pytest.mark.skipif(os.name == "nt", reason="portable symbolic-link contract")
     def test_windows_refuses_a_link_at_the_application_namespace(
@@ -1268,14 +999,9 @@ class TestStateLocation:
 
         target = tmp_path / "redirected"
         target.mkdir()
-        application = tmp_path / ".mcp-server-linkedin-v2"
+        application = tmp_path / daemon_descriptor_module._APPLICATION_STATE_DIR
         application.symlink_to(target, target_is_directory=True)
         monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
-        monkeypatch.setattr(
-            daemon_descriptor_module,
-            "_APPLICATION_STATE_DIR",
-            ".mcp-server-linkedin-v2",
-        )
         monkeypatch.setattr(
             windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
         )
@@ -1290,7 +1016,7 @@ class TestStateLocation:
     def test_windows_refuses_a_permissive_application_namespace(self, tmp_path: Path):
         from linkedin_mcp_server.windows_acl import describe_dacl
 
-        application = tmp_path / ".mcp-server-linkedin-v2"
+        application = tmp_path / daemon_descriptor_module._APPLICATION_STATE_DIR
         application.mkdir()
         subprocess.run(
             ["icacls", str(application), "/grant", "*S-1-1-0:(OI)(CI)F"],
@@ -1314,7 +1040,7 @@ class TestStateLocation:
     ):
         target = tmp_path / "redirected"
         target.mkdir()
-        application = tmp_path / ".mcp-server-linkedin-v2"
+        application = tmp_path / daemon_descriptor_module._APPLICATION_STATE_DIR
         subprocess.run(
             ["cmd.exe", "/d", "/c", "mklink", "/J", str(application), str(target)],
             check=True,
@@ -1444,7 +1170,7 @@ class TestStateLocation:
             home.symlink_to(real, target_is_directory=True)
         else:
             home.mkdir()
-            application = home / ".mcp-server-linkedin"
+            application = home / daemon_descriptor_module._APPLICATION_STATE_DIR
             if depth == "application":
                 application.symlink_to(real, target_is_directory=True)
             else:

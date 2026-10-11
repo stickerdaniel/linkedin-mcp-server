@@ -90,7 +90,7 @@ DEFAULT_SETTLEMENT_SECONDS = 15.0
 #: budget. That is the distinction :class:`Reach` exists to carry.
 _REACHABLE_SECONDS = 5.0
 
-#: How long a superseded owner has to acknowledge a stand-down request. Short:
+#: How long an older owner has to acknowledge a turnover request. Short:
 #: the reply says only that the request arrived, and whether the browser is
 #: actually free is settled by the lock afterwards, not by this.
 _STAND_DOWN_SECONDS = 5.0
@@ -102,11 +102,6 @@ _RETRY_SECONDS = 0.2
 _FAILURE_VERDICT_SECONDS = 0.2
 _PREPARED_READ_SECONDS = 1.0
 _PREPARED_CLEANUP_SECONDS = 1.0
-
-#: How long one pass waits for the Windows exclusion namespace before looking
-#: again. The election deadline is what bounds the whole wait; this only keeps
-#: the loop observing the descriptor while it waits.
-_EXCLUSION_SETTLE_SECONDS = 1.0
 
 #: Retry quickly through the initial race, then back off so a later lock release
 #: remains discoverable without creating one short-lived child per polling pass.
@@ -121,98 +116,6 @@ def _owner_start_delay_after(starts: int, current: float) -> float:
     return min(
         max(current * 2, _OWNER_START_RETRY_SECONDS),
         _MAX_OWNER_START_RETRY_SECONDS,
-    )
-
-
-class _Exclusion(enum.Enum):
-    """What the legacy Windows exclusion permits an election to do right now."""
-
-    #: The tombstone exists. A child started now cannot take that name.
-    READY = "ready"
-
-    #: The inspection that would establish it is still running. Nothing may be
-    #: started yet, and waiting is the thing to do.
-    PENDING = "pending"
-
-    #: The inspection stopped without establishing it. Waiting changes nothing,
-    #: and starting anything is the hazard itself.
-    UNAVAILABLE = "unavailable"
-
-
-def _settled_exclusion(inspector: _DescriptorInspector) -> _Exclusion:
-    """Read the exclusion's state without waiting for anything.
-
-    ``READY`` comes only from the tombstone being known to exist, never from the
-    inspection having stopped. Those are not the same claim and treating them as
-    one is the whole defect: a reader can settle on a transient failure, an ACL
-    that answered once, a descriptor that ran out, with no legacy directory
-    anywhere, and a child started on the strength of that creates the very
-    directory this guard exists to keep out of existence.
-
-    The tombstone rather than the inspector is also what survives an election
-    replacing its inspector, because it is a fact about a file and not about a
-    thread.
-    """
-    if daemon_descriptor.windows_exclusion_established():
-        return _Exclusion.READY
-    if inspector.settled:
-        return _Exclusion.UNAVAILABLE
-    return _Exclusion.PENDING
-
-
-def _exclusion_state(inspector: _DescriptorInspector, *, deadline: float) -> _Exclusion:
-    """Whether an owner may be spawned yet, on this platform, right now.
-
-    Only Windows has anything to wait for. There, ``prepare_daemon_state`` pins
-    the account home and publishes the exclusion object that keeps every pre-v2
-    release out of ``.mcp-server-linkedin``, and it does that inside the
-    inspector's reader thread. A one second read budget expiring does not stop
-    that thread; it only stops the *frontend* from hearing about it, and the old
-    loop went straight on to spawn a child. Under a package rolled back on disk
-    that child is a predecessor, which creates the legacy directory for itself
-    and blocks the v2 namespace for good, invisibly to every current frontend.
-
-    So the spawn waits for the reader instead of racing it, bounded by the
-    caller's own deadline. A reader that stops having established nothing is not
-    a reason to go ahead: it is a reason to stop, because this election cannot
-    tell a transient failure from a permanent one and only one of those is safe
-    to spawn against. The frontend falls back to its own browser and a later
-    election, with private state readable again, elects an owner normally.
-    """
-    if not _IS_WINDOWS:
-        return _Exclusion.READY
-    state = _settled_exclusion(inspector)
-    if state is not _Exclusion.PENDING:
-        return state
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        return _Exclusion.PENDING
-    logger.debug("Waiting for private daemon state before starting an owner")
-    inspector.settle_within(timeout=min(remaining, _EXCLUSION_SETTLE_SECONDS))
-    return _settled_exclusion(inspector)
-
-
-def _report_unusable_exclusion(inspector: _DescriptorInspector) -> None:
-    """Say why no owner can be started, in the reader's own words.
-
-    The settled inspection is consumed here purely for its diagnosis. On Windows
-    a reader that returns normally has already published the tombstone, so this
-    state means it raised, and that exception names the thing to fix: a legacy
-    directory to remove, or a permission that answered once and may not next
-    time.
-    """
-    try:
-        inspector.inspect_until(timeout=0.0)
-    except Exception:
-        logger.warning(
-            "Private daemon state could not be established, so no shared owner "
-            "can be started safely; this client will use its own browser",
-            exc_info=True,
-        )
-        return
-    logger.warning(  # pragma: no cover - a normal return publishes the tombstone
-        "Private daemon state was read without establishing the exclusion a "
-        "shared owner needs; this client will use its own browser"
     )
 
 
@@ -358,14 +261,8 @@ def obtain_owner(
         if time.monotonic() >= active_deadline:
             return settle()
 
-        may_start = time.monotonic() >= next_start
-        if may_start:
-            exclusion = _exclusion_state(inspector, deadline=active_deadline)
-            if exclusion is _Exclusion.UNAVAILABLE:
-                _report_unusable_exclusion(inspector)
-                return ElectionOutcome(last_lookup, started_owner=started)
-            may_start = exclusion is _Exclusion.READY
         now = time.monotonic()
+        may_start = now >= next_start
         remaining = active_deadline - now
         if may_start and remaining > 0:
             starts += 1
@@ -768,21 +665,19 @@ def _decide_control_only(
 
 
 def _ask_to_stand_down(attachment: Attachment) -> None:
-    """Ask a superseded owner to give up the browser.
+    """Ask an older owner to give up the browser for this build.
 
-    Best effort, and deliberately so. The owner may already be gone, may be an
-    older build with no such route, or may be busy finishing a call. In every one
-    of those cases the caller's next step is the same: try the lock, and wait if
-    somebody still holds it. Raising here would turn a routine upgrade into a
-    client that fails to start.
+    Best effort, and deliberately so. The owner may already be gone or may be
+    busy finishing a call. In every one of those cases the caller's next step is
+    the same: try the lock, and wait if somebody still holds it. Raising here
+    would turn a routine upgrade into a client that fails to start.
 
     Whether the owner *complied* is never assumed. The lock is what says the
     browser is free, and this function never claims otherwise.
 
-    Sent with no body, and that is the request's meaning rather than an
-    omission. The route and its bearer check are the control floor every tool
-    protocol keeps (``daemon_owner.STAND_DOWN_PATH``), and a bodyless request is
-    the one form of it an owner reads as unconditional.
+    A turnover request addressed to the instance the descriptor names, through
+    the one route and request version every owner keeps
+    (``daemon_owner.STAND_DOWN_PATH``), whatever its tool protocol.
     """
 
     descriptor = attachment.descriptor
@@ -792,18 +687,12 @@ def _ask_to_stand_down(attachment: Attachment) -> None:
             response = client.post(
                 url,
                 headers={"Authorization": f"Bearer {attachment.token}"},
+                json=daemon_owner.stand_down_request(
+                    descriptor.instance_id, mode=daemon_owner.STAND_DOWN_TURNOVER
+                ),
             )
     except Exception:
         logger.debug("The stale daemon could not be asked to stand down", exc_info=True)
-        return
-    if response.status_code == 404:
-        # An owner from before this route existed. It will not hand over on
-        # request, so the honest outcome is that the upgrade takes effect when
-        # that owner exits for its own reasons.
-        logger.info(
-            "The running daemon is too old to hand the browser over on request; "
-            "it will be replaced when it stops"
-        )
         return
     logger.debug("Stand-down request answered with %s", response.status_code)
 
@@ -1093,7 +982,6 @@ def _start_contending_for_the_lock(
     started = _spawn(
         auth_root,
         config,
-        lock_fd=None,
         timeout=timeout,
         inspector=inspector,
     )
@@ -1110,7 +998,6 @@ def _spawn(
     auth_root: Path,
     config: AppConfig,
     *,
-    lock_fd: int | None,
     timeout: float,
     on_spawned: Callable[[], None] | None = None,
     inspector: _DescriptorInspector | None = None,
@@ -1128,7 +1015,6 @@ def _spawn(
     try:
         nonce = release_nonce() if windows_job is not None else None
         target = _spawn_command(
-            lock_fd=lock_fd,
             job_name=windows_job.name if windows_job is not None else None,
         )
         command = (
@@ -1142,7 +1028,6 @@ def _spawn(
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            pass_fds=() if lock_fd is None else (lock_fd,),
             start_new_session=True,
             close_fds=True,
             creationflags=_detachment_flags(),
@@ -1172,10 +1057,8 @@ def _spawn(
             windows_job.close()
         raise
     prepared_instance_id: str | None = None
-    #: Whether the child may already own itself, either because a commit record
-    #: may have reached it or because it reported a publication a predecessor
-    #: protocol performs on its own authority. Past this, no exception licenses a
-    #: kill.
+    #: Whether the child may already own itself, because a commit record may
+    #: have reached it. Past this, no exception licenses a kill.
     owner_may_be_adopted = False
     assigned = False
     job_settled = False
@@ -1288,16 +1171,6 @@ def _spawn(
         if verdict is _Started.RETRY:
             stop_child()
             return _Started.RETRY
-        if verdict is _Started.YES:
-            # A predecessor owner, started by this current frontend after the
-            # package was replaced on disk. Its protocol has no commit record and
-            # no prepared generation to validate: it published on its own
-            # authority and says so, and this process no longer gets to stop it.
-            # The election's own read of the published descriptor is what decides
-            # whether that owner is usable.
-            logger.info("The daemon published on the predecessor startup protocol")
-            owner_may_be_adopted = True
-            return _Started.YES
 
         if not isinstance(verdict, str):  # pragma: no cover - handled above
             raise AssertionError(f"Unexpected startup verdict: {verdict}")
@@ -1408,8 +1281,7 @@ def _spawn(
                 stop_child()
         # End of file aborts a prepared child that never received the commit
         # record. After that record it is only a lease: the lock holder settles
-        # publication. The configuration pipe was closed with its record, so a
-        # child on a predecessor protocol has long since been released.
+        # publication.
         control.close()
         # Only a spawn that failed before the handover still holds this. Past
         # it the writer owns the stream and this is ``None``.
@@ -1546,19 +1418,14 @@ def _hand_over_config(
 ) -> None:
     """Write one config record and end the pipe on it.
 
-    Closed with the record rather than held open, and that is the whole of the
-    rollback fix. Every owner older than the commit protocol frames its
-    configuration by reading to end of file, so a pipe kept open for a later
-    commit record leaves such a child blocked in its very first read while this
-    process waits for a verdict it will never send. Authorization is on
-    *control* instead, which no predecessor looks for and none of them needs.
+    Closed with the record rather than held open: authorization travels on
+    *control*, so nothing after the record needs the pipe.
 
     The close runs on the writing thread, so a pipe that cannot be closed is
     bounded by the same wait as one that cannot be written. The stream leaves
     ``Popen`` to get there, so the writer owns it from here: a blocked ``write``
     holds the ``BufferedWriter`` lock ``close`` needs, and a cross-thread close
-    would wait for it without a timeout of its own. Nothing after the record
-    needs the pipe, because authorization travels on *control*.
+    would wait for it without a timeout of its own.
     """
     stream, child.stdin = child.stdin, None
     assert stream is not None
@@ -1735,7 +1602,7 @@ def _await_committed(
         return verdict
 
     status, _ = verdict
-    if status in (daemon_owner.READY, daemon_owner.COMMITTED):
+    if status == daemon_owner.COMMITTED:
         return _Started.YES
     if status == daemon_owner.ABORTED:
         return _Started.ABORTED
@@ -1746,7 +1613,7 @@ def _await_committed(
     return _Started.NO
 
 
-def _spawn_command(*, lock_fd: int | None, job_name: str | None = None) -> list[str]:
+def _spawn_command(*, job_name: str | None = None) -> list[str]:
     """How the owner is invoked.
 
     ``-P`` keeps the working directory off ``sys.path`` while preserving the
@@ -1755,8 +1622,8 @@ def _spawn_command(*, lock_fd: int | None, job_name: str | None = None) -> list[
     ``-I``, ``-s`` or ``-E`` mode would restore startup code it refused before the
     configuration secrets cross stdin. The child environment drops ``PYTHONPATH``
     separately, so a workspace cannot put a shadow
-    ``linkedin_mcp_server/daemon_owner.py`` back in front and receive the inherited
-    lock descriptor or configuration secrets.
+    ``linkedin_mcp_server/daemon_owner.py`` back in front and receive the
+    configuration secrets.
     """
     interpreter_flags: list[str] = []
     if sys.flags.isolated:
@@ -1776,8 +1643,6 @@ def _spawn_command(*, lock_fd: int | None, job_name: str | None = None) -> list[
         "-m",
         "linkedin_mcp_server.daemon_owner",
     ]
-    if lock_fd is not None:
-        command += ["--lock-fd", str(lock_fd)]
     if job_name is not None:
         command += ["--job-name", job_name]
     return command
@@ -1951,7 +1816,6 @@ def _reported_owner_verdict(frame: bytes, handshake_nonce: str) -> _OwnerVerdict
     except UnicodeDecodeError:
         return None
     if payload in (
-        daemon_owner.READY,
         daemon_owner.COMMITTED,
         daemon_owner.FAILED,
         daemon_owner.ABORTED,
@@ -2019,14 +1883,7 @@ def _read_owner_verdict(
 def _await_prepared(
     child: subprocess.Popen[bytes], *, handshake_nonce: str, timeout: float
 ) -> str | _Started:
-    """Wait for a prepared generation id, a publication, failure, or silence.
-
-    ``READY`` is the one verdict that is not about this protocol at all. It comes
-    from an owner whose build predates the prepare/commit boundary, started by
-    this current frontend because the package on disk was replaced under it, and
-    it means the descriptor is already published. There is nothing left to
-    authorize and nothing this process may still stop.
-    """
+    """Wait for a prepared generation id, a failure, or silence."""
     verdict = _read_owner_verdict(
         child,
         handshake_nonce=handshake_nonce,
@@ -2041,8 +1898,6 @@ def _await_prepared(
     status, instance_id = verdict
     if status == daemon_owner.PREPARED and instance_id is not None:
         return instance_id
-    if status == daemon_owner.READY:
-        return _Started.YES
     if status == daemon_owner.FAILED:
         logger.info("The daemon reported that it could not start")
         return _Started.NO

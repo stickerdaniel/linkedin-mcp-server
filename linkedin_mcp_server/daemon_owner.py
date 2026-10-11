@@ -85,7 +85,6 @@ from linkedin_mcp_server.private_state import (
     harden_file,
 )
 from linkedin_mcp_server.process_tree import WindowsJob
-from linkedin_mcp_server.profile_lease import _release_locked_fd
 from linkedin_mcp_server.server_role import (
     ServerRole,
     hard_exit_required,
@@ -102,7 +101,6 @@ _IS_WINDOWS = os.name == "nt"
 #: nonce is handed over only after this process exists, so interpreter startup
 #: output cannot forge them.
 HANDSHAKE = "owner"
-READY = "ready"
 COMMIT = "commit"
 PREPARED = "prepared"
 COMMITTED = "committed"
@@ -369,18 +367,25 @@ async def _probe(url: str, token: str) -> None:
         await client.list_tools()
 
 
-#: The route a newer frontend uses to ask a stale owner to stand down: the
-#: control floor. Its path, its bearer check and the meaning of a request with
-#: no body are frozen across tool protocol versions, and change only with a
-#: ``SCHEMA_VERSION`` bump. Every turnover depends on it, and it is the one thing
-#: a frontend may still do with an owner whose tool protocol it does not speak
-#: (``daemon.Attachment.control_only``), so a tool protocol bump that moved it
-#: would strand every owner already installed.
-#:
-#: The one body it accepts is the idle-only retirement a confirmed profile
-#: command sends (``idle_only_request``). It never falls back to the bodiless
-#: form: a body this owner cannot read exactly is refused with nothing changed.
+#: The route a frontend uses to ask an owner to stand down, with the bearer
+#: token and a stand-down request body (:func:`stand_down_request`). The one
+#: interface a later release uses to retire this one: its path, its bearer check
+#: and request version 1 stay as they are across tool protocol and descriptor
+#: schema changes, so it is also all a frontend may do with an owner whose tool
+#: protocol it does not speak (``daemon.Attachment.control_only``).
 STAND_DOWN_PATH = "/control/stand-down"
+
+#: The version of the stand-down request body, independent of the tool protocol.
+STAND_DOWN_REQUEST_VERSION = 1
+
+#: Close admission and drain, whatever is in flight: a newer build takes over.
+STAND_DOWN_TURNOVER = "turnover"
+
+#: Retire only if nothing is in flight or queued: a confirmed profile command.
+STAND_DOWN_IDLE_ONLY = "idle_only"
+
+_STAND_DOWN_MODES = frozenset({STAND_DOWN_TURNOVER, STAND_DOWN_IDLE_ONLY})
+_STAND_DOWN_KEYS = frozenset({"version", "mode", "instance"})
 
 
 def _matches_token(presented: str, expected: str) -> bool:
@@ -403,39 +408,41 @@ def _matches_token(presented: str, expected: str) -> bool:
     )
 
 
-#: The one body the stand-down route accepts, and the keys it must have exactly.
-_IDLE_ONLY_KEYS = frozenset({"only_if_idle", "protocol", "instance"})
-
-
-def idle_only_request(instance_id: str) -> dict[str, Any]:
-    """The body that asks an owner to retire only if nothing is in flight."""
+def stand_down_request(instance_id: str, *, mode: str) -> dict[str, Any]:
+    """The body that asks the owner *instance_id* to stand down in *mode*."""
+    if mode not in _STAND_DOWN_MODES:
+        raise ValueError(f"Unknown stand-down mode: {mode!r}")
     return {
-        "only_if_idle": True,
-        "protocol": daemon_descriptor.PROTOCOL_VERSION,
+        "version": STAND_DOWN_REQUEST_VERSION,
+        "mode": mode,
         "instance": instance_id,
     }
 
 
-def _is_idle_only_request(body: bytes, instance_id: str | None) -> bool:
-    """Whether *body* is exactly an idle-only retirement addressed to this owner.
+def _stand_down_mode(body: bytes, instance_id: str | None) -> str | None:
+    """The mode of *body* if it is exactly a request addressed to this owner.
 
     Exact, because anything looser is a request this owner would be guessing
     at, and the only safe answer to a guess is to change nothing. A bool is an
-    ``int`` in Python, so ``protocol: true`` is refused by type, not by value.
+    ``int`` in Python, so ``version: true`` is refused by type, not by value.
+    An empty body is not a request at all.
     """
     try:
         payload = json.loads(body)
     except ValueError:
-        return False
-    return (
-        isinstance(payload, dict)
-        and payload.keys() == _IDLE_ONLY_KEYS
-        and payload["only_if_idle"] is True
-        and type(payload["protocol"]) is int
-        and payload["protocol"] == daemon_descriptor.PROTOCOL_VERSION
-        and instance_id is not None
-        and payload["instance"] == instance_id
-    )
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.keys() != _STAND_DOWN_KEYS
+        or type(payload["version"]) is not int
+        or payload["version"] != STAND_DOWN_REQUEST_VERSION
+        or type(payload["mode"]) is not str
+        or payload["mode"] not in _STAND_DOWN_MODES
+        or instance_id is None
+        or payload["instance"] != instance_id
+    ):
+        return None
+    return payload["mode"]
 
 
 def create_owner_server(
@@ -476,9 +483,9 @@ def create_owner_server(
         async def stand_down_route(request: Request) -> JSONResponse:
             """Give up the browser so a newer build can take over.
 
-            Or, with the idle-only body, so a profile command the user confirmed
-            can change the profile: then only if nothing is in flight or queued,
-            and a busy owner answers 409 with nothing changed.
+            Or, in idle-only mode, so a profile command the user confirmed can
+            change the profile: then only if nothing is in flight or queued, and
+            a busy owner answers 409 with nothing changed.
 
             The token is checked here rather than left to the server's auth
             provider. Measured on 3.4.4: a custom route is mounted outside the
@@ -491,18 +498,19 @@ def create_owner_server(
             scheme, _, presented = header.partition(" ")
             if scheme.lower() != "bearer" or not _matches_token(presented, token):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
-            # Read whole before anything changes, and only a request with no
-            # body at all is the unconditional stand-down. A body is some other
-            # request, and one this build does not serve must never be read as
-            # the one form that stops the owner regardless of its calls.
+            # Read whole and judged before anything changes. A body this owner
+            # cannot read exactly, an empty one included, changes nothing.
             body = await request.body()
-            if not body:
-                stand_down()
-                return JSONResponse({"standing_down": True})
             liveness = get_liveness()
-            if not _is_idle_only_request(body, liveness.instance_id):
+            mode = _stand_down_mode(body, liveness.instance_id)
+            if mode is None:
                 return JSONResponse(
                     {"error": "unsupported stand-down request"}, status_code=400
+                )
+            if mode == STAND_DOWN_TURNOVER:
+                stand_down()
+                return JSONResponse(
+                    {"standing_down": True, "instance": liveness.instance_id}
                 )
             # A profile command the user confirmed, asking only if nobody else
             # would lose a call. Nothing awaits from the check to the reply, so a
@@ -1007,7 +1015,6 @@ async def _serve(
     handshake: Handshake,
     handshake_nonce: str,
     control: process_control.ControlChannel,
-    startup_protocol: int = daemon_config.STARTUP_PROTOCOL_VERSION,
     job_name: str | None = None,
 ) -> int:
     """Run the endpoint, prepare it, and serve only after parent commit."""
@@ -1066,41 +1073,28 @@ async def _serve(
         )
 
         commit_deadline = time.monotonic() + _COMMIT_AUTH_SECONDS
-        predecessor_protocol = not daemon_config.authorizes_commit(startup_protocol)
         _forget_superseded_tokens(auth_root)
         daemon_descriptor.prepare(auth_root, descriptor, token)
-        if predecessor_protocol:
-            # A predecessor parent has no commit record. Its only safe handoff is
-            # READY before publication: after this authenticated verdict it no
-            # longer kills a silent child, while the daemon lock prevents another
-            # owner from publishing during the remaining commit.
-            handshake.ready()
-        else:
-            handshake.prepared(instance_id)
+        handshake.prepared(instance_id)
 
         # Failed starts deliberately leave this generation's unique pending files.
         # Removing them re-enters account-home storage and can pin this process in
         # the kernel while it still owns the lock. The next successful lock holder's
         # pre-publication sweep removes every superseded generation instead.
-
-        # A predecessor frontend predates parent authorization. READY above ends
-        # its termination authority before this child attempts publication; current
-        # frontends use the atomic prepare/commit boundary below.
-        if not predecessor_protocol:
-            try:
-                decision = await _read_control_until(control, commit_deadline)
-            except TimeoutError:
-                logger.warning("The daemon starter did not authorize commit in time")
-                handshake.retry()
-                server.should_exit = True
-                await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS, lock=lock)
-                return 1
-            if decision != f"{HANDSHAKE} {handshake_nonce} {COMMIT}\n":
-                logger.info("The daemon starter exited before committing this owner")
-                handshake.abort()
-                server.should_exit = True
-                await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS, lock=lock)
-                return 0
+        try:
+            decision = await _read_control_until(control, commit_deadline)
+        except TimeoutError:
+            logger.warning("The daemon starter did not authorize commit in time")
+            handshake.retry()
+            server.should_exit = True
+            await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS, lock=lock)
+            return 1
+        if decision != f"{HANDSHAKE} {handshake_nonce} {COMMIT}\n":
+            logger.info("The daemon starter exited before committing this owner")
+            handshake.abort()
+            server.should_exit = True
+            await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS, lock=lock)
+            return 0
 
         # The parent retains termination authority until this exact commit record.
         # Adopt before the first replacement attempt so parent loss cannot kill an
@@ -1153,8 +1147,7 @@ async def _serve(
         # follow, so a blocked log or state mount cannot strand a canonical owner
         # before the frontend learns it is ready.
         get_liveness().the_endpoint_is_live()
-        if not predecessor_protocol:
-            handshake.committed()
+        handshake.committed()
     except BaseException:
         server.should_exit = True
         # Through the same bounded stop as the stand-down path, and for the same
@@ -1468,8 +1461,8 @@ def _forget_superseded_tokens(auth_root: Path) -> None:
     """Bound old credentials before preparing the next generation.
 
     The caller holds the lock, so the canonical descriptor can only name the
-    predecessor this process is about to replace. Its token remains until the next
-    owner startup. All of this runs before ``prepared`` and publication, while the
+    earlier generation this process is about to replace. Its token remains until
+    the next owner startup. All of this runs before ``prepared`` and publication, while the
     frontend can still kill a child blocked on state storage.
     """
     try:
@@ -1502,7 +1495,7 @@ class _BootstrapDiagnostics:
         self._write((f"{BOOTSTRAP_PREFIX} {code}\n",))
 
     def attached(self, log_path: Path, handshake_nonce: str) -> None:
-        """Preserve the legacy record, then optionally identify the opened log."""
+        """Report the attached stage, then optionally identify the opened log."""
         records = [f"{BOOTSTRAP_PREFIX} {BOOTSTRAP_ATTACHED}\n"]
         candidate = str(log_path)
         encoded = candidate.encode("utf-8", "surrogatepass")
@@ -1544,8 +1537,6 @@ class Handshake(Protocol):
 
     def prepared(self, instance_id: str) -> None: ...
 
-    def ready(self) -> None: ...
-
     def committed(self) -> None: ...
 
     def fail(self) -> None: ...
@@ -1579,9 +1570,6 @@ class _Handshake:
 
     def prepared(self, instance_id: str) -> None:
         self._write(f"{PREPARED} {instance_id}", close=False)
-
-    def ready(self) -> None:
-        self._write(READY)
 
     def committed(self) -> None:
         self._write(COMMITTED)
@@ -1661,9 +1649,9 @@ def _claim_handshake_stream() -> TextIO | None:
         return None
     # newline="\n" is load-bearing rather than tidy. The frontend authenticates
     # this frame by comparing exact bytes, and the default translates the line
-    # ending to os.linesep, so on Windows a genuine READY arrives as CRLF and is
-    # refused. The frontend then waits out its startup deadline and terminates
-    # the Job around an owner that had already published itself.
+    # ending to os.linesep, so on Windows a genuine verdict arrives as CRLF and
+    # is refused. The frontend then waits out its startup deadline and terminates
+    # the Job around an owner that may already have published itself.
     return os.fdopen(duplicate, "w", encoding="utf-8", newline="\n")
 
 
@@ -1674,23 +1662,14 @@ def _close_handshake_stream(stream: TextIO | None) -> None:
             stream.close()
 
 
-def _take_lock(auth_root: Path, inherited_fd: int | None) -> DaemonLock | None:
-    """Hold the daemon lock, normally by contesting inside this process."""
+def _take_lock(auth_root: Path) -> DaemonLock | None:
+    """Hold the daemon lock, or report that another process does."""
     lock = DaemonLock(auth_root)
-    if inherited_fd is not None:
-        lock.adopt(inherited_fd)
-        return lock
     # Losing is an ordinary race: another child is coming up, and the frontend
     # waits for whichever one publishes.
     if not lock.try_acquire():
         return None
     return lock
-
-
-def _abandon_inherited_lock(fd: int) -> None:
-    """Unlock a failed handoff even while the suspended parent keeps a copy."""
-    with contextlib.suppress(OSError, ValueError):
-        _release_locked_fd(fd)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1699,15 +1678,8 @@ def main(argv: list[str] | None = None) -> int:
         prog="linkedin-mcp-daemon",
         description="Serve one shared LinkedIn browser to local MCP clients.",
     )
-    parser.add_argument("--lock-fd", type=int, default=None)
     parser.add_argument("--job-name", default=None)
     args = parser.parse_args(argv)
-
-    def abandon_pending_inherited_lock() -> None:
-        if args.lock_fd is None:
-            return
-        _abandon_inherited_lock(args.lock_fd)
-        args.lock_fd = None
 
     # Standard output is the verdict channel. A private duplicate of standard
     # error carries one fixed, non-secret diagnosis until the real log is ready.
@@ -1721,14 +1693,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise RuntimeError("The Windows owner has no Job Object handoff")
             WindowsJob.verify_current_process(args.job_name)
         # Read before anything else touches the configuration. The frontend
-        # closes this pipe after one record; current commit control is separate.
+        # closes this pipe after one record; commit control travels separately.
         handover = _read_handover()
     except BaseException:
-        # The inherited descriptor shares one POSIX lock with every parent copy.
-        # Closing only this copy would leave a suspended starter holding it after
-        # this child times out, so a failed handoff explicitly unlocks the shared
-        # open-file description before reporting failure.
-        abandon_pending_inherited_lock()
         bootstrap.report(BOOTSTRAP_CONFIGURATION)
         _close_handshake_stream(handshake_stream)
         return 1
@@ -1749,49 +1716,35 @@ def main(argv: list[str] | None = None) -> int:
         profile = Path(config.browser.user_data_dir).expanduser().resolve()
         auth_root = auth_root_dir(profile)
     except BaseException:
-        abandon_pending_inherited_lock()
         bootstrap.report(BOOTSTRAP_STATE)
         handshake.abort()
-        handshake.close()
-        return 1
-
-    if _IS_WINDOWS and not daemon_config.authorizes_commit(handover.startup_protocol):
-        abandon_pending_inherited_lock()
-        bootstrap.report(BOOTSTRAP_STATE)
-        handshake.fail()
         handshake.close()
         return 1
 
     # Before the first state access, so a rendezvous this process cannot reach
     # costs nothing, and so the parent's authority over an unauthorized child is
     # live for the whole of the startup that follows.
-    control: process_control.ControlChannel = sys.stdin
-    if handover.control is not None:
-        try:
-            control = process_control.attach(
-                handover.control.host,
-                handover.control.port,
-                nonce=handover.handshake_nonce,
-                timeout=_STARTUP_PROBE_SECONDS,
-            )
-        except BaseException:
-            abandon_pending_inherited_lock()
-            bootstrap.report(BOOTSTRAP_CONFIGURATION)
-            handshake.abort()
-            handshake.close()
-            return 1
+    try:
+        control = process_control.attach(
+            handover.control.host,
+            handover.control.port,
+            nonce=handover.handshake_nonce,
+            timeout=_STARTUP_PROBE_SECONDS,
+        )
+    except BaseException:
+        bootstrap.report(BOOTSTRAP_CONFIGURATION)
+        handshake.abort()
+        handshake.close()
+        return 1
 
     lock: DaemonLock | None = None
     try:
         try:
-            lock = _take_lock(auth_root, args.lock_fd)
+            lock = _take_lock(auth_root)
         except Exception:
             bootstrap.report(BOOTSTRAP_LOCK)
             handshake.abort()
             return 1
-        # Once adoption succeeds this process owns the inherited descriptor. It
-        # must never pass through the pending-handoff cleanup again.
-        args.lock_fd = None
         if lock is None:
             handshake.retry()
             return 0
@@ -1820,7 +1773,6 @@ def main(argv: list[str] | None = None) -> int:
                     log_path=log_path,
                     handshake=handshake,
                     handshake_nonce=handover.handshake_nonce,
-                    startup_protocol=handover.startup_protocol,
                     control=control,
                     job_name=args.job_name,
                 )
@@ -1835,19 +1787,14 @@ def main(argv: list[str] | None = None) -> int:
         bootstrap.close()
         handshake.close()
         _close_owned_control(control)
-        abandon_pending_inherited_lock()
         if lock is not None:
             lock.release()
 
 
 def _close_owned_control(control: process_control.ControlChannel) -> None:
-    """Release a control channel this process opened, and never the inherited pipe.
-
-    Standard input belongs to the interpreter and to the predecessor protocols
-    that use it; only a channel this process connected for itself is closed here.
-    """
+    """Release the control channel this process connected for itself."""
     close = getattr(control, "close", None)
-    if control is sys.stdin or not callable(close):
+    if not callable(close):
         return
     with contextlib.suppress(OSError, ValueError):
         close()
