@@ -531,13 +531,15 @@ def _guarded_module(module: str | None) -> bool:
     return module is not None and module.split(".")[0] in _GUARDED
 
 
-def _private_access(
-    path: Path, library: set[str], own: set[str]
-) -> Iterator[tuple[str, int, str]]:
+def _private_access(path: Path, library: set[str]) -> Iterator[tuple[str, int, str]]:
     """Every reach into a private name of FastMCP or the SDK in one daemon module.
 
     Imports are judged by where they come from. An attribute is judged by its
-    name: one the libraries define and the daemon package does not. A method a
+    name and its object: a name the libraries define is a reach unless it is
+    read off ``self`` or ``cls`` inside a class of the daemon's own that does
+    not derive from theirs. A name the daemon happens to share with a library
+    exempts nothing else, so ``session._write_stream`` stays a reach beside a
+    daemon attribute of that name. A method a
     class defines is judged by its base: a FastMCP or SDK class, or a class in
     the same module that has one, may override none of the libraries' private
     names but the documented hooks.
@@ -561,28 +563,6 @@ def _private_access(
                         yield here, node.lineno, f"import {alias.name}"
                     from_library.add(alias.asname or alias.name.split(".")[0])
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and _private(node.attr):
-            root = node.value
-            while isinstance(root, ast.Attribute):
-                root = root.value
-            on_a_library_module = isinstance(root, ast.Name) and root.id in (
-                from_library
-            )
-            if on_a_library_module or (node.attr in library and node.attr not in own):
-                yield here, node.lineno, f".{node.attr}"
-        elif (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id in {"getattr", "setattr", "hasattr", "delattr"}
-            and len(node.args) >= 2
-            and isinstance(node.args[1], ast.Constant)
-            and isinstance(node.args[1].value, str)
-            and _private(node.args[1].value)
-            and node.args[1].value in library
-        ):
-            yield here, node.lineno, f"{node.func.id}(..., {node.args[1].value!r})"
-
     library_classes: set[str] = set()
     classes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
     # Repeated until stable, so a subclass of a subclass is found in any order.
@@ -599,6 +579,50 @@ def _private_access(
                     library_classes.add(cls.name)
         if len(library_classes) == before:
             break
+    # Attribute nodes read off the instance or class inside the daemon's own
+    # classes, which are the only private reads of a library name allowed.
+    on_own_instance: set[int] = set()
+    for cls in classes:
+        if cls.name in library_classes:
+            continue
+        for item in cls.body:
+            if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not item.args.args:
+                continue
+            receiver = item.args.args[0].arg
+            for inner in ast.walk(item):
+                if (
+                    isinstance(inner, ast.Attribute)
+                    and isinstance(inner.value, ast.Name)
+                    and inner.value.id == receiver
+                ):
+                    on_own_instance.add(id(inner))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and _private(node.attr):
+            root = node.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            on_a_library_module = isinstance(root, ast.Name) and root.id in (
+                from_library
+            )
+            if on_a_library_module or (
+                node.attr in library and id(node) not in on_own_instance
+            ):
+                yield here, node.lineno, f".{node.attr}"
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"getattr", "setattr", "hasattr", "delattr"}
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+            and _private(node.args[1].value)
+            and node.args[1].value in library
+        ):
+            yield here, node.lineno, f"{node.func.id}(..., {node.args[1].value!r})"
+
     for cls in classes:
         if cls.name not in library_classes:
             continue
@@ -618,14 +642,11 @@ class TestNoPrivateAccess:
     def test_the_daemon_package_uses_no_private_name_of_either_library(self):
         library = _library_private_names()
         sources = _daemon_sources()
-        own = _defined_private_names(iter(sources)) - _ALLOWED_OVERRIDES
         # Sanity: the scan sees the libraries' private names at all.
         assert {"_list_tools", "_get_tool"} <= library
 
         found = [
-            finding
-            for path in sources
-            for finding in _private_access(path, library, own)
+            finding for path in sources for finding in _private_access(path, library)
         ]
 
         assert found == []
@@ -648,6 +669,12 @@ class TestNoPrivateAccess:
             "    async def _get_tool(self, name, version=None): ...\n"
             "    async def _list_resources(self): ...\n"
             "\n"
+            "class Own:\n"
+            "    def __init__(self):\n"
+            "        self._write_stream = None\n"
+            "    def read(self):\n"
+            "        return self._write_stream\n"
+            "\n"
             "def reach(session):\n"
             "    session._write_stream\n"
             "    mt._anything\n"
@@ -656,9 +683,7 @@ class TestNoPrivateAccess:
         )
         library = _library_private_names()
 
-        found = sorted(
-            what for _, _, what in _private_access(planted, library, own=set())
-        )
+        found = sorted(what for _, _, what in _private_access(planted, library))
 
         assert found == sorted(
             [

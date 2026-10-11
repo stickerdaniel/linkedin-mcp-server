@@ -499,7 +499,7 @@ class FrontendCallMiddleware(Middleware):
         never have installed a configuration at all. Measured that way once, a
         1.2-second call budgeted itself 149.8 seconds from the singleton's default.
         """
-        self._backend = backend
+        self._proxy_backend = backend
         self._budget = budget
 
     async def _repeat_the_listing(
@@ -520,7 +520,7 @@ class FrontendCallMiddleware(Middleware):
             if failure is None:
                 raise
             logger.info("Listing failed against a departed owner; looking for another")
-            replacement = await self._backend.recover(
+            replacement = await self._proxy_backend.recover(
                 failure.instance_id, classification=failure.classification
             )
             if replacement is None:
@@ -573,7 +573,9 @@ class FrontendCallMiddleware(Middleware):
                     # part of every decision made after it, this call's retry
                     # and every other call's included.
                     lost = cast(_Lost, effect.failure).failure
-                    self._backend.note_failure(lost.instance_id, lost.classification)
+                    self._proxy_backend.note_failure(
+                        lost.instance_id, lost.classification
+                    )
                 elif isinstance(effect, call_core.TERMINAL):
                     return self._finish(context, effect)
                 else:
@@ -607,7 +609,7 @@ class FrontendCallMiddleware(Middleware):
                 case call_core.Recover(op=op, owner=owner, failure=failure):
                     found = await _by(
                         deadline,
-                        self._backend.recover(
+                        self._proxy_backend.recover(
                             owner,
                             classification=cast(_Lost, failure).failure.classification,
                         ),
@@ -903,7 +905,7 @@ class FrontendCallHeartbeatMiddleware(Middleware):
     """
 
     def __init__(self, backend: DaemonProxyBackend) -> None:
-        self._backend = backend
+        self._proxy_backend = backend
 
     async def on_call_tool(
         self,
@@ -916,7 +918,7 @@ class FrontendCallHeartbeatMiddleware(Middleware):
         # would name a call it has never heard of, while the owner actually
         # running this one stopped being told about it. Refused here if the
         # current owner was written off or proved for control only.
-        attachment = self._backend.attachment_for_a_call()
+        attachment = self._proxy_backend.attachment_for_a_call()
 
         refused = await self._preflight(attachment, call_id)
         if refused is not None:
@@ -924,7 +926,7 @@ class FrontendCallHeartbeatMiddleware(Middleware):
         # Asked again, because the preflight was an await: another call may have
         # found this owner retiring and written it off meanwhile. The go-ahead
         # this preflight got is older than that news.
-        self._backend.refuse_if_written_off(attachment)
+        self._proxy_backend.refuse_if_written_off(attachment)
 
         beating = asyncio.create_task(self._keep_saying(attachment, call_id))
         dispatch = _attempt_dispatch.get()

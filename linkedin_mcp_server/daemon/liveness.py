@@ -197,7 +197,7 @@ class CallLiveness:
     #: running or still queued behind another one. Counted from admission,
     #: which is outside the serializing middleware, so a queued call is as
     #: busy as a running one.
-    _in_flight: int = 0
+    _admitted: int = 0
 
     #: When this owner last did anything for anybody, or ``None`` while it is
     #: still starting. Idleness is only meaningful once the endpoint is
@@ -268,7 +268,7 @@ class CallLiveness:
         *background_work* is detached work the caller knows about and this
         tracker does not, such as a browser setup still running.
         """
-        return self._in_flight > 0 or bool(self._waiting) or background_work
+        return self._admitted > 0 or bool(self._waiting) or background_work
 
     def try_retire(self, reason: str, *, background_work: bool = False) -> bool:
         """Close admission if nothing is in flight or queued. True if it did.
@@ -307,22 +307,22 @@ class CallLiveness:
 
     def call_started(self) -> None:
         """Note a call being admitted."""
-        self._in_flight += 1
+        self._admitted += 1
         self._quiet_since = None
 
     def call_finished(self) -> None:
         """Note an admitted call ending, however it ended."""
-        self._in_flight = max(0, self._in_flight - 1)
-        if self._in_flight == 0:
+        self._admitted = max(0, self._admitted - 1)
+        if self._admitted == 0:
             self._quiet_since = time.monotonic()
 
     def calls_in_flight(self) -> int:
         """How many admitted calls have not finished yet."""
-        return self._in_flight
+        return self._admitted
 
     def background_activity_finished(self) -> None:
         """Start a fresh quiet period after detached work kept the owner active."""
-        if self._in_flight == 0:
+        if self._admitted == 0:
             self._quiet_since = time.monotonic()
 
     def the_endpoint_is_live(self) -> None:
@@ -333,7 +333,7 @@ class CallLiveness:
         counting that as quiet would let a short timeout expire before the
         frontend that asked for this owner had any way to reach it.
         """
-        if self._quiet_since is None and self._in_flight == 0:
+        if self._quiet_since is None and self._admitted == 0:
             self._quiet_since = time.monotonic()
 
     def quiet_for(self) -> float | None:
@@ -344,7 +344,7 @@ class CallLiveness:
         A hint for the idle timer only: whether the owner may actually go is
         :meth:`try_retire`'s answer, taken at the moment it acts.
         """
-        if self._in_flight > 0 or self._quiet_since is None:
+        if self._admitted > 0 or self._quiet_since is None:
             return None
         return time.monotonic() - self._quiet_since
 
@@ -468,7 +468,7 @@ def get_liveness() -> CallLiveness:
 def reset_liveness_for_testing() -> None:
     """Forget every watched call, so one test cannot leak into the next."""
     _liveness._waiting.clear()
-    _liveness._in_flight = 0
+    _liveness._admitted = 0
     _liveness._quiet_since = None
     _liveness._last_scan = None
     _liveness.retiring = False
