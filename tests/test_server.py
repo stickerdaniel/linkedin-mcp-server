@@ -497,7 +497,14 @@ class TestTheRoleAsProcessState:
         monkeypatch.setattr(
             daemon_owner,
             "_read_handover",
-            lambda: daemon_config.OwnerHandover(AppConfig(), "0123456789abcdef" * 4),
+            lambda: daemon_config.OwnerHandover(
+                AppConfig(),
+                "0123456789abcdef" * 4,
+                daemon_config.ControlEndpoint("127.0.0.1", 54321),
+            ),
+        )
+        monkeypatch.setattr(
+            daemon_owner.process_control, "attach", lambda *_a, **_k: MagicMock()
         )
         monkeypatch.setattr(daemon_owner, "set_headless", lambda _headless: None)
         monkeypatch.setattr(daemon_owner, "_take_lock", lambda *_args: MagicMock())

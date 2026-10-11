@@ -174,6 +174,11 @@ from differential.baseline import (
     interpreter_failures,
     stage_frozen_session,
 )
+from differential.daemon_state import (
+    BASELINE_LAYOUT,
+    CANDIDATE_LAYOUT,
+    DaemonStateLayout,
+)
 from differential.events import (
     OUTPUT_FILES,
     OWNER_LOG_FILE,
@@ -551,6 +556,9 @@ class ActorAccount:
     """A profile the harness may hand to actors. Built only by ``claim_account``."""
 
     profile: Path
+    #: Where the row's runtime keeps its daemon state: the candidate's own,
+    #: unless the row runs the frozen baseline (``run_row``).
+    layout: DaemonStateLayout = CANDIDATE_LAYOUT
 
     @property
     def auth_root(self) -> Path:
@@ -3254,13 +3262,13 @@ def retire_daemon_state(
     Removed only once the owner is provably gone or was never published.
     Otherwise the directory stays, as the evidence of what was left running.
     """
-    directory = daemon_descriptor.daemon_dir(account.auth_root)
+    directory = account.layout.directory(account.auth_root)
     existed = directory.exists()
     published: PublishedOwner | None = None
     read_error: str | None = None
     if existed:
         try:
-            descriptor = daemon_descriptor.read(account.auth_root)
+            descriptor = account.layout.read(account.auth_root)
         except Exception as exc:  # noqa: BLE001 - the cleanup reports it
             read_error = f"{type(exc).__name__}: {exc}"
         else:
@@ -5563,7 +5571,7 @@ def observe_owner(
     the watcher saw this row start (``identify_owner``), and its instance."""
     seen: dict[str, Any] = {"label": label, "lifetime": None, "instance_id": None}
     try:
-        published = daemon_descriptor.read(account.auth_root)
+        published = account.layout.read(account.auth_root)
     except Exception as exc:  # noqa: BLE001 - the reading's own evidence
         seen["problem"] = f"the descriptor could not be read: {exc!r}"
         return seen
@@ -5620,7 +5628,7 @@ def descriptor_written(account: ActorAccount) -> dict[str, Any]:
     an owner sets as it prepares its publication, so no later than the
     publication itself.
     """
-    path = daemon_descriptor.descriptor_path(account.auth_root)
+    path = account.layout.descriptor_path(account.auth_root)
     try:
         return {"written": path.stat().st_mtime}
     except FileNotFoundError:
@@ -5639,11 +5647,12 @@ def ask_to_stand_down(
     """Ask the identified owner to stand down, as a newer build does.
 
     The product's own request (``daemon_election._ask_to_stand_down``): a POST
-    with no body to ``daemon_owner.STAND_DOWN_PATH``, with the bearer token
-    read from the row's own auth root, through the owner's loopback client.
-    Sent only when the descriptor still names the owner the row identified,
-    so the request cannot reach another. The token goes into no record; the
-    answer's status and its ``standing_down`` flag do.
+    to ``daemon_owner.STAND_DOWN_PATH`` with the row runtime's turnover body
+    (``DaemonStateLayout.stand_down_body``), with the bearer token read from the
+    row's own auth root, through the owner's loopback client. Sent only when
+    the descriptor still names the owner the row identified, so the request
+    cannot reach another. The token goes into no record; the answer's status
+    and its ``standing_down`` flag do.
     """
     from urllib.parse import urlsplit, urlunsplit
 
@@ -5658,7 +5667,7 @@ def ask_to_stand_down(
         "error": None,
     }
     try:
-        published = daemon_descriptor.read(account.auth_root)
+        published = account.layout.read(account.auth_root)
         if (
             identified is None
             or published is None
@@ -5678,10 +5687,15 @@ def ask_to_stand_down(
         ) as client:
             headers = {
                 "Authorization": "Bearer "
-                + daemon_descriptor.read_token(account.auth_root, published)
+                + account.layout.read_token(account.auth_root, published)
             }
+            body = account.layout.stand_down_body(published.instance_id)
             found["sent_ns"] = time.monotonic_ns()
-            response = client.post(url, headers=headers)
+            response = (
+                client.post(url, headers=headers)
+                if body is None
+                else client.post(url, headers=headers, json=body)
+            )
             found["answered_ns"] = time.monotonic_ns()
     except Exception as exc:  # noqa: BLE001 - the request's own evidence
         found["error"] = type(exc).__name__
@@ -5716,7 +5730,7 @@ def bind_responder(
         "error": None,
     }
     try:
-        published = daemon_descriptor.read(account.auth_root)
+        published = account.layout.read(account.auth_root)
         if (
             identified is None
             or published is None
@@ -6313,8 +6327,8 @@ class RaceSeams:
     """What a row racing the owner's retirement may read (``RowContext.race``).
 
     Readings, and one action on a row declared to take it
-    (``RowLifecycle.stands_down``): ``stand_down``, the product's own
-    bodyless stand-down request to the owner the row identified, with the
+    (``RowLifecycle.stands_down``): ``stand_down``, the turnover request of
+    the row's runtime to the owner the row identified, with the
     token read from the row's own auth root and kept out of every record.
     Nothing here signals or ends anything. Every reading waits and sends
     nothing, and the ones taken at a moment stamp it (``seen_ns``); none
@@ -7151,6 +7165,10 @@ async def measure_host_quit_row(
         expect_owner = daemon
     result = RowResult(experiment=experiment, mode=mode, reference=reference)
     runtime = runtime or candidate_runtime()
+    if runtime.frozen:
+        # The baseline's owners keep their state in its own namespace, and every
+        # lookup of the row's daemon state goes through this account.
+        account = replace(account, layout=BASELINE_LAYOUT)
     shim = job_query_shim
     overlay = r7.overlay if r7 is not None else None
     if shim is not None:
@@ -7596,13 +7614,13 @@ async def measure_host_quit_row(
         # Only looked at, never read into being: ``daemon_descriptor.read``
         # prepares the daemon directory before it reads, so calling it on a
         # row that must leave no daemon state would create that state itself.
-        owner["descriptor_present"] = daemon_descriptor.descriptor_path(
+        owner["descriptor_present"] = account.layout.descriptor_path(
             account.auth_root
         ).exists()
         if not daemon or not owner["descriptor_present"]:
             return
         try:
-            published = daemon_descriptor.read(account.auth_root)
+            published = account.layout.read(account.auth_root)
         except Exception as exc:  # noqa: BLE001 - the row reports it, the host still quits
             owner["read_error"] = f"{type(exc).__name__}: {exc}"
             return
@@ -7770,7 +7788,7 @@ async def measure_host_quit_row(
         found: OwnerIdentity | None = None
         successor.pop("identify_error", None)
         try:
-            published = daemon_descriptor.read(account.auth_root)
+            published = account.layout.read(account.auth_root)
         except Exception as exc:  # noqa: BLE001 - the row reports it
             successor["identify_error"] = f"{type(exc).__name__}: {exc}"
             published = None
@@ -8179,7 +8197,7 @@ async def measure_host_quit_row(
         found: OwnerIdentity | None = None
         problems: list[str] = []
         try:
-            published = daemon_descriptor.read(account.auth_root)
+            published = account.layout.read(account.auth_root)
         except Exception as exc:  # noqa: BLE001 - the row reports it
             hold_publication(None, f"{type(exc).__name__}: {exc}")
             return None, [f"the descriptor could not be read: {exc!r}"]
@@ -8522,7 +8540,7 @@ async def measure_host_quit_row(
         # Only looked at, never read into being (``find_the_owner``).
         if (
             serving is None
-            and daemon_descriptor.descriptor_path(account.auth_root).exists()
+            and account.layout.descriptor_path(account.auth_root).exists()
         ):
             found = await r7_step(
                 "find the serving owner", find_the_successor_r7, {}, seconds=30.0
@@ -9845,12 +9863,9 @@ async def measure_host_quit_row(
         # The event log has only its tail, and the browser's exit, crashed or
         # killed, is near the start of a row. Nothing in the verdict reads it.
         with contextlib.suppress(Exception):
-            from linkedin_mcp_server import daemon_owner
-
             keep_capped(
                 Path(
-                    owner.get("log_path")
-                    or daemon_owner.daemon_log_path(account.auth_root)
+                    owner.get("log_path") or account.layout.log_path(account.auth_root)
                 ),
                 work_dir / OWNER_LOG_FILE,
             )
@@ -9871,8 +9886,8 @@ async def measure_host_quit_row(
                 if owner_identity is not None
             }
             try:
-                if daemon_descriptor.descriptor_path(account.auth_root).exists():
-                    left_published = daemon_descriptor.read(account.auth_root)
+                if account.layout.descriptor_path(account.auth_root).exists():
+                    left_published = account.layout.read(account.auth_root)
                     if (
                         left_published is not None
                         and (left_published.pid, left_published.instance_id)

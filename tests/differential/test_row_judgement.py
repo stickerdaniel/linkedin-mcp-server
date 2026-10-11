@@ -20,6 +20,7 @@ import psutil
 import pytest
 
 from differential import harness
+from differential.daemon_state import CANDIDATE_LAYOUT
 from differential import test_host_quit_row as rows
 from differential.harness import (
     GENERATION_CHANGED,
@@ -712,7 +713,7 @@ def row_state(tmp_path, monkeypatch):
         return published.get("descriptor")
 
     monkeypatch.setattr(harness.daemon_descriptor, "read", read)
-    account = SimpleNamespace(auth_root=Path("/auth"))
+    account = SimpleNamespace(auth_root=Path("/auth"), layout=CANDIDATE_LAYOUT)
     return directory, published, account
 
 

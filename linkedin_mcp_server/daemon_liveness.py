@@ -14,10 +14,9 @@ two must not import each other.
 **Every call is marked, or it does not run.** A call the owner cannot identify
 is a call it cannot cancel, so the owner refuses one that arrives without a
 marker, and the frontend never forwards a call whose heartbeat preflight failed.
-That is tool protocol 2 (``daemon_descriptor.PROTOCOL_VERSION``). Protocol 1
-made both halves optional so a mixed pair could share tools; the default-on
-contract drops that pairing, and a mismatched owner is now only ever asked to
-stand down.
+Both halves are part of the tool protocol (``daemon_descriptor.PROTOCOL_VERSION``),
+so a pair that does not share it never shares tools: a mismatched owner is only
+ever asked to stand down.
 
 **Admission and retirement are one decision.** Whether this owner takes another
 call and whether it may go away are both answered here, on one tracker and with

@@ -922,7 +922,7 @@ class TestOwnerFinalization:
 
         held: list[daemon_lock.DaemonLock] = []
 
-        def take_lock(auth_root: Path, _fd: object) -> daemon_lock.DaemonLock:
+        def take_lock(auth_root: Path) -> daemon_lock.DaemonLock:
             lock = daemon_lock.DaemonLock(auth_root)
             assert lock.try_acquire()
             held.append(lock)

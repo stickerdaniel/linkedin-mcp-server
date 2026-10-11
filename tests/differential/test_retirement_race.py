@@ -440,7 +440,7 @@ def _recording(monkeypatch, published: Any, answer: httpx2.Response) -> list[Any
     return sent
 
 
-def test_the_stand_down_is_the_products_bodyless_request(monkeypatch, tmp_path):
+def test_the_stand_down_is_the_products_turnover_request(monkeypatch, tmp_path):
     from linkedin_mcp_server.daemon_owner import STAND_DOWN_PATH
 
     sent = _recording(
@@ -453,12 +453,38 @@ def test_the_stand_down_is_the_products_bodyless_request(monkeypatch, tmp_path):
     [request] = sent
     assert request.method == "POST"
     assert request.url.path == STAND_DOWN_PATH
-    assert request.content == b""
+    assert json.loads(request.content) == {
+        "version": 1,
+        "mode": "turnover",
+        "instance": "owner-a",
+    }
     assert request.headers["authorization"] == f"Bearer {_SECRET}"
     assert found["status"] == 200 and found["standing_down"] is True
     assert found["addressed"] is True and found["error"] is None
     assert found["sent_ns"] <= found["answered_ns"]
     assert _SECRET not in json.dumps(found)
+
+
+def test_a_frozen_baseline_owner_gets_its_own_bodyless_request(monkeypatch, tmp_path):
+    # The baseline predates the versioned request and refuses a body it does
+    # not know, so a K2 row asks it the way it understands.
+    from differential.daemon_state import BASELINE_LAYOUT, DaemonStateLayout
+
+    sent = _recording(
+        monkeypatch, _published(), httpx2.Response(200, json={"standing_down": True})
+    )
+    monkeypatch.setattr(DaemonStateLayout, "read", lambda _self, _root: _published())
+    monkeypatch.setattr(
+        DaemonStateLayout, "read_token", lambda _self, _root, _published: _SECRET
+    )
+    account = harness.ActorAccount(tmp_path / "profile", layout=BASELINE_LAYOUT)
+
+    found = harness.ask_to_stand_down(account, _identified())
+
+    [request] = sent
+    assert request.content == b""
+    assert request.headers["authorization"] == f"Bearer {_SECRET}"
+    assert found["status"] == 200 and found["standing_down"] is True
 
 
 def test_a_descriptor_naming_another_owner_gets_no_request(monkeypatch, tmp_path):
