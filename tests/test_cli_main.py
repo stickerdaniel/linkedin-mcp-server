@@ -1338,7 +1338,7 @@ class _Owner:
 
         def stand_down() -> None:
             # What `run_owner`'s own callback does.
-            self.liveness.retire("turnover")
+            self.liveness.turn_over()
             self.turnover.append("asked")
 
         self.app = create_owner_server(
@@ -1396,6 +1396,25 @@ class _Owner:
             headers={"content-type": headers.get("content-type", "")},
             content=content,
         )
+
+    def admit_a_call(self, *, running: bool) -> None:
+        """Count one admitted call, *running* in its tool body or still queued.
+
+        Decided through the owner's own core but with no task started, because
+        these tests have no event loop of their own to start one on.
+        """
+        import time
+
+        from linkedin_mcp_server.daemon.core import owner as lifecycle
+        from linkedin_mcp_server.daemon.liveness import new_call_id
+
+        call_id = new_call_id()
+        state, _effects = lifecycle.on_event(
+            self.liveness.state, lifecycle.Admit(call_id, time.monotonic())
+        )
+        if running:
+            state, _effects = lifecycle.on_event(state, lifecycle.BodyBegan(call_id))
+        self.liveness._state = state
 
     def sent_only_the_idle_only_request(self) -> bool:
         from linkedin_mcp_server.daemon.owner import STAND_DOWN_PATH
@@ -1788,9 +1807,7 @@ class TestRetiringASharedBrowser:
 
         self._seed_session()
         owner = self._owner()
-        if busy_with == "running":
-            owner.liveness.watch("v1." + "a" * 32, MagicMock())
-        owner.liveness.call_started()
+        owner.admit_a_call(running=busy_with == "running")
         self._answers("y", "y")
 
         assert self._logout() == 1
@@ -1810,7 +1827,7 @@ class TestRetiringASharedBrowser:
         import os
 
         owner = self._owner()
-        owner.liveness.call_started()
+        owner.admit_a_call(running=False)
         self._answers("y", "y")
 
         login_code, creation = self._login()

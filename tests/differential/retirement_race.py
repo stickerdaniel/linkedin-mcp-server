@@ -162,7 +162,7 @@ CALL_END_SECONDS = 180.0
 START_TOLERANCE_SECONDS = 1.0
 
 #: The contract's drain: how long admitted calls may run after a turnover
-#: (``daemon.owner._TURNOVER_DRAIN_SECONDS``).
+#: (``daemon.core.owner.TURNOVER_DRAIN_SECONDS``).
 TURNOVER_DRAIN_SECONDS = 30.0
 #: How long the owner is given, from the stand-down's answer, to be gone:
 #: the drain, the owner's bounded stop (30 s) and as much again.

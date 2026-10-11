@@ -20,6 +20,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -292,10 +293,12 @@ async def test_the_owners_idle_exit_line_is_the_one_the_rows_wait_for(caplog):
 
     liveness = daemon_liveness.get_liveness()
     liveness.the_endpoint_is_live()
-    liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+    quiet_since = liveness.state.quiet_since
+    assert quiet_since is not None
+    liveness._state = replace(liveness.state, quiet_since=quiet_since - 60)
     server, serving = _stopped_server()
     with caplog.at_level(logging.INFO, logger="linkedin_mcp_server.daemon.owner"):
-        await _serve_until_stopped(server, serving, [], 0.05, lock=None)
+        await _serve_until_stopped(server, serving, 0.05, lock=None)
     assert any(retirement_race.OWNER_IDLE_LINE in line for line in _messages(caplog))
 
 
@@ -304,8 +307,9 @@ async def test_a_turnover_that_cuts_a_call_is_read_from_the_owners_lines(
 ):
     from linkedin_mcp_server.daemon import liveness as daemon_liveness
     from linkedin_mcp_server.daemon import owner as daemon_owner
+    from linkedin_mcp_server.daemon.core import owner as lifecycle
 
-    monkeypatch.setattr(daemon_owner, "_TURNOVER_DRAIN_SECONDS", 0.2)
+    monkeypatch.setattr(lifecycle, "TURNOVER_DRAIN_SECONDS", 0.2)
     liveness = daemon_liveness.get_liveness()
 
     async def held() -> None:
@@ -314,8 +318,9 @@ async def test_a_turnover_that_cuts_a_call_is_read_from_the_owners_lines(
     task = liveness.admit(daemon_liveness.new_call_id(), held)
     assert task is not None
     server, serving = _stopped_server()
+    liveness.turn_over()
     with caplog.at_level(logging.INFO):
-        await daemon_owner._serve_until_stopped(server, serving, ["asked"], lock=None)
+        await daemon_owner._serve_until_stopped(server, serving, lock=None)
     await asyncio.gather(task, return_exceptions=True)
     assert owner_log_reading(_messages(caplog)) == {
         "turned_over": True,
@@ -328,8 +333,9 @@ async def test_a_turnover_with_nothing_admitted_cuts_nothing(caplog):
     from linkedin_mcp_server.daemon import owner as daemon_owner
 
     server, serving = _stopped_server()
+    daemon_owner.get_liveness().turn_over()
     with caplog.at_level(logging.INFO):
-        await daemon_owner._serve_until_stopped(server, serving, ["asked"], lock=None)
+        await daemon_owner._serve_until_stopped(server, serving, lock=None)
     assert owner_log_reading(_messages(caplog)) == {
         "turned_over": True,
         "cut": 0,
@@ -369,13 +375,14 @@ async def test_directs_idle_close_line_is_the_one_the_rows_wait_for(
 
 def test_the_declared_values_are_the_products():
     from linkedin_mcp_server.daemon import owner as daemon_owner
+    from linkedin_mcp_server.daemon.core import owner as lifecycle
     from linkedin_mcp_server.config.schema import AppConfig
 
     server = daemon_owner.create_owner_server(
         config=AppConfig(), token="token", host="127.0.0.1", port=51234
     )
     assert server.config.timeout_graceful_shutdown == OWNER_GRACE_SECONDS
-    assert daemon_owner._TURNOVER_DRAIN_SECONDS == TURNOVER_DRAIN_SECONDS
+    assert lifecycle.TURNOVER_DRAIN_SECONDS == TURNOVER_DRAIN_SECONDS
     assert retirement_race.WARM_TOOL == harness.READ_TOOL
 
 

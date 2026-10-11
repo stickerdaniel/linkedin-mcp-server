@@ -1266,7 +1266,7 @@ class TestSetupGate:
         """
         from linkedin_mcp_server import bootstrap
         from linkedin_mcp_server.daemon import liveness as daemon_liveness
-        from linkedin_mcp_server.daemon import owner as daemon_owner
+        from linkedin_mcp_server.daemon.core import owner as lifecycle
         from linkedin_mcp_server.daemon.owner import _serve_until_stopped
         from linkedin_mcp_server.exceptions import BrowserSetupFailedError
         from linkedin_mcp_server.server_role import ServerRole
@@ -1285,7 +1285,7 @@ class TestSetupGate:
         monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
         monkeypatch.setattr(bootstrap, "_run_browser_setup", setup)
         monkeypatch.setattr(bootstrap, "process_role", lambda: ServerRole.OWNER)
-        monkeypatch.setattr(daemon_owner, "_SETUP_FAILURE_RETRY_GRACE_SECONDS", 5.0)
+        monkeypatch.setattr(lifecycle, "SETUP_FAILURE_RETRY_GRACE_SECONDS", 5.0)
         initialize_bootstrap("managed")
 
         liveness = daemon_liveness.get_liveness()
@@ -1308,7 +1308,7 @@ class TestSetupGate:
             await asyncio.sleep(0.2)
 
         serving = asyncio.create_task(serves())
-        await _serve_until_stopped(server, serving, [], 0.05, lock=None)
+        await _serve_until_stopped(server, serving, 0.05, lock=None)
         assert server.should_exit is False, "the owner exited before the retry"
 
         with pytest.raises(BrowserSetupFailedError, match="the mirror refused"):
