@@ -8,16 +8,17 @@ finished call alive, or an owner that stops a call somebody *is* waiting for.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
+from linkedin_mcp_server.daemon.core.owner import EXPIRY_SECONDS, Fate, Retirement
 from linkedin_mcp_server.daemon.descriptor import PROTOCOL_VERSION
 from linkedin_mcp_server.daemon.liveness import (
     CALL_HEADER,
-    EXPIRY_SECONDS,
     HEARTBEAT_SECONDS,
     CallLiveness,
     OwnerCallLivenessMiddleware,
@@ -27,8 +28,59 @@ from linkedin_mcp_server.daemon.liveness import (
 
 
 def _last_heard(liveness: CallLiveness, call_id: str, seconds_ago: float) -> None:
-    """Pretend the last beat for *call_id* arrived *seconds_ago*."""
-    liveness._waiting[call_id].last_heard -= seconds_ago
+    """Pretend the last beat for *call_id* arrived *seconds_ago*.
+
+    The entry is aged rather than the clock moved. `time.monotonic` is the one
+    the whole interpreter reads, and patching it moves time for everything in
+    the test session, including asyncio's own timers.
+    """
+    state = liveness.state
+    liveness._state = replace(
+        state,
+        calls={
+            ticket: replace(call, last_heard=call.last_heard - seconds_ago)
+            if call.call_id == call_id
+            else call
+            for ticket, call in state.calls.items()
+        },
+    )
+
+
+def _quiet_earlier(liveness: CallLiveness, seconds: float) -> None:
+    """Pretend the owner's quiet period began *seconds* earlier than it did."""
+    quiet_since = liveness.state.quiet_since
+    assert quiet_since is not None
+    liveness._state = replace(liveness.state, quiet_since=quiet_since - seconds)
+
+
+def _last_scanned(liveness: CallLiveness, at: float) -> None:
+    """Pretend the owner last asked who was waiting at *at*."""
+    liveness._state = replace(liveness.state, last_scan=at)
+
+
+def _watched(liveness: CallLiveness) -> set[str]:
+    """The calls a frontend is still known to be waiting for."""
+    return {
+        call.call_id
+        for call in liveness.state.calls.values()
+        if call.fate is Fate.WATCHED
+    }
+
+
+def _tracked(liveness: CallLiveness) -> set[str]:
+    """Every call admitted and not yet finished, whoever still waits for it."""
+    return {call.call_id for call in liveness.state.calls.values()}
+
+
+async def _forever() -> None:
+    await asyncio.Event().wait()
+
+
+def _watch(liveness: CallLiveness, call_id: str) -> asyncio.Task[None]:
+    """Admit *call_id* as a call that runs until something cancels it."""
+    task = liveness.admit(call_id, _forever)
+    assert task is not None
+    return task
 
 
 def _stand_down_body(
@@ -91,30 +143,19 @@ class TestReadingTheMarker:
 class TestCountingWhoIsWaiting:
     """The owner's side of the question, without any transport in the way."""
 
-    @staticmethod
-    def _task() -> Any:
-        task = MagicMock()
-        task.cancel = MagicMock()
-        return task
-
-    def test_a_call_nobody_asks_for_is_cancelled(self):
+    async def test_a_call_nobody_asks_for_is_cancelled(self):
         liveness = CallLiveness()
-        task = self._task()
-        liveness.watch("v1.a", task)
+        task = _watch(liveness, "v1.a")
 
-        # The entry is aged rather than the clock moved. `time.monotonic` is the
-        # one the whole interpreter reads, and patching it moves time for
-        # everything in the test session, including asyncio's own timers.
         _last_heard(liveness, "v1.a", EXPIRY_SECONDS + 0.1)
 
         assert liveness.cancel_the_abandoned() == ["v1.a"]
-        task.cancel.assert_called_once()
+        assert task.cancelling() == 1
 
-    def test_a_call_somebody_is_waiting_for_is_left_alone(self):
+    async def test_a_call_somebody_is_waiting_for_is_left_alone(self):
         liveness = CallLiveness()
-        heard, unheard = self._task(), self._task()
-        liveness.watch("v1.heard", heard)
-        liveness.watch("v1.unheard", unheard)
+        heard = _watch(liveness, "v1.heard")
+        unheard = _watch(liveness, "v1.unheard")
 
         # Both have been running well past the expiry; only one frontend is
         # still saying so.
@@ -123,33 +164,36 @@ class TestCountingWhoIsWaiting:
         assert liveness.heard("v1.heard")
 
         assert liveness.cancel_the_abandoned() == ["v1.unheard"]
-        heard.cancel.assert_not_called()
-        unheard.cancel.assert_called_once()
+        assert heard.cancelling() == 0
+        assert unheard.cancelling() == 1
+        heard.cancel()
 
     def test_a_beat_for_an_unknown_call_changes_nothing(self):
         # A beat that arrives just after its call returned. Ordinary, not a
         # fault, and it must not resurrect an entry.
         liveness = CallLiveness()
         assert liveness.heard("v1.never-registered") is False
+        assert liveness.state.calls == {}
 
-    def test_a_released_call_is_no_longer_watched(self):
+    async def test_a_finished_call_is_no_longer_watched(self):
         liveness = CallLiveness()
-        task = self._task()
-        liveness.watch("v1.a", task)
-        liveness.release("v1.a")
+        task = _watch(liveness, "v1.a")
+        liveness.finished(task)
+        _last_heard(liveness, "v1.a", EXPIRY_SECONDS + 1)
 
         assert liveness.cancel_the_abandoned() == []
-        task.cancel.assert_not_called()
+        assert task.cancelling() == 0
+        task.cancel()
 
     def test_a_stall_is_longer_than_the_owner_looking(self):
         # The threshold has to sit above the interval the owner polls at, or
         # every ordinary scan looks like a stall and nothing is ever expired.
         # Below the poll it is not a smaller margin, it is the feature switched
         # off, and nothing else here would notice.
-        from linkedin_mcp_server.daemon.liveness import _STALL_SECONDS
+        from linkedin_mcp_server.daemon.core.owner import STALL_SECONDS
         from linkedin_mcp_server.daemon.owner import _STAND_DOWN_POLL_SECONDS
 
-        assert _STALL_SECONDS > _STAND_DOWN_POLL_SECONDS * 5
+        assert STALL_SECONDS > _STAND_DOWN_POLL_SECONDS * 5
 
     def test_the_expiry_is_several_cadences(self):
         # The relationship rather than the numbers. Both were measured, but what
@@ -209,7 +253,7 @@ class TestTheOwnerSideMiddleware:
             }
         }
         assert liveness.calls_in_flight() == 0
-        assert liveness._waiting == {}
+        assert liveness.state.calls == {}
 
     async def test_a_marked_call_is_watched_while_it_runs(self, monkeypatch):
         from linkedin_mcp_server.daemon import liveness as daemon_liveness
@@ -219,7 +263,7 @@ class TestTheOwnerSideMiddleware:
         liveness = daemon_liveness.get_liveness()
 
         async def call_next(_context: Any) -> str:
-            assert marker in liveness._waiting
+            assert marker in _watched(liveness)
             return "the result"
 
         assert (
@@ -231,7 +275,7 @@ class TestTheOwnerSideMiddleware:
         )
         # And released afterwards, or the tracker would grow for the life of the
         # process and expire identifiers nothing is running.
-        assert marker not in liveness._waiting
+        assert marker not in _tracked(liveness)
 
     async def test_a_marked_call_is_released_when_it_fails(self, monkeypatch):
         from linkedin_mcp_server.daemon import liveness as daemon_liveness
@@ -247,7 +291,7 @@ class TestTheOwnerSideMiddleware:
                 self._context(),
                 call_next,  # ty: ignore
             )
-        assert marker not in daemon_liveness.get_liveness()._waiting
+        assert marker not in _tracked(daemon_liveness.get_liveness())
 
     async def test_an_abandoned_call_is_stopped_and_says_so(self, monkeypatch):
         from fastmcp.exceptions import ToolError
@@ -278,7 +322,7 @@ class TestTheOwnerSideMiddleware:
 
         with pytest.raises(ToolError, match="stopped waiting"):
             await asyncio.wait_for(running, timeout=5)
-        assert marker not in liveness._waiting
+        assert marker not in _tracked(liveness)
 
     async def test_a_cancellation_from_elsewhere_is_not_swallowed(self, monkeypatch):
         # Shutdown cancels every task. That is not an abandoned call, and
@@ -647,8 +691,7 @@ class TestTheRouteOnARealOwner:
         # frontend abandoned.
         app, base, liveness = serving
         marker = new_call_id()
-        task = MagicMock()
-        liveness.watch(marker, task)
+        _watch(liveness, marker)
         _last_heard(liveness, marker, EXPIRY_SECONDS + 1)
 
         assert await self._post(app, base, token=None, marker=marker) == 401
@@ -661,7 +704,7 @@ class TestTheRouteOnARealOwner:
     async def test_a_beat_with_the_token_keeps_the_call(self, serving):
         app, base, liveness = serving
         marker = new_call_id()
-        liveness.watch(marker, MagicMock())
+        _watch(liveness, marker)
         _last_heard(liveness, marker, EXPIRY_SECONDS + 1)
 
         assert await self._post(app, base, token=self.TOKEN, marker=marker) == 200
@@ -689,8 +732,7 @@ class TestTheOwnersOwnLoop:
 
         liveness = daemon_liveness.get_liveness()
         marker = new_call_id()
-        abandoned = asyncio.create_task(asyncio.sleep(3600))
-        liveness.watch(marker, abandoned)
+        abandoned = _watch(liveness, marker)
         _last_heard(liveness, marker, EXPIRY_SECONDS + 1)
 
         # A server that stops on its own once the loop has had a tick or two.
@@ -698,10 +740,10 @@ class TestTheOwnersOwnLoop:
             await asyncio.sleep(0.35)
 
         serving = asyncio.create_task(serves())
-        await _serve_until_stopped(MagicMock(), serving, [], lock=None)
+        await _serve_until_stopped(MagicMock(), serving, lock=None)
 
         assert abandoned.cancelled(), "the owner never expired an abandoned call"
-        assert marker not in liveness._waiting
+        assert marker not in _watched(liveness)
 
 
 class TestGoingAwayWhenNobodyNeedsIt:
@@ -724,7 +766,7 @@ class TestGoingAwayWhenNobodyNeedsIt:
             await asyncio.sleep(ticks)
 
         serving = asyncio.create_task(serves())
-        await _serve_until_stopped(server, serving, [], idle_timeout, lock=None)
+        await _serve_until_stopped(server, serving, idle_timeout, lock=None)
         return bool(server.should_exit)
 
     async def test_an_owner_nobody_ever_called_still_exits(self):
@@ -736,7 +778,7 @@ class TestGoingAwayWhenNobodyNeedsIt:
 
         liveness = daemon_liveness.get_liveness()
         liveness.the_endpoint_is_live()
-        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+        _quiet_earlier(liveness, 60)
 
         assert await self._run_loop(idle_timeout=5.0) is True
 
@@ -746,7 +788,7 @@ class TestGoingAwayWhenNobodyNeedsIt:
 
         liveness = daemon_liveness.get_liveness()
         liveness.the_endpoint_is_live()
-        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+        _quiet_earlier(liveness, 60)
 
         async def pending_setup() -> None:
             await asyncio.Event().wait()
@@ -773,10 +815,10 @@ class TestGoingAwayWhenNobodyNeedsIt:
         # which is what makes the grace bounded rather than a second wedge.
         from linkedin_mcp_server import bootstrap
         from linkedin_mcp_server.daemon import liveness as daemon_liveness
-        from linkedin_mcp_server.daemon import owner as daemon_owner
+        from linkedin_mcp_server.daemon.core import owner as lifecycle
 
         grace = 1.0
-        monkeypatch.setattr(daemon_owner, "_SETUP_FAILURE_RETRY_GRACE_SECONDS", grace)
+        monkeypatch.setattr(lifecycle, "SETUP_FAILURE_RETRY_GRACE_SECONDS", grace)
 
         async def failed_setup() -> None:
             raise RuntimeError("install failed")
@@ -788,7 +830,7 @@ class TestGoingAwayWhenNobodyNeedsIt:
 
         liveness = daemon_liveness.get_liveness()
         liveness.the_endpoint_is_live()
-        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+        _quiet_earlier(liveness, 60)
         # Where the quiet period starts in production: setup completion resets
         # the idle clock, so the grace is measured from the failure rather than
         # from whenever the endpoint was published.
@@ -830,7 +872,7 @@ class TestGoingAwayWhenNobodyNeedsIt:
         )
         liveness = daemon_liveness.get_liveness()
         liveness.the_endpoint_is_live()
-        liveness._quiet_since = liveness._quiet_since - 3600  # ty: ignore
+        _quiet_earlier(liveness, 3600)
 
         running = asyncio.Event()
 
@@ -860,10 +902,11 @@ class TestGoingAwayWhenNobodyNeedsIt:
 
         liveness = daemon_liveness.get_liveness()
         liveness.the_endpoint_is_live()
-        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+        _quiet_earlier(liveness, 60)
 
-        liveness.call_started()
-        liveness.call_finished()
+        call = _watch(liveness, new_call_id())
+        liveness.finished(call)
+        call.cancel()
 
         # Quiet again, but only just: the wait starts from the call rather than
         # from whenever the endpoint went live.
@@ -876,7 +919,7 @@ class TestGoingAwayWhenNobodyNeedsIt:
 
         liveness = daemon_liveness.get_liveness()
         liveness.the_endpoint_is_live()
-        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+        _quiet_earlier(liveness, 60)
 
         liveness.background_activity_finished()
 
@@ -891,7 +934,7 @@ class TestGoingAwayWhenNobodyNeedsIt:
 
         liveness = daemon_liveness.get_liveness()
         liveness.the_endpoint_is_live()
-        liveness._quiet_since = liveness._quiet_since - 86400  # ty: ignore
+        _quiet_earlier(liveness, 86400)
 
         assert await self._run_loop(idle_timeout=0.0) is False
 
@@ -1059,37 +1102,35 @@ class TestAnOwnerThatWasNotRunning:
     whose frontends were beating throughout.
     """
 
-    def test_a_late_scan_expires_nothing(self):
+    async def test_a_late_scan_expires_nothing(self):
+        import time as clock
+
         liveness = CallLiveness()
-        task = MagicMock()
-        liveness.watch("v1.a", task)
+        task = _watch(liveness, "v1.a")
         _last_heard(liveness, "v1.a", EXPIRY_SECONDS + 5)
 
         # A first scan establishes when the owner last looked, and a second one
         # arrives far too late for the gap to be anything but the owner itself.
-        liveness._last_scan = liveness._last_scan or 0.0
-        import time as clock
-
-        liveness._last_scan = clock.monotonic() - 30
+        _last_scanned(liveness, clock.monotonic() - 30)
 
         assert liveness.cancel_the_abandoned() == []
-        task.cancel.assert_not_called()
+        assert task.cancelling() == 0
+        task.cancel()
 
-    def test_the_next_scan_after_a_stall_judges_normally(self):
+    async def test_the_next_scan_after_a_stall_judges_normally(self):
         # The stall buys one cycle, not immunity: a call that is still unheard
         # by the following scan is expired as usual.
         import time as clock
 
         liveness = CallLiveness()
-        task = MagicMock()
-        liveness.watch("v1.a", task)
+        task = _watch(liveness, "v1.a")
         _last_heard(liveness, "v1.a", EXPIRY_SECONDS + 5)
-        liveness._last_scan = clock.monotonic() - 30
+        _last_scanned(liveness, clock.monotonic() - 30)
         assert liveness.cancel_the_abandoned() == []
 
         _last_heard(liveness, "v1.a", EXPIRY_SECONDS + 1)
         assert liveness.cancel_the_abandoned() == ["v1.a"]
-        task.cancel.assert_called_once()
+        assert task.cancelling() == 1
 
 
 class TestTellingShutdownFromAbandonment:
@@ -1151,8 +1192,7 @@ class TestAnAbandonedCallStillExpiresUnderTheLoop:
 
         liveness = daemon_liveness.get_liveness()
         marker = new_call_id()
-        abandoned = asyncio.create_task(asyncio.sleep(3600))
-        liveness.watch(marker, abandoned)
+        abandoned = _watch(liveness, marker)
 
         # Driven by events rather than by sleeping for a plausible-looking time.
         # An earlier version aged the call after a fixed pause and raced the
@@ -1164,12 +1204,12 @@ class TestAnAbandonedCallStillExpiresUnderTheLoop:
 
         serving = asyncio.create_task(serves())
         loop = asyncio.create_task(
-            _serve_until_stopped(MagicMock(), serving, [], lock=None)
+            _serve_until_stopped(MagicMock(), serving, lock=None)
         )
         try:
             # The first scan has to be behind us, so the decision is taken on a
             # later tick with a real and short gap in front of it.
-            while liveness._last_scan is None:
+            while liveness.state.last_scan is None:
                 await asyncio.sleep(0.01)
             _last_heard(liveness, marker, EXPIRY_SECONDS + 1)
 
@@ -1239,12 +1279,12 @@ class TestAdmissionAndRetirementAreOneDecision:
         )
         await asyncio.wait_for(running.wait(), timeout=5)
 
-        assert liveness.try_retire("idle") is False
+        assert liveness.try_retire(Retirement.IDLE) is False
         assert liveness.retiring is False
 
         release.set()
         assert await call == "the result"
-        assert liveness.try_retire("idle") is True
+        assert liveness.try_retire(Retirement.IDLE) is True
 
     async def test_a_call_after_retirement_is_refused_and_leaves_nothing(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1261,7 +1301,7 @@ class TestAdmissionAndRetirementAreOneDecision:
         liveness = daemon_liveness.get_liveness()
         liveness.serving_as("the-owner")
         liveness.the_endpoint_is_live()
-        quiet_since = liveness._quiet_since
+        quiet_since = liveness.state.quiet_since
         leases = MagicMock(name="get_profile_lease")
         monkeypatch.setattr(
             "linkedin_mcp_server.sequential_tool_middleware.get_profile_lease", leases
@@ -1277,7 +1317,7 @@ class TestAdmissionAndRetirementAreOneDecision:
             return await sequential.on_call_tool(context, tool)  # ty: ignore
 
         tasks_before = len(asyncio.all_tasks())
-        assert liveness.try_retire("idle") is True
+        assert liveness.try_retire(Retirement.IDLE) is True
 
         result = await OwnerCallLivenessMiddleware().on_call_tool(
             _call_context(), call_next
@@ -1288,8 +1328,10 @@ class TestAdmissionAndRetirementAreOneDecision:
         leases.assert_not_called()
         assert not sequential._lock.locked()
         assert liveness.calls_in_flight() == 0
-        assert liveness._waiting == {}
-        assert liveness._quiet_since == quiet_since, "a refused call touched the clock"
+        assert liveness.state.calls == {}
+        assert liveness.state.quiet_since == quiet_since, (
+            "a refused call touched the clock"
+        )
         assert len(asyncio.all_tasks()) == tasks_before, "a refused call left a task"
 
     async def test_a_request_not_yet_admitted_is_refused_by_a_retirement(
@@ -1311,7 +1353,7 @@ class TestAdmissionAndRetirementAreOneDecision:
         arriving = asyncio.create_task(
             OwnerCallLivenessMiddleware().on_call_tool(_call_context(), call_next)  # ty: ignore
         )
-        assert liveness.try_retire("idle") is True
+        assert liveness.try_retire(Retirement.IDLE) is True
 
         result = await arriving
 
@@ -1358,7 +1400,7 @@ class TestAdmissionAndRetirementAreOneDecision:
             assert not queued.done(), "the call was not queued behind the lock"
             assert lease._refs == 0, "the queued call already holds the profile"
 
-            assert liveness.try_retire("idle") is False
+            assert liveness.try_retire(Retirement.IDLE) is False
         finally:
             sequential._lock.release()
         assert await asyncio.wait_for(queued, timeout=5) == "the result"
@@ -1368,19 +1410,21 @@ class TestAdmissionAndRetirementAreOneDecision:
     ):
         """The owner's own loop, with a call arriving in the idle decision.
 
-        The call is scheduled from inside the loop's read of the idle clock,
-        so it is ready to run at whatever point the loop next yields. With the
-        check and the set in one step it never gets in before the owner has
-        closed admission; with any `await` between them it is admitted by an
-        owner that has already decided to exit.
+        The call is scheduled from inside the loop's last observation before
+        it decides, so it is ready to run at whatever point the loop next
+        yields. With the observation, the check and the set in one step it
+        never gets in before the owner has closed admission; with any `await`
+        between them it is admitted by an owner that has already decided to
+        exit.
         """
         from linkedin_mcp_server.daemon import liveness as daemon_liveness
+        from linkedin_mcp_server.daemon import owner as daemon_owner
         from linkedin_mcp_server.daemon.owner import _serve_until_stopped
 
         _mark_calls(monkeypatch)
         liveness = daemon_liveness.get_liveness()
         liveness.the_endpoint_is_live()
-        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+        _quiet_earlier(liveness, 60)
         ran: list[str] = []
 
         async def call_next(_context: Any) -> str:
@@ -1388,9 +1432,8 @@ class TestAdmissionAndRetirementAreOneDecision:
             return "the result"
 
         arriving: list[asyncio.Future[Any]] = []
-        read_the_clock = liveness.quiet_for
 
-        def a_call_arrives_as_the_clock_is_read() -> float | None:
+        def a_call_arrives_as_the_loop_looks() -> bool:
             if not arriving:
                 arriving.append(
                     asyncio.ensure_future(
@@ -1400,9 +1443,13 @@ class TestAdmissionAndRetirementAreOneDecision:
                         )
                     )
                 )
-            return read_the_clock()
+            return False
 
-        monkeypatch.setattr(liveness, "quiet_for", a_call_arrives_as_the_clock_is_read)
+        monkeypatch.setattr(
+            daemon_owner,
+            "browser_setup_failure_pending",
+            a_call_arrives_as_the_loop_looks,
+        )
         server = MagicMock()
         server.should_exit = False
 
@@ -1411,7 +1458,7 @@ class TestAdmissionAndRetirementAreOneDecision:
                 await asyncio.sleep(0.01)
 
         serving = asyncio.create_task(serves())
-        await _serve_until_stopped(server, serving, [], 0.05, lock=None)
+        await _serve_until_stopped(server, serving, 0.05, lock=None)
         result = await arriving[0]
 
         assert server.should_exit is True
@@ -1422,15 +1469,15 @@ class TestAdmissionAndRetirementAreOneDecision:
         from linkedin_mcp_server.daemon import liveness as daemon_liveness
 
         liveness = daemon_liveness.get_liveness()
-        liveness.retire("turnover")
-        liveness.retire("idle")
-        liveness.call_started()
-        liveness.call_finished()
+        liveness.turn_over()
+        liveness.retire(Retirement.IDLE)
+        assert liveness.admit(new_call_id(), _forever) is None
+        liveness.background_activity_finished()
         liveness.the_endpoint_is_live()
 
         assert liveness.retiring is True
         assert liveness.retire_reason == "turnover"
-        assert liveness.try_retire("idle") is True
+        assert liveness.try_retire(Retirement.IDLE) is True
 
 
 class TestEveryWayOutClosesAdmission:
@@ -1453,10 +1500,10 @@ class TestEveryWayOutClosesAdmission:
 
         liveness = daemon_liveness.get_liveness()
         liveness.the_endpoint_is_live()
-        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+        _quiet_earlier(liveness, 60)
         server, serving = self._stopped_server()
 
-        await _serve_until_stopped(server, serving, [], 0.05, lock=None)
+        await _serve_until_stopped(server, serving, 0.05, lock=None)
 
         assert server.should_exit is True
         assert liveness.retire_reason == "idle"
@@ -1467,8 +1514,9 @@ class TestEveryWayOutClosesAdmission:
 
         liveness = daemon_liveness.get_liveness()
         server, serving = self._stopped_server()
+        liveness.turn_over()
 
-        await _serve_until_stopped(server, serving, ["asked"], lock=None)
+        await _serve_until_stopped(server, serving, lock=None)
 
         assert server.should_exit is True
         assert liveness.retire_reason == "turnover"
@@ -1483,7 +1531,7 @@ class TestEveryWayOutClosesAdmission:
         liveness = daemon_liveness.get_liveness()
         server, serving = self._stopped_server()
 
-        await daemon_owner._serve_until_stopped(server, serving, [], lock=None)
+        await daemon_owner._serve_until_stopped(server, serving, lock=None)
 
         assert server.should_exit is True
         assert liveness.retire_reason == "wedged"
@@ -1536,10 +1584,9 @@ class TestStandingDownForANewerBuild:
             while not server.should_exit:
                 await asyncio.sleep(0.01)
 
+        liveness.turn_over()
         loop = asyncio.create_task(
-            _serve_until_stopped(
-                server, asyncio.create_task(serves()), ["asked"], lock=None
-            )
+            _serve_until_stopped(server, asyncio.create_task(serves()), lock=None)
         )
         await asyncio.sleep(0.3)
 
@@ -1565,12 +1612,13 @@ class TestStandingDownForANewerBuild:
         """
         from linkedin_mcp_server.daemon import liveness as daemon_liveness
         from linkedin_mcp_server.daemon import owner as daemon_owner
+        from linkedin_mcp_server.daemon.core import owner as lifecycle
         from linkedin_mcp_server.profile_lease import get_profile_lease
         from linkedin_mcp_server.sequential_tool_middleware import (
             SequentialToolExecutionMiddleware,
         )
 
-        monkeypatch.setattr(daemon_owner, "_TURNOVER_DRAIN_SECONDS", 0.2)
+        monkeypatch.setattr(lifecycle, "TURNOVER_DRAIN_SECONDS", 0.2)
         marker = _mark_calls(monkeypatch)
         lease = get_profile_lease(tmp_path / "profile")
         monkeypatch.setattr(
@@ -1598,7 +1646,7 @@ class TestStandingDownForANewerBuild:
                 OwnerCallLivenessMiddleware().on_call_tool(_call_context(), call_next)
             )
             if queued:
-                while marker not in liveness._waiting:
+                while marker not in _watched(liveness):
                     await asyncio.sleep(0)
             else:
                 await asyncio.wait_for(body_started.wait(), timeout=5)
@@ -1609,8 +1657,9 @@ class TestStandingDownForANewerBuild:
                 while not server.should_exit:
                     await asyncio.sleep(0.01)
 
+            liveness.turn_over()
             await daemon_owner._serve_until_stopped(
-                server, asyncio.create_task(serves()), ["asked"], lock=None
+                server, asyncio.create_task(serves()), lock=None
             )
             result = await asyncio.wait_for(call, timeout=5)
         finally:
@@ -1688,7 +1737,7 @@ class TestTheControlRoutes:
         liveness = daemon_liveness.get_liveness()
         liveness.serving_as("the-owner")
         running = new_call_id()
-        liveness.watch(running, MagicMock())
+        _watch(liveness, running)
         app = self._app()
 
         async with self._client(app) as client:
@@ -1703,7 +1752,7 @@ class TestTheControlRoutes:
                 )
 
             before = await beat(new_call_id())
-            liveness.retire("turnover")
+            liveness.turn_over()
             refused = await beat(new_call_id())
             still_running = await beat(running)
 
@@ -1828,7 +1877,7 @@ class TestTheControlRoutes:
         liveness = daemon_liveness.get_liveness()
         liveness.serving_as("the-owner")
         if busy:
-            liveness.call_started()
+            _watch(liveness, new_call_id())
         asked: list[str] = []
         app = self._app(stand_down=lambda: asked.append("asked"))
 
@@ -1877,12 +1926,13 @@ class TestTheControlRoutes:
         liveness = daemon_liveness.get_liveness()
         liveness.serving_as("the-owner")
         if busy_with == "running":
-            liveness.watch(new_call_id(), MagicMock())
-            liveness.call_started()
+            running = new_call_id()
+            _watch(liveness, running)
+            liveness.body_began(running)
         elif busy_with == "queued":
             # Admitted, so counted, and still waiting behind another call for
             # the sequential lock: as busy as a running one.
-            liveness.call_started()
+            _watch(liveness, new_call_id())
         else:
             monkeypatch.setattr(daemon_owner, "browser_setup_in_progress", lambda: True)
         asked: list[str] = []
@@ -1910,8 +1960,8 @@ class TestTheControlRoutes:
 
         liveness = daemon_liveness.get_liveness()
         liveness.serving_as("the-owner")
-        liveness.call_started()
-        liveness.retire("turnover")
+        _watch(liveness, new_call_id())
+        liveness.turn_over()
         asked: list[str] = []
         app = self._app(stand_down=lambda: asked.append("asked"))
 
@@ -1984,7 +2034,7 @@ class TestTheControlRoutes:
         await asyncio.wait_for(arrived.wait(), timeout=5)
         await asyncio.sleep(0.05)
         assert asked == [], "the stand-down was decided before the body ended"
-        liveness.call_started()
+        _watch(liveness, new_call_id())
         more.set()
         response = await asyncio.wait_for(sent, timeout=5)
 
@@ -2016,8 +2066,8 @@ class TestTheLastCheckBeforeBrowserWork:
 
         liveness = daemon_liveness.get_liveness()
         fresh, stale = new_call_id(), new_call_id()
-        liveness.watch(fresh, MagicMock())
-        liveness.watch(stale, MagicMock())
+        _watch(liveness, fresh)
+        _watch(liveness, stale)
         _last_heard(liveness, stale, EXPIRY_SECONDS + 1)
 
         async def ask(call_id: str) -> bool:
@@ -2076,7 +2126,7 @@ class TestTheLastCheckBeforeBrowserWork:
         call = asyncio.create_task(
             OwnerCallLivenessMiddleware().on_call_tool(_call_context(), call_next)
         )
-        while marker not in liveness._waiting:
+        while marker not in _watched(liveness):
             await asyncio.sleep(0)
         _last_heard(liveness, marker, EXPIRY_SECONDS + 1)
         sequential._lock.release()
@@ -2120,7 +2170,7 @@ class TestTheLastCheckBeforeBrowserWork:
             call = asyncio.create_task(
                 OwnerCallLivenessMiddleware().on_call_tool(_call_context(), call_next)
             )
-            while marker not in liveness._waiting:
+            while marker not in _watched(liveness):
                 await asyncio.sleep(0)
             _last_heard(liveness, marker, EXPIRY_SECONDS + 1)
             assert liveness.cancel_the_abandoned() == [marker]

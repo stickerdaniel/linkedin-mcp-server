@@ -4367,7 +4367,8 @@ class TestAForwardedCallThroughTheRealOwner:
         """
         from fastmcp import Client
 
-        from linkedin_mcp_server.daemon.liveness import EXPIRY_SECONDS, get_liveness
+        from linkedin_mcp_server.daemon.core.owner import EXPIRY_SECONDS
+        from linkedin_mcp_server.daemon.liveness import get_liveness
 
         async with self._a_real_owner(tmp_path, monkeypatch) as owner:
             async with Client(owner.frontend) as client:
@@ -5533,9 +5534,16 @@ class TestVersionSkew:
 
         config = _config(_profile(tmp_path))
         monkeypatch.setattr(config_module, "_config", config)
+        from linkedin_mcp_server.daemon.core import owner as lifecycle
+
         liveness = daemon_liveness.get_liveness()
         liveness.serving_as("the-owner")
-        liveness.call_started()
+        # One admitted call, decided by the owner's own core. No task is
+        # started: this test has no event loop until the request below.
+        liveness._state, _effects = lifecycle.on_event(
+            liveness.state,
+            lifecycle.Admit(daemon_liveness.new_call_id(), time.monotonic()),
+        )
         stopped: list[str] = []
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.bind(("127.0.0.1", 0))
@@ -6051,7 +6059,7 @@ class TestNotHoldingTheLockForever:
             server = Serving()
             serving = asyncio.create_task(server.serve())
             loop = asyncio.create_task(
-                daemon_owner._serve_until_stopped(server, serving, [], lock=None)
+                daemon_owner._serve_until_stopped(server, serving, lock=None)
             )
             try:
                 await asyncio.sleep(0.3)
@@ -6107,7 +6115,7 @@ class TestNotHoldingTheLockForever:
         async def exercise() -> None:
             serving = asyncio.create_task(asyncio.sleep(0))
             await serving
-            await daemon_owner._serve_until_stopped(object(), serving, [], lock=None)
+            await daemon_owner._serve_until_stopped(object(), serving, lock=None)
 
         asyncio.run(exercise())
 
@@ -6144,11 +6152,10 @@ class TestNotHoldingTheLockForever:
         async def exercise() -> float:
             server = NeverStops()
             serving = asyncio.create_task(server.serve())
+            daemon_owner.get_liveness().turn_over()
             began = time.monotonic()
             try:
-                await daemon_owner._serve_until_stopped(
-                    server, serving, ["asked"], lock=None
-                )
+                await daemon_owner._serve_until_stopped(server, serving, lock=None)
                 return time.monotonic() - began
             finally:
                 serving.cancel()
@@ -6203,8 +6210,8 @@ class TestNotHoldingTheLockForever:
             "async def main():\n"
             "    server = Stubborn()\n"
             "    serving = asyncio.create_task(server.serve())\n"
-            "    await daemon_owner._serve_until_stopped("
-            "server, serving, ['asked'], lock=lock)\n"
+            "    daemon_owner.get_liveness().turn_over()\n"
+            "    await daemon_owner._serve_until_stopped(server, serving, lock=lock)\n"
             "asyncio.run(main())\n"
             "print('THE PROCESS SURVIVED')\n"
         )
@@ -6558,7 +6565,6 @@ class TestPublishingLast:
         async def serve_until_stopped(
             server: object,
             serving: object,
-            turnover: object,
             idle_timeout: float,
             *,
             lock: DaemonLock | None,
@@ -7530,6 +7536,7 @@ class TestPublishingLast:
         import asyncio
 
         import linkedin_mcp_server.daemon.liveness as daemon_liveness_module
+        from linkedin_mcp_server.daemon.core import owner as lifecycle
 
         class _Server:
             should_exit = False
@@ -7540,14 +7547,16 @@ class TestPublishingLast:
         async def exercise() -> None:
             serving = asyncio.create_task(asyncio.sleep(3600))
             canonical_read = asyncio.get_running_loop().create_future()
-            abandoned = asyncio.create_task(asyncio.sleep(3600))
             marker = daemon_liveness_module.new_call_id()
-            daemon_owner.get_liveness().watch(marker, abandoned)
+            abandoned = daemon_owner.get_liveness().admit(
+                marker, lambda: asyncio.sleep(3600)
+            )
+            assert abandoned is not None
             # All three above one timer tick, which on Windows is about 15 ms
             # against well under a millisecond here. Below it, the poll that
             # drives the expiry scan does not run at the cadence these numbers
             # describe, and the test measures the platform instead of the code.
-            monkeypatch.setattr(daemon_liveness_module, "EXPIRY_SECONDS", 0.05)
+            monkeypatch.setattr(lifecycle, "EXPIRY_SECONDS", 0.05)
             monkeypatch.setattr(daemon_owner, "_STAND_DOWN_POLL_SECONDS", 0.02)
             # Long, on purpose: the canonical read has to stay held for the
             # whole window below, so reaching the commit stub is a real failure
@@ -7615,7 +7624,6 @@ class TestPublishingLast:
             should_exit = False
 
         server = _Server()
-        turnover: list[str] = []
         exited: list[object] = []
         lock = DaemonLock(tmp_path)
         commits: list[str] = []
@@ -7651,12 +7659,11 @@ class TestPublishingLast:
                     server=server,
                     serving=serving,
                     lock=lock,
-                    turnover=turnover,
                 )
             )
             try:
                 await asyncio.sleep(0)
-                turnover.append("asked")
+                daemon_owner.get_liveness().turn_over()
                 for _ in range(100):
                     if reconciling.done():
                         break
@@ -7710,6 +7717,7 @@ class TestPublishingLast:
         import asyncio
         from unittest.mock import MagicMock
 
+        from linkedin_mcp_server.daemon.core import owner as lifecycle
         from linkedin_mcp_server.daemon.liveness import (
             CALL_HEADER,
             OwnerCallLivenessMiddleware,
@@ -7725,7 +7733,7 @@ class TestPublishingLast:
         monkeypatch.setattr(daemon_owner, "_STAND_DOWN_POLL_SECONDS", 0.01)
         monkeypatch.setattr(daemon_owner, "_UNCERTAIN_PUBLICATION_RETRY_SECONDS", 0.02)
         monkeypatch.setattr(
-            daemon_owner, "_TURNOVER_DRAIN_SECONDS", 0.3 if outlives_the_drain else 10.0
+            lifecycle, "TURNOVER_DRAIN_SECONDS", 0.3 if outlives_the_drain else 10.0
         )
         monkeypatch.setattr(daemon_owner, "stand_down_reason", lambda: None)
         monkeypatch.setattr(

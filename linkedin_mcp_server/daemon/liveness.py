@@ -18,11 +18,12 @@ Both halves are part of the tool protocol (``daemon.descriptor.PROTOCOL_VERSION`
 so a pair that does not share it never shares tools: a mismatched owner is only
 ever asked to stand down.
 
-**Admission and retirement are one decision.** Whether this owner takes another
-call and whether it may go away are both answered here, on one tracker and with
-no ``await`` between checking and setting. On one event loop that makes the two
-orderings the only ones possible: the call wins and retirement sees it, or
-retirement wins and the call is refused before anything below it runs.
+**Admission and retirement are one decision**, and it is not taken here.
+:class:`CallLiveness` holds the owner's state and runs what
+``daemon.core.owner`` decides: it creates an admitted call's task, cancels the
+calls written off, and reports back how each ended. Every method that feeds an
+event is plain rather than ``async``, so on one event loop nothing runs between
+a decision and the state it leaves.
 """
 
 from __future__ import annotations
@@ -33,7 +34,6 @@ import logging
 import secrets
 import time
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 import mcp.types as mt
@@ -41,6 +41,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
+from linkedin_mcp_server.daemon.core import owner as lifecycle
 from linkedin_mcp_server.daemon.descriptor import PROTOCOL_VERSION
 
 logger = logging.getLogger(__name__)
@@ -118,28 +119,9 @@ _ID_HEX = 32
 #: against a server built the way the owner builds one: a heartbeat round trip
 #: costs 0.9ms median while the owner is idle and 1.8ms while it is driving
 #: Chromium, so this cadence occupies an owner about a thousandth of its time
-#: per waiting call.
+#: per waiting call. The owner stops a call after several cadences without a
+#: beat (``daemon.core.owner.EXPIRY_SECONDS``).
 HEARTBEAT_SECONDS = 2.0
-
-#: How long a call may go unheard before the owner stops it. Five cadences, and
-#: the margin is the point rather than the number. Measured worst cases: 9.5ms
-#: for a heartbeat served while a page is being driven, 3.6ms of timer lateness
-#: in a detached process over 25 beats, and 130ms for the longest the owner's
-#: synchronous text extraction holds its event loop, on a 2MiB page far larger
-#: than a real one. A live call therefore needs a stall roughly seventy times
-#: worse than anything measured, or three consecutive beats lost, before it is
-#: wrongly cancelled. The relationship is what matters and what the tests pin;
-#: the two numbers are only a comfortable point on it.
-EXPIRY_SECONDS = 10.0
-
-#: A gap between two of the owner's own expiry scans that means the owner was
-#: not running rather than that a frontend went quiet. The serving loop polls
-#: ten times a second, so anything approaching this is the process itself having
-#: missed its turn: a laptop that slept, a machine under heavy load, or a long
-#: synchronous stretch on the event loop. Expiring on the tick after one of
-#: those would cancel calls whose frontends were beating the whole time and
-#: never got heard, which is the opposite of what any of this is for.
-_STALL_SECONDS = 1.0
 
 
 def new_call_id() -> str:
@@ -170,75 +152,80 @@ def call_id_in(header_value: str | None) -> str | None:
     return header_value
 
 
-@dataclass
-class _Waiting:
-    """One call the owner is running, and when it was last asked for."""
-
-    task: asyncio.Task[Any]
-    last_heard: float
-
-
-@dataclass
 class CallLiveness:
-    """Which calls somebody is still waiting for, and whether any more may come.
+    """The owner's admission and lifecycle state, and the tasks it decides about.
 
     One instance per owner process. Times are monotonic, so a clock the user
-    changes mid-call cannot expire one.
-
-    Admission and retirement are decided here and nowhere else. Every method
-    that reads one of them and writes the other is plain rather than ``async``,
-    which is the whole mechanism: on one event loop nothing can run between the
-    check and the set, so a call and a retirement cannot both win.
+    changes mid-call cannot expire one. Every decision is
+    ``daemon.core.owner.on_event``'s: this class reads the clock, runs the
+    effects that concern calls, and hands the lifecycle effects to the serving
+    loop in ``daemon.owner``.
     """
 
-    _waiting: dict[str, _Waiting] = field(default_factory=dict)
+    def __init__(self) -> None:
+        self._state = lifecycle.Owner()
+        self._tasks: dict[int, asyncio.Future[Any]] = {}
+        self._tickets: dict[asyncio.Future[Any], int] = {}
 
-    #: How many calls were admitted and have not finished, whether they are
-    #: running or still queued behind another one. Counted from admission,
-    #: which is outside the serializing middleware, so a queued call is as
-    #: busy as a running one.
-    _admitted: int = 0
+    @property
+    def state(self) -> lifecycle.Owner:
+        """The state the core decides on."""
+        return self._state
 
-    #: When this owner last did anything for anybody, or ``None`` while it is
-    #: still starting. Idleness is only meaningful once the endpoint is
-    #: published: before that nobody could have called, and an owner that
-    #: counted its own startup as idle time would exit during it.
-    _quiet_since: float | None = None
+    @property
+    def retiring(self) -> bool:
+        """Whether admission is closed. It never reopens in the same process."""
+        return self._state.retirement is not None
 
-    #: When the owner last got round to asking who was still waiting. Compared
-    #: against the next scan so a stall in this process is not charged to the
-    #: frontends.
-    _last_scan: float | None = None
+    @property
+    def retire_reason(self) -> lifecycle.Retirement | None:
+        """Why admission closed. Only the first reason is kept."""
+        return self._state.retirement
 
-    #: Set once, and never cleared for the life of the process. A retiring owner
-    #: admits nothing more, and the heartbeat route tells a frontend so before
-    #: it dispatches anything.
-    retiring: bool = False
+    @property
+    def instance_id(self) -> str | None:
+        """The owner's own instance, named in every refusal."""
+        return self._state.instance
 
-    #: Why, for the log and for tests. Only the first reason is kept.
-    retire_reason: str | None = None
+    def _decide(self, event: lifecycle.Event) -> list[lifecycle.Effect]:
+        self._state, effects = lifecycle.on_event(self._state, event)
+        return effects
 
-    #: The owner's own instance, named in every refusal so a frontend can tell
-    #: this owner's answer from arbitrary tool output.
-    instance_id: str | None = None
+    def _apply(self, event: lifecycle.Event) -> list[lifecycle.Effect]:
+        """Decide *event* and carry out every effect that concerns a call."""
+        effects = self._decide(event)
+        for effect in effects:
+            self.carry_out(effect)
+        return effects
 
-    #: Calls this owner cut off itself while standing down, as opposed to calls
-    #: whose client went away. Somebody is still waiting for each, and what it
-    #: is told depends on ``_began``.
-    _cut: set[str] = field(default_factory=set)
+    def carry_out(self, effect: lifecycle.Effect) -> None:
+        """Run *effect* if it concerns a call. Lifecycle effects are the loop's."""
+        match effect:
+            case lifecycle.Cancel(because=lifecycle.Fate.CUT):
+                logger.warning("Cutting off call %s to stand down", effect.call_id)
+                self._cancel(effect.ticket)
+            case lifecycle.Cancel():
+                logger.info(
+                    "Nobody has waited for call %s in %.0fs; stopping it",
+                    effect.call_id,
+                    lifecycle.EXPIRY_SECONDS,
+                )
+                self._cancel(effect.ticket)
+            case lifecycle.Forgave():
+                logger.info(
+                    "The owner was not scheduled for %.1fs; nobody is written off "
+                    "for that",
+                    effect.seconds,
+                )
 
-    #: Calls whose tool body has begun: past the last abandonment check, holding
-    #: the profile, about to touch the browser. A call cut before this never ran
-    #: and may be repeated; a call cut after it may have acted.
-    _began: set[str] = field(default_factory=set)
-
-    def body_began(self, call_id: str) -> None:
-        """Note that *call_id* is past the point where it could still be refused."""
-        self._began.add(call_id)
+    def _cancel(self, ticket: int) -> None:
+        task = self._tasks.get(ticket)
+        if task is not None:
+            task.cancel()
 
     def serving_as(self, instance_id: str) -> None:
         """Name the instance whose refusals this tracker signs."""
-        self.instance_id = instance_id
+        self._apply(lifecycle.Named(instance_id))
 
     def admit(
         self, call_id: str, start: Callable[[], Coroutine[Any, Any, _T]]
@@ -247,20 +234,39 @@ class CallLiveness:
 
         *start* builds the call's work, and it is called only once the call has
         been admitted. That order is the point: a refused call has no task, so
-        nothing below this could have been scheduled, and none of the counters
-        moved. An admitted call is counted and watched before its task can take
-        a single step, because creating a task only schedules it.
+        nothing below this could have been scheduled, and nothing was counted.
+        An admitted call is counted and watched before its task can take a
+        single step, because creating a task only schedules it.
         """
-        if self.retiring:
+        effects = self._apply(lifecycle.Admit(call_id, time.monotonic()))
+        admitted = [e for e in effects if isinstance(e, lifecycle.StartTask)]
+        if not admitted:
             return None
-        self.call_started()
+        ticket = admitted[0].ticket
         try:
             task = asyncio.ensure_future(start())
         except BaseException:
-            self.call_finished()
+            self._apply(lifecycle.StartFailed(ticket, time.monotonic()))
             raise
-        self.watch(call_id, task)
+        self._tasks[ticket] = task
+        self._tickets[task] = ticket
         return task
+
+    def finished(self, task: asyncio.Future[Any]) -> None:
+        """Note that the admitted call running as *task* ended, however it ended."""
+        ticket = self._tickets.pop(task, None)
+        if ticket is None:
+            return
+        del self._tasks[ticket]
+        self._apply(lifecycle.Finished(ticket, time.monotonic()))
+
+    def stopped(self, task: asyncio.Future[Any]) -> lifecycle.Stopped | None:
+        """How a call this owner cancelled is answered, or ``None`` if it did not."""
+        return lifecycle.stopped(self._state, self._tickets.get(task))
+
+    def body_began(self, call_id: str) -> None:
+        """Note that *call_id* is past the point where it could still be refused."""
+        self._apply(lifecycle.BodyBegan(call_id))
 
     def busy(self, *, background_work: bool = False) -> bool:
         """Whether retiring now would cut off somebody's work.
@@ -268,62 +274,39 @@ class CallLiveness:
         *background_work* is detached work the caller knows about and this
         tracker does not, such as a browser setup still running.
         """
-        return self._admitted > 0 or bool(self._waiting) or background_work
+        return lifecycle.busy(self._state, background=background_work)
 
-    def try_retire(self, reason: str, *, background_work: bool = False) -> bool:
-        """Close admission if nothing is in flight or queued. True if it did.
+    def try_retire(
+        self, reason: lifecycle.Retirement, *, background_work: bool = False
+    ) -> bool:
+        """Close admission if nothing is in flight or queued. True if it is closed."""
+        self._apply(lifecycle.RetireIfIdle(reason, background=background_work))
+        return self.retiring
 
-        The retirement an owner chooses for itself, such as the idle exit.
-        """
-        if self.retiring:
-            return True
-        if self.busy(background_work=background_work):
-            return False
-        self.retire(reason)
-        return True
-
-    def retire(self, reason: str) -> None:
+    def retire(self, reason: lifecycle.Retirement) -> None:
         """Close admission unconditionally, whatever is in flight.
-
-        The retirement something else decided: a newer build taking over, a
-        browser that can no longer be driven, a publication that failed. What
-        is already admitted keeps running for whatever drain the caller allows.
 
         No I/O, not even a log line: one caller is on its way to a hard exit
         that must not wait on a diagnostic. Callers say why themselves.
         """
-        if not self.retiring:
-            self.retiring = True
-            self.retire_reason = reason
+        self._apply(lifecycle.Retire(reason))
 
-    def watch(self, call_id: str, task: asyncio.Task[Any]) -> None:
-        """Start counting for *call_id*, running as *task*.
+    def turn_over(self) -> None:
+        """Close admission now, and owe the admitted calls the turnover drain.
 
-        The first heartbeat arrives before the call is dispatched, so a call is
-        registered already knowing it was heard, rather than starting from a
-        deadline it has to catch up with.
+        In the request itself, not on the loop's next tick: a call arriving
+        between the reply and the tick would otherwise be admitted by an owner
+        that has already said it is leaving.
         """
-        self._waiting[call_id] = _Waiting(task=task, last_heard=time.monotonic())
-
-    def call_started(self) -> None:
-        """Note a call being admitted."""
-        self._admitted += 1
-        self._quiet_since = None
-
-    def call_finished(self) -> None:
-        """Note an admitted call ending, however it ended."""
-        self._admitted = max(0, self._admitted - 1)
-        if self._admitted == 0:
-            self._quiet_since = time.monotonic()
+        self._apply(lifecycle.TurnOver())
 
     def calls_in_flight(self) -> int:
         """How many admitted calls have not finished yet."""
-        return self._admitted
+        return len(self._state.calls)
 
     def background_activity_finished(self) -> None:
         """Start a fresh quiet period after detached work kept the owner active."""
-        if self._admitted == 0:
-            self._quiet_since = time.monotonic()
+        self._apply(lifecycle.BackgroundFinished(time.monotonic()))
 
     def the_endpoint_is_live(self) -> None:
         """Start the idle clock, once there is something to be idle *at*.
@@ -333,118 +316,56 @@ class CallLiveness:
         counting that as quiet would let a short timeout expire before the
         frontend that asked for this owner had any way to reach it.
         """
-        if self._quiet_since is None and self._admitted == 0:
-            self._quiet_since = time.monotonic()
+        self._apply(lifecycle.Published(time.monotonic()))
 
     def quiet_for(self) -> float | None:
-        """Seconds since this owner last had anything to do, if it is free now.
-
-        ``None`` while a call is admitted, and while the endpoint has not been
-        published, which are the two states where the question does not apply.
-        A hint for the idle timer only: whether the owner may actually go is
-        :meth:`try_retire`'s answer, taken at the moment it acts.
-        """
-        if self._admitted > 0 or self._quiet_since is None:
-            return None
-        return time.monotonic() - self._quiet_since
+        """Seconds since this owner last had anything to do, if it is free now."""
+        return lifecycle.quiet_for(self._state, time.monotonic())
 
     def heard(self, call_id: str) -> bool:
-        """Note that somebody is still waiting. False if this call is unknown.
+        """Note that somebody is still waiting. False if this call is not watched.
 
-        Unknown covers both an id for a call that already finished and one that
-        was never registered, and neither is worth distinguishing: the answer to
-        the frontend is the same and it does not get to learn which.
+        Not watched covers a call that already finished, one written off or
+        cut, and one that was never registered, and none is worth
+        distinguishing: the answer to the frontend is the same and it does not
+        get to learn which.
         """
-        entry = self._waiting.get(call_id)
-        if entry is None:
-            return False
-        entry.last_heard = time.monotonic()
-        return True
-
-    def release(self, call_id: str) -> None:
-        """Stop counting for *call_id*, however its call ended."""
-        self._waiting.pop(call_id, None)
-        self._cut.discard(call_id)
-        self._began.discard(call_id)
+        self._apply(lifecycle.Heard(call_id, time.monotonic()))
+        return lifecycle.watching(self._state, call_id)
 
     def abandoned(self, call_id: str) -> bool:
-        """Whether *call_id* may no longer start browser work.
-
-        An absent entry counts as abandoned, and that is deliberate rather than
-        cautious. A running call is registered from admission until it ends, so
-        a missing entry is one the expiry already wrote off or one that never
-        got through admission; neither was heard from, and treating either as
-        freshly heard would hand authority to a call nobody vouched for.
-
-        An entry older than the expiry is abandoned too, even before the next
-        scan pops it, unless this owner itself has not been scanning: the same
-        stall rule :meth:`cancel_the_abandoned` applies, for the same reason.
-        """
-        entry = self._waiting.get(call_id)
-        if entry is None:
-            return True
-        now = time.monotonic()
-        if self._last_scan is not None and now - self._last_scan > _STALL_SECONDS:
-            return False
-        return now - entry.last_heard > EXPIRY_SECONDS
+        """Whether *call_id* may no longer start browser work."""
+        return lifecycle.abandoned(self._state, call_id, time.monotonic())
 
     def cancel_the_abandoned(self) -> list[str]:
-        """Cancel every call nobody has asked for lately, and say which.
+        """Cancel every call nobody has asked for lately, and say which."""
+        effects = self._apply(lifecycle.Scan(time.monotonic()))
+        return [e.call_id for e in effects if isinstance(e, lifecycle.Cancel)]
 
-        Called from the owner's own polling loop rather than from a timer of its
-        own, so this costs one dictionary scan per tick on a process that is
-        already ticking.
+    def tick(
+        self,
+        *,
+        idle_timeout: float = 0.0,
+        wedged: str | None = None,
+        setup_running: bool = False,
+        setup_failed: bool = False,
+        endpoint_stopped: bool = False,
+    ) -> list[lifecycle.Effect]:
+        """One turn of the owner's lifecycle loop, decided and not yet carried out.
+
+        The loop runs the effects in order and hands each that concerns a call
+        to :meth:`carry_out`, so its log reads in the order it was decided.
         """
-        now = time.monotonic()
-        since_last = now - self._last_scan if self._last_scan is not None else 0.0
-        self._last_scan = now
-        if since_last > _STALL_SECONDS:
-            # The owner itself was not running, so nobody had a chance to be
-            # heard. Charging that silence to the frontends would cancel calls
-            # that were being asked for the whole time. Everyone's clock starts
-            # again instead, rather than moving by the length of the stall,
-            # which for a stall longer than the expiry would push deadlines into
-            # the future. A call that really was abandoned gets one more cycle,
-            # which is the cheaper of the two mistakes.
-            logger.info(
-                "The owner was not scheduled for %.1fs; nobody is written off for that",
-                since_last,
+        return self._decide(
+            lifecycle.Tick(
+                now=time.monotonic(),
+                idle_timeout=idle_timeout,
+                wedged=wedged,
+                setup_running=setup_running,
+                setup_failed=setup_failed,
+                endpoint_stopped=endpoint_stopped,
             )
-            for entry in self._waiting.values():
-                entry.last_heard = now
-            return []
-
-        deadline = now - EXPIRY_SECONDS
-        abandoned = [
-            call_id
-            for call_id, entry in self._waiting.items()
-            if entry.last_heard < deadline
-        ]
-        for call_id in abandoned:
-            entry = self._waiting.pop(call_id)
-            logger.info(
-                "Nobody has waited for call %s in %.0fs; stopping it",
-                call_id,
-                EXPIRY_SECONDS,
-            )
-            entry.task.cancel()
-        return abandoned
-
-    def cut_off_the_rest(self) -> list[str]:
-        """Cancel every call still running because this owner is going away.
-
-        Only after admission closed and the drain ran out. Each call cut here is
-        answered rather than reported as abandoned, because its client is still
-        waiting: as not run if its body never began, and as an unknown outcome
-        if it did, since then it may already have acted.
-        """
-        cut = list(self._waiting)
-        for call_id in cut:
-            entry = self._waiting.pop(call_id)
-            self._cut.add(call_id)
-            logger.warning("Cutting off call %s to stand down", call_id)
-            entry.task.cancel()
-        return cut
+        )
 
 
 #: The tracker for this process. Module state rather than something threaded
@@ -467,15 +388,9 @@ def get_liveness() -> CallLiveness:
 
 def reset_liveness_for_testing() -> None:
     """Forget every watched call, so one test cannot leak into the next."""
-    _liveness._waiting.clear()
-    _liveness._admitted = 0
-    _liveness._quiet_since = None
-    _liveness._last_scan = None
-    _liveness.retiring = False
-    _liveness.retire_reason = None
-    _liveness.instance_id = None
-    _liveness._cut.clear()
-    _liveness._began.clear()
+    _liveness._state = lifecycle.Owner()
+    _liveness._tasks.clear()
+    _liveness._tickets.clear()
 
 
 def abandoned_before_browser_work() -> bool:
@@ -583,31 +498,32 @@ class OwnerCallLivenessMiddleware(Middleware):
             )
 
         try:
-            try:
-                return await running
-            except asyncio.CancelledError:
-                outer = asyncio.current_task()
-                if outer is not None and outer.cancelling():
-                    # Somebody cancelled *this* middleware, which is shutdown
-                    # rather than an abandoned call. Reporting it as one would
-                    # tell whoever asked us to stop that the call merely lost
-                    # its client. The same counter tells the two apart in
-                    # `browser_lifespan`, for the same reason.
-                    raise
-                if running.cancelled() and call_id in _liveness._cut:
-                    # Ours, and not because the client left: this owner is
-                    # standing down and the drain ran out. The client is still
-                    # waiting, and what it may do next depends on whether the
-                    # call got as far as its tool body.
-                    if call_id not in _liveness._began:
-                        # Only ever queued, so nothing ran. The same signed
-                        # refusal a retiring owner gives a new call, which a
-                        # frontend already reads as not sent and may repeat.
-                        return _refusal(
-                            RETIRING,
-                            "The shared browser shut down before this call "
-                            "started. Nothing was run; retry it.",
-                        )
+            return await running
+        except asyncio.CancelledError:
+            outer = asyncio.current_task()
+            if outer is not None and outer.cancelling():
+                # Somebody cancelled *this* middleware, which is shutdown
+                # rather than an abandoned call. Reporting it as one would
+                # tell whoever asked us to stop that the call merely lost
+                # its client. The same counter tells the two apart in
+                # `browser_lifespan`, for the same reason.
+                raise
+            if not running.cancelled():
+                raise
+            match _liveness.stopped(running):
+                case lifecycle.Stopped.NOT_RUN:
+                    # Cut by this owner standing down while only ever queued,
+                    # so nothing ran. The same signed refusal a retiring owner
+                    # gives a new call, which a frontend already reads as not
+                    # sent and may repeat.
+                    return _refusal(
+                        RETIRING,
+                        "The shared browser shut down before this call "
+                        "started. Nothing was run; retry it.",
+                    )
+                case lifecycle.Stopped.UNKNOWN:
+                    # Cut after its tool body began, so it may have acted. Its
+                    # client is still waiting and is told exactly that.
                     answer = unknown_outcome(
                         tool=context.message.name,
                         reason="it was replaced and stopped waiting for this call",
@@ -617,15 +533,14 @@ class OwnerCallLivenessMiddleware(Middleware):
                         structured_content=answer,
                         is_error=True,
                     )
-                if running.cancelled() and call_id not in _liveness._waiting:
-                    # Ours: this call was expired above. Reported as an error
+                case lifecycle.Stopped.ABANDONED:
+                    # Expired because nobody was waiting. Reported as an error
                     # rather than re-raised, so the cancellation stops here
                     # instead of travelling on into a server nobody asked to
                     # shut down.
                     raise abandoned_call_error() from None
-                raise
-            finally:
-                _liveness.release(call_id)
+                case None:
+                    raise
         finally:
             # Only an admitted call reaches this, so the count stays balanced.
-            _liveness.call_finished()
+            _liveness.finished(running)
