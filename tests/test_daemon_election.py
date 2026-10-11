@@ -20,6 +20,7 @@ import contextlib
 import importlib
 import io
 import json
+import logging
 import math
 import os
 import signal
@@ -31,7 +32,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import pytest
 
@@ -4125,9 +4126,20 @@ class TestAForwardedCallThroughTheRealOwner:
         monkeypatch.setattr(update_check, "refresh_latest_version", nothing)
         monkeypatch.setattr(update_check, "pending_update_notice", lambda: None)
         elections: list[object] = []
-        monkeypatch.setattr(
-            election_module, "obtain_owner", lambda *_a, **_k: elections.append(1)
-        )
+
+        def no_election_expected(*_a: Any, **_k: Any) -> NoReturn:
+            # Raised rather than returning a stand-in: the proxy logs a failed
+            # election and reports the owner lost, so a call that wrongly
+            # recovers ends with that answer instead of a stub's AttributeError.
+            elections.append(1)
+            raise RuntimeError("this test's owner was taken for lost")
+
+        monkeypatch.setattr(election_module, "obtain_owner", no_election_expected)
+        # Why a call was taken for an owner loss, in the captured log of a
+        # failing run: the loss with its cause, and a hop's closing failures.
+        daemon_logger = logging.getLogger("linkedin_mcp_server.daemon")
+        logged_from = daemon_logger.level
+        daemon_logger.setLevel(logging.DEBUG)
 
         held, release = asyncio.Event(), asyncio.Event()
         bodies: list[dict[str, Any]] = []
@@ -4253,6 +4265,13 @@ class TestAForwardedCallThroughTheRealOwner:
             server.should_exit = True
             await asyncio.wait_for(serving, timeout=10)
             listener.close()
+            daemon_logger.setLevel(logged_from)
+
+    @staticmethod
+    async def _held_by(first: asyncio.Task[Any], owner: Any) -> None:
+        """Wait until the first call holds the browser, or say how it ended."""
+        await _until(lambda: owner.held.is_set() or first.done(), seconds=10)
+        assert owner.held.is_set(), f"the first call never ran: {_outcome(first)}"
 
     async def test_a_forwarded_call_is_routed_admitted_and_kept_in_turn(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4273,7 +4292,7 @@ class TestAForwardedCallThroughTheRealOwner:
                     client.call_tool("hold_the_browser", {"value": "first"})
                 )
                 owner.calls.append(first)
-                await asyncio.wait_for(owner.held.wait(), timeout=10)
+                await self._held_by(first, owner)
                 second = asyncio.create_task(
                     client.call_tool("hold_the_browser", {"value": "second"})
                 )
@@ -4357,7 +4376,7 @@ class TestAForwardedCallThroughTheRealOwner:
                     client.call_tool("hold_the_browser", {"value": "first"})
                 )
                 owner.calls.append(first)
-                await asyncio.wait_for(owner.held.wait(), timeout=10)
+                await self._held_by(first, owner)
                 second = asyncio.create_task(
                     client.call_tool("hold_the_browser", {"value": "second"})
                 )

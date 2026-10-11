@@ -670,6 +670,16 @@ class FrontendCallMiddleware(Middleware):
             failure = unreachable_owner_in(exc)
             if failure is None:
                 return call_core.Raised(op, loop.time(), exc)
+            # With its cause: a loss starts a recovery, and the cause is the
+            # only record of why this owner was given up on.
+            logger.info(
+                "Lost the shared browser owner (%s; %s)",
+                failure.classification.value,
+                "nothing was sent"
+                if failure.nothing_was_sent
+                else "the request may have left",
+                exc_info=exc,
+            )
             return call_core.OwnerLost(
                 op,
                 loop.time(),
