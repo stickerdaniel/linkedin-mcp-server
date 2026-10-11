@@ -35,7 +35,6 @@ returns decides whether a call may be repeated against a replacement owner.
 
 from __future__ import annotations
 
-import asyncio
 import contextvars
 import enum
 import json
@@ -46,7 +45,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any, NoReturn, TypeVar, cast
 
-import anyio
 import httpx2
 import mcp.types as mt
 from fastmcp.server.dependencies import get_context
@@ -96,10 +94,6 @@ _ResultT = TypeVar("_ResultT", bound="BaseModel")
 #: stream it serves without its answer. An owner standing down would lose the
 #: answers it had just cut its calls off with, ahead of uvicorn's grace.
 HOP_PROTOCOL_VERSION = "2026-07-28"
-
-#: How long a caller that gave up waits for its hop to close. On this era that
-#: is the SDK aborting the request's own POST, on loopback.
-_ABANDON_SECONDS = 2.0
 
 #: Who the frontend says it is to the owner.
 _CLIENT_INFO = mt.Implementation(
@@ -773,9 +767,9 @@ class OwnerForwarder(Provider):
         tore the transport down under a request still waiting, is judged like
         any other: a tool request that had entered the session may have left.
 
-        **A caller that gives up is told to the owner.** The hop is cancelled
-        once and given :data:`_ABANDON_SECONDS` to say so before the caller's
-        cancellation continues; the dispatch record is left as far as it got.
+        **A caller that gives up is told to the owner** by the SDK aborting the
+        request's POST, which needs nothing sent; the dispatch record is left
+        as far as it got.
         """
         binding = _call_being_made.get()
         if binding is None:
@@ -791,29 +785,7 @@ class OwnerForwarder(Provider):
         # Read together, never separately: the URL and the token are one
         # credential pair for one owner.
         headers["Authorization"] = f"Bearer {attachment.token}"
-        # A task of its own, so that a caller giving up reaches the hop once.
-        # The caller's cancellation is level-triggered (an anyio scope keeps
-        # cancelling every await inside it). Delivered once to a task outside
-        # that scope, the hop's teardown runs to its end. On this era the owner
-        # learns of it either way: abandoning a request closes its POST, which
-        # needs nothing sent. The handshake eras needed the task, because there
-        # abandoning took a `notifications/cancelled` and a DELETE, which the
-        # caller's scope kept from getting out.
-        # The task inherits this context, the call binding with it.
-        running = asyncio.ensure_future(
-            self._hop(hop, headers, operation, logging_callback)
-        )
-        try:
-            return await asyncio.shield(running)
-        except asyncio.CancelledError:
-            running.cancel()
-            with anyio.CancelScope(shield=True), anyio.move_on_after(_ABANDON_SECONDS):
-                await asyncio.wait({running})
-            if running.done() and not running.cancelled():
-                # Retrieved so it is not reported as never seen; the caller has
-                # gone, and nobody is left to tell.
-                running.exception()
-            raise
+        return await self._hop(hop, headers, operation, logging_callback)
 
     async def _hop(
         self,
