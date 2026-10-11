@@ -393,23 +393,40 @@ class TestTheFrontendSide:
         await asyncio.sleep(quick_cadence * 6)
         assert len(beats) == 1, "kept beating at an owner that got no call"
 
-    async def test_the_marker_reaches_the_client_the_provider_builds(
-        self, tmp_path: Path
+    async def test_the_marker_reaches_the_owner_on_the_forwarded_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         # The identifier has to arrive on the tool call as well as on the beats,
-        # or the owner cannot connect the two.
-        from fastmcp.client.transports import StreamableHttpTransport
+        # or the owner cannot connect the two. Read where the owner receives
+        # the request, over the forwarder's real hop.
+        from fastmcp import FastMCP
+        from owner_hop import Interceptor, method_of, reach_owners_in_process
 
+        from linkedin_mcp_server.daemon.forwarder import OwnerForwarder
+
+        owner = FastMCP("owner")
+
+        @owner.tool(name="get_person_profile")
+        async def get_person_profile() -> str:
+            return "profile"
+
+        seen: list[str | None] = []
+
+        class ReadsTheMarker(Interceptor):
+            async def handle(self, message, request, forward):
+                if method_of(message) == "tools/call":
+                    seen.append(request.headers.get(CALL_HEADER))
+                return await forward()
+
+        reaching = ReadsTheMarker(owner)
+        reach_owners_in_process(monkeypatch, lambda _url: reaching)
         backend = self._backend(tmp_path)
         beats: list[tuple[str, str]] = []
         middleware = self._middleware(backend, beats)
-        seen: list[str | None] = []
+        forwarder = OwnerForwarder(backend, timeout=5.0)
 
-        async def call_next(_context: Any) -> str:
-            client = backend.open_client(timeout=1.0)
-            assert isinstance(client.transport, StreamableHttpTransport)
-            seen.append(client.transport.headers.get(CALL_HEADER))
-            return "the result"
+        async def call_next(_context: Any) -> Any:
+            return await forwarder.call("get_person_profile", {})
 
         await middleware.on_call_tool(
             self._context(),
@@ -420,7 +437,7 @@ class TestTheFrontendSide:
     async def test_no_marker_is_left_behind_afterwards(self, tmp_path: Path):
         # A leaked context variable would stamp the next unrelated operation,
         # including a listing, with a call identifier that is over.
-        from linkedin_mcp_server.daemon.proxy import _call_being_made
+        from linkedin_mcp_server.daemon.forwarder import _call_being_made
 
         backend = self._backend(tmp_path)
         middleware = self._middleware(backend, [])
@@ -487,19 +504,36 @@ class TestTheFrontendSide:
         assert len(beats) == before, "a heartbeat outlived the call it belonged to"
 
     async def test_beats_stay_with_the_owner_running_the_call(
-        self, tmp_path: Path, quick_cadence: float
+        self, tmp_path: Path, quick_cadence: float, monkeypatch: pytest.MonkeyPatch
     ):
         # A call belongs to the owner it was dispatched to. Following the
         # backend to a replacement would beat at an owner that has never heard
         # of this call, while the one actually running it stops being told.
+        from fastmcp import FastMCP
+        from owner_hop import reach_owners_in_process
         from test_daemon_proxy import _attachment
+
+        from linkedin_mcp_server.daemon.forwarder import OwnerForwarder
 
         backend = self._backend(tmp_path)
         original = backend.attachment.descriptor.instance_id
+        original_url = backend.attachment.descriptor.url
         beats: list[tuple[str, str]] = []
         middleware = self._middleware(backend, beats)
+        owner = FastMCP("owner")
+
+        @owner.tool(name="get_person_profile")
+        async def get_person_profile() -> str:
+            return "profile"
 
         dialled: list[str] = []
+
+        def owner_at(url: str) -> FastMCP:
+            dialled.append(url)
+            return owner
+
+        reach_owners_in_process(monkeypatch, owner_at)
+        forwarder = OwnerForwarder(backend, timeout=5.0)
 
         async def call_next(_context: Any) -> str:
             # Another call elects a replacement while this one is running. With
@@ -508,15 +542,14 @@ class TestTheFrontendSide:
             backend._attachment = _attachment(tmp_path, port=51999)
             await asyncio.sleep(quick_cadence * 4)
             # What the provider would open for this call, after the move.
-            # Twice, because one call opens more than one client: with no
+            # Twice, because one call opens more than one hop: with no
             # component cache FastMCP resolves the tool through its own listing
-            # first and then runs it, each with a client of its own. A binding
-            # that only held for the first would send the listing to one owner
-            # and the call itself to another, and one client per test cannot
-            # see that.
-            dialled.append(backend.open_client(timeout=1.0)._instance_id)
+            # first and then runs it, each on a hop of its own. A binding that
+            # only held for the first would send the listing to one owner and
+            # the call itself to another, and one hop per test cannot see that.
+            await forwarder.list_tools()
             backend._attachment = _attachment(tmp_path, port=52000)
-            dialled.append(backend.open_client(timeout=1.0)._instance_id)
+            await forwarder.call("get_person_profile", {})
             return "the result"
 
         await middleware.on_call_tool(
@@ -529,7 +562,7 @@ class TestTheFrontendSide:
         # entirely: the request goes where the beats go. Split between two owners,
         # the one running the call never hears a beat and cancels it after the
         # expiry, so a live call is reported to the user as abandoned.
-        assert dialled == [original, original], (
+        assert dialled and set(dialled) == {original_url}, (
             "the call and its heartbeats named different owners"
         )
 

@@ -11,7 +11,6 @@ import mcp.types as mt
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.server.middleware import MiddlewareContext
-from fastmcp.server.providers.proxy import ProxyClient
 
 import linkedin_mcp_server.server as server_module
 from linkedin_mcp_server import __version__
@@ -109,47 +108,20 @@ def _no_replacement_to_find(
     )
 
 
-class _BackendReaching(DaemonProxyBackend):
-    """A backend whose client reaches an in-process owner instead of a socket.
-
-    A subclass rather than a patched attribute, because the provider is handed
-    *this object's* bound method: production reads the override exactly where it
-    would read the real one, and none of the wiring around it is stood in.
-    """
-
-    def __init__(self, owner: FastMCP) -> None:
-        base = _a_backend()
-        super().__init__(
-            attachment=base.attachment,
-            auth_root=base.auth_root,
-            profile=base.profile,
-            config=base.config,
-        )
-        self._owner = owner
-
-    def open_client(self, *, timeout: float) -> ProxyClient:
-        # ProxyClient, matching production: a plain Client would drop the
-        # progress every browser-backed tool reports.
-        return ProxyClient(self._owner)
-
-
 def _proxy_to(monkeypatch: pytest.MonkeyPatch, owner: FastMCP, **kwargs) -> FastMCP:
-    """Build a PROXY whose provider reaches *owner* in memory rather than over HTTP.
+    """Build a PROXY whose forwarder reaches *owner* in process rather than over a socket.
 
-    The heartbeat preflight is answered in memory too, the way the owner's route
+    Only the hop's byte transport is replaced (``tests/owner_hop.py``): the
+    forwarder, its HTTP client, session and negotiation are production's. The
+    heartbeat preflight is answered in process too, the way the owner's route
     answers a call it has not registered yet. Without an answer the proxy would
     refuse to dispatch, which is the contract and not what these tests are about.
     """
-    import httpx2
+    from owner_hop import reach_owners_in_process
 
-    from linkedin_mcp_server.daemon.proxy import FrontendCallHeartbeatMiddleware
-
-    async def beat(_attachment: object, _call_id: str) -> httpx2.Response:
-        return httpx2.Response(200, json={"watched": False})
-
-    monkeypatch.setattr(FrontendCallHeartbeatMiddleware, "_beat", staticmethod(beat))
+    reach_owners_in_process(monkeypatch, lambda _url: owner)
     return create_mcp_server(
-        role=ServerRole.PROXY, proxy_backend=_BackendReaching(owner), **kwargs
+        role=ServerRole.PROXY, proxy_backend=_a_backend(), **kwargs
     )
 
 
@@ -270,47 +242,44 @@ class TestToolContract:
     ):
         """The list a client of the frontend sees is the owner's own.
 
-        Through the production client the backend builds, on the era it
-        negotiates, with only the socket replaced by the owner in memory. A
+        Through the production forwarder, on the era the client in front
+        negotiates, with only the socket replaced by the owner in process. A
         field the hop drops or rewrites (an annotation, an output schema, a
         title) would leave the owner's list correct and the one clients
         actually read wrong.
 
-        The hop's own era is checked too, because the frontend's says nothing
-        about it: an owner able to speak the 2026-07-28 era is spoken to in it
-        whichever era the client in front chose, and a hop still on the
-        handshake would pass the comparison above unchanged.
+        The hop's own protocol version is checked too, because the frontend's
+        says nothing about it: the hop is pinned whichever era the client in
+        front chose.
         """
-        from contextlib import asynccontextmanager
+        from owner_hop import Interceptor, reach_owners_in_process
 
-        from fastmcp.client import transports
-        from fastmcp.client.transports import FastMCPTransport
-
+        from linkedin_mcp_server.daemon.forwarder import HOP_PROTOCOL_VERSION
         from linkedin_mcp_server.server_role import reset_process_role_for_testing
 
-        hop: list[Any] = []
+        hop: list[tuple[str, str | None]] = []
 
-        class RecordsTheHop(FastMCPTransport):
-            @asynccontextmanager
-            async def connect_session(self, **kwargs: Any):
-                async with super().connect_session(**kwargs) as session:
-                    hop.append(session)
-                    yield session
+        class RecordsTheHop(Interceptor):
+            async def handle(self, message, request, forward):
+                if message is not None and "id" in message:
+                    version = request.headers.get("mcp-protocol-version")
+                    hop.append((message["method"], version))
+                return await forward()
 
         _stand_in_the_lifespan(monkeypatch)
-        owner = _server_for(ServerRole.OWNER)
-        monkeypatch.setattr(
-            transports,
-            "StreamableHttpTransport",
-            lambda *_args, **_kwargs: RecordsTheHop(owner),
-        )
+        owner = RecordsTheHop(_server_for(ServerRole.OWNER))
+        reach_owners_in_process(monkeypatch, lambda _url: owner)
         reset_process_role_for_testing()
         proxy = create_mcp_server(role=ServerRole.PROXY, proxy_backend=_a_backend())
         recorded = json.loads(_TOOL_CONTRACT.read_text(encoding="utf-8"))
 
         assert await _wire_tools(proxy, mode, protocol) == recorded
         assert hop, "the proxy never reached its owner"
-        assert {session.protocol_version for session in hop} == {"2026-07-28"}
+        # The initialize asks for the version in its body; every request after
+        # it names the version the hop speaks.
+        assert {v for method, v in hop if method != "initialize"} == {
+            HOP_PROTOCOL_VERSION
+        }, hop
 
 
 class TestServerRoles:
@@ -785,12 +754,10 @@ class TestProxyRole:
         # Only a lost owner is named. Anything else reaches the SDK as it was
         # raised, so its own masking still decides what a client may read.
         #
-        # A `ValueError` because it is neither of the kinds `ProxyProvider`
-        # turns into an `MCPError` with their text itself: a `RuntimeError` and
-        # the transport errors (`fastmcp/server/providers/proxy.py`,
-        # `_PROXY_TRANSPORT_ERRORS`). Those are readable in both eras already.
+        # A `ValueError`, raised where the forwarder asks the backend for an
+        # owner: neither an owner loss nor an answer from one.
         class _BrokenBackend(DaemonProxyBackend):
-            def open_client(self, *, timeout: float) -> ProxyClient:
+            def attachment_for_a_call(self) -> Any:
                 raise ValueError("something unrelated broke")
 
         base = _a_backend()

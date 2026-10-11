@@ -24,6 +24,7 @@ _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 _AUDIT_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "dependency-audit.yml"
 _RELEASE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
 _EVIDENCE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "differential-evidence.yml"
+_FORWARDER_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "forwarder-compat.yml"
 _DEPENDENCY_REVIEW = (
     "actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0"
 )
@@ -315,7 +316,13 @@ def test_full_audit_includes_the_development_group(
 
 
 def test_new_workflow_actions_are_sha_pinned() -> None:
-    for path in (_CI_WORKFLOW, _AUDIT_WORKFLOW, _RELEASE_WORKFLOW, _EVIDENCE_WORKFLOW):
+    for path in (
+        _CI_WORKFLOW,
+        _AUDIT_WORKFLOW,
+        _RELEASE_WORKFLOW,
+        _EVIDENCE_WORKFLOW,
+        _FORWARDER_WORKFLOW,
+    ):
         workflow = path.read_text(encoding="utf-8")
         uses = [line for line in workflow.splitlines() if "uses:" in line]
         assert uses

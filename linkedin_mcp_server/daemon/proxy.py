@@ -9,11 +9,11 @@ server a role gets; the loopback address, the bearer token, the proxy-environmen
 refusal and the forwarding deadline are all daemon knowledge, and every one of
 them is a way to leak a credential or to hang a call.
 
-No client *session* is cached: one is built per upstream operation, because that
-is how ``ProxyProvider`` uses its factory and because a single shared session
-would outlive the owner it was opened against. The address and token are read
-per operation too, from :class:`DaemonProxyBackend`, so a proxy follows a
-replacement owner instead of keeping an address it captured at startup.
+How a request crosses to the owner is :mod:`linkedin_mcp_server.daemon.forwarder`.
+It reads the owner's address and token per operation from
+:class:`DaemonProxyBackend`, so a proxy follows a replacement owner instead of
+keeping an address it captured at startup. This module is the call shell around
+it: the heartbeat preflight, recovery, auth repair and the call's deadline.
 
 **Which owner that is changes while this process runs**, and the rest of this
 module is about surviving it. ``@latest`` is the documented install, so the first
@@ -37,25 +37,18 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import datetime
-import enum
 import logging
-from collections.abc import Awaitable, Callable, Coroutine
-from dataclasses import dataclass, field, replace
+from collections.abc import Awaitable
+from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx2
 import mcp.types as mt
-from fastmcp.client.progress import ProgressHandler
-from fastmcp.client.telemetry import client_span
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
-from fastmcp.telemetry import inject_trace_context
 from fastmcp.tools import ToolResult
-from fastmcp.utilities.timeout import normalize_timeout_to_seconds
-from mcp import ClientSession, MCPError
-from opentelemetry.trace import Status, StatusCode
+from mcp import MCPError
 
 from linkedin_mcp_server.config.schema import AUTH_REPAIR_LOGIN_WAIT_FRACTION
 from linkedin_mcp_server.daemon import auth_repair
@@ -63,6 +56,14 @@ from linkedin_mcp_server.daemon import owner as daemon_owner
 from linkedin_mcp_server.daemon.auth_repair import a_repeat_could_change_something
 from linkedin_mcp_server.daemon.core import call as call_core
 from linkedin_mcp_server.daemon.descriptor import PROTOCOL_VERSION
+from linkedin_mcp_server.daemon.forwarder import (
+    CallBinding,
+    DispatchRecord,
+    OwnerFailure,
+    OwnerUnreachableError,
+    bound_to,
+    unreachable_owner_in,
+)
 from linkedin_mcp_server.daemon.liveness import (
     CALL_HEADER,
     HEARTBEAT_PATH,
@@ -77,127 +78,23 @@ from linkedin_mcp_server.daemon.liveness import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from fastmcp.server.providers.proxy import ProxyClient, ProxyProvider
-    from mcp.shared.dispatcher import ProgressFnT
-    from mcp.shared.message import ClientMessageMetadata
-    from pydantic import BaseModel, TypeAdapter
-
     from linkedin_mcp_server.config.schema import AppConfig
     from linkedin_mcp_server.daemon.discovery import Attachment
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class _CallBinding:
-    """One call, and the owner it belongs to for as long as it runs.
-
-    The two travel together and must not be read separately. The heartbeats and
-    the request itself both name an owner, and if they name *different* ones the
-    mechanism inverts: the owner running the call never hears a beat and cancels
-    it after the expiry, while a call that is very much alive is reported to the
-    user as abandoned. That is reachable, because with no component cache every
-    call re-lists first, and a replacement adopted between the two would move
-    the backend underneath this call.
-
-    A binding is not yet a call in flight. It is made before the client is
-    built, initialized and asked to send, and an owner written off during any
-    of those awaits must not receive the request. *dispatch* records the one
-    moment the tool request was actually handed to the session; only from then
-    on does the call keep its owner whatever happens to it.
-    """
-
-    call_id: str
-    attachment: Attachment
-    dispatch: _Dispatch = field(default_factory=lambda: _Dispatch())
-
-
-@dataclass
-class _Dispatch:
-    """Whether a bound call's tool request has been handed to its session."""
-
-    sent: bool = False
-
-
-_ResultT = TypeVar("_ResultT", bound="BaseModel")
-
-
-class ClaimsTheToolRequest(ClientSession):
-    """The owner session, which notes a tool request as the SDK takes it.
-
-    Both protocol eras end here. On the 2026-07-28 era ``ProxyTool.run`` calls
-    ``session.call_tool`` itself and never reaches the client's
-    ``call_tool_mcp``, so a claim made in the client would miss the one request
-    that matters. ``send_request`` is where every tool request enters the SDK,
-    in either era, with no await in front of it.
-
-    *tool_request_started* is this session's own record and is kept whether or
-    not a heartbeat binding was handed over. A missing binding means nobody
-    else is watching, never that nothing was sent. With one, the bound call's
-    dispatch is marked as well, so its owner stays fixed from here on.
-
-    Claimed is a superset of written: the SDK still serializes the request and
-    can fail or be cancelled before a byte leaves. What matters is that nothing
-    can take effect at the owner before the claim.
-    """
-
-    #: Handed over by the client once the session exists, and never read back
-    #: from the context variable: see ``_CallBinding``.
-    binding: _CallBinding | None = None
-    tool_request_started: bool = False
-
-    async def send_request(
-        self,
-        request: mt.ClientRequest | mt.Request[Any, Any],
-        result_type: type[_ResultT] | TypeAdapter[_ResultT],
-        request_read_timeout_seconds: float | None = None,
-        metadata: ClientMessageMetadata | None = None,
-        progress_callback: ProgressFnT | None = None,
-    ) -> _ResultT:
-        # Before the first await, which is the dispatcher's. Listings and
-        # negotiation change nothing and stay unclaimed, so they may be repeated.
-        if isinstance(request, mt.CallToolRequest):
-            self.tool_request_started = True
-            if self.binding is not None:
-                self.binding.dispatch.sent = True
-        return await super().send_request(
-            request,
-            result_type,
-            request_read_timeout_seconds,
-            metadata,
-            progress_callback,
-        )
-
-    async def validate_tool_result(self, name: str, result: mt.CallToolResult) -> None:
-        """Accept the owner's answer as it arrived.
-
-        The SDK's own check lists tools first whenever this fresh session has no
-        output schema cached, which is every time. A failure in that second
-        request would replace an answer to a call that may already have changed
-        LinkedIn, and would look safe to repeat. The owner validates its
-        declared output schemas before answering, and a proxy only relays.
-        """
-        return None
-
-
-#: The call the current task is making, for the factory to address and stamp.
-#: A context variable rather than an argument because `ProxyProvider` builds the
-#: client itself: the middleware that knows the call never sees the code that
-#: builds the transport.
-_call_being_made: contextvars.ContextVar[_CallBinding | None] = contextvars.ContextVar(
-    "linkedin_mcp_call", default=None
-)
-
 #: The dispatch record of the attempt :class:`FrontendCallMiddleware` is making,
 #: handed in to the binding the heartbeat middleware makes for it. Read back when
-#: the call's deadline cuts the attempt off, because only the session's own claim
+#: the call's deadline cuts the attempt off, because only the forwarder's record
 #: says whether the tool request had left by then.
-_attempt_dispatch: contextvars.ContextVar[_Dispatch | None] = contextvars.ContextVar(
-    "linkedin_mcp_attempt", default=None
+_attempt_dispatch: contextvars.ContextVar[DispatchRecord | None] = (
+    contextvars.ContextVar("linkedin_mcp_attempt", default=None)
 )
 
-#: Added to the owner's tool timeout to get the frontend's deadlines: each hop's,
-#: and the whole call's (:func:`call_budget`). The owner is the one that should
+#: Added to the owner's tool timeout to get the frontend's deadlines: each hop's
+#: request (:class:`~linkedin_mcp_server.daemon.forwarder.OwnerForwarder`), and
+#: the whole call's (:func:`call_budget`). The owner is the one that should
 #: report a timed-out tool, so the frontend has to outlast it; an equal value
 #: races the owner's own error response and turns a diagnosable "tool timed out"
 #: into a transport failure.
@@ -221,640 +118,6 @@ def call_budget(tool_timeout: float) -> float:
     ``TOOL_TIMEOUT`` already says how long a call may take.
     """
     return tool_timeout + _TIMEOUT_MARGIN_SECONDS
-
-
-#: The provider's component cache, switched off. FastMCP's default is 300
-#: seconds and this module used to take it, on the stated grounds that an owner's
-#: tool set never changes over its lifetime. That was true and is no longer the
-#: question: a proxy now outlives several owners, and after an upgrade several
-#: versions, so what a cache holds is one owner's answer about itself being
-#: served for a different owner's calls.
-#:
-#: Clearing the cache when a replacement is adopted was the first design and it
-#: is not sound. ``ProxyProvider`` writes each cache after a listing completes,
-#: outside any lock (``proxy.py``, ``_list_tools`` and its three siblings), so a
-#: listing already in flight against the departing owner can refill the cache
-#: *after* the replacement was adopted. Reproduced against the installed provider
-#: by holding a listing open across an adoption: the cleared cache came back
-#: holding the old owner's components. No clear-on-adoption design closes that,
-#: because the write is in code this module does not own.
-#:
-#: Freshness is not the sharp end. ``a_repeat_could_change_something`` reads
-#: ``readOnlyHint`` off the tool the provider hands back, so a stale annotation
-#: is what decides whether a call may be repeated against the new owner.
-#:
-#: Measured on this machine against a real loopback owner: 27.8ms versus 56.0ms
-#: median per forwarded call, so the cache was worth about 28ms. A forwarded call
-#: drives a browser through a LinkedIn page and takes seconds. Only single
-#: lookups change either way; an explicit ``tools/list`` re-fetched regardless.
-_NO_COMPONENT_CACHE = 0.0
-
-
-class OwnerFailure(enum.Enum):
-    """Why an owner could not take a call, in the terms recovery acts on.
-
-    Separate from whether anything was sent, which is its own field on
-    :class:`OwnerUnreachableError`: a burying failure is always one where the
-    tool request never left, but the two answer different questions.
-    """
-
-    #: No connection could be opened. Maybe gone, maybe restarting; the
-    #: election's own probe decides.
-    UNREACHABLE = "unreachable"
-    #: Connected, then no usable answer: a read timeout, a protocol error or a
-    #: 5xx. A stalled owner looks like this and may answer a moment later.
-    OWNER_ERROR = "owner_error"
-    #: 401. The token this frontend holds is not the one the process on that
-    #: port accepts, which usually means a different owner holds the port now.
-    TOKEN_REJECTED = "token_rejected"
-    #: 404 on the heartbeat route. Not an owner of this protocol.
-    ROUTE_MISSING = "route_missing"
-    #: This owner has closed admission and is on its way out.
-    RETIRING = "retiring"
-    #: This owner refused a call it could not identify.
-    UNMARKED_REFUSED = "unmarked_refused"
-    #: Any other answer. A same-protocol owner gives only 200, 401 and 409 on
-    #: the heartbeat route, so anything else is not this owner as this
-    #: frontend knows it.
-    UNEXPECTED_STATUS = "unexpected_status"
-
-    @property
-    def buries(self) -> bool:
-        """Whether this instance must never be dispatched to again.
-
-        The failures that say something about the owner rather than about one
-        moment of it. A retiring owner still answers the listing an election
-        probes with, so without this it would be found, attached to, and
-        refused again for as long as it took to leave.
-        """
-        return self in _BURYING
-
-
-_BURYING = frozenset(
-    {
-        OwnerFailure.ROUTE_MISSING,
-        OwnerFailure.RETIRING,
-        OwnerFailure.UNMARKED_REFUSED,
-        OwnerFailure.UNEXPECTED_STATUS,
-    }
-)
-
-
-class OwnerUnreachableError(Exception):
-    """The owner a proxy is attached to could not be reached.
-
-    Raised where the boundary is known rather than diagnosed later, because two
-    things only the client can see decide what a caller may do about it: which
-    owner failed, and whether the request had left this process.
-
-    *instance_id* is that owner's identity. A failure carries it so a recovery
-    that has already happened is not repeated: a call that opened its client
-    before a replacement was adopted fails afterwards against the old one, and
-    without the identity that late failure would elect again.
-
-    *nothing_was_sent* is the whole of the replay question. There is no dispatch
-    acknowledgement anywhere in the protocol, so after an ambiguous transport
-    failure this process cannot tell whether the owner was still queued, already
-    held the profile lease, or had finished the effect. Only when nothing left
-    this process is repeating a mutating call safe. A failed heartbeat
-    preflight and an owner's own refusal both answer it for the tool request,
-    not for the control exchange that carried the news.
-
-    *classification* is carried to :meth:`DaemonProxyBackend.recover`, which is
-    where it decides whether the owner is written off. Derived from the cause
-    when not given, because every transport failure raised below already says
-    whether a connection was ever opened.
-    """
-
-    def __init__(
-        self,
-        *,
-        instance_id: str,
-        nothing_was_sent: bool,
-        cause: BaseException,
-        classification: OwnerFailure | None = None,
-    ) -> None:
-        if classification is None:
-            classification = (
-                OwnerFailure.UNREACHABLE
-                if _no_connection_was_established(cause)
-                else OwnerFailure.OWNER_ERROR
-            )
-        if classification in (OwnerFailure.UNREACHABLE, OwnerFailure.OWNER_ERROR):
-            message = f"The shared browser owner did not answer: {cause}"
-        else:
-            message = (
-                f"The shared browser owner could not take this call "
-                f"({classification.value}): {cause}"
-            )
-        super().__init__(message)
-        self.instance_id = instance_id
-        self.nothing_was_sent = nothing_was_sent
-        self.classification = classification
-
-
-def unreachable_owner_in(exc: BaseException) -> OwnerUnreachableError | None:
-    """Find an unreachable-owner failure in an exception chain, if it is there.
-
-    Walked rather than type-checked directly, and the same reason applies here as
-    to ``daemon.auth_repair._auth_failure_in``: what reaches a middleware is a wrapper.
-    Measured against a dead port with a warm tool cache, the chain the middleware
-    sees is ``ToolError -> RuntimeError('Client failed to connect') ->
-    httpx2.ConnectError``, because ``FastMCP.call_tool`` masks whatever the tool
-    raised. A test that lists first is therefore the only one that exercises the
-    real shape; a cold lookup can deliver the failure unwrapped and let a broken
-    detector pass.
-    """
-    current: BaseException | None = exc
-    while current is not None:
-        if isinstance(current, OwnerUnreachableError):
-            return current
-        current = current.__cause__
-    return None
-
-
-def _no_connection_was_established(exc: BaseException) -> bool:
-    """Whether the cause chain proves no connection was opened.
-
-    The narrow, provable class, and it is narrow on purpose. The tempting rule is
-    to read the message: FastMCP wraps nearly everything from its connect in
-    ``RuntimeError(f"Client failed to connect: {exception}")``, so that prefix
-    looks like proof. It is not. Reproduced against a listener that accepted the
-    ``initialize`` bytes and then closed: same prefix, ``RemoteProtocolError``
-    underneath, and a request that had demonstrably left this process.
-
-    ``ConnectError`` and ``ConnectTimeout`` are the two that mean the connection
-    itself was never established, so nothing on it can have been sent.
-
-    It classifies a failure and no longer answers whether a tool request was
-    sent. A session makes several requests, and a failed connect found after
-    the tool request entered it may belong to a later one.
-    """
-    import httpx2
-
-    current: BaseException | None = exc
-    while current is not None:
-        if isinstance(current, (httpx2.ConnectError, httpx2.ConnectTimeout)):
-            return True
-        current = current.__cause__
-    return False
-
-
-#: Errors the MCP client writes itself when an HTTP exchange produced no
-#: JSON-RPC answer. Matched on code *and* message, because each of these codes
-#: is also one a server may send as a real answer. From
-#: ``mcp/client/streamable_http.py`` at mcp 2.2.0:
-#:
-#: * a 404 to a POST with a session, which says the session is gone (line 409).
-#: * a 404 to a POST before any session exists (line 407).
-#: * any other status of 400 or more whose body is not a JSON-RPC error: a 401
-#:   for a token this owner does not accept, a 500 from a process on its way
-#:   down (line 411).
-#: * a 202 answering a request rather than a notification (lines 362-371).
-_SYNTHETIC_ERRORS = frozenset(
-    {
-        (mt.INVALID_REQUEST, "Session terminated"),
-        (mt.METHOD_NOT_FOUND, "Not Found"),
-        (mt.INTERNAL_ERROR, "Server returned an error response"),
-        (mt.INVALID_REQUEST, "server answered a request with 202 Accepted"),
-    }
-)
-
-#: The same, for the ones whose message ends in text the SDK fills in: the
-#: parse error, the content type it saw, or where a redirect pointed. Same file:
-#: a response body that is not JSON-RPC (line 448), an SSE event that is not
-#: (line 209), a content type that is neither (line 429), and a redirect the
-#: transport would not follow (lines 71-83, delivered at 286 and 379).
-_SYNTHETIC_ERROR_PREFIXES = (
-    (mt.PARSE_ERROR, "Failed to parse JSON response: "),
-    (mt.PARSE_ERROR, "Failed to parse SSE message: "),
-    (mt.INVALID_REQUEST, "Unexpected content type: "),
-    (mt.INVALID_REQUEST, "Redirect to "),
-)
-
-
-def _the_owner_answered(exc: BaseException) -> bool:
-    """Whether *exc* is the owner speaking, rather than a client that gave up.
-
-    An ``MCPError`` looks like an answer and usually is one: a JSON-RPC error
-    came off the wire, so a process was there to send it. Treating those as a
-    departure would elect a replacement for a healthy owner, repeat a read-only
-    call for nothing, and swallow ``ProxyProvider``'s own ``METHOD_NOT_FOUND``
-    handling, which turns an unsupported listing into an empty list.
-
-    Some are not answers, and they matter more than all the real ones put
-    together, because they are what a departure *during* a request looks like.
-    The client invents each of them itself:
-
-    * ``REQUEST_TIMEOUT`` (``-32001``) when nothing came back inside the
-      deadline (``mcp/shared/jsonrpc_dispatcher.py:425``). SDK v1 used the HTTP
-      status 408 here, and v2 no longer does (SDK ``docs/migration.md:1933``).
-    * ``CONNECTION_CLOSED`` when the read stream closes with requests still
-      pending (same file, 400 and 693), and when an SSE response ends without
-      one (``mcp/client/streamable_http.py:502-509``, reached from 498 and 532).
-    * the HTTP stand-ins in :data:`_SYNTHETIC_ERRORS` and
-      :data:`_SYNTHETIC_ERROR_PREFIXES`. SDK v2 turns a failed HTTP exchange
-      into an error for that one request instead of failing the transport
-      (SDK ``docs/migration.md:2178``), and writes one of these whenever the
-      response carried no JSON-RPC error of its own.
-
-    Measured under SDK v1 against a real loopback owner killed while a call was
-    in flight: a timeout error nobody sent. Passing it through as an answer
-    would leave the frontend attached to a process that is gone, which is the
-    failure this module exists to end.
-
-    **The first two are read by code alone and the rest by code and message.**
-    Code alone for the two the SDK reserves for itself, so a reworded message
-    in a future SDK cannot silently stop a real departure from being
-    recognised. Code and message for the rest, because each of their codes is
-    an ordinary answer too. Neither is a guarantee the protocol makes: the SDK
-    forwards a real JSON-RPC error body verbatim, so a server that sends
-    exactly one of these pairs cannot be told from the stand-in, and it is
-    taken for one. That is the cautious direction. It costs an election that
-    finds the same owner still answering, and at worst an ``outcome_unknown``
-    where a plainer error was possible. The owner is this same package and
-    raises no ``MCPError`` of its own: a failing tool comes back as a result
-    with ``is_error`` set.
-
-    Nothing here says whether the tool request left this process, and nothing
-    may read it that way. That is ``nothing_was_sent``, answered by the
-    boundary and the session's own record, and an error the
-    client invented after the request went out leaves it false: a call that
-    could change something is then reported as an unknown outcome and never
-    repeated.
-
-    A departure has three shapes, all measured with the client the provider
-    builds, and only the third reaches this question:
-
-    * already gone when the client connects: ``RuntimeError`` over
-      ``httpx2.ConnectError``, out of ``__aenter__``.
-    * gone after the initialize and before the request that follows it, which is
-      a real window because one operation opens a client, initializes it and then
-      sends its request on that same session: ``anyio.BrokenResourceError`` or
-      ``ClosedResourceError``, depending on timing.
-    * gone while the request is outstanding: one of the invented errors above.
-
-    The first two are not ``MCPError`` and are tagged without consulting any of
-    this. Under SDK v2 the second can reach it too: with a transport that
-    refused the connection for one later request of an open session, that
-    request came back as ``CONNECTION_CLOSED``, which is still not an answer.
-    """
-    from mcp import MCPError
-
-    if not isinstance(exc, MCPError):
-        return False
-    code, message = exc.code, exc.message
-    if code in (mt.CONNECTION_CLOSED, mt.REQUEST_TIMEOUT):
-        return False
-    if (code, message) in _SYNTHETIC_ERRORS:
-        return False
-    return not any(
-        code == synthetic and message.startswith(prefix)
-        for synthetic, prefix in _SYNTHETIC_ERROR_PREFIXES
-    )
-
-
-def _tells_which_owner_failed() -> type:
-    """The proxy client that tags a transport failure with its owner.
-
-    Built on demand rather than at import, because ``ProxyClient`` is a lazy
-    import everywhere else here: FastMCP's server package is heavy and a direct
-    server never needs it.
-    """
-    from fastmcp.server.providers.proxy import ProxyClient
-
-    class TellsWhichOwnerFailed(ProxyClient):
-        """A ``ProxyClient`` that says which owner failed, and whether it heard.
-
-        The connect is one boundary and every request after it is another, and
-        the listings are the ones that are easy to miss. ``ProxyTool.run`` is
-        factory, then ``async with client``, then the call — but
-        ``ProxyProvider._list_tools`` runs ``client.list_tools()`` *after* a
-        successful enter, and its three siblings do the same for resources,
-        templates and prompts. An owner that dies between the negotiation and
-        the list request raises out of neither the enter nor the call, so
-        without these that failure would carry no owner identity and discovery
-        could never recover.
-
-        The dispatch answer differs by boundary, and being precise beats being
-        uniformly cautious:
-
-        * ``__aenter__`` — nothing was sent, *whatever* the exception. Not
-          because the exception says so but because of where it happened: the
-          call is inside the ``async with`` block and cannot have run. A
-          negotiation that reached the owner is still not a tool call.
-        * every request after it — the session monitor answers from the
-          session's own record (:class:`ClaimsTheToolRequest`). Until a tool
-          request entered the session nothing that could act was sent, which
-          is what makes a listing repeatable. From then on nothing here proves
-          it did not arrive, and no exception is read as that proof: a
-          ``ConnectError`` surfacing afterwards may belong to a later exchange
-          on the same session rather than to the tool request.
-        * the listing methods — also tagged around the monitor, for a failure
-          that happens outside it. Listing changes nothing.
-
-        ``__aexit__`` is a boundary of the opposite kind and tags nothing: it
-        runs once the operation has an answer, so the only thing a failure there
-        can do is take that answer's place. See its own docstring.
-        """
-
-        def __init__(
-            self,
-            *args: Any,
-            instance_id: str,
-            attachment: Attachment | None = None,
-            binding: _CallBinding | None = None,
-            still_usable: Callable[[Attachment], None] | None = None,
-            **kwargs: Any,
-        ) -> None:
-            super().__init__(*args, **kwargs)
-            # After `ProxyClient.__init__`, which installs its own forwarding
-            # session class last and would overwrite one passed in. Replaced
-            # rather than rebuilt, so header forwarding and every other option
-            # it set are kept.
-            options = self._transport_options
-            assert options is not None
-            self._transport_options = replace(
-                options, session_class=ClaimsTheToolRequest
-            )
-            self._instance_id = instance_id
-            self._attachment = attachment
-            self._binding = binding
-            self._still_usable = still_usable
-            #: The session this client entered on, kept for what it recorded
-            #: sending: the client's own session state is cleared as soon as
-            #: that session ends, and a failure is often reported after that.
-            self._entered_on: ClaimsTheToolRequest | None = None
-
-        def _check_at_the_session(self) -> None:
-            """Refuse a request to a written-off owner.
-
-            Runs inside the coroutine the session monitor schedules, as its first
-            step before the session method: the last point at which this process
-            can still decline to send. Checking earlier and sending later is not
-            the same thing, because the monitor runs the request as a task of its
-            own and anything already queued runs first, another call's burial
-            included. A refusal here says nothing was sent, which is exactly true.
-
-            Every request is checked, listings too: an owner written off while
-            its client was being set up gets no request at all. A bound call
-            whose tool request was already sent is not checked again, because a
-            request already on its way must stay with the owner whose heartbeats
-            are keeping it alive.
-            """
-            binding = self._binding
-            if binding is not None and binding.dispatch.sent:
-                return
-            target = binding.attachment if binding is not None else self._attachment
-            if self._still_usable is not None and target is not None:
-                self._still_usable(target)
-
-        async def _await_with_session_monitoring(
-            self, coro: Coroutine[Any, Any, Any]
-        ) -> Any:
-            """The installed monitor, with the burial check moved inside its task.
-
-            Every request fastmcp's client makes goes through here, the tool
-            request of both eras included, so this is the one place that sees
-            the send as it happens and can say whether it had begun.
-            """
-            entered = False
-
-            async def at_the_session() -> Any:
-                nonlocal entered
-                entered = True
-                try:
-                    self._check_at_the_session()
-                except BaseException:
-                    # Never started, and closed so it is not reported as a
-                    # coroutine nobody awaited.
-                    coro.close()
-                    raise
-                return await coro
-
-            try:
-                return await super()._await_with_session_monitoring(at_the_session())
-            except OwnerUnreachableError:
-                # Already ours, from the check above. Tagging twice would bury
-                # the answer it recorded.
-                raise
-            except Exception as exc:
-                if _the_owner_answered(exc):
-                    raise
-                # Only the session's own record proves nothing was sent. With no
-                # session entered there is no record, and that is not proof.
-                session = self._entered_on
-                raise OwnerUnreachableError(
-                    instance_id=self._instance_id,
-                    nothing_was_sent=(
-                        session is not None and not session.tool_request_started
-                    ),
-                    cause=exc,
-                ) from exc
-            finally:
-                # The monitor can refuse before it starts the wrapper, when the
-                # session has already ended. It then closes the wrapper, which
-                # never reaches *coro*, so the request is closed here instead.
-                if not entered:
-                    coro.close()
-
-        async def _saying_which_owner(
-            self, operation: Awaitable[Any], *, nothing_was_sent: bool
-        ) -> Any:
-            """Await *operation*, tagging a departed owner with its identity."""
-            try:
-                return await operation
-            except OwnerUnreachableError:
-                # Already ours, from a boundary further in. Tagging twice would
-                # bury the answer the inner one recorded.
-                raise
-            except Exception as exc:
-                if _the_owner_answered(exc):
-                    raise
-                raise OwnerUnreachableError(
-                    instance_id=self._instance_id,
-                    nothing_was_sent=nothing_was_sent,
-                    cause=exc,
-                ) from exc
-
-        async def __aenter__(self) -> Any:
-            entered = await self._saying_which_owner(
-                super().__aenter__(), nothing_was_sent=True
-            )
-            try:
-                # The session the transport really built, not whatever the
-                # options asked for. A transport that ignored `session_class`
-                # would leave the tool request unclaimed, and an attribute set
-                # on the wrong object would hide that.
-                session = self.session
-                if not isinstance(session, ClaimsTheToolRequest):
-                    raise TypeError(
-                        "The owner connection was not given the session that "
-                        f"claims its tool requests: {type(session).__name__}"
-                    )
-                # After the negotiation, which sends no tool request, and before
-                # anything the caller does with the client. The binding read
-                # once in `open_client`, never the context variable again.
-                session.binding = self._binding
-                self._entered_on = session
-            except BaseException as failed:
-                # A failed enter gets no exit of its own, and this one had
-                # already connected.
-                await self.__aexit__(type(failed), failed, failed.__traceback__)
-                raise
-            logger.debug(
-                "Talking to the shared browser owner %s on protocol %s",
-                self._instance_id,
-                self.protocol_version,
-            )
-            return entered
-
-        async def __aexit__(
-            self,
-            exc_type: type[BaseException] | None,
-            exc_val: BaseException | None,
-            exc_tb: Any,
-        ) -> bool | None:
-            """Close the session, and let nothing here decide the outcome.
-
-            The one boundary that runs *after* an answer exists, and the reason
-            it needs guarding at all is that the answer is already on its way
-            out. ``ProxyTool.run`` makes its call inside ``async with client``
-            and all four provider listings do the same (``proxy.py``, ``run``
-            and ``_list_tools`` with its siblings), while ``Client._disconnect``
-            awaits the session task under
-            ``suppress(asyncio.CancelledError)`` (``client.py``). Only
-            cancellation is suppressed, so an ordinary exception from that task
-            leaves this context manager and replaces whatever the operation had
-            decided.
-
-            Both directions are damage, measured through the real stack. With a
-            tagged ``OwnerUnreachableError`` in flight, the replacement reaches
-            the middleware carrying the tag in ``__context__`` only, which
-            ``unreachable_owner_in`` does not walk and must not start walking:
-            Python sets ``__context__`` on *any* exception raised while another
-            is being handled, and this middleware raises its repeat inside the
-            ``except`` that holds the first failure, so every unrelated failure
-            of a repeat would resolve to the owner loss before it — absorbed by
-            today's branches, which read that first failure's own
-            ``nothing_was_sent``, and one edit away from not being. The
-            middleware therefore re-raises at its ``failure is None`` branch and
-            masking flattens that to ``Error calling tool
-            'send_connection_request'`` — nothing about a call that may have
-            acted. With nothing in flight it is the *result* that is replaced,
-            and the owner had already run the tool: the same generic failure for
-            a call that did send the connection request, and this half carries no
-            tag anywhere, so no detector could have found it.
-
-            Swallowing adds no leak of its own here, which is a narrower claim
-            than a promise about every way cleanup can fail. A client here is
-            built for one operation and dropped (``open_client``), and
-            ``_disconnect`` drops the session task in its own ``finally`` —
-            cancelling it first if it is still running — before this is reached,
-            so what arrives is the report of a failure and not a resource still
-            held; what a future ``_disconnect`` might leave behind when *it*
-            fails is its own to answer for. The operation succeeded or it
-            failed, and a departure this one misses is found by the next
-            operation, which opens a client of its own.
-            Cancellation is not caught, because ``CancelledError`` is a
-            ``BaseException`` and a caller giving up is not the session's own
-            failure.
-
-            One falsy return says both things. Python consults it only while an
-            exception is in flight, where falsy means "do not suppress" and the
-            tagged failure goes on propagating; with nothing in flight it is
-            ignored and the result stands.
-            """
-            try:
-                return await super().__aexit__(exc_type, exc_val, exc_tb)
-            except Exception as closing:
-                logger.debug(
-                    "The shared browser owner's session failed while closing, "
-                    "after the operation had already %s",
-                    "failed" if exc_val is not None else "answered",
-                    exc_info=closing,
-                )
-                return False
-
-        async def list_tools_mcp(self, *args: Any, **kwargs: Any) -> Any:
-            return await self._saying_which_owner(
-                super().list_tools_mcp(*args, **kwargs), nothing_was_sent=True
-            )
-
-        async def list_resources_mcp(self, *args: Any, **kwargs: Any) -> Any:
-            return await self._saying_which_owner(
-                super().list_resources_mcp(*args, **kwargs), nothing_was_sent=True
-            )
-
-        async def list_resource_templates_mcp(self, *args: Any, **kwargs: Any) -> Any:
-            return await self._saying_which_owner(
-                super().list_resource_templates_mcp(*args, **kwargs),
-                nothing_was_sent=True,
-            )
-
-        async def list_prompts_mcp(self, *args: Any, **kwargs: Any) -> Any:
-            return await self._saying_which_owner(
-                super().list_prompts_mcp(*args, **kwargs), nothing_was_sent=True
-            )
-
-        async def call_tool_mcp(
-            self,
-            name: str,
-            arguments: dict[str, Any],
-            progress_handler: ProgressHandler | None = None,
-            timeout: datetime.timedelta | float | int | None = None,
-            meta: dict[str, Any] | None = None,
-        ) -> mt.CallToolResult:
-            """Call the owner in one monitored request, and stop at its answer.
-
-            The handshake era's path through ``ProxyTool.run``; on the
-            2026-07-28 era the provider calls the session itself and never comes
-            here. FastMCP's own version awaits the monitor a second time once
-            the answer is in, to drive a multi-round request this owner never
-            makes, and a session failure during that second await would replace
-            an answer to a call that may already have changed LinkedIn. So this
-            makes the same session call the other era makes, once.
-            """
-            with client_span(
-                f"tools/call {name}",
-                "tools/call",
-                name,
-                session_id=self.transport.get_session_id(),
-                tool_name=name,
-            ) as span:
-                logger.debug("[%s] called call_tool: %s", self.name, name)
-                # The injected trace context goes out with the caller's own
-                # `_meta`, never the caller's alone.
-                propagated_meta = inject_trace_context(meta)
-                request_meta = cast(
-                    "mt.RequestParamsMeta | None",
-                    propagated_meta if propagated_meta else None,
-                )
-                # Checked inside the monitored task, right before the session
-                # takes the request, never out here: the monitor schedules that
-                # task, and a burial queued meanwhile runs first
-                # (`_check_at_the_session`).
-                answer = await self._await_with_session_monitoring(
-                    self.session.call_tool(
-                        name,
-                        arguments,
-                        read_timeout_seconds=normalize_timeout_to_seconds(timeout),
-                        progress_callback=progress_handler or self._progress_handler,
-                        meta=request_meta,
-                    )
-                )
-                # Nothing else: the session refuses a multi-round or claimed
-                # answer unless asked to allow one, and this does not ask.
-                result = cast("mt.CallToolResult", answer)
-                if result.is_error and span.is_recording():
-                    span.set_attribute("error.type", "tool_error")
-                    description = ""
-                    if result.content and isinstance(result.content[0], mt.TextContent):
-                        description = result.content[0].text
-                    span.set_status(Status(StatusCode.ERROR, description))
-                return result
-
-    return TellsWhichOwnerFailed
 
 
 #: How many elections one recovery may join. The second exists only for a
@@ -901,8 +164,8 @@ class DaemonProxyBackend:
     anything can.
 
     It carries the election's inputs alongside the answer because nothing
-    downstream has them otherwise. ``create_proxy_provider`` used to receive an
-    ``Attachment`` and a timeout, and ``create_mcp_server`` has no configuration
+    downstream has them otherwise. The forwarder is built from this object, and
+    ``create_mcp_server`` has no configuration
     parameter at all, so the proxy layer could not have elected a replacement
     even if it had wanted to. Reaching for ``get_config()`` there instead would
     supply defaults for a directly constructed server, not the exact inputs that
@@ -969,8 +232,8 @@ class DaemonProxyBackend:
         """Raise if a new request may not go to *attachment*, as of right now.
 
         Asked again at every point a new request could still be stopped: when a
-        call picks its owner, after its preflight returns, when its client is
-        built, and at the send itself. Each of those follows an await during
+        call picks its owner, after its preflight returns, when its hop is
+        opened, and before each request on it. Each of those follows an await during
         which another call can write the owner off, and a check made before the
         await says nothing about after it.
 
@@ -1113,115 +376,6 @@ class DaemonProxyBackend:
             self._attachment = found
         return found
 
-    def open_client(self, *, timeout: float) -> ProxyClient:
-        """Build a client for whoever the owner is at this moment.
-
-        Read here rather than closed over, and that is the whole point of this
-        object. ``ProxyProvider`` calls its factory for every upstream operation
-        and never caches the client, so a factory that reads current state
-        follows a replacement without any further machinery. A factory that
-        captured the address instead keeps using it for the process's life.
-
-        A fresh client per call rather than one shared session, because that is
-        what the provider expects: it opens and closes a client around every
-        upstream operation.
-        """
-        from fastmcp.client.transports import StreamableHttpTransport
-
-        # Which call this request belongs to, if it belongs to one, and the owner
-        # that call was bound to. Read together and never separately: a call that
-        # dialled a replacement while its heartbeats stayed with the departing
-        # owner would be cancelled by the owner actually running it.
-        bound = _call_being_made.get()
-        # A bound call is addressed to the owner it was bound to, never to a
-        # replacement that passed no preflight for it. Until its tool request
-        # has actually been sent, that owner is asked about again here and once
-        # more at the send (`_check_at_the_session`); after it, the call keeps its
-        # owner whatever happens to it. Anything unbound, a listing above all,
-        # gets the owner a new call would get.
-        if bound is None:
-            attachment = self.attachment_for_a_call()
-        else:
-            attachment = bound.attachment
-            if bound.dispatch.sent:
-                _refuse_control_only(attachment)
-            else:
-                self.refuse_if_written_off(attachment)
-        # Verbatim, never rebuilt from host and port: the descriptor's own URL
-        # already carries the MCP path and brackets an IPv6 literal, and FastMCP
-        # deliberately does not rewrite the path it is given.
-        url = attachment.descriptor.url
-        # Read together with the URL, never separately. They are one credential
-        # pair for one owner, and a token kept across an address change would
-        # authenticate against a process it was never issued for.
-        token = attachment.token
-
-        return _tells_which_owner_failed()(
-            StreamableHttpTransport(
-                url,
-                headers={CALL_HEADER: bound.call_id} if bound is not None else None,
-                # A plain string becomes `Authorization: Bearer <token>`, which
-                # is the form the owner's verifier compares against.
-                auth=token,
-                # The owner's own factory, reused rather than reimplemented. It
-                # forces `trust_env=False`, which is not tidiness: httpx2 honours
-                # HTTP_PROXY even for 127.0.0.1 unless NO_PROXY happens to say
-                # otherwise, and the owner reproduced a loopback request arriving
-                # at a capture proxy complete with this bearer token. The user's
-                # configured proxy is for LinkedIn's traffic, not for this hop.
-                httpx_client_factory=daemon_owner.direct_async_http_client,
-            ),
-            # The 2026-07-28 era with an owner that offers it, the handshake
-            # with one that does not. Named because `ProxyClient` pins the
-            # handshake when left alone. Safe on either era only because the
-            # tool request is claimed in the session (`ClaimsTheToolRequest`):
-            # on this era `ProxyTool.run` calls `session.call_tool` and never
-            # reaches `call_tool_mcp`, so a claim made in the client would let
-            # the send go out unclaimed.
-            mode="auto",
-            # Load-bearing rather than tuning. Measured twice against a real
-            # owner: with no timeout here, a call that outlives the underlying
-            # HTTP read timeout never returns at all — still hanging when an
-            # outer bound cut it off at 30s. With one, the same call either
-            # succeeds or fails cleanly at the deadline. Setting it here also
-            # raises the HTTP read timeout, so one value covers both layers.
-            timeout=timeout,
-            # So a failure says which owner it was against. Read from the same
-            # attachment as the URL and the token, so all three describe one owner
-            # even while a replacement is being adopted concurrently.
-            instance_id=attachment.descriptor.instance_id,
-            attachment=attachment,
-            binding=bound,
-            still_usable=self.refuse_if_written_off,
-        )
-
-
-def create_proxy_provider(
-    backend: DaemonProxyBackend, *, tool_timeout: float
-) -> ProxyProvider:
-    """Serve the owner's tools as if they were this server's own."""
-    from fastmcp.server.providers.proxy import ProxyProvider
-
-    timeout = tool_timeout + _TIMEOUT_MARGIN_SECONDS
-    logger.debug(
-        "Forwarding tool calls to the shared browser owner at %s (deadline %.0fs)",
-        backend.attachment.descriptor.url,
-        timeout,
-    )
-    # One callable, built once and never replaced. That is a requirement rather
-    # than a style: `ProxyProvider` hands this object to every `ProxyTool` it
-    # builds while listing, and a tool outlives the listing that built it.
-    # Reassigning the provider's factory later would not reach them, so the
-    # object has to stay the same one and resolve inside.
-    #
-    # ProxyClient rather than a plain Client, and that is not a preference
-    # either: a plain client installs no progress handler, so the progress every
-    # browser-backed tool reports is silently dropped. Measured both ways.
-    return ProxyProvider(
-        partial(backend.open_client, timeout=timeout),
-        cache_ttl=_NO_COMPONENT_CACHE,
-    )
-
 
 #: What a client is told once recovery has ended without an owner to forward to.
 #: Fixed text and never the failure's own: that names the loopback address, and
@@ -1330,9 +484,10 @@ class FrontendCallMiddleware(Middleware):
     opening exchange asks for resources and prompts too, and with
     ``provider_error_strategy = "raise"`` a departed owner turns that answer
     into an error the user sees. Reads and renders are left out because no
-    owner here registers a resource or a prompt; the day one is registered,
-    ``read_resource_mcp`` and ``get_prompt_mcp`` need the same treatment as the
-    listings, along with ``on_read_resource`` and ``on_get_prompt`` here.
+    owner here registers a resource or a prompt; the forwarder asks the owner's
+    listing for those lookups too, and the day one is registered they need the
+    same treatment as the listings, along with ``on_read_resource`` and
+    ``on_get_prompt`` here.
     """
 
     def __init__(self, backend: DaemonProxyBackend, *, budget: float) -> None:
@@ -1459,8 +614,8 @@ class FrontendCallMiddleware(Middleware):
                     )
                     return call_core.Recovered(op, loop.time(), found is not None)
                 case call_core.Classify(op=op):
-                    # A fresh forwarded listing with the component cache off
-                    # (`_NO_COMPONENT_CACHE`), and the call's own, so it is cut
+                    # A fresh forwarded listing, the forwarder keeps no
+                    # component cache, and the call's own, so it is cut
                     # at the deadline like any other wait of this call's. It
                     # catches its own failures and answers `True`, the cautious
                     # side.
@@ -1503,12 +658,14 @@ class FrontendCallMiddleware(Middleware):
         the only proof of whether its tool request had left.
         """
         loop = asyncio.get_running_loop()
-        record = _Dispatch()
+        record = DispatchRecord()
         handed_in = _attempt_dispatch.set(record)
         try:
             result = await _by(deadline, call_next(context))
         except _OutOfTime:
-            return call_core.Expired(op, loop.time(), request_left=record.sent)
+            return call_core.Expired(
+                op, loop.time(), request_left=not record.nothing_was_sent
+            )
         except Exception as exc:
             failure = unreachable_owner_in(exc)
             if failure is None:
@@ -1761,15 +918,13 @@ class FrontendCallHeartbeatMiddleware(Middleware):
 
         beating = asyncio.create_task(self._keep_saying(attachment, call_id))
         dispatch = _attempt_dispatch.get()
-        marked = _call_being_made.set(
-            _CallBinding(
-                call_id, attachment, dispatch if dispatch is not None else _Dispatch()
-            )
+        binding = CallBinding(
+            call_id, attachment, dispatch if dispatch is not None else DispatchRecord()
         )
         try:
-            result = await call_next(context)
+            with bound_to(binding):
+                result = await call_next(context)
         finally:
-            _call_being_made.reset(marked)
             # In a finally, and unconditionally: a task left running would go on
             # keeping a finished call alive in the owner's tracker, which is the
             # exact state this exists to prevent.
