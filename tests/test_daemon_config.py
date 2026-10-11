@@ -9,7 +9,6 @@ to use it, because the fingerprint it compares covers exactly these fields.
 
 from __future__ import annotations
 
-import json
 import os
 import stat
 from dataclasses import fields
@@ -19,28 +18,54 @@ from typing import Any, cast
 import pytest
 
 from linkedin_mcp_server.daemon import config as daemon_config
+from linkedin_mcp_server.daemon import startup
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon.descriptor import config_fingerprint
 
 _NONCE = "0123456789abcdef" * 4
-_CONTROL = daemon_config.ControlEndpoint("127.0.0.1", 54321)
 
 
-class _AttachedControl:
-    """A control channel the owner attached to, for tests that stop before commit."""
+class _Frontend:
+    """The frontend's ends of two real pipes around an owner's startup channel.
 
-    def readline(self) -> str:
-        return ""
+    *sent* is everything the frontend says, written up front and then ended,
+    unless *keep_open* holds the input open the way a suspended starter would.
+    """
+
+    def __init__(self, sent: bytes = b"", *, keep_open: bool = False) -> None:
+        inbound, frontend_input = os.pipe()
+        self._input: int | None = frontend_input
+        self._output, outbound = os.pipe()
+        os.write(self._input, sent)
+        if not keep_open:
+            self.end_input()
+        self.channel = startup.OwnerChannel(inbound, outbound)
+
+    def end_input(self) -> None:
+        descriptor, self._input = self._input, None
+        if descriptor is not None:
+            os.close(descriptor)
+
+    def received(self) -> bytes:
+        """Everything the owner wrote, once it has ended its output."""
+        data = b""
+        while chunk := os.read(self._output, 65536):
+            data += chunk
+        return data
 
     def close(self) -> None:
-        pass
+        self.end_input()
+        self.channel.close_output()
+        self.channel.close()
+        os.close(self._output)
 
 
-def _attach_without_a_parent(monkeypatch: pytest.MonkeyPatch) -> None:
-    from linkedin_mcp_server.daemon import process_control
-
-    monkeypatch.setattr(
-        process_control, "attach", lambda *_args, **_kwargs: _AttachedControl()
+def _greeting(config: AppConfig, *, protocol: object = startup.PROTOCOL) -> bytes:
+    """HELLO and CONFIG as a frontend of this build writes them."""
+    return startup.encode(
+        startup.message(startup.HELLO, _NONCE, protocol=protocol)
+    ) + startup.encode(
+        startup.message(startup.CONFIG, _NONCE, config=daemon_config.encode(config))
     )
 
 
@@ -77,61 +102,25 @@ class TestRoundTrip:
         )
 
     def test_owner_handover_carries_the_post_spawn_nonce(self):
-        original = _config(headless=False)
+        from linkedin_mcp_server.daemon import owner as daemon_owner
 
-        handover = daemon_config.decode_handover(
-            daemon_config.encode_handover(original, _NONCE, _CONTROL)
+        original = _config(
+            headless=False,
+            proxy_server="http://proxy.example:8080",
+            proxy_username="user",
+            proxy_password="secret",
         )
+        frontend = _Frontend(_greeting(original))
+        try:
+            handover = daemon_owner._read_handover(frontend.channel, timeout=5.0)
+        finally:
+            frontend.close()
 
         assert handover.handshake_nonce == _NONCE
         assert handover.config.browser.headless is False
-
-    def test_a_record_without_a_startup_protocol_is_refused(self):
-        # What a released frontend from before startup versions wrote. This
-        # owner shares no startup protocol with it and refuses before any state.
-        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
-        payload.pop("startup_protocol")
-
-        with pytest.raises(ValueError, match="startup protocol"):
-            daemon_config.decode_handover(json.dumps(payload))
-
-    @pytest.mark.parametrize("value", [True, 0, 1, 2, 3, 5, "4", 4.0, None])
-    def test_any_other_startup_protocol_is_refused(self, value: object):
-        # 1 to 3 are what released frontends sent. A bool is an int in Python,
-        # so ``True`` is refused by type, not by value.
-        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
-        payload["startup_protocol"] = value
-
-        with pytest.raises(ValueError, match="startup protocol"):
-            daemon_config.decode_handover(json.dumps(payload))
-
-    def test_the_current_record_names_the_control_rendezvous(self):
-        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
-        handover = daemon_config.decode_handover(json.dumps(payload))
-
-        assert payload["startup_protocol"] == daemon_config.STARTUP_PROTOCOL_VERSION
-        assert handover.control == _CONTROL
-
-    def test_a_current_record_without_a_rendezvous_is_refused(self):
-        # Nothing could authorize such an owner: it would prepare a generation
-        # and then wait out its commit deadline with the lock in hand.
-        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
-        payload.pop("control_host")
-
-        with pytest.raises(ValueError, match="control host"):
-            daemon_config.decode_handover(json.dumps(payload))
-
-    @pytest.mark.parametrize("port", [0, 65536, -1, True, "8080", 8080.0])
-    def test_an_unusable_control_port_is_refused(self, port: object):
-        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
-        payload["control_port"] = port
-
-        with pytest.raises(ValueError, match="control port"):
-            daemon_config.decode_handover(json.dumps(payload))
-
-    def test_owner_handover_requires_a_valid_nonce(self):
-        with pytest.raises(ValueError, match="handshake nonce"):
-            daemon_config.decode_handover(daemon_config.encode(_config()))
+        # The one secret in the configuration crosses on the pipe and nowhere
+        # else, so it has to arrive intact here.
+        assert handover.config.browser.proxy_password == "secret"
 
     def test_every_browser_setting_crosses_unchanged(self):
         # The fingerprint check above is necessary and not sufficient: it only
@@ -168,7 +157,7 @@ class TestRoundTrip:
         # for any field left at its default — `chrome_path` is one, and so is
         # every field added in future. Checking the serialised keys against the
         # dataclass is what makes the name of this test true.
-        assert set(json.loads(carried)["browser"]) == {
+        assert set(cast(dict[str, object], carried["browser"])) == {
             field.name for field in fields(original.browser)
         }
 
@@ -451,7 +440,7 @@ class TestRefusing:
         original.server.transport = "streamable-http"
         original.server.port = 9999
 
-        carried = json.loads(daemon_config.encode(original))
+        carried = cast(dict[str, Any], daemon_config.encode(original))
 
         assert "login" not in carried["server"]
         assert "transport" not in carried["server"]
@@ -462,51 +451,43 @@ class TestRefusing:
         # not come from encode(). Skipping it quietly would be an owner running
         # on settings nobody chose.
         with pytest.raises(ValueError, match="unknown"):
-            daemon_config.decode(json.dumps({"browser": {"nonsense": 1}, "server": {}}))
+            daemon_config.decode({"browser": {"nonsense": 1}, "server": {}})
 
     def test_a_frontend_setting_smuggled_into_the_server_section_is_refused(self):
         # The allowed list is enforced on the way in, not only on the way out.
         with pytest.raises(ValueError, match="unknown"):
-            daemon_config.decode(json.dumps({"browser": {}, "server": {"login": True}}))
+            daemon_config.decode({"browser": {}, "server": {"login": True}})
 
     def test_a_value_of_the_wrong_type_is_refused_before_it_reaches_a_browser(self):
         # JSON cannot tell seconds from a count. Left unchecked this surfaces
         # deep inside a browser launch, in a detached process, as an error
         # nobody can trace back to here.
         with pytest.raises(ValueError, match="wrong type"):
-            daemon_config.decode(
-                json.dumps({"browser": {"slow_mo": "quickly"}, "server": {}})
-            )
+            daemon_config.decode({"browser": {"slow_mo": "quickly"}, "server": {}})
 
     def test_a_boolean_is_not_accepted_where_a_number_belongs(self):
         # bool is a subclass of int, so an isinstance check alone accepts True
         # as a timeout. That is exactly the silent nonsense this refuses.
         with pytest.raises(ValueError, match="wrong type"):
-            daemon_config.decode(
-                json.dumps({"browser": {"slow_mo": True}, "server": {}})
-            )
+            daemon_config.decode({"browser": {"slow_mo": True}, "server": {}})
 
     def test_an_integer_is_accepted_where_a_float_belongs(self):
         # The other direction, and it has to work: JSON writes 0 for 0.0, so
         # refusing would make an ordinary configuration untransportable.
         restored = daemon_config.decode(
-            json.dumps({"browser": {"login_timeout_seconds": 0}, "server": {}})
+            {"browser": {"login_timeout_seconds": 0}, "server": {}}
         )
 
         assert restored.browser.login_timeout_seconds == 0
 
     def test_an_optional_setting_may_be_unset(self):
-        restored = daemon_config.decode(
-            json.dumps({"browser": {"user_agent": None}, "server": {}})
-        )
+        restored = daemon_config.decode({"browser": {"user_agent": None}, "server": {}})
 
         assert restored.browser.user_agent is None
 
     def test_a_log_level_outside_the_supported_set_is_refused(self):
         with pytest.raises(ValueError, match="wrong type"):
-            daemon_config.decode(
-                json.dumps({"browser": {}, "server": {"log_level": "CHATTY"}})
-            )
+            daemon_config.decode({"browser": {}, "server": {"log_level": "CHATTY"}})
 
     def test_a_configuration_the_frontend_would_reject_is_rejected_here_too(self):
         # The owner is the process that opens the browser, so a value refused at
@@ -519,7 +500,7 @@ class TestRefusing:
 
         with pytest.raises(ConfigurationError, match="tool_timeout_seconds"):
             daemon_config.decode(
-                json.dumps({"browser": {}, "server": {"tool_timeout_seconds": -1.0}})
+                {"browser": {}, "server": {"tool_timeout_seconds": -1.0}}
             )
 
     def test_the_owner_applies_the_browser_mode_it_was_handed(
@@ -538,12 +519,8 @@ class TestRefusing:
         # Driven through `main`, and asserted against the global the launcher
         # actually reads. Calling `set_headless` directly here would only prove
         # that setter works; what was broken is that the owner never called it.
-        import io
-        import sys
-
         import linkedin_mcp_server.drivers.browser as browser_module
         from linkedin_mcp_server.daemon import owner as daemon_owner
-        from linkedin_mcp_server.daemon.process_control import ControlListener
 
         def refuse_lock(*_args):
             raise OSError("lock unavailable")
@@ -553,24 +530,15 @@ class TestRefusing:
         visible.browser.headless = False
 
         original = browser_module.current_headless()
-        stdin = sys.stdin
         browser_module.set_headless(True)
         monkeypatch.setattr(
             daemon_owner,
             "_attach_daemon_log",
             lambda auth_root: auth_root / "daemon.log",
         )
-        # A real rendezvous, so the owner gets past its control attach and on to
-        # the lock. Nothing here accepts it: the connection waits in the backlog,
-        # exactly as it does until a parent has a prepared generation to validate.
-        control = ControlListener.open()
-        sys.stdin = io.StringIO(
-            daemon_config.encode_handover(
-                visible,
-                _NONCE,
-                daemon_config.ControlEndpoint(control.host, control.port),
-            )
-            + "\n"
+        frontend = _Frontend(_greeting(visible))
+        monkeypatch.setattr(
+            daemon_owner, "_claim_startup_channel", lambda: frontend.channel
         )
         try:
             # The lock failure is reported rather than raised, without creating
@@ -581,35 +549,26 @@ class TestRefusing:
                 "the owner ignored the browser mode it was handed"
             )
         finally:
-            control.close()
-            sys.stdin = stdin
+            frontend.close()
             browser_module.set_headless(original)
 
     def test_owner_verdict_carries_the_handed_over_nonce(self):
+        import io
+
         from linkedin_mcp_server.daemon import owner as daemon_owner
 
-        class RecordingStream:
-            def __init__(self) -> None:
-                self.written = ""
-                self.flushed = False
-                self.closed = False
+        frontend = _Frontend()
+        try:
+            daemon_owner._Handshake(frontend.channel, _NONCE).committed()
+            # The verdict ends the output, so this read reaches end of file.
+            received = io.BytesIO(frontend.received())
+        finally:
+            frontend.close()
 
-            def write(self, value: str) -> int:
-                self.written += value
-                return len(value)
-
-            def flush(self) -> None:
-                self.flushed = True
-
-            def close(self) -> None:
-                self.closed = True
-
-        stream = RecordingStream()
-        daemon_owner._Handshake(cast(Any, stream), _NONCE).committed()
-
-        assert stream.written == f"owner {_NONCE} committed\n"
-        assert stream.flushed
-        assert stream.closed
+        assert startup.read_frame(received.read) == startup.message(
+            startup.VERDICT, _NONCE, status=startup.COMMITTED
+        )
+        assert received.read() == b""
 
     def test_a_configuration_failure_reports_then_closes_without_a_verdict(
         self, monkeypatch: pytest.MonkeyPatch
@@ -631,17 +590,17 @@ class TestRefusing:
             def close(self) -> None:
                 pass
 
-        class RecordingStream:
+        class RecordingChannel:
             def close(self) -> None:
                 events.append("closed")
 
-        def reject() -> daemon_config.OwnerHandover:
+        def reject(*_args: object, **_kwargs: object) -> daemon_config.OwnerHandover:
             raise ValueError("invalid handed-over configuration")
 
         monkeypatch.setattr(daemon_owner, "_BootstrapDiagnostics", RecordingBootstrap)
         monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
         monkeypatch.setattr(
-            daemon_owner, "_claim_handshake_stream", lambda: RecordingStream()
+            daemon_owner, "_claim_startup_channel", lambda: RecordingChannel()
         )
         monkeypatch.setattr(daemon_owner, "_read_handover", reject)
         monkeypatch.setattr(
@@ -700,18 +659,17 @@ class TestRefusing:
         monkeypatch.setattr(daemon_owner, "_BootstrapDiagnostics", RecordingBootstrap)
         monkeypatch.setattr(daemon_owner, "_Handshake", RecordingHandshake)
         monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
-        monkeypatch.setattr(daemon_owner, "_claim_handshake_stream", lambda: None)
+        monkeypatch.setattr(daemon_owner, "_claim_startup_channel", lambda: None)
         monkeypatch.setattr(
             daemon_owner,
             "_read_handover",
-            lambda: daemon_config.OwnerHandover(config, _NONCE, _CONTROL),
+            lambda *_args, **_kwargs: daemon_config.OwnerHandover(config, _NONCE),
         )
         monkeypatch.setattr(
             daemon_owner.logger,
             "exception",
             lambda *_args, **_kwargs: pytest.fail("pre-log failure used logging"),
         )
-        _attach_without_a_parent(monkeypatch)
         if stage == "state":
 
             class UnresolvablePath:
@@ -745,25 +703,28 @@ class TestRefusing:
         assert daemon_owner.main([]) == 1
         assert events == expected
 
-    @pytest.mark.parametrize("startup_protocol", [None, 1, 2, 3])
-    def test_a_handover_without_the_current_startup_protocol_is_refused(
-        self, monkeypatch: pytest.MonkeyPatch, startup_protocol: int | None
+    @pytest.mark.parametrize(
+        "protocol",
+        [
+            startup.PROTOCOL - 1,
+            startup.PROTOCOL + 1,
+            str(startup.PROTOCOL),
+            float(startup.PROTOCOL),
+            True,
+            None,
+        ],
+    )
+    def test_a_frontend_speaking_another_startup_protocol_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, protocol: object
     ):
-        # What a released frontend writes when it starts this owner from a
-        # package replaced under it: no version, or one of 1 to 3. The owner
-        # refuses it before any state is touched, and says only that its
-        # configuration was refused.
-        import io
-
+        # A frontend from another build greets this owner after a package was
+        # replaced under it. The owner refuses before any state is touched,
+        # answers nothing a frontend could mistake for an ACK, and says only
+        # that its configuration was refused. A bool is an int in Python, so
+        # ``True`` is refused by type, not by value.
         from linkedin_mcp_server.daemon import owner as daemon_owner
-        from linkedin_mcp_server.daemon import process_control
 
         events: list[str] = []
-        payload = json.loads(daemon_config.encode_handover(_config(), _NONCE, _CONTROL))
-        if startup_protocol is None:
-            del payload["startup_protocol"]
-        else:
-            payload["startup_protocol"] = startup_protocol
 
         class RecordingBootstrap:
             def __init__(self, _stream: object) -> None:
@@ -775,17 +736,11 @@ class TestRefusing:
             def close(self) -> None:
                 pass
 
-        class RecordingStream:
-            def close(self) -> None:
-                events.append("closed")
-
+        frontend = _Frontend(_greeting(_config(), protocol=protocol))
         monkeypatch.setattr(daemon_owner, "_BootstrapDiagnostics", RecordingBootstrap)
         monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
         monkeypatch.setattr(
-            daemon_owner, "_claim_handshake_stream", lambda: RecordingStream()
-        )
-        monkeypatch.setattr(
-            daemon_owner.sys, "stdin", io.StringIO(json.dumps(payload) + "\n")
+            daemon_owner, "_claim_startup_channel", lambda: frontend.channel
         )
         monkeypatch.setattr(
             daemon_owner,
@@ -793,21 +748,18 @@ class TestRefusing:
             lambda _profile: pytest.fail("a refused handover resolved profile state"),
         )
         monkeypatch.setattr(
-            process_control,
-            "attach",
-            lambda *_args, **_kwargs: pytest.fail("a refused handover attached"),
-        )
-        monkeypatch.setattr(
             daemon_owner,
             "_take_lock",
             lambda _auth_root: pytest.fail("a refused handover took the lock"),
         )
+        try:
+            assert daemon_owner.main([]) == 1
+            received = frontend.received()
+        finally:
+            frontend.close()
 
-        assert daemon_owner.main([]) == 1
-        assert events == [
-            f"diagnostic:{daemon_owner.BOOTSTRAP_CONFIGURATION}",
-            "closed",
-        ]
+        assert events == [f"diagnostic:{daemon_owner.BOOTSTRAP_CONFIGURATION}"]
+        assert received == b"", "the owner answered a frontend it cannot speak to"
 
     def test_a_lock_failure_is_reported_before_the_daemon_log(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -845,13 +797,12 @@ class TestRefusing:
         monkeypatch.setattr(daemon_owner, "_BootstrapDiagnostics", RecordingBootstrap)
         monkeypatch.setattr(daemon_owner, "_Handshake", RecordingHandshake)
         monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
-        monkeypatch.setattr(daemon_owner, "_claim_handshake_stream", lambda: None)
+        monkeypatch.setattr(daemon_owner, "_claim_startup_channel", lambda: None)
         monkeypatch.setattr(
             daemon_owner,
             "_read_handover",
-            lambda: daemon_config.OwnerHandover(config, _NONCE, _CONTROL),
+            lambda *_args, **_kwargs: daemon_config.OwnerHandover(config, _NONCE),
         )
-        _attach_without_a_parent(monkeypatch)
         monkeypatch.setattr(daemon_owner, "auth_root_dir", lambda profile: tmp_path)
         monkeypatch.setattr(
             daemon_owner,
@@ -951,13 +902,12 @@ class TestRefusing:
         monkeypatch.setattr(daemon_owner, "_BootstrapDiagnostics", RecordingBootstrap)
         monkeypatch.setattr(daemon_owner, "_Handshake", RecordingHandshake)
         monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
-        monkeypatch.setattr(daemon_owner, "_claim_handshake_stream", lambda: None)
+        monkeypatch.setattr(daemon_owner, "_claim_startup_channel", lambda: None)
         monkeypatch.setattr(
             daemon_owner,
             "_read_handover",
-            lambda: daemon_config.OwnerHandover(config, _NONCE, _CONTROL),
+            lambda *_args, **_kwargs: daemon_config.OwnerHandover(config, _NONCE),
         )
-        _attach_without_a_parent(monkeypatch)
         monkeypatch.setattr(daemon_owner, "auth_root_dir", lambda profile: tmp_path)
         monkeypatch.setattr(
             daemon_owner,
@@ -974,57 +924,50 @@ class TestRefusing:
         assert daemon_owner.main([]) == 0
         assert events == ["retry", "bootstrap-closed", "handshake-closed"]
 
-    def test_a_suspended_starter_cannot_pin_the_owner_on_config_read(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        import threading
+    def test_a_suspended_starter_cannot_pin_the_owner_on_config_read(self):
         import time
 
         from linkedin_mcp_server.daemon import owner as daemon_owner
 
-        release = threading.Event()
-
-        class _SuspendedStarter:
-            def readline(self) -> str:
-                release.wait()
-                return ""
-
-        monkeypatch.setattr(daemon_owner.sys, "stdin", _SuspendedStarter())
+        # The input stays open and silent, which is a starter stopped between
+        # spawning this process and writing its HELLO.
+        frontend = _Frontend(keep_open=True)
         started = time.monotonic()
         try:
             with pytest.raises(TimeoutError, match="did not provide its configuration"):
-                daemon_owner._read_handover(timeout=0.01)
+                daemon_owner._read_handover(frontend.channel, timeout=0.01)
+            elapsed = time.monotonic() - started
         finally:
-            release.set()
+            frontend.close()
 
-        assert time.monotonic() - started < 1.0
+        assert elapsed < 1.0
 
-    def test_the_owner_refuses_to_start_without_a_configuration(self):
-        # The owner reads its settings from standard input and must not fall
-        # back to parsing its own command line: `load_config` would then see the
-        # daemon's argv, and the browser it opened would be configured by
-        # accident rather than by the client that asked for it.
+    def test_the_owner_refuses_to_start_without_a_configuration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The owner reads its settings from the startup channel and must not
+        # fall back to parsing its own command line: `load_config` would then
+        # see the daemon's argv, and the browser it opened would be configured
+        # by accident rather than by the client that asked for it.
         #
         # Exercised through `main`, which is otherwise reached only inside a
-        # spawned process where coverage cannot see it.
-        import io
-        import sys
-
+        # spawned process where coverage cannot see it. What arrives is the
+        # line the old handover would have carried, which the framed channel
+        # reads as a header announcing far more than a frame may hold.
         from linkedin_mcp_server.daemon import owner as daemon_owner
 
-        original = sys.stdin
-        sys.stdin = io.StringIO("   \n")
+        frontend = _Frontend(b"   \n")
+        monkeypatch.setattr(
+            daemon_owner, "_claim_startup_channel", lambda: frontend.channel
+        )
         try:
             assert daemon_owner.main([]) == 1
         finally:
-            sys.stdin = original
+            frontend.close()
 
     def test_something_that_is_not_a_configuration_is_refused(self):
-        with pytest.raises(ValueError, match="not valid JSON"):
-            daemon_config.decode("not json at all")
-
         with pytest.raises(ValueError, match="not an object"):
-            daemon_config.decode("[1, 2, 3]")
+            daemon_config.decode([1, 2, 3])
 
         with pytest.raises(ValueError, match="no browser section"):
-            daemon_config.decode(json.dumps({"server": {}}))
+            daemon_config.decode({"server": {}})

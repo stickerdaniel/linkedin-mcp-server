@@ -498,22 +498,15 @@ class TestTheRoleAsProcessState:
         monkeypatch.setattr(
             daemon_owner,
             "_read_handover",
-            lambda: daemon_config.OwnerHandover(
-                AppConfig(),
-                "0123456789abcdef" * 4,
-                daemon_config.ControlEndpoint("127.0.0.1", 54321),
+            lambda *_args, **_kwargs: daemon_config.OwnerHandover(
+                AppConfig(), "0123456789abcdef" * 4
             ),
-        )
-        monkeypatch.setattr(
-            daemon_owner.process_control, "attach", lambda *_a, **_k: MagicMock()
         )
         monkeypatch.setattr(daemon_owner, "set_headless", lambda _headless: None)
         monkeypatch.setattr(daemon_owner, "_take_lock", lambda *_args: MagicMock())
         monkeypatch.setattr(daemon_owner, "_attach_daemon_log", at_checkpoint)
         monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
-        monkeypatch.setattr(
-            daemon_owner, "_claim_handshake_stream", lambda: MagicMock()
-        )
+        monkeypatch.setattr(daemon_owner, "_claim_startup_channel", lambda: MagicMock())
 
         assert daemon_owner.main([]) == 1
         assert seen == [ServerRole.OWNER]
@@ -528,7 +521,7 @@ class TestTheRoleAsProcessState:
 
         events: list[str] = []
 
-        def read_config():
+        def read_config(*_args, **_kwargs):
             assert events == ["verified:named-job"]
             raise Checkpoint
 
@@ -539,9 +532,7 @@ class TestTheRoleAsProcessState:
             lambda name: events.append(f"verified:{name}"),
         )
         monkeypatch.setattr(daemon_owner, "_read_handover", read_config)
-        monkeypatch.setattr(
-            daemon_owner, "_claim_handshake_stream", lambda: MagicMock()
-        )
+        monkeypatch.setattr(daemon_owner, "_claim_startup_channel", lambda: MagicMock())
 
         assert daemon_owner.main(["--job-name", "named-job"]) == 1
         assert events == ["verified:named-job"]

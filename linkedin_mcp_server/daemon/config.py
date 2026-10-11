@@ -8,27 +8,20 @@ would then refuse to attach to it: ``config_fingerprint`` compares exactly the
 fields that would differ. The result is not a wrong browser but a client that
 elects an owner and then declines to use it, forever.
 
-So the resolved configuration is handed over explicitly, on the child's standard
-input, together with the post-spawn nonce that authenticates its startup verdict.
-Not the environment and not the command line, because both are readable by
-anything running as this account (``/proc/<pid>/environ`` and ``ps``), and what
-travels here includes ``proxy_password``. A pipe is read once by one process and
-never lands anywhere.
+So the resolved configuration is handed over explicitly, as the CONFIG frame of
+the startup protocol on the child's standard input
+(:mod:`linkedin_mcp_server.daemon.startup`), and only after the child has
+answered in that protocol with this build's identity. Not the environment and
+not the command line, because both are readable by anything running as this
+account (``/proc/<pid>/environ`` and ``ps``), and what travels here includes
+``proxy_password``. A pipe is read once by one process and never lands anywhere.
 
-A long-running frontend can start an owner after the package was replaced on
-disk, so the handover names its startup-protocol version, and an owner refuses a
-record that does not name the current one, a missing version included, before
-it touches any state. Input is still parsed as untrusted-shaped data because the
-reconstructed values decide which browser opens against a logged-in session.
-
-Commit authorization travels on a separate loopback channel named here, so the
-configuration pipe closes as soon as the record is written. See
-:mod:`linkedin_mcp_server.daemon.process_control`.
+Input is still parsed as untrusted-shaped data because the reconstructed values
+decide which browser opens against a logged-in session.
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, fields
 from types import UnionType
 from typing import (
@@ -42,7 +35,6 @@ from typing import (
 )
 
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.process_protocol import valid_nonce
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -52,33 +44,18 @@ if TYPE_CHECKING:
 #: *frontend's* invocation, and an owner that adopted them would try to run the
 #: client's transport or re-run its ``--login``.
 _SERVER_FIELDS = ("tool_timeout_seconds", "log_level")
-#: The one startup protocol this build speaks. Never 1, 2 or 3: released
-#: frontends sent those (1 by leaving the field out), and the released owners
-#: that read this field accept only them, so a fresh number makes a startup
-#: across that boundary fail on both sides before either touches state. The
-#: earliest owners never read the field; they refuse this record only because
-#: its configuration carries fields they do not know.
-STARTUP_PROTOCOL_VERSION = 4
-
-
-@dataclass(frozen=True)
-class ControlEndpoint:
-    """Where the parent is listening for its child's commit channel."""
-
-    host: str
-    port: int
 
 
 @dataclass(frozen=True)
 class OwnerHandover:
-    """Configuration and the post-spawn token for its startup verdict."""
+    """Configuration and the post-spawn nonce every later startup frame carries."""
 
     config: AppConfig
     handshake_nonce: str
-    control: ControlEndpoint
 
 
-def _encoded(config: AppConfig) -> dict[str, object]:
+def encode(config: AppConfig) -> dict[str, object]:
+    """The parts of *config* that an owner has to agree on, as a JSON object."""
     return {
         # Every browser field, not just the fingerprinted ones. The fingerprint
         # says which differences make two clients unable to share an owner; it
@@ -93,48 +70,7 @@ def _encoded(config: AppConfig) -> dict[str, object]:
     }
 
 
-def encode(config: AppConfig) -> str:
-    """Serialise the parts of *config* that an owner has to agree on."""
-    return json.dumps(_encoded(config))
-
-
-def encode_handover(
-    config: AppConfig, handshake_nonce: str, control: ControlEndpoint
-) -> str:
-    """Serialise owner settings with a nonce created after its process exists."""
-    if not valid_nonce(handshake_nonce):
-        raise ValueError("The owner handshake nonce is invalid")
-    payload = _encoded(config)
-    payload["handshake_nonce"] = handshake_nonce
-    payload["startup_protocol"] = STARTUP_PROTOCOL_VERSION
-    payload["control_host"] = control.host
-    payload["control_port"] = control.port
-    return json.dumps(payload)
-
-
-def _parsed(raw: str) -> dict[str, object]:
-    try:
-        parsed = json.loads(raw)
-    except ValueError as exc:
-        raise ValueError(f"The owner configuration is not valid JSON: {exc}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("The owner configuration is not an object")
-    return parsed
-
-
-def _decoded(parsed: dict[str, object]) -> AppConfig:
-    config = AppConfig()
-    _apply(config.browser, parsed.get("browser"), "browser")
-    _apply(config.server, parsed.get("server"), "server", allowed=_SERVER_FIELDS)
-    # The same validation the frontend's own configuration went through. An
-    # owner is the process that opens the browser, so a value that would be
-    # refused there must be refused here rather than reaching Chromium by the
-    # back door.
-    config.validate()
-    return config
-
-
-def decode(raw: str) -> AppConfig:
+def decode(payload: object) -> AppConfig:
     """Rebuild the configuration an owner was started with.
 
     Unknown names are refused rather than skipped. The two ends are one
@@ -142,36 +78,17 @@ def decode(raw: str) -> AppConfig:
     but a blob that did not come from :func:`encode`, and the quiet reading of
     it would be an owner running on settings nobody chose.
     """
-    return _decoded(_parsed(raw))
-
-
-def decode_handover(raw: str) -> OwnerHandover:
-    """Rebuild owner settings and authenticate its future startup verdict."""
-    parsed = _parsed(raw)
-    handshake_nonce = parsed.get("handshake_nonce")
-    if not valid_nonce(handshake_nonce):
-        raise ValueError("The owner configuration has no valid handshake nonce")
-    assert isinstance(handshake_nonce, str)
-    startup_protocol = parsed.get("startup_protocol")
-    if (
-        type(startup_protocol) is not int
-        or startup_protocol != STARTUP_PROTOCOL_VERSION
-    ):
-        raise ValueError(
-            "The owner configuration names an unsupported startup protocol"
-        )
-    return OwnerHandover(_decoded(parsed), handshake_nonce, _control_endpoint(parsed))
-
-
-def _control_endpoint(parsed: dict[str, object]) -> ControlEndpoint:
-    """The rendezvous the parent authorizes commit on, which every record names."""
-    host = parsed.get("control_host")
-    port = parsed.get("control_port")
-    if not isinstance(host, str) or not host or any(c.isspace() for c in host):
-        raise ValueError("The owner configuration has no valid control host")
-    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
-        raise ValueError("The owner configuration has no valid control port")
-    return ControlEndpoint(host, port)
+    if not isinstance(payload, dict):
+        raise ValueError("The owner configuration is not an object")
+    config = AppConfig()
+    _apply(config.browser, payload.get("browser"), "browser")
+    _apply(config.server, payload.get("server"), "server", allowed=_SERVER_FIELDS)
+    # The same validation the frontend's own configuration went through. An
+    # owner is the process that opens the browser, so a value that would be
+    # refused there must be refused here rather than reaching Chromium by the
+    # back door.
+    config.validate()
+    return config
 
 
 def _apply(

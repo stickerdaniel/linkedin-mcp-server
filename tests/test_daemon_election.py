@@ -41,12 +41,10 @@ import linkedin_mcp_server.daemon.descriptor as daemon_descriptor_module
 import linkedin_mcp_server.daemon.election as election_module
 import linkedin_mcp_server.daemon.owner as daemon_owner
 from linkedin_mcp_server import __version__
-from linkedin_mcp_server.daemon import process_control
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon.discovery import Attachment, OwnerLookup, OwnerState
 from linkedin_mcp_server.daemon.election import (
     _Attempt,
-    _Started,
     ElectionOutcome,
     Reach,
     obtain_owner,
@@ -63,12 +61,55 @@ from linkedin_mcp_server.daemon.lock import (
     DaemonLockError,
     daemon_is_running,
 )
+from linkedin_mcp_server.daemon import startup
+from linkedin_mcp_server.daemon import version as daemon_version
 from linkedin_mcp_server.private_state import harden_directory
 from linkedin_mcp_server.process_tree import ProcessTreeError
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _RUNTIME = "test-runtime"
 _HANDSHAKE_NONCE = "0123456789abcdef" * 4
+
+
+def _owner_says(nonce: str, *frames: tuple[str, dict[str, object]]) -> bytes:
+    """What an owner of this build writes: its sync line and ACK, then *frames*."""
+    ack = startup.message(
+        startup.ACK,
+        nonce,
+        protocol=startup.PROTOCOL,
+        build=daemon_version.build_identity(),
+    )
+    return (
+        startup.sync_line(nonce)
+        + startup.encode(ack)
+        + b"".join(
+            startup.encode(startup.message(kind, nonce, **fields))
+            for kind, fields in frames
+        )
+    )
+
+
+def _frames_in(written: bytes) -> list[dict[str, object]]:
+    """Every frame a frontend wrote, in order, after any gate release line."""
+    if written.startswith(b"release "):
+        written = written.split(b"\n", 1)[1]
+    stream = io.BytesIO(written)
+    frames: list[dict[str, object]] = []
+    while True:
+        try:
+            frames.append(startup.read_frame(stream.read))
+        except EOFError:
+            return frames
+
+
+#: A stand-in owner's first lines, run as ``python -c``: the production owner
+#: channel, greeted the way the owner greets, so the frontend's ACK check passes
+#: and the case reaches the stage it is about.
+_GREETED_CHILD = (
+    "from linkedin_mcp_server.daemon import startup, version\n"
+    "channel = startup.OwnerChannel.claim()\n"
+    "nonce, _config = channel.accept(build=version.build_identity())\n"
+)
 
 #: What a call given a 0.01s bound may take before the bound is not the thing
 #: deciding. A hundred times the argument, and still two orders below the
@@ -83,6 +124,10 @@ _BOUNDED_CALL_SECONDS = 1.0
 #: how long a *fast* path may take: stretching that constant would hide
 #: regressions. Measured on Windows daemon jobs for #874 / #845.
 _THREAD_START_SECONDS = 5.0
+
+#: A bound on every wait below, so a regression fails an assertion instead of
+#: hanging the suite.
+_PARKED = 5.0
 
 _POSIX_ONLY = pytest.mark.skipif(
     os.name == "nt",
@@ -1229,21 +1274,19 @@ class TestFailingFast:
         assert waits == [0.0]
 
     @_POSIX_ONLY
-    def test_a_child_that_never_reads_its_configuration_does_not_block_the_spawn(
+    def test_a_child_that_never_reads_its_input_does_not_block_the_spawn(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        # The handshake timeout is reached only if the spawn gets that far. The
-        # configuration is written to the child's pipe first, and a pipe buffer
-        # is small — 64 KiB on Linux — while the configuration has no size limit
-        # at all: proxy_bypass and the paths are free-form strings. A child that
-        # neither reads nor exits blocks that write indefinitely, before any
-        # budget applies, with both processes holding the lock.
-        #
-        # Reproduced with a 10 MiB bypass list and a child that only sleeps: the
-        # outer process timeout fired and the wait was never entered.
+        # The handshake timeout is reached only if the spawn gets that far. A
+        # write to the child's pipe comes first, and a child that neither reads
+        # nor exits once blocked such a write indefinitely, before any budget
+        # applied, with both processes holding the lock: reproduced with a
+        # 10 MiB bypass list and a child that only sleeps, the outer process
+        # timeout fired and the wait was never entered. Every startup write is
+        # now bounded by the caller's wait, and frames by the protocol's size
+        # limit; this is the child that never reads at all.
         profile = _profile(tmp_path)
         config = _config(profile)
-        config.browser.proxy_bypass = "x" * (10 * 1024 * 1024)
         auth_root = profile.parent
 
         sleepers: list[subprocess.Popen[Any]] = []
@@ -1303,8 +1346,8 @@ class TestFailingFast:
             # `-n auto --cov` spent 4.1s on it and failed a 3s bound — against a
             # defect that costs 5.5s. A threshold does fit in that 1.4s gap;
             # what does not fit is any confidence that the gap is stable, since
-            # the total also contains forking an interpreter and encoding a
-            # 10 MiB configuration and neither is this code's to bound.
+            # the total also contains forking an interpreter, which is not this
+            # code's to bound.
             #
             # The exit status has no such problem. `_stop_child` kills, so the
             # child dies of SIGKILL; anything that asks first kills it with
@@ -1414,14 +1457,15 @@ class TestFailingFast:
             # survives the handshake release and ends only when the child dies,
             # in either order, so the ordering above stays a Windows claim.
             for thread in threading.enumerate():
-                if "daemon-config" in thread.name:
+                if thread.name.startswith("daemon-startup-"):
                     thread.join(timeout=1)
             assert all(
                 sleeper.stdin is None or sleeper.stdin.closed for sleeper in sleepers
-            ), "the configuration pipe was left open"
+            ), "the startup pipe was left open"
             assert not any(
-                "daemon-config" in thread.name for thread in threading.enumerate()
-            ), "the writer thread outlived the child it was writing to"
+                thread.name.startswith("daemon-startup-")
+                for thread in threading.enumerate()
+            ), "a startup thread outlived the child it was talking to"
         finally:
             for sleeper in sleepers:
                 if sleeper.poll() is None:  # pragma: no cover - the stop worked
@@ -1450,11 +1494,8 @@ class TestFailingFast:
                 [
                     command[0],
                     "-c",
-                    "import json, sys, time\n"
-                    "handover = json.loads(sys.stdin.readline())\n"
-                    "nonce = handover['handshake_nonce']\n"
-                    "sys.stdout.write(f'owner {nonce} failed\\n')\n"
-                    "sys.stdout.flush()\n"
+                    _GREETED_CHILD + "import time\n"
+                    "channel.send(startup.VERDICT, nonce, status=startup.FAILED)\n"
                     "time.sleep(600)\n",
                 ],
                 **kwargs,
@@ -1501,14 +1542,11 @@ class TestFailingFast:
             if command[1:4] != ["-P", "-m", "linkedin_mcp_server.daemon.owner"]:
                 return real(command, **kwargs)
             script = (
-                "import json, pathlib, subprocess, sys, time\n"
-                "handover = json.loads(sys.stdin.readline())\n"
-                "nonce = handover['handshake_nonce']\n"
+                _GREETED_CHILD + "import pathlib, subprocess, sys, time\n"
                 "grandchild = subprocess.Popen([sys.executable, '-c', "
                 "'import time; time.sleep(600)'])\n"
                 f"pathlib.Path({str(pid_file)!r}).write_text(str(grandchild.pid))\n"
-                "sys.stdout.write(f'owner {nonce} failed\\n')\n"
-                "sys.stdout.flush()\n"
+                "channel.send(startup.VERDICT, nonce, status=startup.FAILED)\n"
                 "time.sleep(600)\n"
             )
             child = real([command[0], "-c", script], **kwargs)
@@ -1552,9 +1590,9 @@ class TestFailingFast:
         config = _config(profile)
         auth_root = profile.parent
 
-        # An ordinary configuration, so the handover succeeds and the silence
-        # happens at the handshake. The large-configuration case reaches the
-        # same wedge by blocking the write instead, and is covered separately.
+        # The greeting fits the pipe, so the write succeeds and the silence
+        # happens at the handshake. A child that never reads reaches the same
+        # wedge by blocking a write instead, and is covered separately.
         real = subprocess.Popen
         started: list[subprocess.Popen[Any]] = []
 
@@ -1585,8 +1623,12 @@ class TestFailingFast:
             # the handshake pipe is released, so nothing has to interrupt a live
             # reader, and the writer holds no lock descriptor.
             assert all(child.stdin is None or child.stdin.closed for child in started)
+            for thread in threading.enumerate():
+                if thread.name.startswith("daemon-startup-"):
+                    thread.join(timeout=1)
             assert not any(
-                "daemon-config" in thread.name for thread in threading.enumerate()
+                thread.name.startswith("daemon-startup-")
+                for thread in threading.enumerate()
             )
 
             # And on time. The timeout bounds the *wait*, and the cleanup after
@@ -1994,325 +2036,6 @@ def test_windows_owner_cleanup_uses_taskkill(monkeypatch: pytest.MonkeyPatch):
     ]
 
 
-@pytest.mark.parametrize(
-    ("startup_output", "authenticated", "expected"),
-    [
-        (b"committed\nfailed\n", "failed", _Started.NO),
-        (b"failed\ncommitted\n", "committed", _Started.YES),
-        (b"sitecustomize: committed", "committed", _Started.YES),
-    ],
-)
-def test_owner_startup_verdicts_require_the_post_spawn_nonce(
-    startup_output: bytes, authenticated: str, expected: _Started
-):
-    nonce = "0123456789abcdef" * 4
-    frame = f"owner {nonce} {authenticated}\n".encode()
-    child = SimpleNamespace(stdout=io.BytesIO(startup_output + frame))
-
-    assert (
-        election_module._await_committed(
-            cast(Any, child), handshake_nonce=nonce, timeout=1
-        )
-        is expected
-    )
-
-
-def test_owner_rejects_unauthenticated_startup_verdicts_at_eof():
-    nonce = "0123456789abcdef" * 4
-    child = SimpleNamespace(stdout=io.BytesIO(b"committed\nfailed\n"))
-
-    assert (
-        election_module._await_committed(
-            cast(Any, child), handshake_nonce=nonce, timeout=1
-        )
-        is _Started.NO
-    )
-
-
-def test_owner_accepts_a_verdict_after_large_finite_startup_output():
-    nonce = "0123456789abcdef" * 4
-    frame = f"owner {nonce} committed\n".encode()
-    child = SimpleNamespace(stdout=io.BytesIO(b"x" * 5000 + frame))
-
-    assert (
-        election_module._await_committed(
-            cast(Any, child),
-            handshake_nonce=nonce,
-            timeout=1,
-        )
-        is _Started.YES
-    )
-
-
-#: A bound on every wait below, so a regression fails an assertion instead of
-#: hanging the suite.
-_PARKED = 5.0
-
-_NONCE = "0123456789abcdef" * 4
-_COMMITTED = f"owner {_NONCE} committed\n".encode()
-
-
-class _Pipe:
-    """A handshake pipe that parks its read until the child writes.
-
-    ``blocking_close`` is the Windows behaviour: a close waits for a read in
-    flight instead of ending it, which is what POSIX does.
-    """
-
-    def __init__(self, payload: bytes = b"", *, blocking_close: bool = False) -> None:
-        self._payload = io.BytesIO(payload)
-        self._parked = not payload
-        self._blocking_close = blocking_close
-        self.reading = threading.Event()
-        self.wrote = threading.Event()
-        self.shut = threading.Event()
-        self.closes = 0
-        self.detaches = 0
-
-    def readline(self, size: int = -1) -> bytes:
-        self.reading.set()
-        if self._parked:
-            self.wrote.wait(_PARKED)
-        return self._payload.readline(size)
-
-    def detach(self) -> _Pipe:
-        self.detaches += 1
-        return self
-
-    def close(self) -> None:
-        if self._blocking_close and self._parked:
-            self.wrote.wait(_PARKED)
-        self.closes += 1
-        self.wrote.set()
-        self.shut.set()
-
-
-def test_windows_release_leaves_a_parked_reader_holding_the_pipe(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """A committed owner holds stdout open, so closing here would wait for it."""
-    monkeypatch.setattr(election_module, "_IS_WINDOWS", True)
-    pipe = _Pipe(blocking_close=True)
-    child = SimpleNamespace(stdout=pipe)
-
-    verdict = election_module._await_committed(
-        cast(Any, child), handshake_nonce=_NONCE, timeout=0.05
-    )
-
-    assert verdict is _Started.STILL_TRYING
-    assert pipe.reading.wait(_PARKED)
-
-    started = time.monotonic()
-    election_module._release_handshake(cast(Any, child))
-    elapsed = time.monotonic() - started
-
-    assert elapsed < 1.0
-    assert (pipe.detaches, pipe.closes) == (0, 0)
-    assert child.stdout is None
-
-    # The child stops writing, and the reader closes what it kept, exactly once.
-    pipe.wrote.set()
-    assert pipe.shut.wait(_PARKED)
-    assert pipe.closes == 1
-
-
-@pytest.mark.parametrize(
-    ("windows", "make_pipe", "expected"),
-    [
-        (True, lambda: _Pipe(_COMMITTED, blocking_close=True), _Started.YES),
-        (False, _Pipe, _Started.STILL_TRYING),
-    ],
-    ids=["windows-read-over", "posix-read-parked"],
-)
-def test_the_caller_closes_the_pipe_it_may_take(
-    windows: bool,
-    make_pipe: Callable[[], Any],
-    expected: _Started,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Only Windows keeps a read in flight; every other case closes here, once."""
-    monkeypatch.setattr(election_module, "_IS_WINDOWS", windows)
-    pipe = make_pipe()
-    child = SimpleNamespace(stdout=pipe)
-    before = set(threading.enumerate())
-
-    verdict = election_module._await_committed(
-        cast(Any, child), handshake_nonce=_NONCE, timeout=0.05
-    )
-    readers = [thread for thread in threading.enumerate() if thread not in before]
-
-    assert verdict is expected
-    assert pipe.reading.wait(_PARKED)
-
-    election_module._release_handshake(cast(Any, child))
-    for reader in readers:
-        reader.join(_PARKED)
-
-    assert (pipe.detaches, pipe.closes) == (1, 1)
-
-
-def test_a_read_that_ended_hands_its_pipe_back():
-    """The window the release tests cannot reach: a read ending as the caller
-    times out, where both sides walking away would leave the pipe open."""
-    pipe = _Pipe()
-    active = election_module._ActiveRead()
-
-    active.finish(pipe)
-
-    assert pipe.closes == 0
-    assert active.abandon() is True
-
-
-@_POSIX_ONLY
-class TestSaturatedControlQueue:
-    """The child's rendezvous, already full when the child goes looking for it.
-
-    The listener is bound before the spawn, because its address travels in the
-    configuration record. Anything running as this account can therefore queue on
-    it before the child exists, and the queue holds sixteen. A child that finds it
-    full does not fail: it blocks in connect for its own thirty second timeout, so
-    it never reports the prepared generation the parent waited for before it would
-    accept anything. The parent then killed a healthy owner for never attaching,
-    on every attempt, for as long as the strangers sat there.
-
-    Real sockets and a real protocol-3 exchange, because the defect is in the
-    order two processes reach one kernel queue. The Windows path puts a Job Object
-    in front of the same exchange, and its ordering is pinned by the doubles in
-    ``TestWindowsAtomicOwnerHandoff``.
-    """
-
-    class _Child:
-        """A protocol-3 owner, in a thread, doing what one does and in that order.
-
-        It attaches before it prepares anything, which is the ordering the whole
-        defect turns on: nothing it says can reach the parent until it is through
-        the queue.
-        """
-
-        def __init__(self, instance_id: str) -> None:
-            configuration_read, configuration_write = os.pipe()
-            report_read, report_write = os.pipe()
-            self.pid = 424242
-            self.stdin = os.fdopen(configuration_write, "wb")
-            self.stdout = os.fdopen(report_read, "rb")
-            self.stderr = None
-            self.returncode: int | None = None
-            self.killed = False
-            self.attached_at: float | None = None
-            self.failure: BaseException | None = None
-            self._instance_id = instance_id
-            self._configuration = os.fdopen(configuration_read, "rb")
-            self._report = os.fdopen(report_write, "wb")
-            self._nonce = ""
-            self.thread = threading.Thread(target=self._run, daemon=True)
-            self.thread.start()
-
-        def _run(self) -> None:
-            try:
-                with self._configuration as stream:
-                    record = json.loads(stream.readline())
-                self._nonce = record["handshake_nonce"]
-                channel = process_control.attach(
-                    record["control_host"],
-                    record["control_port"],
-                    nonce=self._nonce,
-                    timeout=20.0,
-                )
-                self.attached_at = time.monotonic()
-                try:
-                    self._say(f"prepared {self._instance_id}")
-                    commit = f"owner {self._nonce} commit\n"
-                    self._say("committed" if channel.readline() == commit else "failed")
-                finally:
-                    cast(Any, channel).close()
-            except BaseException as exc:  # noqa: BLE001 - reported to the test
-                self.failure = exc
-            finally:
-                with contextlib.suppress(OSError, ValueError):
-                    self._report.close()
-
-        def _say(self, message: str) -> None:
-            self._report.write(f"owner {self._nonce} {message}\n".encode("ascii"))
-            self._report.flush()
-
-        def kill(self) -> None:
-            self.killed = True
-            self.returncode = -9
-
-        def wait(self, timeout: float | None = None) -> int:
-            return self.returncode if self.returncode is not None else 0
-
-        def poll(self) -> int | None:
-            return self.returncode
-
-        def close(self) -> None:
-            self.thread.join(timeout=30.0)
-            # ``stdout`` is None once the parent has released the handshake pipe.
-            for stream in (self.stdin, self.stdout, self._report):
-                if stream is not None:
-                    with contextlib.suppress(OSError, ValueError):
-                        cast(Any, stream).close()
-
-    def test_a_queue_saturated_before_the_child_still_reaches_commit(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        profile = _profile(tmp_path)
-        config = _config(profile)
-        instance_id = new_instance_id()
-        child = self._Child(instance_id)
-        silent: list[socket.socket] = []
-        opened = election_module.ControlListener.open
-
-        def open_and_saturate() -> election_module.ControlListener:
-            # Every slot taken before the child exists, by peers that say
-            # nothing: the cheapest way to occupy the rendezvous and the one the
-            # per-peer allowance alone does not answer, because that bound
-            # divides the wait among peers ahead of a connection that is already
-            # queued.
-            listener = opened()
-            silent.extend(
-                socket.create_connection((listener.host, listener.port))
-                for _ in range(process_control._BACKLOG)
-            )
-            return listener
-
-        monkeypatch.setattr(
-            election_module.ControlListener, "open", staticmethod(open_and_saturate)
-        )
-        monkeypatch.setattr(election_module.subprocess, "Popen", lambda *a, **k: child)
-        monkeypatch.setattr(
-            election_module,
-            "terminate_process_group",
-            lambda *a, **k: pytest.fail("the healthy owner was stopped"),
-        )
-        monkeypatch.setattr(
-            election_module.daemon_descriptor,
-            "validate_prepared",
-            lambda *a, **k: None,
-        )
-        monkeypatch.setattr(
-            election_module.daemon_descriptor, "discard_prepared", lambda *a, **k: None
-        )
-
-        began = time.monotonic()
-        try:
-            outcome = election_module._spawn(profile.parent, config, timeout=8.0)
-            elapsed = time.monotonic() - began
-        finally:
-            child.close()
-            for peer in silent:
-                peer.close()
-
-        assert child.failure is None, child.failure
-        assert outcome is election_module._Started.YES
-        assert not child.killed, "a child that could not reach the queue was killed"
-        # And it got there while the strangers were still standing in front of
-        # it, rather than after its own connect timeout gave up on them.
-        assert child.attached_at is not None
-        assert child.attached_at - began < 8.0
-        assert elapsed < 8.0, "the spawn spent its whole budget on the queue"
-
-
 class TestWindowsAtomicOwnerHandoff:
     def test_owner_requests_breakaway_from_the_host_job(
         self, monkeypatch: pytest.MonkeyPatch
@@ -2424,53 +2147,36 @@ class TestWindowsAtomicOwnerHandoff:
             events.append("create-handshake-nonce")
             return handshake_nonce
 
-        class _Control:
-            """The rendezvous, stubbed so no real socket is bound here.
+        class _Channel:
+            """The startup channel, stubbed so no thread is started here.
 
-            Only the ordering is recorded. Where the drain and the attachment sit
-            relative to the Job and to the child's own report is what this class
-            is about; the channel's own behaviour is pinned in
-            ``tests/test_process_control.py``.
+            Only the ordering is recorded. Where the greeting and the frames sit
+            relative to the Job is what this class is about; the channel's own
+            behaviour is pinned in ``tests/test_daemon_startup.py``.
             """
 
-            host = "127.0.0.1"
-            port = 4321
-
-            @classmethod
-            def open(cls) -> _Control:
-                return cls()
-
-            def start_accepting(self, *, nonce: str, timeout: float) -> None:
+            def __init__(self, process: object, nonce: str) -> None:
+                assert process is child
                 assert nonce == handshake_nonce
-                assert timeout == 1.0
-                events.append("drain")
-
-            def attached_within(self, *, timeout: float) -> None:
-                assert timeout <= 1.0
-                assert "drain" in events, "the attachment was taken without a drain"
-                events.append("attach")
+                self.nonce = nonce
+                events.append("channel")
 
             def close(self) -> None:
                 pass
 
-        def hand_over(
-            process: object,
-            sent: AppConfig,
-            *,
-            handshake_nonce: str,
-            control: object,
-            timeout: float,
-        ) -> None:
-            assert process is child
-            assert sent is config
-            assert handshake_nonce == "0123456789abcdef" * 4
-            assert isinstance(control, _Control)
+        def greet(channel: object, *, timeout: float) -> None:
+            assert isinstance(channel, _Channel)
             assert timeout == 1.0
+            events.append("hello")
+
+        def hand_over(channel: object, sent: AppConfig, *, timeout: float) -> None:
+            assert isinstance(channel, _Channel)
+            assert sent is config
+            assert timeout <= 1.0
             events.append("config")
 
-        def prepared(process: object, *, handshake_nonce: str, timeout: float) -> str:
-            assert process is child
-            assert handshake_nonce == "0123456789abcdef" * 4
+        def prepared(channel: object, *, timeout: float) -> str:
+            assert isinstance(channel, _Channel)
             assert timeout <= 1.0
             events.append("prepared")
             return instance_id
@@ -2491,18 +2197,15 @@ class TestWindowsAtomicOwnerHandoff:
             if validation_error is not None:
                 raise validation_error
 
-        def send_commit(channel: object, *, handshake_nonce: str) -> None:
-            assert isinstance(channel, _Control)
-            assert handshake_nonce == "0123456789abcdef" * 4
+        def send_commit(channel: object, instance: str, *, timeout: float) -> None:
+            assert isinstance(channel, _Channel)
+            assert instance == instance_id
             events.append("commit")
 
-        def await_committed(
-            process: object, *, handshake_nonce: str, timeout: float
-        ) -> object:
-            assert process is child
-            assert handshake_nonce == "0123456789abcdef" * 4
+        def await_committed(channel: object, *, timeout: float) -> object:
+            assert isinstance(channel, _Channel)
             events.append(
-                daemon_owner.COMMITTED
+                startup.COMMITTED
                 if committed is election_module._Started.YES
                 else committed.value
             )
@@ -2512,13 +2215,14 @@ class TestWindowsAtomicOwnerHandoff:
             election_module, "os", SimpleNamespace(name="nt", environ=os.environ)
         )
         monkeypatch.setattr(election_module, "WindowsJob", _Job)
-        monkeypatch.setattr(election_module, "ControlListener", _Control)
+        monkeypatch.setattr(startup, "FrontendChannel", _Channel)
         monkeypatch.setattr(election_module, "release_nonce", lambda: "nonce")
         monkeypatch.setattr(election_module, "new_nonce", make_handshake_nonce)
         monkeypatch.setattr(election_module, "windows_gate_command", gate)
         monkeypatch.setattr(election_module.subprocess, "Popen", popen)
         monkeypatch.setattr(election_module, "release_windows_gate", release)
         monkeypatch.setattr(election_module, "_detachment_flags", lambda: 0)
+        monkeypatch.setattr(election_module, "_greet", greet)
         monkeypatch.setattr(election_module, "_hand_over_config", hand_over)
         monkeypatch.setattr(election_module, "_await_prepared", prepared)
         monkeypatch.setattr(
@@ -2530,7 +2234,6 @@ class TestWindowsAtomicOwnerHandoff:
         monkeypatch.setattr(
             election_module, "_report_child_failure", lambda report: None
         )
-        monkeypatch.setattr(election_module, "_release_handshake", lambda process: None)
         monkeypatch.setattr(election_module, "_reap", lambda process: None)
         monkeypatch.setattr(
             election_module,
@@ -2560,17 +2263,15 @@ class TestWindowsAtomicOwnerHandoff:
             "build-gate",
             "start-gate",
             "create-handshake-nonce",
-            # The drain begins on the nonce and before the configuration record,
-            # so the queue is being emptied from before the child can reach the
-            # port. It is parent-side work and changes nothing about the Job,
-            # which is still assigned before the gate is released, so no owner
-            # code exists until the parent owns the Job.
-            "drain",
+            # The Job is assigned before the gate is released, so no owner code
+            # exists until the parent owns the Job, and the channel takes the
+            # child's pipes only after the release line has gone through them.
             "assign-gate",
             "release-gate",
+            "channel",
+            "hello",
             "config",
             "prepared",
-            "attach",
             "validate",
             "commit",
             "committed",
@@ -2794,7 +2495,7 @@ class TestSpawnCleanupBoundary:
 
         The bootstrap diagnosis starts one, and it is created after the spawn,
         so its failure is the first that can strand a child: nothing would send
-        the configuration record it waits its whole handover timeout for.
+        the HELLO it waits its whole handover timeout for.
         """
         profile = _profile(tmp_path)
         config = _config(profile)
@@ -2818,13 +2519,6 @@ class TestSpawnCleanupBoundary:
 
         child = _Child()
         stopped: list[int] = []
-        listeners: list[process_control.ControlListener] = []
-        opened = election_module.ControlListener.open
-
-        def remember() -> election_module.ControlListener:
-            listener = opened()
-            listeners.append(listener)
-            return listener
 
         def refuse(_stream: object, *, handshake_nonce: str) -> object:
             assert handshake_nonce
@@ -2834,9 +2528,6 @@ class TestSpawnCleanupBoundary:
             stopped.append(pid)
             return True
 
-        monkeypatch.setattr(
-            election_module.ControlListener, "open", staticmethod(remember)
-        )
         monkeypatch.setattr(election_module.subprocess, "Popen", lambda *a, **k: child)
         monkeypatch.setattr(election_module, "_BootstrapReport", refuse)
         monkeypatch.setattr(election_module, "terminate_process_group", stop)
@@ -2846,11 +2537,6 @@ class TestSpawnCleanupBoundary:
 
         assert stopped == [child.pid], "the child nobody could configure was stopped"
         assert child.returncode is not None, "and collected"
-        assert len(listeners) == 1
-        with pytest.raises(OSError):
-            socket.create_connection(
-                (listeners[0].host, listeners[0].port), timeout=1.0
-            ).close()
 
 
 def _await_fixture_imports(child: subprocess.Popen[Any], imported: Path) -> None:
@@ -2878,47 +2564,6 @@ class TestAtomicStartupCommit:
         monkeypatch.setattr(election_module, "terminate_process_group", stop)
         monkeypatch.setattr(election_module, "new_nonce", lambda: _HANDSHAKE_NONCE)
 
-    @pytest.fixture(autouse=True)
-    def control_peers(
-        self, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
-    ):
-        """Give each control channel the peer a real child would attach.
-
-        The real listener rather than a stub, so these tests keep exercising the
-        authentication they depend on. A connect completes against the backlog
-        without an accept, so this needs no thread: the parent finds the peer
-        waiting exactly as it does in production.
-
-        Not for a case whose child is a real process. The drain takes the first
-        peer that presents the nonce and closes the rendezvous behind it, exactly
-        as the single accept did, so a stand-in planted alongside a real owner
-        would win the attachment that owner is there to make.
-        """
-        if request.node.get_closest_marker("real_control_peer"):
-            yield []
-            return
-        opened = election_module.ControlListener.open
-        peers: list[process_control.ControlChannel] = []
-
-        def open_and_attach() -> election_module.ControlListener:
-            listener = opened()
-            peers.append(
-                process_control.attach(
-                    listener.host,
-                    listener.port,
-                    nonce=_HANDSHAKE_NONCE,
-                    timeout=5.0,
-                )
-            )
-            return listener
-
-        monkeypatch.setattr(
-            election_module.ControlListener, "open", staticmethod(open_and_attach)
-        )
-        yield peers
-        for peer in peers:
-            cast(Any, peer).close()
-
     class _Input(io.BytesIO):
         def __init__(self) -> None:
             super().__init__()
@@ -2931,16 +2576,19 @@ class TestAtomicStartupCommit:
     class _Child:
         def __init__(self, instance_id: str, final: str = "committed") -> None:
             self.pid = 424242
+            self.instance_id = instance_id
             #: Kept beside ``stdin`` because the handover takes the stream out
             #: of the process object, leaving this the only handle on it.
             self.input = TestAtomicStartupCommit._Input()
             self.stdin: io.BytesIO | None = self.input
-            self.stdout = io.BytesIO(
-                (
-                    f"owner {_HANDSHAKE_NONCE} prepared {instance_id}\n"
-                    f"owner {_HANDSHAKE_NONCE} {final}\n"
-                ).encode()
-            )
+            #: An owner's answers: PREPARED, then *final* as its verdict, or
+            #: nothing after PREPARED when *final* is empty.
+            frames: list[tuple[str, dict[str, object]]] = [
+                (startup.PREPARED, {"instance": instance_id})
+            ]
+            if final:
+                frames.append((startup.VERDICT, {"status": final}))
+            self.stdout = io.BytesIO(_owner_says(_HANDSHAKE_NONCE, *frames))
             self.returncode: int | None = None
             self.killed = False
 
@@ -3362,7 +3010,9 @@ class TestAtomicStartupCommit:
     ):
         profile = _profile(tmp_path)
         child = self._Child(new_instance_id())
-        child.stdout = io.BytesIO(f"owner {_HANDSHAKE_NONCE} retry\n".encode())
+        child.stdout = io.BytesIO(
+            _owner_says(_HANDSHAKE_NONCE, (startup.VERDICT, {"status": startup.RETRY}))
+        )
         monkeypatch.setattr(election_module.subprocess, "Popen", lambda *a, **k: child)
         monkeypatch.setattr(
             election_module,
@@ -3529,7 +3179,9 @@ class TestAtomicStartupCommit:
 
         assert outcome is election_module._Started.NO
         assert child.killed
-        assert b"commit\n" not in child.input.written
+        assert startup.COMMIT not in [
+            frame["type"] for frame in _frames_in(child.input.written)
+        ]
         assert events == ["discard"]
 
     def test_missing_prepared_state_consumes_the_child_retry(
@@ -3550,10 +3202,7 @@ class TestAtomicStartupCommit:
         assert events == ["discard"]
 
     def test_only_the_lock_holding_child_commits(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        control_peers: list[Any],
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         outcome, child, events = self._spawn(
             tmp_path,
@@ -3562,13 +3211,17 @@ class TestAtomicStartupCommit:
         )
 
         assert outcome is election_module._Started.YES
-        # On the control channel, and only there. The configuration pipe carries
-        # its one record and ends, so an owner that frames by end of file is
-        # released rather than left waiting behind an authorization it has never
-        # heard of.
-        assert control_peers[-1].readline() == f"owner {_HANDSHAKE_NONCE} commit\n"
-        assert child.input.written.endswith(b"}\n")
-        assert b"commit" not in child.input.written
+        # The whole exchange, in order and authenticated: the greeting, the
+        # configuration only after the ACK, and the COMMIT naming the generation
+        # this child prepared and nothing else.
+        written = _frames_in(child.input.written)
+        assert [frame["type"] for frame in written] == [
+            startup.HELLO,
+            startup.CONFIG,
+            startup.COMMIT,
+        ]
+        assert all(frame["nonce"] == _HANDSHAKE_NONCE for frame in written)
+        assert written[2]["instance"] == child.instance_id
         assert not child.killed
         assert events == []
 
@@ -3675,7 +3328,6 @@ class TestAtomicStartupCommit:
         assert calls == [profile.parent]
 
     @_POSIX_ONLY
-    @pytest.mark.real_control_peer
     def test_attached_child_failure_reports_the_actual_log_path(
         self,
         tmp_path: Path,
@@ -3737,7 +3389,6 @@ class TestAtomicStartupCommit:
                     child.wait(timeout=30)
 
     @_POSIX_ONLY
-    @pytest.mark.real_control_peer
     def test_planted_child_log_fifo_is_refused_without_blocking(
         self,
         tmp_path: Path,
@@ -3900,10 +3551,7 @@ class TestAtomicStartupCommit:
         assert events == []
 
     def test_interrupt_after_commit_request_does_not_kill_the_child(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        control_peers: list[Any],
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         profile = _profile(tmp_path)
         config = _config(profile)
@@ -3928,7 +3576,9 @@ class TestAtomicStartupCommit:
         with pytest.raises(KeyboardInterrupt):
             election_module._spawn(profile.parent, config, timeout=1.0)
 
-        assert control_peers[-1].readline() == f"owner {_HANDSHAKE_NONCE} commit\n"
+        assert startup.COMMIT in [
+            frame["type"] for frame in _frames_in(child.input.written)
+        ]
         assert not child.killed
         # Closed by the writer thread that took it, and gone from ``Popen``
         # so nothing on the frontend's deadline path can close it a second
@@ -4168,58 +3818,13 @@ class TestAtomicStartupCommit:
         assert not any(path.exists() for path in abandoned_paths)
         assert all(path.read_text() == "replacement" for path in replacement_paths)
 
-    def test_the_configuration_pipe_ends_on_its_record(self, tmp_path: Path):
-        # The record is all the pipe carries: authorization travels on the
-        # control channel, so the frontend ends the pipe on the record.
-        class _Flushed(io.BytesIO):
-            flushes = 0
-            content = b""
-
-            def flush(self) -> None:
-                self.flushes += 1
-                super().flush()
-
-            def close(self) -> None:
-                self.content = self.getvalue()
-                super().close()
-
-        stream = _Flushed()
-        child = self._Child(new_instance_id())
-        child.stdin = stream
-        control = election_module.ControlListener.open()
-
-        try:
-            election_module._hand_over_config(
-                cast(Any, child),
-                _config(_profile(tmp_path)),
-                handshake_nonce=_HANDSHAKE_NONCE,
-                control=control,
-                timeout=1.0,
-            )
-        finally:
-            control.close()
-
-        assert stream.flushes == 1
-        assert stream.closed, "the configuration pipe was left open past its record"
-        # Flushed before the close rather than by it, so a child reading the
-        # record and a child reading to end of file both see the same bytes.
-        assert stream.content.endswith(b"\n")
-        # And the rendezvous the commit record will arrive on travelled with it.
-        record = json.loads(stream.content)
-        assert record["startup_protocol"] == daemon_config.STARTUP_PROTOCOL_VERSION
-        assert (record["control_host"], record["control_port"]) == (
-            control.host,
-            control.port,
-        )
-
     class _StalledPipe:
-        """A configuration pipe whose ``close`` needs the lock its ``write`` holds.
+        """A startup input pipe whose ``close`` needs the lock its ``write`` holds.
 
         What ``BufferedWriter`` does against a child that never reads, without a
         real pipe or a platform's buffer size: the write parks holding the
         buffer's own lock, and every other operation on that object waits for it
-        to finish. ``_close_handshake_stream`` documents the measured read-side
-        twin, 29.27 of thirty seconds.
+        to finish. The read side has a measured twin, 29.27 of thirty seconds.
         """
 
         def __init__(self) -> None:
@@ -4314,7 +3919,7 @@ class TestAtomicStartupCommit:
             assert pipe.writing.wait(timeout=10), "the writer never reached its write"
             spawner.join(timeout=20)
             assert not spawner.is_alive(), (
-                "the frontend was pinned by a configuration write that never returned"
+                "the frontend was pinned by a startup write that never returned"
             )
             assert finished == [election_module._Started.NO]
             # The stop ran, was bounded, and left the child alive: exactly the
@@ -4325,7 +3930,7 @@ class TestAtomicStartupCommit:
             # `_spawn` can reach it.
             assert child.stdin is None
             assert pipe.closed_by == [], (
-                "the configuration pipe was closed while the write still held it"
+                "the startup pipe was closed while the write still held it"
             )
         finally:
             pipe.read_end_died.set()
@@ -4337,9 +3942,9 @@ class TestAtomicStartupCommit:
                 break
             time.sleep(0.01)
         for thread in threading.enumerate():
-            if thread.name == "daemon-config":
+            if thread.name == "daemon-startup-input":
                 thread.join(timeout=5)
-        assert pipe.closed_by == ["daemon-config"]
+        assert pipe.closed_by == ["daemon-startup-input"]
 
     def test_a_generic_case_is_given_a_job_before_the_owner_starts(
         self,
@@ -4970,15 +4575,13 @@ class TestRealOwner:
         child = tmp_path / "lock_taking_child.py"
         marker = tmp_path / "locked"
         child.write_text(
-            "import sys\n"
+            _GREETED_CHILD + "import sys\n"
             "from pathlib import Path\n"
             "from linkedin_mcp_server.daemon.lock import DaemonLock\n"
-            "sys.stdin.readline()\n"
             "lock = DaemonLock(Path(sys.argv[1]))\n"
             "assert lock.try_acquire()\n"
             "Path(sys.argv[2]).write_text('locked')\n"
-            "sys.stdout.write('failed\\n')\n"
-            "sys.stdout.flush()\n"
+            "channel.send(startup.VERDICT, nonce, status=startup.FAILED)\n"
             "raise SystemExit(7)\n"
         )
 
@@ -6194,15 +5797,16 @@ class TestVersionSkew:
 
 class TestBudgets:
     @pytest.mark.parametrize("platform", ["posix", "nt"])
-    def test_handover_and_prepared_wait_share_one_budget(
+    def test_greeting_handover_and_prepared_wait_share_one_budget(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str
     ):
         profile = _profile(tmp_path)
         config = _config(profile)
         budget = 0.5
-        handover_time = 0.4
+        greeting_time = 0.1
+        handover_time = 0.3
         handshake_nonce = "0123456789abcdef" * 4
-        prepared_timeouts: list[float] = []
+        timeouts: dict[str, float] = {}
 
         class _Clock:
             now = 100.0
@@ -6240,42 +5844,33 @@ class TestBudgets:
                 assert purpose == "owner"
                 return cls("Local\\linkedin-mcp-owner-budget-double")
 
-        class _Control:
-            host = "127.0.0.1"
-            port = 4321
-
-            @classmethod
-            def open(cls) -> _Control:
-                return cls()
-
-            def start_accepting(self, *, nonce: str, timeout: float) -> None:
+        class _Channel:
+            def __init__(self, process: object, nonce: str) -> None:
+                assert process is child
                 assert nonce == handshake_nonce
-                assert timeout == budget
+                self.nonce = nonce
 
             def close(self) -> None:
                 pass
 
+        def greet(channel: object, *, timeout: float) -> None:
+            assert isinstance(channel, _Channel)
+            timeouts["greet"] = timeout
+            _Clock.now += greeting_time
+
         def hand_over(
-            process: object,
-            handed_config: AppConfig,
-            *,
-            handshake_nonce: str,
-            control: object,
-            timeout: float,
+            channel: object, handed_config: AppConfig, *, timeout: float
         ) -> None:
-            assert process is child
+            assert isinstance(channel, _Channel)
             assert handed_config is config
-            assert handshake_nonce == "0123456789abcdef" * 4
-            assert isinstance(control, _Control)
-            assert timeout == budget
+            timeouts["config"] = timeout
             _Clock.now += handover_time
 
         def await_prepared(
-            process: object, *, handshake_nonce: str, timeout: float
+            channel: object, *, timeout: float
         ) -> election_module._Started:
-            assert process is child
-            assert handshake_nonce == "0123456789abcdef" * 4
-            prepared_timeouts.append(timeout)
+            assert isinstance(channel, _Channel)
+            timeouts["prepared"] = timeout
             # A verdict that ends the attempt here, so only the shared budget
             # up to the prepared wait is under test.
             return election_module._Started.RETRY
@@ -6304,7 +5899,7 @@ class TestBudgets:
             )
         monkeypatch.setattr(election_module, "time", _Clock)
         monkeypatch.setattr(election_module, "WindowsJob", _Job)
-        monkeypatch.setattr(election_module, "ControlListener", _Control)
+        monkeypatch.setattr(startup, "FrontendChannel", _Channel)
         monkeypatch.setattr(election_module, "new_nonce", lambda: handshake_nonce)
 
         def popen(*args: object, **kwargs: object) -> _Child:
@@ -6312,6 +5907,7 @@ class TestBudgets:
             return child
 
         monkeypatch.setattr(election_module.subprocess, "Popen", popen)
+        monkeypatch.setattr(election_module, "_greet", greet)
         monkeypatch.setattr(election_module, "_hand_over_config", hand_over)
         monkeypatch.setattr(election_module, "_await_prepared", await_prepared)
 
@@ -6319,7 +5915,13 @@ class TestBudgets:
 
         assert verdict is election_module._Started.RETRY
         assert spawn_kwargs["creationflags"] == (0x7 if platform == "nt" else 0)
-        assert prepared_timeouts == pytest.approx([budget - handover_time])
+        assert timeouts == pytest.approx(
+            {
+                "greet": budget,
+                "config": budget - greeting_time,
+                "prepared": budget - greeting_time - handover_time,
+            }
+        )
 
     def test_the_owner_may_not_take_longer_than_the_frontend_will_wait(self):
         # The frontend now stops a child that has said nothing by the end of its
@@ -6639,8 +6241,11 @@ class TestTheHardExitFreesTheElectionFirst:
             async def serve(self, sockets: object = None) -> None:
                 return None
 
+        announced: list[str] = []
+
         class _SilentHandshake:
-            def prepared(self, instance_id: str) -> None: ...
+            def prepared(self, instance_id: str) -> None:
+                announced.append(instance_id)
 
             def ready(self) -> None: ...
 
@@ -6657,8 +6262,8 @@ class TestTheHardExitFreesTheElectionFirst:
             def close(self) -> None: ...
 
         class _CommittingParent:
-            def readline(self) -> str:
-                return f"owner {nonce} commit\n"
+            def read(self) -> dict[str, object]:
+                return startup.message(startup.COMMIT, nonce, instance=announced[-1])
 
         monkeypatch.setattr(daemon_owner.os, "_exit", exit_now)
         monkeypatch.setattr(daemon_owner, "hard_exit_required", lambda: True)
@@ -6784,9 +6389,13 @@ class TestPublishingLast:
         job_name: str = _OWNER_JOB_NAME,
         adopt: Callable[[str], None] | None = None,
         commit_implementation: Callable[[Path, str], object] | None = None,
+        announced: list[str] | None = None,
     ) -> int:
         import asyncio
 
+        #: The generation the owner announced in PREPARED, which is the one a
+        #: genuine COMMIT names.
+        announced = [] if announced is None else announced
         profile = _profile(tmp_path)
         config = _config(profile)
         if idle_timeout is not None:
@@ -6805,6 +6414,7 @@ class TestPublishingLast:
 
         class _RecordingHandshake:
             def prepared(self, instance_id: str) -> None:
+                announced.append(instance_id)
                 order.append("prepared")
 
             def committed(self) -> None:
@@ -6826,9 +6436,13 @@ class TestPublishingLast:
                 return None
 
         class _Control:
-            def readline(self) -> str:
+            def read(self) -> dict[str, object]:
                 order.append("control")
-                return f"owner {'0123456789abcdef' * 4} commit\n" if commit else ""
+                if not commit:
+                    raise EOFError
+                return startup.message(
+                    startup.COMMIT, "0123456789abcdef" * 4, instance=announced[-1]
+                )
 
         class _StoppedServer:
             started = True
@@ -6950,8 +6564,8 @@ class TestPublishingLast:
     def test_the_frontend_authorizes_the_commit_over_control(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        # The one startup protocol: prepared, then the frontend's commit read
-        # from the control channel, and only then the canonical descriptor.
+        # The one startup protocol: prepared, then the frontend's COMMIT read
+        # from the startup channel, and only then the canonical descriptor.
         order: list[str] = []
 
         self._run_serve(tmp_path, monkeypatch, order)
@@ -7112,22 +6726,31 @@ class TestPublishingLast:
         ]
 
     @pytest.mark.parametrize(
-        "record",
-        ["commit\n", f"owner {'f' * 64} commit\n"],
-        ids=["plain", "wrong-nonce"],
+        "forge",
+        [
+            lambda instance: {"type": startup.COMMIT, "instance": instance},
+            lambda instance: startup.message(
+                startup.COMMIT, "f" * 64, instance=instance
+            ),
+            lambda instance: startup.message(
+                startup.COMMIT, "0123456789abcdef" * 4, instance=new_instance_id()
+            ),
+        ],
+        ids=["plain", "wrong-nonce", "other-generation"],
     )
     def test_commit_authorization_requires_the_handed_over_nonce(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        record: str,
+        forge: Callable[[str], dict[str, object]],
     ):
         order: list[str] = []
+        announced: list[str] = []
 
         class _UnauthenticatedParent:
-            def readline(self) -> str:
+            def read(self) -> dict[str, object]:
                 order.append("control")
-                return record
+                return forge(announced[-1])
 
         monkeypatch.setattr(
             daemon_owner.logger, "info", lambda *args, **kwargs: order.append("logged")
@@ -7138,6 +6761,7 @@ class TestPublishingLast:
             monkeypatch,
             order,
             control=_UnauthenticatedParent(),
+            announced=announced,
         )
 
         assert outcome == 0
@@ -7162,11 +6786,11 @@ class TestPublishingLast:
         errors: list[BaseException] = []
 
         class _SuspendedParent:
-            def readline(self) -> str:
+            def read(self) -> dict[str, object]:
                 order.append("control")
                 control_read.set()
                 release.wait()
-                return "commit\n"
+                raise EOFError
 
         def log_timeout(*args: object, **kwargs: object) -> None:
             assert control_read.is_set()
@@ -7259,10 +6883,10 @@ class TestPublishingLast:
             release_cleanup.wait()
 
         class _SuspendedParent:
-            def readline(self) -> str:
+            def read(self) -> dict[str, object]:
                 order.append("control")
                 release_control.wait()
-                return "commit\n"
+                raise EOFError
 
         monkeypatch.setattr(
             daemon_owner.daemon_descriptor,
@@ -9055,29 +8679,15 @@ class TestOwnerBootstrapOrdering:
             def close(self) -> None:
                 events.append("handshake:closed")
 
-        class Control:
-            def readline(self) -> str:
-                return ""
-
-            def close(self) -> None:
-                return None
-
-        handover = daemon_config.OwnerHandover(
-            _config(profile),
-            _HANDSHAKE_NONCE,
-            control=daemon_config.ControlEndpoint("127.0.0.1", 54321),
-        )
-        monkeypatch.setattr(
-            daemon_owner.process_control, "attach", lambda *a, **k: Control()
-        )
+        handover = daemon_config.OwnerHandover(_config(profile), _HANDSHAKE_NONCE)
         monkeypatch.setattr(
             daemon_owner.WindowsJob, "verify_current_process", lambda name: None
         )
         monkeypatch.setattr(daemon_owner, "_BootstrapDiagnostics", Bootstrap)
         monkeypatch.setattr(daemon_owner, "_Handshake", Handshake)
         monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
-        monkeypatch.setattr(daemon_owner, "_claim_handshake_stream", lambda: None)
-        monkeypatch.setattr(daemon_owner, "_read_handover", lambda: handover)
+        monkeypatch.setattr(daemon_owner, "_claim_startup_channel", lambda: None)
+        monkeypatch.setattr(daemon_owner, "_read_handover", lambda *a, **k: handover)
         monkeypatch.setattr(daemon_owner, "set_config", lambda config: None)
         monkeypatch.setattr(daemon_owner, "set_headless", lambda headless: None)
         monkeypatch.setattr(daemon_owner, "set_process_role", lambda role: None)
@@ -9234,57 +8844,42 @@ def _prepare_browser_cache(profile: Path) -> None:
     )
 
 
-class TestTheHandshakeFrameIsNotPlatformTranslated:
-    """The frontend authenticates this frame by comparing exact bytes."""
+class TestTheStartupFramesAreNotPlatformTranslated:
+    """The frontend reads lengths and bytes, so the owner has to write them exact."""
 
-    def test_the_stream_is_opened_without_newline_translation(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        """Checked at the argument, because only Windows would translate.
+    def test_a_length_holding_a_line_feed_crosses_the_pipe_unchanged(self):
+        """The header is binary, and one of its bytes may be a line feed.
 
-        There is no way to observe the difference on a POSIX host: the default
-        writes LF here too. What decides the Windows outcome is the argument
-        this passes, so that is what this asserts.
+        JSON escapes every control character, so a body never carries a raw LF;
+        a length can. 266 bytes is ``00 00 01 0A`` on the wire, and a text-mode
+        descriptor on Windows would write that last byte as CR LF, shifting
+        every frame after it. The owner sets its descriptors to binary mode for
+        that reason; on a POSIX host this pins the round trip it protects.
         """
-        from linkedin_mcp_server.daemon import owner as daemon_owner
-
-        opened: dict[str, object] = {}
-
-        class _Stream:
-            def close(self) -> None:
-                return None
-
-        def fdopen(_descriptor: int, mode: str, **kwargs: object) -> object:
-            opened.update(kwargs)
-            opened["mode"] = mode
-            return _Stream()
-
-        monkeypatch.setattr(daemon_owner.sys.stdout, "flush", lambda: None)
-        monkeypatch.setattr(daemon_owner.os, "dup", lambda _fd: 99)
-        monkeypatch.setattr(daemon_owner.os, "dup2", lambda _src, _dst: None)
-        monkeypatch.setattr(daemon_owner.os, "fdopen", fdopen)
-
-        stream = daemon_owner._claim_handshake_stream()
-
-        assert stream is not None
-        assert opened["newline"] == "\n", (
-            "a translated line ending makes a genuine verdict unrecognisable"
-        )
-
-    def test_a_carriage_return_is_not_a_verdict(self):
-        """And the reader stays strict, so the writer has to be exact."""
-        from linkedin_mcp_server.daemon import owner as daemon_owner
-
         nonce = "0123456789abcdef" * 4
-        frame = f"{daemon_owner.HANDSHAKE} {nonce} {daemon_owner.COMMITTED}"
+        empty = startup.encode(startup.message(startup.PREPARED, nonce, instance=""))
+        instance = "x" * (266 - (len(empty) - 4))
+        expected = startup.encode(
+            startup.message(startup.PREPARED, nonce, instance=instance)
+        )
+        assert b"\n" in expected[:4]
 
-        assert election_module._reported_owner_verdict(
-            f"{frame}\n".encode(), nonce
-        ) == (daemon_owner.COMMITTED, None)
-        assert (
-            election_module._reported_owner_verdict(f"{frame}\r\n".encode(), nonce)
-            is None
-        ), "the carriage return stays part of the payload and matches no verdict"
+        inbound, unused = os.pipe()
+        os.close(unused)
+        read_end, write_end = os.pipe()
+        channel = startup.OwnerChannel(inbound, write_end)
+        try:
+            channel.send(startup.PREPARED, nonce, instance=instance)
+            channel.close_output()
+            received = b""
+            while chunk := os.read(read_end, 4096):
+                received += chunk
+        finally:
+            channel.close_output()
+            channel.close()
+            os.close(read_end)
+
+        assert received == expected
 
 
 def _with_published_fields(auth_root: Path, **fields: object) -> None:
