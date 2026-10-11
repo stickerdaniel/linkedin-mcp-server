@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import mcp.types as mt
 import pytest
@@ -24,9 +24,9 @@ from linkedin_mcp_server.daemon import auth_repair as daemon_auth
 from linkedin_mcp_server.daemon.auth_repair import (
     MARKER_KEY,
     MARKER_VERSION,
-    FrontendAuthRepairMiddleware,
     OwnerAuthSignalMiddleware,
 )
+from linkedin_mcp_server.daemon.proxy import FrontendCallMiddleware
 from linkedin_mcp_server.core.exceptions import AccountRestrictedError
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.exceptions import (
@@ -67,23 +67,20 @@ def _owner_that_fails_with(
 
 
 def _proxy_to(
-    owner: FastMCP, *, repairing: bool = True, tool_timeout: float | None = None
+    owner: FastMCP, *, repairing: bool = True, budget: float = 30.0
 ) -> FastMCP:
     """A frontend forwarding to *owner* in memory, wired as production does.
 
-    *tool_timeout* is handed to the middleware the way ``create_mcp_server`` does,
-    rather than left to the configuration: the repair budgets itself from what
-    its server was built with, so a test that set only the config would be
-    measuring a number the production path never reads.
+    *budget* is the call's one deadline, handed to the middleware the way
+    ``create_mcp_server`` does rather than left to the configuration: a test that
+    set only the config would be measuring a number the production path never
+    reads. The backend is never asked for anything here, because the in-memory
+    owner never goes away.
     """
     front = FastMCP("front", mask_error_details=True)
     front.add_provider(ProxyProvider(lambda: ProxyClient(owner)))
     if repairing:
-        front.add_middleware(
-            FrontendAuthRepairMiddleware(
-                **({} if tool_timeout is None else {"tool_timeout": tool_timeout})
-            )
-        )
+        front.add_middleware(FrontendCallMiddleware(MagicMock(), budget=budget))
     return front
 
 
@@ -547,9 +544,8 @@ class TestTheRepairRunsForReal:
 
         config = AppConfig()
         config.browser.login_inline_wait_seconds = 0.2
-        # The repair wait is a fraction of this, so setting the real budget is
-        # what scales it, and the test exercises that derivation rather than
-        # patching over it.
+        # Not what budgets the repair: that is the call's one deadline, which
+        # `_proxy_to` hands the middleware the way `create_mcp_server` does.
         config.server.tool_timeout_seconds = 6.0
         set_config(config)
 
@@ -612,7 +608,7 @@ class TestTheRepairRunsForReal:
         get_config().server.tool_timeout_seconds = 0.4
 
         with self._profile_is_free(), self._a_login_that(takes=5.0):
-            async with Client(_proxy_to(owner, tool_timeout=0.4)) as client:
+            async with Client(_proxy_to(owner, budget=0.4)) as client:
                 result = await client.call_tool("read_page", raise_on_error=False)
 
         assert len(calls) == 1
@@ -655,7 +651,7 @@ class TestTheRepairRunsForReal:
             self._a_login_that(takes=30.0),
             patch.object(daemon_auth, "_wait_for_the_sign_in", record),
         ):
-            async with Client(_proxy_to(owner, tool_timeout=budget)) as client:
+            async with Client(_proxy_to(owner, budget=budget)) as client:
                 result = await client.call_tool("read_page", raise_on_error=False)
 
         assert asked_for, "the sign-in was never waited for"
@@ -669,21 +665,18 @@ class TestTheRepairRunsForReal:
         assert asked_for[0] < share, "the spent time was not subtracted"
         assert result.is_error is True
         assert len(calls) == 1
-
-        # And exactly, away from the clock entirely, so the subtraction is pinned
-        # rather than merely implied by an inequality.
-        assert daemon_auth._how_long_to_wait_for_the_sign_in(1.2, 0.5) == pytest.approx(
-            0.5
-        )
+        # The exact arithmetic, away from the clock, is pinned where it is
+        # decided: `test_daemon_call_core.py`, the sign-in wait's end.
 
     async def test_a_replay_that_runs_long_does_not_hang_the_client(self):
         """Waiting bounded and replaying unbounded still overruns the deadline.
 
-        Nothing under this middleware bounds the whole path: the forwarded call
-        gets its own deadline per hop, so the first call, the wait and the replay
-        each stay inside one while their sum stays inside nothing. A sign-in
-        finishing near the end of the wait, followed by a slow replay, put the
-        client past its deadline with the answer already in hand.
+        Once nothing bounded the whole path: the forwarded call got its own
+        deadline per hop, so the first call, the wait and the replay each stayed
+        inside one while their sum stayed inside nothing. A sign-in finishing
+        near the end of the wait, followed by a slow replay, put the client past
+        its deadline with the answer already in hand. The replay now ends at the
+        call's one deadline like every other wait.
 
         The owner's readable failure is the right answer then: the session now
         exists, so the next call succeeds, and a bare transport error would say
@@ -707,14 +700,8 @@ class TestTheRepairRunsForReal:
             return "read ok"
 
         owner.add_middleware(OwnerAuthSignalMiddleware())
-        with (
-            self._profile_is_free(),
-            self._a_login_that(takes=0.05),
-            patch(
-                "linkedin_mcp_server.daemon.auth_repair._MINIMUM_REPLAY_SECONDS", 0.2
-            ),
-        ):
-            async with Client(_proxy_to(owner, tool_timeout=1.0)) as client:
+        with self._profile_is_free(), self._a_login_that(takes=0.05):
+            async with Client(_proxy_to(owner, budget=1.0)) as client:
                 result = await client.call_tool("read_page", raise_on_error=False)
 
         assert len(calls) == 2, "the replay never ran"
@@ -754,7 +741,7 @@ class TestTheRepairRunsForReal:
 
         owner.add_middleware(OwnerAuthSignalMiddleware())
         with self._profile_is_free(), self._a_login_that(takes=0.05):
-            async with Client(_proxy_to(owner, tool_timeout=5.0)) as client:
+            async with Client(_proxy_to(owner, budget=5.0)) as client:
                 result = await client.call_tool("send", raise_on_error=False)
             # Repaired all the same, which is what makes the retry the message
             # asks for work. Read inside the patch, where readiness reflects the
@@ -791,25 +778,11 @@ class TestTheRepairRunsForReal:
 
         owner.add_middleware(OwnerAuthSignalMiddleware())
         with self._profile_is_free(), self._a_login_that(takes=0.05):
-            async with Client(_proxy_to(owner, tool_timeout=5.0)) as client:
+            async with Client(_proxy_to(owner, budget=5.0)) as client:
                 result = await client.call_tool("act", raise_on_error=False)
 
         assert calls == [1], "an unannotated tool was replayed"
         assert result.is_error is True
-
-    async def test_the_replay_floor_stays_inside_the_budget(self):
-        """The floor must not outlive the call it is a floor for.
-
-        Measured at ``tool_timeout_seconds=1.0`` with 0.9s spent: a flat floor
-        allowed a 5-second replay inside a 1-second call, which is the overrun
-        the budget arithmetic exists to prevent.
-        """
-        from linkedin_mcp_server.daemon import auth_repair as da
-
-        assert da._what_is_left_of_this_call(1.0, 0.9) <= 1.0
-        assert da._what_is_left_of_this_call(60.0, 59.9) == da._MINIMUM_REPLAY_SECONDS
-        # The ordinary case is untouched: plenty left, so the floor never binds.
-        assert da._what_is_left_of_this_call(180.0, 30.0) == 150.0
 
 
 class TestWhichRolesGetWhichHalf:
@@ -843,7 +816,7 @@ class TestWhichRolesGetWhichHalf:
         # inline, and a second path would run a login on top of that one.
         for role in ServerRole:
             has_it = any(
-                isinstance(m, FrontendAuthRepairMiddleware)
+                isinstance(m, FrontendCallMiddleware)
                 for m in self._built(role).middleware
             )
             assert has_it == (role is ServerRole.PROXY), role
