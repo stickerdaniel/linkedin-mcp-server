@@ -386,6 +386,8 @@ STAND_DOWN_IDLE_ONLY = "idle_only"
 
 _STAND_DOWN_MODES = frozenset({STAND_DOWN_TURNOVER, STAND_DOWN_IDLE_ONLY})
 _STAND_DOWN_KEYS = frozenset({"version", "mode", "instance"})
+#: A request is about a hundred bytes; anything far larger is not one.
+_STAND_DOWN_BODY_LIMIT = 1024
 
 
 def _matches_token(presented: str, expected: str) -> bool:
@@ -419,6 +421,18 @@ def stand_down_request(instance_id: str, *, mode: str) -> dict[str, Any]:
     }
 
 
+def _unique_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """An object whose members are named once, refused otherwise.
+
+    ``json.loads`` keeps the last of two equal names, so a body naming
+    ``mode`` twice would be judged on whichever came second.
+    """
+    payload = dict(pairs)
+    if len(payload) != len(pairs):
+        raise ValueError("duplicate member")
+    return payload
+
+
 def _stand_down_mode(body: bytes, instance_id: str | None) -> str | None:
     """The mode of *body* if it is exactly a request addressed to this owner.
 
@@ -428,7 +442,7 @@ def _stand_down_mode(body: bytes, instance_id: str | None) -> str | None:
     An empty body is not a request at all.
     """
     try:
-        payload = json.loads(body)
+        payload = json.loads(body, object_pairs_hook=_unique_members)
     except ValueError:
         return None
     if (
@@ -499,10 +513,18 @@ def create_owner_server(
             if scheme.lower() != "bearer" or not _matches_token(presented, token):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             # Read whole and judged before anything changes. A body this owner
-            # cannot read exactly, an empty one included, changes nothing.
-            body = await request.body()
+            # cannot read exactly, an empty one included, changes nothing. Read
+            # under a cap rather than with request.body(), which buffers
+            # whatever arrives, chunked or not.
+            body = bytearray()
+            async for chunk in request.stream():
+                body += chunk
+                if len(body) > _STAND_DOWN_BODY_LIMIT:
+                    return JSONResponse(
+                        {"error": "unsupported stand-down request"}, status_code=400
+                    )
             liveness = get_liveness()
-            mode = _stand_down_mode(body, liveness.instance_id)
+            mode = _stand_down_mode(bytes(body), liveness.instance_id)
             if mode is None:
                 return JSONResponse(
                     {"error": "unsupported stand-down request"}, status_code=400

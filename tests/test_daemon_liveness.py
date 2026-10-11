@@ -1720,6 +1720,11 @@ class TestTheControlRoutes:
             _stand_down_body(drop="instance"),
             _stand_down_body(drop="version"),
             _stand_down_body(drop="mode"),
+            b'{"version": 1, "mode": "idle_only", "mode": "turnover",'
+            b' "instance": "the-owner"}',
+            b'{"version": 1, "mode": "turnover", "instance": "the-owner"'
+            + b" " * 65536
+            + b"}",
         ],
         ids=[
             "no body",
@@ -1748,6 +1753,8 @@ class TestTheControlRoutes:
             "no instance",
             "no version",
             "no mode",
+            "mode named twice",
+            "a valid request padded past the limit",
         ],
     )
     async def test_a_stand_down_with_any_other_body_changes_nothing(

@@ -53,9 +53,11 @@ if TYPE_CHECKING:
 #: client's transport or re-run its ``--login``.
 _SERVER_FIELDS = ("tool_timeout_seconds", "log_level")
 #: The one startup protocol this build speaks. Never 1, 2 or 3: released
-#: frontends sent those (1 by leaving the field out), and released owners accept
-#: them, so a fresh number is what makes a startup across that boundary fail on
-#: both sides before either touches state.
+#: frontends sent those (1 by leaving the field out), and the released owners
+#: that read this field accept only them, so a fresh number makes a startup
+#: across that boundary fail on both sides before either touches state. The
+#: earliest owners never read the field; they refuse this record only because
+#: its configuration carries fields they do not know.
 STARTUP_PROTOCOL_VERSION = 4
 
 

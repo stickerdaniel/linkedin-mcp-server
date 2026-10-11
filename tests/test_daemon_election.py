@@ -84,7 +84,8 @@ _BOUNDED_CALL_SECONDS = 1.0
 _THREAD_START_SECONDS = 5.0
 
 _POSIX_ONLY = pytest.mark.skipif(
-    os.name == "nt", reason="the lock is handed to the child only on POSIX"
+    os.name == "nt",
+    reason="drives POSIX process groups, signals, FIFOs or an ungated spawn",
 )
 
 #: Set by the manual election soak workflow, which arms ``DontShowUI`` before

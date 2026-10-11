@@ -7,6 +7,7 @@ the namespace earlier releases used, and is read there without being created.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -74,10 +75,14 @@ def test_the_baseline_reads_its_own_schema_where_it_wrote_it(tmp_path: Path):
     published = _descriptor(auth_root, token)
     raw = json.loads(published.to_json())
     raw["schema_version"] = 2
-    _write_private(BASELINE_LAYOUT.descriptor_path(auth_root), json.dumps(raw))
-    _write_private(
-        BASELINE_LAYOUT.directory(auth_root) / f"token-{published.instance_id}", token
+    # Placed where the frozen release writes it, spelled out rather than taken
+    # from the layout under test, so a layout that looks elsewhere fails here.
+    released = ".mcp-server-linkedin-v2" if os.name == "nt" else ".mcp-server-linkedin"
+    directory = (
+        _home() / released / "daemon" / daemon_descriptor._daemon_dir_name(auth_root)
     )
+    _write_private(directory / "daemon.json", json.dumps(raw))
+    _write_private(directory / f"token-{published.instance_id}", token)
 
     read = BASELINE_LAYOUT.read(auth_root)
 
