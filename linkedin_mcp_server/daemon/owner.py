@@ -14,9 +14,10 @@ on by default, and it is not a regression today, since the feature is opt-in.
 
 The startup boundary is load-bearing. This child listens, proves its own
 authenticated endpoint, and writes only a generation-specific pending descriptor.
-The frontend validates that state and sends one commit record. The lock-holding
-child then performs the same-directory replacement: EOF before the record aborts,
-while parent loss after it cannot revoke an owner that may already be canonical.
+The frontend validates that state and sends one COMMIT frame
+(:mod:`linkedin_mcp_server.daemon.startup`). The lock-holding child then performs
+the same-directory replacement: EOF before that frame aborts, while parent loss
+after it cannot revoke an owner that may already be canonical.
 
 The port is chosen by the kernel, so the socket is bound before the descriptor is
 built. The endpoint is proved through the descriptor's own URL and token before
@@ -51,7 +52,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, NoReturn, Protocol, TextIO
+from typing import Any, NoReturn, Protocol, TextIO, cast
 
 import httpx2
 
@@ -65,7 +66,8 @@ from linkedin_mcp_server.config import set_config
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon import config as daemon_config
 from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
-from linkedin_mcp_server.daemon import process_control
+from linkedin_mcp_server.daemon import startup
+from linkedin_mcp_server.daemon import version as daemon_version
 from linkedin_mcp_server.daemon.lock import DaemonLock
 from linkedin_mcp_server.daemon.liveness import (
     CALL_HEADER,
@@ -94,18 +96,6 @@ from linkedin_mcp_server.session_state import auth_root_dir, get_runtime_id
 logger = logging.getLogger(__name__)
 
 _IS_WINDOWS = os.name == "nt"
-
-#: Records carried by the authenticated startup control and handshake pipes. The
-#: nonce is handed over only after this process exists, so interpreter startup
-#: output cannot forge them.
-HANDSHAKE = "owner"
-COMMIT = "commit"
-PREPARED = "prepared"
-COMMITTED = "committed"
-FAILED = "failed"
-ABORTED = "aborted"
-RETRY = "retry"
-UNCERTAIN = "uncertain"
 
 #: Bounded bootstrap records carried on the original standard error. Stage
 #: records contain no values; the post-attach hint carries only its nonce and log path.
@@ -992,16 +982,22 @@ async def _reconcile_until_published(
             )
 
 
+class StartupControl(Protocol):
+    """Where the frontend's COMMIT arrives: one blocking frame read."""
+
+    def read(self) -> dict[str, object]: ...
+
+
 async def _read_control_until(
-    control: process_control.ControlChannel, deadline: float
-) -> str:
-    """Read one control record without making event-loop shutdown wait on it."""
+    control: StartupControl, deadline: float
+) -> dict[str, object]:
+    """Read one frontend frame without making event-loop shutdown wait on it."""
     loop = asyncio.get_running_loop()
-    result: asyncio.Future[str] = loop.create_future()
+    result: asyncio.Future[dict[str, object]] = loop.create_future()
 
     def read() -> None:
         try:
-            decision = control.readline()
+            decision = control.read()
         except BaseException as exc:  # noqa: BLE001 - delivered to the event loop
 
             def fail(error: BaseException = exc) -> None:
@@ -1011,7 +1007,7 @@ async def _read_control_until(
             complete = fail
         else:
 
-            def succeed(value: str = decision) -> None:
+            def succeed(value: dict[str, object] = decision) -> None:
                 if not result.done():
                     result.set_result(value)
 
@@ -1025,6 +1021,15 @@ async def _read_control_until(
     return await asyncio.wait_for(result, max(deadline - time.monotonic(), 0.0))
 
 
+def _authorizes(decision: object, handshake_nonce: str, instance_id: str) -> bool:
+    """Whether *decision* is the frontend's COMMIT for this prepared generation."""
+    try:
+        commit = startup.expect(decision, startup.COMMIT, nonce=handshake_nonce)
+    except startup.ProtocolError:
+        return False
+    return commit["instance"] == instance_id
+
+
 async def _serve(
     *,
     lock: DaemonLock,
@@ -1034,7 +1039,7 @@ async def _serve(
     log_path: Path,
     handshake: Handshake,
     handshake_nonce: str,
-    control: process_control.ControlChannel,
+    control: StartupControl,
     job_name: str | None = None,
 ) -> int:
     """Run the endpoint, prepare it, and serve only after parent commit."""
@@ -1102,21 +1107,25 @@ async def _serve(
         # the kernel while it still owns the lock. The next successful lock holder's
         # pre-publication sweep removes every superseded generation instead.
         try:
-            decision = await _read_control_until(control, commit_deadline)
+            decision: object = await _read_control_until(control, commit_deadline)
         except TimeoutError:
             logger.warning("The daemon starter did not authorize commit in time")
             handshake.retry()
             server.should_exit = True
             await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS, lock=lock)
             return 1
-        if decision != f"{HANDSHAKE} {handshake_nonce} {COMMIT}\n":
+        except (EOFError, OSError, ValueError):
+            # End of file is the frontend's abort, and anything it cannot have
+            # written means the same: nothing authorized this generation.
+            decision = None
+        if not _authorizes(decision, handshake_nonce, instance_id):
             logger.info("The daemon starter exited before committing this owner")
             handshake.abort()
             server.should_exit = True
             await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS, lock=lock)
             return 0
 
-        # The parent retains termination authority until this exact commit record.
+        # The parent retains termination authority until this exact COMMIT frame.
         # Adopt before the first replacement attempt so parent loss cannot kill an
         # owner whose publication may already have happened on remote storage.
         if os.name == "nt":
@@ -1571,48 +1580,41 @@ class Handshake(Protocol):
 
 
 class _Handshake:
-    """The pipe the frontend waits on through prepare and commit.
-
-    Standard output, taken over at startup and closed after the verdict. Not an
-    inherited descriptor of its own: ``pass_fds`` is POSIX-only
-    (``subprocess.py:1464``), and the platform without it is precisely the one
-    where the frontend has nothing else to go on, because it cannot hand over a
-    lock either and so cannot know whether this child won.
+    """The frames this process answers the frontend with, after its ACK.
 
     A pipe rather than a file, because the interesting failure is silence. When
     this process dies the frontend's read ends at once, so an owner that never
     reaches a verdict is reported as a failed election rather than waited out.
     """
 
-    def __init__(self, stream: TextIO | None, handshake_nonce: str) -> None:
-        self._stream = stream
-        self._nonce = handshake_nonce
+    def __init__(self, channel: startup.OwnerChannel | None, nonce: str) -> None:
+        self._channel = channel
+        self._nonce = nonce
 
     def prepared(self, instance_id: str) -> None:
-        self._write(f"{PREPARED} {instance_id}", close=False)
+        self._send(startup.PREPARED, close=False, instance=instance_id)
 
     def committed(self) -> None:
-        self._write(COMMITTED)
+        self._send(startup.VERDICT, status=startup.COMMITTED)
 
     def fail(self) -> None:
-        self._write(FAILED)
+        self._send(startup.VERDICT, status=startup.FAILED)
 
     def abort(self) -> None:
-        self._write(ABORTED)
+        self._send(startup.VERDICT, status=startup.ABORTED)
 
     def retry(self) -> None:
-        self._write(RETRY)
+        self._send(startup.VERDICT, status=startup.RETRY)
 
     def uncertain(self) -> None:
-        self._write(UNCERTAIN)
+        self._send(startup.VERDICT, status=startup.UNCERTAIN)
 
-    def _write(self, message: str, *, close: bool = True) -> None:
-        stream = self._stream
-        if stream is None:
+    def _send(self, kind: str, *, close: bool = True, **fields: object) -> None:
+        channel = self._channel
+        if channel is None:
             return
         try:
-            stream.write(f"{HANDSHAKE} {self._nonce} {message}\n")
-            stream.flush()
+            channel.send(kind, self._nonce, **fields)
         except (OSError, ValueError):
             pass
         finally:
@@ -1620,12 +1622,10 @@ class _Handshake:
                 self.close()
 
     def close(self) -> None:
-        """Close without a verdict, so the frontend sees the pipe end."""
-        stream, self._stream = self._stream, None
-        if stream is None:
-            return
-        with contextlib.suppress(OSError, ValueError):
-            stream.close()
+        """End the output without a verdict, so the frontend sees the pipe end."""
+        channel, self._channel = self._channel, None
+        if channel is not None:
+            channel.close_output()
 
 
 def _claim_bootstrap_stream() -> TextIO | None:
@@ -1637,49 +1637,33 @@ def _claim_bootstrap_stream() -> TextIO | None:
     return os.fdopen(duplicate, "w", encoding="utf-8")
 
 
-def _claim_handshake_stream() -> TextIO | None:
-    """Take standard output for the handshake, and point everything else away.
+def _claim_startup_channel() -> startup.OwnerChannel | None:
+    """Take standard input and output for the startup protocol.
 
-    Two things at once, and both matter. The frontend reads only startup records
-    from this pipe, so anything else written to it would be read as a verdict. The
-    pipe stops being read the moment the frontend has its answer, so a process
-    that kept writing there would eventually block on a full buffer or die of a
-    broken pipe — for a daemon that outlives its starter by design, that is a
-    hang with no visible cause.
-
-    So the descriptor is duplicated for this module's use and the original is
-    pointed at standard error. The frontend reads that separate bootstrap pipe for
-    one fixed diagnosis until the child opens the daemon log and attaches both
+    The frontend reads only frames from the output, so anything else written to
+    it would end the exchange. The output also stops being read the moment the
+    frontend has its answer, so a process that kept writing there would
+    eventually block on a full buffer or die of a broken pipe, which for a
+    daemon that outlives its starter is a hang with no visible cause.
+    :meth:`startup.OwnerChannel.claim` keeps private copies and points the
+    originals elsewhere; the frontend reads the separate bootstrap pipe for one
+    fixed diagnosis until the child opens the daemon log and attaches both
     output streams before logging is configured.
     """
     try:
-        sys.stdout.flush()
-        duplicate = os.dup(sys.stdout.fileno())
+        return startup.OwnerChannel.claim()
     except (OSError, ValueError, AttributeError):
-        # No usable standard output means the required parent handshake is
-        # unavailable. Startup will fail before serving because only the parent
-        # can validate and authorize this owner's prepared descriptor.
+        # No usable standard streams means the required exchange is unavailable.
+        # Startup fails before serving, because only the frontend can validate
+        # and authorize this owner's prepared descriptor.
         return None
-    try:
-        # Keep ordinary output off the handshake pipe until the child attaches
-        # both streams to its own log.
-        os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
-    except (OSError, ValueError, AttributeError):
-        os.close(duplicate)
-        return None
-    # newline="\n" is load-bearing rather than tidy. The frontend authenticates
-    # this frame by comparing exact bytes, and the default translates the line
-    # ending to os.linesep, so on Windows a genuine verdict arrives as CRLF and
-    # is refused. The frontend then waits out its startup deadline and terminates
-    # the Job around an owner that may already have published itself.
-    return os.fdopen(duplicate, "w", encoding="utf-8", newline="\n")
 
 
-def _close_handshake_stream(stream: TextIO | None) -> None:
-    """End an unarmed handshake without making any startup claim."""
-    if stream is not None:
+def _close_startup_channel(channel: startup.OwnerChannel | None) -> None:
+    """End the exchange without making any startup claim."""
+    if channel is not None:
         with contextlib.suppress(OSError, ValueError):
-            stream.close()
+            channel.close()
 
 
 def _take_lock(auth_root: Path) -> DaemonLock | None:
@@ -1701,27 +1685,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--job-name", default=None)
     args = parser.parse_args(argv)
 
-    # Standard output is the verdict channel. A private duplicate of standard
-    # error carries one fixed, non-secret diagnosis until the real log is ready.
-    # The token authenticating verdicts arrives in the configuration, so a
-    # failure before that read closes the pipe without emitting a forgeable one.
+    # Standard input and output carry the startup protocol. A private duplicate
+    # of standard error carries one fixed, non-secret diagnosis until the real
+    # log is ready. The nonce authenticating every later frame arrives in the
+    # HELLO, so a failure before that read closes the output without a frame.
     bootstrap = _BootstrapDiagnostics(_claim_bootstrap_stream())
-    handshake_stream = _claim_handshake_stream()
+    channel = _claim_startup_channel()
     try:
         if os.name == "nt":
             if args.job_name is None:
                 raise RuntimeError("The Windows owner has no Job Object handoff")
             WindowsJob.verify_current_process(args.job_name)
-        # Read before anything else touches the configuration. The frontend
-        # closes this pipe after one record; commit control travels separately.
-        handover = _read_handover()
+        # Before anything else touches the configuration, which arrives only
+        # after this process has answered HELLO with its own build.
+        handover = _read_handover(channel)
     except BaseException:
         bootstrap.report(BOOTSTRAP_CONFIGURATION)
-        _close_handshake_stream(handshake_stream)
+        _close_startup_channel(channel)
         return 1
 
     config = handover.config
-    handshake = _Handshake(handshake_stream, handover.handshake_nonce)
+    handshake = _Handshake(channel, handover.handshake_nonce)
     try:
         set_config(config)
         # Installing the configuration is not enough: the browser mode lives in a
@@ -1739,22 +1723,7 @@ def main(argv: list[str] | None = None) -> int:
         bootstrap.report(BOOTSTRAP_STATE)
         handshake.abort()
         handshake.close()
-        return 1
-
-    # Before the first state access, so a rendezvous this process cannot reach
-    # costs nothing, and so the parent's authority over an unauthorized child is
-    # live for the whole of the startup that follows.
-    try:
-        control = process_control.attach(
-            handover.control.host,
-            handover.control.port,
-            nonce=handover.handshake_nonce,
-            timeout=_STARTUP_PROBE_SECONDS,
-        )
-    except BaseException:
-        bootstrap.report(BOOTSTRAP_CONFIGURATION)
-        handshake.abort()
-        handshake.close()
+        _close_startup_channel(channel)
         return 1
 
     lock: DaemonLock | None = None
@@ -1793,7 +1762,7 @@ def main(argv: list[str] | None = None) -> int:
                     log_path=log_path,
                     handshake=handshake,
                     handshake_nonce=handover.handshake_nonce,
-                    control=control,
+                    control=cast(StartupControl, channel),
                     job_name=args.job_name,
                 )
             )
@@ -1803,47 +1772,52 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     finally:
         # After the verdict either way, so a frontend blocked on the pipe is
-        # released even by a path that forgot to answer.
+        # released even by a path that forgot to answer. The input is closed
+        # only if no read is parked in it, so this cannot wait on a frontend
+        # that stays open without committing, and the lock below is always
+        # reached.
         bootstrap.close()
         handshake.close()
-        _close_owned_control(control)
+        _close_startup_channel(channel)
         if lock is not None:
             lock.release()
 
 
-def _close_owned_control(control: process_control.ControlChannel) -> None:
-    """Release the control channel this process connected for itself."""
-    close = getattr(control, "close", None)
-    if not callable(close):
-        return
-    with contextlib.suppress(OSError, ValueError):
-        close()
-
-
 def _read_handover(
-    *, timeout: float = _STARTUP_PROBE_SECONDS
+    channel: startup.OwnerChannel | None,
+    *,
+    timeout: float = _STARTUP_PROBE_SECONDS,
 ) -> daemon_config.OwnerHandover:
-    """Read one handover record without letting a suspended parent pin the lock."""
-    received: queue.Queue[str | BaseException] = queue.Queue(maxsize=1)
+    """Answer HELLO and read CONFIG, without letting a suspended parent pin us.
+
+    One budget for the whole greeting, since to the frontend it is one wait.
+    The read runs in a thread because a blocking pipe read has no timeout of its
+    own on Windows; a read left parked by the timeout is harmless, because this
+    process then exits.
+    """
+    if channel is None:
+        raise OSError("The daemon has no startup channel")
+    received: queue.Queue[tuple[str, dict[str, object]] | BaseException] = queue.Queue(
+        maxsize=1
+    )
 
     def read() -> None:
         try:
-            received.put(sys.stdin.readline())
+            received.put(channel.accept(build=daemon_version.build_identity()))
         except BaseException as exc:  # noqa: BLE001 - re-raised in the main thread
             received.put(exc)
 
     threading.Thread(target=read, name="daemon-config-read", daemon=True).start()
     try:
-        raw = received.get(timeout=max(timeout, 0.0))
+        answer = received.get(timeout=max(timeout, 0.0))
     except queue.Empty:
         raise TimeoutError(
             "The daemon starter did not provide its configuration in time"
         ) from None
-    if isinstance(raw, BaseException):
-        raise raw
-    if not raw.strip():
-        raise ValueError("The daemon was started without a configuration")
-    return daemon_config.decode_handover(raw)
+    if isinstance(answer, BaseException):
+        raise answer
+    nonce, payload = answer
+    return daemon_config.OwnerHandover(daemon_config.decode(payload), nonce)
 
 
 if __name__ == "__main__":  # pragma: no cover - process entry point

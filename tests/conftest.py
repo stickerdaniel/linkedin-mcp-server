@@ -391,8 +391,8 @@ def no_owner_on_the_real_profile(monkeypatch):
     """Fail a test that would start an owner process on the real state root.
 
     The owner is a separate process, so none of the in-process patches in
-    ``isolate_profile_dir`` reach it: it takes its profile from the
-    configuration record on its standard input. An ``AppConfig()`` built in a
+    ``isolate_profile_dir`` reach it: it takes its profile from the CONFIG
+    frame on its standard input. An ``AppConfig()`` built in a
     test names ``~/.linkedin-mcp/profile``, and an election that got as far as
     spawning ran a real owner against it, which opened its trace directory
     there and left a ``run-*/server.log`` behind on every full run, while
