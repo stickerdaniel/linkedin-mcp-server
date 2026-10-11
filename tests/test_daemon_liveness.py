@@ -2181,3 +2181,35 @@ class TestTheLastCheckBeforeBrowserWork:
 
         assert lease._refs == 0
         assert liveness.calls_in_flight() == 0
+
+
+class TestACallWhoseTaskNeverStarted:
+    """A failed start must give its reservation back, or the owner never idles."""
+
+    @pytest.mark.parametrize("failure", ["building the work", "scheduling it"])
+    async def test_it_leaves_the_owner_free_to_retire(
+        self, failure: str, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.serving_as("the-owner")
+
+        def unbuildable() -> Any:
+            raise RuntimeError("the work could not be built")
+
+        start: Any = unbuildable
+        if failure == "scheduling it":
+
+            def unschedulable(work: Any) -> Any:
+                work.close()
+                raise RuntimeError("the task could not be scheduled")
+
+            monkeypatch.setattr(daemon_liveness.asyncio, "ensure_future", unschedulable)
+            start = _forever
+
+        with pytest.raises(RuntimeError):
+            liveness.admit(new_call_id(), start)
+
+        assert liveness.busy() is False
+        assert liveness.try_retire(Retirement.IDLE) is True
