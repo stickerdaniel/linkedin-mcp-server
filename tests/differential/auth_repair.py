@@ -253,7 +253,7 @@ READ_ARGUMENTS = {"num_posts": 1}
 
 # --- What the product says ---------------------------------------------------------
 
-#: ``daemon_auth``: the owner marking a failure, with what it marked, and
+#: ``daemon.auth_repair``: the owner marking a failure, with what it marked, and
 #: the frontend's ends.
 MARKED_LINE = "Asking the client to sign in"
 _MARKED = re.compile(

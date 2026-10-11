@@ -749,7 +749,7 @@ def test_dependency_direction_violations_are_reported_deterministically():
             "linkedin_mcp_server.linkedin.alpha",
             "linkedin_mcp_server/linkedin/alpha.py",
             (
-                "linkedin_mcp_server.daemon_owner",
+                "linkedin_mcp_server.daemon.owner",
                 "linkedin_mcp_server.linkedin.beta",
                 "linkedin_mcp_server.linkedin.extractor",
             ),
@@ -767,7 +767,7 @@ def test_dependency_direction_violations_are_reported_deterministically():
 
     assert dependency_violations(modules) == (
         "forbidden layer import: `linkedin_mcp_server.linkedin.alpha` -> "
-        "`linkedin_mcp_server.daemon_owner`",
+        "`linkedin_mcp_server.daemon.owner`",
         "import cycle: `linkedin_mcp_server.linkedin.alpha` -> "
         "`linkedin_mcp_server.linkedin.beta` -> "
         "`linkedin_mcp_server.linkedin.alpha`",

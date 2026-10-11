@@ -19,9 +19,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import linkedin_mcp_server.daemon_descriptor as daemon_descriptor_module
+import linkedin_mcp_server.daemon.descriptor as daemon_descriptor_module
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.daemon_descriptor import (
+from linkedin_mcp_server.daemon.descriptor import (
     CONTROL_FLOOR_PROTOCOL,
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
@@ -739,8 +739,8 @@ class TestRefusals:
     ):
         # Refusing it here made an older owner unreadable, and an owner nobody
         # can read is one nobody can ask to stand down. The comparison moved to
-        # `daemon._inspect`, which turns it into a control-only pair; this pins
-        # that `read` still parses and returns the owner's real protocol.
+        # `daemon.discovery._inspect`, which turns it into a control-only pair; this
+        # pins that `read` still parses and returns the owner's real protocol.
         token = new_token()
         publish(tmp_path, _descriptor(tmp_path, token), token)
         raw = json.loads(descriptor_path(tmp_path).read_text())

@@ -24,11 +24,11 @@ from unittest import mock
 
 import pytest
 
-import linkedin_mcp_server.daemon_descriptor as daemon_descriptor_module
-import linkedin_mcp_server.daemon_lock as daemon_lock_module
-from linkedin_mcp_server import daemon_owner
-from linkedin_mcp_server.daemon_descriptor import daemon_dir, daemon_state_root
-from linkedin_mcp_server.daemon_lock import (
+import linkedin_mcp_server.daemon.descriptor as daemon_descriptor_module
+import linkedin_mcp_server.daemon.lock as daemon_lock_module
+from linkedin_mcp_server.daemon import owner as daemon_owner
+from linkedin_mcp_server.daemon.descriptor import daemon_dir, daemon_state_root
+from linkedin_mcp_server.daemon.lock import (
     DaemonLock,
     DaemonLockError,
     daemon_is_running,
@@ -66,8 +66,8 @@ _TRY_ACQUIRE = """
     import os
     import sys
     from pathlib import Path
-    import linkedin_mcp_server.daemon_descriptor as daemon_descriptor
-    from linkedin_mcp_server.daemon_lock import DaemonLock
+    import linkedin_mcp_server.daemon.descriptor as daemon_descriptor
+    from linkedin_mcp_server.daemon.lock import DaemonLock
 
     daemon_descriptor._account_home = lambda: Path(os.environ["HOME"])
     lock = DaemonLock(Path(sys.argv[1]))
@@ -303,7 +303,7 @@ class TestRegistry:
         # remained through which to release it or clean it up after a fork.
         import gc
 
-        from linkedin_mcp_server.daemon_lock import _held_locks
+        from linkedin_mcp_server.daemon.lock import _held_locks
 
         DaemonLock(tmp_path).try_acquire()
         gc.collect()
@@ -323,7 +323,7 @@ class TestRegistry:
         # owns nothing, so keeping it would be a leak for no benefit.
         import gc
 
-        from linkedin_mcp_server.daemon_lock import _held_locks
+        from linkedin_mcp_server.daemon.lock import _held_locks
 
         DaemonLock(tmp_path)
         gc.collect()

@@ -59,8 +59,8 @@ from linkedin_mcp_server.server import ServerRole, create_mcp_server
 from linkedin_mcp_server.setup import run_profile_creation
 
 if TYPE_CHECKING:
-    from linkedin_mcp_server.daemon import Attachment
-    from linkedin_mcp_server.daemon_proxy import DaemonProxyBackend
+    from linkedin_mcp_server.daemon.discovery import Attachment
+    from linkedin_mcp_server.daemon.proxy import DaemonProxyBackend
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +195,7 @@ def _retire_a_shared_browser(config: AppConfig, retirement: _Retirement) -> bool
     Nothing is contacted before the user answers. The lookup reads files only,
     and a process that would never use a shared browser does not even do that.
     """
-    from linkedin_mcp_server.daemon import daemon_would_be_used
+    from linkedin_mcp_server.daemon.discovery import daemon_would_be_used
 
     if not daemon_would_be_used(config):
         return False
@@ -228,7 +228,7 @@ def _owner_to_retire(config: AppConfig) -> "Attachment | None":
     A reading of files and nothing more, so it says what is recorded rather than
     what is running: an owner that exited leaves its record behind.
     """
-    from linkedin_mcp_server.daemon import (
+    from linkedin_mcp_server.daemon.discovery import (
         Mismatch,
         OwnerState,
         look_up_owner,
@@ -272,7 +272,7 @@ def _shared_browser_recorded(config: AppConfig) -> bool:
     browser, and silent: an unreadable record means nothing is named, never
     that the status check failed.
     """
-    from linkedin_mcp_server.daemon import (
+    from linkedin_mcp_server.daemon.discovery import (
         OwnerState,
         daemon_would_be_used,
         look_up_owner,
@@ -308,7 +308,7 @@ def _ask_to_retire(attachment: "Attachment") -> bool:
 
     import httpx2
 
-    from linkedin_mcp_server import daemon_owner
+    from linkedin_mcp_server.daemon import owner as daemon_owner
 
     instance = attachment.descriptor.instance_id
     parts = urlsplit(attachment.descriptor.url)
@@ -691,20 +691,20 @@ def _obtain_shared_owner(config: AppConfig) -> "DaemonProxyBackend | None":
     That safety net carries weight on every platform, which is worth knowing
     before the flag becomes the default. A frontend takes no lock itself: it
     starts a child that competes for one
-    (``daemon_election._start_contending_for_the_lock``), and only the child that
+    (``daemon.election._start_contending_for_the_lock``), and only the child that
     wins holds it and publishes. A local spawn failure is therefore
     indistinguishable from a rival owner that holds the lock and has not
     published yet, so this process can fall back while an owner is in fact
     coming up.
     """
-    from linkedin_mcp_server.daemon import daemon_would_be_used
+    from linkedin_mcp_server.daemon.discovery import daemon_would_be_used
 
     if not daemon_would_be_used(config):
         return None
 
     try:
-        from linkedin_mcp_server.daemon_election import obtain_owner
-        from linkedin_mcp_server.daemon_proxy import DaemonProxyBackend
+        from linkedin_mcp_server.daemon.election import obtain_owner
+        from linkedin_mcp_server.daemon.proxy import DaemonProxyBackend
         from linkedin_mcp_server.session_state import auth_root_dir
 
         profile = get_profile_dir()

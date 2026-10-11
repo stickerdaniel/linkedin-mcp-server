@@ -520,7 +520,7 @@ class TestLoaders:
         make every existing owner unreadable, which is how an owner stops being
         retirable at all.
         """
-        from linkedin_mcp_server.daemon_descriptor import SHARED_CONFIG_FIELDS
+        from linkedin_mcp_server.daemon.descriptor import SHARED_CONFIG_FIELDS
 
         assert "claim_profile_root" not in SHARED_CONFIG_FIELDS
 

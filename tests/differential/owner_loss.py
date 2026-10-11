@@ -152,7 +152,7 @@ from differential.synthetic_origin import (
     SERVED,
     person_path,
 )
-from linkedin_mcp_server.daemon_liveness import CALL_HEADER, HEARTBEAT_PATH
+from linkedin_mcp_server.daemon.liveness import CALL_HEADER, HEARTBEAT_PATH
 
 if TYPE_CHECKING:
     from differential.harness import OwnerLossSeams, RowContext
@@ -224,7 +224,7 @@ STOP_SECONDS = 20.0
 #: healthy owner retire as it wakes, which would read as a replacement.
 RESUME_TOLERANCE_SECONDS = 5.0
 #: How long the frontend's preflight may take to fail against the stopped
-#: owner: its own read timeout (``daemon_liveness.HEARTBEAT_SECONDS``, 2 s)
+#: owner: its own read timeout (``daemon.liveness.HEARTBEAT_SECONDS``, 2 s)
 #: and the frontend's scheduling.
 PREFLIGHT_BOUND_SECONDS = 10.0
 #: How long one call may take to end: an election (90 s) and its settlement
@@ -286,9 +286,9 @@ FENCE = (
     "page, so the product stops at message_unavailable"
 )
 
-#: What the frontend logs as it writes an owner off (``daemon_proxy``), with
+#: What the frontend logs as it writes an owner off (``daemon.proxy``), with
 #: the classification in parentheses; and the election's two probe verdicts
-#: (``daemon_election``): refused, which buries locally, and silent.
+#: (``daemon.election``): refused, which buries locally, and silent.
 BURIAL_LINE = "Not using this shared browser owner again ("
 ELECTION_REFUSED_LINE = "The published daemon is not answering; electing a new one"
 ELECTION_SILENT_LINE = "The published daemon has not answered yet; will ask again"
@@ -409,7 +409,7 @@ class DeclaredResponder(ThreadingHTTPServer):
 
 def is_dispatch(request: Mapping[str, Any]) -> bool:
     """Whether a request the responder got belongs to a call's dispatch: it
-    carries the call's header (``daemon_proxy`` sends it on the forwarded
+    carries the call's header (``daemon.proxy`` sends it on the forwarded
     call and on the heartbeat only) and is not the heartbeat."""
     return request.get("call") is True and request.get("path") != HEARTBEAT_PATH
 

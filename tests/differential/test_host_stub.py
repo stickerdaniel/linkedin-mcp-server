@@ -30,7 +30,7 @@ from differential.harness import (
     run_host_session,
 )
 from differential.synthetic_origin import POST_MARKER
-from linkedin_mcp_server import daemon_descriptor
+from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
 
 _STAND_IN_SERVER = """
 import os

@@ -178,7 +178,7 @@ _STORAGE_CELLS = [
 def _plant_in(row: str, home: Path, profile_dir: Path) -> tuple[Planted, Path]:
     """The cell's metadata planted in *home*, and the profile the cell runs
     on, the way ``test_eligibility_rows.planted`` plants it on a runner."""
-    from linkedin_mcp_server import daemon_descriptor
+    from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
     from linkedin_mcp_server.session_state import canonical
 
     case = CASES[row]
@@ -209,9 +209,11 @@ def test_the_planted_metadata_is_classified_and_refused_as_the_cell_declares(
     planted, profile_dir = _plant_in(row, tmp_path / "home", tmp_path / "auth" / "p")
     try:
         storage = storage_reading(profile_dir)
-        from linkedin_mcp_server.daemon import daemon_would_be_used
+        from linkedin_mcp_server.daemon.discovery import daemon_would_be_used
 
-        with caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.daemon"):
+        with caplog.at_level(
+            logging.WARNING, logger="linkedin_mcp_server.daemon.discovery"
+        ):
             assert daemon_would_be_used(_eligible_config(profile_dir)) is False
     finally:
         assert planted.remove() == []
@@ -223,12 +225,15 @@ def test_the_planted_metadata_is_classified_and_refused_as_the_cell_declares(
 
 
 def test_a_container_is_refused_in_the_line_the_cell_expects(monkeypatch, caplog):
-    from linkedin_mcp_server.daemon import daemon_would_be_used
+    from linkedin_mcp_server.daemon.discovery import daemon_would_be_used
 
     monkeypatch.setattr(
-        "linkedin_mcp_server.daemon.get_runtime_id", lambda: "linux-x64-container"
+        "linkedin_mcp_server.daemon.discovery.get_runtime_id",
+        lambda: "linux-x64-container",
     )
-    with caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.daemon"):
+    with caplog.at_level(
+        logging.WARNING, logger="linkedin_mcp_server.daemon.discovery"
+    ):
         assert daemon_would_be_used(_eligible_config(Path("/unused/p"))) is False
 
     lines = decision_lines(_formatted(caplog.records))
@@ -249,8 +254,13 @@ def test_a_rival_left_alone_says_so_in_the_line_counted_as_its_fallback(
     """The election's own decision on a same-build owner of another
     configuration, as it logs it."""
     from linkedin_mcp_server import __version__
-    from linkedin_mcp_server.daemon import Attachment, Mismatch, OwnerLookup, OwnerState
-    from linkedin_mcp_server.daemon_election import Reach, _decide_control_only
+    from linkedin_mcp_server.daemon.discovery import (
+        Attachment,
+        Mismatch,
+        OwnerLookup,
+        OwnerState,
+    )
+    from linkedin_mcp_server.daemon.election import Reach, _decide_control_only
 
     attachment = Attachment(
         descriptor=SimpleNamespace(  # ty: ignore[invalid-argument-type]
@@ -259,7 +269,7 @@ def test_a_rival_left_alone_says_so_in_the_line_counted_as_its_fallback(
         token="t",
         control_only=True,
     )
-    with caplog.at_level(logging.INFO, logger="linkedin_mcp_server.daemon_election"):
+    with caplog.at_level(logging.INFO, logger="linkedin_mcp_server.daemon.election"):
         found, asked, _ = _decide_control_only(
             OwnerLookup(state=OwnerState.INCOMPATIBLE, mismatch=Mismatch.CONFIGURATION),
             attachment,
@@ -282,11 +292,16 @@ def test_the_frontend_says_it_drives_its_own_browser_and_forwards_in_its_own_lin
 ):
     """``_obtain_shared_owner``'s two ends, as the frontend logs them."""
     from linkedin_mcp_server import cli_main
-    from linkedin_mcp_server.daemon import DirectFallback, OwnerLookup, OwnerState
-    from linkedin_mcp_server.daemon_election import ElectionOutcome
+    from linkedin_mcp_server.daemon.discovery import (
+        DirectFallback,
+        OwnerLookup,
+        OwnerState,
+    )
+    from linkedin_mcp_server.daemon.election import ElectionOutcome
 
     monkeypatch.setattr(
-        "linkedin_mcp_server.daemon.daemon_would_be_used", lambda _config: True
+        "linkedin_mcp_server.daemon.discovery.daemon_would_be_used",
+        lambda _config: True,
     )
     monkeypatch.setattr(
         "linkedin_mcp_server.cli_main.get_profile_dir", lambda: tmp_path / "p"
@@ -301,7 +316,7 @@ def test_the_frontend_says_it_drives_its_own_browser_and_forwards_in_its_own_lin
     )
     outcomes = iter([fallback, forwarded])
     monkeypatch.setattr(
-        "linkedin_mcp_server.daemon_election.obtain_owner",
+        "linkedin_mcp_server.daemon.election.obtain_owner",
         lambda *_args, **_kwargs: next(outcomes),
     )
     with caplog.at_level(logging.INFO):

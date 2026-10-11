@@ -419,7 +419,12 @@ def posix_pgid(pid: int) -> int | None:
 LAUNCHER_ENV = "__PYVENV_LAUNCHER__"
 
 SERVER_MODULE = "linkedin_mcp_server"
-OWNER_MODULE = "linkedin_mcp_server.daemon_owner"
+OWNER_MODULE = "linkedin_mcp_server.daemon.owner"
+#: The owner module as the frozen baseline (``baseline.BASELINE_SHA``) names
+#: it, from before the daemon became a package. A row runs either build, so
+#: every observer of an owner recognises both; the product keeps no alias.
+BASELINE_OWNER_MODULE = "linkedin_mcp_server.daemon_owner"
+OWNER_MODULES = frozenset({OWNER_MODULE, BASELINE_OWNER_MODULE})
 
 #: CPython's short options (``Python/getopt.c``, ``bBc:dEhiIm:OPqRsStuvVW:xX:?``):
 #: flags without a value; ``c``, ``m``, ``W`` and ``X`` take one, from the rest
@@ -552,7 +557,7 @@ def classify(process: ProcessRecord) -> str:
     joined = " ".join(process.cmdline)
     if any(argument.startswith(USER_DATA_DIR_FLAG) for argument in process.cmdline):
         return "browser"
-    if "linkedin_mcp_server.daemon_owner" in joined:
+    if any(module in joined for module in OWNER_MODULES):
         return "owner"
     if "process_guardian" in joined:
         return "guardian"
@@ -1415,7 +1420,7 @@ class Sampler:
         for pid, process in list(sample.items()):
             if not process.in_row or pid not in identified:
                 continue
-            if invoked_module(process.cmdline) not in (SERVER_MODULE, OWNER_MODULE):
+            if invoked_module(process.cmdline) not in {SERVER_MODULE, *OWNER_MODULES}:
                 continue
             key = (process.pid, process.start, process.cmdline)
             if key in self._launchers_read:

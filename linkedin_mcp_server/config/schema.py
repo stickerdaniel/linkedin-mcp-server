@@ -189,8 +189,8 @@ class BrowserConfig:
     #
     # It stays for the same reason ``user_agent`` above does: it is part of the
     # daemon's configuration fingerprint (``SHARED_CONFIG_FIELDS``), and
-    # ``daemon.py`` rejects a fingerprint mismatch *before* it compares package
-    # versions. Drop the field and a running owner of the other version stops
+    # ``daemon/discovery.py`` rejects a fingerprint mismatch *before* it compares
+    # package versions. Drop the field and a running owner of the other version stops
     # being readable, so it can never be asked to stand down. Both can go once
     # owner turnover survives a fingerprint change.
     eager_full_chromium: bool = False

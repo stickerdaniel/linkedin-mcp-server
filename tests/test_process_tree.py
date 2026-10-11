@@ -2415,7 +2415,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from linkedin_mcp_server import daemon_owner, process_tree
+from linkedin_mcp_server import process_tree
+from linkedin_mcp_server.daemon import owner as daemon_owner
 
 child = subprocess.Popen(
     [sys.executable, "-c", "import time; time.sleep(600)"],
@@ -2950,7 +2951,7 @@ import subprocess
 import sys
 import threading
 
-from linkedin_mcp_server import daemon_owner
+from linkedin_mcp_server.daemon import owner as daemon_owner
 from linkedin_mcp_server.process_tree import WindowsJob
 
 name = sys.argv[1]

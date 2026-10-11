@@ -46,7 +46,7 @@ _BACKLOG = 16
 _MAX_RECORD_BYTES = 128
 
 #: A bind that fails this way on IPv6 means the host has none, not that the
-#: address is taken. Mirrors ``daemon_owner._bind_loopback``.
+#: address is taken. Mirrors ``daemon.owner._bind_loopback``.
 _NO_IPV6 = (errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL, errno.EPROTONOSUPPORT)
 
 #: The absolute ceiling on what one unauthenticated peer may take to present its
@@ -64,7 +64,7 @@ _PEER_SECONDS = 1.0
 #: eighths of the wait, and the child queued behind them still has the rest.
 #:
 #: A share and never a fixed span, in either direction. The fixed span was the
-#: defect: an owner is accepted within ``daemon_election._PREPARED_READ_SECONDS``,
+#: defect: an owner is accepted within ``daemon.election._PREPARED_READ_SECONDS``,
 #: one second, and the per-peer bound was one second too, so the first silent
 #: peer consumed the whole wait and the owner queued behind it was killed for
 #: never attaching. A *floor* under the share is the same defect one step down,
@@ -76,7 +76,7 @@ _PEER_SHARE = 1.0 / (2 * _BACKLOG)
 #: The window a queued child has to be reached inside, and therefore the basis
 #: for what one unauthenticated peer ahead of it may spend. It is the wait the
 #: parent gives the attachment once a prepared generation exists
-#: (``daemon_election._PREPARED_READ_SECONDS``), and a test pins the pair.
+#: (``daemon.election._PREPARED_READ_SECONDS``), and a test pins the pair.
 #:
 #: The basis is this window and not the drain's own budget, which is far longer.
 #: Only the peers *ahead* of the child's connection can delay it and the queue
@@ -174,7 +174,7 @@ class ControlListener:
                 # the same answer, not a different failure.
                 sock = socket.socket(family, socket.SOCK_STREAM)
                 # Deliberately no SO_REUSEADDR, for the reason
-                # ``daemon_owner._bind_loopback`` gives: a port the kernel just
+                # ``daemon.owner._bind_loopback`` gives: a port the kernel just
                 # handed out is unused, and on the BSDs the option would let a
                 # second bind succeed against a live listener.
                 sock.bind((host, 0))
@@ -414,7 +414,7 @@ class _AttachedControl:
         return in under a millisecond.
 
         That matters here rather than in the abstract, because this is the
-        owner's teardown path. ``daemon_owner.main`` closes the control channel
+        owner's teardown path. ``daemon.owner.main`` closes the control channel
         in its ``finally``, *before* it releases the daemon lock, so a close
         that never returns leaves a process that has already given up holding
         the lock every future election needs.

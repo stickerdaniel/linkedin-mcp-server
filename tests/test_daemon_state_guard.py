@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from linkedin_mcp_server import daemon_descriptor
+from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
 from linkedin_mcp_server.private_state import harden_directory
 
 pytest_plugins = ["pytester"]
@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from linkedin_mcp_server.daemon_descriptor import (
+from linkedin_mcp_server.daemon.descriptor import (
     TEST_ACCOUNT_HOME_ENV,
     daemon_dir,
     prepare_daemon_state,
@@ -78,7 +78,7 @@ def test_inherits_stale_state(tmp_path):
 _STALE = """
 import pytest
 
-from linkedin_mcp_server.daemon_descriptor import TEST_ACCOUNT_HOME_ENV, prepare_daemon_state
+from linkedin_mcp_server.daemon.descriptor import TEST_ACCOUNT_HOME_ENV, prepare_daemon_state
 
 
 @pytest.fixture(autouse=True)

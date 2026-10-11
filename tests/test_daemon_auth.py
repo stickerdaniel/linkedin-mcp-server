@@ -20,8 +20,8 @@ from fastmcp.server.middleware import Middleware
 from fastmcp.server.providers.proxy import ProxyClient, ProxyProvider
 from fastmcp.tools import ToolResult
 
-from linkedin_mcp_server import daemon_auth
-from linkedin_mcp_server.daemon_auth import (
+from linkedin_mcp_server.daemon import auth_repair as daemon_auth
+from linkedin_mcp_server.daemon.auth_repair import (
     MARKER_KEY,
     MARKER_VERSION,
     FrontendAuthRepairMiddleware,
@@ -96,7 +96,7 @@ class TestTheMarkerSurvivesTheHop:
         )
 
         with patch(
-            "linkedin_mcp_server.daemon_auth._browser_still_holds_the_profile",
+            "linkedin_mcp_server.daemon.auth_repair._browser_still_holds_the_profile",
             return_value=False,
         ):
             async with Client(owner) as client:
@@ -121,7 +121,7 @@ class TestTheMarkerSurvivesTheHop:
         )
 
         with patch(
-            "linkedin_mcp_server.daemon_auth._browser_still_holds_the_profile",
+            "linkedin_mcp_server.daemon.auth_repair._browser_still_holds_the_profile",
             return_value=False,
         ):
             # No repair middleware: this asserts what crosses the hop, which a
@@ -141,7 +141,7 @@ class TestTheMarkerSurvivesTheHop:
         owner, calls = _owner_that_fails_with(AuthMissingOnOwnerError("no session"))
 
         with patch(
-            "linkedin_mcp_server.daemon_auth._browser_still_holds_the_profile",
+            "linkedin_mcp_server.daemon.auth_repair._browser_still_holds_the_profile",
             return_value=False,
         ):
             async with Client(owner) as client:
@@ -177,7 +177,7 @@ class TestTheMarkerSurvivesTheHop:
         owner.add_middleware(OwnerAuthSignalMiddleware())
 
         with patch(
-            "linkedin_mcp_server.daemon_auth._browser_still_holds_the_profile",
+            "linkedin_mcp_server.daemon.auth_repair._browser_still_holds_the_profile",
             return_value=False,
         ):
             async with Client(owner) as client:
@@ -204,13 +204,13 @@ class TestTheFrontendActsOnTheMarker:
     def _repair(self):
         """Watch the login without running one."""
         return patch(
-            "linkedin_mcp_server.daemon_auth._repair_auth_locally",
+            "linkedin_mcp_server.daemon.auth_repair._repair_auth_locally",
             new_callable=AsyncMock,
         )
 
     def _profile_is_free(self):
         return patch(
-            "linkedin_mcp_server.daemon_auth._browser_still_holds_the_profile",
+            "linkedin_mcp_server.daemon.auth_repair._browser_still_holds_the_profile",
             return_value=False,
         )
 
@@ -265,11 +265,11 @@ class TestTheFrontendActsOnTheMarker:
         with (
             self._profile_is_free(),
             patch(
-                "linkedin_mcp_server.daemon_auth._repair_auth_locally",
+                "linkedin_mcp_server.daemon.auth_repair._repair_auth_locally",
                 AsyncMock(side_effect=repair_error),
             ),
             patch(
-                "linkedin_mcp_server.daemon_auth._wait_for_the_sign_in",
+                "linkedin_mcp_server.daemon.auth_repair._wait_for_the_sign_in",
                 AsyncMock(side_effect=AccountRestrictedError()),
             ),
         ):
@@ -307,7 +307,7 @@ class TestTheFrontendActsOnTheMarker:
 
         with (
             patch(
-                "linkedin_mcp_server.daemon_auth._browser_still_holds_the_profile",
+                "linkedin_mcp_server.daemon.auth_repair._browser_still_holds_the_profile",
                 return_value=True,
             ),
             self._repair() as repair,
@@ -397,7 +397,7 @@ class TestTheFrontendActsOnTheMarker:
         with (
             self._profile_is_free(),
             patch(
-                "linkedin_mcp_server.daemon_auth._repair_auth_locally",
+                "linkedin_mcp_server.daemon.auth_repair._repair_auth_locally",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("the user closed the window"),
             ),
@@ -474,7 +474,7 @@ class TestTheFrontendActsOnTheMarker:
         with (
             self._profile_is_free(),
             patch(
-                "linkedin_mcp_server.daemon_auth._repair_auth_locally",
+                "linkedin_mcp_server.daemon.auth_repair._repair_auth_locally",
                 new_callable=AsyncMock,
                 side_effect=PeerSessionInPlaceError("another client signed in"),
             ),
@@ -505,7 +505,7 @@ class TestTheRepairRunsForReal:
 
     def _profile_is_free(self):
         return patch(
-            "linkedin_mcp_server.daemon_auth._browser_still_holds_the_profile",
+            "linkedin_mcp_server.daemon.auth_repair._browser_still_holds_the_profile",
             return_value=False,
         )
 
@@ -710,7 +710,9 @@ class TestTheRepairRunsForReal:
         with (
             self._profile_is_free(),
             self._a_login_that(takes=0.05),
-            patch("linkedin_mcp_server.daemon_auth._MINIMUM_REPLAY_SECONDS", 0.2),
+            patch(
+                "linkedin_mcp_server.daemon.auth_repair._MINIMUM_REPLAY_SECONDS", 0.2
+            ),
         ):
             async with Client(_proxy_to(owner, tool_timeout=1.0)) as client:
                 result = await client.call_tool("read_page", raise_on_error=False)
@@ -802,7 +804,7 @@ class TestTheRepairRunsForReal:
         allowed a 5-second replay inside a 1-second call, which is the overrun
         the budget arithmetic exists to prevent.
         """
-        from linkedin_mcp_server import daemon_auth as da
+        from linkedin_mcp_server.daemon import auth_repair as da
 
         assert da._what_is_left_of_this_call(1.0, 0.9) <= 1.0
         assert da._what_is_left_of_this_call(60.0, 59.9) == da._MINIMUM_REPLAY_SECONDS

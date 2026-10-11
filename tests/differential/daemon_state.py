@@ -1,8 +1,8 @@
 """Where a row's daemon state lives, by the runtime that wrote it.
 
 The candidate's owners keep their state where this checkout's
-``daemon_descriptor`` says, and are asked to stand down with this checkout's
-request (``daemon_owner.stand_down_request``). The frozen baseline
+``daemon.descriptor`` says, and are asked to stand down with this checkout's
+request (``daemon.owner.stand_down_request``). The frozen baseline
 (``baseline.BASELINE_SHA``) predates the clean slate
 (``docs/decisions/2026-10-11-daemon-clean-slate.md``): its owners keep their
 state under the earlier namespace, publish descriptor schema 2, and know only
@@ -22,8 +22,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from linkedin_mcp_server import daemon_descriptor, daemon_owner
-from linkedin_mcp_server.daemon_descriptor import DaemonDescriptor, DescriptorError
+from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
+from linkedin_mcp_server.daemon import owner as daemon_owner
+from linkedin_mcp_server.daemon.descriptor import DaemonDescriptor, DescriptorError
 
 _DESCRIPTOR_FILE = "daemon.json"
 _LOG_FILE = "daemon.log"
@@ -34,7 +35,7 @@ class DaemonStateLayout:
     """One runtime's daemon state: its directory, its files and its stand-down."""
 
     #: The account-level namespace of a frozen runtime; None for the candidate,
-    #: whose namespace is whatever this checkout's ``daemon_descriptor`` names.
+    #: whose namespace is whatever this checkout's ``daemon.descriptor`` names.
     namespace: str | None
     #: The descriptor schema a frozen runtime publishes.
     schema_version: int = daemon_descriptor.SCHEMA_VERSION

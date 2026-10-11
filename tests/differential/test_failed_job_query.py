@@ -1221,16 +1221,41 @@ def test_nothing_else_is_observed(tmp_path, logger, message, args):
     assert len(kept.records) == 1
 
 
-@pytest.mark.parametrize("module", ["daemon_owner", "unrelated_owner"])
+@pytest.mark.parametrize(
+    "owner",
+    # The frozen baseline's flat module, and this checkout's package.
+    ["linkedin_mcp_server.daemon_owner", "linkedin_mcp_server.daemon.owner"],
+    ids=["baseline", "candidate"],
+)
+def test_the_shim_witnesses_the_stand_down_under_either_owner_name(tmp_path, owner):
+    record = tmp_path / "reached.jsonl"
+    loggers, _ = _witnessed(record)
+    assert owner in loggers, "no filter on this build's owner logger"
+    loggers[owner].warning("Standing down: %s", HELD_PROFILE_REASON)
+    (event,) = logged(record)
+    assert (event["event"], event["reason"]) == (STAND_DOWN, HELD_PROFILE_REASON)
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "linkedin_mcp_server.daemon_owner",
+        "linkedin_mcp_server.daemon.owner",
+        "linkedin_mcp_server.unrelated_owner",
+    ],
+    ids=["baseline-owner", "candidate-owner", "unrelated"],
+)
 def test_module_entry_logger_only_witnesses_the_real_owner_name(tmp_path, module):
     # python -m sets __name__ to __main__ while preserving the target in __spec__.
     # A harmless stand-in uses the product's actual logging pattern; no owner runs.
-    package = tmp_path / "linkedin_mcp_server"
-    package.mkdir()
-    (package / "__init__.py").write_text("")
+    *packages, leaf = module.split(".")
+    package = tmp_path.joinpath(*packages)
+    package.mkdir(parents=True)
+    for depth in range(1, len(packages) + 1):
+        tmp_path.joinpath(*packages[:depth], "__init__.py").write_text("")
     (tmp_path / "probe_shim.py").write_text(SHIM_SOURCE)
     record = tmp_path / "reached.jsonl"
-    (package / f"{module}.py").write_text(
+    (package / f"{leaf}.py").write_text(
         "import logging\n"
         "from probe_shim import witness\n"
         f"witness(logging, {str(record)!r}, created=5.0)\n"
@@ -1238,7 +1263,7 @@ def test_module_entry_logger_only_witnesses_the_real_owner_name(tmp_path, module
         f"logger.warning('Standing down: %s', {HELD_PROFILE_REASON!r})\n"
     )
     result = subprocess.run(
-        [sys.executable, "-S", "-m", f"linkedin_mcp_server.{module}"],
+        [sys.executable, "-S", "-m", module],
         cwd=tmp_path,
         env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
         capture_output=True,
@@ -1248,7 +1273,7 @@ def test_module_entry_logger_only_witnesses_the_real_owner_name(tmp_path, module
     )
     assert f"Standing down: {HELD_PROFILE_REASON}" in result.stderr
     events = logged(record)
-    if module == "daemon_owner":
+    if leaf != "unrelated_owner":
         assert len(events) == 1
         assert events[0]["event"] == STAND_DOWN
         assert events[0]["reason"] == HELD_PROFILE_REASON

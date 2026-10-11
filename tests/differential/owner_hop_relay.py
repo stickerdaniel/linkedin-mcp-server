@@ -5,7 +5,7 @@ A native claim that a frontend survives a lost auth marker needs exactly that
 response gone and nothing else. The owner hop is loopback HTTP/1.1, so the
 relay works on whole exchanges: it reads each request whole and forwards it,
 reads each response whole before it forwards a byte of it, and the first
-response whose body carries the marker key (``daemon_auth.MARKER_KEY``) is
+response whose body carries the marker key (``daemon.auth_repair.MARKER_KEY``) is
 never forwarded at all: the client's connection is closed instead, with the
 upstream's answer read in full and recorded as arrived. Every other exchange
 reaches the client byte for byte.
@@ -35,7 +35,7 @@ import threading
 import time
 from typing import Any
 
-from linkedin_mcp_server.daemon_auth import MARKER_KEY
+from linkedin_mcp_server.daemon.auth_repair import MARKER_KEY
 
 #: How long one read or write on either side may block: the hop's own
 #: requests are answered well inside it.

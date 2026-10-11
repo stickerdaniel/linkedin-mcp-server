@@ -102,7 +102,8 @@ from differential.test_preservation_gate import (  # noqa: F401 - fixtures
     _Watcher,
     profile,
 )
-from linkedin_mcp_server.daemon_liveness import CALL_HEADER, HEARTBEAT_PATH
+from differential.watcher import OWNER_MODULE
+from linkedin_mcp_server.daemon.liveness import CALL_HEADER, HEARTBEAT_PATH
 
 MS = 1_000_000
 
@@ -118,8 +119,8 @@ def _attachment(tmp_path: Path, port: int) -> Any:
     """An attachment to a same-build owner published on *port*."""
     from linkedin_mcp_server import __version__
     from linkedin_mcp_server.config.schema import AppConfig
-    from linkedin_mcp_server.daemon import Attachment
-    from linkedin_mcp_server.daemon_descriptor import build, new_instance_id, new_token
+    from linkedin_mcp_server.daemon.discovery import Attachment
+    from linkedin_mcp_server.daemon.descriptor import build, new_instance_id, new_token
 
     directory = tmp_path / "profile"
     directory.mkdir(exist_ok=True)
@@ -152,8 +153,8 @@ def _frontend_lines(sink: Callable[[str], None]) -> Iterator[None]:
 
     handler = Forward(level=logging.INFO)
     loggers = [
-        logging.getLogger("linkedin_mcp_server.daemon_proxy"),
-        logging.getLogger("linkedin_mcp_server.daemon_election"),
+        logging.getLogger("linkedin_mcp_server.daemon.proxy"),
+        logging.getLogger("linkedin_mcp_server.daemon.election"),
     ]
     levels = [logger.level for logger in loggers]
     for logger in loggers:
@@ -169,7 +170,7 @@ def _frontend_lines(sink: Callable[[str], None]) -> Iterator[None]:
 
 async def _preflight(attachment: Any) -> Any:
     """The frontend's real preflight against whatever answers *attachment*."""
-    from linkedin_mcp_server.daemon_proxy import FrontendCallHeartbeatMiddleware
+    from linkedin_mcp_server.daemon.proxy import FrontendCallHeartbeatMiddleware
 
     return await FrontendCallHeartbeatMiddleware(MagicMock())._preflight(
         attachment, "v1." + "0" * 32
@@ -196,7 +197,7 @@ def responder_404() -> Iterator[DeclaredResponder]:
 async def test_the_frontends_preflight_classifies_the_responders_answer(
     tmp_path, status, classification, buried
 ):
-    from linkedin_mcp_server.daemon_proxy import DaemonProxyBackend
+    from linkedin_mcp_server.daemon.proxy import DaemonProxyBackend
     from linkedin_mcp_server.config.schema import AppConfig
 
     responder = DeclaredResponder("127.0.0.1", _free_port(), status)
@@ -236,7 +237,7 @@ async def test_the_frontends_preflight_classifies_the_responders_answer(
 def test_the_elections_probe_of_the_responder_is_refused_and_no_dispatch(
     tmp_path, responder_404
 ):
-    from linkedin_mcp_server.daemon_election import Reach, _reachable
+    from linkedin_mcp_server.daemon.election import Reach, _reachable
 
     attachment = _attachment(tmp_path, responder_404.server_address[1])
     assert _reachable(attachment, 5.0) is Reach.REFUSED
@@ -271,8 +272,8 @@ async def test_an_unanswered_preflight_names_no_class(tmp_path):
 
 def test_the_elections_probe_lines_are_the_ones_the_rows_count(tmp_path):
     from linkedin_mcp_server.config.schema import AppConfig
-    from linkedin_mcp_server.daemon import OwnerLookup, OwnerState
-    from linkedin_mcp_server.daemon_election import Reach, _live_lookup
+    from linkedin_mcp_server.daemon.discovery import OwnerLookup, OwnerState
+    from linkedin_mcp_server.daemon.election import Reach, _live_lookup
 
     attachment = _attachment(tmp_path, _free_port())
     inspector = SimpleNamespace(
@@ -331,11 +332,11 @@ def test_a_dead_owners_address_bound_again_answers_with_the_declared_status(
 
 
 def test_the_declared_values_are_the_products():
-    from linkedin_mcp_server.daemon_election import (
+    from linkedin_mcp_server.daemon.election import (
         DEFAULT_ELECTION_SECONDS,
         DEFAULT_SETTLEMENT_SECONDS,
     )
-    from linkedin_mcp_server.daemon_liveness import HEARTBEAT_SECONDS
+    from linkedin_mcp_server.daemon.liveness import HEARTBEAT_SECONDS
     from linkedin_mcp_server.linkedin.identifiers import person_profile_url
 
     # The stop outlasts a preflight's bound, which outlasts the product's own
@@ -1460,7 +1461,7 @@ def _owner_record(pid: int, start: float) -> dict:
         "pid": pid,
         "ppid": 1,
         "start_identity": start,
-        "cmdline": ["python", "-m", harness.OWNER_MODULE],
+        "cmdline": ["python", "-m", OWNER_MODULE],
     }
 
 
@@ -1637,8 +1638,8 @@ class _OwnerLossScene(_CalibrationScene):
             self._line("The shared browser owner did not answer the call preflight")
             return
         from linkedin_mcp_server.config.schema import AppConfig
-        from linkedin_mcp_server.daemon_election import _reachable
-        from linkedin_mcp_server.daemon_proxy import DaemonProxyBackend
+        from linkedin_mcp_server.daemon.election import _reachable
+        from linkedin_mcp_server.daemon.proxy import DaemonProxyBackend
 
         attachment = _attachment(self.tmp_path, self.port)
         with _frontend_lines(self.on_stderr):

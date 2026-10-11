@@ -1,6 +1,6 @@
 """Talking to the owner, from the frontend that forwards to it.
 
-The other half of :mod:`linkedin_mcp_server.daemon_election`: that module gets an
+The other half of :mod:`linkedin_mcp_server.daemon.election`: that module gets an
 owner running and hands back an attachment, and this one turns the attachment into
 something a FastMCP server can serve tools from.
 
@@ -21,7 +21,7 @@ client to launch after an upgrade stands the old owner down, and every proxy
 already attached to it would otherwise be dead until its own process restarts.
 Reproduced end to end before any of this existed: a proxy serving 19 tools was
 asked nothing, its owner was told to stand down the way a newer build does
-(``daemon_election._ask_to_stand_down``), and the next listing failed with
+(``daemon.election._ask_to_stand_down``), and the next listing failed with
 ``McpError: Client failed to connect``. Idle exit and a crashed owner end the
 same way.
 
@@ -57,10 +57,10 @@ from fastmcp.utilities.timeout import normalize_timeout_to_seconds
 from mcp import ClientSession, MCPError
 from opentelemetry.trace import Status, StatusCode
 
-from linkedin_mcp_server import daemon_owner
-from linkedin_mcp_server.daemon_auth import a_repeat_could_change_something
-from linkedin_mcp_server.daemon_descriptor import PROTOCOL_VERSION
-from linkedin_mcp_server.daemon_liveness import (
+from linkedin_mcp_server.daemon import owner as daemon_owner
+from linkedin_mcp_server.daemon.auth_repair import a_repeat_could_change_something
+from linkedin_mcp_server.daemon.descriptor import PROTOCOL_VERSION
+from linkedin_mcp_server.daemon.liveness import (
     CALL_HEADER,
     HEARTBEAT_PATH,
     HEARTBEAT_SECONDS,
@@ -80,7 +80,7 @@ if TYPE_CHECKING:
     from pydantic import BaseModel, TypeAdapter
 
     from linkedin_mcp_server.config.schema import AppConfig
-    from linkedin_mcp_server.daemon import Attachment
+    from linkedin_mcp_server.daemon.discovery import Attachment
 
 logger = logging.getLogger(__name__)
 
@@ -334,7 +334,7 @@ def unreachable_owner_in(exc: BaseException) -> OwnerUnreachableError | None:
     """Find an unreachable-owner failure in an exception chain, if it is there.
 
     Walked rather than type-checked directly, and the same reason applies here as
-    to ``daemon_auth._auth_failure_in``: what reaches a middleware is a wrapper.
+    to ``daemon.auth_repair._auth_failure_in``: what reaches a middleware is a wrapper.
     Measured against a dead port with a warm tool cache, the chain the middleware
     sees is ``ToolError -> RuntimeError('Client failed to connect') ->
     httpx2.ConnectError``, because ``FastMCP.call_tool`` masks whatever the tool
@@ -1044,7 +1044,7 @@ class DaemonProxyBackend:
 
     async def _elect(self, buried: frozenset[str]) -> Attachment | None:
         """Run one election and adopt what it finds, unless it is written off."""
-        from linkedin_mcp_server.daemon_election import obtain_owner
+        from linkedin_mcp_server.daemon.election import obtain_owner
 
         try:
             outcome = await asyncio.to_thread(
@@ -1359,7 +1359,7 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
 
         ``is_error`` stays true so a client that reads no structured content
         still sees a failure rather than a success carrying no data, the way
-        ``daemon_auth`` answers a sign-in.
+        ``daemon.auth_repair`` answers a sign-in.
 
         Keeping it true is also what lets this payload ignore the tool's declared
         output schema: an error result travels as a whole ``CallToolResult``,
@@ -1413,7 +1413,7 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
             # (`_NO_COMPONENT_CACHE`) that is a fresh forwarded listing carrying
             # the client's own deadline (`create_proxy_provider`, `tool_timeout +
             # _TIMEOUT_MARGIN_SECONDS`), after a `recover` above that may already
-            # have spent `daemon_election.DEFAULT_ELECTION_SECONDS`. And a
+            # have spent `daemon.election.DEFAULT_ELECTION_SECONDS`. And a
             # cancellation is not one of the exceptions that lands on the
             # cautious side: `CancelledError` is a `BaseException`, so it passes
             # that `except Exception` and leaves through here, which is what
@@ -1589,7 +1589,7 @@ def _owner_refused(result: object, attachment: Attachment) -> OwnerFailure | Non
 class FrontendCallHeartbeatMiddleware(Middleware):
     """Mark every call, and say for as long as this frontend waits that it still is.
 
-    The other half of `daemon_liveness`. Cancellation does not cross the hop, so
+    The other half of `daemon.liveness`. Cancellation does not cross the hop, so
     an owner cannot tell a call somebody wants from one whose client has gone;
     this is the frontend answering that question over and over until it stops
     caring, at which point the answer stops arriving and the owner draws the

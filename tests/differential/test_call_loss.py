@@ -93,8 +93,8 @@ from differential.test_row_judgement import _healthy
 from differential.unconfirmed_close import R7Setup
 from linkedin_mcp_server.config.loaders import EnvironmentKeys
 from linkedin_mcp_server.core.auth import _LOGIN_TITLE_PATTERNS
-from linkedin_mcp_server.daemon_auth import MARKER_KEY
-from linkedin_mcp_server.daemon_liveness import REFUSAL_KEY
+from linkedin_mcp_server.daemon.auth_repair import MARKER_KEY
+from linkedin_mcp_server.daemon.liveness import REFUSAL_KEY
 from linkedin_mcp_server.linkedin.fields import PERSON_SECTIONS
 
 MS = 1_000_000

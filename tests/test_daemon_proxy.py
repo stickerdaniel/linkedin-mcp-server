@@ -36,10 +36,10 @@ from fastmcp.server.providers.proxy import ProxyClient, ProxyProvider
 from fastmcp.tools import ToolResult
 
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.daemon import Attachment
-from linkedin_mcp_server.daemon_descriptor import build, new_instance_id, new_token
-from linkedin_mcp_server import daemon_descriptor
-from linkedin_mcp_server.daemon_proxy import (
+from linkedin_mcp_server.daemon.discovery import Attachment
+from linkedin_mcp_server.daemon.descriptor import build, new_instance_id, new_token
+from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
+from linkedin_mcp_server.daemon.proxy import (
     DaemonProxyBackend,
     create_proxy_provider,
 )
@@ -89,8 +89,8 @@ def _attachment(
 
 def _elected(attachment: Attachment):
     """What `obtain_owner` returns when it found *attachment*."""
-    from linkedin_mcp_server.daemon import OwnerLookup, OwnerState
-    from linkedin_mcp_server.daemon_election import ElectionOutcome
+    from linkedin_mcp_server.daemon.discovery import OwnerLookup, OwnerState
+    from linkedin_mcp_server.daemon.election import ElectionOutcome
 
     return ElectionOutcome(
         OwnerLookup(state=OwnerState.ATTACHABLE, attachment=attachment),
@@ -205,7 +205,7 @@ def _reach_owners_in_process(
     """
     from fastmcp.client import transports
 
-    from linkedin_mcp_server.daemon_proxy import FrontendCallHeartbeatMiddleware
+    from linkedin_mcp_server.daemon.proxy import FrontendCallHeartbeatMiddleware
 
     def transport_for(url: str, **_ignored: Any) -> ClientTransport:
         reached = owner_at(url)
@@ -300,7 +300,7 @@ def _sessions_opened(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     Read off the constructor of the session class the client installs, so a
     client that installed some other class shows up as no sessions at all.
     """
-    from linkedin_mcp_server.daemon_proxy import ClaimsTheToolRequest
+    from linkedin_mcp_server.daemon.proxy import ClaimsTheToolRequest
 
     opened: list[Any] = []
     construct = ClaimsTheToolRequest.__init__
@@ -367,7 +367,7 @@ class TestCallingTheOwner:
             return {**(meta or {}), "traceparent": "00-trace-span-01"}
 
         monkeypatch.setattr(
-            "linkedin_mcp_server.daemon_proxy.inject_trace_context", inject
+            "linkedin_mcp_server.daemon.proxy.inject_trace_context", inject
         )
         seen_progress: list[tuple[float, float | None, str | None]] = []
 
@@ -478,7 +478,7 @@ class TestCallingTheOwner:
         from fastmcp.client.mixins.tools import ClientToolsMixin
         from mcp import ClientSession
 
-        from linkedin_mcp_server.daemon_proxy import ClaimsTheToolRequest
+        from linkedin_mcp_server.daemon.proxy import ClaimsTheToolRequest
 
         client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=1.0)
         boundary = inspect.signature(type(client).call_tool_mcp)
@@ -691,7 +691,7 @@ class TestServingTheOwnersTools:
             lambda url: before if url == elected.descriptor.url else after,
         )
         monkeypatch.setattr(
-            "linkedin_mcp_server.daemon_election.obtain_owner",
+            "linkedin_mcp_server.daemon.election.obtain_owner",
             lambda *_args, **_kwargs: _elected(replacement),
         )
 
@@ -731,7 +731,7 @@ class TestServingTheOwnersTools:
             lambda url: held if url == elected.descriptor.url else after,
         )
         monkeypatch.setattr(
-            "linkedin_mcp_server.daemon_election.obtain_owner",
+            "linkedin_mcp_server.daemon.election.obtain_owner",
             lambda *_args, **_kwargs: _elected(replacement),
         )
 
@@ -792,7 +792,7 @@ class TestServingTheOwnersTools:
             )
             return _elected(replacement)
 
-        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+        monkeypatch.setattr("linkedin_mcp_server.daemon.election.obtain_owner", elect)
 
         daemon_descriptor.publish(auth_root, elected.descriptor, elected.token)
         backend = _backend(elected, tmp_path)
@@ -832,7 +832,7 @@ class TestServingTheOwnersTools:
             elections += 1
             return _elected(replacement)
 
-        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+        monkeypatch.setattr("linkedin_mcp_server.daemon.election.obtain_owner", elect)
 
         assert await backend.recover(elected.descriptor.instance_id) is not None
         assert elections == 1
@@ -862,7 +862,7 @@ class TestServingTheOwnersTools:
             holding.wait(timeout=5)
             return _elected(replacement)
 
-        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+        monkeypatch.setattr("linkedin_mcp_server.daemon.election.obtain_owner", elect)
 
         failed = elected.descriptor.instance_id
         waiting = [asyncio.create_task(backend.recover(failed)) for _ in range(5)]
@@ -900,7 +900,7 @@ class TestServingTheOwnersTools:
             holding.wait(timeout=5)
             return _elected(replacement)
 
-        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+        monkeypatch.setattr("linkedin_mcp_server.daemon.election.obtain_owner", elect)
 
         failed = elected.descriptor.instance_id
         gives_up = asyncio.create_task(backend.recover(failed))
@@ -1092,7 +1092,7 @@ def _fail_the_way_a_real_call_fails(
       `_connection_failure` at 235) whenever the session task ended in anything
       but an `MCPError` or an `HTTPStatusError`.
     * `OwnerUnreachableError`, raised `from` that by `_saying_which_owner` in
-      `daemon_proxy`, which is where the owner's identity and the dispatch
+      `daemon.proxy`, which is where the owner's identity and the dispatch
       answer are attached.
     * `ToolError("Error calling tool ...")`, raised `from` that at
       `fastmcp/server/server.py:1564` under the `mask_error_details=True` this
@@ -1102,7 +1102,7 @@ def _fail_the_way_a_real_call_fails(
     `unreachable_owner_in` exists rather than an `isinstance`. A second failure
     raised bare leaves that walk unrun on the way back out.
     """
-    from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
+    from linkedin_mcp_server.daemon.proxy import OwnerUnreachableError
 
     try:
         try:
@@ -1191,7 +1191,7 @@ class TestRepeatingOnlyWhatIsSafe:
         one carries, with the tag three links under a `ToolError` instead of
         raised bare.
         """
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             FrontendOwnerRecoveryMiddleware,
             OwnerUnreachableError,
         )
@@ -1240,7 +1240,7 @@ class TestRepeatingOnlyWhatIsSafe:
         elected = _attachment(tmp_path)
         replacement = _attachment(tmp_path, port=elected.descriptor.port + 1)
         monkeypatch.setattr(
-            "linkedin_mcp_server.daemon_election.obtain_owner",
+            "linkedin_mcp_server.daemon.election.obtain_owner",
             lambda *_a, **_k: _elected(replacement),
         )
         return _backend(elected, tmp_path), elected.descriptor.instance_id
@@ -1253,7 +1253,7 @@ class TestRepeatingOnlyWhatIsSafe:
         def elect(*_a: Any, **_k: Any):
             raise RuntimeError("no owner could be started")
 
-        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+        monkeypatch.setattr("linkedin_mcp_server.daemon.election.obtain_owner", elect)
         return _backend(elected, tmp_path), elected.descriptor.instance_id
 
     @staticmethod
@@ -1276,7 +1276,7 @@ class TestRepeatingOnlyWhatIsSafe:
         owner-loss failure, rather than something the recovery itself broke on
         while deciding what to do with it.
         """
-        from linkedin_mcp_server.daemon_proxy import unreachable_owner_in
+        from linkedin_mcp_server.daemon.proxy import unreachable_owner_in
 
         assert isinstance(answer, _Escaped), f"{why}: answered {answer!r}"
         assert unreachable_owner_in(answer.error) is not None, (
@@ -1287,7 +1287,7 @@ class TestRepeatingOnlyWhatIsSafe:
     async def test_a_mutating_call_is_not_repeated_when_it_may_have_run(
         self, _recovering
     ):
-        # The failure the user pays for. `daemon_auth` already recorded the
+        # The failure the user pays for. `daemon.auth_repair` already recorded the
         # measurement behind the rule: a client answered with an error at 0.66s
         # and the effect landing 0.7s later.
         backend, failed = _recovering
@@ -1331,13 +1331,13 @@ class TestRepeatingOnlyWhatIsSafe:
     async def test_the_unknown_outcome_speaks_the_send_contracts_vocabulary(self):
         """The two halves of the payload are keys a send already uses.
 
-        The builder lives in `daemon_proxy` on purpose: this is the transport
+        The builder lives in `daemon.proxy` on purpose: this is the transport
         saying it knows nothing, not a page-read outcome, and no daemon module
         imports from `linkedin/`. The cost of that is two places naming the same
         keys, so the names are pinned against their source here rather than
         left to drift until a client reads one of them and not the other.
         """
-        from linkedin_mcp_server.daemon_liveness import unknown_outcome
+        from linkedin_mcp_server.daemon.liveness import unknown_outcome
         from linkedin_mcp_server.linkedin.contracts import message_action_result
 
         reported = unknown_outcome(tool="send_message", reason="the owner went away")
@@ -1565,7 +1565,7 @@ class TestRepeatingOnlyWhatIsSafe:
         never acted. It is raised as a `ToolError` saying the owner is gone, so
         the masking below and the SDK above leave the reason readable.
         """
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             FrontendOwnerRecoveryMiddleware,
             OwnerUnreachableError,
         )
@@ -1594,7 +1594,7 @@ class TestRepeatingOnlyWhatIsSafe:
     async def test_a_failure_from_something_else_is_left_alone(self, _recovering):
         # Only an unreachable owner is this middleware's business. Swallowing or
         # retrying anything else would hide a real tool error behind a recovery.
-        from linkedin_mcp_server.daemon_proxy import FrontendOwnerRecoveryMiddleware
+        from linkedin_mcp_server.daemon.proxy import FrontendOwnerRecoveryMiddleware
 
         backend, _failed = _recovering
         attempts = 0
@@ -1860,7 +1860,7 @@ class TestRecoveringThroughTheWholeProxy:
             elections += 1
             return _elected(replacement)
 
-        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+        monkeypatch.setattr("linkedin_mcp_server.daemon.election.obtain_owner", elect)
         return backend, elected, replacement, lambda: elections
 
     async def test_a_client_lists_again_after_its_owner_went_away(
@@ -2376,8 +2376,8 @@ def _retiring(instance_id: str) -> httpx2.Response:
 
 
 def _signed_refusal(kind: str, instance_id: str, *, protocol: object = None) -> Any:
-    """An owner's own refusal of a call, as `daemon_liveness` returns it."""
-    from linkedin_mcp_server.daemon_liveness import REFUSAL_KEY
+    """An owner's own refusal of a call, as `daemon.liveness` returns it."""
+    from linkedin_mcp_server.daemon.liveness import REFUSAL_KEY
 
     return ToolResult(
         content=[mt.TextContent(type="text", text="refused")],
@@ -2475,7 +2475,7 @@ class TestThePreflightDecides:
         return context
 
     async def test_a_validated_answer_dispatches_a_marked_call(self, tmp_path: Path):
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             FrontendCallHeartbeatMiddleware,
             _call_being_made,
         )
@@ -2505,7 +2505,7 @@ class TestThePreflightDecides:
         classification: str,
         buries: bool,
     ):
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             FrontendCallHeartbeatMiddleware,
             OwnerUnreachableError,
         )
@@ -2549,7 +2549,7 @@ class TestThePreflightDecides:
         election is told to pass over it. Every row ends with the call made
         once, on the replacement, and never on the owner that failed.
         """
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             FrontendCallHeartbeatMiddleware,
             FrontendOwnerRecoveryMiddleware,
             _call_being_made,
@@ -2565,7 +2565,7 @@ class TestThePreflightDecides:
             told_to_bury.append(set(buried))
             return _elected(replacement)
 
-        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+        monkeypatch.setattr("linkedin_mcp_server.daemon.election.obtain_owner", elect)
         heartbeat = FrontendCallHeartbeatMiddleware(backend)
         heartbeat._beat = _answers(
             **{
@@ -2603,7 +2603,7 @@ class TestAnOwnersOwnRefusal:
 
     @staticmethod
     async def _call(tmp_path: Path, result: Any) -> Any:
-        from linkedin_mcp_server.daemon_proxy import FrontendCallHeartbeatMiddleware
+        from linkedin_mcp_server.daemon.proxy import FrontendCallHeartbeatMiddleware
 
         attachment = _attachment(tmp_path)
         middleware = FrontendCallHeartbeatMiddleware(_backend(attachment, tmp_path))
@@ -2626,7 +2626,7 @@ class TestAnOwnersOwnRefusal:
     async def test_a_signed_refusal_is_a_call_that_never_ran(
         self, tmp_path: Path, kind: str, classification: str
     ):
-        from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
+        from linkedin_mcp_server.daemon.proxy import OwnerUnreachableError
 
         answer = await self._call(
             tmp_path, lambda instance: _signed_refusal(kind, instance)
@@ -2696,7 +2696,7 @@ class TestWritingAnOwnerOff:
         again; its answer must not be adopted, and the second caller gets one
         more election that knows.
         """
-        from linkedin_mcp_server.daemon_proxy import OwnerFailure
+        from linkedin_mcp_server.daemon.proxy import OwnerFailure
 
         retiring = _attachment(tmp_path)
         replacement = _attachment(tmp_path, port=retiring.descriptor.port + 1)
@@ -2712,7 +2712,7 @@ class TestWritingAnOwnerOff:
                 return _elected(retiring)
             return _elected(replacement)
 
-        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+        monkeypatch.setattr("linkedin_mcp_server.daemon.election.obtain_owner", elect)
 
         first = asyncio.create_task(
             backend.recover(retiring_id, classification=OwnerFailure.OWNER_ERROR)
@@ -2741,7 +2741,7 @@ class TestWritingAnOwnerOff:
     ):
         # The bound on the rule above: a second election only for news the
         # first did not have. Finding nobody with full knowledge is an answer.
-        from linkedin_mcp_server.daemon_proxy import OwnerFailure
+        from linkedin_mcp_server.daemon.proxy import OwnerFailure
 
         failed = _attachment(tmp_path)
         backend = _backend(failed, tmp_path)
@@ -2751,7 +2751,7 @@ class TestWritingAnOwnerOff:
             elections.append(set(buried))
             raise RuntimeError("nobody could be started")
 
-        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+        monkeypatch.setattr("linkedin_mcp_server.daemon.election.obtain_owner", elect)
 
         found = await backend.recover(
             failed.descriptor.instance_id, classification=OwnerFailure.RETIRING
@@ -2766,12 +2766,12 @@ class TestWritingAnOwnerOff:
         # A token is minted per instance and never changes, so the same owner
         # found again carries the token it just refused. Retrying would be
         # refused the same way; the recovery ends instead.
-        from linkedin_mcp_server.daemon_proxy import OwnerFailure
+        from linkedin_mcp_server.daemon.proxy import OwnerFailure
 
         owner = _attachment(tmp_path)
         backend = _backend(owner, tmp_path)
         monkeypatch.setattr(
-            "linkedin_mcp_server.daemon_election.obtain_owner",
+            "linkedin_mcp_server.daemon.election.obtain_owner",
             lambda *_a, **_k: _elected(owner),
         )
 
@@ -2784,7 +2784,7 @@ class TestWritingAnOwnerOff:
     async def test_a_written_off_owner_gets_no_listing_and_no_new_call(
         self, tmp_path: Path
     ):
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             FrontendCallHeartbeatMiddleware,
             OwnerFailure,
             OwnerUnreachableError,
@@ -2824,7 +2824,7 @@ class TestWritingAnOwnerOff:
         # been sent, the owner it names is asked about again, and a burial that
         # landed meanwhile refuses the client with a not-sent failure naming
         # that owner rather than quietly swapping in another one.
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             OwnerFailure,
             OwnerUnreachableError,
             _call_being_made,
@@ -2850,7 +2850,7 @@ class TestWritingAnOwnerOff:
     ):
         # The second failure is not recovered from, but what it learned about
         # the replacement is not thrown away either.
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             FrontendOwnerRecoveryMiddleware,
             OwnerFailure,
             OwnerUnreachableError,
@@ -2866,7 +2866,7 @@ class TestWritingAnOwnerOff:
             elections += 1
             return _elected(replacement)
 
-        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+        monkeypatch.setattr("linkedin_mcp_server.daemon.election.obtain_owner", elect)
         attempts = 0
 
         async def call_next(_context: Any) -> Any:
@@ -2910,7 +2910,7 @@ class TestControlOnlyNeverRunsATool:
         failed = _attachment(tmp_path)
         backend = _backend(failed, tmp_path)
         monkeypatch.setattr(
-            "linkedin_mcp_server.daemon_election.obtain_owner",
+            "linkedin_mcp_server.daemon.election.obtain_owner",
             lambda *_a, **_k: _elected(self._control_only(tmp_path)),
         )
 
@@ -2918,7 +2918,7 @@ class TestControlOnlyNeverRunsATool:
         assert backend.attachment is failed
 
     def test_a_bound_call_cannot_open_a_client_to_one(self, tmp_path: Path):
-        from linkedin_mcp_server.daemon_proxy import _call_being_made, _CallBinding
+        from linkedin_mcp_server.daemon.proxy import _call_being_made, _CallBinding
 
         backend = _backend(_attachment(tmp_path), tmp_path)
         marked = _call_being_made.set(
@@ -2931,7 +2931,7 @@ class TestControlOnlyNeverRunsATool:
             _call_being_made.reset(marked)
 
     async def test_a_call_is_not_preflighted_or_sent_to_one(self, tmp_path: Path):
-        from linkedin_mcp_server.daemon_proxy import FrontendCallHeartbeatMiddleware
+        from linkedin_mcp_server.daemon.proxy import FrontendCallHeartbeatMiddleware
 
         backend = _backend(_attachment(tmp_path), tmp_path)
         backend._attachment = self._control_only(tmp_path)
@@ -2969,13 +2969,13 @@ class TestWhatOneCallCanCost:
     async def test_without_late_burial_news_a_call_costs_two_elections(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        from linkedin_mcp_server import daemon_auth
-        from linkedin_mcp_server.daemon_auth import (
+        from linkedin_mcp_server.daemon import auth_repair as daemon_auth
+        from linkedin_mcp_server.daemon.auth_repair import (
             MARKER_KEY,
             MARKER_VERSION,
             FrontendAuthRepairMiddleware,
         )
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             FrontendCallHeartbeatMiddleware,
             FrontendOwnerRecoveryMiddleware,
             OwnerUnreachableError,
@@ -2991,7 +2991,7 @@ class TestWhatOneCallCanCost:
             elections += 1
             return _elected(owners[elections])
 
-        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+        monkeypatch.setattr("linkedin_mcp_server.daemon.election.obtain_owner", elect)
 
         async def repaired(*_args: Any) -> None:
             return None
@@ -3069,13 +3069,13 @@ class TestWhatOneCallCanCost:
         ceiling. The news arrives from another thread, the way the event loop
         would deliver another call's burial while the election runs.
         """
-        from linkedin_mcp_server import daemon_auth
-        from linkedin_mcp_server.daemon_auth import (
+        from linkedin_mcp_server.daemon import auth_repair as daemon_auth
+        from linkedin_mcp_server.daemon.auth_repair import (
             MARKER_KEY,
             MARKER_VERSION,
             FrontendAuthRepairMiddleware,
         )
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             FrontendCallHeartbeatMiddleware,
             FrontendOwnerRecoveryMiddleware,
             OwnerFailure,
@@ -3108,7 +3108,7 @@ class TestWhatOneCallCanCost:
                 return _elected(owner)
             return _elected(owners[number // 2])
 
-        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", elect)
+        monkeypatch.setattr("linkedin_mcp_server.daemon.election.obtain_owner", elect)
 
         async def repaired(*_args: Any) -> None:
             return None
@@ -3223,8 +3223,8 @@ class TestBurialAfterTheLastCheck:
         # that news.
         from unittest.mock import patch
 
-        from linkedin_mcp_server import daemon_election
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon import election as daemon_election
+        from linkedin_mcp_server.daemon.proxy import (
             FrontendCallHeartbeatMiddleware,
             FrontendOwnerRecoveryMiddleware,
             OwnerFailure,
@@ -3289,7 +3289,7 @@ class TestBurialAfterTheLastCheck:
         # The call is bound and its client is being initialized when another
         # call writes the owner off. The client is real and the owner is an
         # in-process server, so a request that got through would run its tool.
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             FrontendCallHeartbeatMiddleware,
             OwnerFailure,
             OwnerUnreachableError,
@@ -3334,7 +3334,7 @@ class TestBurialAfterTheLastCheck:
         # when the owner is written off and a replacement adopted. Moving its
         # heartbeats, or refusing it now, would get a live call cancelled by the
         # owner running it.
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             FrontendCallHeartbeatMiddleware,
             OwnerFailure,
         )
@@ -3349,7 +3349,7 @@ class TestBurialAfterTheLastCheck:
             return "sent"
 
         _reach_owners_in_process(monkeypatch, lambda _url: owner)
-        monkeypatch.setattr("linkedin_mcp_server.daemon_proxy.HEARTBEAT_SECONDS", 0.05)
+        monkeypatch.setattr("linkedin_mcp_server.daemon.proxy.HEARTBEAT_SECONDS", 0.05)
         beats: list[str] = []
 
         async def beat(attachment: Attachment, _call_id: str) -> httpx2.Response:
@@ -3399,7 +3399,7 @@ class TestTheSendBoundary:
         # session has ended, and closes what it was given: the wrapper. The
         # request the wrapper holds must be closed too, not left unawaited, and
         # a request that never started was never sent.
-        from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
+        from linkedin_mcp_server.daemon.proxy import OwnerUnreachableError
 
         ran: list[str] = []
         owner = FastMCP("owner")
@@ -3435,7 +3435,7 @@ class TestTheSendBoundary:
     async def test_a_burial_queued_as_the_monitor_takes_the_send_stops_it(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, buried: bool
     ):
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             FrontendCallHeartbeatMiddleware,
             OwnerFailure,
             OwnerUnreachableError,
@@ -3499,7 +3499,7 @@ class TestTheSendBoundary:
         # later request on the same client goes to that owner even after it was
         # written off: refusing it would abandon a call the owner may still be
         # running for this frontend.
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             OwnerFailure,
             _call_being_made,
             _CallBinding,
@@ -3540,7 +3540,7 @@ class TestTheSendBoundary:
         # over, and its tool schemas may differ from its replacement's.
         from fastmcp.server.middleware import Middleware as ServerMiddleware
 
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             OwnerFailure,
             OwnerUnreachableError,
         )
@@ -3634,7 +3634,7 @@ class TestTheSessionClaimsTheToolRequest:
     @staticmethod
     def _bound_client(backend: DaemonProxyBackend, attachment: Attachment) -> Any:
         """A client opened the way a forwarded call opens one, and its binding."""
-        from linkedin_mcp_server.daemon_proxy import _call_being_made, _CallBinding
+        from linkedin_mcp_server.daemon.proxy import _call_being_made, _CallBinding
 
         binding = _CallBinding("a-call", attachment)
         marked = _call_being_made.set(binding)
@@ -3658,7 +3658,7 @@ class TestTheSessionClaimsTheToolRequest:
         Read where the owner takes the call, before it acts: in the tool body
         of an in-process owner, and as the request arrives at one over HTTP.
         """
-        from linkedin_mcp_server.daemon_proxy import ClaimsTheToolRequest
+        from linkedin_mcp_server.daemon.proxy import ClaimsTheToolRequest
 
         attachment = _attachment(tmp_path)
         backend = _backend(attachment, tmp_path)
@@ -3811,7 +3811,7 @@ class TestTheSessionClaimsTheToolRequest:
         it, because a real transport fails the outstanding request first and
         the monitor then never sees the connect error at all.
         """
-        from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
+        from linkedin_mcp_server.daemon.proxy import OwnerUnreachableError
 
         ran: list[str] = []
         died: asyncio.Future[None] = asyncio.get_running_loop().create_future()
@@ -3855,7 +3855,7 @@ class TestTheSessionClaimsTheToolRequest:
         that point is not evidence that nothing was sent: this client did send
         a tool request, and the refusal has to say it may have arrived.
         """
-        from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
+        from linkedin_mcp_server.daemon.proxy import OwnerUnreachableError
 
         ran: list[str] = []
         owner = FastMCP("owner")
@@ -4002,7 +4002,7 @@ class _OwnerOverHttp:
     async def __call__(self, request: httpx2.Request) -> httpx2.Response:
         import json
 
-        from linkedin_mcp_server.daemon_liveness import HEARTBEAT_PATH
+        from linkedin_mcp_server.daemon.liveness import HEARTBEAT_PATH
 
         self.requests.append(request)
         if request.url.path == HEARTBEAT_PATH:
@@ -4084,11 +4084,11 @@ def _serve_over_http(
 ) -> None:
     """Send every loopback request to the owner *owner_at* names for its address.
 
-    Through ``daemon_owner.direct_async_http_client`` itself, wrapped rather
+    Through ``daemon.owner.direct_async_http_client`` itself, wrapped rather
     than replaced, so its forced ``trust_env=False`` stays on the path. The
     heartbeat preflight takes the same factory and arrives here too.
     """
-    from linkedin_mcp_server import daemon_owner
+    from linkedin_mcp_server.daemon import owner as daemon_owner
 
     real = daemon_owner.direct_async_http_client
 
@@ -4174,7 +4174,7 @@ class TestTheSdksOwnHttpErrors:
         era: str,
         protocol: str,
     ):
-        from linkedin_mcp_server.daemon_proxy import (
+        from linkedin_mcp_server.daemon.proxy import (
             OwnerFailure,
             OwnerUnreachableError,
         )
@@ -4219,7 +4219,7 @@ class TestTheSdksOwnHttpErrors:
         server says it has no listing of a kind. The 2026-07-28 era has no
         session at all, so only the second can happen there.
         """
-        from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
+        from linkedin_mcp_server.daemon.proxy import OwnerUnreachableError
 
         failure, _owner, _protocol = await self._fail_at(
             tmp_path, monkeypatch, phase, _STAND_INS["404"], era=era, session=session
@@ -4261,7 +4261,7 @@ class TestTheSdksOwnHttpErrors:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, era: str, protocol: str
     ):
         """The session's own deadline: ``REQUEST_TIMEOUT``, not HTTP 408."""
-        from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
+        from linkedin_mcp_server.daemon.proxy import OwnerUnreachableError
 
         async def never(_body: dict[str, Any]) -> httpx2.Response:
             await asyncio.sleep(30)
@@ -4298,7 +4298,7 @@ class TestTheSdksOwnHttpErrors:
         keeping count, never that no tool request went out: the owner here ran
         it before its answer was lost.
         """
-        from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
+        from linkedin_mcp_server.daemon.proxy import OwnerUnreachableError
 
         owner = _OwnerOverHttp(era=era)
         owner.fail["tools/call"] = owner.after_running(_STAND_INS[stand_in])
@@ -4403,7 +4403,7 @@ class TestHowTheHopIsNegotiated:
     async def test_an_owner_with_no_way_in_is_not_entered(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        from linkedin_mcp_server.daemon_proxy import OwnerUnreachableError
+        from linkedin_mcp_server.daemon.proxy import OwnerUnreachableError
 
         owner = _OwnerOverHttp(
             fail={
@@ -4468,7 +4468,7 @@ class TestHowTheHopIsNegotiated:
         backend = _backend(elected, tmp_path)
         elections: list[object] = []
         monkeypatch.setattr(
-            "linkedin_mcp_server.daemon_election.obtain_owner",
+            "linkedin_mcp_server.daemon.election.obtain_owner",
             lambda *_a, **_k: elections.append(1),
         )
         proxy = create_mcp_server(
@@ -4511,7 +4511,7 @@ class TestWhatTheOwnerDidBeforeItWentAway:
         elected = _attachment(tmp_path)
         standby = _attachment(tmp_path, port=elected.descriptor.port + 1)
         monkeypatch.setattr(
-            "linkedin_mcp_server.daemon_election.obtain_owner",
+            "linkedin_mcp_server.daemon.election.obtain_owner",
             lambda *_a, **_k: _elected(standby),
         )
         owners = {_address(elected): original, _address(standby): replacement}
@@ -4598,7 +4598,7 @@ class TestTheHeadersTheOwnerReceives:
     ):
         from fastmcp.utilities.tests import asgi_client
 
-        from linkedin_mcp_server.daemon_liveness import CALL_HEADER, HEARTBEAT_PATH
+        from linkedin_mcp_server.daemon.liveness import CALL_HEADER, HEARTBEAT_PATH
         from linkedin_mcp_server.server import create_mcp_server
         from linkedin_mcp_server.server_role import ServerRole
 
@@ -4665,7 +4665,7 @@ from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_http_headers
 from starlette.responses import JSONResponse
 
-from linkedin_mcp_server.daemon_liveness import HEARTBEAT_PATH
+from linkedin_mcp_server.daemon.liveness import HEARTBEAT_PATH
 from linkedin_mcp_server.server import _StaticTokenAuth
 
 root, token, behaviour = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
@@ -4841,7 +4841,7 @@ class TestAnOwnerProcessKilledMidCall:
                 return _elected(standby)
 
             monkeypatch.setattr(
-                "linkedin_mcp_server.daemon_election.obtain_owner", elect
+                "linkedin_mcp_server.daemon.election.obtain_owner", elect
             )
             backend = _backend(attachment, tmp_path / "original")
             proxy = create_mcp_server(

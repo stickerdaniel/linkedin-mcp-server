@@ -55,12 +55,7 @@ from typing import Any, NoReturn, Protocol, TextIO
 
 import httpx2
 
-from linkedin_mcp_server import (
-    __version__,
-    daemon_config,
-    daemon_descriptor,
-    process_control,
-)
+from linkedin_mcp_server import __version__
 from linkedin_mcp_server.bootstrap import (
     browser_setup_failure_pending,
     browser_setup_in_progress,
@@ -68,8 +63,11 @@ from linkedin_mcp_server.bootstrap import (
 from linkedin_mcp_server.common_utils import is_still_at
 from linkedin_mcp_server.config import set_config
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.daemon_lock import DaemonLock
-from linkedin_mcp_server.daemon_liveness import (
+from linkedin_mcp_server.daemon import config as daemon_config
+from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
+from linkedin_mcp_server.daemon import process_control
+from linkedin_mcp_server.daemon.lock import DaemonLock
+from linkedin_mcp_server.daemon.liveness import (
     CALL_HEADER,
     HEARTBEAT_PATH,
     RETIRING,
@@ -283,7 +281,7 @@ def _endpoint_host(sock: socket.socket) -> str:
     """The address to publish for *sock*, unbracketed.
 
     The descriptor stores a bare host and brackets it when it builds a URL
-    (``daemon_descriptor.py:576-585``), so bracketing here would produce
+    (``daemon/descriptor.py:576-585``), so bracketing here would produce
     ``[[::1]]``.
     """
     address = sock.getsockname()[0]
@@ -372,7 +370,7 @@ async def _probe(url: str, token: str) -> None:
 #: interface a later release uses to retire this one: its path, its bearer check
 #: and request version 1 stay as they are across tool protocol and descriptor
 #: schema changes, so it is also all a frontend may do with an owner whose tool
-#: protocol it does not speak (``daemon.Attachment.control_only``).
+#: protocol it does not speak (``daemon.discovery.Attachment.control_only``).
 STAND_DOWN_PATH = "/control/stand-down"
 
 #: The version of the stand-down request body, independent of the tool protocol.

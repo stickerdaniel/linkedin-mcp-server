@@ -64,7 +64,7 @@ class ServerRole(enum.Enum):
 #: differently, and the only thing it can consult is the process it is.
 #:
 #: Deliberately not in ``AppConfig``. That is settings a user chose, and it
-#: travels to the owner over a pipe (``daemon_config``) carrying exactly the
+#: travels to the owner over a pipe (``daemon.config``) carrying exactly the
 #: fields both ends must agree on. The role is not one of them: an owner knows
 #: what it is, and being told by the frontend would be the wrong direction.
 #:
