@@ -207,8 +207,10 @@ async def test_a_black_hole_origin_is_a_navigation_stalled_before_its_response(
     assert navigation["timeout_ms"] is None, "the default bound, not one of ours"
     assert navigation["ended_ms"] - navigation["started_ms"] >= 29_000
     assert navigation["phases"]["request"] is not None
-    assert navigation["phases"]["response"] is None
     assert record["first_failed_navigation"] == 0
+    # Read when the goto gave up. The phases themselves are not: the recorder
+    # listens until the page closes, so a stall that delays the close records
+    # the answer at 35 s as well.
     assert record["stalled_phase"] == "response"
 
 
