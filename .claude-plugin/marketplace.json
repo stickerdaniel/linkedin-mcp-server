@@ -1,0 +1,17 @@
+{
+  "name": "linkedin-mcp-server",
+  "owner": {
+    "name": "Daniel Sticker",
+    "url": "https://daniel.sticker.name/"
+  },
+  "metadata": {
+    "description": "The LinkedIn MCP Server plugin: a local, browser-backed MCP server and its skill."
+  },
+  "plugins": [
+    {
+      "name": "linkedin-mcp-server",
+      "source": "./plugins/linkedin-mcp-server",
+      "description": "Research LinkedIn through a local, browser-backed MCP server."
+    }
+  ]
+}
