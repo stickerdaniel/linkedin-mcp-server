@@ -118,6 +118,39 @@
       }
     },
     "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Diagnostics: open one of your profile's edit forms and list its controls. Read-only.\n\nNothing is typed or saved; the form is left by navigating away. Use it\nto see why a write reports SELECTOR_NOT_FOUND or to update locators.\nText field values are reported only as lengths.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "form": {
+          "description": "intro | position | education | publication",
+          "type": "string"
+        }
+      },
+      "required": [
+        "form"
+      ],
+      "type": "object"
+    },
+    "name": "describe_profile_form",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Describe Profile Form"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "profile-edit"
+        ]
+      }
+    },
+    "annotations": {
       "destructiveHint": false,
       "openWorldHint": false,
       "readOnlyHint": false
@@ -791,13 +824,13 @@
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Creates a previewable profile change set. Does not modify LinkedIn.\n\nReads the current values of the targeted fields, validates every\nrequested value (including LinkedIn's character limits; over-long text\nis refused, never truncated), and stores a change set with before and\nafter values and a fingerprint of the profile it was planned against.\nShow the returned diff to the user. Nothing is applied until the user\napproves and apply_profile_changes is called with confirm=true.\n\nOnly send values the user has written or approved. This tool carries\ncontent; it must not be used to invent jobs, employers, dates,\nqualifications, skills or achievements. Supported: headline, about,\ntitle and description of an existing experience, adding and removing\nskills. Anything else returns UNSUPPORTED_FIELD.",
+    "description": "Creates a previewable profile change set. Does not modify LinkedIn.\n\nReads the current values of the targeted fields, validates every\nrequested value (including LinkedIn's character limits; over-long text\nis refused, never truncated), and stores a change set with before and\nafter values and a fingerprint of the profile it was planned against.\nShow the returned diff to the user. Nothing is applied until the user\napproves and apply_profile_changes is called with confirm=true.\n\nOnly send values the user has written or approved. This tool carries\ncontent; it must not be used to invent jobs, employers, dates,\nqualifications, skills or achievements. Supported: first and last\nname, headline, about, title and description of an existing\nexperience, adding and removing skills, adding new positions,\neducation and publications, and linking an existing position or\neducation entry to an organization's LinkedIn page (organizations). Anything else returns UNSUPPORTED_FIELD.\nA new entry that resembles an existing one is refused unless\nallowDuplicate is set. Use rehearse_profile_changes to fill the forms\nwithout saving before applying.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "changes": {
           "additionalProperties": true,
-          "description": "headline, about, experiences [{experienceId | match, title,\ndescription}], skills {add, remove}",
+          "description": "firstName, lastName, headline, about, experiences\n[{experienceId | match, title, description}], skills {add,\nremove}, newPositions, newEducation, newPublications",
           "properties": {
             "about": {
               "anyOf": [
@@ -905,6 +938,17 @@
               "maxItems": 20,
               "type": "array"
             },
+            "firstName": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
             "headline": {
               "anyOf": [
                 {
@@ -915,6 +959,378 @@
                 }
               ],
               "default": null
+            },
+            "lastName": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "newEducation": {
+              "items": {
+                "additionalProperties": true,
+                "properties": {
+                  "activities": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "allowDuplicate": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "degree": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "description": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "endMonth": {
+                    "anyOf": [
+                      {
+                        "maximum": 12,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "endYear": {
+                    "anyOf": [
+                      {
+                        "maximum": 2100,
+                        "minimum": 1900,
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Or expected graduation year."
+                  },
+                  "fieldOfStudy": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "grade": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "school": {
+                    "type": "string"
+                  },
+                  "startMonth": {
+                    "anyOf": [
+                      {
+                        "maximum": 12,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "startYear": {
+                    "anyOf": [
+                      {
+                        "maximum": 2100,
+                        "minimum": 1900,
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "school"
+                ],
+                "type": "object"
+              },
+              "maxItems": 10,
+              "type": "array"
+            },
+            "newPositions": {
+              "items": {
+                "additionalProperties": true,
+                "properties": {
+                  "allowDuplicate": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "company": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Organization name."
+                  },
+                  "current": {
+                    "anyOf": [
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Currently in this role. Defaults to true when no end date is given."
+                  },
+                  "description": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "employmentType": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "e.g. Full-time, Part-time, Internship (as the form shows it)."
+                  },
+                  "endMonth": {
+                    "anyOf": [
+                      {
+                        "maximum": 12,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "endYear": {
+                    "anyOf": [
+                      {
+                        "maximum": 2100,
+                        "minimum": 1900,
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "location": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "locationType": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "On-site, Hybrid or Remote (as the form shows it)."
+                  },
+                  "startMonth": {
+                    "anyOf": [
+                      {
+                        "maximum": 12,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "startYear": {
+                    "maximum": 2100,
+                    "minimum": 1900,
+                    "type": "integer"
+                  },
+                  "title": {
+                    "description": "Job title.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title",
+                  "startYear"
+                ],
+                "type": "object"
+              },
+              "maxItems": 10,
+              "type": "array"
+            },
+            "newPublications": {
+              "items": {
+                "additionalProperties": true,
+                "properties": {
+                  "allowDuplicate": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "date": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "mm/dd/yyyy"
+                  },
+                  "description": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "publisher": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Journal, conference or publisher."
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "e.g. the DOI link."
+                  }
+                },
+                "required": [
+                  "title"
+                ],
+                "type": "object"
+              },
+              "maxItems": 20,
+              "type": "array"
+            },
+            "organizations": {
+              "items": {
+                "additionalProperties": true,
+                "properties": {
+                  "entryId": {
+                    "description": "LinkedIn's id of the existing entry.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "position",
+                      "education"
+                    ],
+                    "type": "string"
+                  },
+                  "name": {
+                    "description": "The organization's exact LinkedIn page name; only an exact suggestion is selected.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "entryId",
+                  "name"
+                ],
+                "type": "object"
+              },
+              "maxItems": 10,
+              "type": "array"
             },
             "skills": {
               "anyOf": [
@@ -959,6 +1375,39 @@
       "type": "object"
     },
     "title": "Propose Profile Changes"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "profile-edit"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Fill LinkedIn's forms with a pending change set and leave without saving. Does not modify LinkedIn.\n\nProves each form accepts the approved values (fields found, limits,\ndropdown options, suggestions) before anything is saved. The change\nset stays pending. Skill changes are not rehearsed.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "changeSetId": {
+          "description": "id returned by propose_profile_changes",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeSetId"
+      ],
+      "type": "object"
+    },
+    "name": "rehearse_profile_changes",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Rehearse Profile Changes"
   },
   {
     "_meta": {

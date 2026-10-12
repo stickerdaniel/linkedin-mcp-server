@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
 
+import json
 import logging
 import re
 
@@ -23,6 +24,7 @@ from linkedin_mcp_server.core.exceptions import (
 from linkedin_mcp_server.profile_edit.changeset import (
     ChangeSet,
     ChangeSetStatus,
+    EntryRequest,
     FieldChange,
     SkillsRequest,
     TextRequest,
@@ -36,18 +38,22 @@ from linkedin_mcp_server.profile_edit.errors import (
     ProfileEditErrorCode,
 )
 from linkedin_mcp_server.profile_edit.model import (
+    ENTRY_PRIMARY,
+    EntrySummary,
     ExperienceForm,
     ExperienceSummary,
     OwnProfile,
     Skill,
     TextField,
     normalize_text,
+    same_saved_text,
 )
 from linkedin_mcp_server.profile_edit.store import ProfileEditStore
 
 logger = logging.getLogger(__name__)
 
 ExperienceField = Literal["title", "description"]
+NameField = Literal["first", "last"]
 
 
 class ProfileEditorPort(Protocol):
@@ -61,14 +67,43 @@ class ProfileEditorPort(Protocol):
     async def list_experiences(self) -> list[ExperienceSummary]: ...
     async def read_experience(self, experience_id: str) -> ExperienceForm: ...
     async def list_skills(self) -> list[Skill]: ...
-    async def write_headline(self, *, expected: str, value: str) -> None: ...
-    async def write_about(self, *, expected: str, value: str) -> None: ...
+    async def read_name(self) -> tuple[TextField, TextField]: ...
+    async def list_entries(self, kind: str) -> list[EntrySummary]: ...
+    async def write_headline(
+        self, *, expected: str, value: str, dry_run: bool = False
+    ) -> None: ...
+    async def write_about(
+        self, *, expected: str, value: str, dry_run: bool = False
+    ) -> None: ...
     async def write_experience(
-        self, experience_id: str, *, field: ExperienceField, expected: str, value: str
+        self,
+        experience_id: str,
+        *,
+        field: ExperienceField,
+        expected: str,
+        value: str,
+        dry_run: bool = False,
+    ) -> None: ...
+    async def write_name(
+        self, which: NameField, *, expected: str, value: str, dry_run: bool = False
+    ) -> None: ...
+    async def create_entry(
+        self, kind: str, values: dict[str, Any], *, dry_run: bool = False
+    ) -> dict[str, Any]: ...
+    async def read_organization(self, kind: str, entry_id: str) -> TextField: ...
+    async def write_organization(
+        self,
+        kind: str,
+        entry_id: str,
+        *,
+        expected: str,
+        value: str,
+        dry_run: bool = False,
     ) -> None: ...
     async def add_skill(self, name: str) -> str: ...
     async def remove_skill(self, skill: Skill) -> None: ...
     async def pause(self, seconds: float) -> None: ...
+    async def describe_form(self, form: str) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,17 +117,34 @@ class ExperienceEdit:
 
 
 @dataclass(frozen=True, slots=True)
+class OrganizationEdit:
+    """Link an existing position or education entry to the named LinkedIn page."""
+
+    kind: str  # position | education
+    entry_id: str
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
 class Proposal:
     headline: str | None = None
     about: str | None = None
     experiences: Sequence[ExperienceEdit] = ()
     skills_add: Sequence[str] = ()
     skills_remove: Sequence[str] = ()
+    first_name: str | None = None
+    last_name: str | None = None
+    new_entries: Sequence[EntryRequest] = ()
+    organizations: Sequence[OrganizationEdit] = ()
 
     def is_empty(self) -> bool:
         return (
-            self.headline is None
+            not self.organizations
+            and self.headline is None
             and self.about is None
+            and self.first_name is None
+            and self.last_name is None
+            and not self.new_entries
             and not any(
                 e.title is not None or e.description is not None
                 for e in self.experiences
@@ -249,6 +301,9 @@ class ProfileEditService:
             }
         }
 
+    async def describe_form(self, form: str) -> dict[str, Any]:
+        return await self._editor.describe_form(form)
+
     async def get_skills(self) -> dict[str, Any]:
         return {"skills": [s.as_dict() for s in await self._editor.list_skills()]}
 
@@ -320,6 +375,49 @@ class ProfileEditService:
                             exp.id,
                         )
                     )
+        if proposal.first_name is not None or proposal.last_name is not None:
+            first, last = await self._editor.read_name()
+            for which, wanted, now in (
+                ("first", proposal.first_name, first),
+                ("last", proposal.last_name, last),
+            ):
+                if wanted is None:
+                    continue
+                texts.append(
+                    TextRequest(
+                        f"name/{which}",
+                        "name",
+                        f"{which}_name",
+                        f"{which.capitalize()} name",
+                        wanted,
+                        now.value,
+                        now.max_length,
+                    )
+                )
+        for org in proposal.organizations:
+            if org.kind not in {"position", "education"}:
+                raise ProfileEditError(
+                    ProfileEditErrorCode.UNSUPPORTED_FIELD,
+                    "Organizations can be set on positions and education only.",
+                    kind=org.kind,
+                )
+            now = await self._editor.read_organization(org.kind, org.entry_id)
+            texts.append(
+                TextRequest(
+                    f"{org.kind}/{org.entry_id}/organization",
+                    org.kind,
+                    "organization",
+                    f"{org.kind.capitalize()} {org.entry_id} organization",
+                    org.name,
+                    now.value,
+                    now.max_length,
+                    org.entry_id,
+                )
+            )
+        existing: dict[str, list[EntrySummary]] = {}
+        for kind in dict.fromkeys(e.kind for e in proposal.new_entries):
+            if kind in ENTRY_PRIMARY:
+                existing[kind] = await self._editor.list_entries(kind)
         current_skills: list[str] = []
         if proposal.skills_add or proposal.skills_remove:
             current_skills = [s.name for s in await self._editor.list_skills()]
@@ -328,6 +426,8 @@ class ProfileEditService:
             SkillsRequest(proposal.skills_add, proposal.skills_remove),
             current_skills,
             now=self._clock(),
+            entries=proposal.new_entries,
+            existing_entries=existing,
         )
         cs.account = await self._editor.account()
         self._store.save(cs)
@@ -555,11 +655,11 @@ class ProfileEditService:
         return out
 
     async def _attempt(
-        self, change: FieldChange, skills: dict[str, Skill]
+        self, change: FieldChange, skills: dict[str, Skill], *, dry_run: bool = False
     ) -> dict[str, Any]:
         """Apply one field; turn every expected failure into a result row."""
         try:
-            return await self._apply_one(change, skills)
+            return await self._apply_one(change, skills, dry_run=dry_run)
         except ProfileEditError as e:
             return {
                 "field": change.key,
@@ -615,9 +715,93 @@ class ProfileEditService:
                 signedIn=current,
             )
 
-    async def _apply_one(
-        self, change: FieldChange, skills: dict[str, Skill]
+    async def _create_entry(
+        self, change: FieldChange, *, dry_run: bool
     ) -> dict[str, Any]:
+        """Add one entry, then prove exactly one new matching entry exists."""
+        kind = change.target or change.section
+        values = json.loads(change.after or "{}")
+        before = {e.id for e in await self._editor.list_entries(kind)}
+        filled = await self._editor.create_entry(kind, values, dry_run=dry_run)
+        if dry_run:
+            return {
+                "field": change.key,
+                "status": "FILLED_NOT_SAVED",
+                "verified": True,
+                "filled": filled,
+            }
+        after = await self._editor.list_entries(kind)
+        new = [e for e in after if e.id not in before]
+        primary = skill_key(str(values.get(ENTRY_PRIMARY[kind], "")))
+        matching = [e for e in new if primary in skill_key(" ".join(e.lines))]
+        if len(new) != 1 or len(matching) != 1:
+            raise ProfileEditError(
+                ProfileEditErrorCode.VERIFICATION_FAILED,
+                f"Expected exactly one new {kind} named like the approved one.",
+                field=change.key,
+                newEntries=[e.as_dict() for e in new],
+            )
+        return {
+            "field": change.key,
+            "status": "CREATED",
+            "verified": True,
+            "entryId": matching[0].id,
+        }
+
+    async def _apply_one(
+        self, change: FieldChange, skills: dict[str, Skill], *, dry_run: bool = False
+    ) -> dict[str, Any]:
+        if change.action == "create":
+            return await self._create_entry(change, dry_run=dry_run)
+        if change.key.endswith("/organization") and change.target:
+            await self._editor.write_organization(
+                change.section,
+                change.target,
+                expected=change.before or "",
+                value=change.after or "",
+                dry_run=dry_run,
+            )
+            if dry_run:
+                return {
+                    "field": change.key,
+                    "status": "FILLED_NOT_SAVED",
+                    "verified": True,
+                }
+            got = await self._editor.read_organization(change.section, change.target)
+            if skill_key(got.value) != skill_key(change.after or ""):
+                raise ProfileEditError(
+                    ProfileEditErrorCode.VERIFICATION_FAILED,
+                    field=change.key,
+                    expected=change.after,
+                    observed=got.value,
+                )
+            return {"field": change.key, "status": "UPDATED", "verified": True}
+        if change.section == "name":
+            which: NameField = "first" if change.key == "name/first" else "last"
+            await self._editor.write_name(
+                which,
+                expected=change.before or "",
+                value=change.after or "",
+                dry_run=dry_run,
+            )
+            if dry_run:
+                return {
+                    "field": change.key,
+                    "status": "FILLED_NOT_SAVED",
+                    "verified": True,
+                }
+            first, last = await self._editor.read_name()
+            observed = normalize_text((first if which == "first" else last).value)
+            if observed != (change.after or ""):
+                raise ProfileEditError(
+                    ProfileEditErrorCode.VERIFICATION_FAILED,
+                    field=change.key,
+                    expected=change.after,
+                    observed=observed,
+                )
+            return {"field": change.key, "status": "UPDATED", "verified": True}
+        if dry_run:
+            return await self._rehearse_text(change)
         if change.key == "headline":
             await self._editor.write_headline(
                 expected=change.before or "", value=change.after or ""
@@ -677,7 +861,7 @@ class ProfileEditService:
             raise ProfileEditError(
                 ProfileEditErrorCode.UNSUPPORTED_FIELD, field=change.key
             )
-        if observed != (change.after or ""):
+        if not same_saved_text(observed, change.after or ""):
             raise ProfileEditError(
                 ProfileEditErrorCode.VERIFICATION_FAILED,
                 field=change.key,
@@ -686,12 +870,99 @@ class ProfileEditService:
             )
         return {"field": change.key, "status": "UPDATED", "verified": True}
 
+    async def _rehearse_text(self, change: FieldChange) -> dict[str, Any]:
+        """Type a text change into its form and leave without saving."""
+        if change.action != "set":
+            return {
+                "field": change.key,
+                "status": "NOT_REHEARSED",
+                "verified": False,
+                "message": "Skill changes are not rehearsed.",
+            }
+        kw = {
+            "expected": change.before or "",
+            "value": change.after or "",
+            "dry_run": True,
+        }
+        if change.key == "headline":
+            await self._editor.write_headline(**kw)
+        elif change.key == "about":
+            await self._editor.write_about(**kw)
+        elif change.section == "experience" and change.target:
+            await self._editor.write_experience(
+                change.target,
+                field="title" if change.key.endswith("/title") else "description",
+                **kw,
+            )
+        else:
+            raise ProfileEditError(
+                ProfileEditErrorCode.UNSUPPORTED_FIELD, field=change.key
+            )
+        return {"field": change.key, "status": "FILLED_NOT_SAVED", "verified": True}
+
+    # ── REHEARSE ────────────────────────────────────────────────────────────
+    async def rehearse(self, change_set_id: str) -> dict[str, Any]:
+        """Fill every form exactly as apply would, then leave without saving.
+
+        Proves the forms take the approved values (selectors, limits, dropdown
+        options, suggestions) without changing LinkedIn. The change set stays
+        pending; nothing is recorded as applied.
+        """
+        cs = self._store.load(change_set_id)
+        if cs.status is not ChangeSetStatus.PENDING_APPROVAL:
+            raise ProfileEditError(
+                ProfileEditErrorCode.CHANGE_SET_NOT_PENDING,
+                changeSetId=cs.id,
+                status=str(cs.status),
+            )
+        await self._check_account(cs)
+        stale = stale_fields(cs, await self._current_values(cs))
+        if stale:
+            raise ProfileEditError(
+                ProfileEditErrorCode.STALE_CHANGE_SET,
+                changeSetId=cs.id,
+                changedFields=stale,
+            )
+        results = [await self._attempt(c, {}, dry_run=True) for c in cs.changes]
+        self._store.audit(
+            at=self._clock(),
+            tool="rehearse_profile_changes",
+            changeSetId=cs.id,
+            status=str(cs.status),
+        )
+        return {
+            "changeSetId": cs.id,
+            "status": str(cs.status),
+            "rehearsal": True,
+            "allFilled": all(
+                r["verified"] for r in results if r["status"] != "NOT_REHEARSED"
+            ),
+            "results": results,
+            "note": "Forms were filled and left without saving. Nothing changed on LinkedIn.",
+        }
+
     # ── helpers ─────────────────────────────────────────────────────────────
     async def _current_values(self, cs: ChangeSet) -> dict[str, Any]:
         reads = _Reads(self._editor)
         current: dict[str, Any] = {}
+        names: tuple[TextField, TextField] | None = None
         for key in cs.baseline:
-            if key == "headline":
+            if key in {"name/first", "name/last"}:
+                names = names or await self._editor.read_name()
+                current[key] = normalize_text(
+                    (names[0] if key == "name/first" else names[1]).value
+                )
+            elif key.endswith("/organization"):
+                kind, entry_id, _ = key.split("/", 2)
+                current[key] = normalize_text(
+                    (await self._editor.read_organization(kind, entry_id)).value
+                )
+            elif key.endswith("/entries"):
+                kind = key.split("/", 1)[0]
+                current[key] = sorted(
+                    e.id for e in await self._editor.list_entries(kind)
+                )
+            elif key == "headline":
                 current[key] = normalize_text(
                     (await self._editor.read_headline()).value
                 )

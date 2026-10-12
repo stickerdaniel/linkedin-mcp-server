@@ -12,8 +12,10 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+import asyncio
 import logging
 import re
+import time
 
 from patchright.async_api import Locator, Page
 
@@ -26,6 +28,8 @@ from linkedin_mcp_server.profile_edit.errors import (
     ProfileEditErrorCode,
 )
 from linkedin_mcp_server.profile_edit.model import (
+    ENTRY_SPECS,
+    EntrySummary,
     ExperienceForm,
     ExperienceSummary,
     Skill,
@@ -45,6 +49,9 @@ _VIEW_SETTLE_MS = 2_500
 _MAX_VIEW_SCROLLS = 8
 _SCROLL_SETTLE_MS = 1_500
 _OPTION_TIMEOUT_MS = 6_000
+# Hard limit per step of a write, and the duration after which a step is logged.
+_PHASE_LIMIT_S = 45.0
+_SLOW_PHASE_S = 15.0
 _DATE_RANGE = re.compile(r"\b(19|20)\d{2}\b")
 
 
@@ -101,6 +108,25 @@ class ProfileEditor:
             await self._dialog().wait_for(state="visible", timeout=_DIALOG_TIMEOUT_MS)
         except Exception:
             raise await self._not_found(what, url, "edit dialog did not open") from None
+        await self._use_page_locale()
+
+    async def _use_page_locale(self) -> None:
+        """Pick the label table for the UI language LinkedIn rendered.
+
+        An unknown language keeps English; exact labels then fail closed with
+        SELECTOR_NOT_FOUND rather than matching something else.
+        """
+        try:
+            lang = await self._page.evaluate("document.documentElement.lang") or ""
+        except Exception:
+            return
+        table = sel.LABELS.get(lang.split("-")[0].lower())
+        if table is not None:
+            self._labels = table
+
+    async def _leave_unsaved(self) -> None:
+        """Abandon an open form without saving: navigate back to the profile."""
+        await self._goto(sel.profile_url(await self._vanity_name()))
 
     async def _open_form(self, urls: tuple[str, ...], spec: sel.FieldSpec) -> Locator:
         """Navigate to the first URL whose dialog contains *spec*; return the field."""
@@ -230,7 +256,14 @@ class ProfileEditor:
                 )
 
     async def _replace(
-        self, loc: Locator, *, expected: str, value: str, field: str, url: str
+        self,
+        loc: Locator,
+        *,
+        expected: str,
+        value: str,
+        field: str,
+        url: str,
+        dry_run: bool = False,
     ) -> None:
         current = normalize_text((await self._read(loc)).value)
         if current != normalize_text(expected):
@@ -253,6 +286,9 @@ class ProfileEditor:
                 typedLength=len(typed),
                 wantedLength=len(value),
             )
+        if dry_run:
+            await self._leave_unsaved()
+            return
         await self._save(field, url)
 
     async def _button(self, key: str, scope: Locator | None = None) -> Locator | None:
@@ -276,10 +312,14 @@ class ProfileEditor:
             raise await self._not_found(
                 f"{field} save button", url, "no unique save control"
             )
+        form_url = self._page.url
         await save.click()
         try:
             await self._dialog().wait_for(state="hidden", timeout=_SAVE_TIMEOUT_MS)
         except Exception:
+            if await self._saved_into_follow_up(form_url):
+                await self._session.check_rate_limit()
+                return
             errors: list[str] = []
             for css in sel.FORM_ERROR:
                 found = self._dialog().locator(css)
@@ -295,6 +335,33 @@ class ProfileEditor:
                 currentUrl=self._page.url,
             ) from None
         await self._session.check_rate_limit()
+
+    async def _saved_into_follow_up(self, form_url: str) -> bool:
+        """Whether Save succeeded and LinkedIn opened a follow-up dialog instead.
+
+        Adding a position can replace the form with a "share this with your
+        network" prompt at a ``next-action`` URL rather than closing it; the
+        prompt is abandoned by navigating away, so nothing is shared. Adding a
+        publication can instead return to the profile page. In both cases the
+        form was saved, and verification still re-reads the section.
+        """
+        url = self._page.url
+        if url.rstrip("/") == form_url.rstrip("/"):
+            return False
+        if sel.FOLLOW_UP_AFTER_SAVE.search(url):
+            logger.info(
+                "Save opened a follow-up prompt (%s); leaving it unanswered", url
+            )
+            await self._leave_unsaved()
+            return True
+        # LinkedIn also closes a form by navigating back to a page that is not
+        # an edit form (the profile); another popup there can keep a dialog
+        # visible. Leaving the form URL is LinkedIn's own sign the save went
+        # through; the caller still verifies the result by reading it back.
+        if "/edit/" not in url:
+            logger.info("Save left the form for %s; treating it as saved", url)
+            return True
+        return False
 
     # ── reads ───────────────────────────────────────────────────────────────
     async def account(self) -> str:
@@ -327,6 +394,47 @@ class ProfileEditor:
     async def read_about(self) -> TextField:
         urls = sel.about_form_urls(await self._vanity_name())
         return await self._read(await self._open_form(urls, sel.ABOUT))
+
+    async def describe_form(self, form: str) -> dict[str, Any]:
+        """Open an edit form and describe its controls; nothing is typed or saved."""
+        vanity = await self._vanity_name()
+        if form == "connections":
+            await self._goto(sel.CONNECTIONS_URL)
+            await self._page.wait_for_timeout(_SETTLE_MS * 4)
+            return {
+                "form": form,
+                **await self._page.evaluate(sel.DESCRIBE_CONNECTIONS_JS),
+            }
+        if form.startswith("list:") and form[5:] in sel.NEW_ENTRY_FORM_PATHS:
+            await self._goto(sel.entry_list_url(vanity, form[5:]))
+            await self._session.scroll_body(pause_time=0.8, max_scrolls=4)
+            hrefs = await self._page.evaluate(
+                '() => [...new Set([...document.querySelectorAll(\'main a[href*="/edit/"], main a[href*="/details/"]\')]'
+                ".map((a) => a.getAttribute('href').split('?')[0]))].slice(0, 40)"
+            )
+            return {"form": form, "url": self._page.url, "hrefs": hrefs}
+        if form == "intro":
+            urls: tuple[str, ...] = (sel.intro_form_url(vanity),)
+        elif form in sel.NEW_ENTRY_FORM_PATHS:
+            urls = sel.new_entry_form_urls(vanity, form)
+        else:
+            raise ProfileEditError(ProfileEditErrorCode.UNSUPPORTED_FIELD, form=form)
+        tried: list[dict[str, Any]] = []
+        for url in urls:
+            try:
+                await self._open_dialog(url, form)
+            except ProfileEditError as e:
+                if e.code is not ProfileEditErrorCode.SELECTOR_NOT_FOUND:
+                    raise
+                tried.append({"url": url, "currentUrl": self._page.url})
+                continue
+            await self._page.wait_for_timeout(_SETTLE_MS * 2)
+            return {
+                "form": form,
+                "tried": tried,
+                **await self._page.evaluate(sel.DESCRIBE_FORM_JS),
+            }
+        return {"form": form, "dialog": False, "tried": tried}
 
     async def list_experiences(self) -> list[ExperienceSummary]:
         vanity = await self._vanity_name()
@@ -421,18 +529,32 @@ class ProfileEditor:
         ]
 
     # ── writes ──────────────────────────────────────────────────────────────
-    async def write_headline(self, *, expected: str, value: str) -> None:
+    async def write_headline(
+        self, *, expected: str, value: str, dry_run: bool = False
+    ) -> None:
         url = sel.intro_form_url(await self._vanity_name())
         loc = await self._open_form((url,), sel.HEADLINE)
         await self._replace(
-            loc, expected=expected, value=value, field="headline", url=url
+            loc,
+            expected=expected,
+            value=value,
+            field="headline",
+            url=url,
+            dry_run=dry_run,
         )
 
-    async def write_about(self, *, expected: str, value: str) -> None:
+    async def write_about(
+        self, *, expected: str, value: str, dry_run: bool = False
+    ) -> None:
         urls = sel.about_form_urls(await self._vanity_name())
         loc = await self._open_form(urls, sel.ABOUT)
         await self._replace(
-            loc, expected=expected, value=value, field="about", url=self._page.url
+            loc,
+            expected=expected,
+            value=value,
+            field="about",
+            url=self._page.url,
+            dry_run=dry_run,
         )
 
     async def write_experience(
@@ -442,47 +564,499 @@ class ProfileEditor:
         field: Literal["title", "description"],
         expected: str,
         value: str,
+        dry_run: bool = False,
     ) -> None:
         url = sel.experience_form_url(await self._vanity_name(), experience_id)
         spec = sel.EXPERIENCE_TITLE if field == "title" else sel.EXPERIENCE_DESCRIPTION
         loc = await self._open_form((url,), spec)
         await self._replace(
-            loc, expected=expected, value=value, field=f"experience {field}", url=url
+            loc,
+            expected=expected,
+            value=value,
+            field=f"experience {field}",
+            url=url,
+            dry_run=dry_run,
         )
+
+    # ── name ────────────────────────────────────────────────────────────────
+    async def _name_inputs(self, url: str) -> tuple[Locator, Locator]:
+        await self._open_dialog(url, "name")
+        inputs = self._dialog().locator(sel.NAME_INPUTS)
+        try:
+            await inputs.first.wait_for(state="visible", timeout=_FIELD_TIMEOUT_MS)
+        except Exception:
+            pass  # reported below
+        if await inputs.count() < 2:
+            raise await self._not_found(
+                "first/last name", url, "fewer than two required text inputs"
+            )
+        return inputs.nth(0), inputs.nth(1)
+
+    async def read_name(self) -> tuple[TextField, TextField]:
+        url = sel.intro_form_url(await self._vanity_name())
+        first, last = await self._name_inputs(url)
+        return await self._read(first), await self._read(last)
+
+    async def write_name(
+        self,
+        which: Literal["first", "last"],
+        *,
+        expected: str,
+        value: str,
+        dry_run: bool = False,
+    ) -> None:
+        url = sel.intro_form_url(await self._vanity_name())
+        first, last = await self._name_inputs(url)
+        await self._replace(
+            first if which == "first" else last,
+            expected=expected,
+            value=value,
+            field=f"{which} name",
+            url=url,
+            dry_run=dry_run,
+        )
+
+    # ── new entries ─────────────────────────────────────────────────────────
+    async def list_entries(self, kind: str) -> list[EntrySummary]:
+        """Every entry of a section, identified by LinkedIn's own entity id."""
+        if kind == "position":
+            return [
+                EntrySummary(
+                    e.id, tuple(x for x in (e.title, e.company, e.date_range) if x)
+                )
+                for e in await self.list_experiences()
+            ]
+        vanity = await self._vanity_name()
+        await self._goto(sel.entry_list_url(vanity, kind))
+        await self._session.scroll_body(pause_time=0.8, max_scrolls=8)
+        items = await self._page.evaluate(
+            sel.LIST_ITEMS_JS, sel.ENTRY_EDIT_HREF[kind].pattern
+        )
+        return [EntrySummary(i["id"], tuple(i["lines"])) for i in items]
+
+    async def _labelled(self, kind: str, name: str, url: str) -> Locator:
+        """The one control labelled exactly *label*, or "*label*, <limit note>".
+
+        Some fields' accessible name is their label followed by a stated limit
+        ("Description, maximum 1,000 characters"); the match stays anchored to
+        the whole label so "Description" never matches another field.
+        """
+        dialog = self._dialog()
+        for text in self._labels.get(f"{kind}.{name}", ()):
+            for matcher in (text, re.compile(rf"^{re.escape(text)},")):
+                loc = (
+                    dialog.get_by_label(matcher, exact=True)
+                    if isinstance(matcher, str)
+                    else dialog.get_by_label(matcher)
+                )
+                if await loc.count() == 1:
+                    return loc
+        raise await self._not_found(f"{kind} {name}", url, "no unique labelled control")
+
+    async def _set_switch(
+        self, box: Locator, on: bool, what: str, handle: Locator | None = None
+    ) -> None:
+        """Set a checkbox/switch and confirm its state; refuse if it will not move.
+
+        LinkedIn's switches render a visible ``div[role="switch"]`` over a
+        hidden checkbox: the visible *handle* is clicked when given, and the
+        checkbox's own state is what is confirmed either way.
+        """
+        attempts = [handle.click] if handle is not None else []
+        attempts += [
+            lambda: box.set_checked(on, force=True),
+            lambda: box.evaluate("(el) => el.click()"),
+        ]
+        for attempt in attempts:
+            if await box.is_checked() == on:
+                break
+            try:
+                await attempt()
+            except Exception:
+                continue
+            await self._page.wait_for_timeout(_SETTLE_MS)
+        if await box.is_checked() != on:
+            raise ProfileEditError(
+                ProfileEditErrorCode.LINKEDIN_SAVE_FAILED,
+                f"Could not set {what}; nothing was saved.",
+                control=what,
+                wanted=on,
+            )
+
+    async def _blur(self) -> None:
+        """Close a suggestion list by clicking the dialog heading (Escape would close the dialog)."""
+        heading = self._dialog().locator(sel.HEADINGS).first
+        if await heading.count():
+            await heading.click()
+
+    async def _fill_typeahead(self, loc: Locator, value: str) -> str:
+        """Type a value; pick a suggestion only when it is exactly that value."""
+        await loc.fill(value[:-1])
+        await loc.press_sequentially(value[-1], delay=120)
+        options = self._page.locator(sel.TYPEAHEAD_OPTION)
+        try:
+            await options.first.wait_for(state="visible", timeout=2_500)
+        except Exception:
+            await self._blur()
+            return await loc.input_value()
+        for i in range(await options.count()):
+            text = normalize_text((await options.nth(i).inner_text()).split("\n")[0])
+            if skill_key(text) == skill_key(value):
+                await options.nth(i).click()
+                await self._page.wait_for_timeout(_SETTLE_MS)
+                return await loc.input_value()
+        await self._blur()
+        return await loc.input_value()
+
+    async def _pick_suggestion(self, loc: Locator, value: str, what: str) -> str:
+        """Type *value* and select LinkedIn's suggestion of exactly that name.
+
+        Used where the point of the edit is the link to LinkedIn's own page
+        (an organization), so free text is never accepted: without an exact
+        suggestion nothing is selected and the offered names are reported.
+        """
+        await loc.fill(value[:-1])
+        await loc.press_sequentially(value[-1], delay=120)
+        options = self._page.locator(sel.TYPEAHEAD_OPTION)
+        try:
+            await options.first.wait_for(state="visible", timeout=_OPTION_TIMEOUT_MS)
+        except Exception:
+            raise ProfileEditError(
+                ProfileEditErrorCode.VALIDATION_ERROR,
+                f"LinkedIn offered no suggestions for {what} '{value}'; nothing was saved.",
+                field=what,
+            ) from None
+        offered: list[str] = []
+        for i in range(await options.count()):
+            text = normalize_text((await options.nth(i).inner_text()).split("\n")[0])
+            offered.append(text)
+            if skill_key(text) == skill_key(value):
+                await options.nth(i).click()
+                await self._page.wait_for_timeout(_SETTLE_MS)
+                return await loc.input_value()
+        raise ProfileEditError(
+            ProfileEditErrorCode.VALIDATION_ERROR,
+            f"LinkedIn has no {what} named exactly '{value}'; nothing was saved. "
+            "Use one of the offered names.",
+            field=what,
+            offered=offered,
+        )
+
+    _ORG_FIELD = {"position": "company", "education": "school"}
+
+    async def _organization_field(
+        self, kind: str, entry_id: str
+    ) -> tuple[Locator, str]:
+        urls = sel.entry_form_urls(await self._vanity_name(), kind, entry_id)
+        last: ProfileEditError | None = None
+        for url in urls:
+            try:
+                await self._open_dialog(url, f"{kind} {entry_id}")
+                await self._page.wait_for_timeout(_SETTLE_MS * 2)
+                return await self._labelled(kind, self._ORG_FIELD[kind], url), url
+            except ProfileEditError as e:
+                if e.code is not ProfileEditErrorCode.SELECTOR_NOT_FOUND:
+                    raise
+                last = e
+        assert last is not None
+        raise last
+
+    async def read_organization(self, kind: str, entry_id: str) -> TextField:
+        loc, _ = await self._organization_field(kind, entry_id)
+        return TextField(value=await loc.input_value())
+
+    async def write_organization(
+        self,
+        kind: str,
+        entry_id: str,
+        *,
+        expected: str,
+        value: str,
+        dry_run: bool = False,
+    ) -> None:
+        """Replace an entry's organization with LinkedIn's own page of that name."""
+        loc, url = await self._organization_field(kind, entry_id)
+        current = normalize_text(await loc.input_value())
+        if current != normalize_text(expected):
+            raise ProfileEditError(
+                ProfileEditErrorCode.STALE_CHANGE_SET,
+                f"The {kind} organization no longer matches the change set; nothing was typed.",
+                expected=expected,
+                actual=current,
+            )
+        dialog = self._dialog()
+        switches = dialog.locator(sel.NOTIFY_SWITCH)
+        handles = dialog.locator(sel.NOTIFY_SWITCH_HANDLE)
+        same = await handles.count() == await switches.count()
+        for i in range(await switches.count()):
+            await self._set_switch(
+                switches.nth(i),
+                False,
+                "notify-your-network switch",
+                handles.nth(i) if same else None,
+            )
+        got = await self._pick_suggestion(loc, value, f"{kind} organization")
+        if skill_key(got) != skill_key(value):
+            raise ProfileEditError(
+                ProfileEditErrorCode.LINKEDIN_SAVE_FAILED,
+                "The organization field did not keep the selected name; nothing was saved.",
+                wanted=value,
+                got=got,
+            )
+        if dry_run:
+            await self._leave_unsaved()
+            return
+        await self._save(f"{kind} organization", url)
+
+    async def _select(self, loc: Locator, wanted: str, what: str) -> str:
+        """Choose an option by its value or exact visible text; report the text."""
+        options = await loc.evaluate(
+            "(s) => [...s.options].map((o) => [o.value, o.text.trim()])"
+        )
+        for value, text in options:
+            if value and (value == wanted or skill_key(text) == skill_key(wanted)):
+                await loc.select_option(value=value)
+                return text
+        raise ProfileEditError(
+            ProfileEditErrorCode.VALIDATION_ERROR,
+            f"'{wanted}' is not an option for {what}.",
+            control=what,
+            options=[t for v, t in options if v],
+        )
+
+    async def create_entry(
+        self, kind: str, values: dict[str, Any], *, dry_run: bool = False
+    ) -> dict[str, Any]:
+        """Fill an add-entry form with exactly *values*, check it, then save.
+
+        The notify-your-network switch, on by default on these forms, is turned
+        off and confirmed off first: adding an approved entry must not also
+        broadcast it. Every filled control is read back before Save; any
+        difference stops with nothing saved. With *dry_run* the form is left
+        unsaved after the read-back.
+        """
+        specs = {s.name: s for s in ENTRY_SPECS[kind]}
+        urls = sel.new_entry_form_urls(await self._vanity_name(), kind)
+        opened = None
+        for url in urls:
+            try:
+                await self._open_dialog(url, kind)
+                opened = url
+                break
+            except ProfileEditError as e:
+                if e.code is not ProfileEditErrorCode.SELECTOR_NOT_FOUND:
+                    raise
+        if opened is None:
+            raise await self._not_found(
+                f"new {kind} form", urls[-1], "no add form opened"
+            )
+        url = opened
+        await self._page.wait_for_timeout(_SETTLE_MS * 2)
+        dialog = self._dialog()
+
+        switches = dialog.locator(sel.NOTIFY_SWITCH)
+        handles = dialog.locator(sel.NOTIFY_SWITCH_HANDLE)
+        same = await handles.count() == await switches.count()
+        for i in range(await switches.count()):
+            await self._set_switch(
+                switches.nth(i),
+                False,
+                "notify-your-network switch",
+                handles.nth(i) if same else None,
+            )
+
+        filled: dict[str, Any] = {}
+        if kind == "position":
+            box = dialog.locator(sel.CURRENT_ROLE_CHECKBOX)
+            if await box.count() != 1:
+                raise await self._not_found(
+                    "current-role checkbox", url, "not exactly one"
+                )
+            # The input is hidden; its own <label for=…> is the visible box
+            # (measured 12 October 2026).
+            box_id = await box.get_attribute("id")
+            handle = dialog.locator(f'label[for="{box_id}"]') if box_id else None
+            if handle is not None and await handle.count() != 1:
+                handle = None
+            await self._set_switch(
+                box, bool(values.get("current")), "current-role checkbox", handle
+            )
+            filled["current"] = await box.is_checked()
+
+        for name, value in values.items():
+            spec = specs[name]
+            if spec.control in {"flag", "month", "year"}:
+                continue
+            if spec.control == "rich":
+                loc = dialog.locator(sel.RICH_TEXT)
+                if await loc.count() != 1:
+                    raise await self._not_found(
+                        f"{kind} {name}", url, "no unique rich-text box"
+                    )
+                await self._type(loc, value)
+                got = (await self._read(loc)).value
+            elif spec.control == "select":
+                loc = await self._labelled(kind, name, url)
+                got = await self._select(loc, str(value), f"{kind} {name}")
+                filled[name] = got
+                continue
+            else:
+                loc = await self._labelled(kind, name, url)
+                limit = await self._limit(loc)
+                if limit and len(str(value)) > limit:
+                    raise ProfileEditError(
+                        ProfileEditErrorCode.VALIDATION_ERROR,
+                        f"{kind} {name} is longer than the form allows.",
+                        field=name,
+                        allowedLength=limit,
+                        proposedLength=len(str(value)),
+                    )
+                if spec.control == "typeahead":
+                    got = await self._fill_typeahead(loc, str(value))
+                else:
+                    await loc.fill(str(value))
+                    if spec.control == "date":
+                        await self._blur()
+                    got = await loc.input_value()
+            if normalize_text(got) != normalize_text(str(value)) and not (
+                spec.control == "typeahead" and skill_key(got) == skill_key(str(value))
+            ):
+                raise ProfileEditError(
+                    ProfileEditErrorCode.LINKEDIN_SAVE_FAILED,
+                    f"The {kind} {name} field did not keep the approved value; nothing was saved.",
+                    field=name,
+                    wanted=value,
+                    got=got,
+                )
+            filled[name] = got
+
+        selects = dialog.locator("select")
+        for side, idx in (("start", 0), ("end", 1)):
+            # Looked up again per side: the end dropdowns' options follow the
+            # chosen start year.
+            dates = await self._page.evaluate(sel.DATE_SELECTS_JS)
+            for unit, key in (("Year", "years"), ("Month", "months")):
+                name = f"{side}{unit}"
+                if name not in values:
+                    continue
+                if idx >= len(dates[key]):
+                    err = await self._not_found(
+                        f"{kind} {name}", url, "date dropdown not present"
+                    )
+                    err.details["dateSelects"] = dates
+                    err.details["selects"] = await self._page.evaluate(
+                        sel.DESCRIBE_SELECTS_JS
+                    )
+                    raise err
+                loc = selects.nth(dates[key][idx])
+                await loc.select_option(value=str(values[name]))
+                got = await loc.input_value()
+                if got != str(values[name]):
+                    raise ProfileEditError(
+                        ProfileEditErrorCode.LINKEDIN_SAVE_FAILED,
+                        f"The {kind} {name} did not take the approved value; nothing was saved.",
+                        field=name,
+                        wanted=values[name],
+                        got=got,
+                    )
+                filled[name] = int(got)
+        # A month left over from LinkedIn's defaults (the position form starts
+        # at the current month) is cleared when no month was approved.
+        for side, idx in (("start", 0), ("end", 1)):
+            if (
+                f"{side}Year" in values
+                and f"{side}Month" not in values
+                and idx < len(dates["months"])
+            ):
+                loc = selects.nth(dates["months"][idx])
+                if await loc.input_value():
+                    await loc.select_option(value="")
+
+        for i in range(await switches.count()):
+            if await switches.nth(i).is_checked():
+                raise ProfileEditError(
+                    ProfileEditErrorCode.VALIDATION_ERROR,
+                    "The notify-your-network switch turned itself back on; nothing was saved.",
+                )
+        if dry_run:
+            await self._leave_unsaved()
+            return filled
+        await self._save(f"new {kind}", url)
+        return filled
+
+    async def _phase(
+        self, step: str, awaitable: Any, *, limit: float = _PHASE_LIMIT_S
+    ) -> Any:
+        """Run one step of a write with a hard time limit, and log slow steps.
+
+        A step that never finishes must not hang the tool: it stops with the
+        step's name instead. Steps over _SLOW_PHASE_S are logged at WARNING,
+        which the server writes at its default log level.
+        """
+        started = time.monotonic()
+        try:
+            return await asyncio.wait_for(awaitable, timeout=limit)
+        except TimeoutError:
+            logger.warning("Profile edit step %r exceeded %.0fs; stopped", step, limit)
+            raise ProfileEditError(
+                ProfileEditErrorCode.LINKEDIN_SAVE_FAILED,
+                f"The step '{step}' took longer than {limit:.0f}s and was stopped."
+                + (
+                    " The save may or may not have gone through; check the profile."
+                    if step == "save"
+                    else " Nothing was saved."
+                ),
+                step=step,
+            ) from None
+        finally:
+            elapsed = time.monotonic() - started
+            if elapsed > _SLOW_PHASE_S:
+                logger.warning("Profile edit step %r took %.1fs", step, elapsed)
 
     async def add_skill(self, name: str) -> str:
         url = sel.new_skill_form_url(await self._vanity_name())
-        box = await self._open_form((url,), sel.SKILL_INPUT)
+        box = await self._phase(
+            "open skill form", self._open_form((url,), sel.SKILL_INPUT)
+        )
         # Typing a whole name key by key lost characters while the suggestion
         # list re-rendered ("Large LanguagModels"). Set all but the last
         # character at once, type the last to trigger suggestions, and only
         # continue when the box holds exactly the intended name.
-        await box.fill(name[:-1])
-        await box.press_sequentially(name[-1], delay=120)
-        if await box.input_value() != name:
+        await self._phase("type skill", box.fill(name[:-1]))
+        await self._phase("type skill", box.press_sequentially(name[-1], delay=120))
+        typed = await self._phase("read skill box", box.input_value())
+        if typed != name:
             raise ProfileEditError(
                 ProfileEditErrorCode.LINKEDIN_SAVE_FAILED,
                 "The skill box did not take the exact name; nothing was added.",
                 skill=name,
-                typed=await box.input_value(),
+                typed=typed,
             )
         options = self._page.locator(sel.TYPEAHEAD_OPTION)
         try:
-            await options.first.wait_for(state="visible", timeout=_OPTION_TIMEOUT_MS)
+            await self._phase(
+                "wait for suggestions",
+                options.first.wait_for(state="visible", timeout=_OPTION_TIMEOUT_MS),
+            )
         except Exception:
             raise ProfileEditError(
                 ProfileEditErrorCode.SKILL_NOT_FOUND,
                 f"LinkedIn offered no suggestions for '{name}'.",
                 skill=name,
             ) from None
-        offered: list[str] = []
-        for i in range(await options.count()):
-            text = normalize_text((await options.nth(i).inner_text()).split("\n")[0])
-            offered.append(text)
+
+        async def offered_names() -> list[str]:
+            return [
+                normalize_text(t.split("\n")[0])
+                for t in await options.all_inner_texts()
+            ]
+
+        offered = await self._phase("read suggestions", offered_names())
+        for i, text in enumerate(offered):
             if skill_key(text) == skill_key(name):
-                await options.nth(i).click()
-                await self._refuse_if_notifying("skill")
-                await self._save("skill", url)
+                await self._phase("pick suggestion", options.nth(i).click())
+                await self._phase("notify check", self._refuse_if_notifying("skill"))
+                await self._phase("save", self._save("skill", url), limit=60)
                 return text
         raise ProfileEditError(
             ProfileEditErrorCode.SKILL_NOT_FOUND,

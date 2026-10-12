@@ -77,6 +77,8 @@ async def test_only_apply_is_marked_as_modifying_external_state(mcp):
         "preview_profile_changes",
         "apply_profile_changes",
         "discard_profile_changes",
+        "describe_profile_form",
+        "rehearse_profile_changes",
     }
     assert tools["apply_profile_changes"].annotations.destructive_hint is True
     assert "This modifies external state" in (

@@ -22,10 +22,104 @@ DEFAULT_LIMITS: dict[str, int] = {
     "experience_title": 100,
     "experience_description": 2000,
     "skill": 80,
+    # The intro form's name inputs expose no maxlength; generous on purpose.
+    "first_name": 100,
+    "last_name": 100,
+    "organization": 100,
 }
 
 # Single-line fields; newlines are refused rather than silently joined.
-SINGLE_LINE = frozenset({"headline", "experience_title", "skill"})
+SINGLE_LINE = frozenset(
+    {
+        "headline",
+        "experience_title",
+        "skill",
+        "first_name",
+        "last_name",
+        "organization",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class EntryFieldSpec:
+    """One field of a new profile entry, as its add form accepts it.
+
+    ``control`` says how the form takes the value: ``text`` (an input or
+    textarea), ``typeahead`` (an input that offers suggestions; free text is
+    kept when none matches exactly), ``rich`` (the rich-text description),
+    ``select`` (a dropdown, matched by option value or exact text), ``month`` /
+    ``year`` (date dropdowns, found by structure), ``date`` (mm/dd/yyyy text),
+    ``flag`` (a checkbox). Limits were measured on the add forms on 12 October
+    2026; a limit the form states itself always wins.
+    """
+
+    name: str
+    control: str
+    limit: int | None = None
+    required: bool = False
+    multiline: bool = False
+
+
+ENTRY_SPECS: dict[str, tuple[EntryFieldSpec, ...]] = {
+    "position": (
+        EntryFieldSpec("title", "typeahead", 100, required=True),
+        EntryFieldSpec("company", "typeahead", 100),
+        EntryFieldSpec("location", "typeahead", 100),
+        EntryFieldSpec("locationType", "select"),
+        EntryFieldSpec("employmentType", "select"),
+        EntryFieldSpec("current", "flag"),
+        EntryFieldSpec("startMonth", "month"),
+        EntryFieldSpec("startYear", "year", required=True),
+        EntryFieldSpec("endMonth", "month"),
+        EntryFieldSpec("endYear", "year"),
+        EntryFieldSpec("description", "rich", 2000, multiline=True),
+    ),
+    "education": (
+        EntryFieldSpec("school", "typeahead", 100, required=True),
+        EntryFieldSpec("degree", "typeahead", 100),
+        EntryFieldSpec("fieldOfStudy", "typeahead", 100),
+        EntryFieldSpec("startMonth", "month"),
+        EntryFieldSpec("startYear", "year"),
+        EntryFieldSpec("endMonth", "month"),
+        EntryFieldSpec("endYear", "year"),
+        EntryFieldSpec("grade", "text", 80),
+        EntryFieldSpec("activities", "text", 500, multiline=True),
+        EntryFieldSpec("description", "text", 1000, multiline=True),
+    ),
+    "publication": (
+        EntryFieldSpec("title", "text", 255, required=True),
+        EntryFieldSpec("publisher", "text", 255),
+        EntryFieldSpec("date", "date"),
+        EntryFieldSpec("url", "text", 500),
+        EntryFieldSpec("description", "text", 2000, multiline=True),
+    ),
+}
+
+# The field that names an entry, used for duplicate checks and verification.
+ENTRY_PRIMARY = {"position": "title", "education": "school", "publication": "title"}
+# A second field that, with the primary one, identifies a likely duplicate.
+ENTRY_SECONDARY = {
+    "position": "company",
+    "education": "degree",
+    "publication": "publisher",
+}
+ENTRY_SECTION_LABEL = {
+    "position": "Experience",
+    "education": "Education",
+    "publication": "Publications",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class EntrySummary:
+    """One existing entry of a section, as listed on its details page."""
+
+    id: str
+    lines: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"id": self.id, "lines": list(self.lines)}
 
 
 def normalize_text(value: str) -> str:
@@ -42,6 +136,19 @@ def normalize_text(value: str) -> str:
 
 
 _BLANK_LINES = re.compile(r"\n[ \t]*\n(?:[ \t]*\n)+")
+_ANY_BREAKS = re.compile(r"\n(?:[ \t]*\n)*")
+
+
+def same_saved_text(observed: str, approved: str) -> bool:
+    """Whether a re-read rich-text value is the approved one as LinkedIn stores it.
+
+    LinkedIn's rich-text editors may read a single line break back as a
+    paragraph break (measured 12 October 2026: a line before each "•" came back
+    with a blank line). Words and their order must match exactly; only how many
+    line breaks separate two lines is not compared.
+    """
+    a, b = normalize_text(observed), normalize_text(approved)
+    return a == b or _ANY_BREAKS.sub("\n", a) == _ANY_BREAKS.sub("\n", b)
 
 
 @dataclass(frozen=True, slots=True)

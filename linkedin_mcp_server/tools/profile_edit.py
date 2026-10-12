@@ -10,7 +10,7 @@ the change set was planned against.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Literal
 
 import logging
 
@@ -33,8 +33,10 @@ from linkedin_mcp_server.profile_edit.errors import (
     ProfileEditError,
     ProfileEditErrorCode,
 )
+from linkedin_mcp_server.profile_edit.changeset import EntryRequest
 from linkedin_mcp_server.profile_edit.service import (
     ExperienceEdit,
+    OrganizationEdit,
     ProfileEditService,
     Proposal,
 )
@@ -75,20 +77,110 @@ class SkillChanges(BaseModel):
     remove: list[str] = Field(default_factory=list, max_length=20)
 
 
-class ProfileChanges(BaseModel):
-    # Extra keys are accepted so an unsupported field (location, education,
-    # featured, ...) is reported back as UNSUPPORTED_FIELD instead of failing
-    # schema validation with no explanation.
+class NewPosition(BaseModel):
     model_config = ConfigDict(extra="allow")
+    title: str = Field(description="Job title.")
+    company: str | None = Field(default=None, description="Organization name.")
+    location: str | None = None
+    locationType: str | None = Field(
+        default=None, description="On-site, Hybrid or Remote (as the form shows it)."
+    )
+    employmentType: str | None = Field(
+        default=None,
+        description="e.g. Full-time, Part-time, Internship (as the form shows it).",
+    )
+    current: bool | None = Field(
+        default=None,
+        description="Currently in this role. Defaults to true when no end date is given.",
+    )
+    startMonth: int | None = Field(default=None, ge=1, le=12)
+    startYear: int = Field(ge=1900, le=2100)
+    endMonth: int | None = Field(default=None, ge=1, le=12)
+    endYear: int | None = Field(default=None, ge=1900, le=2100)
+    description: str | None = None
+    allowDuplicate: bool = False
+
+
+class NewEducation(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    school: str
+    degree: str | None = None
+    fieldOfStudy: str | None = None
+    startMonth: int | None = Field(default=None, ge=1, le=12)
+    startYear: int | None = Field(default=None, ge=1900, le=2100)
+    endMonth: int | None = Field(default=None, ge=1, le=12)
+    endYear: int | None = Field(
+        default=None, ge=1900, le=2100, description="Or expected graduation year."
+    )
+    grade: str | None = None
+    activities: str | None = None
+    description: str | None = None
+    allowDuplicate: bool = False
+
+
+class NewPublication(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    title: str
+    publisher: str | None = Field(
+        default=None, description="Journal, conference or publisher."
+    )
+    date: str | None = Field(default=None, description="mm/dd/yyyy")
+    url: str | None = Field(default=None, description="e.g. the DOI link.")
+    description: str | None = None
+    allowDuplicate: bool = False
+
+
+class OrganizationChange(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    kind: Literal["position", "education"]
+    entryId: str = Field(description="LinkedIn's id of the existing entry.")
+    name: str = Field(
+        description="The organization's exact LinkedIn page name; only an exact suggestion is selected."
+    )
+
+
+class ProfileChanges(BaseModel):
+    # Extra keys are accepted so an unsupported field (location, featured,
+    # ...) is reported back as UNSUPPORTED_FIELD instead of failing schema
+    # validation with no explanation.
+    model_config = ConfigDict(extra="allow")
+    firstName: str | None = None
+    lastName: str | None = None
     headline: str | None = None
     about: str | None = None
     experiences: list[ExperienceChange] = Field(default_factory=list, max_length=20)
     skills: SkillChanges | None = None
+    newPositions: list[NewPosition] = Field(default_factory=list, max_length=10)
+    newEducation: list[NewEducation] = Field(default_factory=list, max_length=10)
+    newPublications: list[NewPublication] = Field(default_factory=list, max_length=20)
+    organizations: list[OrganizationChange] = Field(default_factory=list, max_length=10)
+
+
+def _entry_requests(changes: ProfileChanges) -> list[EntryRequest]:
+    out: list[EntryRequest] = []
+    for kind, items in (
+        ("position", changes.newPositions),
+        ("education", changes.newEducation),
+        ("publication", changes.newPublications),
+    ):
+        for item in items:
+            fields = item.model_dump(exclude={"allowDuplicate"}, exclude_none=True)
+            for k in item.model_extra or {}:
+                fields.pop(k, None)
+            out.append(EntryRequest(kind, fields, allow_duplicate=item.allowDuplicate))
+    return out
 
 
 def _unsupported_fields(changes: ProfileChanges) -> list[str]:
     """Every key the server cannot act on, with its path, at any depth."""
     found = [str(k) for k in changes.model_extra or {}]
+    for name, items in (
+        ("newPositions", changes.newPositions),
+        ("newEducation", changes.newEducation),
+        ("newPublications", changes.newPublications),
+    ):
+        for i, item in enumerate(items):
+            found += [f"{name}[{i}].{k}" for k in item.model_extra or {}]
     for i, exp in enumerate(changes.experiences):
         found += [f"experiences[{i}].{k}" for k in exp.model_extra or {}]
         if exp.match is not None:
@@ -199,6 +291,30 @@ def register_profile_edit_tools(
 
     @mcp.tool(
         timeout=tool_timeout,
+        title="Describe Profile Form",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"profile-edit"},
+    )
+    async def describe_profile_form(ctx: Context, form: str) -> dict[str, Any]:
+        """
+        Diagnostics: open one of your profile's edit forms and list its controls. Read-only.
+
+        Nothing is typed or saved; the form is left by navigating away. Use it
+        to see why a write reports SELECTOR_NOT_FOUND or to update locators.
+        Text field values are reported only as lengths.
+
+        Args:
+            ctx: FastMCP context
+            form: intro | position | education | publication
+        """
+
+        async def body(s: ProfileEditService) -> dict[str, Any]:
+            return await s.describe_form(form)
+
+        return await _run(ctx, "describe_profile_form", body)
+
+    @mcp.tool(
+        timeout=tool_timeout,
         title="Propose Profile Changes",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"profile-edit"},
@@ -218,14 +334,20 @@ def register_profile_edit_tools(
 
         Only send values the user has written or approved. This tool carries
         content; it must not be used to invent jobs, employers, dates,
-        qualifications, skills or achievements. Supported: headline, about,
-        title and description of an existing experience, adding and removing
-        skills. Anything else returns UNSUPPORTED_FIELD.
+        qualifications, skills or achievements. Supported: first and last
+        name, headline, about, title and description of an existing
+        experience, adding and removing skills, adding new positions,
+        education and publications, and linking an existing position or
+        education entry to an organization's LinkedIn page (organizations). Anything else returns UNSUPPORTED_FIELD.
+        A new entry that resembles an existing one is refused unless
+        allowDuplicate is set. Use rehearse_profile_changes to fill the forms
+        without saving before applying.
 
         Args:
             ctx: FastMCP context
-            changes: headline, about, experiences [{experienceId | match, title,
-                description}], skills {add, remove}
+            changes: firstName, lastName, headline, about, experiences
+                [{experienceId | match, title, description}], skills {add,
+                remove}, newPositions, newEducation, newPublications
         """
         extra = _unsupported_fields(changes)
         if extra:
@@ -252,6 +374,13 @@ def register_profile_edit_tools(
             ],
             skills_add=changes.skills.add if changes.skills else [],
             skills_remove=changes.skills.remove if changes.skills else [],
+            first_name=changes.firstName,
+            last_name=changes.lastName,
+            new_entries=_entry_requests(changes),
+            organizations=[
+                OrganizationEdit(o.kind, o.entryId, o.name)
+                for o in changes.organizations
+            ],
         )
         return await _run(ctx, "propose_profile_changes", lambda s: s.propose(proposal))
 
@@ -276,6 +405,30 @@ def register_profile_edit_tools(
         """
         return await _run(
             ctx, "preview_profile_changes", lambda s: s.preview(changeSetId)
+        )
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Rehearse Profile Changes",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"profile-edit"},
+    )
+    async def rehearse_profile_changes(
+        ctx: Context, changeSetId: str
+    ) -> dict[str, Any]:
+        """
+        Fill LinkedIn's forms with a pending change set and leave without saving. Does not modify LinkedIn.
+
+        Proves each form accepts the approved values (fields found, limits,
+        dropdown options, suggestions) before anything is saved. The change
+        set stays pending. Skill changes are not rehearsed.
+
+        Args:
+            ctx: FastMCP context
+            changeSetId: id returned by propose_profile_changes
+        """
+        return await _run(
+            ctx, "rehearse_profile_changes", lambda s: s.rehearse(changeSetId)
         )
 
     @mcp.tool(

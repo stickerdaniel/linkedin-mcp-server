@@ -132,6 +132,8 @@ PROFILE_EDIT_TOOLS = {
     "preview_profile_changes",
     "apply_profile_changes",
     "discard_profile_changes",
+    "describe_profile_form",
+    "rehearse_profile_changes",
 }
 
 

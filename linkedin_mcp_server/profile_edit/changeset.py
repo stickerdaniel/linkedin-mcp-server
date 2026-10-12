@@ -25,7 +25,12 @@ from linkedin_mcp_server.profile_edit.errors import (
 )
 from linkedin_mcp_server.profile_edit.model import (
     DEFAULT_LIMITS,
+    ENTRY_PRIMARY,
+    ENTRY_SECONDARY,
+    ENTRY_SECTION_LABEL,
+    ENTRY_SPECS,
     SINGLE_LINE,
+    EntrySummary,
     normalize_text,
 )
 
@@ -135,6 +140,130 @@ class SkillsRequest:
     remove: Sequence[str] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class EntryRequest:
+    """A new entry to add to a section (position, education, publication)."""
+
+    kind: str
+    fields: Mapping[str, Any]
+    # Add even when an entry with the same primary/secondary text exists.
+    allow_duplicate: bool = False
+
+
+_DATE = re.compile(r"^(\d{2})/(\d{2})/(\d{4})$")
+
+
+def entry_values(fields: Mapping[str, Any]) -> dict[str, Any]:
+    """The canonical stored form of an entry's values (stable key order)."""
+    return {k: fields[k] for k in sorted(fields) if fields[k] is not None}
+
+
+def _validate_entry(
+    req: EntryRequest, label: str, problems: list[dict[str, Any]]
+) -> dict[str, Any]:
+    specs = {s.name: s for s in ENTRY_SPECS[req.kind]}
+    out: dict[str, Any] = {}
+    for name, raw in req.fields.items():
+        spec = specs.get(name)
+        where = f"{label}.{name}"
+        if spec is None:
+            problems.append(
+                {
+                    "field": where,
+                    "reason": f"not a {req.kind} field",
+                    "allowed": sorted(specs),
+                }
+            )
+            continue
+        if raw is None:
+            continue
+        if spec.control == "flag":
+            if not isinstance(raw, bool):
+                problems.append({"field": where, "reason": "must be true or false"})
+                continue
+            out[name] = raw
+        elif spec.control in {"month", "year"}:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                problems.append({"field": where, "reason": "must be a number"})
+                continue
+            lo, hi = (1, 12) if spec.control == "month" else (1900, 2100)
+            if not lo <= raw <= hi:
+                problems.append({"field": where, "reason": f"must be {lo}-{hi}"})
+                continue
+            out[name] = raw
+        else:
+            if not isinstance(raw, str):
+                problems.append({"field": where, "reason": "must be text"})
+                continue
+            value = normalize_text(raw)
+            if not value:
+                continue
+            if _CONTROL.search(value):
+                problems.append(
+                    {"field": where, "reason": "contains control characters"}
+                )
+            if not spec.multiline and "\n" in value:
+                problems.append({"field": where, "reason": "must be a single line"})
+            if spec.limit and (p := _length_problem(where, value, spec.limit)):
+                problems.append(p)
+            if spec.control == "date":
+                m = _DATE.match(value)
+                if not m or not (1 <= int(m[1]) <= 12 and 1 <= int(m[2]) <= 31):
+                    problems.append({"field": where, "reason": "must be mm/dd/yyyy"})
+            if name == "url" and not re.match(r"^https?://\S+$", value):
+                problems.append({"field": where, "reason": "must be an http(s) URL"})
+            out[name] = value
+    for spec in ENTRY_SPECS[req.kind]:
+        if spec.required and spec.name not in out:
+            problems.append({"field": f"{label}.{spec.name}", "reason": "is required"})
+    # Date consistency. A month needs its year; an end needs a start; an end
+    # is not before its start; a current position has no end.
+    for side in ("start", "end"):
+        if f"{side}Month" in out and f"{side}Year" not in out:
+            problems.append(
+                {"field": f"{label}.{side}Month", "reason": f"needs {side}Year"}
+            )
+    if "endYear" in out and "startYear" not in out:
+        problems.append({"field": f"{label}.endYear", "reason": "needs startYear"})
+    if "endYear" in out and "startYear" in out:
+        start = (out["startYear"], out.get("startMonth", 1))
+        end = (out["endYear"], out.get("endMonth", 12))
+        if end < start:
+            problems.append(
+                {"field": f"{label}.endYear", "reason": "is before the start"}
+            )
+    if req.kind == "position":
+        current = out.get("current", "endYear" not in out)
+        if current and ("endYear" in out or "endMonth" in out):
+            problems.append(
+                {
+                    "field": f"{label}.current",
+                    "reason": "a current position has no end date",
+                }
+            )
+        out["current"] = current
+    return out
+
+
+def _looks_like(
+    kind: str, values: Mapping[str, Any], existing: Sequence[EntrySummary]
+) -> EntrySummary | None:
+    """An existing entry whose text holds this entry's primary (and secondary) value."""
+    primary = skill_key(str(values.get(ENTRY_PRIMARY[kind], "")))
+    secondary = skill_key(str(values.get(ENTRY_SECONDARY[kind], "")))
+    for e in existing:
+        text = skill_key(" \n ".join(e.lines))
+        if primary and primary in text and (not secondary or secondary in text):
+            return e
+    return None
+
+
+def entry_label(kind: str, values: Mapping[str, Any]) -> str:
+    primary = values.get(ENTRY_PRIMARY[kind], "")
+    secondary = values.get(ENTRY_SECONDARY[kind])
+    return f"New {kind}: {primary}" + (f" · {secondary}" if secondary else "")
+
+
 @dataclass(slots=True)
 class ChangeSet:
     id: str
@@ -242,6 +371,8 @@ def plan_changes(
     texts: Sequence[TextRequest],
     skills: SkillsRequest,
     current_skills: Sequence[str],
+    entries: Sequence[EntryRequest] = (),
+    existing_entries: Mapping[str, Sequence[EntrySummary]] | None = None,
 ) -> tuple[list[FieldChange], dict[str, Any], list[str]]:
     """Validate requests against current values; return changes, baseline, warnings.
 
@@ -262,7 +393,12 @@ def plan_changes(
         after = normalize_text(t.after)
         before = normalize_text(t.current)
         _check_text(t.kind, t.label, after, problems)
-        if not after and t.kind in {"headline", "experience_title"}:
+        if not after and t.kind in {
+            "headline",
+            "experience_title",
+            "first_name",
+            "last_name",
+        }:
             problems.append({"field": t.label, "reason": "cannot be empty"})
         limit = t.max_length or DEFAULT_LIMITS[t.kind]
         if (p := _length_problem(t.label, after, limit)) is not None:
@@ -327,8 +463,59 @@ def plan_changes(
         if by_key[k] not in removes:
             removes.append(by_key[k])
 
+    planned_entries: list[tuple[EntryRequest, dict[str, Any]]] = []
+    existing_entries = existing_entries or {}
+    for n, req in enumerate(entries):
+        if req.kind not in ENTRY_SPECS:
+            problems.append(
+                {"field": f"entries[{n}]", "reason": f"unknown kind {req.kind!r}"}
+            )
+            continue
+        values = _validate_entry(req, f"{req.kind}[{n}]", problems)
+        if any(
+            r.kind == req.kind and entry_values(v) == entry_values(values)
+            for r, v in planned_entries
+        ):
+            problems.append(
+                {"field": f"{req.kind}[{n}]", "reason": "requested more than once"}
+            )
+            continue
+        existing = existing_entries.get(req.kind, ())
+        if (dup := _looks_like(req.kind, values, existing)) is not None:
+            if not req.allow_duplicate:
+                problems.append(
+                    {
+                        "field": f"{req.kind}[{n}]",
+                        "reason": "looks like an existing entry; pass allowDuplicate to add anyway",
+                        "existing": dup.as_dict(),
+                    }
+                )
+                continue
+            warnings.append(
+                f"{entry_label(req.kind, values)} resembles an existing entry."
+            )
+        planned_entries.append((req, values))
+
     if problems:
         raise ProfileEditError(ProfileEditErrorCode.VALIDATION_ERROR, problems=problems)
+
+    for n, (req, values) in enumerate(planned_entries):
+        baseline[f"{req.kind}/entries"] = sorted(
+            e.id for e in existing_entries.get(req.kind, ())
+        )
+        stored = entry_values(values)
+        changes.append(
+            FieldChange(
+                key=f"{req.kind}/new/{n}",
+                section=req.kind,
+                kind="entry",
+                label=entry_label(req.kind, stored),
+                action="create",
+                before=None,
+                after=json.dumps(stored, ensure_ascii=False, sort_keys=True),
+                target=req.kind,
+            )
+        )
 
     if adds or removes:
         baseline["skills"] = sorted(skill_key(s) for s in current_skills)
@@ -368,8 +555,12 @@ def build_change_set(
     *,
     now: str,
     change_set_id: str | None = None,
+    entries: Sequence[EntryRequest] = (),
+    existing_entries: Mapping[str, Sequence[EntrySummary]] | None = None,
 ) -> ChangeSet:
-    changes, baseline, warnings = plan_changes(texts, skills, current_skills)
+    changes, baseline, warnings = plan_changes(
+        texts, skills, current_skills, entries, existing_entries
+    )
     if not changes:
         raise ProfileEditError(
             ProfileEditErrorCode.VALIDATION_ERROR,
@@ -404,9 +595,13 @@ def render_diff(cs: ChangeSet) -> str:
     """The human-readable diff shown to the user before approval."""
     lines: list[str] = []
     for section in dict.fromkeys(c.section for c in cs.changes):
-        lines.append(section.upper())
+        lines.append(ENTRY_SECTION_LABEL.get(section, section).upper())
         for c in (c for c in cs.changes if c.section == section):
-            if c.action == "add":
+            if c.action == "create":
+                lines.append(f"+ {c.label}")
+                for k, v in json.loads(c.after or "{}").items():
+                    lines.append(f"    {k}: {v}")
+            elif c.action == "add":
                 lines.append(f"+ {c.after}")
             elif c.action == "remove":
                 lines.append(f"- {c.before}")

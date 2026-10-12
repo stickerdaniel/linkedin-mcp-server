@@ -8,7 +8,7 @@ saved. Failures are injected per operation to model LinkedIn's bad days.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from linkedin_mcp_server.profile_edit.changeset import skill_key
 from linkedin_mcp_server.profile_edit.errors import (
@@ -16,6 +16,8 @@ from linkedin_mcp_server.profile_edit.errors import (
     ProfileEditErrorCode,
 )
 from linkedin_mcp_server.profile_edit.model import (
+    ENTRY_PRIMARY,
+    EntrySummary,
     ExperienceForm,
     ExperienceSummary,
     Skill,
@@ -49,6 +51,18 @@ class FakeEditor:
     # The signed-in account; change it to model a different login.
     account_url: str = "https://www.linkedin.com/in/jane/"
     pauses: list[float] = field(default_factory=list)
+    first_name: str = "Jane"
+    last_name: str = "Doe"
+    # kind -> list of (id, values); positions added this way are separate
+    # from `positions` (the editable ones), which list_entries also reports.
+    entries: dict[str, list[tuple[str, dict[str, Any]]]] = field(default_factory=dict)
+    # Kinds whose create "saves" nothing, to model a save LinkedIn dropped.
+    drop_creates: set[str] = field(default_factory=set)
+    rehearsals: list[str] = field(default_factory=list)
+    # (kind, entry id) -> organization text; `pages` are the names LinkedIn suggests.
+    organizations: dict[tuple[str, str], str] = field(default_factory=dict)
+    pages: set[str] = field(default_factory=lambda: {"Example University, Exampleland"})
+    _next_id: int = 500
 
     def _maybe_fail(self, op: str) -> None:
         if op in self.fail:
@@ -107,13 +121,23 @@ class FakeEditor:
                 actual=current,
             )
 
-    async def write_headline(self, *, expected: str, value: str) -> None:
+    async def write_headline(
+        self, *, expected: str, value: str, dry_run: bool = False
+    ) -> None:
         self._check("write_headline", self.headline, expected)
+        if dry_run:
+            self.rehearsals.append("headline")
+            return
         self.headline = self.mangle.get("headline", value)
         self.writes.append("headline")
 
-    async def write_about(self, *, expected: str, value: str) -> None:
+    async def write_about(
+        self, *, expected: str, value: str, dry_run: bool = False
+    ) -> None:
         self._check("write_about", self.about, expected)
+        if dry_run:
+            self.rehearsals.append("about")
+            return
         self.about = self.mangle.get("about", value)
         self.writes.append("about")
 
@@ -124,9 +148,13 @@ class FakeEditor:
         field: Literal["title", "description"],
         expected: str,
         value: str,
+        dry_run: bool = False,
     ) -> None:
         p = self._position(experience_id)
         self._check(f"write_experience_{field}", getattr(p, field), expected)
+        if dry_run:
+            self.rehearsals.append(f"experience/{experience_id}/{field}")
+            return
         setattr(p, field, value)
         self.writes.append(f"experience/{experience_id}/{field}")
 
@@ -148,6 +176,85 @@ class FakeEditor:
 
     async def pause(self, seconds: float) -> None:
         self.pauses.append(seconds)
+
+    async def read_organization(self, kind: str, entry_id: str) -> TextField:
+        if (kind, entry_id) not in self.organizations:
+            raise ProfileEditError(ProfileEditErrorCode.EXPERIENCE_NOT_FOUND)
+        return TextField(self.organizations[(kind, entry_id)])
+
+    async def write_organization(
+        self,
+        kind: str,
+        entry_id: str,
+        *,
+        expected: str,
+        value: str,
+        dry_run: bool = False,
+    ) -> None:
+        self._check(
+            f"write_org_{entry_id}", self.organizations[(kind, entry_id)], expected
+        )
+        page = next((p for p in self.pages if skill_key(p) == skill_key(value)), None)
+        if page is None:
+            raise ProfileEditError(
+                ProfileEditErrorCode.VALIDATION_ERROR, offered=sorted(self.pages)
+            )
+        if dry_run:
+            self.rehearsals.append(f"org/{entry_id}")
+            return
+        self.organizations[(kind, entry_id)] = page
+        self.writes.append(f"org/{entry_id}")
+
+    async def describe_form(self, form: str) -> dict[str, Any]:
+        return {"form": form, "dialog": True, "controls": []}
+
+    # names
+    async def read_name(self) -> tuple[TextField, TextField]:
+        self._maybe_fail("read_name")
+        return TextField(self.first_name), TextField(self.last_name)
+
+    async def write_name(
+        self,
+        which: Literal["first", "last"],
+        *,
+        expected: str,
+        value: str,
+        dry_run: bool = False,
+    ) -> None:
+        attr = f"{which}_name"
+        self._check(f"write_name_{which}", getattr(self, attr), expected)
+        if dry_run:
+            self.rehearsals.append(f"name/{which}")
+            return
+        setattr(self, attr, self.mangle.get(attr, value))
+        self.writes.append(f"name/{which}")
+
+    # entries
+    async def list_entries(self, kind: str) -> list[EntrySummary]:
+        self._maybe_fail(f"list_entries_{kind}")
+        out = [
+            EntrySummary(i, tuple(str(v) for v in values.values()))
+            for i, values in self.entries.get(kind, [])
+        ]
+        if kind == "position":
+            out += [
+                EntrySummary(p.id, (p.title, p.company, p.date_range))
+                for p in self.positions
+            ]
+        return out
+
+    async def create_entry(
+        self, kind: str, values: dict[str, Any], *, dry_run: bool = False
+    ) -> dict[str, Any]:
+        self._maybe_fail(f"create_{kind}")
+        if dry_run:
+            self.rehearsals.append(f"{kind}:{values[ENTRY_PRIMARY[kind]]}")
+            return dict(values)
+        if kind not in self.drop_creates:
+            self._next_id += 1
+            self.entries.setdefault(kind, []).append((str(self._next_id), dict(values)))
+        self.writes.append(f"{kind}+{values[ENTRY_PRIMARY[kind]]}")
+        return dict(values)
 
 
 def similar_positions() -> list[FakePosition]:
