@@ -30,6 +30,16 @@ Symbols are named relative to `linkedin_mcp_server`. Tests are named as
 - **No two browsers in a direct collision test.** Five rounds with a successor
   pre-armed and spinning produced no round with two live browsers on one
   profile. Source `6d369701`, 2026-07-29.
+- **A hard kill on Windows frees the lease before the browser dies, and no
+  successor overlaps it.** A contender, armed before the kill, raced a hard
+  kill of the owner and of a frozen Direct server. In both lanes the lease was
+  free within 10 ms of the kill, before the old browser was gone. The last old
+  browser process was gone after 36-62 ms (Direct) and 59-90 ms (owner); the
+  successor's browser started after 1.5-2.0 s and 6.0-6.7 s. Five
+  windows-latest runs, no overlap in either lane, so the daemon adds none.
+  The watcher samples: a process that lives wholly between two samples is not
+  seen. Source `2d6e0b99`, 2026-10-12. Test
+  `tests/differential/test_crash_overlap_rows.py::test_no_successor_browser_overlaps_only_under_the_daemon`.
 - **An inherited handle does not hold the lock on Windows.** A child that
   inherited the handle did not hold the lock once the parent had closed its
   handles and exited, in 20 of 20 runs. Justifies the owner taking the lock
