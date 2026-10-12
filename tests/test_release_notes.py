@@ -988,6 +988,7 @@ def _run_protection_steps(
         "plugins/linkedin-mcp-server/.claude-plugin/plugin.json",
         "plugins/linkedin-mcp-server/.cursor-plugin/plugin.json",
         "plugins/linkedin-mcp-server/.mcp.json",
+        "README.md",
     )
     for name in files:
         path = repo / name
