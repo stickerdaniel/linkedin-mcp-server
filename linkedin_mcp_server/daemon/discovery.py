@@ -1,8 +1,9 @@
 """Decide whether this process attaches to a daemon, owns one, or goes it alone.
 
 The discovery half: is there an owner to talk to, and may it be trusted with a
-token. Electing and spawning one is :mod:`linkedin_mcp_server.daemon.election`;
-forwarding to it is :mod:`linkedin_mcp_server.daemon.proxy`.
+token. Electing one is :mod:`linkedin_mcp_server.daemon.election`, spawning it
+:mod:`linkedin_mcp_server.daemon.spawn`; forwarding to it is
+:mod:`linkedin_mcp_server.daemon.proxy`.
 
 A file says nothing about whether the process that wrote it still exists. Only
 :meth:`DaemonLock.try_acquire` settles who owns the browser, and only connecting

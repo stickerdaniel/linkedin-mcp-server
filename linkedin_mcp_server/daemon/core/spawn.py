@@ -3,7 +3,7 @@
 The frontend starts a child, greets it, hands over the configuration, waits for
 the generation it prepared, checks it on disk and asks the child to commit it.
 The exchange is :mod:`linkedin_mcp_server.daemon.startup`;
-``daemon.election._Startup`` runs each effect and feeds back what came of it.
+``daemon.spawn._Startup`` runs each effect and feeds back what came of it.
 
 - Publication happens only inside the lock-holding child. The parent's one
   write is :class:`DiscardPrepared`, of its own child's pending generation and

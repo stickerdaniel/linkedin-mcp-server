@@ -778,11 +778,11 @@ def test_a_hostile_working_directory_is_refused(overlay, tmp_path):
 
 
 def test_the_row_directory_reaches_the_owner_environment(monkeypatch, tmp_path):
-    from linkedin_mcp_server.daemon import election as daemon_election
+    from linkedin_mcp_server.daemon import spawn as daemon_spawn
 
     monkeypatch.setenv(r7_fault.FAULT_DIR_ENV, str(tmp_path))
     monkeypatch.setenv("PYTHONPATH", str(tmp_path))
-    environment = daemon_election._owner_environment()
+    environment = daemon_spawn._owner_environment()
     assert environment[r7_fault.FAULT_DIR_ENV] == str(tmp_path)
     assert "PYTHONPATH" not in environment
 
