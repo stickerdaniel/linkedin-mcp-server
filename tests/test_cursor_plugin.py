@@ -23,14 +23,6 @@ _DEEPLINK_PREFIX = (
 )
 
 
-def _cursor_install_config_b64() -> str:
-    mcp = _load_json(_PLUGIN_MCP)
-    payload = {"linkedin": mcp["mcpServers"]["linkedin"]}
-    return base64.b64encode(
-        json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    ).decode("ascii")
-
-
 def test_cursor_manifest_matches_the_repository_release() -> None:
     manifest = _load_json(_CURSOR_MANIFEST)
     assert manifest["name"] == _PLUGIN_ROOT.name
@@ -77,4 +69,5 @@ def test_release_workflow_updates_and_commits_cursor_manifest() -> None:
     cursor_manifest = "plugins/linkedin-mcp-server/.cursor-plugin/plugin.json"
     assert workflow.count(cursor_manifest) >= 3
     assert '"Cursor plugin": [cursor_plugin["version"]]' in workflow
-    assert "Update Codex and Cursor plugin versions" in workflow
+    assert "Update plugin versions" in workflow
+    assert "README.md" in workflow

@@ -90,13 +90,15 @@ def test_release_workflow_updates_and_commits_every_plugin_file() -> None:
     for path in (
         "plugins/linkedin-mcp-server/.codex-plugin/plugin.json",
         "plugins/linkedin-mcp-server/.claude-plugin/plugin.json",
+        "plugins/linkedin-mcp-server/.cursor-plugin/plugin.json",
         "plugins/linkedin-mcp-server/.mcp.json",
     ):
         assert workflow.count(path) >= 3
     assert 'args[package_args[0]] = f"mcp-server-linkedin@{version}"' in workflow
-    assert '"Codex plugin": [codex_plugin["version"]]' in workflow
+    assert '"Codex plugin": [plugin["version"]]' in workflow
     assert '"Codex plugin MCP": [' in workflow
     assert '"Claude Code plugin": [claude_plugin["version"]]' in workflow
+    assert '"Cursor plugin": [cursor_plugin["version"]]' in workflow
 
 
 def test_claude_code_marketplace_resolves_the_plugin() -> None:
