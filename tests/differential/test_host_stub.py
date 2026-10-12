@@ -6,8 +6,9 @@ starts signalling, so a stub that killed its server would fail here and a
 native row built on it would measure a kill while calling it a quit. Two more
 answer the call and then end badly, one with a nonzero status on EOF and one
 before the host ever quits; neither may read as a normal host quit. A fourth
-leaves a grandchild holding its stderr past its exit, which is where the
-post-exit hook has to run: after the exit, before that stderr closes.
+leaves a grandchild holding its stderr past its exit until the post-exit hook
+releases it, which is where that hook has to run: after the exit, before that
+stderr closes.
 """
 
 from __future__ import annotations
@@ -60,16 +61,23 @@ async def closing(app):
             sys.stderr.flush()
             os._exit(7)
         elif ending == "linger":
-            # A grandchild that inherits stderr and outlives the server by two
-            # seconds, then says so on that stderr.
+            # A grandchild that inherits stderr and holds it past the server's
+            # exit until the post-exit hook releases it, then says so on that
+            # stderr. Its own deadline outlasts the stub's stderr wait, so a
+            # hook that ran after that wait finds stderr still open.
             import subprocess
 
             subprocess.Popen(
                 [
                     sys.executable,
                     "-c",
-                    "import sys, time; time.sleep(2); "
+                    "import os, sys, time\\n"
+                    "deadline = time.monotonic() + 30\\n"
+                    "while not os.path.exists(sys.argv[1]) "
+                    "and time.monotonic() < deadline:\\n"
+                    "    time.sleep(0.02)\\n"
                     "print('grandchild done', file=sys.stderr, flush=True)",
+                    die + ".release",
                 ],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -176,6 +184,10 @@ def _server_pid(tmp_path: Path) -> int:
     return int((tmp_path / "die.pid").read_text())
 
 
+def _release_the_grandchild(tmp_path: Path) -> None:
+    (tmp_path / "die.release").touch()
+
+
 async def test_the_post_exit_hook_runs_after_the_exit_and_before_stderr_closes(
     tmp_path,
 ):
@@ -188,13 +200,14 @@ async def test_the_post_exit_hook_runs_after_the_exit_and_before_stderr_closes(
         at_hook["server_running"] = psutil.pid_exists(_server_pid(tmp_path)) and (
             psutil.Process(_server_pid(tmp_path)).status() != psutil.STATUS_ZOMBIE
         )
+        _release_the_grandchild(tmp_path)
 
     session = await _session(tmp_path, "linger", seen, after_exit=after_exit)
 
     assert session.error is None and session.after_exit_error is None
     assert at_hook["server_running"] is False
-    # The grandchild still held stderr when the hook ran, and the stub then
-    # waited for it as before.
+    # The grandchild held stderr until the hook released it, and the stub then
+    # waited for it as before; a hook run after that wait finds it still open.
     assert "grandchild done" not in at_hook["lines"]
     assert "grandchild done" in session.stderr and session.stderr_closed is True
     assert session.eof_monotonic_ns is not None
@@ -207,6 +220,7 @@ async def test_a_failed_post_exit_hook_is_recorded_and_the_quit_still_completes(
     tmp_path,
 ):
     async def after_exit() -> None:
+        _release_the_grandchild(tmp_path)
         raise RuntimeError("planted")
 
     session = await _session(tmp_path, "linger", after_exit=after_exit)
