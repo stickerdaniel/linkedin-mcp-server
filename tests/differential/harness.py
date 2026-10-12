@@ -3617,18 +3617,28 @@ def browser_lineage(observed: Iterable[dict[str, Any]]) -> list[list[Any]]:
 _CHROMIUM_MARKERS = ("--type=", "--user-data-dir")
 
 
-def browser_processes(observed: Iterable[dict[str, Any]]) -> list[list[Any]]:
+def browser_processes(
+    observed: Iterable[dict[str, Any]], browser_key: str
+) -> list[list[Any]]:
     """Every browser process the watcher saw this row's actors start, members
     as well as roots, with its tree's root: ``[pid, start, gone, root pid,
     root start]``. What a crash row holds an old browser's members to
     (``crash_overlap``), where ``browser_lineage`` names the roots alone.
 
+    The watcher samples, so this is what its samples saw: a process whose
+    whole lifetime fell between two samples is in no record and not here.
+
     A process a browser started is a browser too, whatever its command line;
-    *gone* and the parent rule are ``browser_lineage``'s. A process that
-    reaches no tree, its parent never sampled, is listed with no root,
-    ``[pid, start, gone, None, None]``, when it could be a browser's helper
-    whose ancestry was lost: it runs a root's image, or its image was never
-    read and its command line carries a Chromium marker or was withheld.
+    *gone* and the parent rule are ``browser_lineage``'s. A browser outside
+    every tree roots one of its own only on proof: a record of it reads a
+    root's command line, ``--user-data-dir`` without ``--type=``, on the
+    profile *browser_key*, or, its arguments withheld, names that profile as
+    the watcher read it. Anything else that reaches no tree, its parent never
+    sampled or no browser, is listed with no root, ``[pid, start, gone, None,
+    None]``, when it could be a browser's helper whose ancestry was lost: it
+    runs a root's image, or its image was never read and its command line
+    carries a Chromium marker or was withheld. So a renderer is never taken
+    for a root, and never for a successor's.
     """
     observed = list(observed)
     first, browsers, gone, parent_of = _lifetimes(observed)
@@ -3636,6 +3646,8 @@ def browser_processes(observed: Iterable[dict[str, Any]]) -> list[list[Any]]:
     image: dict[tuple[int, float], str] = {}
     # Lifetimes whose command line may be a Chromium process's.
     marked: set[tuple[int, float]] = set()
+    # Lifetimes read as a browser root on the profile.
+    proven: set[tuple[int, float]] = set()
     for record in observed:
         pid, start, exe = (
             record.get(name) for name in ("pid", "start_identity", "exe")
@@ -3652,12 +3664,19 @@ def browser_processes(observed: Iterable[dict[str, Any]]) -> list[list[Any]]:
             or any(str(a).startswith(_CHROMIUM_MARKERS) for a in arguments)
         ):
             marked.add(key)
+        profile = (
+            record.get("profile")
+            if record.get("cmdline_withheld")
+            else user_data_dir([str(a) for a in arguments])
+        )
+        if profile == browser_key:
+            proven.add(key)
     root_of: dict[tuple[int, float], tuple[int | None, float | None]] = {}
     for key in sorted(first, key=lambda key: key[1]):
         parent = parent_of(key)
         if parent is not None and parent in root_of:
             root_of[key] = root_of[parent]
-        elif key in browsers:
+        elif key in browsers and key in proven:
             root_of[key] = key
     roots = {
         image[key] for key, root in root_of.items() if root == key and key in image
@@ -10268,7 +10287,9 @@ async def measure_host_quit_row(
         row_record["owner_processes"] = owners
         row_record["gate_processes"] = gates
         row_record["browser_roots"] = browser_lineage(observed_events)
-        row_record["browser_processes"] = browser_processes(observed_events)
+        row_record["browser_processes"] = browser_processes(
+            observed_events, account.browser_key
+        )
         # Every server and frontend, each lifetime once: what a browser's
         # launcher is tied to the host that started it by.
         row_record["frontend_processes"] = frontend_lifetimes(

@@ -9,8 +9,10 @@ handles, elsewhere ``flock`` and signal 0.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import replace
 from typing import Any
@@ -30,10 +32,17 @@ from differential.crash_overlap import (
     OTHER,
     OVERLAP,
     ROW,
+    Reading,
     crash_reading,
     lane_failures,
     o1_findings,
     problems_for,
+)
+from differential.watcher import (
+    ProcessRecord,
+    Tracker,
+    canonical_user_data_dir,
+    record,
 )
 from linkedin_mcp_server.profile_lease import get_profile_lease
 
@@ -44,6 +53,10 @@ KILL = 1_800_000_000 * 10**9
 OLD = 1_799_999_000.0
 #: The old browser's root.
 ROOT = 10
+#: The row's profile, as the harness and the watcher spell it. Never created.
+PROFILE = canonical_user_data_dir(
+    os.path.join(tempfile.gettempdir(), "crash-overlap-profile")
+)
 
 
 def _at(ms: float) -> float:
@@ -130,9 +143,6 @@ def _record(
         for entry in watched
         if entry["kind"] != ACTOR
     ]
-    roots: list[list[Any]] = [[ROOT, OLD, _at(45), 3, OLD]]
-    if successor is not None:
-        roots.append([20, _at(successor), _at(9000), 4, _at(1000)])
     return {
         "row": ROW,
         "mode": "daemon",
@@ -145,7 +155,7 @@ def _record(
             {"tool": "get_feed", "outcome": "returned", "read_the_post": True},
             {"tool": "get_feed", "outcome": "returned", "read_the_post": True},
         ],
-        "browser_roots": roots,
+        "browser_key": PROFILE,
         "browser_processes": (
             _history(watched, successor) if history is None else history
         ),
@@ -268,8 +278,9 @@ Orphan = dict[str, Any]
 
 
 def _events(*, late: bool, orphans: tuple[Orphan, ...] = ()) -> list[dict[str, Any]]:
-    """The watcher's records of the old browser and the successor's. Members
-    carry no ``--user-data-dir`` here, as a Chromium child need not; *late*
+    """The watcher's records of the old browser and the successor's, each
+    root's command line on the profile. Members carry no ``--user-data-dir``
+    here, as a Chromium child need not; *late*
     adds a renderer the old root started after the row read its tree, alive
     past the successor's root. Each of *orphans* (``Orphan``) is a helper
     whose parent, an old browser process, began and ended between samples."""
@@ -282,7 +293,11 @@ def _events(*, late: bool, orphans: tuple[Orphan, ...] = ()) -> list[dict[str, A
             "pid": pid,
             "ppid": ppid,
             "exe": CHROME,
-            "cmdline": [CHROME, "--type=renderer"],
+            "cmdline": (
+                [CHROME, f"--user-data-dir={PROFILE}"]
+                if actor == "browser"
+                else [CHROME, "--type=renderer"]
+            ),
             "start_identity": at,
             "t": at,
         }
@@ -313,9 +328,9 @@ def test_an_old_member_the_row_never_watched_keeps_no_overlap_from_being_claimed
     # Started after the row read the tree and before the kill: in no snapshot
     # and no watch list, only in the watcher's completed history.
     clean = _settled_tree()
-    history = harness.browser_processes(_events(late=False))
+    history = harness.browser_processes(_events(late=False), PROFILE)
     assert crash_reading(_record(clean, history=history)).verdict == NO_OVERLAP
-    history = harness.browser_processes(_events(late=True))
+    history = harness.browser_processes(_events(late=True), PROFILE)
     reading = crash_reading(_record(clean, history=history))
     assert reading.verdict == INCONCLUSIVE, reading
     assert "old browser process 13" in reading.reasons[0]
@@ -327,7 +342,9 @@ def test_a_possible_helper_whose_parent_was_never_sampled_counts():
     # An old browser process started it and ended between two samples, so no
     # tree reaches it, and it outlived the successor's root.
     def read(**orphan: Any) -> str:
-        history = harness.browser_processes(_events(late=False, orphans=(orphan,)))
+        history = harness.browser_processes(
+            _events(late=False, orphans=(orphan,)), PROFILE
+        )
         return crash_reading(_record(_settled_tree(), history=history)).verdict
 
     assert read() == INCONCLUSIVE
@@ -343,6 +360,78 @@ def test_a_possible_helper_whose_parent_was_never_sampled_counts():
     assert read(exe="C:\\node\\node.exe", cmdline=["node.exe"]) == NO_OVERLAP
     assert read(exe=None, cmdline=["helper.exe", "--flag"]) == NO_OVERLAP
     assert read(began=3100) == NO_OVERLAP
+
+
+#: A browser root's arguments on the profile, and on another one.
+ON_PROFILE = (CHROME, f"--user-data-dir={PROFILE}")
+ELSEWHERE = (
+    CHROME,
+    "--user-data-dir="
+    + canonical_user_data_dir(os.path.join(tempfile.gettempdir(), "another-profile")),
+)
+
+
+def _exported(
+    stray: ProcessRecord, *, until: float, successor: ProcessRecord | None = None
+) -> Reading:
+    """The reading of a record whose history the watcher's own ``Tracker``
+    and exporter wrote, sampled every 500 ms: the old root, armed and seen
+    gone by the contender 100 ms before the kill; *stray*, whose parent no
+    sample saw, seen from
+    50 ms to *until*; and *successor*, by default a root on the profile begun
+    at 3 s, seen from 3.05 s on."""
+    old = record(ROOT, 3, _at(-5000), CHROME, ON_PROFILE, in_row=True)
+    if successor is None:
+        successor = record(20, 4, _at(3000), CHROME, ON_PROFILE, in_row=True)
+    timeline = [(at, [old]) for at in range(-4990, -100, 500)]
+    timeline += [
+        (at, [p for p, seen in ((stray, at < until), (successor, at > 3000)) if seen])
+        for at in range(50, 4600, 500)
+    ]
+    tracker = Tracker()
+    events: list[dict[str, Any]] = []
+    for at, alive in [(-6000, []), *timeline]:
+        changes = tracker.observe({p.pid: p for p in alive}, _at(at))
+        events += [
+            {"actor": actor, "kind": kind, "t": _at(at), **fields}
+            for actor, kind, fields in changes
+        ]
+    watched = [
+        _life(2, ACTOR, alive=-1, gone=5),
+        _life(3, OTHER, alive=30, gone=35),
+        {**_life(ROOT, BROWSER_ROOT, alive=-110, gone=-100), "start": _at(-5000)},
+    ]
+    history = harness.browser_processes(events, PROFILE)
+    return crash_reading(_record(watched, history=history))
+
+
+def test_an_orphan_renderer_born_after_the_kill_stays_a_possible_old_member():
+    # The old root left a helper that started a renderer after the kill's
+    # stamp and ended between samples. Out of the row, the renderer's
+    # arguments are withheld and it names no profile: nothing shows it a root.
+    renderer = record(
+        14, 13, _at(0.01), CHROME, (CHROME, "--type=renderer", *ON_PROFILE[1:])
+    )
+    reading = _exported(renderer, until=4000)
+    assert reading.verdict == INCONCLUSIVE, reading
+    assert any("old browser process 14" in reason for reason in reading.reasons)
+    assert reading.ms["successor_admitted"] == pytest.approx(3000, abs=0.01)
+
+
+def test_the_successor_is_a_root_on_the_profile_begun_after_it_was_asked_for():
+    # A root on the profile begun between the kill and the request is not the
+    # successor's, whether the successor's arguments were read or withheld.
+    early = record(14, 13, _at(10), CHROME, ON_PROFILE, in_row=True)
+    for in_row in (True, False):
+        successor = record(20, 4, _at(3000), CHROME, ON_PROFILE, in_row=in_row)
+        reading = _exported(early, until=100, successor=successor)
+        assert reading.verdict == NO_OVERLAP, reading
+        assert reading.ms["successor_admitted"] == pytest.approx(3000, abs=0.01)
+    # A root on another profile is no successor at all.
+    elsewhere = record(20, 4, _at(3000), CHROME, ELSEWHERE)
+    reading = _exported(early, until=100, successor=elsewhere)
+    assert reading.verdict == INCONCLUSIVE, reading
+    assert reading.ms["successor_admitted"] is None
 
 
 def test_a_contender_not_armed_before_the_kill_decides_nothing():

@@ -25,16 +25,19 @@ After the warm-up read, with the browser live, the row:
 5. stops the contender once that read returned and a second passed.
 
 The verdict (``crash_reading``) reads the raw record alone, after the
-watcher's completed history added every browser process and its tree's root
-(``harness.browser_processes``): **overlap** when a successor root on the
-profile began while an old browser process, root or member, was still seen
-alive after it; **no overlap** when every old browser process was seen gone
-before the successor root began, by more than the row waited for the grant
-before asking for it; **inconclusive** otherwise, a missing successor, an
-old process the row never watched and a possible browser helper whose
-ancestry was lost included. The snapshots are not exhaustive; the
-history is. A lease seen free is never an O1 finding by itself; it is
-reported as a number. The comparison (``o1_findings``) is the contract's O1:
+watcher's completed history added every browser process it sampled and its
+tree's root (``harness.browser_processes``). A successor root is one read as
+a root on the profile, begun after the row asked for it: **overlap** when it
+began while an old browser process, root or member, was still seen alive
+after it; **no overlap** when every old browser process was seen gone before
+the successor root began, by more than the row waited for the grant before
+asking for it; **inconclusive** otherwise, a missing successor, an old
+process the row never watched and a possible browser helper whose ancestry
+was lost included. Neither the snapshots nor the history is exhaustive: the
+watcher samples, and a process whose whole lifetime falls between two
+samples is in neither, a known limit. A lease seen free is never an O1
+finding by itself; it is reported as a number. The comparison
+(``o1_findings``) is the contract's O1:
 an overlap in K3 that K1 does not show, the watcher's second root included
 (``lane_failures``). K2 is not applicable.
 """
@@ -413,15 +416,21 @@ def _ms(at: int | None, kill: int) -> float | None:
 
 
 def _successor_root(
-    record: Mapping[str, Any], kill: int, armed: Sequence[Mapping[str, Any]]
+    record: Mapping[str, Any], since: int, armed: Sequence[Mapping[str, Any]]
 ) -> tuple[int, float] | None:
-    """The first browser root on the profile begun after the kill, from the
-    watcher's completed history (``harness.browser_lineage``)."""
+    """The first browser root on the profile begun no earlier than *since*,
+    from the watcher's completed history (``harness.browser_processes``),
+    which roots a tree only on a root's command line on the profile. *since*
+    is when the successor was asked for: no root begun before that is its."""
     found = []
-    for raw in _sequence(record.get("browser_roots")):
-        root = _sequence(raw)
-        pid, start = (root[0], _number(root[1])) if len(root) >= 2 else (None, None)
-        if type(pid) is not int or start is None or start * 1e9 < kill:
+    for raw in _sequence(record.get("browser_processes")):
+        entry = _sequence(raw)
+        if len(entry) < 5 or type(entry[0]) is not int:
+            continue
+        pid, start = entry[0], _number(entry[1])
+        if start is None or entry[3] != pid or _number(entry[4]) != start:
+            continue
+        if start * 1e9 < since:
             continue
         if untracked(armed, [{"pid": pid, "start": start}]):
             found.append((pid, start))
@@ -504,7 +513,8 @@ def crash_reading(record: Mapping[str, Any]) -> Reading:
         ),
         None,
     )
-    successor = _successor_root(record, kill, armed)
+    issued = _ns(_mapping(contended.get("successor")).get("issued_wall_ns"))
+    successor = _successor_root(record, kill if issued is None else issued, armed)
     admitted = int(successor[1] * 1e9) if successor is not None else None
     root = next((life for life in browsers if life.kind == BROWSER_ROOT), None)
     ms = {
@@ -561,7 +571,6 @@ def crash_reading(record: Mapping[str, Any]) -> Reading:
             "no successor browser root began on the profile after the kill; a "
             "lease seen free alone is not an O1 finding",
         )
-    issued = _ns(_mapping(contended.get("successor")).get("issued_wall_ns"))
     if issued is None or free_at is None or free_at > issued:
         return reading(
             INCONCLUSIVE,
