@@ -5,7 +5,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncio
+import gc
 import logging
+import time
 
 import anyio
 from patchright.async_api import Error as PatchrightError
@@ -1335,6 +1337,22 @@ class TestSendMessageDeadline:
 
     _TOOL_TIMEOUT = 0.5
 
+    @pytest.fixture(autouse=True)
+    def _without_collector_pauses(self):
+        """Keep collector pauses out of the deadlines these tests measure.
+
+        Collecting the heap earlier tests left behind can stop the event loop
+        for longer than the whole reply reserve, and a test then ends at the
+        tool deadline instead of the answer it checks.
+        """
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            yield
+        finally:
+            if enabled:
+                gc.enable()
+
     @staticmethod
     async def _call(sender, monkeypatch):
         from fastmcp import Client, FastMCP
@@ -1543,24 +1561,33 @@ class TestSendMessageDeadline:
         ("path", "thread_id"),
         [("/messaging/thread/2-abc==/", "2-abc=="), ("/messaging/compose/", None)],
     )
-    async def test_a_late_snapshot_keeps_the_thread_when_disposal_stalls(
+    async def test_a_late_snapshot_keeps_the_thread_when_disposal_overruns(
         self, mock_page, monkeypatch, path, thread_id
     ):
-        """A snapshot taken just before the work deadline survives a stalled disposal.
+        """A snapshot accepted before the work deadline survives that deadline.
 
-        Disposal has to finish inside the work budget the answer returns
-        through, not only inside the later tool deadline. A longer bound lets
-        that budget cancel the accepted result.
+        The snapshot arrives just before the budget the answer returns
+        through ends, and the event loop then stalls past it while disposal
+        is in flight, as a collector pause or a starved CPU does. The send
+        was confirmed before the budget ended, so its cancellation must not
+        take the answer back on the way out.
         """
+        budget_end = 0.0
 
         async def late_snapshot():
-            deadline = anyio.current_effective_deadline()
-            await anyio.sleep(max(0.0, deadline - anyio.current_time() - 0.02))
+            nonlocal budget_end
+            budget_end = anyio.current_effective_deadline()
+            await anyio.sleep(max(0.0, budget_end - anyio.current_time() - 0.02))
             return {"path": path}
+
+        async def overrunning_dispose():
+            # Blocks the loop itself, the way a collector pause does.
+            time.sleep(max(0.0, budget_end - anyio.current_time()) + 0.001)
+            await anyio.sleep_forever()
 
         handle = MagicMock()
         handle.json_value = AsyncMock(side_effect=late_snapshot)
-        handle.dispose = AsyncMock(side_effect=_stall)
+        handle.dispose = AsyncMock(side_effect=overrunning_dispose)
         mock_page.wait_for_function = AsyncMock(return_value=handle)
         sender = _sender(mock_page)
 
