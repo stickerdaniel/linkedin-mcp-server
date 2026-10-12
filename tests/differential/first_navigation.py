@@ -1058,7 +1058,7 @@ class LifetimeSampler:
                 if self.document["sampler"] == "running":
                     self.document["sampler"] = "stopped" if stopped else "still running"
                 for record in self._tracked.values():
-                    record["ended"] = self._ended(record, requested)
+                    record["ended"] = self._ended(record, requested, stopped=stopped)
                 self._persist()
             finally:
                 self._lock.release()
@@ -1066,10 +1066,16 @@ class LifetimeSampler:
             pass
 
     def _ended(
-        self, record: Mapping[str, Any], requested: Mapping[str, float | None] | None
+        self,
+        record: Mapping[str, Any],
+        requested: Mapping[str, float | None] | None,
+        *,
+        stopped: bool,
     ) -> str:
         if record["gone_ms"] is None:
-            return "alive-at-stop" if self._complete else "unknown"
+            # A sampler still reading at the bound saw nothing since its last
+            # sample, so that sample no longer speaks for the stop.
+            return "alive-at-stop" if stopped and self._complete else "unknown"
         if requested is None:
             return "unknown"
         asked = requested.get(record["role"])

@@ -865,7 +865,13 @@ def test_a_stop_does_not_wait_out_a_read_past_its_bound(tmp_path, monkeypatch):
     )
     lifetimes = LifetimeSampler(
         tmp_path / BROWSER_LIFETIMES_FILE, profile=tmp_path / "profile", label="held"
-    ).start()
+    )
+    # A driver the last finished sample saw alive, which may die while the
+    # next one is blocked.
+    lifetimes._track((8, 1.0), "driver", 0.0)
+    driver = SimpleNamespace(children=lambda recursive: [_listed(8, lambda: "running")])
+    lifetimes._sample(psutil, driver)
+    lifetimes.start()
     assert holding.wait(5), "the sampler never reached the blocking read"
     stopper = threading.Thread(target=lambda: lifetimes.stop(exc=None, requested=None))
     stopper.start()
@@ -874,6 +880,8 @@ def test_a_stop_does_not_wait_out_a_read_past_its_bound(tmp_path, monkeypatch):
     release.set()
     stopper.join(5)
     assert lifetimes.document["stopped_within_bound"] is False
+    (record,) = lifetimes.document["processes"]
+    assert record["ended"] == "unknown"
 
 
 def test_an_unreadable_process_is_not_recorded_as_gone(tmp_path):
@@ -926,7 +934,7 @@ def test_a_death_read_during_a_sample_is_not_ordered_before_a_close(tmp_path):
     )
     assert record["gone_ms"] == first_gone
     asked = {"browser-root": first_gone / 1000 + lifetimes._began_wall + 5}
-    assert lifetimes._ended(record, asked) == "ambiguous"
+    assert lifetimes._ended(record, asked, stopped=True) == "ambiguous"
 
 
 def test_a_sampler_that_cannot_start_does_not_stop_the_launch(tmp_path, monkeypatch):
