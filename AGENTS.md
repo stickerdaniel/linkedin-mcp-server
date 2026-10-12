@@ -167,6 +167,10 @@ Optional additional keys:
   only coverage. Prefer a unit test elsewhere, and keep in mind that a
   fixture imitating LinkedIn's markup is a claim about LinkedIn, while one
   driving a synthetic container is a claim about the algorithm only.
+- **Reproduce a timing flake at its seam.** Inject the stall where the code
+  waits, with a monkeypatch or a `time.sleep` in a scratch copy, and run only
+  the affected tests at `-n 4` at most. Agents share one machine; one session
+  owns full-suite runs.
 
 ## Verifying Bug Reports
 
