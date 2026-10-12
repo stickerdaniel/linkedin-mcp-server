@@ -25,7 +25,7 @@ from dataclasses import dataclass, field, replace
 #: How long a call may go unheard before the owner stops it. Five of the
 #: frontend's heartbeat cadences: the margin is the point, so a live call is
 #: cancelled only after several consecutive lost beats or an event-loop stall
-#: far beyond a heartbeat's own latency.
+#: far beyond a heartbeat's own latency. Measured: docs/daemon-measurements.md.
 EXPIRY_SECONDS = 10.0
 
 #: A gap between two of the owner's own scans that means the owner was not

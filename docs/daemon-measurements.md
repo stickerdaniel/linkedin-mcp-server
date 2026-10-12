@@ -1,0 +1,348 @@
+# Daemon measurements
+
+What has been measured or observed about the shared-browser daemon
+(`linkedin_mcp_server/daemon/`), and which code each observation justifies.
+
+Every number here is an observation, not a guarantee. Each entry names the
+commit that recorded it and that commit's date, which is the closest record of
+when the measurement was made. A dependency version named in an entry is the
+version measured against; the project may have moved past it since. Code
+comments point here instead of restating these numbers. When a re-measurement
+changes a number, edit the entry and give its new source and date.
+
+Symbols are named relative to `linkedin_mcp_server`. Tests are named as
+`path::Class::test`.
+
+## Lock
+
+- **Unlocking before closing frees the lock for every holder.** Unlock-then-close
+  left the lock free while a live process believed it held it, on both POSIX and
+  Windows. Justifies `daemon.lock.DaemonLock.release` closing rather than
+  unlocking. Source `50dfdbf5`, 2026-07-28. Test
+  `tests/test_daemon_lock.py::TestReleaseSemantics::test_releasing_closes_rather_than_unlocks`.
+- **Chromium outlives a free lock only briefly.** An earlier note claimed "over
+  twenty seconds". Re-measuring found 13-38 ms on one machine and 11-103 ms
+  independently, because Chromium is wired to its driver by
+  `--remote-debugging-pipe` and exits when the pipe breaks. The rule in the
+  `daemon.lock` docstring that a free lock is no proof nothing runs stands
+  regardless. Source `6d369701`, 2026-07-29 (the old figure dates from
+  `50dfdbf5`, 2026-07-28).
+- **No two browsers in a direct collision test.** Five rounds with a successor
+  pre-armed and spinning produced no round with two live browsers on one
+  profile. Source `6d369701`, 2026-07-29.
+- **An inherited handle does not hold the lock on Windows.** A child that
+  inherited the handle did not hold the lock once the parent had closed its
+  handles and exited, in 20 of 20 runs. Justifies the owner taking the lock
+  itself on every platform (`daemon.lock.DaemonLock`). Source `50dfdbf5`,
+  2026-07-28.
+- **A collected wrapper leaves the lock held.** After dropping the last
+  reference to an acquired lock, the registry was empty and another process
+  still could not take it. Justifies `daemon.lock._live_locks` holding a held
+  lock strongly. Source `50dfdbf5`, 2026-07-28. Test
+  `tests/test_daemon_lock.py::TestRegistry::test_a_held_lock_survives_losing_its_last_reference`.
+- **An untouched fork child keeps the lock.** After the owner released and
+  exited, a fork child that never touched the lock kept it held, so no other
+  process could elect a replacement. Justifies
+  `daemon.lock._discard_inherited_locks`. Source `50dfdbf5`, 2026-07-28. Test
+  `tests/test_daemon_lock.py::TestFork::test_a_child_that_never_touches_the_lock_does_not_hold_it`.
+- **Neither probe mode is exact.** Probing exclusively, 43 of 400 concurrent
+  probes read a sibling probe as an owner. Probing shared, 11 of 3000 concurrent
+  elections failed against a probe while no owner existed at all. Justifies the
+  shared probe in `daemon.lock.daemon_is_running`. Source `50dfdbf5`,
+  2026-07-28. Tests
+  `tests/test_daemon_lock.py::TestLiveness::test_concurrent_probes_do_not_see_each_other`
+  and
+  `tests/test_daemon_lock.py::TestLiveness::test_the_probe_is_an_observation_not_a_decision`.
+
+## Descriptor and auth root
+
+- **Containers sharing a mounted profile do not share daemon state.** Measured
+  with two containers on one mounted profile: both saw the same auth root
+  identity and both took the lock, because each has its own home. Applies to
+  `daemon.descriptor.daemon_state_root`. Source `50dfdbf5`, 2026-07-28.
+- **A path changed under a running owner splits the lock.** After retargeting a
+  link or renaming a directory, a second process took a lock on a different
+  inode while the first still held its own. Applies to
+  `daemon.descriptor.daemon_state_root`. Source `50dfdbf5`, 2026-07-28.
+- **A non-ASCII digest raised outside `DescriptorError`.** `hmac.compare_digest`
+  raises `TypeError` for a string with a non-ASCII character. A descriptor with
+  an accented character was accepted and the comparison failed later with that
+  `TypeError`. Justifies `daemon.descriptor._digest_text`. Source `50dfdbf5`,
+  2026-07-28. Test
+  `tests/test_daemon_descriptor.py::TestDigestFields::test_a_field_that_is_not_a_digest_is_refused`.
+- **A file at the auth root surfaced as `NotADirectoryError`.** With the check
+  after `secure_mkdir`, a file where the auth root belongs surfaced as
+  `NotADirectoryError`. Justifies checking before creating in
+  `daemon.descriptor._auth_root_identity`. Source `50dfdbf5`, 2026-07-28. Test
+  `tests/test_daemon_descriptor.py::TestAuthRootShape::test_a_file_where_the_auth_root_belongs_is_refused`.
+- **A vanished auth root surfaced as `FileNotFoundError`.** An auth root that
+  vanished between creating it and reading it back surfaced as
+  `FileNotFoundError`. Applies to `daemon.descriptor._auth_root_identity`.
+  Source `50dfdbf5`, 2026-07-28.
+- **The first login changed a profile's identity.** With the auth root
+  non-empty, `serves()` went from True to False across the login that created
+  the profile directory. Justifies `daemon.descriptor.profile_identity`
+  consulting only the parent. Source `50dfdbf5`, 2026-07-28. Test
+  `tests/test_daemon_descriptor.py::TestProfileIdentityStability::test_the_identity_survives_the_profile_being_created`.
+- **Case folding merged two profiles on case-sensitive APFS.** On a
+  case-sensitive APFS volume, once with both `Profile` and `profile` present
+  and once with only the sibling, two distinct profiles shared an identity,
+  which would have served a client the other one's logged-in session. Justifies
+  asking the filesystem in `daemon.descriptor.profile_identity`. Source
+  `50dfdbf5`, 2026-07-28. Tests
+  `tests/test_daemon_descriptor.py::TestProfileIdentityStability::test_case_distinct_siblings_do_not_collide`
+  and
+  `tests/test_daemon_descriptor.py::TestProfileIdentityStability::test_a_missing_profile_does_not_borrow_a_siblings_identity`.
+- **Composition needs normalising.** On macOS an accented name written
+  decomposed and composed is one directory, and comparing the two spellings
+  without normalising gave them different identities. Justifies NFC in
+  `daemon.descriptor.profile_identity`. Source `50dfdbf5`, 2026-07-28. Test
+  `tests/test_daemon_descriptor.py::TestProfileIdentityStability::test_an_alias_of_the_profile_name_itself_matches`.
+- **The scan must not stop at the first fold match.** With `É` and `é` present
+  and `é` asked for, the scan met `É` first, was told they differ, and gave up
+  before reaching the entry that did match. Justifies continuing the scan in
+  `daemon.descriptor.profile_identity`. Source `50dfdbf5`, 2026-07-28.
+- **An unbracketed IPv6 literal made an unusable URL.** A valid `::1` endpoint
+  produced a URL no client could use. Justifies bracketing in
+  `daemon.descriptor.DaemonDescriptor.url`. Source `50dfdbf5`, 2026-07-28. Test
+  `tests/test_daemon_descriptor.py::TestEndpointUrl::test_every_accepted_host_produces_a_usable_url`.
+- **A denylist of control characters left thirty-six gaps.** An earlier version
+  banned CR, LF, tab and NUL by name and left thirty-six other code points that
+  were accepted here and rejected by the client. Justifies the printable-ASCII
+  rule in `daemon.descriptor.DaemonDescriptor.check_endpoint_is_local`. Source
+  `50dfdbf5`, 2026-07-28. Test
+  `tests/test_daemon_descriptor.py::TestEndpointSpelling::test_an_endpoint_that_composes_into_nothing_usable_is_refused`.
+- **Plausible fields composed into unusable endpoints.** Three such descriptors
+  were accepted: `"[::1] "`, a bracketed IPv4, and a path with a newline, each
+  failing later in the client. Justifies the `urlsplit` round trip in
+  `daemon.descriptor.DaemonDescriptor.check_endpoint_is_local`. Source
+  `50dfdbf5`, 2026-07-28. Test
+  `tests/test_daemon_descriptor.py::TestEndpointSpelling::test_an_endpoint_that_composes_into_nothing_usable_is_refused`.
+- **The verified host and the contacted host came apart.** A space-padded
+  address passed as loopback and produced a host of `"%20127.0.0.1%20"`.
+  Justifies reading the host back in
+  `daemon.descriptor.DaemonDescriptor.check_endpoint_is_local`. Source
+  `50dfdbf5`, 2026-07-28. Test
+  `tests/test_daemon_descriptor.py::TestEndpointSpelling::test_an_endpoint_that_composes_into_nothing_usable_is_refused`.
+- **Trailing dots passed the loopback check.** `is_loopback_host` strips
+  trailing dots, so `"127.0.0.1."` and `"localhost.."` passed as loopback while
+  `getaddrinfo` refused them outright. Applies to
+  `daemon.descriptor.DaemonDescriptor.check_endpoint_is_local`. Source
+  `50dfdbf5`, 2026-07-28. Test
+  `tests/test_daemon_descriptor.py::TestEndpointSpelling::test_an_endpoint_that_composes_into_nothing_usable_is_refused`.
+- **The resolver has no deadline.** With a stalled resolver, `getaddrinfo` took
+  two seconds for a two second stall, and is unbounded in principle. Justifies
+  answering address literals without the resolver in
+  `daemon.descriptor.DaemonDescriptor.check_endpoint_is_local`. Source
+  `50dfdbf5`, 2026-07-28.
+- **`localhost` can resolve off this machine.** With the resolver made to
+  answer `203.0.113.9` for `localhost`, the descriptor was accepted and the
+  token would have been posted off this machine. Justifies checking every
+  resolver answer in
+  `daemon.descriptor.DaemonDescriptor.check_endpoint_is_local`. Source
+  `50dfdbf5`, 2026-07-28. Test
+  `tests/test_daemon_descriptor.py::TestEndpointSpelling::test_a_name_resolving_off_this_machine_is_refused`.
+
+## Election and startup
+
+- **A dead owner refuses fast; a stalled one spends the budget.** Against the
+  real probe with a real descriptor and token, a closed port refused in about
+  ten milliseconds, while a process holding a listening socket that nobody
+  reads spent a full five seconds. Justifies `daemon.core.lookup.Reach` and
+  `daemon.election._REACHABLE_SECONDS`. Source `a9ca8138`, 2026-07-31. Test
+  `tests/test_daemon_election.py::TestSilenceIsNotDeath::test_a_dead_endpoint_and_a_frozen_one_are_told_apart`.
+- **A boolean probe buried a live owner.** When the probe answered `bool`, a
+  frontend buried a live owner it had just started because one ping landed in a
+  scheduler stall. Justifies the three-valued `daemon.election._reachable`.
+  Source `a9ca8138`, 2026-07-31. Test
+  `tests/test_daemon_election.py::TestRealOwner::test_a_paused_owner_is_waited_for_rather_than_written_off`.
+- **A ping fails against a healthy owner in the 2026-07-28 era.** That protocol
+  era removed ping (SDK `docs/migration.md:1800`), a default client negotiates
+  it with a current owner, and a ping came back as an error from a healthy
+  owner. Justifies the tool listing in `daemon.election._reachable` and
+  `daemon.owner._probe`. Source `b3fcac2e`, 2026-09-27. Test
+  `tests/test_daemon_election.py::TestSilenceIsNotDeath::test_a_healthy_owner_answers`.
+- **A flat poll interval overran a small budget.** Before the clamp, a flat
+  poll interval turned a 1 ms budget into 101 ms. Justifies never sleeping past
+  the deadline in `daemon.discovery.look_up_owner`. Source `98e99338`,
+  2026-07-28. Test
+  `tests/test_daemon.py::TestWaitingForAStartingOwner::test_a_small_budget_is_not_rounded_up_to_a_poll`.
+- **A replacement is read through a dead owner's file.** An owner that crashed
+  serving a sibling profile reads as `INCOMPATIBLE` while its replacement is
+  coming up. Justifies waiting out every state but `ATTACHABLE` in
+  `daemon.discovery.look_up_owner`. Source `98e99338`, 2026-07-28. Test
+  `tests/test_daemon.py::TestTellingTheRefusalsApart::test_a_replacement_owner_is_seen_through_a_dead_descriptor`.
+- **A boolean start result cost a minute.** A child that reported it could not
+  serve read as "somebody is starting", so the caller waited out its whole
+  deadline for a descriptor nothing was going to write. Justifies
+  `daemon.core.spawn.Attempt`. Source `6d369701`, 2026-07-29.
+- **No zombie without `_reap`.** A failed election left no zombie with the
+  `_reap` call removed, because `subprocess` reaps abandoned children when the
+  next one is created. `daemon.election._reap` stays because that is a
+  standard-library detail. Source `6d369701`, 2026-07-29.
+- **Closing a parked reader blocks.** `BufferedReader.close()` blocked for 29.27
+  of thirty seconds against a silent child. Justifies detaching first in
+  `daemon.startup._close_output`. Source `6d369701`, 2026-07-29. Test
+  `tests/test_daemon_election.py::TestFailingFast::test_a_child_that_says_nothing_does_not_keep_the_lock`.
+- **`start_new_session` does nothing on Windows.** CPython's Windows
+  implementation names the parameter `unused_start_new_session` and ignores it
+  (`subprocess.py:1461`). Justifies the creation flags in
+  `daemon.election._detachment_flags`. Source `6d369701`, 2026-07-29.
+
+## Owner process and HTTP
+
+- **The owner survives its frontend on POSIX.** After `SIGKILL` to the
+  frontend's whole process group, the owner was still running and had
+  reparented to pid 1. On Windows `start_new_session` is POSIX-only
+  (`subprocess.py:795`). Applies to the `daemon.owner` docstring and
+  `daemon.election._detachment_flags`. Source `6d369701`, 2026-07-29. Test
+  `tests/test_daemon_election.py::TestRealOwner::test_the_owner_outlives_the_client_that_started_it`.
+- **In a container the owner dies with the display.** Inside the image the
+  owner had a distinct process group and was still alive when EOF ended the
+  frontend, then the container's PID namespace killed it with Xvfb. Justifies
+  refusing the daemon in a container in `daemon.discovery._daemon_would_be_used`.
+  Source `8d5c3bd0`, 2026-08-09. Test
+  `tests/test_daemon.py::TestWhetherTheDaemonAppliesAtAll::test_a_container_refuses_the_daemon_and_says_why`.
+- **An environment proxy received the bearer token.** httpx2 honours
+  `HTTP_PROXY` even for `127.0.0.1` unless `NO_PROXY` says otherwise.
+  Reproduced against a capture proxy: a request to `http://127.0.0.1:9/...`
+  arrived at the proxy with `Authorization: Bearer <token>`. Justifies
+  `trust_env=False` in `daemon.owner.direct_http_client` and
+  `daemon.owner.direct_async_http_client`. Source `6d369701`, 2026-07-29. Tests
+  `tests/test_daemon_election.py::TestVersionSkew::test_the_token_never_goes_through_a_configured_proxy`
+  and
+  `tests/test_daemon_proxy.py::TestKeepingTheTokenOffTheNetwork::test_the_environment_proxy_is_refused`.
+- **FastMCP passes more than the factory protocol.** FastMCP's transport passes
+  `follow_redirects` on top of the `McpHttpClientFactory` protocol
+  (`fastmcp/client/transports/http.py:176-181`). A factory that accepted only
+  the documented signature failed at connect time with an unexpected keyword,
+  and took every real-owner test with it. Justifies `**extra` in
+  `daemon.owner.direct_async_http_client`. Source `6d369701`, 2026-07-29.
+- **A non-ASCII token turned a 401 into a 500.** Compared directly as strings, a
+  header of `Bearer töken` raised `TypeError` inside the route and the caller
+  got a 500 where it should get a 401. Justifies comparing digests in
+  `daemon.owner._matches_token`. Source `6d369701`, 2026-07-29. Test
+  `tests/test_daemon_election.py::TestVersionSkew::test_a_non_ascii_token_is_refused_rather_than_raising`.
+- **Uvicorn driven directly still runs the lifespan.** Verified against the
+  installed FastMCP 3.4.4: `run_http_async` builds its own server, binds its
+  own port and blocks with no handle to stop it
+  (`fastmcp/server/mixins/transport.py`), and a lifespan still runs both ways
+  round when uvicorn is driven directly. Justifies serving through uvicorn
+  in `daemon.owner.create_owner_server`. Source `6d369701`, 2026-07-29.
+- **Custom routes sit outside the auth middleware.** Measured on FastMCP 3.4.4:
+  a custom route is mounted outside the authentication middleware, so an
+  unauthenticated POST to the stand-down path was served. Justifies the
+  explicit token checks in the stand-down and heartbeat routes of
+  `daemon.owner.create_owner_server`. Source `6d369701`, 2026-07-29. Tests
+  `tests/test_daemon_election.py::TestVersionSkew::test_a_stand_down_request_needs_the_token`
+  and
+  `tests/test_daemon_liveness.py::TestTheRouteOnARealOwner::test_a_beat_without_the_token_is_refused_and_does_not_count`.
+- **Ending the wait did not end the process.** Before the hard exit existed,
+  the helper returned on time and the process never came out of `asyncio.run`.
+  Justifies the hard exit in `daemon.owner._stop_within`. Source `6d369701`,
+  2026-07-29. Test
+  `tests/test_daemon_election.py::TestNotHoldingTheLockForever::test_a_shutdown_that_resists_cancellation_still_ends_the_process`.
+
+## Proxy and forwarding
+
+- **A stand-down left attached proxies dead.** Reproduced end to end: a proxy
+  serving 19 tools, whose owner was told to stand down the way a newer build
+  does (`daemon.election._ask_to_stand_down`), failed its next listing with
+  `McpError: Client failed to connect`. Justifies recovery in
+  `daemon.proxy.DaemonProxyBackend`. Source `619ff243`, 2026-07-30. Test
+  `tests/test_daemon_proxy.py::TestRecoveringThroughTheWholeProxy::test_a_client_lists_again_after_its_owner_went_away`.
+- **A tool's timeout starts after the queue.** A tool declared with a one
+  second timeout, queued two seconds behind another call, succeeded after
+  2.02 s. So no margin derived from the tool timeout covers a queued call.
+  Applies to `daemon.proxy._TIMEOUT_MARGIN_SECONDS`. Source `619ff243`,
+  2026-07-30.
+- **Cancelling a `to_thread` awaiter does not stop the worker.** Driven
+  directly, an awaiter cancelled at 0.1 s while its worker still finished its
+  1.5 s of work. Justifies shielding the election in
+  `daemon.proxy.DaemonProxyBackend.recover`. Source `c13b974e`, 2026-08-01. Test
+  `tests/test_daemon_proxy.py::TestServingTheOwnersTools::test_a_caller_that_gives_up_does_not_free_the_election`.
+- **The configuration singleton gave the wrong budget.** On a server built
+  directly, a 1.2-second call budgeted itself 149.8 seconds from the
+  singleton's default. Justifies `daemon.proxy.FrontendCallMiddleware` taking
+  the tool timeout as an argument. Source `52370602`, 2026-07-31.
+- **Only `MCPError` reaches the wire intact.** On a 2026-07-28 connection any
+  other exception becomes `Internal server error` (`mcp/server/runner.py`,
+  `modern_error_data`, SDK 2.2.0). Justifies
+  `daemon.proxy._owner_lost_from_a_listing` returning an `MCPError`. Source
+  `3da596de`, 2026-10-05.
+- **Masking hides a re-raised owner loss.** Measured against fastmcp 3.4.7
+  with `mask_error_details=True`: re-raising `OwnerUnreachableError` left the
+  client only `ToolError("Error calling tool 'send_message'")`
+  (`fastmcp/server/server.py:1342-1358`), while a `ToolError` raised in the
+  middleware kept its own text (`:1327-1331`). Neither carries `status` and
+  `retry_safe`, which is why
+  `daemon.proxy.FrontendCallMiddleware._report_an_unknown_outcome` returns a
+  result. Source `824c0f46`, 2026-09-18. Test
+  `tests/test_daemon_proxy.py::TestRecoveringThroughTheWholeProxy::test_a_mutating_call_whose_answer_never_came_is_not_repeated`.
+- **An error result skips output-schema validation.** An error result travels
+  as a whole `CallToolResult`, which `mcp.server.lowlevel.server` returns
+  unchanged instead of validating it against the called tool's output schema.
+  Applies to
+  `daemon.proxy.FrontendCallMiddleware._report_an_unknown_outcome`. Source
+  `824c0f46`, 2026-09-18.
+
+## Liveness and heartbeats
+
+- **Cancellation does not cross the hop.** Over a real loopback owner, the
+  client was answered at 0.66 s with an error and the effect landed 0.7 s
+  later. Justifies `daemon.liveness` and the `COULD_CHANGE` refusal in
+  `daemon.auth_repair.say_why`. Source `52370602`, 2026-07-31. Tests
+  `tests/test_daemon_auth.py::TestTheRepairRunsForReal::test_a_tool_that_changes_something_is_never_replayed`
+  and
+  `tests/test_daemon_proxy.py::TestRepeatingOnlyWhatIsSafe::test_a_mutating_call_is_not_repeated_when_it_may_have_run`.
+- **A heartbeat is cheap.** Against a server built the way the owner builds
+  one, a heartbeat round trip cost 0.9 ms median while the owner was idle and
+  1.8 ms while it was driving Chromium, so the cadence occupies an owner about a
+  thousandth of its time per waiting call. Justifies
+  `daemon.liveness.HEARTBEAT_SECONDS`. Source `d69bcc8c`, 2026-08-01.
+- **The expiry margin is wide.** Worst cases: 9.5 ms for a heartbeat served
+  while a page is being driven, 3.6 ms of timer lateness in a detached process
+  over 25 beats, and 130 ms for the longest the owner's synchronous text
+  extraction holds its event loop, on a 2 MiB page far larger than a real one.
+  A live call needs a stall roughly seventy times worse than anything measured,
+  or three consecutive beats lost, before it is wrongly cancelled. Justifies
+  `daemon.core.owner.EXPIRY_SECONDS`. Source `d69bcc8c`, 2026-08-01.
+
+## Auth repair
+
+- **An exception loses the marker; a result keeps it.** Measured against
+  fastmcp 3.4.4: a middleware that re-raised delivered
+  `meta=None, isError=True, content=["Error calling tool 'x'"]` to the outer
+  client, because `mask_error_details` is on. Returning
+  `ToolResult(..., meta=..., is_error=True)` delivered the marker intact, and a
+  client that raises on error still got its `ToolError` with the original
+  message. The proxy copies `meta` and `isError` explicitly
+  (`fastmcp/server/providers/proxy.py:212-225`). Justifies the result-shaped
+  refusal in `daemon.auth_repair`. Source `52370602`, 2026-07-31. Test
+  `tests/test_daemon_auth.py::TestTheMarkerSurvivesTheHop::test_the_marker_reaches_the_outer_client_through_the_proxy`.
+- **The cause chain once arrived severed.** Before `raise_tool_error` passed an
+  already-shaped `ToolError` through, the missing-session path arrived as
+  `['ToolError']` with the cause severed. Applies to the `__cause__` walk in
+  `daemon.auth_repair`. Source `52370602`, 2026-07-31. Test
+  `tests/test_daemon_auth.py::TestTheMarkerSurvivesTheHop::test_the_marker_is_found_through_the_wrapping_tool_error`.
+- **Every origin looks the same to a client.** Counted in the source: all 18
+  tool catch sites collapse failures into one `except` clause, so only the owner
+  can decide `replayable`. Source `52370602`, 2026-07-31.
+- **The marker key sits beside fastmcp's own.** A custom meta key coexists with
+  fastmcp's own `{'fastmcp': {...}}` entry as a separate top-level key. Applies
+  to `daemon.auth_repair.MARKER_KEY`. Source `52370602`, 2026-07-31.
+- **A started login is not a failed repair.** Read as a failure, a started
+  login abandoned every repair: on the stale path with a login that finished
+  successfully, the owner was called once and the client still got the error.
+  The missing path did the same as soon as signing in took longer than the
+  inline budget. Justifies `daemon.auth_repair.start_sign_in`. Source
+  `52370602`, 2026-07-31. Tests
+  `tests/test_daemon_auth.py::TestTheRepairRunsForReal::test_a_stale_session_is_replayed_once_the_login_succeeds`
+  and
+  `tests/test_daemon_auth.py::TestTheRepairRunsForReal::test_a_slow_sign_in_is_still_replayed`.
+- **A client-cancelled replay still sends.** Beyond the 0.66 s and 0.7 s
+  observation under liveness, an MCP client that gave up on its own call
+  produced the same orphan, measured as effects `['sent']` after the cancel and
+  `['sent', 'sent']` after the retry. Justifies `COULD_CHANGE` in
+  `daemon.auth_repair.say_why`. Source `52370602`, 2026-07-31. Test
+  `tests/test_daemon_auth.py::TestTheRepairRunsForReal::test_a_tool_that_changes_something_is_never_replayed`.

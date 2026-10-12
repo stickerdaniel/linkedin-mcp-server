@@ -97,7 +97,8 @@ _ID_HEX = 32
 
 #: How often a waiting frontend says it is still there. A beat is a cheap
 #: loopback round trip; the owner stops a call after several cadences without
-#: one (``daemon.core.owner.EXPIRY_SECONDS``).
+#: one (``daemon.core.owner.EXPIRY_SECONDS``). Measured:
+#: docs/daemon-measurements.md.
 HEARTBEAT_SECONDS = 2.0
 
 
