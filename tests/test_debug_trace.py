@@ -1,6 +1,8 @@
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import time
 from unittest.mock import AsyncMock, MagicMock
 
@@ -145,6 +147,46 @@ def test_a_new_run_removes_runs_left_behind_long_ago(monkeypatch, tmp_path):
     assert trace_dir is not None and trace_dir.parent == root.resolve()
     assert not stale.exists()
     assert recent.exists() and foreign.exists()
+
+
+def test_a_quiet_run_of_a_live_server_is_kept(monkeypatch, tmp_path):
+    """Another server that has logged nothing for weeks still owns its run."""
+    _use_profile(monkeypatch, tmp_path / "profile")
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "USER_DATA_DIR": str(tmp_path / "profile"),
+    }
+    env.pop("LINKEDIN_DEBUG_TRACE_DIR", None)
+    env.pop("LINKEDIN_TRACE_MODE", None)
+    other = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from linkedin_mcp_server.debug_trace import get_trace_dir;"
+            "print(get_trace_dir(), flush=True); input()",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        env=env,
+        text=True,
+    )
+    try:
+        assert other.stdout is not None
+        quiet = Path(other.stdout.readline().strip())
+        assert quiet.parent == (tmp_path / "trace-runs").resolve()
+        stamp = time.time() - 30 * 24 * 60 * 60
+        for path in (*quiet.iterdir(), quiet):
+            os.utime(path, (stamp, stamp))
+
+        get_trace_dir()
+
+        assert quiet.exists()
+    finally:
+        other.communicate("\n", timeout=30)
 
 
 def test_a_run_still_being_written_is_kept(monkeypatch, tmp_path):
