@@ -188,6 +188,13 @@ Symbols are named relative to `linkedin_mcp_server`. Tests are named as
   implementation names the parameter `unused_start_new_session` and ignores it
   (`subprocess.py:1461`). Justifies the creation flags in
   `daemon.election._detachment_flags`. Source `6d369701`, 2026-07-29.
+- **The election reducers decide what the shell decided before.** Run against
+  the code they replaced, the extracted reducers matched its results, ordered
+  effects and scripted timing on 1,224 lookup cases, 2,500 election traces and
+  126 startup cases. Justifies moving `daemon.core.lookup`,
+  `daemon.core.spawn` and `daemon.core.election` out of `daemon.election`
+  without a behaviour change. Source review of `8bde6775` against `f4073e29`,
+  merged as `45d54e18`, 2026-10-12.
 
 ## Owner process and HTTP
 

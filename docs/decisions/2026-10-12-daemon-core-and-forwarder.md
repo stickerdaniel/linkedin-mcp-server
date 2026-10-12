@@ -21,4 +21,4 @@ Decisions interleaved with I/O could only be tested through processes, sockets a
 
 ## Evidence
 
-Each stage compared the extracted reducer against the code it replaced. The election stage matched on 1,224 lookup cases, 2,500 election traces and 126 startup cases, reviewed on 2026-10-12. The owner reducer's schedule test runs 6,720 orderings of admission, completion, expiry, stand-down, cutoff and idle ticks.
+The election reducers' comparison with the code they replaced is in `docs/daemon-measurements.md`. `tests/test_daemon_owner_core.py::test_every_schedule_keeps_admission_and_retirement_apart` enumerates the owner reducer's orderings of admission, completion, expiry, stand-down, cutoff and idle ticks.
