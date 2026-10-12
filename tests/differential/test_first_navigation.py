@@ -957,6 +957,27 @@ def test_a_close_after_the_machine_slept_is_not_unexpected(tmp_path, monkeypatch
     assert root["ended"] == "after-close-request"
 
 
+def test_a_wall_clock_set_back_leaves_the_order_open(tmp_path, monkeypatch):
+    lifetimes = LifetimeSampler(
+        tmp_path / BROWSER_LIFETIMES_FILE, profile=tmp_path / "profile", label="back"
+    )
+    lifetimes._track((4242, 1.0), "browser-root", 0.0)
+    alive = SimpleNamespace(
+        children=lambda recursive: [_listed(4242, lambda: "running")]
+    )
+    gone = SimpleNamespace(children=lambda recursive: [])
+    asked = time.time()
+    # Seen alive after the close was asked for, then gone once the clock is set
+    # back past the request.
+    lifetimes._sample(psutil, alive)
+    real = time.time
+    monkeypatch.setattr(time, "time", lambda: real() - 60)
+    lifetimes._sample(psutil, gone)
+    lifetimes.stop(exc=None, requested={"browser-root": asked})
+    (root,) = _record(tmp_path / BROWSER_LIFETIMES_FILE)["processes"]
+    assert root["ended"] == "ambiguous"
+
+
 def test_a_death_read_during_a_sample_is_not_ordered_before_a_close(tmp_path):
     lifetimes = LifetimeSampler(
         tmp_path / BROWSER_LIFETIMES_FILE, profile=tmp_path / "profile", label="order"

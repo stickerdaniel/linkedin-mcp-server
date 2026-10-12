@@ -807,6 +807,7 @@ class LifetimeSampler:
         #: Whether the latest sample read every descendant. Only that one says
         #: what is alive at the stop; an earlier gap was settled by later ones.
         self._complete = False
+        self._last_wall = self._began_wall
         self.document: dict[str, Any] = {
             "label": label,
             "began_wall": self._began_wall,
@@ -824,6 +825,7 @@ class LifetimeSampler:
             "processes": [],
             "dropped_processes": 0,
             "write_failures": 0,
+            "wall_clock_stepped_back": False,
         }
         self._persist()
 
@@ -914,6 +916,12 @@ class LifetimeSampler:
             return
         now = self._ms()
         wall = time.time()
+        with self._lock:
+            # A wall clock set back puts a later observation before an earlier
+            # request, so no end can be ordered against a close from then on.
+            if wall < self._last_wall:
+                self.document["wall_clock_stepped_back"] = True
+            self._last_wall = wall
         alive: set[tuple[int, float]] = set()
         changed = False
         truncated = False
@@ -1090,7 +1098,7 @@ class LifetimeSampler:
         asked = requested.get(record["role"])
         if asked is None:
             return "unexpected"
-        if record.get("order_uncertain"):
+        if record.get("order_uncertain") or self.document["wall_clock_stepped_back"]:
             return "ambiguous"
         if record["gone_wall"] <= asked:
             return "unexpected"
