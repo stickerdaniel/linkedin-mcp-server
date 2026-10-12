@@ -12,11 +12,13 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from typing import Any
 
 import psutil
 import pytest
 
+from differential import harness
 from differential.crash_contender import ACTOR, FREE, HELD, Contender
 from differential.crash_overlap import (
     BROWSER,
@@ -29,6 +31,7 @@ from differential.crash_overlap import (
     OVERLAP,
     ROW,
     crash_reading,
+    lane_failures,
     o1_findings,
     problems_for,
 )
@@ -39,6 +42,8 @@ MS = 1_000_000
 KILL = 1_800_000_000 * 10**9
 #: When the old processes began, long before the kill.
 OLD = 1_799_999_000.0
+#: The old browser's root.
+ROOT = 10
 
 
 def _at(ms: float) -> float:
@@ -71,21 +76,41 @@ def _life(
     }
 
 
-def _run(state: str, first: float, last: float) -> dict[str, Any]:
+def _run(state: str, at: float) -> dict[str, Any]:
     return {
         "state": state,
         "reason": None,
-        "first_wall_ns": KILL + int(first * MS),
-        "last_wall_ns": KILL + int(last * MS),
+        "first_wall_ns": KILL + int(at * MS),
+        "last_wall_ns": KILL + int(at * MS),
         "first_ns": 0,
         "last_ns": 0,
         "count": 1,
     }
 
 
-#: The lease held before the kill, seen free 60 ms after it, and taken again
-#: by the successor.
-LEASE = [_run(HELD, -500, -1), _run(FREE, 60, 2900), _run(HELD, 2950, 6000)]
+#: The lease held before the kill and granted once, 60 ms after it.
+LEASE = [_run(HELD, -500), _run(FREE, 60)]
+#: How long that one grant held the lease.
+HOLD_NS = 100_000
+
+
+def _history(watched: list[dict[str, Any]], successor: float | None) -> list[list[Any]]:
+    """``harness.browser_processes`` for *watched*: each old browser process
+    in the old root's tree, gone when the contender saw it gone."""
+    history = [
+        [
+            entry["pid"],
+            entry["start"],
+            None if entry["gone_wall_ns"] is None else entry["gone_wall_ns"] / 1e9,
+            ROOT,
+            OLD,
+        ]
+        for entry in watched
+        if entry["kind"] in (BROWSER_ROOT, BROWSER)
+    ]
+    if successor is not None:
+        history.append([20, _at(successor), None, 20, _at(successor)])
+    return history
 
 
 def _record(
@@ -93,8 +118,9 @@ def _record(
     *,
     successor: float | None = 3000,
     lease: list[dict[str, Any]] = LEASE,
+    hold_ns: int | None = HOLD_NS,
     ready: float = -500,
-    untracked: list[dict[str, Any]] | None = None,
+    history: list[list[Any]] | None = None,
     platform: str = "win32",
 ) -> dict[str, Any]:
     """A daemon record whose successor's root began *successor* ms after the
@@ -104,7 +130,7 @@ def _record(
         for entry in watched
         if entry["kind"] != ACTOR
     ]
-    roots: list[list[Any]] = [[10, OLD, _at(45), 3, OLD]]
+    roots: list[list[Any]] = [[ROOT, OLD, _at(45), 3, OLD]]
     if successor is not None:
         roots.append([20, _at(successor), _at(9000), 4, _at(1000)])
     return {
@@ -120,16 +146,19 @@ def _record(
             {"tool": "get_feed", "outcome": "returned", "read_the_post": True},
         ],
         "browser_roots": roots,
+        "browser_processes": (
+            _history(watched, successor) if history is None else history
+        ),
         "contended": {
             "role": "owner",
             "actor": {"pid": 2, "start": OLD},
             "armed": armed,
-            "untracked": untracked or [],
             "kill": {"wall_ns": KILL, "monotonic_ns": 1, "exit": "killed"},
             "contender": {
                 "error": None,
                 "ready": {"state": HELD, "wall_ns": KILL + int(ready * MS), "ns": 0},
                 "lease": lease,
+                "hold_ns": hold_ns,
                 "watched": watched,
             },
         },
@@ -142,7 +171,7 @@ def _settled_tree() -> list[dict[str, Any]]:
     return [
         _life(2, ACTOR, alive=-1, gone=5),
         _life(3, OTHER, alive=30, gone=35),
-        _life(10, BROWSER_ROOT, alive=38, gone=42),
+        _life(ROOT, BROWSER_ROOT, alive=38, gone=42),
         _life(11, BROWSER, alive=80, gone=85),
         _life(12, BROWSER, alive=110, gone=118),
     ]
@@ -199,6 +228,21 @@ def test_a_member_seen_alive_within_a_clock_tick_of_the_successor_decides_nothin
     assert "old browser process 12" in reading.reasons[0]
 
 
+def test_a_member_gone_within_what_the_grant_could_postpone_decides_nothing():
+    # Gone 95 ms before the successor's root: a successor the contender's one
+    # grant refused waits a poll, so without it this member could have been
+    # beside the successor.
+    tree = _settled_tree()
+    tree[4] = _life(12, BROWSER, alive=2900, gone=2905)
+    reading = crash_reading(_record(tree))
+    assert reading.verdict == INCONCLUSIVE, reading
+    assert "old browser process 12" in reading.reasons[0]
+    # A grant that was not timed bounds nothing.
+    untimed = crash_reading(_record(_settled_tree(), hold_ns=None))
+    assert untimed.verdict == INCONCLUSIVE
+    assert "not timed" in untimed.reasons[0]
+
+
 def test_a_member_never_watched_keeps_no_overlap_from_being_claimed():
     tree = _settled_tree()
     tree[4] = _life(12, BROWSER, alive=None, gone=None, opened=False)
@@ -208,15 +252,59 @@ def test_a_member_never_watched_keeps_no_overlap_from_being_claimed():
         12, BROWSER, alive=None, gone=-700, opened=False, gone_before_watched=True
     )
     assert crash_reading(_record(tree)).verdict == NO_OVERLAP
-    late = {"pid": 13, "start": _at(-200), "ppid": 10, "kind": BROWSER}
-    reading = crash_reading(_record(_settled_tree(), untracked=[late]))
-    assert reading.verdict == INCONCLUSIVE
-    assert "never watched" in reading.reasons[0]
+
+
+def _events(*, late: bool) -> list[dict[str, Any]]:
+    """The watcher's records of the old browser and the successor's. Members
+    carry no ``--user-data-dir`` here, as a Chromium child need not; *late*
+    adds a renderer the old root started after the row read its tree, alive
+    past the successor's root."""
+
+    def start(actor: str, pid: int, ppid: int, at: float) -> dict[str, Any]:
+        return {
+            "kind": "process.start",
+            "actor": actor,
+            "in_row": True,
+            "pid": pid,
+            "ppid": ppid,
+            "start_identity": at,
+            "t": at,
+        }
+
+    def exit_(pid: int, at: float, gone: float) -> dict[str, Any]:
+        return {"kind": "process.exit", "pid": pid, "start_identity": at, "t": gone}
+
+    events = [
+        start("browser", ROOT, 3, OLD),
+        start("other", 11, ROOT, OLD),
+        start("other", 12, ROOT, OLD),
+        start("browser", 20, 4, _at(3000)),
+        exit_(ROOT, OLD, _at(45)),
+        exit_(11, OLD, _at(90)),
+        exit_(12, OLD, _at(120)),
+    ]
+    if late:
+        events += [start("other", 13, ROOT, _at(-200)), exit_(13, _at(-200), _at(3500))]
+    return events
+
+
+def test_an_old_member_the_row_never_watched_keeps_no_overlap_from_being_claimed():
+    # Started after the row read the tree and before the kill: in no snapshot
+    # and no watch list, only in the watcher's completed history.
+    clean = _settled_tree()
+    history = harness.browser_processes(_events(late=False))
+    assert crash_reading(_record(clean, history=history)).verdict == NO_OVERLAP
+    history = harness.browser_processes(_events(late=True))
+    reading = crash_reading(_record(clean, history=history))
+    assert reading.verdict == INCONCLUSIVE, reading
+    assert "old browser process 13" in reading.reasons[0]
+    # Without the history nothing says the watch list was whole.
+    assert crash_reading(_record(clean, history=[])).verdict == INCONCLUSIVE
 
 
 def test_a_contender_not_armed_before_the_kill_decides_nothing():
     assert crash_reading(_record(_lingering_member(), ready=10)).verdict == INCONCLUSIVE
-    free = [_run(FREE, -500, 2900), _run(HELD, 2950, 6000)]
+    free = [_run(FREE, -500)]
     assert crash_reading(_record(_settled_tree(), lease=free)).verdict == INCONCLUSIVE
 
 
@@ -243,6 +331,30 @@ def test_only_an_overlap_the_daemon_alone_shows_is_an_o1_finding():
     assert o1_findings(None, clean) != []
 
 
+def test_a_second_root_is_the_comparisons_and_an_unhealthy_watcher_still_fails():
+    single = harness.RowVector(
+        mode="direct",
+        o1_single_browser=True,
+        browser_seen=True,
+        watcher_healthy=True,
+        o4_session=harness.RETAINED,
+        origin_saw_feed=True,
+        feed_carried_session=True,
+        tool_succeeded=True,
+        owner_published=False,
+        fell_back=False,
+        host_exit_clean=True,
+        cleanup_clean=True,
+    )
+    assert harness.row_expectations(single) == []
+    # Two roots in one sample: an overlap in both lanes is a measurement.
+    second = replace(single, o1_single_browser=False)
+    assert harness.row_expectations(second) != []
+    assert lane_failures(harness.row_expectations(second)) == []
+    blind = replace(second, watcher_healthy=False)
+    assert lane_failures(harness.row_expectations(blind)) != []
+
+
 def test_the_row_verdict_fails_an_undecided_lane_and_records_an_overlap():
     assert problems_for(_record(_lingering_member()), daemon=True) == []
     assert problems_for(_record(_settled_tree()), daemon=True) == []
@@ -260,13 +372,14 @@ def lease(tmp_path):
     held = get_profile_lease(tmp_path / "auth" / "profile")
     assert held.try_acquire()
     yield held
-    if held.held:
+    while held.held:
         held.release()
 
 
-def test_the_contender_sees_the_lease_come_free_and_a_watched_process_end(
+def test_the_contender_takes_the_lease_once_and_sees_a_watched_process_end(
     tmp_path, lease
 ):
+    # Ended and reaped, though on Windows this Popen still holds its handle.
     ended = subprocess.Popen([sys.executable, "-c", "pass"])
     ended_start = psutil.Process(ended.pid).create_time()
     ended.wait()
@@ -289,9 +402,14 @@ def test_the_contender_sees_the_lease_come_free_and_a_watched_process_end(
         released = time.time_ns()
         lease.release()
         time.sleep(0.2)
+        # Granted once, the contender never asks again: the product takes
+        # the lease and holds it with nobody refused or counted.
+        assert lease.try_acquire()
+        time.sleep(0.2)
+        before_kill = time.time_ns()
         child.kill()
         child.wait()
-        killed = time.time_ns()
+        after_wait = time.time_ns()
         time.sleep(0.2)
         result = contender.stop(15.0)
     finally:
@@ -299,13 +417,18 @@ def test_the_contender_sees_the_lease_come_free_and_a_watched_process_end(
         child.wait()
         contender.end(5.0)
     assert result["error"] is None, result
-    assert [run["state"] for run in result["lease"]] == [HELD, FREE]
+    assert [(run["state"], run["count"]) for run in result["lease"]] == [
+        (HELD, result["lease"][0]["count"]),
+        (FREE, 1),
+    ]
     assert result["lease"][1]["first_wall_ns"] >= released
+    assert 0 < result["hold_ns"] < 200 * MS
     watched, gone = result["watched"]
     assert watched["opened"] is True and watched["verified"] is not False
-    assert watched["last_alive_wall_ns"] < killed <= watched["gone_wall_ns"]
+    assert watched["last_alive_wall_ns"] < after_wait
+    assert before_kill <= watched["gone_wall_ns"]
+    assert watched["last_alive_wall_ns"] < watched["gone_wall_ns"]
     assert gone["gone_before_watched"] is True
     assert gone["gone_wall_ns"] < released
-    # Nothing announced, and nothing held: the product takes the lease again.
+    # Nothing announced.
     assert not (lease.auth_root / "profile.handoff").exists()
-    assert lease.try_acquire()

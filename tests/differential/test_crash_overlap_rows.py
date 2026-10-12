@@ -8,7 +8,8 @@ overlap, no overlap or inconclusive, with the milliseconds from the kill to
 the lease seen free, to the last old process seen gone and to the
 successor's root; it is printed and kept beside the row as ``reading.json``.
 An inconclusive lane fails. The comparison fails only on an overlap K3 shows
-and K1 does not (``o1_findings``). K2 is not applicable.
+and K1 does not (``o1_findings``); a second root the watcher saw is that
+comparison's, not a lane's failure (``lane_failures``). K2 is not applicable.
 
 Native, like ``test_owner_loss_rows``: only where CI opted in after trusting
 the CA, never under xdist, in file order.
@@ -36,6 +37,7 @@ from differential.crash_overlap import (
     ROW,
     Reading,
     crash_reading,
+    lane_failures,
     o1_findings,
 )
 from differential.events import EventLog
@@ -122,7 +124,7 @@ async def _run(
 def _recorded(result: RowResult) -> None:
     assert result.record is not None
     assert result.record["k2"] == K2_NOT_APPLICABLE
-    assert not result.failures, result.report()
+    assert not lane_failures(result.failures), result.report()
 
 
 @pytest.mark.differential_row(row=ROW, experiment="K1", column="integrated")

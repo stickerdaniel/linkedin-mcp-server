@@ -6,17 +6,21 @@ asynchronously, so the lock may come free while the old browser still runs.
 ``lease_probe`` asks once and only on POSIX. This one asks continuously, from
 before the kill, with the primitive the product takes on each platform
 (``profile_lease.try_lock``): ``LockFileEx``, exclusive and fail-immediately,
-on byte 0 on Windows, and ``flock``, exclusive and non-blocking, on POSIX. A
-grant is released at once, and the longest hold is recorded.
+on byte 0 on Windows, and ``flock``, exclusive and non-blocking, on POSIX.
+
+It asks until the first grant and never again. A grant is the real exclusive
+lease until it is given back, so a successor asking in that window is refused
+and waits one poll of its own; one grant bounds that delay, and its hold is
+recorded so the verdict can allow for it (``crash_overlap``).
 
 The helper runs as its own process with no site processing, like
 ``lease_probe``. It opens the existing lock file once, never creating,
 truncating or announcing anything, and a handle to each process it is told to
 watch, checked against the creation time the harness read. Then, every
 ``interval`` until the stop file appears or its deadline passes, it asks for
-the lock and asks each watched process whether it has ended, and stamps each
-answer. Equal consecutive lock answers fold into one run, so the record stays
-small however long the helper ran.
+the lock, until it is first granted, and asks each watched process whether
+it has ended, and stamps each answer. Equal consecutive lock answers fold
+into one run, so the record stays small however long the helper ran.
 
 It holds no Job handle and must not. A handle to a kill-on-close Job keeps the
 Job open past its owner's death and postpones the termination being measured.
@@ -272,11 +276,16 @@ class _Watched:
         self.handle, self.verified, self.error, gone = backend.open_process(
             self.pid, self.start
         )
+        self.exit: int | None = None
+        if self.handle is not None and not gone and backend.ended(self.handle):
+            # Opened, but already ended: on Windows another handle to it, as
+            # its parent's, keeps an exited process open.
+            gone = True
+            self.exit = backend.exit_wall_ns(self.handle)
         self.last_alive: int | None = None
         # Gone before the first round, and so before any kill it races.
         self.gone_before_watched = gone
         self.gone: int | None = time.time_ns() if gone else None
-        self.exit: int | None = None
         self.unanswered = 0
 
     def observe(self, backend: Any) -> None:
@@ -350,8 +359,10 @@ def contend(config: Mapping[str, Any]) -> dict[str, Any]:
         "ready": None,
         "lease": [],
         "watched": [],
-        "probes": 0,
-        "max_hold_ns": 0,
+        "rounds": 0,
+        # How long the one grant held the lease, from before the request to
+        # after the unlock; None until granted.
+        "hold_ns": None,
         "max_gap_ns": 0,
         "ended": None,
         "error": None,
@@ -374,22 +385,22 @@ def contend(config: Mapping[str, Any]) -> dict[str, Any]:
         deadline = time.monotonic() + float(config["deadline"])
         previous: int | None = None
         while True:
-            state, reason, hold = backend.lock(fd)
-            _fold(found["lease"], state, reason)
-            if hold is not None:
-                found["max_hold_ns"] = max(found["max_hold_ns"], hold)
+            if found["hold_ns"] is None:
+                state, reason, found["hold_ns"] = backend.lock(fd)
+                _fold(found["lease"], state, reason)
             for each in watched:
                 each.observe(backend)
-            found["probes"] += 1
+            found["rounds"] += 1
             now = time.monotonic_ns()
             if previous is not None:
                 found["max_gap_ns"] = max(found["max_gap_ns"], now - previous)
             previous = now
             if found["ready"] is None:
+                first = found["lease"][0]
                 found["ready"] = {
-                    "state": state,
-                    "wall_ns": found["lease"][-1]["first_wall_ns"],
-                    "ns": found["lease"][-1]["first_ns"],
+                    "state": first["state"],
+                    "wall_ns": first["first_wall_ns"],
+                    "ns": first["first_ns"],
                     "unwatched": [each.pid for each in watched if each.handle is None],
                 }
                 _write(directory / READY_FILE, found["ready"])

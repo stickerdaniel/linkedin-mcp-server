@@ -15,8 +15,7 @@ After the warm-up read, with the browser live, the row:
 2. starts the contender (``crash_contender``) on the profile's real lock,
    watching the actor and each of those processes through a process handle
    and never a Job handle, and waits for its first answer, which must be
-   ``held``; then reads the tree again, so a member started meanwhile is
-   named untracked rather than missed;
+   ``held``;
 3. kills the actor through the handle the row tied it by;
 4. at once asks for a successor's browser: in K3 a read through the same
    host, whose frontend elects a successor owner; in K1 a fresh host's read,
@@ -24,14 +23,17 @@ After the warm-up read, with the browser live, the row:
 5. stops the contender once that read returned and a second passed.
 
 The verdict (``crash_reading``) reads the raw record alone, after the
-watcher's completed history added the browser roots: **overlap** when a
-successor root on the profile began while an old browser process, root or
-member, was still seen alive after it; **no overlap** when every old browser
-process was seen gone before the successor root began; **inconclusive**
-otherwise, a missing successor included. A lease seen free is never an O1
-finding by itself; it is reported as a number. The comparison
-(``o1_findings``) is the contract's O1: an overlap in K3 that K1 does not
-show. K2 is not applicable.
+watcher's completed history added every browser process and its tree's root
+(``harness.browser_processes``): **overlap** when a successor root on the
+profile began while an old browser process, root or member, was still seen
+alive after it; **no overlap** when every old browser process was seen gone
+before the successor root began, by more than the contender's one grant of
+the lease could have postponed it; **inconclusive** otherwise, a missing
+successor or an old process the row never watched included. The snapshots
+are not exhaustive; the history is. A lease seen free is never an O1 finding
+by itself; it is reported as a number. The comparison (``o1_findings``) is
+the contract's O1: an overlap in K3 that K1 does not show, the watcher's
+second root included (``lane_failures``). K2 is not applicable.
 """
 
 from __future__ import annotations
@@ -69,6 +71,7 @@ from differential.watcher import (
     read_arguments,
     user_data_dir,
 )
+from linkedin_mcp_server.profile_lease import _POLL_INTERVAL_SECONDS
 
 if TYPE_CHECKING:
     from differential.harness import RowContext
@@ -96,6 +99,12 @@ START_TOLERANCE_SECONDS = 0.05
 #: default Windows clock tick. An old process seen alive within it of the
 #: successor's creation is not shown concurrent.
 CLOCK_TOLERANCE_NS = 16_000_000
+#: How much later than its grant's hold the contender can have made the
+#: successor's lease: a successor refused during the grant asks again one
+#: poll later (``ProfileLease.acquire``), woken within a clock tick, and the
+#: contender never asks again. An old process seen gone within that of the
+#: successor's root might have outlived the successor without the contender.
+POSTPONED_NS = int(_POLL_INTERVAL_SECONDS * 1e9) + CLOCK_TOLERANCE_NS
 
 FEED_ARGUMENTS = {"num_posts": 1}
 
@@ -264,7 +273,7 @@ async def script(ctx: RowContext) -> None:
             deadline=CONTENDER_DEADLINE_SECONDS,
         )
         try:
-            await _race(ctx, contender, armed)
+            await _race(ctx, contender)
         finally:
             contended["contender"] = await ctx.run_owned(
                 "stop the contender",
@@ -278,16 +287,13 @@ async def script(ctx: RowContext) -> None:
                 ctx.retain("the crash contender", contender.end)
 
 
-async def _race(
-    ctx: RowContext, contender: Contender, armed: list[dict[str, Any]]
-) -> None:
+async def _race(ctx: RowContext, contender: Contender) -> None:
     """Arm the contender, kill the actor and ask for a successor at once."""
     record = ctx.record
     problems: list[str] = record["observation_problems"]
     contended = record["contended"]
     seams = ctx.owner_loss
     assert seams is not None
-    actor = contended["actor"]
     await ctx.run_owned("start the contender", contender.start, seconds=30.0)
     ready = await ctx.run_owned(
         "the contender's first answer",
@@ -302,19 +308,6 @@ async def _race(
             f"{ready!r}"
         )
         return
-    try:
-        now = await ctx.run_owned(
-            "the tree at the kill",
-            actor_tree,
-            actor["pid"],
-            actor["start"],
-            ctx.account.browser_key,
-            seconds=30.0,
-        )
-    except Exception as exc:  # noqa: BLE001 - the row's evidence
-        problems.append(f"{INVALID}the tree was not read again: {exc!r}")
-        return
-    contended["untracked"] = untracked(armed, now)
     _phase(ctx, "contender armed")
     kill: dict[str, Any] = {
         "wall_ns": time.time_ns(),
@@ -428,22 +421,31 @@ def _successor_root(
     return min(found, key=lambda root: root[1]) if found else None
 
 
-def _roots_missed(
+def _unarmed(
     record: Mapping[str, Any], kill: int, armed: Sequence[Mapping[str, Any]]
-) -> list[int]:
-    """Browser roots the watcher saw live at the kill that the row never armed."""
+) -> list[int] | None:
+    """The old browser processes, roots and members, that the watcher's
+    completed history (``harness.browser_processes``) does not show gone
+    before the kill and the row never armed; None without that history.
+
+    Old is in a tree whose root began before the kill, whenever the process
+    itself began: a member started after the row read the tree is old too.
+    """
+    history = _sequence(record.get("browser_processes"))
+    if not history:
+        return None
     missed = []
-    for raw in _sequence(record.get("browser_roots")):
-        root = _sequence(raw)
-        if len(root) < 3 or type(root[0]) is not int:
+    for raw in history:
+        entry = _sequence(raw)
+        if len(entry) < 5 or type(entry[0]) is not int:
             continue
-        start, gone = _number(root[1]), _number(root[2])
-        if start is None or start * 1e9 >= kill:
+        start, gone, root = _number(entry[1]), _number(entry[2]), _number(entry[4])
+        if start is None or root is None or root * 1e9 >= kill:
             continue
         if gone is not None and gone * 1e9 < kill:
             continue
-        if untracked(armed, [{"pid": root[0], "start": start}]):
-            missed.append(root[0])
+        if untracked(armed, [{"pid": entry[0], "start": start}]):
+            missed.append(entry[0])
     return missed
 
 
@@ -540,22 +542,25 @@ def crash_reading(record: Mapping[str, Any]) -> Reading:
             "no successor browser root began on the profile after the kill; a "
             "lease seen free alone is not an O1 finding",
         )
+    hold = _ns(contender.get("hold_ns"))
+    # Without the contender's grant the successor could have begun this early.
+    unpostponed = admitted - (hold or 0) - POSTPONED_NS
     reasons = [
-        f"old browser process {life.pid} ({life.kind}) is not shown gone before "
-        f"the successor's root began"
+        f"old browser process {life.pid} ({life.kind}) is not shown gone more "
+        f"than {_ms(admitted, unpostponed)} ms before the successor's root "
+        f"began, which the contender's grant could have postponed by that much"
         for life in browsers
-        if not (life.known and life.gone_by is not None and life.gone_by < admitted)
+        if not (life.known and life.gone_by is not None and life.gone_by < unpostponed)
     ]
+    if free_at is not None and hold is None:
+        reasons.append("the contender's grant of the lease was not timed")
+    unarmed = _unarmed(record, kill, armed)
+    if unarmed is None:
+        reasons.append("the watcher's history of browser processes is missing")
     reasons += [
-        f"old process {_mapping(entry).get('pid')} started after the row armed and "
-        f"was never watched"
-        for entry in _sequence(contended.get("untracked"))
-        if _mapping(entry).get("kind") != OTHER
-    ]
-    reasons += [
-        f"the watcher saw browser root {pid} live at the kill, which the row never "
-        f"armed"
-        for pid in _roots_missed(record, kill, armed)
+        f"the watcher saw old browser process {pid} live at the kill, which the "
+        f"row never watched"
+        for pid in unarmed or ()
     ]
     if reasons:
         return reading(INCONCLUSIVE, *reasons)
@@ -625,3 +630,13 @@ def o1_findings(direct: Reading | None, daemon: Reading | None) -> list[str]:
             f"{list(daemon.overlapping)}, which the frozen Direct server's did not"
         ]
     return []
+
+
+def lane_failures(failures: Sequence[str]) -> list[str]:
+    """A lane's row failures, less the watcher's second root on the profile:
+    the concurrency this row measures, which ``o1_findings`` judges between
+    the lanes. The watcher's health still fails on its own."""
+    # Here, not at the top: the harness imports this module for its rows.
+    from differential.harness import SECOND_BROWSER
+
+    return [failure for failure in failures if failure != SECOND_BROWSER]

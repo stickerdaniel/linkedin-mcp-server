@@ -3592,6 +3592,59 @@ def browser_lineage(observed: Iterable[dict[str, Any]]) -> list[list[Any]]:
     the watcher never saw that ancestor. A launch that read a page had a
     browser of its own, so this names which launch could have read what,
     whatever its process timing.
+    """
+    _, browsers, gone, parent_of = _lifetimes(observed)
+    roots = []
+    for key in sorted(browsers, key=lambda key: key[1]):
+        parent = parent_of(key)
+        if parent is not None and parent in browsers:
+            continue
+        launcher = parent_of(parent) if parent is not None else None
+        roots.append(
+            [
+                key[0],
+                key[1],
+                gone.get(key),
+                launcher[0] if launcher is not None else None,
+                launcher[1] if launcher is not None else None,
+            ]
+        )
+    return roots
+
+
+def browser_processes(observed: Iterable[dict[str, Any]]) -> list[list[Any]]:
+    """Every browser process the watcher saw this row's actors start, members
+    as well as roots, with its tree's root: ``[pid, start, gone, root pid,
+    root start]``. What a crash row holds an old browser's members to
+    (``crash_overlap``), where ``browser_lineage`` names the roots alone.
+
+    A process a browser started is a browser too, whatever its command line;
+    *gone* and the parent rule are ``browser_lineage``'s.
+    """
+    first, browsers, gone, parent_of = _lifetimes(observed)
+    root_of: dict[tuple[int, float], tuple[int, float]] = {}
+    for key in sorted(first, key=lambda key: key[1]):
+        parent = parent_of(key)
+        if parent is not None and parent in root_of:
+            root_of[key] = root_of[parent]
+        elif key in browsers:
+            root_of[key] = key
+    return [
+        [key[0], key[1], gone.get(key), *root]
+        for key, root in sorted(root_of.items(), key=lambda item: item[0][1])
+    ]
+
+
+def _lifetimes(
+    observed: Iterable[dict[str, Any]],
+) -> tuple[
+    dict[tuple[int, float], dict[str, Any]],
+    set[tuple[int, float]],
+    dict[tuple[int, float], float],
+    Callable[[tuple[int, float]], tuple[int, float] | None],
+]:
+    """The watcher's records by lifetime: each one's first record, the
+    browsers, when each was seen gone, and each one's parent.
 
     A lifetime is a browser if any record of it says so: a child sampled
     between fork and exec is first seen with its parent's command line and
@@ -3619,30 +3672,18 @@ def browser_lineage(observed: Iterable[dict[str, Any]]) -> list[list[Any]]:
             record.get("t"), (int, float)
         ):
             gone.setdefault(key, float(record["t"]))
+    by_pid: dict[int, list[float]] = {}
+    for pid, start in first:
+        by_pid.setdefault(pid, []).append(start)
 
-    def parent_of(
-        child: tuple[int, float],
-    ) -> tuple[int, float] | None:
+    def parent_of(child: tuple[int, float]) -> tuple[int, float] | None:
         ppid = first[child].get("ppid")
-        found = [key for key in first if key[0] == ppid and key[1] <= child[1]]
-        return max(found, key=lambda key: key[1]) if found else None
+        if type(ppid) is not int:
+            return None
+        starts = [start for start in by_pid.get(ppid, ()) if start <= child[1]]
+        return (ppid, max(starts)) if starts else None
 
-    roots = []
-    for key in sorted(browsers, key=lambda key: key[1]):
-        parent = parent_of(key)
-        if parent is not None and parent in browsers:
-            continue
-        launcher = parent_of(parent) if parent is not None else None
-        roots.append(
-            [
-                key[0],
-                key[1],
-                gone.get(key),
-                launcher[0] if launcher is not None else None,
-                launcher[1] if launcher is not None else None,
-            ]
-        )
-    return roots
+    return first, browsers, gone, parent_of
 
 
 def launch_lifetimes(
@@ -3770,6 +3811,10 @@ _LINEAGE_EXPECTED = {
 }
 
 
+#: ``row_expectations``' O1: two browser roots on the profile in one sample.
+SECOND_BROWSER = "O1: a second browser ran on the profile, or O1 is unknown"
+
+
 def row_expectations(
     vector: RowVector,
     *,
@@ -3795,7 +3840,7 @@ def row_expectations(
     if not vector.browser_seen:
         failures.append("the watcher never saw a browser on the row's profile")
     if not vector.o1_single_browser:
-        failures.append("O1: a second browser ran on the profile, or O1 is unknown")
+        failures.append(SECOND_BROWSER)
     if not vector.origin_saw_feed:
         failures.append("the synthetic origin logged no /feed/ request in the row")
     if not vector.feed_carried_session:
@@ -10187,6 +10232,7 @@ async def measure_host_quit_row(
         row_record["owner_processes"] = owners
         row_record["gate_processes"] = gates
         row_record["browser_roots"] = browser_lineage(observed_events)
+        row_record["browser_processes"] = browser_processes(observed_events)
         # Every server and frontend, each lifetime once: what a browser's
         # launcher is tied to the host that started it by.
         row_record["frontend_processes"] = frontend_lifetimes(
