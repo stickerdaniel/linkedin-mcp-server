@@ -3612,6 +3612,11 @@ def browser_lineage(observed: Iterable[dict[str, Any]]) -> list[list[Any]]:
     return roots
 
 
+#: Arguments only a Chromium process carries: a child's process type, and
+#: the profile every browser launch names.
+_CHROMIUM_MARKERS = ("--type=", "--user-data-dir")
+
+
 def browser_processes(observed: Iterable[dict[str, Any]]) -> list[list[Any]]:
     """Every browser process the watcher saw this row's actors start, members
     as well as roots, with its tree's root: ``[pid, start, gone, root pid,
@@ -3619,21 +3624,34 @@ def browser_processes(observed: Iterable[dict[str, Any]]) -> list[list[Any]]:
     (``crash_overlap``), where ``browser_lineage`` names the roots alone.
 
     A process a browser started is a browser too, whatever its command line;
-    *gone* and the parent rule are ``browser_lineage``'s. A process that runs
-    a root's image but reaches no tree, its parent never sampled, is listed
-    with no root, ``[pid, start, gone, None, None]``: a browser's helper
-    whose ancestry was lost is never dropped.
+    *gone* and the parent rule are ``browser_lineage``'s. A process that
+    reaches no tree, its parent never sampled, is listed with no root,
+    ``[pid, start, gone, None, None]``, when it could be a browser's helper
+    whose ancestry was lost: it runs a root's image, or its image was never
+    read and its command line carries a Chromium marker or was withheld.
     """
     observed = list(observed)
     first, browsers, gone, parent_of = _lifetimes(observed)
     # The image each lifetime last ran: the one it became, where it execs.
     image: dict[tuple[int, float], str] = {}
+    # Lifetimes whose command line may be a Chromium process's.
+    marked: set[tuple[int, float]] = set()
     for record in observed:
         pid, start, exe = (
             record.get(name) for name in ("pid", "start_identity", "exe")
         )
-        if type(pid) is int and isinstance(start, (int, float)) and exe:
-            image[(pid, float(start))] = str(exe)
+        if type(pid) is not int or not isinstance(start, (int, float)):
+            continue
+        key = (pid, float(start))
+        if exe:
+            image[key] = str(exe)
+        arguments = record.get("cmdline") or ()
+        if (
+            record.get("cmdline_withheld")
+            or record.get("profile")
+            or any(str(a).startswith(_CHROMIUM_MARKERS) for a in arguments)
+        ):
+            marked.add(key)
     root_of: dict[tuple[int, float], tuple[int | None, float | None]] = {}
     for key in sorted(first, key=lambda key: key[1]):
         parent = parent_of(key)
@@ -3645,7 +3663,7 @@ def browser_processes(observed: Iterable[dict[str, Any]]) -> list[list[Any]]:
         image[key] for key, root in root_of.items() if root == key and key in image
     }
     for key in first.keys() - root_of.keys():
-        if image.get(key) in roots:
+        if image.get(key) in roots or (key not in image and key in marked):
             root_of[key] = (None, None)
     return [
         [key[0], key[1], gone.get(key), *root]

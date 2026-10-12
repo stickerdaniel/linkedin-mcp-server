@@ -262,25 +262,27 @@ def test_a_member_never_watched_keeps_no_overlap_from_being_claimed():
 CHROME = "C:\\chrome\\chrome.exe"
 
 
-def _events(
-    *, late: bool, orphans: tuple[tuple[int, str, float, float], ...] = ()
-) -> list[dict[str, Any]]:
+#: A helper whose parent was never sampled: its record's fields over those
+#: of a renderer the old browser started 1 ms before the kill, alive to 3.5 s.
+Orphan = dict[str, Any]
+
+
+def _events(*, late: bool, orphans: tuple[Orphan, ...] = ()) -> list[dict[str, Any]]:
     """The watcher's records of the old browser and the successor's. Members
     carry no ``--user-data-dir`` here, as a Chromium child need not; *late*
     adds a renderer the old root started after the row read its tree, alive
-    past the successor's root. Each of *orphans*, ``(pid, image, began,
-    gone)`` in ms from the kill, is a helper whose parent was never sampled."""
+    past the successor's root. Each of *orphans* (``Orphan``) is a helper
+    whose parent, an old browser process, began and ended between samples."""
 
-    def start(
-        actor: str, pid: int, ppid: int, at: float, exe: str = CHROME
-    ) -> dict[str, Any]:
+    def start(actor: str, pid: int, ppid: int, at: float) -> dict[str, Any]:
         return {
             "kind": "process.start",
             "actor": actor,
             "in_row": True,
             "pid": pid,
             "ppid": ppid,
-            "exe": exe,
+            "exe": CHROME,
+            "cmdline": [CHROME, "--type=renderer"],
             "start_identity": at,
             "t": at,
         }
@@ -299,12 +301,11 @@ def _events(
     ]
     if late:
         events += [start("other", 13, ROOT, _at(-200)), exit_(13, _at(-200), _at(3500))]
-    for pid, exe, at, gone in orphans:
-        # Its parent, an old browser process, began and ended between samples.
-        events += [
-            start("other", pid, 13, _at(at), exe),
-            exit_(pid, _at(at), _at(gone)),
-        ]
+    for orphan in orphans:
+        fields = {"pid": 14, "began": -1, "gone": 3500, **orphan}
+        began, gone = _at(fields.pop("began")), _at(fields.pop("gone"))
+        record = {**start("other", 14, 13, began), **fields}
+        events += [record, exit_(record["pid"], began, gone)]
     return events
 
 
@@ -322,19 +323,26 @@ def test_an_old_member_the_row_never_watched_keeps_no_overlap_from_being_claimed
     assert crash_reading(_record(clean, history=[])).verdict == INCONCLUSIVE
 
 
-def test_a_helper_of_the_browsers_image_whose_parent_was_never_sampled_counts():
+def test_a_possible_helper_whose_parent_was_never_sampled_counts():
     # An old browser process started it and ended between two samples, so no
-    # tree reaches it; it ran the browser's image and outlived the successor.
-    def read(*orphan: tuple[int, str, float, float]) -> str:
-        history = harness.browser_processes(_events(late=False, orphans=orphan))
+    # tree reaches it, and it outlived the successor's root.
+    def read(**orphan: Any) -> str:
+        history = harness.browser_processes(_events(late=False, orphans=(orphan,)))
         return crash_reading(_record(_settled_tree(), history=history)).verdict
 
-    assert read((14, CHROME, -1, 3500)) == INCONCLUSIVE
+    assert read() == INCONCLUSIVE
+    # Born after the kill's stamp, which precedes the kill: still possibly old.
+    assert read(began=20) == INCONCLUSIVE
+    # Its image never read, its arguments a Chromium child's, or withheld.
+    assert read(exe=None) == INCONCLUSIVE
+    assert read(exe=None, cmdline=[], cmdline_withheld=True) == INCONCLUSIVE
     # Seen gone before the successor could have begun, it decides nothing.
-    assert read((14, CHROME, -1, 40)) == NO_OVERLAP
-    # Neither does another image, nor a process begun after the kill.
-    assert read((14, "C:\\node\\node.exe", -1, 3500)) == NO_OVERLAP
-    assert read((14, CHROME, 20, 3500)) == NO_OVERLAP
+    assert read(gone=40) == NO_OVERLAP
+    # Nor does another image, an unread one with no Chromium argument, or a
+    # process born after the successor's root, which alone owns its tree.
+    assert read(exe="C:\\node\\node.exe", cmdline=["node.exe"]) == NO_OVERLAP
+    assert read(exe=None, cmdline=["helper.exe", "--flag"]) == NO_OVERLAP
+    assert read(began=3100) == NO_OVERLAP
 
 
 def test_a_contender_not_armed_before_the_kill_decides_nothing():

@@ -31,8 +31,8 @@ profile began while an old browser process, root or member, was still seen
 alive after it; **no overlap** when every old browser process was seen gone
 before the successor root began, by more than the row waited for the grant
 before asking for it; **inconclusive** otherwise, a missing successor, an
-old process the row never watched and a process of the browser's image
-whose ancestry was lost included. The snapshots are not exhaustive; the
+old process the row never watched and a possible browser helper whose
+ancestry was lost included. The snapshots are not exhaustive; the
 history is. A lease seen free is never an O1 finding by itself; it is
 reported as a number. The comparison (``o1_findings``) is the contract's O1:
 an overlap in K3 that K1 does not show, the watcher's second root included
@@ -432,6 +432,7 @@ def _unarmed(
     record: Mapping[str, Any],
     kill: int,
     armed: Sequence[Mapping[str, Any]],
+    admitted: int,
     before: int,
 ) -> list[int] | None:
     """The old browser processes the watcher's completed history
@@ -439,9 +440,11 @@ def _unarmed(
 
     A root or member is old in a tree whose root began before the kill,
     whenever it began itself, and counts when not shown gone before the kill
-    and never armed. A process of the browser's image that history could not
-    put in any tree, begun before the kill, counts when not shown gone
-    *before* that, armed or not: its ancestry was lost, never its age.
+    and never armed. A possible helper that history could not put in any
+    tree counts when begun before the successor's root, which alone owns its
+    tree, and not shown gone *before* that, armed or not: its ancestry was
+    lost, and the kill's stamp precedes the kill, so its birth after the
+    stamp says nothing of whose it is.
     """
     history = _sequence(record.get("browser_processes"))
     if not history:
@@ -455,7 +458,7 @@ def _unarmed(
         if start is None:
             continue
         if root is None:
-            if start * 1e9 < kill and (gone is None or gone * 1e9 >= before):
+            if start * 1e9 < admitted and (gone is None or gone * 1e9 >= before):
                 missed.append(entry[0])
             continue
         if root * 1e9 >= kill or (gone is not None and gone * 1e9 < kill):
@@ -574,7 +577,7 @@ def crash_reading(record: Mapping[str, Any]) -> Reading:
         for life in browsers
         if not (life.known and life.gone_by is not None and life.gone_by < unpostponed)
     ]
-    unarmed = _unarmed(record, kill, armed, unpostponed)
+    unarmed = _unarmed(record, kill, armed, admitted, unpostponed)
     if unarmed is None:
         reasons.append("the watcher's history of browser processes is missing")
     reasons += [
