@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from typing import TYPE_CHECKING
 
 import mcp.types as mt
 
@@ -20,6 +21,9 @@ from linkedin_mcp_server.daemon.liveness import (
 )
 from linkedin_mcp_server.exceptions import BrowserBusyError
 from linkedin_mcp_server.profile_lease import get_profile_lease
+
+if TYPE_CHECKING:
+    from linkedin_mcp_server.daemon.discovery import Unanswered
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +42,15 @@ class SequentialToolExecutionMiddleware(Middleware):
     the last one to close silently overwrites the other's cookies.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, silent_owner: Unanswered | None = None) -> None:
+        """*silent_owner* is the shared owner a Direct server fell back from.
+
+        Its silence was seen once, at startup, so it explains only a lease wait
+        that fails, and only until this process first gets the lease: after
+        that, whoever holds the browser is not explained by it.
+        """
         self._lock = asyncio.Lock()
+        self._silent_owner = silent_owner
 
     async def _report_progress(
         self,
@@ -83,6 +94,21 @@ class SequentialToolExecutionMiddleware(Middleware):
             )
             return await self._run_owning_the_profile(context, call_next, tool_name)
 
+    def _busy_because(self) -> str | None:
+        """The busy text for a silent owner, or ``None`` for the default.
+
+        Worded as history, since nothing has asked the owner since startup.
+        """
+        silent = self._silent_owner
+        if silent is None:
+            return None
+        return (
+            "When this server started, the shared browser process "
+            f"(pid {silent.pid} at startup) did not respond in time. It may "
+            "still be holding the browser, so restarting only your MCP client "
+            "may not release it."
+        )
+
     async def _run_owning_the_profile(
         self,
         context: MiddlewareContext[mt.CallToolRequestParams],
@@ -115,7 +141,9 @@ class SequentialToolExecutionMiddleware(Middleware):
             # thrown in middleware does not pass through raise_tool_error, and
             # mask_error_details would otherwise hide the explanation.
             logger.info("Tool '%s' gave up waiting for the shared browser", tool_name)
-            raise ToolError(str(BrowserBusyError()))
+            raise ToolError(str(BrowserBusyError(self._busy_because())))
+        # For good: the startup observation no longer describes the holder.
+        self._silent_owner = None
 
         # After every wait this call can spend queued, and before the browser is
         # touched: the last point at which an owner can still decline work its

@@ -134,13 +134,16 @@ def _beating(monkeypatch, answer: Callable[[], Any]) -> None:
 
 
 async def _preflight_lines(monkeypatch, caplog, tmp_path, answer) -> list[str]:
-    from linkedin_mcp_server.daemon.proxy import FrontendCallHeartbeatMiddleware
+    from linkedin_mcp_server.daemon.proxy import (
+        FrontendCallHeartbeatMiddleware,
+        Responsiveness,
+    )
 
     _beating(monkeypatch, answer)
     attachment = _attachment(tmp_path)
     with caplog.at_level(logging.INFO, logger="linkedin_mcp_server.daemon.proxy"):
         await FrontendCallHeartbeatMiddleware(MagicMock())._preflight(
-            attachment, "v1." + "0" * 32
+            attachment, "v1." + "0" * 32, Responsiveness()
         )
     return _messages(caplog)
 
@@ -163,12 +166,15 @@ async def test_a_retiring_owners_preflight_refusal_reads_as_retiring(
             },
         )
 
-    from linkedin_mcp_server.daemon.proxy import FrontendCallHeartbeatMiddleware
+    from linkedin_mcp_server.daemon.proxy import (
+        FrontendCallHeartbeatMiddleware,
+        Responsiveness,
+    )
 
     _beating(monkeypatch, refused)
     with caplog.at_level(logging.INFO, logger="linkedin_mcp_server.daemon.proxy"):
         await FrontendCallHeartbeatMiddleware(MagicMock())._preflight(
-            attachment, "v1." + "0" * 32
+            attachment, "v1." + "0" * 32, Responsiveness()
         )
     attempts = attempts_in(_messages(caplog))
     assert attempts == [{"attempt": "preflight", "classification": "retiring"}]

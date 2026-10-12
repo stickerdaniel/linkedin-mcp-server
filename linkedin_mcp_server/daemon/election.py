@@ -48,6 +48,7 @@ from linkedin_mcp_server.daemon.discovery import (
     Attachment,
     OwnerLookup,
     OwnerState,
+    Unanswered,
     _DescriptorInspector,
     _DescriptorReadTimeout,
 )
@@ -132,10 +133,48 @@ class ElectionOutcome:
     #: Whether this process started the owner. Diagnostics only: an attachment
     #: is worth exactly the same either way.
     started_owner: bool = False
+    #: The generation the election's probes last found silent, if nothing it
+    #: saw since says otherwise (:class:`_ProbeWitness`). For the text a caller
+    #: reads; the election decided without it.
+    unanswered: Unanswered | None = None
 
     @property
     def worth_connecting(self) -> bool:
         return self.attachment_lookup.worth_connecting
+
+
+@dataclass
+class _ProbeWitness:
+    """What the election last heard from the published owner, beside the reducers.
+
+    Kept in the shell because a pass's finding cannot carry it: a silent probe
+    reports ``NOT_ANSWERED_YET``, and the pass after it, out of time, reports
+    ``NOT_PROBED`` and is the lookup the election returns. Nothing here is fed
+    back to a reducer.
+
+    A probe that ran out its positive budget records the probed generation. An
+    answer or a refusal clears it, as does a completed read naming another
+    generation. A pass that ends on the descriptor alone leaves it.
+    """
+
+    unanswered: Unanswered | None = None
+
+    def read(self, lookup: OwnerLookup) -> None:
+        attachment = lookup.attachment
+        if (
+            self.unanswered is not None
+            and attachment is not None
+            and attachment.descriptor.instance_id != self.unanswered.instance_id
+        ):
+            self.unanswered = None
+
+    def probed(self, attachment: Attachment, budget: float, reach: Reach) -> None:
+        if reach is not Reach.SILENT:
+            self.unanswered = None
+        elif budget > 0:
+            # Only a probe that started: `_reachable` answers a spent budget
+            # with SILENT without asking anybody.
+            self.unanswered = Unanswered.of(attachment)
 
 
 def obtain_owner(
@@ -158,6 +197,9 @@ def obtain_owner(
     Returns at once with a ``fallback`` set when an owner of this build with
     another configuration answers its one probe or stays silent through it:
     that owner is left alone and the caller drives its own browser.
+
+    The outcome's ``unanswered`` names the published generation its probes
+    last found silent, whatever the election decided.
     """
     # Frozen here because the first election is part of a frontend's own
     # startup: a package replaced later must show up as a difference against
@@ -167,6 +209,7 @@ def obtain_owner(
     inspector = _DescriptorInspector(auth_root, profile, config)
     # A copy, never the caller's own set: `_live_lookup` adds to it.
     buried = set(buried)
+    witness = _ProbeWitness()
     election, effects = election_core.elect(
         now=time.monotonic(),
         deadline_seconds=deadline_seconds,
@@ -182,7 +225,11 @@ def obtain_owner(
         [effect] = effects
         match effect:
             case election_core.Decide(lookup=lookup, started=started):
-                return ElectionOutcome(cast(OwnerLookup, lookup), started_owner=started)
+                return ElectionOutcome(
+                    cast(OwnerLookup, lookup),
+                    started_owner=started,
+                    unanswered=witness.unanswered,
+                )
             case election_core.Look(op=op, may_ask=may_ask, wait=wait, deadline=until):
                 found, asked, observed = _live_lookup(
                     auth_root,
@@ -194,6 +241,7 @@ def obtain_owner(
                     may_ask_for_turnover=may_ask,
                     wait_seconds=wait,
                     deadline=until,
+                    witness=witness,
                 )
                 event: election_core.Event = election_core.Looked(
                     op,
@@ -248,6 +296,7 @@ def _live_lookup(
     may_ask_for_turnover: bool = True,
     wait_seconds: float = 0.0,
     deadline: float,
+    witness: _ProbeWitness | None = None,
 ) -> tuple[OwnerLookup, bool, bool]:
     """Find an owner and prove it answers, or report it as leftovers.
 
@@ -260,9 +309,11 @@ def _live_lookup(
     Returns the lookup, whether turnover was requested, and whether the lookup
     came from a completed read, so settlement keeps its last concrete
     observation when a read times out. Written-off generations are added to
-    *buried*.
+    *buried*, and what each read and probe heard is told to *witness*.
     """
     del auth_root, profile, config  # carried by the reusable inspector
+    if witness is None:
+        witness = _ProbeWitness()
     state, effects = lookup_core.look(
         now=time.monotonic(),
         deadline=deadline,
@@ -288,12 +339,17 @@ def _live_lookup(
                         timed_out = str(exc)
                         event = lookup_core.ReadTimedOut(op, time.monotonic())
                     else:
+                        witness.read(read)
                         event = lookup_core.Read(op, time.monotonic(), _reading(read))
                 case lookup_core.Pause(op=op, seconds=seconds):
                     time.sleep(seconds)
                     event = lookup_core.Paused(op, time.monotonic())
                 case lookup_core.Probe(op=op, timeout=timeout):
-                    verdict = reach(_attachment(read), timeout)
+                    # Told here, while the probed pair is in hand: the finding
+                    # this pass concludes with no longer names it.
+                    probed = _attachment(read)
+                    verdict = reach(probed, timeout)
+                    witness.probed(probed, timeout, verdict)
                     event = lookup_core.Probed(op, time.monotonic(), verdict)
                 case lookup_core.AskToStandDown(because=because):
                     _turn_over(_attachment(read), because)

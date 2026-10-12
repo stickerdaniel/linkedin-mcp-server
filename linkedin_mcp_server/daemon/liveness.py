@@ -59,19 +59,23 @@ _ABANDONED = "Stopped because the client that asked for it stopped waiting"
 UNKNOWN_OUTCOME_STATUS = "outcome_unknown"
 
 
-def unknown_outcome(*, tool: str, reason: str) -> dict[str, Any]:
+def unknown_outcome(
+    *, tool: str, reason: str, owner: str = "went away"
+) -> dict[str, Any]:
     """The structured half of a call whose effect nobody can vouch for.
 
     Uses `linkedin.contracts.message_action_result`'s field names (`status`,
     `retry_safe`) without importing from `linkedin/`. `sent` and the other
     unknowns are omitted rather than null, since a null reads as "no". Used by
     the frontend when an owner vanished mid-call and by the owner when it cut a
-    call off to stand down.
+    call off to stand down. *owner* says what the shared browser process did;
+    the frontend replaces the default when the owner did not answer its
+    heartbeats, which says nothing about whether it is gone.
     """
     return {
         "status": UNKNOWN_OUTCOME_STATUS,
         "message": (
-            f"{tool} was in flight when the shared browser process went away "
+            f"{tool} was in flight when the shared browser process {owner} "
             f"({reason}). Whether the action reached LinkedIn is unknown. Check "
             "LinkedIn before calling again, because a repeat may perform the "
             "action a second time."

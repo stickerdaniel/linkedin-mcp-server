@@ -122,6 +122,32 @@ class Attachment:
 
 
 @dataclass(frozen=True)
+class Unanswered:
+    """An owner generation that did not answer a control request in time.
+
+    A control request or probe addressed to *instance_id* did not complete
+    within its positive budget, and nothing about whether a connection opened.
+    Two producers only: a heartbeat or preflight that ended in a read timeout
+    (``daemon.proxy``), and an election probe that ran out its budget
+    (``daemon.election``). Never a tool request, which can be slow while
+    heartbeats answer.
+
+    An observation for the text a caller reads, never a decision: nothing
+    buries, stops or repairs an owner on it, because a paused or busy owner
+    looks exactly like this and may answer a moment later.
+    """
+
+    instance_id: str
+    pid: int
+
+    @classmethod
+    def of(cls, attachment: Attachment) -> Unanswered:
+        """The generation *attachment* names, as found silent."""
+        descriptor = attachment.descriptor
+        return cls(descriptor.instance_id, descriptor.pid)
+
+
+@dataclass(frozen=True)
 class OwnerLookup:
     """The verdict, and the attachment when there is one."""
 

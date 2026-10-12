@@ -170,10 +170,13 @@ def _frontend_lines(sink: Callable[[str], None]) -> Iterator[None]:
 
 async def _preflight(attachment: Any) -> Any:
     """The frontend's real preflight against whatever answers *attachment*."""
-    from linkedin_mcp_server.daemon.proxy import FrontendCallHeartbeatMiddleware
+    from linkedin_mcp_server.daemon.proxy import (
+        FrontendCallHeartbeatMiddleware,
+        Responsiveness,
+    )
 
     return await FrontendCallHeartbeatMiddleware(MagicMock())._preflight(
-        attachment, "v1." + "0" * 32
+        attachment, "v1." + "0" * 32, Responsiveness()
     )
 
 

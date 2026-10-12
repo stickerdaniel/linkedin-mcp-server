@@ -314,6 +314,20 @@ Symbols are named relative to `linkedin_mcp_server`. Tests are named as
   A live call needs a stall roughly seventy times worse than anything measured,
   or three consecutive beats lost, before it is wrongly cancelled. Justifies
   `daemon.core.owner.EXPIRY_SECONDS`. Source `d69bcc8c`, 2026-08-01.
+- **A stopped owner is silent, not gone.** On macOS 27.0.1, a SIGSTOPped real
+  owner kept accepting connections, and every heartbeat to it ended in
+  `httpx2.ReadTimeout` 1.002 to 1.005 s into a 1 s budget, both before a call
+  was dispatched and while one was in flight. The election's probe found it
+  `SILENT`, and after SIGCONT the same pid answered within 6 ms and served the
+  call. An owner whose event loop was blocked, rather than stopped, timed out
+  the same way at 1.003 s. Three runs each. Justifies
+  `daemon.discovery.Unanswered` and counting only `ReadTimeout` as silence in
+  `daemon.proxy.Responsiveness`. Measured on `5bdef1c9` with the change that
+  adds these tests, 2026-10-12. Tests
+  `tests/test_daemon_silence.py::TestAStoppedRealOwner::test_stopped_before_the_call`,
+  `tests/test_daemon_silence.py::TestAStoppedRealOwner::test_stopped_after_the_request_left`
+  and
+  `tests/test_daemon_silence.py::TestABlockedOwnerLoop::test_a_blocked_owner_is_named_and_sent_nothing`.
 
 ## Auth repair
 

@@ -20,7 +20,7 @@ import asyncio
 import contextvars
 import logging
 from collections.abc import Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
@@ -37,6 +37,7 @@ from linkedin_mcp_server.daemon import owner as daemon_owner
 from linkedin_mcp_server.daemon.auth_repair import a_repeat_could_change_something
 from linkedin_mcp_server.daemon.core import call as call_core
 from linkedin_mcp_server.daemon.descriptor import PROTOCOL_VERSION
+from linkedin_mcp_server.daemon.discovery import Unanswered
 from linkedin_mcp_server.daemon.forwarder import (
     CallBinding,
     DispatchRecord,
@@ -65,11 +66,44 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-#: The dispatch record of the attempt :class:`FrontendCallMiddleware` is making,
-#: handed in to the binding the heartbeat middleware makes for it. Read back when
-#: the call's deadline cuts the attempt off, because only the forwarder's record
-#: says whether the tool request had left by then.
-_attempt_dispatch: contextvars.ContextVar[DispatchRecord | None] = (
+@dataclass
+class Responsiveness:
+    """Whether the owner one attempt is bound to answered its control requests.
+
+    One per attempt, written by its preflight and by the heartbeat task, which
+    runs as a task of its own: a context variable set there would never reach
+    the call. Shared by reference the way :class:`DispatchRecord` is, and read
+    once the call ends, so it outlives the attempt, a deadline cut included.
+
+    Only a read timeout records silence: the request was sent and nothing came
+    back in time. A refused, unwritten or never-pooled request is not the
+    owner's silence, and any answer at all clears it.
+    """
+
+    unanswered: Unanswered | None = None
+
+    def note(self, attachment: Attachment, failure: Exception | None = None) -> None:
+        """Note how one control request to *attachment* ended."""
+        if failure is None:
+            self.unanswered = None
+        elif isinstance(failure, httpx2.ReadTimeout):
+            self.unanswered = Unanswered.of(attachment)
+
+
+@dataclass(frozen=True)
+class _AttemptRecords:
+    """What the attempt :class:`FrontendCallMiddleware` is making writes to."""
+
+    dispatch: DispatchRecord = field(default_factory=DispatchRecord)
+    responsiveness: Responsiveness = field(default_factory=Responsiveness)
+
+
+#: The records of the attempt :class:`FrontendCallMiddleware` is making, handed
+#: in to the binding and the heartbeats the heartbeat middleware makes for it.
+#: Read back when the call ends, because only the forwarder's record says
+#: whether the tool request had left by a deadline, and only the heartbeats
+#: whether the owner was answering.
+_attempt_records: contextvars.ContextVar[_AttemptRecords | None] = (
     contextvars.ContextVar("linkedin_mcp_attempt", default=None)
 )
 
@@ -100,10 +134,23 @@ _ELECTIONS_PER_RECOVERY = 2
 
 
 @dataclass(frozen=True)
+class Recovery:
+    """What a recovery came to: the owner to use now, if any, and what it heard.
+
+    *unanswered* is the last joined election's own observation
+    (``ElectionOutcome.unanswered``), carried on the flight's result rather than
+    kept on the backend, so each caller reads the election it joined.
+    """
+
+    attachment: Attachment | None
+    unanswered: Unanswered | None = None
+
+
+@dataclass(frozen=True)
 class _Flight:
     """One election in progress, and which owners it was told to pass over."""
 
-    task: asyncio.Task[Attachment | None]
+    task: asyncio.Task[Recovery]
     buried: frozenset[str]
 
 
@@ -217,12 +264,13 @@ class DaemonProxyBackend:
         failed_instance: str,
         *,
         classification: OwnerFailure = OwnerFailure.UNREACHABLE,
-    ) -> Attachment | None:
+    ) -> Recovery:
         """Find an owner to replace *failed_instance*, at most once at a time.
 
-        Returns the attachment to use now, or ``None`` when none could be
-        established. A *classification* that buries the failed owner is
-        recorded first (:meth:`note_failure`).
+        Returns the attachment to use now, or none when none could be
+        established, with what the last election this caller joined heard. A
+        *classification* that buries the failed owner is recorded first
+        (:meth:`note_failure`).
 
         - The identity check comes first, so the other calls failing against an
           owner already replaced do not each elect again.
@@ -241,8 +289,9 @@ class DaemonProxyBackend:
         current = self._attachment.descriptor.instance_id
         if current != failed_instance and current not in self._unusable:
             # Somebody already replaced it. Nothing to do but use the answer.
-            return self._attachment
+            return Recovery(self._attachment)
 
+        heard: Unanswered | None = None
         for _ in range(_ELECTIONS_PER_RECOVERY):
             flight = self._electing
             if flight is None:
@@ -253,7 +302,11 @@ class DaemonProxyBackend:
                 flight = _Flight(asyncio.create_task(self._elect(buried)), buried)
                 self._electing = flight
             # Shielded so this caller's deadline cannot cancel the shared election.
-            found = await asyncio.shield(flight.task)
+            elected = await asyncio.shield(flight.task)
+            # Read off this caller's own flight, never `_electing`, which may
+            # already name a later one. The last election joined is the word.
+            heard = elected.unanswered
+            found = elected.attachment
             if found is not None and found.descriptor.instance_id in self._unusable:
                 found = None
             if found is not None:
@@ -264,15 +317,15 @@ class DaemonProxyBackend:
                     # A token is minted per instance and never changes, so the
                     # same instance comes back with the same token that was just
                     # refused. Another attempt would only be refused again.
-                    return None
-                return found
+                    return Recovery(None, heard)
+                return Recovery(found, heard)
             if self._unusable.keys() <= flight.buried:
                 # The election knew everything this caller knows. Its answer
                 # stands, and asking again would get the same one.
-                return None
-        return None
+                return Recovery(None, heard)
+        return Recovery(None, heard)
 
-    async def _elect(self, buried: frozenset[str]) -> Attachment | None:
+    async def _elect(self, buried: frozenset[str]) -> Recovery:
         """Run one election and adopt what it finds, unless it is written off."""
         from linkedin_mcp_server.daemon.election import obtain_owner
 
@@ -291,7 +344,7 @@ class DaemonProxyBackend:
                 "Could not elect a replacement for the shared browser owner",
                 exc_info=True,
             )
-            return None
+            return Recovery(None)
         finally:
             # Only after the worker has ended, and only if this is still the
             # registered flight: a caller that timed out may already have left,
@@ -300,25 +353,26 @@ class DaemonProxyBackend:
             if flight is not None and flight.task is asyncio.current_task():
                 self._electing = None
 
+        heard = outcome.unanswered
         found = outcome.attachment_lookup.attachment
         if not outcome.worth_connecting or found is None or found.control_only:
             logger.warning(
                 "No shared browser owner could be established (%s)",
                 outcome.attachment_lookup.state.value,
             )
-            return None
+            return Recovery(None, heard)
 
         # Against the latest set, not the snapshot the election ran with: an
         # owner written off while it ran must not become the one every new call
         # is sent to.
         if found.descriptor.instance_id in self._unusable:
             logger.info("The election found an owner already written off")
-            return None
+            return Recovery(None, heard)
 
         if found.descriptor.instance_id != self._attachment.descriptor.instance_id:
             logger.info("Attached to a replacement shared browser owner")
             self._attachment = found
-        return found
+        return Recovery(found, heard)
 
 
 #: What a client is told once recovery has ended without an owner to forward to.
@@ -330,24 +384,46 @@ _OWNER_LOST = (
 )
 
 
-def _owner_lost_from_a_listing() -> MCPError:
+def _owner_lost(unanswered: Unanswered | None) -> str:
+    """What a client is told once recovery has ended without an owner.
+
+    With *unanswered*, the owner was there and did not respond, which a client
+    restart does not touch: the owner is detached and keeps the browser. Never
+    "stuck" or "dead", which nothing here can tell apart from paused or busy.
+    """
+    if unanswered is None:
+        return _OWNER_LOST
+    return (
+        f"The shared browser process (pid {unanswered.pid}) did not respond. "
+        "It may still hold the browser, so restarting only your MCP client may "
+        "not release it."
+    )
+
+
+def _owner_lost_from_a_listing(unanswered: Unanswered | None) -> MCPError:
     """The listing failure a client of either protocol era can read.
 
     An ``MCPError``, the one exception the SDK carries to the wire as it is; on
     a 2026-07-28 connection anything else becomes ``Internal server error``.
     No listing handler converts a ``ToolError``.
     """
-    return MCPError(code=mt.INTERNAL_ERROR, message=_OWNER_LOST)
+    return MCPError(code=mt.INTERNAL_ERROR, message=_owner_lost(unanswered))
 
 
-def _owner_lost_from_a_call() -> ToolError:
+def _owner_lost_from_a_call(
+    unanswered: Unanswered | None, *, nothing_was_sent: bool
+) -> ToolError:
     """The tool call failure a client of either protocol era can read.
 
     A ``ToolError``, which FastMCP's ``tools/call`` handler turns into an error
     result a model reads in both eras; an ``MCPError`` would leave the handler
-    as a protocol error.
+    as a protocol error. *nothing_was_sent* is said only beside the silence,
+    where a user deciding whether to retry has no other way to know it.
     """
-    return ToolError(_OWNER_LOST)
+    message = _owner_lost(unanswered)
+    if unanswered is not None and nothing_was_sent:
+        message += " Nothing was sent."
+    return ToolError(message)
 
 
 @dataclass(frozen=True)
@@ -360,6 +436,18 @@ class _Lost:
 
     caught: Exception
     failure: OwnerUnreachableError
+
+
+@dataclass
+class _LastHeard:
+    """What one call last heard of its owner's silence, for its final answer.
+
+    The latest attempt's record, until a recovery completes and its election's
+    observation takes over. Kept by the call rather than the attempt, so a
+    call the deadline cut off still reads what its heartbeats heard.
+    """
+
+    record: Responsiveness = field(default_factory=Responsiveness)
 
 
 class _OutOfTime(Exception):
@@ -430,6 +518,8 @@ class FrontendCallMiddleware(Middleware):
 
         Only a failure recognised as the owner's becomes
         :func:`_owner_lost_from_a_listing`; anything else leaves as it arrived.
+        A listing sends no heartbeat, so only the recovery's election can have
+        found the owner silent.
         """
         try:
             return await call_next(context)
@@ -438,11 +528,11 @@ class FrontendCallMiddleware(Middleware):
             if failure is None:
                 raise
             logger.info("Listing failed against a departed owner; looking for another")
-            replacement = await self._proxy_backend.recover(
+            recovery = await self._proxy_backend.recover(
                 failure.instance_id, classification=failure.classification
             )
-            if replacement is None:
-                raise _owner_lost_from_a_listing() from exc
+            if recovery.attachment is None:
+                raise _owner_lost_from_a_listing(recovery.unanswered) from exc
         # Unconditional, because listing changes nothing on LinkedIn. There is
         # no effect a second one could repeat.
         try:
@@ -450,7 +540,7 @@ class FrontendCallMiddleware(Middleware):
         except Exception as again:
             if unreachable_owner_in(again) is None:
                 raise
-            raise _owner_lost_from_a_listing() from again
+            raise _owner_lost_from_a_listing(recovery.unanswered) from again
 
     async def on_list_tools(
         self, context: MiddlewareContext[Any], call_next: CallNext[Any, Any]
@@ -483,6 +573,7 @@ class FrontendCallMiddleware(Middleware):
             budget=self._call_budget,
             sign_in_share=AUTH_REPAIR_LOGIN_WAIT_FRACTION,
         )
+        heard = _LastHeard()
         while True:
             waiting: call_core.Effect | None = None
             for effect in effects:
@@ -495,14 +586,18 @@ class FrontendCallMiddleware(Middleware):
                         lost.instance_id, lost.classification
                     )
                 elif isinstance(effect, call_core.TERMINAL):
-                    return self._finish(context, effect)
+                    return self._finish(
+                        context, effect, call.dispatch, heard.record.unanswered
+                    )
                 else:
                     waiting = effect
             if waiting is None:
                 raise AssertionError(
                     f"the call core left the call waiting on {effects}"
                 )
-            event = await self._carry_out(waiting, call.deadline, context, call_next)
+            event = await self._carry_out(
+                waiting, call.deadline, context, call_next, heard
+            )
             call, effects = call_core.on_event(call, event)
 
     async def _carry_out(
@@ -511,6 +606,7 @@ class FrontendCallMiddleware(Middleware):
         deadline: float,
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+        heard: _LastHeard,
     ) -> call_core.Event:
         """Run one effect until it completes or *deadline*, and say which."""
         loop = asyncio.get_running_loop()
@@ -523,16 +619,22 @@ class FrontendCallMiddleware(Middleware):
                         )
                     elif kind is call_core.AttemptKind.REPLAY:
                         logger.info("Signed in; running the call again")
-                    return await self._attempt(op, deadline, context, call_next)
+                    return await self._attempt(op, deadline, context, call_next, heard)
                 case call_core.Recover(op=op, owner=owner, failure=failure):
-                    found = await _by(
+                    recovery = await _by(
                         deadline,
                         self._proxy_backend.recover(
                             owner,
                             classification=cast(_Lost, failure).failure.classification,
                         ),
                     )
-                    return call_core.Recovered(op, loop.time(), found is not None)
+                    # Completed, so its election's word replaces the attempt's,
+                    # an empty one included: it may have seen the owner answer
+                    # or refuse. Cut off by the deadline, it says nothing.
+                    heard.record = Responsiveness(recovery.unanswered)
+                    return call_core.Recovered(
+                        op, loop.time(), recovery.attachment is not None
+                    )
                 case call_core.Classify(op=op):
                     # A fresh forwarded listing, the forwarder keeps no
                     # component cache, and the call's own, so it is cut
@@ -570,21 +672,24 @@ class FrontendCallMiddleware(Middleware):
         deadline: float,
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+        heard: _LastHeard,
     ) -> call_core.Event:
         """One attempt, through the heartbeat middleware and the provider.
 
-        The attempt's dispatch record is handed in so the binding made below
-        writes to it. When the deadline cuts the attempt off, that record is
-        the only proof of whether its tool request had left.
+        The attempt's records are handed in so the binding and the heartbeats
+        made below write to them. When the deadline cuts the attempt off, the
+        dispatch record is the only proof of whether its tool request had left.
+        A fresh pair per attempt, so a retry starts from nothing heard.
         """
         loop = asyncio.get_running_loop()
-        record = DispatchRecord()
-        handed_in = _attempt_dispatch.set(record)
+        records = _AttemptRecords()
+        heard.record = records.responsiveness
+        handed_in = _attempt_records.set(records)
         try:
             result = await _by(deadline, call_next(context))
         except _OutOfTime:
             return call_core.Expired(
-                op, loop.time(), request_left=not record.nothing_was_sent
+                op, loop.time(), request_left=not records.dispatch.nothing_was_sent
             )
         except Exception as exc:
             failure = unreachable_owner_in(exc)
@@ -608,7 +713,7 @@ class FrontendCallMiddleware(Middleware):
                 failure=_Lost(exc, failure),
             )
         finally:
-            _attempt_dispatch.reset(handed_in)
+            _attempt_records.reset(handed_in)
         return call_core.Answered(
             op, loop.time(), result, auth=auth_repair.auth_request(result)
         )
@@ -617,8 +722,14 @@ class FrontendCallMiddleware(Middleware):
         self,
         context: MiddlewareContext[mt.CallToolRequestParams],
         effect: call_core.Effect,
+        dispatch: call_core.Dispatch,
+        unanswered: Unanswered | None,
     ) -> ToolResult:
-        """Give the client the answer the call core ended the call with."""
+        """Give the client the answer the call core ended the call with.
+
+        *unanswered* is what the call last heard (:class:`_LastHeard`), which
+        changes only the words of a loss, never which answer is given.
+        """
         match effect:
             case call_core.Return(result=result, because=because):
                 auth_repair.say_why(because)
@@ -639,13 +750,17 @@ class FrontendCallMiddleware(Middleware):
                         "than repeating a call that could change something"
                     )
                     reason = str(cast(_Lost, failure).failure)
-                return self._report_an_unknown_outcome(context, reason)
+                return self._report_an_unknown_outcome(context, reason, unanswered)
             case call_core.ReportLost(failure=failure, expired=expired):
                 if expired:
                     logger.info("The call ran out of time before any owner took it")
+                # A read-only call that may have been sent ends here too.
+                lost = _owner_lost_from_a_call(
+                    unanswered, nothing_was_sent=dispatch is call_core.Dispatch.UNSENT
+                )
                 if failure is None:
-                    raise _owner_lost_from_a_call()
-                raise _owner_lost_from_a_call() from cast(_Lost, failure).caught
+                    raise lost
+                raise lost from cast(_Lost, failure).caught
             case call_core.Reraise(error=error):
                 raise error
             case call_core.ReportRestricted(error=error):
@@ -656,6 +771,7 @@ class FrontendCallMiddleware(Middleware):
         self,
         context: MiddlewareContext[mt.CallToolRequestParams],
         reason: str,
+        unanswered: Unanswered | None,
     ) -> ToolResult:
         """Say that nobody here knows whether the call acted.
 
@@ -669,7 +785,14 @@ class FrontendCallMiddleware(Middleware):
         sees a failure, and so the SDK skips validating this stand-in against
         the called tool's output schema.
         """
-        answer = unknown_outcome(tool=context.message.name, reason=reason)
+        if unanswered is None:
+            answer = unknown_outcome(tool=context.message.name, reason=reason)
+        else:
+            answer = unknown_outcome(
+                tool=context.message.name,
+                reason=reason,
+                owner=f"did not respond (pid {unanswered.pid})",
+            )
         return ToolResult(
             content=[mt.TextContent(type="text", text=answer["message"])],
             structured_content=answer,
@@ -810,8 +933,9 @@ class FrontendCallHeartbeatMiddleware(Middleware):
         # running this one stopped being told about it. Refused here if the
         # current owner was written off or proved for control only.
         attachment = self._proxy_backend.attachment_for_a_call()
+        records = _attempt_records.get() or _AttemptRecords()
 
-        refused = await self._preflight(attachment, call_id)
+        refused = await self._preflight(attachment, call_id, records.responsiveness)
         if refused is not None:
             raise refused
         # Asked again, because the preflight was an await: another call may have
@@ -819,11 +943,10 @@ class FrontendCallHeartbeatMiddleware(Middleware):
         # this preflight got is older than that news.
         self._proxy_backend.refuse_if_written_off(attachment)
 
-        beating = asyncio.create_task(self._keep_saying(attachment, call_id))
-        dispatch = _attempt_dispatch.get()
-        binding = CallBinding(
-            call_id, attachment, dispatch if dispatch is not None else DispatchRecord()
+        beating = asyncio.create_task(
+            self._keep_saying(attachment, call_id, records.responsiveness)
         )
+        binding = CallBinding(call_id, attachment, records.dispatch)
         try:
             with bound_to(binding):
                 result = await call_next(context)
@@ -848,18 +971,19 @@ class FrontendCallHeartbeatMiddleware(Middleware):
         return result
 
     async def _preflight(
-        self, attachment: Attachment, call_id: str
+        self, attachment: Attachment, call_id: str, heard: Responsiveness
     ) -> OwnerUnreachableError | None:
         """Beat once before dispatching, and say why not if the call must not go.
 
         The not-sent answer is about the tool request, not the preflight, which
         may have arrived. Neither ``UNREACHABLE`` nor ``OWNER_ERROR`` buries the
         owner: a restart or a stall looks like either, and the election's probe
-        decides.
+        decides. What the beat heard goes to *heard* and decides nothing.
         """
         try:
             response = await self._beat(attachment, call_id)
         except Exception as exc:
+            heard.note(attachment, exc)
             logger.info(
                 "The shared browser owner did not answer the call preflight",
                 exc_info=True,
@@ -869,6 +993,7 @@ class FrontendCallHeartbeatMiddleware(Middleware):
                 nothing_was_sent=True,
                 cause=exc,
             )
+        heard.note(attachment)
         classification = _classify_preflight(response, attachment)
         if classification is None:
             return None
@@ -884,18 +1009,24 @@ class FrontendCallHeartbeatMiddleware(Middleware):
             classification=classification,
         )
 
-    async def _keep_saying(self, attachment: Attachment, call_id: str) -> None:
+    async def _keep_saying(
+        self, attachment: Attachment, call_id: str, heard: Responsiveness
+    ) -> None:
         """Beat until cancelled; a failed beat does not end the run.
 
         A failed beat is no evidence the call is over, and giving up would
-        expire a running call. Only the caller's cancellation ends this.
+        expire a running call. Only the caller's cancellation ends this. Each
+        beat's end is told to *heard*, which is all a failed one changes.
         """
         while True:
             await asyncio.sleep(HEARTBEAT_SECONDS)
             try:
                 await self._beat(attachment, call_id)
-            except Exception:
+            except Exception as exc:
+                heard.note(attachment, exc)
                 logger.debug("A heartbeat did not arrive", exc_info=True)
+            else:
+                heard.note(attachment)
 
     @staticmethod
     async def _beat(attachment: Attachment, call_id: str) -> httpx2.Response:
