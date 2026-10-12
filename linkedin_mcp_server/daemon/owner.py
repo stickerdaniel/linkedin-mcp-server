@@ -2,8 +2,9 @@
 
 Started by a frontend and independent of it afterwards: it holds the daemon lock
 for its lifetime, listens on an ephemeral loopback port, and drives the one
-Chromium every client shares. Detachment is POSIX-only (``start_new_session``);
-on Windows a job object can still take the child down with its parent.
+Chromium every client shares. It detaches with ``start_new_session`` on POSIX;
+on Windows it breaks away from the starter's Job and adopts its own named Job
+after COMMIT, before publishing.
 
 Publication belongs to this lock holder. The child proves its endpoint and
 writes only a pending descriptor; the frontend's COMMIT frame
