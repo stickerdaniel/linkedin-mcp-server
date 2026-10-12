@@ -1926,12 +1926,15 @@ class TestTwoStageInstall:
         )
 
         initialize_bootstrap("managed")
-        await start_background_browser_setup_if_needed()
-
-        task = get_bootstrap_state().setup_task
-        assert task is not None
-        with pytest.raises(BrowserSetupFailedError, match="background deadline"):
-            await task
+        # The deadline set at start is the real one, half an hour; only the
+        # reschedule above shortens it. If that stops working, this fails
+        # here, and the timeout cancels the task with it.
+        async with asyncio.timeout(30):
+            await start_background_browser_setup_if_needed()
+            task = get_bootstrap_state().setup_task
+            assert task is not None
+            with pytest.raises(BrowserSetupFailedError, match="background deadline"):
+                await task
         assert not bootstrap.browser_setup_in_progress()
         assert stood_down == []
         with pytest.raises(BrowserSetupFailedError, match="background deadline"):
