@@ -4527,7 +4527,9 @@ class TestClosingAnObservedBody:
     """
 
     @staticmethod
-    def _response(content: bytes, **faults: bool) -> httpx2.Response:
+    def _response(
+        content: bytes, media: str = "application/json", **faults: bool
+    ) -> httpx2.Response:
         wire = _Wire(DispatchRecord())
         posted, _ = (
             wire.posted(
@@ -4539,7 +4541,7 @@ class TestClosingAnObservedBody:
         )
         # Request 2 is in flight on the same wire, so an answer to it is one
         # the wire knows, but not the answer to this POST.
-        reader = _Reader(wire, posted, "application/json")
+        reader = _Reader(wire, posted, media)
         return httpx2.Response(
             200, stream=_ObservedBody(_BadlyClosed(content, **faults), reader)
         )
@@ -4562,6 +4564,12 @@ class TestClosingAnObservedBody:
     ):
         with pytest.raises(OSError):
             await self._response(content, fail_after=fail_after).aread()
+
+    async def test_a_close_after_a_whole_event_still_fails(self):
+        """The SDK delivers an event before the stream ends, so none is kept."""
+        event = b'event: message\ndata: {"jsonrpc": "2.0", "id": 1, "result": {}}\n\n'
+        with pytest.raises(OSError):
+            await self._response(event, media="text/event-stream").aread()
 
     async def test_cancellation_while_closing_is_never_swallowed(self):
         whole = b'{"jsonrpc": "2.0", "id": 1, "result": {}}'
