@@ -33,6 +33,7 @@ from linkedin_mcp_server.daemon import config as daemon_config
 from linkedin_mcp_server.daemon import startup
 from linkedin_mcp_server.daemon import version as daemon_version
 from linkedin_mcp_server.daemon.core.spawn import Started
+from linkedin_mcp_server.daemon.discovery import _DescriptorInspector
 from linkedin_mcp_server.daemon.election import obtain_owner
 
 _NONCE = "0123456789abcdef" * 4
@@ -609,12 +610,16 @@ class TestARealChildIsRefused:
         fault: str,
     ):
         profile = _profile(tmp_path)
+        config = _config(profile)
         stand_ins = _StandIns(tmp_path, monkeypatch)
         stand_ins.mode, stand_ins.fault = mode, fault
         began = time.monotonic()
         try:
             outcome = election_module._spawn(
-                profile.parent, _config(profile), timeout=self._BUDGET
+                profile.parent,
+                config,
+                timeout=self._BUDGET,
+                inspector=_DescriptorInspector(profile.parent, profile, config),
             )
             elapsed = time.monotonic() - began
             _assert_nothing_survived(stand_ins, profile.parent)
@@ -638,11 +643,15 @@ class TestARealChildIsRefused:
         # The EOF reader is an owner that frames its input by reading to end of
         # file, as released owners did: it takes HELLO and waits for more.
         profile = _profile(tmp_path)
+        config = _secret_config(profile)
         stand_ins = _StandIns(tmp_path, monkeypatch)
         stand_ins.mode = mode
         try:
             outcome = election_module._spawn(
-                profile.parent, _secret_config(profile), timeout=0.5
+                profile.parent,
+                config,
+                timeout=0.5,
+                inspector=_DescriptorInspector(profile.parent, profile, config),
             )
             _assert_nothing_survived(stand_ins, profile.parent)
         finally:
@@ -734,9 +743,15 @@ class TestRefusedBeforeSpawning:
             raise PermissionError("the package directory cannot be read")
 
         monkeypatch.setattr(daemon_version, "installed_build_identity", unreadable)
+        config = _config(profile)
 
         assert (
-            election_module._spawn(profile.parent, _config(profile), timeout=5.0)
+            election_module._spawn(
+                profile.parent,
+                config,
+                timeout=5.0,
+                inspector=_DescriptorInspector(profile.parent, profile, config),
+            )
             is Started.ABORTED
         )
 
@@ -749,7 +764,12 @@ class TestRefusedBeforeSpawning:
         config.browser.proxy_bypass = "x" * startup.MAX_FRAME_BYTES
 
         assert (
-            election_module._spawn(profile.parent, config, timeout=5.0)
+            election_module._spawn(
+                profile.parent,
+                config,
+                timeout=5.0,
+                inspector=_DescriptorInspector(profile.parent, profile, config),
+            )
             is Started.ABORTED
         )
 

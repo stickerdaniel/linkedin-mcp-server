@@ -698,7 +698,7 @@ def _start_owner(
     config: AppConfig,
     *,
     timeout: float,
-    inspector: _DescriptorInspector | None = None,
+    inspector: _DescriptorInspector,
 ) -> Attempt:
     """Start one child that competes for the lock and reports the outcome.
 
@@ -749,7 +749,7 @@ def _spawn(
     config: AppConfig,
     *,
     timeout: float,
-    inspector: _DescriptorInspector | None = None,
+    inspector: _DescriptorInspector,
 ) -> Started:
     """Start a detached owner and atomically commit its prepared descriptor.
 
@@ -835,7 +835,7 @@ class _Startup:
         gate_nonce: str | None,
         handshake_nonce: str,
         bootstrap: _BootstrapReport,
-        inspector: _DescriptorInspector | None,
+        inspector: _DescriptorInspector,
     ) -> None:
         self._auth_root = auth_root
         self._config = config
@@ -975,10 +975,7 @@ class _Startup:
                 return spawn_core.Verdict(op, time.monotonic(), verdict)
             case spawn_core.SettleCommit(op=op, instance=instance, timeout=timeout):
                 verdict = _settle_commit_result(
-                    self._auth_root,
-                    instance,
-                    timeout=timeout,
-                    inspector=self._inspector,
+                    instance, timeout=timeout, inspector=self._inspector
                 )
                 return spawn_core.Settled(op, time.monotonic(), verdict)
         raise AssertionError(f"not an effect that waits: {effect!r}")
@@ -1256,24 +1253,8 @@ def _send_commit(
     channel.send(startup.COMMIT, instance=instance_id, timeout=timeout)
 
 
-def _read_canonical_until(
-    auth_root: Path, *, timeout: float
-) -> daemon_descriptor.DaemonDescriptor | None:
-    """Read canonical state without letting filesystem I/O exceed the caller's wait."""
-    return _filesystem_until(
-        lambda: daemon_descriptor.read(auth_root),
-        timeout=timeout,
-        thread_name="daemon-canonical-read",
-        timeout_message="Canonical daemon state could not be read in time",
-    )
-
-
 def _settle_commit_result(
-    auth_root: Path,
-    instance_id: str,
-    *,
-    timeout: float,
-    inspector: _DescriptorInspector | None = None,
+    instance_id: str, *, timeout: float, inspector: _DescriptorInspector
 ) -> Started:
     """Settle a missing commit verdict through the election's shared inspection.
 
@@ -1281,18 +1262,10 @@ def _settle_commit_result(
     attempted remote rename.
     """
     try:
-        if inspector is None:
-            canonical = _read_canonical_until(auth_root, timeout=timeout)
-            committed_instance = None if canonical is None else canonical.instance_id
-        else:
-            lookup = inspector.inspect_until(timeout=timeout)
-            attachment = lookup.attachment
-            committed_instance = (
-                None if attachment is None else attachment.descriptor.instance_id
-            )
+        attachment = inspector.inspect_until(timeout=timeout).attachment
     except Exception:
         return Started.UNCERTAIN
-    if committed_instance == instance_id:
+    if attachment is not None and attachment.descriptor.instance_id == instance_id:
         return Started.YES
     # After the COMMIT frame may have arrived, a dead child is not proof of an
     # uncommitted generation. NFS may report a failed rename and keep returning a

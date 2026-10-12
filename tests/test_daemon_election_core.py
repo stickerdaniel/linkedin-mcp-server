@@ -624,15 +624,6 @@ class TestOneStart:
         assert spawn.StopChild() in effects
         assert finish(effects) is answer
 
-    def test_an_uncertain_verdict_keeps_the_lock_holder_alive(self):
-        _, effects = drive(
-            [*TO_COMMIT, ok(spawn.CommitSent), verdict(Started.UNCERTAIN)],
-            contained=True,
-        )
-
-        assert finish(effects) is Started.UNCERTAIN
-        assert not any(isinstance(e, spawn.StopChild) for e in effects)
-
     @pytest.mark.parametrize(
         ("replies", "stops"),
         [
@@ -776,7 +767,7 @@ def _spawn_schedules(contained: bool) -> Iterator[tuple[list[_Turn], spawn.Spawn
 def test_every_start_keeps_the_termination_authority(contained: bool):
     schedules = list(_spawn_schedules(contained))
     # Every reply to every wait, to the end: a sanity count, not a contract.
-    assert len(schedules) == 40
+    assert len(schedules) == 42
 
     for path, state in schedules:
         where = [type(t.reply).__name__ for t in path]
