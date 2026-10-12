@@ -53,6 +53,7 @@ ACTOR = "actor"
 
 CONFIG_FILE = "config.json"
 READY_FILE = "ready.json"
+GRANTED_FILE = "granted.json"
 STOP_FILE = "stop"
 RESULT_FILE = "result.json"
 STDERR_FILE = "stderr.txt"
@@ -388,6 +389,9 @@ def contend(config: Mapping[str, Any]) -> dict[str, Any]:
             if found["hold_ns"] is None:
                 state, reason, found["hold_ns"] = backend.lock(fd)
                 _fold(found["lease"], state, reason)
+                if found["hold_ns"] is not None:
+                    # Written after the unlock, so it costs the race nothing.
+                    _write(directory / GRANTED_FILE, {"hold_ns": found["hold_ns"]})
             for each in watched:
                 each.observe(backend)
             found["rounds"] += 1
@@ -467,8 +471,15 @@ class Contender:
 
     def wait_ready(self, seconds: float) -> dict[str, Any] | None:
         """The first round's answer, once written, or None if it never is."""
+        return self._wait_for(READY_FILE, seconds)
+
+    def wait_granted(self, seconds: float) -> dict[str, Any] | None:
+        """The one grant, once taken and given back, or None if it never is."""
+        return self._wait_for(GRANTED_FILE, seconds)
+
+    def _wait_for(self, name: str, seconds: float) -> dict[str, Any] | None:
         deadline = time.monotonic() + seconds
-        path = self.directory / READY_FILE
+        path = self.directory / name
         while True:
             if path.exists():
                 return json.loads(path.read_text())

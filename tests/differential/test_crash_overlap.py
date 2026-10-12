@@ -401,7 +401,7 @@ def test_the_contender_takes_the_lease_once_and_sees_a_watched_process_end(
         assert ready is not None and ready["state"] == HELD, ready
         released = time.time_ns()
         lease.release()
-        time.sleep(0.2)
+        assert contender.wait_granted(30.0) is not None
         # Granted once, the contender never asks again: the product takes
         # the lease and holds it with nobody refused or counted.
         assert lease.try_acquire()
