@@ -1,8 +1,14 @@
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+from linkedin_mcp_server.profile_lease import ProfileLeaseUnavailableError
 
 from linkedin_mcp_server.debug_trace import (
     _safe_source_profile_dir,
@@ -112,3 +118,134 @@ def test_safe_source_profile_dir_ignores_generic_env_fallback(monkeypatch):
     )
 
     assert _safe_source_profile_dir() == Path("~/.linkedin-mcp/profile").expanduser()
+
+
+def _aged_run(root: Path, name: str, *, days: float) -> Path:
+    run = root / name
+    run.mkdir(parents=True)
+    log = run / "server.log"
+    log.write_text("x")
+    stamp = time.time() - days * 24 * 60 * 60
+    os.utime(log, (stamp, stamp))
+    os.utime(run, (stamp, stamp))
+    return run
+
+
+def _use_profile(monkeypatch, profile: Path) -> None:
+    monkeypatch.setattr(
+        "linkedin_mcp_server.debug_trace.get_source_profile_dir", lambda: profile
+    )
+
+
+def test_a_new_run_removes_runs_left_behind_long_ago(monkeypatch, tmp_path):
+    _use_profile(monkeypatch, tmp_path / "profile")
+    root = tmp_path / "trace-runs"
+    stale = _aged_run(root, "run-stale", days=30)
+    recent = _aged_run(root, "run-recent", days=1)
+    foreign = _aged_run(root, "notes", days=30)
+
+    trace_dir = get_trace_dir()
+
+    assert trace_dir is not None and trace_dir.parent == root.resolve()
+    assert not stale.exists()
+    assert recent.exists() and foreign.exists()
+
+
+def test_a_quiet_run_of_a_live_server_is_kept(monkeypatch, tmp_path):
+    """Another server that has logged nothing for weeks still owns its run."""
+    _use_profile(monkeypatch, tmp_path / "profile")
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "USER_DATA_DIR": str(tmp_path / "profile"),
+    }
+    env.pop("LINKEDIN_DEBUG_TRACE_DIR", None)
+    env.pop("LINKEDIN_TRACE_MODE", None)
+    other = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from linkedin_mcp_server.debug_trace import get_trace_dir;"
+            "print(get_trace_dir(), flush=True); input()",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        env=env,
+        text=True,
+    )
+    try:
+        assert other.stdout is not None
+        quiet = Path(other.stdout.readline().strip())
+        assert quiet.parent == (tmp_path / "trace-runs").resolve()
+        stamp = time.time() - 30 * 24 * 60 * 60
+        for path in (*quiet.iterdir(), quiet):
+            os.utime(path, (stamp, stamp))
+
+        get_trace_dir()
+
+        assert quiet.exists()
+    finally:
+        other.communicate("\n", timeout=30)
+
+
+def test_a_run_that_could_not_be_locked_is_kept(monkeypatch, tmp_path):
+    """Its server may still be alive once locking works again."""
+    _use_profile(monkeypatch, tmp_path / "profile")
+
+    def unavailable(fd: int, *, exclusive: bool) -> bool:
+        raise ProfileLeaseUnavailableError("no locks here")
+
+    with monkeypatch.context() as patched:
+        patched.setattr("linkedin_mcp_server.debug_trace.try_lock", unavailable)
+        unlocked = get_trace_dir()
+    assert unlocked is not None
+    stamp = time.time() - 30 * 24 * 60 * 60
+    for path in (*unlocked.iterdir(), unlocked):
+        os.utime(path, (stamp, stamp))
+    reset_trace_state_for_testing()
+
+    get_trace_dir()
+
+    assert unlocked.exists()
+
+
+def test_a_run_still_being_written_is_kept(monkeypatch, tmp_path):
+    _use_profile(monkeypatch, tmp_path / "profile")
+    live = _aged_run(tmp_path / "trace-runs", "run-live", days=30)
+    (live / "server.log").write_text("still logging")
+
+    get_trace_dir()
+
+    assert live.exists()
+
+
+def test_runs_under_a_root_this_server_does_not_own_are_left_alone(
+    monkeypatch, tmp_path
+):
+    # Not tmp_path/profile, which the isolation fixture claims.
+    profile = tmp_path / "elsewhere" / "profile"
+    profile.mkdir(parents=True)
+    (profile / "someone-elses-file").write_text("x")
+    _use_profile(monkeypatch, profile)
+    stale = _aged_run(tmp_path / "elsewhere" / "trace-runs", "run-stale", days=30)
+
+    get_trace_dir()
+
+    assert stale.exists()
+
+
+def test_a_linked_trace_root_is_not_pruned(monkeypatch, tmp_path):
+    _use_profile(monkeypatch, tmp_path / "profile")
+    elsewhere = tmp_path / "elsewhere"
+    stale = _aged_run(elsewhere, "run-stale", days=30)
+    try:
+        (tmp_path / "trace-runs").symlink_to(elsewhere, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"this runner cannot create symlinks: {exc}")
+
+    get_trace_dir()
+
+    assert stale.exists()
