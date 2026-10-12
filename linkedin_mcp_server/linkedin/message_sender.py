@@ -1743,17 +1743,19 @@ class MessageSender:
         is still live, by that budget too. The captured one matters once a
         stalled read has cancelled the budget, where the effective deadline
         reads as gone and a fresh bound would outlast the tool deadline. The
-        live one matters when the snapshot arrived just before the budget
-        ends: disposal has to finish inside it, or the budget cancels the
-        accepted result on the way out.
+        live one keeps disposal out of the reserve the cleanup and the answer
+        after it need.
+
+        A loaded event loop can still end disposal after the budget, so
+        nothing here checkpoints once the shield lifts: the budget's
+        cancellation would land there and discard a snapshot already
+        accepted, although the send stands.
         """
         now = anyio.current_time()
         limit = _MESSAGE_CLEANUP_TIMEOUT_SECONDS
         for deadline in (reply_deadline, anyio.current_effective_deadline()):
             if now < deadline < math.inf:
                 limit = min(limit, (deadline - now) / 2)
-        if limit <= 0:
-            return
         with anyio.CancelScope(deadline=now + limit, shield=True) as scope:
             try:
                 await handle.dispose()
@@ -1764,7 +1766,6 @@ class MessageSender:
                 )
         if scope.cancel_called:
             logger.warning("Timed out releasing message confirmation snapshot")
-        await anyio.lowlevel.checkpoint()
 
     async def _dispose_message_confirmation(
         self, owner: Any, confirmation: str
