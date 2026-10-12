@@ -136,12 +136,6 @@ class BrowserConfig:
 
     headless: bool = True
     slow_mo: int = 0  # Milliseconds between browser actions (debugging)
-    # Always None: the override was removed and both settings that used to fill
-    # this are now refused at startup. ``SHARED_CONFIG_FIELDS`` still hashes it
-    # into the daemon's configuration fingerprint. Dropping it no longer
-    # strands a running owner: a newer frontend turns over an older owner
-    # whatever its fingerprint.
-    user_agent: str | None = None
     viewport_width: int = 1280
     viewport_height: int = 720
     default_timeout: int = 5000  # Milliseconds for page operations
@@ -183,15 +177,6 @@ class BrowserConfig:
     # user's keychain and degrades to manual login, and no cookie crosses the
     # network.
     auto_import_from_browser: bool | None = None
-    # Read by nothing, and accepted anyway. It used to choose between installing
-    # the full browser up front or lazily on the first headed login; there is
-    # only one browser now, so both answers describe the same install.
-    #
-    # Like ``user_agent`` above, it is still part of the daemon's configuration
-    # fingerprint (``SHARED_CONFIG_FIELDS``), and dropping it no longer strands
-    # a running owner: a newer frontend turns over an older owner whatever its
-    # fingerprint.
-    eager_full_chromium: bool = False
     # Temporary directory parent used during browser installation bootstrap.
     # Defaults to system tempdir (tempfile.gettempdir()) when None.
     installer_temp_dir: str | None = None

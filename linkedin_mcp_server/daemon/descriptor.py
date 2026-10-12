@@ -97,11 +97,17 @@ _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 #: these either changes what the browser *is* (its fingerprint, its exit
 #: address, where its profile lives) or how long the owner keeps it. Anything
 #: not listed here may differ freely between clients.
+#:
+#: The login settings (``login_timeout_seconds``, ``login_inline_wait_seconds``,
+#: ``auto_import_from_browser``) are left out on purpose. The owner never signs
+#: in: ``bootstrap._start_login_if_needed`` refuses before the inline wait or a
+#: login starts, and ``_auto_import_allowed`` answers False there. So they
+#: change nothing the owner does, and each client applies its own when it signs
+#: in itself.
 SHARED_CONFIG_FIELDS = (
     "user_data_dir",
     "headless",
     "slow_mo",
-    "user_agent",
     "viewport_width",
     "viewport_height",
     "default_timeout",
@@ -110,10 +116,6 @@ SHARED_CONFIG_FIELDS = (
     "proxy_username",
     "proxy_password",
     "proxy_bypass",
-    "login_timeout_seconds",
-    "login_inline_wait_seconds",
-    "auto_import_from_browser",
-    "eager_full_chromium",
     "browser_idle_timeout_seconds",
 )
 
@@ -555,10 +557,6 @@ def _normalize(name: str, value: Any) -> Any:
     count. When unsure, err towards a difference: that costs a refusal, while
     the opposite hands a client a differently configured browser.
     """
-    if name == "auto_import_from_browser":
-        # Auto-import is enabled by default. None and True therefore ask for the
-        # same browser behaviour; only an explicit False disables it.
-        return value is not False
     if value is None:
         return None
     if name == "user_data_dir":

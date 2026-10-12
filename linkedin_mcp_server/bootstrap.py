@@ -4052,7 +4052,8 @@ def _auto_import_allowed() -> bool:
         #
         # The frontend does it instead, and it is the better place for both
         # reasons: it has the desktop session, and it is the process that holds
-        # the profile while it works.
+        # the profile while it works. `SHARED_CONFIG_FIELDS` leaves
+        # `auto_import_from_browser` out because of this.
         return False
     if config.browser.proxy_server:
         # The point of configuring a proxy is that LinkedIn sees one address.
@@ -4218,6 +4219,7 @@ async def _start_login_if_needed(
         # it.
         # Reporting from here leaves the session state exactly as the frontend
         # will find it, which is what lets the frontend take over cleanly.
+        # `SHARED_CONFIG_FIELDS` leaves the login settings out because of this.
         raise AuthMissingOnOwnerError(
             "The shared LinkedIn browser has no usable session, and it cannot "
             "sign in by itself. Retry this tool: the client will open a login "

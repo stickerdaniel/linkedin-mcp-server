@@ -1087,9 +1087,7 @@ class TestRetainedRevisionReportCallSites:
 
     async def test_a_finished_install_reports(self, isolate_profile_dir, monkeypatch):
         _patch_targets_and_version(monkeypatch)
-        config = SimpleNamespace(
-            browser=SimpleNamespace(headless=True, eager_full_chromium=False)
-        )
+        config = SimpleNamespace(browser=SimpleNamespace(headless=True))
         monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
 
         async def fake_install(extra_arg: str, **_kwargs: object) -> None:
@@ -1407,22 +1405,15 @@ class TestTwoStageInstall:
         return calls
 
     @pytest.mark.parametrize("headless", [True, False])
-    @pytest.mark.parametrize("eager", [True, False])
-    async def test_one_stage_regardless_of_mode_or_eager_knob(
-        self, isolate_profile_dir, monkeypatch, headless, eager
+    async def test_one_stage_regardless_of_mode(
+        self, isolate_profile_dir, monkeypatch, headless
     ):
-        """Exactly one install, and neither setting moves it.
+        """Exactly one install, and the headless setting does not move it.
 
-        The shell stage is gone because nothing launches the shell. The eager
-        knob is inert for the same reason: with one browser, "up front" and
-        "lazily" name the same install. It stays accepted in configuration so an
-        existing command line keeps working, and it stays in the daemon
-        fingerprint, but it must not reach the installer.
+        The shell stage is gone because nothing launches the shell.
         """
         _patch_targets_and_version(monkeypatch)
-        config = SimpleNamespace(
-            browser=SimpleNamespace(headless=headless, eager_full_chromium=eager)
-        )
+        config = SimpleNamespace(browser=SimpleNamespace(headless=headless))
         monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
         calls = self._stub_install(monkeypatch)
 
@@ -1445,9 +1436,7 @@ class TestTwoStageInstall:
         from linkedin_mcp_server.exceptions import BrowserSetupFailedError
 
         _patch_targets_and_version(monkeypatch)
-        config = SimpleNamespace(
-            browser=SimpleNamespace(headless=True, eager_full_chromium=False)
-        )
+        config = SimpleNamespace(browser=SimpleNamespace(headless=True))
         monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
 
         async def fake_install(extra_arg: str, **_kwargs: object) -> None:
@@ -1470,9 +1459,7 @@ class TestTwoStageInstall:
         """The install runs inside the one background setup task."""
         _patch_targets_and_version(monkeypatch)
         config = SimpleNamespace(
-            browser=SimpleNamespace(
-                headless=False, eager_full_chromium=False, chrome_path=None
-            )
+            browser=SimpleNamespace(headless=False, chrome_path=None)
         )
         monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
         monkeypatch.setattr(

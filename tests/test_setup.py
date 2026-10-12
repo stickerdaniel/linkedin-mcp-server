@@ -222,33 +222,6 @@ async def test_interactive_login_passes_slow_mo_to_browser_manager(
 
 
 @pytest.mark.asyncio
-async def test_login_never_overrides_the_user_agent(monkeypatch, tmp_path):
-    """No user agent reaches BrowserManager, even from a config carrying one.
-
-    ``BrowserConfig.user_agent`` still exists, because the daemon's
-    configuration fingerprint hashes it and removing a field there breaks owner
-    turnover. Nothing may read it: the login is where the session is minted, so
-    a UA applied here would be the one every later contradiction is measured
-    against.
-    """
-    browser = _make_browser(export_cookies=True)
-    captured_kwargs: dict = {}
-
-    def fake_browser_manager(**kwargs):
-        captured_kwargs.update(kwargs)
-        return _BrowserContextManager(browser)
-
-    config = AppConfig()
-    config.browser.user_agent = "CustomAgent/1.0"
-
-    _patch_login_deps(monkeypatch, browser_factory=fake_browser_manager, config=config)
-
-    await interactive_login(tmp_path / "profile")
-
-    assert "user_agent" not in captured_kwargs
-
-
-@pytest.mark.asyncio
 async def test_interactive_login_threads_login_timeout(monkeypatch, tmp_path):
     """config.browser.login_timeout_seconds is converted to ms and passed through."""
     browser = _make_browser(export_cookies=True)

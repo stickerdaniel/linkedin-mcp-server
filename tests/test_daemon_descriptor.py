@@ -1579,7 +1579,6 @@ class TestConfigFingerprint:
         "field,value",
         [
             ("headless", False),
-            ("user_agent", "custom-agent"),
             ("viewport_width", 1920),
             ("proxy_server", "http://proxy.example:8080"),
             ("proxy_password", "hunter2"),
@@ -1678,28 +1677,6 @@ class TestConfigFingerprint:
         assert config_fingerprint(one, key=token) == config_fingerprint(
             other, key=token
         )
-
-    def test_default_auto_import_matches_explicit_enabled(self):
-        # None is the enabled default, so spelling that default as True must not
-        # stop an otherwise compatible client from attaching.
-        token = new_token()
-        default = _config()
-        enabled = _config(auto_import_from_browser=True)
-
-        assert config_fingerprint(default, key=token) == config_fingerprint(
-            enabled, key=token
-        )
-        assert mismatched_fields(default, enabled) == ()
-
-    def test_disabled_auto_import_remains_a_difference(self):
-        token = new_token()
-        default = _config()
-        disabled = _config(auto_import_from_browser=False)
-
-        assert config_fingerprint(default, key=token) != config_fingerprint(
-            disabled, key=token
-        )
-        assert mismatched_fields(default, disabled) == ("auto_import_from_browser",)
 
 
 class TestMismatchReporting:

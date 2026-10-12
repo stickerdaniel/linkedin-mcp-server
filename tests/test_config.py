@@ -26,7 +26,6 @@ class TestBrowserConfig:
         assert config.login_timeout_seconds == 1800.0
         assert config.login_inline_wait_seconds == 25.0
         assert config.auto_import_from_browser is None
-        assert config.eager_full_chromium is False
 
     def test_validate_passes(self):
         BrowserConfig().validate()  # No error
@@ -335,13 +334,25 @@ class TestUserAgentRefusal:
         monkeypatch.setenv("USER_AGENT", "")
         from linkedin_mcp_server.config.loaders import load_from_env
 
-        assert load_from_env(AppConfig()).browser.user_agent is None
+        load_from_env(AppConfig())
 
     def test_cli_user_agent_refuses_to_start(self, monkeypatch):
         from linkedin_mcp_server.config.loaders import load_from_args
 
         with pytest.raises(ConfigurationError, match="--user-agent"):
             load_from_args(AppConfig(), ["--user-agent", "CustomAgent/1.0"])
+
+
+class TestRetiredChromiumFlags:
+    """Once documented, now ignored: a saved command line must still start."""
+
+    @pytest.mark.parametrize(
+        "flag", ["--eager-full-chromium", "--no-eager-full-chromium"]
+    )
+    def test_a_retired_flag_is_accepted_and_changes_nothing(self, flag):
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        assert load_from_args(AppConfig(), [flag]) == load_from_args(AppConfig(), [])
 
 
 class TestLoaders:
@@ -516,9 +527,8 @@ class TestLoaders:
     def test_claim_profile_root_is_not_part_of_the_owner_fingerprint(self):
         """It decides whether a marker may be written, not what the browser is.
 
-        Listing it would change the configuration fingerprint for everyone and
-        make every existing owner unreadable, which is how an owner stops being
-        retirable at all.
+        Listing it would stop a client that claimed the root from sharing the
+        owner every other client of that profile uses.
         """
         from linkedin_mcp_server.daemon.descriptor import SHARED_CONFIG_FIELDS
 
@@ -737,48 +747,6 @@ class TestLoaders:
 
         config = load_config([])
         assert config.browser.auto_import_from_browser is None
-
-    def test_eager_full_chromium_default_is_false(self):
-        assert BrowserConfig().eager_full_chromium is False
-
-    @pytest.mark.parametrize(
-        ("value", "expected"),
-        [("false", False), ("true", True), ("0", False), ("1", True)],
-    )
-    def test_load_from_env_eager_full_chromium(self, monkeypatch, value, expected):
-        monkeypatch.setenv("EAGER_FULL_CHROMIUM", value)
-        from linkedin_mcp_server.config.loaders import load_from_env
-
-        config = load_from_env(AppConfig())
-        assert config.browser.eager_full_chromium is expected
-
-    def test_load_from_args_eager_full_chromium(self, monkeypatch):
-        from linkedin_mcp_server.config.loaders import load_from_args
-
-        config = load_from_args(AppConfig(), ["--eager-full-chromium"])
-        assert config.browser.eager_full_chromium is True
-
-    def test_load_from_args_no_eager_full_chromium(self, monkeypatch):
-        from linkedin_mcp_server.config.loaders import load_from_args
-
-        config = AppConfig()
-        config.browser.eager_full_chromium = True
-        config = load_from_args(config, ["--no-eager-full-chromium"])
-        assert config.browser.eager_full_chromium is False
-
-    def test_no_eager_flag_overrides_env_true(self, monkeypatch):
-        monkeypatch.setenv("EAGER_FULL_CHROMIUM", "true")
-        from linkedin_mcp_server.config import load_config
-
-        config = load_config(["--no-eager-full-chromium"])
-        assert config.browser.eager_full_chromium is False
-
-    def test_eager_full_chromium_absent_keeps_default(self, monkeypatch):
-        monkeypatch.delenv("EAGER_FULL_CHROMIUM", raising=False)
-        from linkedin_mcp_server.config import load_config
-
-        config = load_config([])
-        assert config.browser.eager_full_chromium is False
 
     def test_daemon_enabled_default_is_false(self):
         # Supervision and liveness are unfinished, so a shared browser-owning
