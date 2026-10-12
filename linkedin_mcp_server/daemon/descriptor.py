@@ -1,45 +1,19 @@
 """What a running daemon publishes about itself, and what a client checks.
 
-A client that finds a descriptor is about to send a bearer token to whatever
-address it names and then drive a logged-in LinkedIn session through it. So
-nothing here is taken on trust: the endpoint is checked to be loopback before
-the token goes anywhere, the profile path is compared exactly, and the
-configuration is compared through a fingerprint.
+A client sends a bearer token to the address a descriptor names and drives a
+logged-in session through it, so nothing here is taken on trust: the endpoint
+must be loopback before the token goes anywhere, the profile is compared by
+:func:`profile_identity` (``auth_root_dir`` is the profile's parent, so sibling
+profiles share one lock), and the configuration through a keyed fingerprint,
+keyed because ``proxy_password`` is part of it.
 
-Two fields exist because of measurements rather than tidiness:
+The token lives in its own file named after the instance, and the descriptor
+carries only its digest, so no client pairs one generation's descriptor with the
+next generation's token.
 
-``profile_path`` and ``profile_identity``
-    ``auth_root_dir`` returns the profile's *parent*, so ``.../profile`` and
-    ``.../profile2`` share one auth root and therefore one lock. The path is
-    retained for diagnostics; the identity is what is compared. It is built
-    from the parent's inode and the profile's own name rather than the
-    profile's inode, because the profile directory is replaced whenever a new
-    session is established: keyed by its inode, a descriptor would stop
-    matching its own profile at the first login. The parent's inode still
-    settles the case and Unicode aliases that a bare string comparison gets
-    wrong on an insensitive volume.
-
-``config_fingerprint``
-    Two clients that disagree about ``headless``, the user agent or the proxy
-    are not interchangeable, because the owner's browser can only be one of
-    them. The fingerprint is keyed rather than a plain digest: ``proxy_password``
-    is part of what must match, and a plain hash over otherwise-guessable
-    configuration would be an offline check for password guesses.
-
-The token itself is deliberately *not* here. It lives beside the descriptor in
-its own file, named after the instance, and the descriptor carries only its
-digest. Fixed names would let a client pair one generation's descriptor with the
-next generation's token and read that mismatch as corruption rather than as the
-restart it is.
-
-State lives under the account's own directory rather than under the auth root,
-which is configurable and may be a directory this application does not own. One
-consequence is worth stating before anything is wired to it: two containers
-sharing a bind-mounted auth root do *not* share this state, because each has its
-own home. Measured with two containers on one mounted profile: both saw the same
-auth root identity and both took the lock. Whatever adopts this has to either
-keep containers on the existing per-operation lease or give them a shared state
-directory of their own.
+State lives under the account's home, not the configurable auth root. Two
+containers sharing a bind-mounted auth root therefore do not share it, and only
+the profile lease keeps them apart.
 """
 
 from __future__ import annotations
@@ -82,21 +56,14 @@ SCHEMA_VERSION = 1
 
 #: Bumped when the daemon's tool protocol changes incompatibly: the call
 #: metadata, the heartbeat contract, or the ping contract. Compatibility keys on
-#: this rather than on the package version, because the documented install is
-#: ``@latest`` and this project releases often. Matching exact versions would
-#: mean a manual shutdown after almost every release, which is precisely the
-#: friction the daemon exists to remove.
+#: this rather than on the package version, so frequent ``@latest`` releases do
+#: not each force a restart. The call marker is mandatory in both directions
+#: (:mod:`linkedin_mcp_server.daemon.liveness`).
 #:
-#: The call marker is mandatory in both directions: a frontend never forwards a
-#: call it could not mark, and an owner refuses one that arrives without a
-#: marker (:mod:`linkedin_mcp_server.daemon.liveness`).
-#:
-#: A bump does not make an older owner unreadable, and that is what lets it be
-#: bumped at all. :func:`read` parses a descriptor from any protocol at or above
-#: :data:`CONTROL_FLOOR_PROTOCOL` and leaves the comparison to the caller, which
-#: may then use it for control and never for a tool call
-#: (``daemon.discovery.Attachment.control_only``). An owner nobody can read is an owner
-#: nobody can ask to stand down.
+#: A bump keeps older owners readable: :func:`read` parses any protocol at or
+#: above :data:`CONTROL_FLOOR_PROTOCOL` and the caller may use a mismatched one
+#: for control only (``daemon.discovery.Attachment.control_only``). An owner
+#: nobody can read is an owner nobody can ask to stand down.
 PROTOCOL_VERSION = 1
 
 #: The oldest tool protocol whose owner this build can still ask to stand down.
@@ -110,13 +77,12 @@ _DAEMON_DIR = "daemon"
 
 
 #: The account-level namespace every daemon of this account shares. Earlier
-#: releases kept their daemon state under ``.mcp-server-linkedin`` and, on
-#: Windows, ``.mcp-server-linkedin-v2``. This build never reads, creates or
-#: removes either, so an owner left running by one of them shares no
-#: coordination state with this one; the profile lease still keeps the two off
-#: one browser. On Windows this namespace is only ever created through
-#: ``harden_directory_entry``, with Python 3.12.4+'s restricted creation DACL,
-#: so no handle opened under a formerly permissive root can reach it.
+#: releases' namespaces are never touched
+#: (docs/decisions/2026-10-11-daemon-clean-slate.md); the profile lease still
+#: keeps their owners off this browser. On Windows this namespace is only
+#: created through ``harden_directory_entry``, with Python 3.12.4+'s restricted
+#: creation DACL, so no handle opened under a formerly permissive root can
+#: reach it.
 _APPLICATION_STATE_DIR = ".linkedin-mcp-daemon"
 _WINDOWS = os.name == "nt"
 _windows_account_home_pins: dict[str, tuple[tuple[int, int], tuple[Any, ...]]] = {}
@@ -172,16 +138,8 @@ def _text(raw: Mapping[Any, Any], name: str) -> str:
 def _digest_text(raw: Mapping[Any, Any], name: str) -> str:
     """Read a field that must be a SHA-256 digest, and check that it is one.
 
-    ``token_sha256`` is compared with ``hmac.compare_digest``, which refuses a
-    string carrying anything outside ASCII and raises TypeError doing so.
-    Measured with an accented character: the descriptor was accepted here and
-    the comparison failed later with a TypeError, outside the DescriptorError
-    every caller of this module is written to expect.
-
-    ``config_fingerprint`` is only produced and parsed so far, and is checked
-    the same way because it is the same kind of value and will be compared the
-    same way once there is something to compare it against. A digest has one
-    shape, so establishing it costs nothing.
+    Checked here because ``hmac.compare_digest`` raises ``TypeError`` on a
+    non-ASCII string, outside the :class:`DescriptorError` callers expect.
     """
     value = _text(raw, name)
     if len(value) != 64 or any(character not in _HEX_DIGITS for character in value):
@@ -285,16 +243,10 @@ def _usable_home(entry: str) -> Path:
 def daemon_state_root() -> Path:
     """Return the private application root shared by every local daemon.
 
-    Fully resolved, so that processes reaching this directory by different
-    routes still agree on one lock. Symbolic links along the way are followed
-    rather than refused: they are a normal way to lay out a home directory.
-
-    What this cannot defend against is the path being *changed* underneath a
-    running owner, by retargeting a link or renaming a directory. Measured: a
-    second process then takes a lock on a different inode while the first still
-    holds its own. The existing profile lease has exactly the same property, for
-    the same reason, and no lock addressed by path can avoid it. The account
-    that could do this is the one whose browser is at stake.
+    Resolved on POSIX, so processes reaching it through different symlinks
+    agree on one lock. A path changed underneath a running owner (a retargeted
+    link, a renamed directory) splits the lock, as it does the profile lease;
+    no lock addressed by path avoids that.
     """
     root = _account_home() / _APPLICATION_STATE_DIR / _DAEMON_DIR
     # Windows must inspect each application-owned component before following it.
@@ -303,14 +255,10 @@ def daemon_state_root() -> Path:
 
 
 def _canonical_path(path: Path, label: str) -> Path:
-    """Resolve *path*, in this module's vocabulary rather than the runtime's.
+    """Resolve *path*, raising :class:`DescriptorError` if it is unusable.
 
-    expanduser and resolve are the first thing every caller reaches, and they
-    have failure modes of their own: a home directory that cannot be
-    determined raises RuntimeError, an embedded NUL raises ValueError, and an
-    unreadable parent raises PermissionError. All three arrive from
-    type-correct configuration, so they are refusals rather than defects, and
-    they belong in the error every caller of this module is written to expect.
+    ``expanduser`` and ``resolve`` raise ``RuntimeError``, ``ValueError`` or
+    ``OSError`` on type-correct configuration, so those are refusals.
     """
     try:
         return path.expanduser().resolve()
@@ -325,35 +273,21 @@ def _canonical_path(path: Path, label: str) -> Path:
 def _auth_root_identity(auth_root: Path) -> bytes:
     """Return the stable filesystem identity of *auth_root*, creating it once.
 
-    Created rather than merely inspected, because this runs in the process that
-    is establishing state: the first daemon on a fresh install must not key a
-    missing path and then switch to an inode after creating it, which would
-    leave its own lock at an address nothing else computes. ``secure_mkdir``
-    creates only what is missing and deliberately leaves permissions on
-    existing parents alone.
-
-    Device plus inode identifies the physical directory rather than one
-    spelling of it, which keeps case and Unicode aliases together on an
-    insensitive volume without conflating distinct directories on a sensitive
-    one. The auth root can be keyed this way because nothing rotates it; the
-    profile inside it cannot, and :func:`profile_identity` says why.
+    Created rather than inspected, so the first daemon on a fresh install
+    never keys a missing path and then an inode. Device plus inode keeps case
+    and Unicode aliases together without merging distinct directories; the
+    auth root is never rotated, unlike the profile (:func:`profile_identity`).
     """
     canonical = _canonical_path(auth_root, "authentication root")
-    # Checked before creating, not after. secure_mkdir refuses an existing
-    # non-directory itself, with a NotADirectoryError that reaches the caller
-    # instead of the DescriptorError this module is read through, and the check
-    # below could then never run: measured, a file where the auth root belongs
-    # surfaced as NotADirectoryError.
+    # Before creating: secure_mkdir would refuse an existing file with a
+    # NotADirectoryError rather than this module's DescriptorError.
     if canonical.exists() and not canonical.is_dir():
         raise DescriptorError(
             f"The authentication root is not a directory: {canonical}"
         )
 
-    # Creating and then reading it back are one operation as far as a caller is
-    # concerned, and both can fail in ways the operating system describes in its
-    # own vocabulary. Measured: an auth root that vanished between the two
-    # surfaced as FileNotFoundError, several layers from anything that could
-    # explain it as a descriptor problem.
+    # Creating and reading back are one step to a caller; either may fail in
+    # the operating system's terms, for example a root that vanished between.
     try:
         secure_mkdir(canonical, mode=0o700)
         info = canonical.stat()
@@ -377,27 +311,12 @@ def _auth_root_identity(auth_root: Path) -> bytes:
 def profile_identity(profile: Path) -> str:
     """Return an identity for a browser profile, by location rather than inode.
 
-    Deliberately not the device and inode that address daemon state. A profile
-    directory is *replaced* in normal operation: every path that establishes a
-    new session rotates the old one into quarantine and Chromium creates a fresh
-    directory at the same place. Keyed by inode, a descriptor published before
-    the first login would stop matching its own profile the moment that login
-    happened, and the owner would keep the lock while no client could recognise
-    it. The auth root above it is not rotated, which is why the lock can use an
-    inode and this cannot.
-
-    Location, then, but not a bare string comparison: on a case-insensitive
-    volume ``resolve()`` keeps whichever spelling the caller used, so two names
-    for one profile would look like two profiles. The parent is identified by
-    its inode, and the final component is taken from the parent's own directory
-    listing rather than from the caller, which is what makes ``Profile`` and
-    ``profile`` land on the same answer where the filesystem says they are one
-    directory. ``normcase`` alone would not: it is a no-op on POSIX, and macOS
-    is case-insensitive all the same.
-
-    Creates nothing: this runs while assembling a refusal, and leaving a browser
-    profile behind to explain one would be a strange thing for a client to
-    discover afterwards.
+    Not by inode: every new session replaces the profile directory, so an
+    inode key would stop matching its own descriptor at the first login. Not
+    by bare string either: the parent is keyed by inode and the final
+    component is taken from the parent's listing, so spellings the filesystem
+    treats as one directory agree. Creates nothing, since this also runs while
+    assembling a refusal.
     """
     canonical = _canonical_path(profile, "browser profile")
     try:
@@ -410,25 +329,12 @@ def profile_identity(profile: Path) -> str:
     if not stat.S_ISDIR(info.st_mode) or not info.st_ino:
         return f"path\0{os.path.normcase(str(canonical))}"
 
-    # The name as the filesystem holds it, where it holds one. Only the parent
-    # is consulted, never the profile itself, because the profile legitimately
-    # does not exist yet before the first login: an identity that changed when
-    # it appeared would leave a descriptor published beforehand no longer
-    # matching its own profile. Measured, with the auth root non-empty so the
-    # scan had something to walk: serves() went from True to False across the
-    # login that created the directory.
-    # The name as the filesystem holds it, which is only a different name from
-    # the caller's where the filesystem says the two are one directory. Asking
-    # it directly rather than folding on principle: on a case-sensitive volume
-    # Profile and profile are two directories, and treating a fold match as the
-    # same entry there is wrong twice over. Measured on a case-sensitive APFS
-    # volume, once with both present and once with only the sibling: two
-    # distinct profiles shared an identity, which would have served a client
-    # the other one's logged-in session.
-    # Folded and normalised. casefold settles case; NFC settles composition,
-    # which is a separate axis macOS also collapses: an accented name written
-    # decomposed and composed is one directory there, and comparing the two
-    # spellings without normalising gave them different identities.
+    # Only the parent is consulted: the profile may not exist before the first
+    # login, and the identity must not change when it appears.
+    # A fold match is only a candidate: on a case-sensitive volume Profile and
+    # profile are two directories, and merging them would serve one profile's
+    # session to the other's client. casefold settles case; NFC settles
+    # composition, which macOS also collapses.
     wanted = canonical.name
     folded = unicodedata.normalize("NFC", wanted).casefold()
     try:
@@ -441,17 +347,9 @@ def profile_identity(profile: Path) -> str:
         for name in entries:
             if unicodedata.normalize("NFC", name).casefold() != folded:
                 continue
-            # samefile answers what folding only guesses at, and it is safe to
-            # ask here: the candidate exists by definition, and the profile
-            # need not, which is the case that made an earlier version of this
-            # fall back to a path and change its answer at the first login.
-            #
-            # Keep looking when it says no. Several entries can fold alike on a
-            # volume that distinguishes them, so stopping at the first
-            # candidate would settle on a directory the filesystem had just
-            # denied was the same one: measured with É and é present and é
-            # asked for, the scan met É first, was told they differ, and gave
-            # up before reaching the entry that did match.
+            # samefile confirms what folding only guesses. Keep looking when it
+            # says no: several entries can fold alike on a volume that
+            # distinguishes them, and a later one may be the match.
             try:
                 if canonical.parent.joinpath(name).samefile(canonical):
                     wanted = name
@@ -468,12 +366,10 @@ def _daemon_dir_name(auth_root: Path) -> str:
 def daemon_dir(auth_root: Path) -> Path:
     """Where daemon state for *auth_root* lives.
 
-    The auth root is user-configurable and may be a shared directory such as
-    ``/tmp`` or a home directory. Storing state below it would either change
-    permissions on a directory this application does not own or trust a
-    replaceable directory link for the ownership lock. Keep state under the
-    operating system account's private application directory instead, keyed by
-    the physical auth root so sibling profiles still share exactly one election.
+    Under the account's private application directory rather than the
+    configurable auth root, which may be ``/tmp`` or another directory this
+    application does not own. Keyed by the physical auth root, so sibling
+    profiles share one election.
     """
     return daemon_state_root() / _daemon_dir_name(auth_root)
 
@@ -563,11 +459,9 @@ def reset_daemon_descriptor_for_testing() -> None:
 def prepare_daemon_state(auth_root: Path) -> Path:
     """Establish owner-only storage before trusting any per-auth state entry.
 
-    The shared root is hardened first. A permissive directory from an older start
-    may already contain a planted per-auth entry, so the final component is then
-    established without following a link and is checked for owner-only access in
-    its own right. Files inside are hardened separately before their contents or
-    locking semantics are used.
+    The shared root is hardened first. A permissive root may already hold a
+    planted per-auth entry, so that entry is established without following a
+    link and checked in its own right; files inside are hardened before use.
     """
     root = daemon_state_root()
     if _WINDOWS:
@@ -601,18 +495,10 @@ def pending_descriptor_path(auth_root: Path, instance_id: str) -> Path:
 def token_path(auth_root: Path, instance_id: str) -> Path:
     """Where the bearer token lives, named for the instance that owns it.
 
-    Named rather than fixed so a descriptor and a token can never belong to
-    different generations. With one shared name, a client that read the old
-    descriptor and then the new token would find a digest that does not match
-    and, following the discovery rules, call it corruption instead of a restart.
-
-    The identifier is checked to be a UUID before it becomes part of a path.
-    It arrives from a file, and a file is only ever as trustworthy as what can
-    write to it. The state directory is owner-only now, so that is this account
-    and whatever runs as it, but building a filename from the identifier
-    unchecked would let ``..`` walk out of the daemon directory and turn any
-    readable file into what this client sends to the endpoint as its bearer
-    token. The check costs one parse.
+    Per instance, so a descriptor and a token never belong to different
+    generations. The identifier comes from a file and is checked to be a UUID
+    first; ``..`` in it would turn any readable file into the bearer token
+    sent to the endpoint.
     """
     return daemon_dir(auth_root) / f"token-{_checked_instance_id(instance_id)}"
 
@@ -665,11 +551,9 @@ _EMPTY_IS_MEANINGFUL = frozenset({"proxy_username", "proxy_password"})
 def _normalize(name: str, value: Any) -> Any:
     """Reduce a field to the form two processes should agree on.
 
-    Only differences that would actually make the owner's browser wrong for a
-    client should count. Two spellings of the same path are the same profile.
-    Erring towards a false difference is safe here: it costs a refusal that
-    names the field. Erring the other way hands a client a browser configured
-    differently from what it asked for.
+    Only differences that would make the owner's browser wrong for a client
+    count. When unsure, err towards a difference: that costs a refusal, while
+    the opposite hands a client a differently configured browser.
     """
     if name == "auto_import_from_browser":
         # Auto-import is enabled by default. None and True therefore ask for the
@@ -698,12 +582,9 @@ def _normalize(name: str, value: Any) -> Any:
 def config_fingerprint(config: AppConfig, *, key: str) -> str:
     """Digest the configuration an owner and its clients must agree on.
 
-    Keyed with the daemon's own token. That is not belt and braces: the shared
-    fields include ``proxy_password``, and the remaining fields are mostly
-    guessable, so an unkeyed digest sitting in a world-readable descriptor would
-    let anyone test password guesses offline. The key never leaves the token
-    file, so only a process already entitled to talk to the daemon can compute
-    or compare it.
+    Keyed with the daemon's token, because ``proxy_password`` is among the
+    fields and an unkeyed digest of otherwise guessable values would allow
+    offline password guessing.
     """
     material = {
         name: _normalize(name, getattr(config.browser, name, None))
@@ -750,17 +631,14 @@ class DaemonDescriptor:
     config_fingerprint: str
     started_at: str
     log_path: str
-    #: Diagnostics only. Never used to decide whether the daemon is alive: a
-    #: recycled process id reads as alive forever, which is how a comparable
-    #: server wedged itself permanently.
+    #: Diagnostics only, never a liveness test: a recycled process id reads as
+    #: alive forever.
     pid: int = field(default=0)
 
     @property
     def url(self) -> str:
-        # An IPv6 literal has to be bracketed, or the colons in the address run
-        # into the one before the port and the whole thing parses as a bad
-        # port. Measured: a valid ::1 endpoint produced a URL no client could
-        # use. Bracketed already, or a name, it is left alone.
+        # An IPv6 literal has to be bracketed, or its colons run into the port.
+        # Bracketed already, or a name, it is left alone.
         host = self.host
         if ":" in host and not host.startswith("["):
             host = f"[{host}]"
@@ -773,10 +651,8 @@ class DaemonDescriptor:
     def from_mapping(cls, raw: object) -> DaemonDescriptor:
         """Build one from parsed JSON, refusing anything unusable.
 
-        Field by field rather than by unpacking the mapping, because this is
-        reading a file that another process wrote and that anything with write
-        access could have edited. Unpacking would accept a port that is a string
-        and fail much later, somewhere that cannot explain why.
+        Field by field, because another process wrote the file; unpacking
+        would accept a string port and fail much later.
         """
         if not isinstance(raw, Mapping):
             raise DescriptorError("The daemon descriptor is not an object")
@@ -807,13 +683,8 @@ class DaemonDescriptor:
     def check_endpoint_is_local(self) -> None:
         """Refuse an endpoint that is not this machine, before sending a token.
 
-        The descriptor is a file on disk, so it says what was last written to
-        it rather than what this process believes. Reading a host from it and
-        posting a bearer token there unchecked would turn a corrupted or
-        stale file into a way to hand over the token and, through it, the
-        LinkedIn session behind it. The file lives in owner-only state, so this
-        is about what has gone wrong rather than about another account, and it
-        is cheap enough to check either way.
+        The file says what was last written to it, and posting the bearer token
+        to an unchecked host would hand over the LinkedIn session behind it.
         """
         if not is_loopback_host(self.host):
             raise DescriptorError(
@@ -828,13 +699,8 @@ class DaemonDescriptor:
         if not self.path.startswith("/"):
             raise DescriptorError("The daemon descriptor has no usable path")
 
-        # A URL is printable ASCII. Stated as a rule rather than as a list of
-        # the characters that happened to come up: an earlier version banned
-        # CR, LF, tab and NUL by name and left thirty-six other code points
-        # that were accepted here and rejected by the client, which is exactly
-        # the shape of failure this check exists to move. Anything outside the
-        # printable range goes, whether it is a control character, a
-        # non-breaking space, or a lone surrogate.
+        # A URL is printable ASCII. A range rather than a list of known-bad
+        # characters, so nothing the client would reject gets past here.
         for name, value in (("host", self.host), ("path", self.path)):
             if any(character < "\x21" or character > "\x7e" for character in value):
                 raise DescriptorError(
@@ -842,15 +708,8 @@ class DaemonDescriptor:
                     f"cannot appear in a URL, so it cannot name an endpoint"
                 )
 
-        # The fields are individually plausible; whether they compose into
-        # something a client can use is a separate question, and the only one
-        # that finally matters. Measured accepting three such descriptors:
-        # "[::1] ", a bracketed IPv4, and a path with a newline, each failing
-        # later in the client rather than here where it could be explained as a
-        # descriptor this did not write.
-        #
-        # urlsplit rather than an HTTP client's parser: this has no business
-        # depending on which client the caller happens to use.
+        # Individually plausible fields must also compose into a URL a client
+        # can use. urlsplit, so this does not depend on the caller's client.
         try:
             parsed = urlsplit(self.url)
             port_survived = parsed.port == self.port
@@ -860,34 +719,21 @@ class DaemonDescriptor:
                 f"The daemon descriptor describes an endpoint that cannot be "
                 f"used to reach anything: {exc}"
             ) from exc
-        # The host is read back, not just the port. is_loopback_host was asked
-        # about the field; this asks about the string a client will actually
-        # connect to, and the two came apart: a space-padded address passed as
-        # loopback and produced a host of "%20127.0.0.1%20", so what was
-        # verified and what would be contacted were not the same name.
+        # The host is read back too: is_loopback_host judged the field, and a
+        # space-padded address can pass it while the URL names another host.
         if not port_survived or not host_survived or parsed.scheme != "http":
             raise DescriptorError(
                 f"The daemon descriptor's host, port and path do not compose "
                 f"into a usable address: {self.url!r}"
             )
 
-        # And finally: what does this name actually resolve to. Spelling rules
-        # keep answering slightly the wrong question, because a host can be
-        # well formed and still resolve to nothing, or to somewhere else.
-        # is_loopback_host strips trailing dots before deciding whether it is
-        # looking at a literal or a name, so "127.0.0.1." and "localhost.."
-        # passed as loopback while getaddrinfo refused them outright; and it
-        # accepts "localhost" by name, which says nothing about where the
-        # resolver on this machine actually sends it.
+        # Finally, what the name resolves to: is_loopback_host accepts
+        # ``localhost`` by name and trailing-dot spellings, which say nothing
+        # about where this machine's resolver sends them.
         hostname = parsed.hostname or ""
         try:
-            # An address literal is its own answer, and asking the resolver
-            # about one would be a needless trip through a component that can
-            # hang: getaddrinfo takes no deadline, so a wedged NSS or mDNS
-            # responder blocks for as long as it likes. Measured with a stalled
-            # resolver: two seconds for a two second stall, and unbounded in
-            # principle. This is what a daemon publishes for itself, so the
-            # common path never reaches the call below.
+            # A literal is its own answer, and the owner publishes one, so the
+            # common path never reaches getaddrinfo, which takes no deadline.
             ipaddress.ip_address(hostname)
             return
         except ValueError:
@@ -901,16 +747,9 @@ class DaemonDescriptor:
                 f"not resolve to an address on this machine: {exc}"
             ) from exc
 
-        # Every answer, not merely the first: a name can carry several, and one
-        # of them being loopback says nothing about the one a client picks.
-        # Measured with the resolver made to answer 203.0.113.9 for localhost:
-        # the descriptor was accepted, and the token would have been posted off
-        # this machine.
-        #
-        # This does not close the gap entirely, because the client resolves the
-        # name again when it connects and can get a different answer. What it
-        # does is stop a descriptor naming a host that resolves elsewhere right
-        # now, which is the difference between a check and a decoration.
+        # Every answer, not the first: one loopback answer says nothing about
+        # the one a client picks. The client resolves again when it connects,
+        # so this narrows the gap rather than closing it.
         for *_, address in resolved:
             if not is_loopback_host(str(address[0])):
                 raise DescriptorError(
@@ -1056,18 +895,10 @@ def _read_own_file(
 ) -> str | None:
     """Read a file this daemon wrote, refusing anything that is not one.
 
-    Both files under the daemon directory go through here, because both are
-    read by a client that is about to act on them and neither is safe to open
-    by path alone. Three things are established before a byte is used:
-
-    * it is not a symbolic link, so the path cannot aim the read elsewhere;
-    * it is a regular file, so a named pipe cannot stand in for one;
-    * the open does not block, so such a pipe cannot hang the client inside
-      ``open`` before either check has run.
-
-    *missing_is_none* separates the two callers. Absence of a descriptor is the
-    ordinary first-start case; absence of a token beside a published descriptor
-    is not, and *missing_message* is how that caller says why.
+    Before a byte is used, the entry must not be a symlink, must be a regular
+    file, and the open must not block, so a link cannot aim the read elsewhere
+    and a named pipe cannot hang the client. With *missing_is_none*, absence
+    returns ``None``; otherwise it raises with *missing_message*.
     """
     # Windows has no O_NOFOLLOW, so the open there resolves a link and the
     # check below then sees a perfectly ordinary regular file at the other end.
@@ -1148,12 +979,9 @@ def _read_own_file(
 def _decode_descriptor(path: Path, raw: str) -> DaemonDescriptor:
     """Parse and version-check one descriptor read from *path*.
 
-    The schema is enforced here and the tool protocol is not. The schema is the
-    file format, so a mismatch means fields this client cannot read. A protocol
-    mismatch is a file this client reads perfectly well, naming an owner it may
-    only ask to stand down, and that distinction is the caller's to draw
-    (``daemon.discovery._inspect``). Everything else ``from_mapping`` checks still holds
-    for it: field types, the instance identifier and a local endpoint.
+    Enforces the schema (the file format) but not the tool protocol: a
+    protocol mismatch names an owner this client may only ask to stand down,
+    which the caller decides (``daemon.discovery._inspect``).
     """
     try:
         parsed = json.loads(raw)
@@ -1246,19 +1074,13 @@ _MAX_TOKEN_BYTES = 4096
 def read_token(auth_root: Path, descriptor: DaemonDescriptor) -> str:
     """Read the token belonging to *descriptor*, checking it is the right one.
 
-    Opened without following links and confirmed to be a regular file before a
-    byte is read. Confining the *filename* to the daemon directory, which the
-    UUID check does, is not enough on its own: a link sitting at that name
-    still points wherever it likes, and a special file there could block the
-    client before any of the checks ran.
+    The UUID check confines the filename, not what sits there, so the file
+    goes through :func:`_read_own_file`.
     """
     directory = prepare_daemon_state(auth_root)
     path = directory / f"token-{_checked_instance_id(descriptor.instance_id)}"
-    # None only comes back for a missing file, and this caller asked for that
-    # to raise instead: a token missing beside a published descriptor is a
-    # daemon in a state it should not be in, not an ordinary absence. Checked
-    # rather than asserted, since assertions are removed under -O and this one
-    # guards what gets used as a credential.
+    # A token missing beside a published descriptor raises. Checked rather
+    # than asserted below, since -O strips assertions and this is a credential.
     text = _read_own_file(
         path,
         _MAX_TOKEN_BYTES,

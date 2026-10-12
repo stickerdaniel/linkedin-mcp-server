@@ -1,36 +1,17 @@
 """Talking to the owner, from the frontend that forwards to it.
 
-The other half of :mod:`linkedin_mcp_server.daemon.election`: that module gets an
-owner running and hands back an attachment, and this one turns the attachment into
-something a FastMCP server can serve tools from.
+:mod:`linkedin_mcp_server.daemon.election` gets an owner running; this module
+serves tools from it. The forwarder (:mod:`linkedin_mcp_server.daemon.forwarder`)
+reads the owner's address and token per operation from
+:class:`DaemonProxyBackend`, so a proxy follows a replacement owner. This module
+is the call shell around it: heartbeat preflight, recovery, auth repair and the
+call's deadline.
 
-Kept out of ``server.py`` deliberately. That module answers which parts of a
-server a role gets; the loopback address, the bearer token, the proxy-environment
-refusal and the forwarding deadline are all daemon knowledge, and every one of
-them is a way to leak a credential or to hang a call.
-
-How a request crosses to the owner is :mod:`linkedin_mcp_server.daemon.forwarder`.
-It reads the owner's address and token per operation from
-:class:`DaemonProxyBackend`, so a proxy follows a replacement owner instead of
-keeping an address it captured at startup. This module is the call shell around
-it: the heartbeat preflight, recovery, auth repair and the call's deadline.
-
-**Which owner that is changes while this process runs**, and the rest of this
-module is about surviving it. ``@latest`` is the documented install, so the first
-client to launch after an upgrade stands the old owner down, and every proxy
-already attached to it would otherwise be dead until its own process restarts.
-Reproduced end to end before any of this existed: a proxy serving 19 tools was
-asked nothing, its owner was told to stand down the way a newer build does
-(``daemon.election._ask_to_stand_down``), and the next listing failed with
-``McpError: Client failed to connect``. Idle exit and a crashed owner end the
-same way.
-
-Noticing the departure is one half; repeating the call is the other, and it is
-the half that can do damage. There is no dispatch acknowledgement anywhere in the
-protocol, so a failure is classified where the boundary is known
-(:class:`OwnerUnreachableError`) rather than diagnosed from a message afterwards.
-Only a request that provably never left this process may be repeated when running
-it twice would send a connection request twice.
+The owner changes while this process runs: an upgrade, an idle exit or a crash
+replaces it. The protocol has no dispatch acknowledgement, so a failure is
+classified where the boundary is known (:class:`OwnerUnreachableError`), and only
+a request that provably never left this process may be repeated when running it
+twice could repeat a LinkedIn write.
 """
 
 from __future__ import annotations
@@ -94,28 +75,21 @@ _attempt_dispatch: contextvars.ContextVar[DispatchRecord | None] = (
 
 #: Added to the owner's tool timeout to get the frontend's deadlines: each hop's
 #: request (:class:`~linkedin_mcp_server.daemon.forwarder.OwnerForwarder`), and
-#: the whole call's (:func:`call_budget`). The owner is the one that should
-#: report a timed-out tool, so the frontend has to outlast it; an equal value
-#: races the owner's own error response and turns a diagnosable "tool timed out"
-#: into a transport failure.
+#: the whole call's (:func:`call_budget`). The frontend has to outlast the owner
+#: so the owner reports a timed-out tool; an equal value races that report.
 #:
-#: It does not make room for a queued call, and no value derived from the tool
-#: timeout could. The owner serializes in middleware, and a tool's timeout only
-#: starts once the middleware lets it through — measured: a tool declared with a
-#: one second timeout, queued two seconds behind another call, succeeded after
-#: 2.02s. So under real concurrency the call's deadline can pass while it is
-#: still waiting its turn. The frontend then stops waiting and stops its
-#: heartbeats, and the owner cancels the call once they have expired.
+#: It does not cover a queued call: the owner's tool timeout starts only once
+#: its serializing middleware admits the call. Under concurrency the frontend
+#: can stop waiting first; its heartbeats then stop and the owner cancels the
+#: call once they expire.
 _TIMEOUT_MARGIN_SECONDS = 30.0
 
 
 def call_budget(tool_timeout: float) -> float:
     """The seconds one forwarded call may take, from its arrival at the frontend.
 
-    The tool timeout a client configured, plus :data:`_TIMEOUT_MARGIN_SECONDS`:
-    the bound a first attempt's hop always had, now covering everything else
-    the call waits on too (``daemon.core.call``). No setting of its own, because
-    ``TOOL_TIMEOUT`` already says how long a call may take.
+    The configured tool timeout plus :data:`_TIMEOUT_MARGIN_SECONDS`, covering
+    every wait of the call (``daemon.core.call``).
     """
     return tool_timeout + _TIMEOUT_MARGIN_SECONDS
 
@@ -143,10 +117,8 @@ class _WrittenOff(Exception):
 def _refuse_control_only(attachment: Attachment) -> None:
     """Refuse to dispatch anything through a pair proved for control only.
 
-    Checked wherever an attachment becomes somewhere to send a call, not just
-    where it is produced. The lookup that makes one never marks it attachable,
-    and that is one rule in one place; this makes the prohibition hold even if
-    that place changes.
+    Checked wherever an attachment becomes a dispatch target, not only where
+    the lookup produces it, so the prohibition survives a change there.
     """
     if attachment.control_only:
         raise ValueError(
@@ -157,31 +129,17 @@ def _refuse_control_only(attachment: Attachment) -> None:
 class DaemonProxyBackend:
     """The owner this proxy forwards to, and what it would take to find another.
 
-    One object rather than two loose values, and the reason is the second half:
-    an owner is replaced by every upgrade, so the address a proxy uses has to be
-    a thing that can change rather than a value captured at startup. Nothing
-    changes it yet — that is the next change — but the shape has to exist before
-    anything can.
+    Mutable because every upgrade replaces the owner; the frozen ``Attachment``
+    it holds is a proof about one owner. Carries the election's inputs because
+    ``create_mcp_server`` has no configuration, and ``get_config()`` would give
+    defaults rather than the inputs that elected the current owner.
 
-    It carries the election's inputs alongside the answer because nothing
-    downstream has them otherwise. The forwarder is built from this object, and
-    ``create_mcp_server`` has no configuration
-    parameter at all, so the proxy layer could not have elected a replacement
-    even if it had wanted to. Reaching for ``get_config()`` there instead would
-    supply defaults for a directly constructed server, not the exact inputs that
-    elected the owner being replaced.
-
-    Not frozen, unlike the ``Attachment`` it holds. The attachment is a proved
-    fact about one owner and must not be edited; which attachment is current is
-    exactly the thing that moves.
-
-    **Some owners are written off for good.** An owner that refused a call as
-    retiring, answered the heartbeat route with 404 or anything unexpected, or
-    refused an unmarked call is recorded in ``_unusable`` and never dispatched
-    to again by this process. Every consumer asks: a new call, a listing, an
-    election's result before it is adopted, and a caller that joined an election
-    already in progress. A call already running keeps the owner it was bound to,
-    because moving its heartbeats would get it cancelled by the owner running it.
+    Some owners are written off for good: one that refused a call as retiring,
+    answered the heartbeat route unexpectedly or refused an unmarked call is
+    recorded in ``_unusable`` and never dispatched to again. Every consumer
+    checks: a new call, a listing, an election's result before adoption, and a
+    caller joining an election in progress. A running call keeps its bound
+    owner, because moving its heartbeats would get it cancelled.
     """
 
     def __init__(
@@ -233,17 +191,13 @@ class DaemonProxyBackend:
     ) -> None:
         """Raise if a new request may not go to *attachment*, as of right now.
 
-        Asked again at every point a new request could still be stopped: when a
-        call picks its owner, after its preflight returns, when its hop is
-        opened, and before each request on it. Each of those follows an await during
-        which another call can write the owner off, and a check made before the
-        await says nothing about after it. Whether it refuses is
-        ``daemon.core.call.binding_refusal``'s rule; *sent* is whether a request
-        of this call may already have left.
-
-        The failure says nothing was sent, which is true: nothing was. It names
-        the owner that was written off, not whichever replacement the backend
-        holds now, because that one has passed no preflight for this call.
+        Asked again after every await where another call could write the owner
+        off: when a call picks its owner, after its preflight, when its hop
+        opens, and before each request. The rule is
+        ``daemon.core.call.binding_refusal``; *sent* is whether a request of
+        this call may already have left. The failure names the written-off
+        owner, not the backend's current one, which passed no preflight for this
+        call.
         """
         _refuse_control_only(attachment)
         instance = attachment.descriptor.instance_id
@@ -267,37 +221,21 @@ class DaemonProxyBackend:
         """Find an owner to replace *failed_instance*, at most once at a time.
 
         Returns the attachment to use now, or ``None`` when none could be
-        established.
+        established. A *classification* that buries the failed owner is
+        recorded first (:meth:`note_failure`).
 
-        *classification* is why the failed owner failed. One that buries it is
-        recorded before anything else happens (:meth:`note_failure`).
-
-        **The identity check comes first, and it is what keeps a late failure
-        cheap.** Several calls can be in flight against one owner. The first to
-        fail elects a replacement; the others fail afterwards still carrying the
-        old identity, and without this they would each elect again, against an
-        owner that is already answering.
-
-        **The latest burial wins over an election already running.** A caller
-        that joins a flight started before it buried an owner cannot trust that
-        flight's answer, because the election ran without knowing: a retiring
-        owner still answers its probe. An answer naming a written-off owner is
-        refused, and if the flight did not know everything this caller knows,
-        one more flight is run with it. At most two per call here, so a
-        recovery cannot spin.
-
-        **The election runs in a thread, and that is correctness rather than
-        latency.** ``obtain_owner`` probes liveness through ``asyncio.run``, which
-        raises inside a running loop, and its own ``except`` turns that into
-        ``Reach.REFUSED``. Called in-loop it would therefore bury a *healthy*
-        owner for the whole election rather than merely blocking.
-
-        **Shielded, and this one is measured.** Cancelling the task that awaits
-        ``asyncio.to_thread`` returns to the awaiter at once while the worker runs
-        to completion regardless: driven directly, an awaiter cancelled at 0.1s
-        and a worker that still finished its 1.5s of work. So a caller that gives
-        up must not clear this guard, or the next failure starts a second election
-        while the first is still running.
+        - The identity check comes first, so the other calls failing against an
+          owner already replaced do not each elect again.
+        - The latest burial wins: a flight started before it may return a
+          written-off owner (a retiring owner still answers its probe). That
+          answer is refused, and one more flight runs with everything this
+          caller knows, at most :data:`_ELECTIONS_PER_RECOVERY` in all.
+        - The election runs in a thread for correctness: ``obtain_owner`` uses
+          ``asyncio.run``, which fails inside a running loop and would bury a
+          healthy owner.
+        - Shielded, because cancelling the awaiter of ``asyncio.to_thread``
+          leaves the worker running; a caller that gives up must not clear the
+          guard while that election still runs.
         """
         self.note_failure(failed_instance, classification)
         current = self._attachment.descriptor.instance_id
@@ -395,12 +333,9 @@ _OWNER_LOST = (
 def _owner_lost_from_a_listing() -> MCPError:
     """The listing failure a client of either protocol era can read.
 
-    An ``MCPError`` because that is the one exception the SDK carries to the
-    wire as it is. On a 2026-07-28 connection anything else becomes ``Internal
-    server error`` (``mcp/server/runner.py``, ``modern_error_data``, SDK 2.2.0),
-    and on a handshake-era one it arrives as the failure's own text, which says
-    "connect" and not what to do about it. A ``ToolError`` would not help here:
-    no listing handler converts one, so it is just another exception to the SDK.
+    An ``MCPError``, the one exception the SDK carries to the wire as it is; on
+    a 2026-07-28 connection anything else becomes ``Internal server error``.
+    No listing handler converts a ``ToolError``.
     """
     return MCPError(code=mt.INTERNAL_ERROR, message=_OWNER_LOST)
 
@@ -408,13 +343,9 @@ def _owner_lost_from_a_listing() -> MCPError:
 def _owner_lost_from_a_call() -> ToolError:
     """The tool call failure a client of either protocol era can read.
 
-    A ``ToolError`` rather than the ``MCPError`` a listing gets, because a call
-    has an error result and a listing does not. FastMCP's ``tools/call`` handler
-    turns a ``FastMCPError`` into a result carrying its text, in both eras,
-    which is the shape a model reads; an ``MCPError`` would leave the handler
-    as a protocol error instead. What it replaces is either the masked ``Error
-    calling tool '<name>'`` or, when the heartbeat preflight found nobody, a
-    plain exception the SDK masks in its turn.
+    A ``ToolError``, which FastMCP's ``tools/call`` handler turns into an error
+    result a model reads in both eras; an ``MCPError`` would leave the handler
+    as a protocol error.
     """
     return ToolError(_OWNER_LOST)
 
@@ -459,51 +390,35 @@ _SIGN_INS: set[asyncio.Task[Any]] = set()
 class FrontendCallMiddleware(Middleware):
     """Carry one tool call through to an answer, as ``daemon.core.call`` decides.
 
-    The shell around the call core, and the outer of the two middlewares a
-    proxy installs. The core decides; this runs each effect and feeds the
-    completion back: an attempt is ``call_next``, which enters
-    :class:`FrontendCallHeartbeatMiddleware` and the provider below it; a
-    recovery is the backend's one election; a classification is the tool's
-    annotations; a repair and a sign-in wait are ``daemon.auth_repair``'s.
+    The outer of the two middlewares a proxy installs. The core decides; this
+    runs each effect and feeds the completion back: an attempt is
+    ``call_next`` (through :class:`FrontendCallHeartbeatMiddleware`), a
+    recovery is the backend's election, a repair and a sign-in wait are
+    ``daemon.auth_repair``'s.
 
-    **One deadline per call** (:func:`call_budget`, from arrival here). Every
-    wait above is cut there at the latest. Two of them are shared, and the
-    deadline ends only this call's wait for them, never the work: the
-    election is shielded inside :meth:`DaemonProxyBackend.recover`, and a
-    sign-in runs as a task of its own (:data:`_SIGN_INS`). A forwarded request
-    that is cut is this call's own and is cancelled, which ends its heartbeats
-    so the owner cancels it in turn.
+    One deadline per call (:func:`call_budget`). It ends only this call's wait
+    for shared work: the election is shielded in
+    :meth:`DaemonProxyBackend.recover`, and a sign-in runs as its own task
+    (:data:`_SIGN_INS`). A cut forwarded request is cancelled, which ends its
+    heartbeats so the owner cancels it too.
 
-    **What one tool call can cost, counted.** An invocation is at most two
-    attempts, each one heartbeat preflight and at most one dispatch, and one
-    recovery joining at most :data:`_ELECTIONS_PER_RECOVERY` elections; the
-    second attempt's failure is recorded without electing. A sign-in adds at
-    most one read-only replay, a second invocation. So one client call is at
-    most four preflights, four dispatches and four election joins, all inside
-    one deadline.
+    An invocation is at most two attempts (one preflight and at most one
+    dispatch each) and one recovery of at most :data:`_ELECTIONS_PER_RECOVERY`
+    elections; a sign-in adds at most one read-only replay. One client call is
+    therefore at most four preflights, four dispatches and four election joins.
 
-    Discovery is covered here as well, and it is the half a client hits first:
-    many list before they call. A recovery that only covered ``tools/call``
-    would leave a client whose owner died unable to list, and therefore unable
-    to make the call that would have triggered the recovery. All four listings,
-    not only tools, although this role serves nothing but tools: a client's
-    opening exchange asks for resources and prompts too, and with
-    ``provider_error_strategy = "raise"`` a departed owner turns that answer
-    into an error the user sees. Reads and renders are left out because no
-    owner here registers a resource or a prompt; the forwarder asks the owner's
-    listing for those lookups too, and the day one is registered they need the
-    same treatment as the listings, along with ``on_read_resource`` and
-    ``on_get_prompt`` here.
+    All four listings recover too, because clients list before they call and
+    ``provider_error_strategy = "raise"`` surfaces a departed owner. Resource
+    reads and prompt renders are not covered because no owner registers either;
+    registering one needs ``on_read_resource`` and ``on_get_prompt`` here.
     """
 
     def __init__(self, backend: DaemonProxyBackend, *, budget: float) -> None:
         """*budget* is the seconds a call may take from its arrival here.
 
-        Taken as an argument rather than read from the configuration singleton,
-        because the two can disagree: ``create_mcp_server`` is handed the tool
-        timeout every tool it registers gets, and a server built directly may
-        never have installed a configuration at all. Measured that way once, a
-        1.2-second call budgeted itself 149.8 seconds from the singleton's default.
+        An argument rather than the configuration singleton, which a directly
+        built server may never have installed, so its default would disagree
+        with the tool timeout ``create_mcp_server`` was given.
         """
         self._proxy_backend = backend
         self._call_budget = budget
@@ -513,11 +428,8 @@ class FrontendCallMiddleware(Middleware):
     ) -> Any:
         """List once, and once more against a replacement if the owner was lost.
 
-        When no owner is left, either because recovery found none or because
-        the replacement failed the repeat as well, the client is told so in
-        words it can act on (:func:`_owner_lost_from_a_listing`). Only a
-        failure recognised as the owner's is put that way; anything else leaves
-        as it arrived, and the SDK masks it as it would on any server.
+        Only a failure recognised as the owner's becomes
+        :func:`_owner_lost_from_a_listing`; anything else leaves as it arrived.
         """
         try:
             return await call_next(context)
@@ -747,36 +659,15 @@ class FrontendCallMiddleware(Middleware):
     ) -> ToolResult:
         """Say that nobody here knows whether the call acted.
 
-        The one case where the honest answer is to report the failure. Nothing in
-        the protocol says whether the departed owner had already sent the
-        connection request or the message, and asking costs one retry while
-        guessing wrong sends it twice. The user knows which happened; this
-        process does not.
+        The protocol cannot say whether the departed owner already sent the
+        request, and guessing wrong sends it twice, so the user decides.
 
-        A result rather than a raise, and what decides that is the payload rather
-        than the masking. Two raises have to be told apart, both measured against
-        fastmcp 3.4.7 with the masking this server switches on (``server.py``,
-        ``mask_error_details=True``). Re-raising the failure that arrived says
-        nothing: ``OwnerUnreachableError`` is a plain ``Exception``, so the call
-        below has already replaced it with ``ToolError("Error calling tool
-        'send_message'")`` (``fastmcp/server/server.py:1342-1358``), and that is
-        the whole of what the client gets on the one call that most needs to
-        hear a retry can deliver the message twice. A ``ToolError`` raised
-        *here* keeps its own text: the masking sits below this middleware, and
-        even there a ``FastMCPError`` — which ``ToolError`` is — is re-raised
-        untouched (``:1327-1331``). What neither raise carries is ``status`` and
-        ``retry_safe``, the two fields a client can act on without reading
-        prose, and they are why this answer is a result.
-
-        ``is_error`` stays true so a client that reads no structured content
-        still sees a failure rather than a success carrying no data, the way
-        ``daemon.auth_repair`` answers a sign-in.
-
-        Keeping it true is also what lets this payload ignore the tool's declared
-        output schema: an error result travels as a whole ``CallToolResult``,
-        which ``mcp.server.lowlevel.server`` returns unchanged instead of
-        validating it. A success-shaped dict would be checked against the schema
-        of whichever tool was called, and this one is a stand-in for all of them.
+        A result rather than a raise, because only a result carries ``status``
+        and ``retry_safe``, the fields a client acts on; a re-raised
+        ``OwnerUnreachableError`` is masked to ``Error calling tool``.
+        ``is_error`` stays true so a client reading no structured content still
+        sees a failure, and so the SDK skips validating this stand-in against
+        the called tool's output schema.
         """
         answer = unknown_outcome(tool=context.message.name, reason=reason)
         return ToolResult(
@@ -891,23 +782,17 @@ def _owner_refused(result: object, attachment: Attachment) -> OwnerFailure | Non
 class FrontendCallHeartbeatMiddleware(Middleware):
     """Mark every call, and say for as long as this frontend waits that it still is.
 
-    The other half of `daemon.liveness`. Cancellation does not cross the hop, so
-    an owner cannot tell a call somebody wants from one whose client has gone;
-    this is the frontend answering that question over and over until it stops
-    caring, at which point the answer stops arriving and the owner draws the
-    obvious conclusion.
+    The other half of `daemon.liveness`: cancellation does not cross the hop,
+    so the owner learns a client has gone only when the beats stop.
 
-    **No call leaves unmarked.** The first beat is a preflight, and only a
-    validated 200 dispatches the call. Every other answer, and every failure to
-    get one, raises :class:`OwnerUnreachableError` with ``nothing_was_sent``
-    true and a classification, before the call is handed on. The same holds for
-    an owner that answered the call itself with its signed refusal: the tool
-    never ran, and recovery may repeat it.
+    No call leaves unmarked. The first beat is a preflight, and only a
+    validated 200 dispatches; every other answer or failure raises
+    :class:`OwnerUnreachableError` with ``nothing_was_sent`` before the call is
+    handed on, as does the owner's own signed refusal of the call.
 
-    Inner of the two a proxy installs, and that is what makes a repeat behave:
-    :class:`FrontendCallMiddleware` sits outside, so every attempt it makes
-    enters here afresh and gets its own identifier and its own heartbeats
-    against whichever owner it is now talking to.
+    The inner of the two middlewares a proxy installs, so every attempt
+    :class:`FrontendCallMiddleware` makes gets its own call id and heartbeats
+    against its current owner.
     """
 
     def __init__(self, backend: DaemonProxyBackend) -> None:
@@ -967,11 +852,10 @@ class FrontendCallHeartbeatMiddleware(Middleware):
     ) -> OwnerUnreachableError | None:
         """Beat once before dispatching, and say why not if the call must not go.
 
-        Its not-sent answer is about the tool request, which this makes certain
-        has not left, and not about the preflight, which may well have arrived.
-        A connection that was never opened is ``UNREACHABLE``; one that opened
-        and then failed is ``OWNER_ERROR``. Neither buries the owner: a restart
-        or a stall looks like either, and the election's own probe decides.
+        The not-sent answer is about the tool request, not the preflight, which
+        may have arrived. Neither ``UNREACHABLE`` nor ``OWNER_ERROR`` buries the
+        owner: a restart or a stall looks like either, and the election's probe
+        decides.
         """
         try:
             response = await self._beat(attachment, call_id)
@@ -1001,13 +885,10 @@ class FrontendCallHeartbeatMiddleware(Middleware):
         )
 
     async def _keep_saying(self, attachment: Attachment, call_id: str) -> None:
-        """Beat until cancelled, and never let a failed beat end the run.
+        """Beat until cancelled; a failed beat does not end the run.
 
-        A beat that fails is not evidence the call is over: the owner may be
-        momentarily busy, and giving up here would expire a call that is running
-        perfectly well. The frontend stops saying it is waiting only when it
-        stops waiting, which is what the cancellation in the caller's `finally`
-        expresses.
+        A failed beat is no evidence the call is over, and giving up would
+        expire a running call. Only the caller's cancellation ends this.
         """
         while True:
             await asyncio.sleep(HEARTBEAT_SECONDS)
@@ -1020,13 +901,9 @@ class FrontendCallHeartbeatMiddleware(Middleware):
     async def _beat(attachment: Attachment, call_id: str) -> httpx2.Response:
         """One heartbeat, returning the owner's answer with its body read.
 
-        The address is the published one with its path replaced, rather than
-        rebuilt from host and port: the descriptor's URL already brackets an
-        IPv6 literal, and rebuilding is how that bracket gets lost.
-
-        The owner's own client factory, for the reason it exists: httpx2 honours
-        ``HTTP_PROXY`` even for loopback unless ``NO_PROXY`` happens to say
-        otherwise, and this request carries the bearer token.
+        The descriptor's URL with its path replaced, not rebuilt from host and
+        port, which would lose an IPv6 literal's brackets. The proxy-free client
+        keeps the bearer token away from ``HTTP_PROXY``.
         """
         from urllib.parse import urlsplit, urlunsplit
 

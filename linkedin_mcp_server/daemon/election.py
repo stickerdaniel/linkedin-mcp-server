@@ -1,23 +1,18 @@
 """Getting an owner started, from the side of the process that wants one.
 
-The counterpart to :mod:`linkedin_mcp_server.daemon.discovery`, which only reads.
-This is where a process acts: it starts a detached owner and waits for the endpoint to
-exist. It never becomes the owner itself, because it cannot: ``cli_main`` runs
-the stdio server blocking, so a process that served the owner's HTTP could not
-also serve its own client.
+The acting counterpart of :mod:`linkedin_mcp_server.daemon.discovery`: it
+starts a detached owner and waits for its endpoint. It never becomes the owner
+itself, since ``cli_main`` blocks on the stdio server.
 
-The child owns every operation that may mutate daemon state. It takes the lock,
-opens the log, starts the endpoint, and publishes while holding that lock. This
-subprocess boundary is also the frontend's timeout boundary: if state storage is
-stuck in the kernel, the parent can kill the child and prove that no abandoned
-worker can later acquire the lock or publish over an in-process fallback. A
-thread cannot provide that proof because it cannot be killed.
+The child owns every operation that may mutate daemon state (lock, log,
+endpoint, publication), so the frontend enforces its timeout by killing it; an
+abandoned thread could still take the lock or publish later.
 
-What to do next is decided in ``daemon.core``: the election loop in
+Decisions live in ``daemon.core``: the loop in
 :mod:`~linkedin_mcp_server.daemon.core.election`, each look at the published
 owner in :mod:`~linkedin_mcp_server.daemon.core.lookup`, and each child start in
 :mod:`~linkedin_mcp_server.daemon.core.spawn`. This module carries out their
-effects, reads the clock and feeds back what came of each.
+effects and feeds back the clock and the results.
 """
 
 from __future__ import annotations
@@ -89,12 +84,8 @@ DEFAULT_ELECTION_SECONDS = 90.0
 DEFAULT_SETTLEMENT_SECONDS = 15.0
 
 #: How long a published owner has to answer before it is treated as *silent*.
-#: This is a loopback request to a process that is either serving or gone, so
-#: the only thing a longer budget buys is a longer stall on a dead descriptor —
-#: and a dead one does not stall at all, it refuses. Measured against a real
-#: descriptor and token: a closed port comes back in about ten milliseconds,
-#: while a process holding a listening socket that nobody reads spends the whole
-#: budget. That is the distinction :class:`Reach` exists to carry.
+#: A dead owner refuses at once; only a stalled listener spends the budget,
+#: which is the distinction :class:`Reach` carries.
 _REACHABLE_SECONDS = 5.0
 
 #: How long an older owner has to acknowledge a turnover request. Short:
@@ -160,17 +151,13 @@ def obtain_owner(
     """Return an owner to talk to, starting one if nobody else has.
 
     The loop is :mod:`linkedin_mcp_server.daemon.core.election`'s, including the
-    separate budgets of active election and quiescent settlement.
+    separate budgets of active election and quiescent settlement. *buried*
+    names generations the caller already found unusable, which are never
+    contacted or returned (a retiring owner still answers the probe).
 
-    *buried* names generations the caller has already found unusable, so they
-    are never contacted or returned here. A proxy recovering from an owner that
-    refused its calls passes them, because a retiring owner still answers the
-    listing this election probes with.
-
-    Returns at once, with nothing worth connecting to and a ``fallback`` set,
-    when an owner of this build with another configuration answers its one
-    probe or stays silent through it: that owner is left alone, and the caller
-    drives its own browser rather than waiting on the lock it may hold.
+    Returns at once with a ``fallback`` set when an owner of this build with
+    another configuration answers its one probe or stays silent through it:
+    that owner is left alone and the caller drives its own browser.
     """
     # Frozen here because the first election is part of a frontend's own
     # startup: a package replaced later must show up as a difference against
@@ -264,20 +251,16 @@ def _live_lookup(
 ) -> tuple[OwnerLookup, bool, bool]:
     """Find an owner and prove it answers, or report it as leftovers.
 
-    The one place ``ATTACHABLE`` is turned from a claim about a file into a
-    claim about a process. Everything in
-    :mod:`linkedin_mcp_server.daemon.discovery` reads disk; this connects. What
-    each reading calls for is :mod:`linkedin_mcp_server.daemon.core.lookup`'s
-    decision.
-
-    Reads stay on the caller's one inspector. A paced pass may re-read the
-    canonical descriptor, but returns when that pass's wait ends so the active
-    loop can try the lock again instead of spending its whole budget on reads.
+    The one place ``ATTACHABLE`` turns from a claim about a file into a claim
+    about a process; what each reading calls for is
+    :mod:`linkedin_mcp_server.daemon.core.lookup`'s decision. Reads stay on the
+    caller's one inspector, and a paced pass returns when its wait ends so the
+    loop can try the lock again.
 
     Returns the lookup, whether turnover was requested, and whether the lookup
-    came from a completed descriptor read. The last flag lets settlement retain
-    its last concrete observation when a bounded read times out. Generations the
-    pass writes off are added to *buried*.
+    came from a completed read, so settlement keeps its last concrete
+    observation when a read times out. Written-off generations are added to
+    *buried*.
     """
     del auth_root, profile, config  # carried by the reusable inspector
     state, effects = lookup_core.look(
@@ -449,17 +432,10 @@ def _what_was_found(finding: Finding, read: OwnerLookup, timed_out: str) -> Owne
 def _ask_to_stand_down(attachment: Attachment) -> None:
     """Ask an older owner to give up the browser for this build.
 
-    Best effort, and deliberately so. The owner may already be gone or may be
-    busy finishing a call. In every one of those cases the caller's next step is
-    the same: try the lock, and wait if somebody still holds it. Raising here
-    would turn a routine upgrade into a client that fails to start.
-
-    Whether the owner *complied* is never assumed. The lock is what says the
-    browser is free, and this function never claims otherwise.
-
-    A turnover request addressed to the instance the descriptor names, through
-    the one route and request version every owner keeps
-    (``daemon.owner.STAND_DOWN_PATH``), whatever its tool protocol.
+    Best effort: whatever happens, the caller next tries the lock, and only the
+    lock says the browser is free. Sent to the descriptor's instance through
+    the one stable route and request version (``daemon.owner.STAND_DOWN_PATH``),
+    whatever its tool protocol.
     """
 
     descriptor = attachment.descriptor
@@ -482,23 +458,10 @@ def _ask_to_stand_down(attachment: Attachment) -> None:
 def _reachable(attachment: Attachment, timeout: float) -> Reach:
     """What the published endpoint says when asked with this token.
 
-    An authenticated round trip rather than a TCP connect. A connect succeeds
-    against any listener that happens to hold the port, including one the
-    operating system handed to something else after the owner died, and against
-    an owner whose token no longer matches the file this client just read.
-
-    The timeout is caught apart from every other failure, and that separation is
-    the whole point of this function's return type. An owner that is gone refuses
-    the connection; an owner that is merely stalled holds the port and says
-    nothing. Both used to arrive here as ``False``, so a frontend buried a live
-    owner it had just started because one ping landed in a scheduler stall.
-
-    The round trip is a tool listing, not a ping, and the difference decides the
-    answer. The 2026-07-28 protocol era removed ping (SDK
-    ``docs/migration.md:1800``) and a default client negotiates that era with a
-    current owner, so a ping came back as an error from a healthy owner and was
-    read here as a refusal. A listing answers in every era, runs no tool and
-    touches no browser.
+    An authenticated tool listing: a TCP connect succeeds against any listener
+    on a reused port, and protocol 2026-07-28 removed ping. A timeout is
+    ``SILENT``, kept apart from a refusal, because a stalled owner may answer a
+    moment later and must not be buried like a dead one.
     """
     import asyncio
 
@@ -722,15 +685,9 @@ def _start_contending_for_the_lock(
 def _refusal_before_spawn(config: AppConfig) -> Started | None:
     """Refuse a start that cannot succeed, before there is a child to stop.
 
-    Two permanent conditions, both answered with ``ABORTED`` so the election
-    hands back to Direct rather than spending its budget on children that would
-    fail the same way.
-
-    The installed package differing from the one this process loaded is a
-    diagnostic, not the authority: a replacement can still land between this
-    check and the spawn, and the child's ACK is what refuses that case. The
-    check exists to say why in a log a user can act on, without starting a
-    process first.
+    Permanent conditions answer ``ABORTED``, so the election falls back to
+    Direct. The installed-package check is a diagnostic for the log only: a
+    replacement can still land after it, and the child's ACK is the authority.
     """
     try:
         running = daemon_version.build_identity()
@@ -769,12 +726,10 @@ def _spawn(
 ) -> Started:
     """Start a detached owner and atomically commit its prepared descriptor.
 
-    The exchange itself is described in :mod:`linkedin_mcp_server.daemon.startup`,
-    and what follows each step of it, including when the child may be stopped, in
-    :mod:`linkedin_mcp_server.daemon.core.spawn`. Standard error carries one
-    bounded bootstrap diagnosis until the child opens its own log. Every
-    operation against state storage remains inside the process that a timed-out
-    frontend can kill.
+    The exchange is :mod:`linkedin_mcp_server.daemon.startup`'s; what follows
+    each step, including when the child may be stopped, is
+    :mod:`linkedin_mcp_server.daemon.core.spawn`'s. Every state-storage
+    operation stays in the child, which a timed-out frontend can kill.
     """
     refusal = _refusal_before_spawn(config)
     if refusal is not None:
@@ -1071,20 +1026,11 @@ def _stop_child(
 ) -> None:
     """End a child whose startup cannot produce a usable owner, and collect it.
 
-    Called after a configuration timeout, an exhausted startup budget, or a
-    terminal non-ready verdict. A reported failure has already run ``_serve``'s
-    bounded endpoint shutdown, and EOF means the child already exited. A timed-out
-    child may be blocked in log or lock I/O, so it must be made terminal before the
-    frontend can fall back to an in-process browser.
-
-    The contained tree is killed outright rather than asked politely first. A
-    ``SIGTERM`` grace period is time added after the caller's budget is already
-    spent, so a child that ignores it would make the documented ceiling false.
-
-    The wait normally proves process death before this returns: a signalled
-    process may still have its descriptors open until the kernel finishes the
-    exit. The bounded-wait warning is the explicit exception, and the caller must
-    not claim the lock is certainly free after it.
+    A timed-out child may be blocked in log or lock I/O, so it is made terminal
+    before the frontend falls back to an in-process browser. Killed outright:
+    a ``SIGTERM`` grace period would run past the caller's spent budget. The
+    wait normally proves death before this returns; after the bounded-wait
+    warning the caller must not claim the lock is free.
     """
     deadline = time.monotonic() + _STOP_CHILD_SECONDS
     if windows_job is not None:
@@ -1104,12 +1050,10 @@ def _stop_child(
                 windows_job.release_popen_handle(child)
             except BaseException:
                 # Kill-on-close is the one containment that depends on none of
-                # the calls above. Without this the handle stays open and unheld
-                # by anyone: the caller cleared its own cleanup before calling,
-                # and only this branch still knows the Job exists. The tree would
-                # then live until this process exits, holding the daemon lock a
-                # failed owner was stopped to release. The installer keeps the
-                # same fallback in ``_cleanup_assigned_windows_job_once``.
+                # the calls above, and only this branch still holds the Job.
+                # Without it the tree would keep the daemon lock until this
+                # process exits. The installer keeps the same fallback in
+                # ``_cleanup_assigned_windows_job_once``.
                 windows_job.close()
                 raise
             # Left to settle itself: it closes on a proved drain and retains the
@@ -1162,12 +1106,10 @@ def _stop_child(
 def _greet(channel: startup.FrontendChannel, *, timeout: float) -> Started | None:
     """Send HELLO and accept only an ACK from this build. ``None`` means go on.
 
-    The child holds nothing yet: no configuration, no lock. So every way this
-    fails ends in a stop, and the only question is whether retrying could help.
-    Silence, end of file and a frame this protocol does not permit could be a
-    slow or crashed child (``NO``). An ACK naming another protocol or another
-    build is the installed package having changed under this process, which
-    another child would repeat (``ABORTED``).
+    The child holds nothing yet, so every failure ends in a stop. Silence, EOF
+    or an unexpected frame may be a slow or crashed child (``NO``); an ACK
+    naming another protocol or build means the installed package changed,
+    which another child would repeat (``ABORTED``).
     """
     started = time.monotonic()
     try:
@@ -1361,14 +1303,11 @@ def _await_committed(channel: startup.FrontendChannel, *, timeout: float) -> Sta
 def _spawn_command(*, job_name: str | None = None) -> list[str]:
     """How the owner is invoked.
 
-    ``-P`` keeps the working directory off ``sys.path`` while preserving the
-    interpreter's user site, where a supported ``pip install --user`` may have put
-    this package. An explicitly isolated frontend is different: weakening its
-    ``-I``, ``-s`` or ``-E`` mode would restore startup code it refused before the
-    configuration secrets cross stdin. The child environment drops ``PYTHONPATH``
-    separately, so a workspace cannot put a shadow
-    ``linkedin_mcp_server/daemon/owner.py`` back in front and receive the
-    configuration secrets.
+    ``-P`` keeps the working directory off ``sys.path`` but keeps the user
+    site, where ``pip install --user`` may have put this package. An isolated
+    frontend's ``-I``, ``-s`` or ``-E`` is preserved, since weakening it would
+    restore startup code it refused before the configuration secrets cross
+    stdin. :func:`_owner_environment` drops ``PYTHONPATH`` for the same reason.
     """
     interpreter_flags: list[str] = []
     if sys.flags.isolated:
@@ -1393,33 +1332,20 @@ def _spawn_command(*, job_name: str | None = None) -> list[str]:
     return command
 
 
-#: Environment variables carrying a secret that the owner has no use for. It
-#: receives every setting it needs on standard input, so keeping these would be
-#: the exposure the stdin channel exists to avoid, held for the owner's whole
-#: lifetime rather than the frontend's. ``/proc/<pid>/environ`` is readable by
-#: this account, and ``ps e`` shows it on the BSDs.
-#:
-#: ``PROXY_SERVER`` belongs here despite its name. The documented form accepts
-#: embedded credentials — ``http://user:password@host:port`` — which
-#: ``BrowserConfig.validate`` splits out into the separate fields
-#: (``config/schema.py:242-253``). It splits them out of the *configuration*; the
-#: environment variable still holds the original string.
+#: Environment variables carrying a secret the owner has no use for: it gets
+#: every setting on standard input, and its environment stays readable
+#: (``/proc/<pid>/environ``, ``ps e``) for its whole lifetime. ``PROXY_SERVER``
+#: belongs here because its documented form may embed ``user:password@``.
 _SECRETS_TO_DROP = ("PROXY_PASSWORD", "PROXY_USERNAME", "PROXY_SERVER")
 
 
 def _owner_environment() -> dict[str, str]:
     """The environment to start the owner in, minus what it must not keep.
 
-    ``daemon.config`` hands the configuration over on standard input precisely
-    so that a password does not sit in a readable environment. That is only half
-    the job while the child inherits the frontend's environment unchanged: the
-    documented way to configure a proxy is ``PROXY_PASSWORD``
-    (``config/loaders.py:107-108``), so the owner would hold the raw value for
-    as long as it runs, which is far longer than the process it came from.
-
-    Dropped rather than emptied. An empty ``PROXY_USERNAME`` is meaningful to
-    the configuration parser (``daemon/descriptor.py:480``), and the owner is
-    told the real values through the channel that was built for them.
+    Secrets are dropped, not emptied: an empty ``PROXY_USERNAME`` is
+    meaningful to the configuration parser, and the owner gets the real values
+    over the startup channel. ``PYTHONPATH`` is dropped so a workspace cannot
+    shadow the owner module.
     """
     environment = dict(os.environ)
     for name in _SECRETS_TO_DROP:
@@ -1431,17 +1357,11 @@ def _owner_environment() -> dict[str, str]:
 def _detachment_flags() -> int:
     """What it takes on this platform to survive the client that started us.
 
-    ``start_new_session`` is POSIX-only. CPython's Windows implementation names
-    the parameter ``unused_start_new_session`` and ignores it outright
-    (``subprocess.py:1461``), so passing it there detaches nothing: a console
-    ``Ctrl+C``, or a client that cleans up its process tree, would take the
-    owner down with it — the opposite of what the owner is for.
-
-    The Windows equivalent is a creation flag. ``CREATE_NEW_PROCESS_GROUP``
-    removes the child from the console group that receives ``Ctrl+C`` and
-    ``Ctrl+Break``, ``DETACHED_PROCESS`` gives it no console, and
-    ``CREATE_BREAKAWAY_FROM_JOB`` keeps a host's kill-on-close Job from retaining
-    authority after the owner adopts its own Job.
+    CPython ignores ``start_new_session`` on Windows. There
+    ``CREATE_NEW_PROCESS_GROUP`` escapes the console's ``Ctrl+C``,
+    ``DETACHED_PROCESS`` gives the child no console, and
+    ``CREATE_BREAKAWAY_FROM_JOB`` keeps a host's kill-on-close Job from
+    retaining authority once the owner adopts its own Job.
     """
     if not _IS_WINDOWS:
         return 0
@@ -1455,16 +1375,10 @@ def _detachment_flags() -> int:
 def _reap(child: subprocess.Popen[bytes]) -> None:
     """Collect a child that has already exited, without waiting for one that has not.
 
-    A successful election leaves a *running* owner, and this process must never
-    wait for it: outliving this process is the point. The other outcomes leave a
-    child that has exited, and ``poll`` collects exactly those.
-
-    Belt and braces rather than a fix for something observed. ``subprocess``
-    keeps its own registry of abandoned children and reaps them when the next one
-    is created, and a failed election measured here left no zombie with this call
-    removed. It is kept because that behaviour is an implementation detail of the
-    standard library, and this is the one place that knowingly walks away from a
-    child.
+    A successful election leaves a running owner that must outlive this
+    process, so this only polls. ``subprocess`` also reaps abandoned children
+    on its own, but that is a standard-library detail, and this is the one
+    place that knowingly walks away from a child.
     """
     with contextlib.suppress(OSError, ValueError):
         child.poll()

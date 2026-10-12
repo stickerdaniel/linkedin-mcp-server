@@ -1,36 +1,16 @@
 """Decide whether this process attaches to a daemon, owns one, or goes it alone.
 
-A stdio server is spawned per MCP client, and #598 made several of them safe on
-one profile by passing the browser between them. Safe, but not cheap: ownership
-moves on nearly every call, and every move reopens Chromium and revalidates the
-session against ``/feed/``. One long-lived owner removes that traffic entirely.
+The discovery half: is there an owner to talk to, and may it be trusted with a
+token. Electing and spawning one is :mod:`linkedin_mcp_server.daemon.election`;
+forwarding to it is :mod:`linkedin_mcp_server.daemon.proxy`.
 
-This module is only the discovery half: it answers "is there an owner I should
-be talking to, and may I trust it with a token". Electing one and spawning it
-live in :mod:`linkedin_mcp_server.daemon.election`, and forwarding to what it
-returns in :mod:`linkedin_mcp_server.daemon.proxy`.
-
-Finding an owner takes a wait rather than a single read, because the interesting
-case is neither "an owner exists" nor "none does", but the window in between. An
-owner takes the lock first and publishes its descriptor only once it is actually
-listening, so a client arriving in that gap loses the lock race while the file
-still says whatever the *last* owner left there — nothing, or a descriptor that
-outlived its writer. Settling on either reading is how a process ends up driving
-its own browser against the same profile for its whole life, which is the
-per-call handoff this feature exists to remove, and it is what two clients
-starting together would normally hit.
-
-One rule underpins the whole module: a file says nothing about whether the
-process that wrote it still exists. Only :meth:`DaemonLock.try_acquire` settles
-who owns the browser, and only connecting settles whether anything is listening.
-Every place this module was wrong before, it was wrong by forgetting that — most
-recently about ``ATTACHABLE`` itself, which an owner leaves behind intact when it
-crashes after publishing.
-
-That is also why the only entry point returns an :class:`OwnerLookup` rather
-than an optional attachment. A convenience wrapper that handed back just the
-attachment existed here and was removed: it let a caller act on "there is a
-daemon" without the state that says how much that is worth.
+A file says nothing about whether the process that wrote it still exists. Only
+:meth:`DaemonLock.try_acquire` settles who owns the browser, and only connecting
+settles whether anything listens. An owner publishes only once it listens, so a
+client that just lost the lock race reads its predecessor's leftovers, which is
+why finding an owner takes a wait rather than one read. The entry point returns
+an :class:`OwnerLookup`, never a bare attachment, so no caller acts on "there is
+a daemon" without the state that says what that is worth.
 """
 
 from __future__ import annotations
@@ -68,10 +48,8 @@ class _DescriptorReadTimeout(TimeoutError):
 class OwnerState(enum.Enum):
     """What the published descriptor says, in the terms a caller must act on.
 
-    Strictly a reading of one file. None of these states knows whether the
-    process that wrote it still exists, which is why none of them decides who
-    owns the browser; they decide whether there is someone to *talk* to, and
-    what to say when there is not.
+    Strictly a reading of one file: no state knows whether its writer still
+    exists, so none decides who owns the browser.
     """
 
     #: Nothing published. The ordinary first start.
@@ -99,9 +77,8 @@ class OwnerState(enum.Enum):
 class Mismatch(enum.Enum):
     """Which check an ``INCOMPATIBLE`` descriptor failed, as a fact to act on.
 
-    Typed rather than read out of the reason, which is prose for a log line and
-    free to change. The election acts on two of these differently from the
-    rest, and an English sentence is the wrong thing to key that on.
+    Typed, because the election acts on some of these and the reason is prose
+    for a log line.
     """
 
     RUNTIME = "runtime"
@@ -116,9 +93,8 @@ class Mismatch(enum.Enum):
 class DirectFallback(enum.Enum):
     """Why an election ended at once in this client's own browser.
 
-    Two values because the probe can establish two different things, and the
-    second must not be reported as the first: silence is not proof that the
-    owner is alive, only that it is not one this client can use now.
+    Silence is no proof the owner is alive, so it is reported apart from an
+    answer.
     """
 
     #: The owner answered its probe.
@@ -134,10 +110,8 @@ class Attachment:
     """An owner worth talking to, and the credential for doing so."""
 
     descriptor: DaemonDescriptor
-    #: Kept out of the repr, as the proxy credentials are
-    #: (``config/schema.py:116-117``). This is a bearer token for a server that
-    #: drives a logged-in LinkedIn session, and the surrounding code logs whole
-    #: objects at DEBUG while users paste those logs into issue reports.
+    #: Kept out of the repr, as the proxy credentials are: DEBUG logs of whole
+    #: objects end up in issue reports, and this is a bearer token.
     token: str = field(repr=False)
     #: A pair proved for control and nothing else: the endpoint, profile,
     #: runtime and token all passed, and the owner still may not run a tool for
@@ -154,10 +128,8 @@ class OwnerLookup:
     state: OwnerState
     attachment: Attachment | None = None
     #: Why, for a log line. Never a token, and never a value read from the
-    #: configuration. It *can* name a path or host taken from the descriptor
-    #: when that is the diagnosis — an unusable profile path is only
-    #: actionable if you can see which path — so it is DEBUG-grade detail and
-    #: the callers here log it accordingly.
+    #: configuration. It can name a path or host from the descriptor when that
+    #: is the diagnosis, so it is DEBUG-grade detail and logged as such.
     reason: str = ""
     #: Which check an ``INCOMPATIBLE`` reading failed, where one did.
     mismatch: Mismatch | None = None
@@ -171,10 +143,9 @@ class OwnerLookup:
     def worth_connecting(self) -> bool:
         """Whether there is a compatible endpoint to try talking to.
 
-        Deliberately not "an owner is running". Connecting is what establishes
-        that, and a caller whose connection is refused is looking at a crashed
-        owner's leftovers, not at a daemon. It must fall through to the lock
-        exactly as if nothing had been published.
+        Not "an owner is running": a caller whose connection is refused is
+        looking at leftovers and must fall through to the lock as if nothing
+        had been published.
         """
         return self.state is OwnerState.ATTACHABLE
 
@@ -184,13 +155,10 @@ def _inspect(
 ) -> OwnerLookup:
     """Read the descriptor once and say what it means.
 
-    Order matters. The cheap, local checks come first, so a descriptor that
-    already disqualifies itself is rejected before the token is read.
-
-    *for_retirement* asks whether the owner may be asked to retire, not whether
-    it may run this client's calls, so the configuration is not compared. An
-    owner of this profile, runtime and protocol with other settings is still the
-    owner of the browser a profile command is about to change.
+    Cheap local checks come first, so a descriptor that disqualifies itself is
+    rejected before the token is read. *for_retirement* skips the configuration
+    comparison: an owner of this profile with other settings still owns the
+    browser a profile command is about to change.
     """
     descriptor = daemon_descriptor.read(auth_root)
     if descriptor is None:
@@ -216,10 +184,8 @@ def _inspect(
             mismatch=Mismatch.PROFILE,
         )
 
-    # No endpoint check here: `from_mapping` already refuses a non-local host
-    # while parsing, so `read` above cannot return one. Repeating it would read
-    # as the safeguard when it is really a second copy of one, and a second
-    # copy is what rots when the first moves.
+    # No endpoint check here: `from_mapping` already refuses a non-local host,
+    # so `read` above cannot return one.
     token = daemon_descriptor.read_token(auth_root, descriptor)
 
     # After every identity check and the token, so a control-only pair is
@@ -258,9 +224,8 @@ def _inspect(
     return OwnerLookup(
         state=OwnerState.ATTACHABLE,
         attachment=Attachment(descriptor=descriptor, token=token),
-        # Says what the file is, not what any process is doing. "attached to
-        # the running daemon" was the earlier wording and it was wrong twice
-        # over: nothing has attached yet, and the writer may be long dead.
+        # Says what the file is, not what any process is doing: nothing has
+        # attached yet, and the writer may be dead.
         reason="the published daemon is compatible with this client",
     )
 
@@ -364,49 +329,26 @@ def look_up_owner(
 ) -> OwnerLookup:
     """Read the descriptor until it is compatible or the budget runs out.
 
-    Every state but ``ATTACHABLE`` is waited out, not just ``ABSENT``. The
-    tempting rule is that only ``ABSENT`` can turn into ``ATTACHABLE``, since a
-    starting owner publishes late. It is wrong for the same reason every other
-    mistake in this module was: a descriptor outlives the owner that wrote it,
-    so a fresh owner mid-startup is read through the dead one's file. Measured
-    on this tree — an owner that crashed serving a sibling profile reads as
-    ``INCOMPATIBLE`` while its replacement is coming up.
+    Every state but ``ATTACHABLE`` is waited out, not only ``ABSENT``: a
+    descriptor outlives its writer, so an owner mid-startup can be read
+    through a dead predecessor's ``INCOMPATIBLE`` file. ``ATTACHABLE`` only
+    says a compatible file is on disk; a caller whose connection then fails
+    must go to the lock. With the default of no wait this is a single read.
 
-    Stopping at ``ATTACHABLE`` is not the same claim. It says a compatible file
-    is on disk, which is all a re-read can ever establish; the process that
-    wrote it may be gone. A caller whose connection to that endpoint fails must
-    go to the lock rather than conclude a daemon exists.
+    *ignore_instances* names generations the caller already judged unusable
+    (by connecting, in :mod:`linkedin_mcp_server.daemon.election`). They are
+    waited out like any unusable state, so a new generation published over
+    them is still seen within one poll and the caller's retry loop does not
+    spin at read speed. When the budget ends, the reading is returned as is.
 
-    Callers pass a wait only when they have reason to think an owner is
-    starting, which in practice means having just lost the lock race. With the
-    default of no wait this is a single read.
-
-    *ignore_instances* names generations the caller has already judged unusable,
-    and it exists because ``ATTACHABLE`` alone made this function return
-    instantly on a file the caller was going to throw away. Only the caller can
-    know that: burial lives in :mod:`linkedin_mcp_server.daemon.election` and is
-    established by connecting, which nothing here does. Without it a caller that
-    asked for a wait got none, and its own retry loop spun through the whole
-    backoff at read speed, starting a descriptor inspection thread and touching
-    state storage on every pass. Named instances are therefore waited out like
-    any other unusable state: the poll keeps watching the same file, so a *new*
-    generation published over it is still picked up within one poll interval,
-    and the buried endpoint is never contacted again. When the budget ends with
-    nothing better, the reading is returned exactly as before, so the caller's
-    own downgrade is unchanged.
-
-    *for_retirement* is for a profile command deciding whether there is an owner
-    to ask to retire: the configuration is not compared (``_inspect``). It is
-    still only a reading of files, so nothing is contacted here either.
+    *for_retirement* skips the configuration comparison (``_inspect``).
 
     Raises:
         ValueError: *wait_seconds* is not finite.
     """
-    # A NaN or infinite budget makes `monotonic() >= deadline` false forever,
-    # so the stdio process would never finish starting. Refused rather than
-    # clamped: an infinite wait is a plausible thing for a caller to mean and a
-    # ruinous thing to grant, and the configuration parsers refuse non-finite
-    # timeouts on the same grounds. A negative wait is merely no wait.
+    # A non-finite budget would never expire, so the stdio process would never
+    # finish starting. Refused rather than clamped, as the configuration
+    # parsers refuse non-finite timeouts. A negative wait is merely no wait.
     if not math.isfinite(wait_seconds):
         raise ValueError(f"wait_seconds must be a finite number, got {wait_seconds}")
 
@@ -442,9 +384,8 @@ def look_up_owner(
         ):
             return lookup
 
-        # Never sleep past the deadline. A flat poll interval turned a 1 ms
-        # budget into 101 ms, which is a hundredfold overrun for a caller that
-        # asked to stay near fail-fast. Measured before this clamp existed.
+        # Never sleep past the deadline, or a tiny budget overruns by a whole
+        # poll interval.
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             # The state at INFO, the detail at DEBUG. A reason can quote a path
@@ -465,15 +406,10 @@ def look_up_owner(
 def daemon_would_be_used(config: AppConfig) -> bool:
     """Whether this process is even a candidate for sharing a browser.
 
-    Separate from finding an owner, and it never raises: every refusal, and
-    every failure to decide, is today's Direct server. A refusal happens before
-    any daemon state is prepared, locked, read or spawned, because the caller
-    returns on it before importing the election.
-
-    Recovery does not ask again. ``DaemonProxyBackend`` is built only by
-    ``cli_main._obtain_shared_owner`` after this returned True, and it keeps
-    the configuration admitted then, so no proxy exists to recover for a
-    process refused here.
+    Never raises: every refusal or failure to decide means today's Direct
+    server, settled before any daemon state is prepared, locked, read or
+    spawned. Recovery does not ask again, because ``DaemonProxyBackend`` keeps
+    the configuration admitted here.
     """
     try:
         return _daemon_would_be_used(config)
@@ -497,14 +433,9 @@ def _daemon_would_be_used(config: AppConfig) -> bool:
     if config.server.transport != "stdio":
         return False
     if get_runtime_id().endswith("-container"):
-        # Xvfb belongs to PID 1's process group. The daemon owner deliberately
-        # starts a new session so it can outlive an ordinary stdio frontend;
-        # inside the image that gives the browser an owner which outlives the
-        # display it needs. Measured: the owner had a distinct process group and
-        # was still alive when EOF ended the frontend, then the container's PID
-        # namespace killed it with the display. A display supervisor would make
-        # the experimental daemon much larger than the problem it solves here,
-        # so the container keeps one browser per frontend instead.
+        # Xvfb belongs to PID 1's process group, while the owner starts its own
+        # session to outlive a stdio frontend, so in the image it would outlive
+        # the display it needs. The container keeps one browser per frontend.
         logger.warning(
             "DAEMON_ENABLED is ignored in a container; the shared-browser "
             "daemon cannot outlive the virtual display owned by this server"
@@ -531,11 +462,9 @@ def _daemon_would_be_used(config: AppConfig) -> bool:
 def _storage_refusal(config: AppConfig) -> str | None:
     """Why the daemon's roots are not on local storage, or None if both are.
 
-    Two roots, because either one carries the coordination: the auth root holds
-    the profile the owner drives, and the state root the lock, descriptor and
-    token every process reads. Only paths are computed here. Nothing is created
-    under either, since creating state for a daemon that will not run is the
-    effect this refusal exists to prevent.
+    Checks the profile, its auth root and the state root. Only paths are
+    computed: creating state for a daemon that will not run is what this
+    refusal prevents.
     """
     # The auth root the election would use: ``_obtain_shared_owner`` passes
     # ``auth_root_dir(get_profile_dir())``, and ``get_profile_dir`` is this

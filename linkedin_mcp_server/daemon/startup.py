@@ -1,15 +1,9 @@
 """The one startup protocol between a frontend and the owner it spawns.
 
-Everything travels on the child's own standard input and output, in both
-directions, as length-prefixed JSON frames. Not a loopback port and not an
-inherited descriptor: a port is reachable by anything running as this account,
-so it needs an authentication step of its own and a queue strangers can fill,
-and ``pass_fds`` is POSIX only while the Windows owner starts behind
-:mod:`linkedin_mcp_server.process_gate`, which forwards the three standard
-handles and nothing else. The pipes reach exactly one process, need nobody's
-cooperation in between, and end when that process does.
-
-The exchange, in order::
+Length-prefixed JSON frames on the child's own standard input and output
+(docs/decisions/2026-10-11-daemon-framed-startup.md). Not a loopback port, which
+anything running as this account can reach, and not ``pass_fds``, which is
+POSIX-only while the Windows process gate forwards only the standard handles::
 
     frontend -> HELLO     {nonce, protocol}
     owner    -> sync line, then ACK {protocol, build}
@@ -18,41 +12,17 @@ The exchange, in order::
     frontend -> COMMIT    {instance}
     owner    -> VERDICT   {status}
 
-Every frame after HELLO carries the HELLO's nonce, which is created after the
-child exists and is never on its command line or in its environment, so output
-written before the child read it cannot pass for one of these frames.
-
-**Nothing usable crosses before ACK.** The configuration carries
-``proxy_password`` and decides which browser opens against a logged-in session,
-so it is written only once the child has answered HELLO in this framing, with
-this protocol number and the frontend's own build identity
-(:func:`linkedin_mcp_server.daemon.version.build_identity`). A child that does
-none of that, an earlier owner that reads its standard input to end of file
-included, never sees it: it is stopped when the frontend's wait runs out.
-
-**The frontend may kill the child until it writes COMMIT.** From the first
-byte of COMMIT the frame may have arrived, the child may already own itself (on
-Windows it adopts its own Job before publishing) and its descriptor may be
-canonical, so only the lock holder can settle publication. After that only an
-authenticated VERDICT saying the child did not publish permits a kill; silence
-or a malformed verdict does not. End of file on the child's standard input
-before COMMIT is the abort.
-
-**The sync line.** Interpreter startup hooks (a ``.pth`` file, a
-``sitecustomize``) run before the owner can claim its standard output, and may
-write to it. So the owner's first output is one line naming the nonce, found by
-the same bounded scan that authenticates other post-spawn status lines
-(:func:`linkedin_mcp_server.process_protocol.read_authenticated_status`), and
-framing is strict from the byte after it. The owner moves file descriptor 1 to
-standard error before it writes anything, so nothing else in the process can put
-a byte between two frames.
-
-Frames are 1 to 65,536 bytes of strict UTF-8 JSON naming exactly the fields of
-their type. Anything else, a zero or oversized length, a header or body cut off
-by end of file, duplicate keys, a non-object, an unknown field or a wrong nonce,
-ends the exchange; neither side tries to resynchronise. Reads are blocking and
-every wait on them is bounded by the side that started it, so a silent peer
-costs that side's deadline and nothing more.
+- Every frame after HELLO carries its nonce, created after the child exists and
+  never on its command line, so earlier output cannot pass for a frame. The
+  sync line skips output from interpreter startup hooks; framing is strict from
+  the byte after it.
+- CONFIG carries ``proxy_password`` and is written only after an ACK naming
+  this protocol and the frontend's own build.
+- The frontend may kill the child until it writes COMMIT. After that only an
+  authenticated VERDICT saying the child did not publish permits a kill. EOF
+  on the child's input before COMMIT is the abort.
+- Any malformed, oversized, truncated or unexpected frame ends the exchange;
+  neither side resynchronises, and each side bounds its own waits.
 """
 
 from __future__ import annotations
@@ -293,10 +263,10 @@ class _ActiveRead:
 def _close_output(stream: Any) -> None:
     """Close the descriptor rather than the buffer, which a parked reader holds.
 
-    ``BufferedReader.close()`` waits for that reader's I/O lock, so it blocks for
-    as long as the child stays silent: measured at 29.27 of thirty seconds.
-    ``detach()`` first, or the raw object's finalizer prints ``Bad file
-    descriptor`` from a context nothing can catch.
+    ``BufferedReader.close()`` waits for that reader's lock, so it would block
+    for as long as the child stays silent. ``detach()`` first, or the raw
+    object's finalizer prints ``Bad file descriptor`` where nothing can catch
+    it.
     """
     # `Popen.stdout` is declared as a plain `IO`, which has no `detach`; the
     # object is a BufferedReader in practice, and the fallback covers a caller
@@ -311,14 +281,12 @@ def _close_output(stream: Any) -> None:
 
 
 class _Writer:
-    """The only thread that touches the child's standard input.
+    """The only thread that touches the child's standard input, close included.
 
-    It owns the stream from the moment it starts, close included. A write
-    blocked on a child that stopped reading holds the ``BufferedWriter`` lock a
-    ``close`` needs, so a close from any other thread would wait on that write
-    with no deadline of its own. The caller waits on each write with its own
-    deadline instead, and the thread unwinds when the child's death breaks the
-    pipe.
+    A write blocked on a child that stopped reading holds the lock ``close``
+    needs, so a close from another thread would wait without a deadline. The
+    caller waits on each write with its own deadline, and the thread unwinds
+    when the child's death breaks the pipe.
     """
 
     def __init__(self, stream: Any) -> None:
@@ -479,13 +447,10 @@ class FrontendChannel:
     def close(self) -> None:
         """End the input, then stop listening, without waiting for the child.
 
-        Closing the output under a parked reader is what makes this prompt on
-        POSIX: the pending read fails and the thread unwinds. Windows closes
-        through the UCRT, which waits for the same handle lock the blocked
-        ``ReadFile`` holds, so after a commit whose verdict timed out the close
-        would wait for an owner that keeps its output open for as long as it
-        runs. There a read still in flight keeps its pipe and closes it itself
-        at end of file.
+        On POSIX, closing the output under a parked reader fails its read at
+        once. On Windows the close would wait for the handle lock a blocked
+        ``ReadFile`` holds, possibly for the owner's whole life, so a read
+        still in flight keeps its pipe and closes it at end of file.
         """
         self._writer.close(timeout=_INPUT_CLOSE_SECONDS)
         reader, self._reader = self._reader, None
@@ -503,11 +468,9 @@ class FrontendChannel:
 class OwnerChannel:
     """The owner's end: private copies of its standard input and output.
 
-    Reads are blocking; the owner bounds each wait itself. A read may be left
-    parked by a wait that gave up, so the input descriptor is closed only once
-    no read is inside it: closing a descriptor under a blocked read frees its
-    number for reuse, and the parked read can then be answered by an unrelated
-    file in this process.
+    Reads block; the owner bounds each wait. The input descriptor is closed
+    only once no read is inside it, because closing under a blocked read frees
+    the number for reuse and the parked read could then read an unrelated file.
     """
 
     def __init__(self, inbound: int, outbound: int) -> None:
@@ -521,13 +484,10 @@ class OwnerChannel:
     def claim(cls) -> OwnerChannel:
         """Take standard input and output for the exchange, and point both away.
 
-        The protocol gets private duplicates, and descriptor 1 is pointed at
-        standard error, so anything else that writes there, this process or a
-        child it starts, lands in the bootstrap diagnostics and later the daemon
-        log instead of between two frames. Descriptor 0 is pointed at the null
-        device for the same reason in the other direction: a stray reader must
-        not consume the commit. The duplicates are not inheritable, so no
-        browser started later holds the frontend's pipes open.
+        The protocol gets non-inheritable duplicates, so no browser started
+        later holds the frontend's pipes open. Descriptor 1 then points at
+        standard error, so no other writer lands between two frames, and
+        descriptor 0 at the null device, so no stray reader consumes the commit.
         """
         with contextlib.suppress(AttributeError, OSError, ValueError):
             sys.stdout.flush()

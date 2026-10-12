@@ -1,44 +1,19 @@
 """Getting a login done in the process that can actually show one.
 
-The owner drives the browser, so it is the process that *notices* bad LinkedIn
-auth, and it has nobody in front of it, so it is the one that cannot fix it. Not
-because it cannot open a browser: it can, and does when configured to run headed.
-An interactive login is different in kind, because it waits for someone to type
-credentials. The frontend is the opposite: it was spawned by an MCP client, a user
-is there, and it can ask. This module carries the fact across the loopback hop between
-them, and acts on it at the other end.
+The owner notices bad auth but has nobody in front of it to type credentials;
+the frontend has a user. This module carries the fact across the hop and acts
+on it in the frontend.
 
-**Why a result and not an exception.** The owner's refusal has to survive
-``ProxyProvider`` forwarding with its meaning intact, and an exception does not.
-Measured against fastmcp 3.4.4: a middleware that re-raises delivered
-``meta=None, isError=True, content=["Error calling tool 'x'"]`` to the outer
-client, because ``mask_error_details`` is on and the type is gone by then. The
-same middleware returning ``ToolResult(..., meta=..., is_error=True)`` delivered
-the marker intact, and a client that raises on error still got its ``ToolError``
-with the original message. The proxy copies ``meta`` and ``isError`` explicitly
-(``fastmcp/server/providers/proxy.py:212-225``).
-
-**Why the exception chain and not a ContextVar.** The owner-side middleware reads
-``__cause__`` to find out what happened. A ``ContextVar`` set by the tool body
-would also work, but only by accident: fastmcp runs ``async def`` tools inline and
-offloads plain ``def`` tools to a thread, where the value set inside is invisible
-to the middleware. Every tool here is ``async def`` today, so both would pass, and
-one of them would break silently the first time that changed.
-
-That chain reaching this far depends on ``raise_tool_error`` passing an
-already-shaped ``ToolError`` through rather than re-deriving it. Before that fix
-the missing-session path arrived as ``['ToolError']`` with the cause severed, and
-this module could not have worked at all.
-
-**What the frontend does with it.** Two fields, and they answer different
-questions. ``reason`` says what to repair: a missing session needs a login, a
-stale one needs the old session retired first. ``replayable`` says whether the
-call may be run again afterwards, which depends on whether any work had happened
-when it failed. Both combinations occur, so neither field implies the other.
-
-Only the owner can decide ``replayable``, because every origin looks the same by
-the time a failure reaches a client: all 18 tool catch sites collapse them into
-one ``except`` clause.
+- The refusal travels as an error result carrying a marker, not as an
+  exception: with ``mask_error_details`` a re-raised exception arrives as a bare
+  ``Error calling tool``, while a result's ``meta`` and ``isError`` cross intact.
+- The owner middleware finds the failure through ``__cause__``, not a
+  ``ContextVar``, which a sync tool run in a worker thread would not share. This
+  relies on ``raise_tool_error`` passing an already-shaped ``ToolError`` through.
+- ``reason`` says what to repair (a missing session needs a login, a stale one
+  needs retiring first); ``replayable`` says whether the call may run again.
+  Only the owner can decide ``replayable``: by the time a failure reaches a
+  client every origin looks the same.
 """
 
 from __future__ import annotations
@@ -63,36 +38,26 @@ from linkedin_mcp_server.exceptions import (
 logger = logging.getLogger(__name__)
 
 
-#: Namespaced so a future fastmcp key cannot shadow it. Measured: a custom key
-#: coexists with fastmcp's own ``{'fastmcp': {...}}`` entry as a separate
-#: top-level key, so there is no clash to work around, only a name to keep
-#: unmistakable.
+#: Namespaced so a future fastmcp key cannot shadow it; it sits beside
+#: fastmcp's own ``fastmcp`` entry.
 MARKER_KEY = "linkedin.dev/auth"
 
 #: Bumped when the shape below changes in a way an older reader would misread.
+#: Only forward tolerance is needed: an older frontend may attach to a newer
+#: owner (``daemon.version.Skew.SERVICEABLE``) and must ignore unknown markers,
+#: while a newer frontend retires an older owner rather than talking to it.
 #:
-#: Only forward tolerance is needed, and that asymmetry is deliberate rather than
-#: lucky. An *older* frontend attaches to a newer owner on purpose
-#: (``daemon.version.Skew.SERVICEABLE``), so it will meet markers from builds it
-#: does not know and has to ignore them. The reverse cannot arise: a newer
-#: frontend asks an older owner to stand down and elects a replacement, so it
-#: never talks to an owner that predates a version it understands.
-#:
-#: 2 adds ``generation``, and the bump is what makes it safe. A version-1 reader
-#: accepts a version-1 marker, ignores fields it does not know, and repairs
-#: without passing the generation on, which is the unguarded path that rotates a
-#: peer's fresh session away. Refusing the marker outright leaves that frontend
-#: reporting the owner's failure instead, which is the worse-informed but honest
-#: outcome, and it is the one this version number buys.
+#: 2 added ``generation``. A version-1 reader would repair without it and could
+#: rotate away a peer's fresh session, so it refuses the marker and reports the
+#: owner's failure instead.
 MARKER_VERSION = 2
 
 
 def _auth_failure_in(exc: BaseException) -> OwnerCannotAuthenticateError | None:
     """Find the owner's auth refusal in an exception chain, if it is there.
 
-    Walked rather than type-checked directly, because nothing that leaves a tool
-    is the original exception: ``raise_tool_error`` wraps it in a ``ToolError``,
-    and the middleware only ever sees that wrapper.
+    Walked, because the middleware only sees the ``ToolError`` that
+    ``raise_tool_error`` wraps it in.
     """
     current: BaseException | None = exc
     while current is not None:
@@ -105,9 +70,9 @@ def _auth_failure_in(exc: BaseException) -> OwnerCannotAuthenticateError | None:
 class OwnerAuthSignalMiddleware(Middleware):
     """Turn the owner's auth refusal into something the hop preserves.
 
-    Installed only on an owner. On any other role it would announce a repair
-    nobody asked for, and on a frontend it would compete with the middleware that
-    is supposed to *act* on the marker.
+    Installed only on an owner: elsewhere it would announce a repair nobody
+    asked for, and on a frontend it would compete with the code that acts on
+    the marker.
     """
 
     async def on_call_tool(
@@ -129,17 +94,10 @@ class OwnerAuthSignalMiddleware(Middleware):
                 else "stale",
                 "replayable": failure.nothing_ran_yet,
                 "browser_open": _browser_still_holds_the_profile(),
-                # Which session the owner found broken, so the frontend can tell
-                # "this is still the dead one" from "somebody else already fixed
-                # it". Two frontends meeting one dead session would otherwise both
-                # rotate, and the second would destroy the first's fresh login.
-                #
-                # Taken from the failure rather than read again here. By this
-                # point the browser has closed and the profile lease is free, so a
-                # fresh read can return a generation another process has just
-                # written, and the frontend would then rotate away exactly the
-                # session it was told about. The owner's latch was armed from the
-                # same observation, so the two cannot disagree.
+                # Which session the owner found broken, so a second frontend
+                # does not rotate away the first one's fresh login. Taken from
+                # the failure, not read again: the lease is free by now, so a
+                # fresh read could return another process's new generation.
                 "generation": failure.generation,
             }
             logger.info(
@@ -160,10 +118,8 @@ class OwnerAuthSignalMiddleware(Middleware):
 def _browser_still_holds_the_profile() -> bool:
     """Whether Chromium may still be on the profile in this process.
 
-    Reported to the frontend because a login cannot start while it is true: the
-    login takes the profile exclusively and would fail on a lease it cannot get.
-    The lease only clears this once a close is *confirmed*, so an unconfirmed
-    teardown keeps it set, which is the cautious direction.
+    A login cannot start while this is true, since it takes the profile
+    exclusively. Only a confirmed close clears it, the cautious direction.
     """
     from linkedin_mcp_server.profile_lease import get_profile_lease
 
@@ -217,14 +173,9 @@ async def start_sign_in(
     except AccountRestrictedError as exc:
         return Repair.RESTRICTED, exc
     except (AuthenticationStartedError, AuthenticationInProgressError):
-        # Also not a failure, and the one that mattered most. Both functions
-        # behind `_repair_auth_locally` report a *started* login by raising,
-        # while the window is still open and nobody has typed anything yet. Read
-        # as a failure, every repair this exists to perform was abandoned one step
-        # before it worked: measured on the stale path with a login that finished
-        # successfully, the owner was called once and the client still got the
-        # error. The missing path did the same as soon as signing in took longer
-        # than the inline budget, which is every login a person actually performs.
+        # Also not a failure: both repair paths report a *started* login by
+        # raising while its window is still open. Read as a failure, every
+        # repair would be abandoned one step before it worked.
         return Repair.STARTED, None
     except Exception as exc:
         # The login path reports itself through its own exceptions, which the
@@ -287,22 +238,14 @@ _KEPT_THE_OWNERS_ANSWER = {
 def say_why(because: Because) -> None:
     """Log why a call ended on the answer it already had.
 
-    The reasons themselves are the call core's. Two are worth spelling out,
-    because both look like a missed chance:
+    The reasons are the call core's. Two look like a missed chance:
 
     * ``PROFILE_HELD``: the owner's Chromium may still hold the profile, so a
-      login would fail on a lease it cannot take. The owner's own wording says
-      to retry, and by the next call the close will have been confirmed.
-    * ``COULD_CHANGE``: repaired, not run again. An auto-replay cannot be made
-      safe here, and two rounds of trying showed why. Bounding it locally left
-      the owner finishing the mutation after the frontend had reported failure,
-      because cancellation is not forwarded across the hop: measured over a
-      real loopback owner, the client was answered at 0.66s with an error and
-      the effect landed 0.7s later. Removing the bound only moved the deadline:
-      an MCP client that gives up on its own call produces the same orphan,
-      measured as effects ``['sent']`` after the cancel and ``['sent', 'sent']``
-      after the retry. So the user decides, who knows whether the message was
-      sent: asking costs one retry, while guessing wrong sends it twice.
+      login would fail; by the next call the close will be confirmed.
+    * ``COULD_CHANGE``: repaired but not run again. Cancellation does not
+      cross the hop, so a bounded or client-cancelled replay can still land
+      after a reported failure. The user knows whether the action happened;
+      guessing wrong would send it twice.
     """
     line = _KEPT_THE_OWNERS_ANSWER.get(because)
     if line is not None:
@@ -328,20 +271,12 @@ async def a_repeat_could_change_something(
 ) -> bool:
     """Whether running this tool again could repeat an effect on LinkedIn.
 
-    Public because two replays need the same answer: one after signing in, and
-    one after electing a replacement owner. ``daemon.proxy`` asks it for both,
-    whenever the call core asks for a classification. One rule, in one place, so
-    the two cannot drift apart in the unsafe direction.
-
-    Read from the tool's own annotations, which survive the hop
-    (``ProxyProvider`` copies them), rather than from a list of names kept here:
-    a list would go stale the first time a tool is added, and it would go stale
-    silently in the unsafe direction.
-
-    Unknown counts as changing something. Only ``readOnlyHint`` says otherwise,
-    and a tool that declares nothing has not promised anything. Read under its
-    Python name, ``read_only_hint``: the camelCase attribute is a deprecation
-    shim in FastMCP 4 that a setting can switch off.
+    One rule for both replays, after signing in and after electing a
+    replacement owner, so they cannot drift apart. Read from the tool's
+    annotations, which survive the hop, never from a name list that would go
+    stale in the unsafe direction. Unknown counts as changing something; only
+    ``read_only_hint`` says otherwise, read under its Python name because the
+    camelCase attribute is a FastMCP 4 shim a setting can switch off.
     """
     name = getattr(context.message, "name", None)
     fastmcp_context = context.fastmcp_context
@@ -359,10 +294,8 @@ async def a_repeat_could_change_something(
 def _readable_marker(result: ToolResult) -> dict[str, Any] | None:
     """The marker on *result*, if there is one this build understands.
 
-    Every field is checked rather than assumed. This runs on whatever an owner
-    sent, and an older frontend deliberately attaches to a newer owner, so a
-    marker from a build that does not exist yet has to be ignored rather than
-    half-read.
+    Every field is checked: an older frontend may attach to a newer owner, so
+    an unknown marker is ignored rather than half-read.
     """
     marker = (result.meta or {}).get(MARKER_KEY)
     if not isinstance(marker, dict):
@@ -387,9 +320,8 @@ def _readable_marker(result: ToolResult) -> dict[str, Any] | None:
 async def _wait_for_the_sign_in(timeout: float) -> bool:
     """Whether a session exists once the login this process started has run.
 
-    Imported at the call rather than at module scope, like the repair below and
-    for the same reason: the login path pulls in the browser stack, and this
-    module is imported whenever a server is assembled.
+    Imported at the call, like the repair below: the login path pulls in the
+    browser stack.
     """
     from linkedin_mcp_server.bootstrap import wait_for_login_to_finish
 

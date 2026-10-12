@@ -1,22 +1,18 @@
 """What one look at the published owner establishes, decided without looking.
 
-One pass of the election reads the canonical descriptor, waits a little for a
-usable one, and then acts on what it found: an attachable owner is probed, an
-older one is asked to stand down, an owner this build may only control is asked
-to stand down, written off or probed once, and leftovers are buried. Which of
-these happens is decided here from events alone. ``daemon.election._live_lookup``
-reads, sleeps, probes and sends the request, and feeds back what came of it.
+One pass reads the canonical descriptor, waits a little for a usable one, then
+acts: an attachable owner is probed, an older one asked to stand down, one this
+build may only control asked, written off or probed once, and leftovers buried.
+``daemon.election._live_lookup`` carries out the effects.
 
-**A descriptor that fails the probe is downgraded, never deleted.** A live owner
-this client merely cannot reach would be stranded by a deletion, along with every
-client attached to it. The file is left alone and the lock decides what happens
-next. A refusal buries the generation, so it is never asked again; a silence
-records nothing, so the next pass asks afresh.
-
-**An owner of this build with another configuration is probed once.** Answering
-or silent, it is left alone and the election ends in this client's own browser
-(:attr:`Finding.LIVE_RIVAL`, :attr:`Finding.SILENT_RIVAL`), with no turnover
-request, no owner start and no second probe. Refused, it is leftovers.
+- A descriptor that fails the probe is downgraded, never deleted: deleting it
+  would strand a live but unreachable owner and its clients. The lock decides.
+  A refusal buries the generation; a silence records nothing, so the next pass
+  asks again.
+- An owner of this build with another configuration is probed once. Answering
+  or silent, it is left alone and the election ends in Direct
+  (:attr:`Finding.LIVE_RIVAL`, :attr:`Finding.SILENT_RIVAL`) with no turnover,
+  start or second probe. Refused, it is leftovers.
 """
 
 from __future__ import annotations
@@ -28,17 +24,10 @@ from dataclasses import dataclass, replace
 class Reach(enum.Enum):
     """What a probe of a published endpoint established.
 
-    Three answers rather than two, because "it did not answer" covers two
-    situations that call for opposite reactions, and collapsing them is what
-    made a healthy owner unreachable for a whole election.
-
-    A process that is *gone* leaves a closed port, and the kernel refuses the
-    connection at once. A process that is *stalled* still holds its listening
-    socket, so the handshake completes into the backlog and the probe waits out
-    its whole budget. Measured against the real probe with a real descriptor and
-    token: about ten milliseconds for the first, a full five seconds for the
-    second. Three orders of magnitude apart, and the old ``bool`` threw the
-    difference away.
+    "No answer" is two opposite situations: a gone process leaves a closed
+    port that refuses at once, while a stalled one still holds its socket and
+    the probe waits out its budget. Treating a stall as gone buries a healthy
+    owner, so the two stay apart.
     """
 
     #: The endpoint answered an authenticated request. Attach to it.
@@ -303,13 +292,10 @@ def on_event(lookup: Lookup, event: Event) -> tuple[Lookup, list[Effect]]:
 def wants_a_decision(reading: Reading) -> bool:
     """Whether an unusable reading still needs the election to act on it.
 
-    A control-only pair is not an owner to attach to, but two kinds of it are
-    not merely something to wait out either. A protocol mismatch is an owner to
-    ask to stand down or to write off, and a same-build configuration mismatch
-    is an owner to probe: alive, it is left alone and the caller falls back at
-    once; gone, its descriptor is leftovers like any other. Every other
-    reading is paced exactly as before, which keeps a caller from spinning
-    through its backoff at read speed on a file it cannot use.
+    Two control-only kinds need action rather than waiting: a protocol
+    mismatch (ask to stand down or write off) and a same-build configuration
+    mismatch (probe). Every other reading is paced, so a caller does not spin
+    at read speed on a file it cannot use.
     """
     if not reading.control_only:
         return False
@@ -375,16 +361,11 @@ def _decide_control_only(
 ) -> tuple[Lookup, list[Effect]]:
     """Act on an owner this build may control but never give a tool call.
 
-    **Another protocol.** An older owner is asked to stand down through the
-    control floor, the one route every protocol keeps. The same or a newer one
-    is left running. Either way this generation is written off, so the election
-    goes to the lock: after a turnover that is where the replacement starts,
-    and otherwise it ends in the caller's own browser for as long as that owner
-    lives.
-
-    **Same build, another configuration.** Probed once, because a descriptor
-    outlives its writer and an owner that went idle leaves one behind on
-    purpose.
+    Another protocol: an older owner is asked to stand down through the one
+    route every protocol keeps; the same or a newer one is left running.
+    Either way the generation is written off and the lock decides. Same build
+    with another configuration: probed once, since a descriptor outlives its
+    writer.
     """
     if not reading.other_protocol:
         return _probe(lookup, reading, now)

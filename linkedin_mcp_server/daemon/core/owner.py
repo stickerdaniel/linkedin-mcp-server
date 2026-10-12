@@ -1,27 +1,19 @@
 """When the owner takes a call and when it may go, decided without doing either.
 
-The owner process admits calls, hears its frontends say they are still waiting,
-expires the calls nobody waits for, and goes away when it is idle, when its
-browser cannot be driven, or when a newer build or a profile command asks for
-the browser. Which of these happens, and to which call, is decided here from
-events alone. ``daemon.liveness`` and ``daemon.owner`` run each effect and feed
-back the event that completes it.
+The owner admits calls, hears its frontends' heartbeats, expires calls nobody
+waits for, and goes away when idle, wedged, or asked for the browser by a newer
+build or a profile command. ``daemon.liveness`` and ``daemon.owner`` run each
+effect and feed back the event that completes it.
 
-**Admission and retirement are one decision.** Both are answered on one state,
-and every event that reads one of them and writes the other is a single call to
-:func:`on_event`, so nothing can run between the check and the set. Only two
-orderings exist: the call is admitted and retirement sees it, or retirement wins
-and the call is refused before anything below it runs.
-
-**Admission is reserved here, and only the task start is an effect.** An
-admitted call is counted and watched before the shell creates its task. A start
-that fails comes back as :class:`StartFailed`, which releases the reservation.
-Every admission carries a ticket, and a completion naming a ticket that is no
-longer admitted is stale and changes nothing.
-
-**The owner's own stall is not a frontend going quiet.** A gap between two of
-the owner's scans longer than :data:`STALL_SECONDS` means this process was not
-running, so it writes nobody off for it.
+- Admission and retirement are one decision on one state: every event that
+  reads one and writes the other is a single :func:`on_event` call, so either
+  the call is admitted and retirement sees it, or retirement wins and the call
+  is refused before anything runs.
+- Admission is reserved here, before the shell creates the task; a failed
+  start comes back as :class:`StartFailed`. A completion naming a ticket that
+  is no longer admitted is stale and changes nothing.
+- A gap between the owner's own scans longer than :data:`STALL_SECONDS` means
+  this process was not running, and writes nobody off.
 """
 
 from __future__ import annotations
@@ -31,13 +23,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 
 #: How long a call may go unheard before the owner stops it. Five of the
-#: frontend's heartbeat cadences, and the margin is the point rather than the
-#: number. Measured worst cases: 9.5ms for a heartbeat served while a page is
-#: being driven, 3.6ms of timer lateness in a detached process over 25 beats,
-#: and 130ms for the longest the owner's synchronous text extraction holds its
-#: event loop, on a 2MiB page far larger than a real one. A live call therefore
-#: needs a stall roughly seventy times worse than anything measured, or three
-#: consecutive beats lost, before it is wrongly cancelled.
+#: frontend's heartbeat cadences: the margin is the point, so a live call is
+#: cancelled only after several consecutive lost beats or an event-loop stall
+#: far beyond a heartbeat's own latency. Measured: docs/daemon-measurements.md.
 EXPIRY_SECONDS = 10.0
 
 #: A gap between two of the owner's own scans that means the owner was not
@@ -384,15 +372,10 @@ def watching(owner: Owner, call_id: str) -> bool:
 def abandoned(owner: Owner, call_id: str, now: float) -> bool:
     """Whether *call_id* may no longer start browser work.
 
-    An unknown call counts as abandoned, and that is deliberate rather than
-    cautious. A running call is watched from admission until it is expired,
-    cut or finished, so an unwatched one was written off or never admitted;
-    neither was heard from, and treating either as freshly heard would hand
-    authority to a call nobody vouched for.
-
-    A call older than the expiry is abandoned before the next scan writes it
-    off, unless this owner itself has not been scanning: the stall rule the
-    scan applies, for the same reason.
+    An unknown call counts as abandoned on purpose: an unwatched call was
+    written off or never admitted, and nobody vouched for it. A call older
+    than the expiry is abandoned before the next scan writes it off, unless
+    this owner itself stalled, the scan's own rule.
     """
     call = _watched(owner, call_id)
     if call is None:

@@ -1,24 +1,19 @@
 """Whether to look again, start an owner or stop, decided without doing any of it.
 
-An election alternates two things until it has an answer: a pass over the
-published descriptor (:mod:`linkedin_mcp_server.daemon.core.lookup`), and a
-start of one child that competes for the lock
-(:mod:`linkedin_mcp_server.daemon.core.spawn`). When to start, how starts back
-off, when the active budget is spent and what the quiet settlement after it may
-still do are decided here from events alone. ``daemon.election.obtain_owner``
-runs each effect and feeds back what came of it.
+An election alternates a pass over the published descriptor
+(:mod:`linkedin_mcp_server.daemon.core.lookup`) and a start of one child that
+competes for the lock (:mod:`linkedin_mcp_server.daemon.core.spawn`).
+``daemon.election.obtain_owner`` runs each effect and feeds back what came of it.
 
-**Active election and quiescent settlement have separate budgets.** Both
-deadlines are fixed from the election's start. An early terminal failure of a
-start gets at most one settlement budget from that failure, capped by the global
-deadline. Settlement never starts or turns over an owner; it only observes the
-canonical descriptor and authenticates a compatible endpoint.
-
-**Direct on every refusal.** A pass that found an owner to attach to, or an
-owner of this build with another configuration (``OwnerLookup.fallback``), ends
-the election at once. A lock that cannot be used ends it with the last thing
-seen, and a start that never produced a child, or a child that proved a
-permanent failure, ends it after settlement. Nothing here retries a refusal.
+- Active election and quiescent settlement have separate budgets, both fixed
+  from the election's start. An early terminal start failure gets at most one
+  settlement budget from that failure, capped by the global deadline.
+  Settlement only observes and authenticates; it never starts or turns over an
+  owner.
+- Direct on every refusal: an owner to attach to or a same-build
+  ``OwnerLookup.fallback`` ends the election at once, an unusable lock ends it
+  with the last thing seen, and a start that produced no child or a permanent
+  failure ends it after settlement. Nothing here retries a refusal.
 """
 
 from __future__ import annotations
