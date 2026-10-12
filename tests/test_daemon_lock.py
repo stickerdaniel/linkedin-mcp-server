@@ -175,12 +175,35 @@ class TestScope:
         path.parent.mkdir(parents=True, mode=0o777)
         path.parent.chmod(0o777)
         os.mkfifo(path)
-        started = time.monotonic()
+        raised: list[BaseException] = []
 
-        with pytest.raises(PrivateStateError, match="not a regular file"):
-            DaemonLock(tmp_path / "auth").try_acquire()
+        def acquire() -> None:
+            try:
+                DaemonLock(tmp_path / "auth").try_acquire()
+            except BaseException as exc:
+                raised.append(exc)
 
-        assert time.monotonic() - started < 0.1
+        # Opening a FIFO for reading waits for a writer, and none ever comes, so
+        # a lock that opened it would wait forever. The join only turns that
+        # into a failure: how long the refusal takes on a loaded host is not the
+        # claim, and a wall-clock bound on it failed a correct refusal.
+        worker = threading.Thread(target=acquire, daemon=True)
+        worker.start()
+        worker.join(timeout=30)
+        if worker.is_alive():
+            # A writer releases the blocked open, so the thread ends with the
+            # test. It is offered until the thread is gone: one offered before
+            # the open is reached finds no reader (ENXIO) and releases nothing.
+            deadline = time.monotonic() + 30
+            while worker.is_alive() and time.monotonic() < deadline:
+                with contextlib.suppress(OSError):
+                    os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
+                worker.join(timeout=0.05)
+            pytest.fail("acquiring the lock blocked on the planted FIFO")
+
+        assert len(raised) == 1
+        assert isinstance(raised[0], PrivateStateError)
+        assert "not a regular file" in str(raised[0])
         assert path.is_fifo()
 
     @pytest.mark.skipif(
