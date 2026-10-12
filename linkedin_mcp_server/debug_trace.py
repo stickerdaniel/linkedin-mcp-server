@@ -24,6 +24,8 @@ _EXPLICIT_TRACE_DIR = False
 #: This process's lock on its own run directory, held until it exits.
 _RUN_LOCK_FD: int | None = None
 _RUN_LOCK = ".alive"
+#: Marks a run whose lock could not be taken, which pruning then always keeps.
+_UNLOCKED = ".unlocked"
 
 #: How long a run directory under ``trace-runs`` outlives its last write. Each
 #: process creates one, and a host that kills its server skips the exit-time
@@ -80,23 +82,29 @@ def get_trace_dir() -> Path | None:
 def _hold_run(run: Path) -> None:
     """Lock *run* for as long as this process lives, so pruning passes it by.
 
-    The kernel releases the lock when the process dies, killed or not. Without
-    file locking the run goes unlocked, and so does every other run, which
-    pruning then keeps.
+    The kernel releases the lock when the process dies, killed or not. A run
+    that could not be locked is marked instead, because a lock taken later by
+    someone else would read as a dead owner; it then stays, as every run did
+    before pruning.
     """
     global _RUN_LOCK_FD
     try:
         fd = os.open(run / _RUN_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
     except OSError:
-        return
+        fd = None
     try:
-        held = try_lock(fd, exclusive=True)
+        held = fd is not None and try_lock(fd, exclusive=True)
     except ProfileLeaseUnavailableError:
         held = False
     if held:
         _RUN_LOCK_FD = fd
-    else:
+        return
+    if fd is not None:
         os.close(fd)
+    try:
+        (run / _UNLOCKED).touch(mode=0o600)
+    except OSError:
+        pass
 
 
 def _release_run() -> None:
@@ -109,6 +117,8 @@ def _release_run() -> None:
 
 def _in_use(run: Path) -> bool:
     """Whether a live process holds *run*. Not knowing counts as yes."""
+    if os.path.lexists(run / _UNLOCKED):
+        return True
     try:
         fd = os.open(run / _RUN_LOCK, os.O_RDWR)
     except FileNotFoundError:

@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from linkedin_mcp_server.profile_lease import ProfileLeaseUnavailableError
+
 from linkedin_mcp_server.debug_trace import (
     _safe_source_profile_dir,
     cleanup_trace_dir,
@@ -187,6 +189,27 @@ def test_a_quiet_run_of_a_live_server_is_kept(monkeypatch, tmp_path):
         assert quiet.exists()
     finally:
         other.communicate("\n", timeout=30)
+
+
+def test_a_run_that_could_not_be_locked_is_kept(monkeypatch, tmp_path):
+    """Its server may still be alive once locking works again."""
+    _use_profile(monkeypatch, tmp_path / "profile")
+
+    def unavailable(fd: int, *, exclusive: bool) -> bool:
+        raise ProfileLeaseUnavailableError("no locks here")
+
+    with monkeypatch.context() as patched:
+        patched.setattr("linkedin_mcp_server.debug_trace.try_lock", unavailable)
+        unlocked = get_trace_dir()
+    assert unlocked is not None
+    stamp = time.time() - 30 * 24 * 60 * 60
+    for path in (*unlocked.iterdir(), unlocked):
+        os.utime(path, (stamp, stamp))
+    reset_trace_state_for_testing()
+
+    get_trace_dir()
+
+    assert unlocked.exists()
 
 
 def test_a_run_still_being_written_is_kept(monkeypatch, tmp_path):
