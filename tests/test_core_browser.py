@@ -6,7 +6,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
@@ -303,7 +302,11 @@ class TestTheWindowlessLaunchEndToEnd:
                 stops["count"] += 1
                 recorder.setdefault("events", []).append("stop")
                 if stop_hangs:
-                    await asyncio.sleep(30)
+                    try:
+                        await asyncio.sleep(30)
+                    except asyncio.CancelledError:
+                        recorder["events"].append("stop abandoned")
+                        raise
                 return None
 
         async def start():
@@ -428,7 +431,6 @@ class TestTheWindowlessLaunchEndToEnd:
         start, _ = self._fake_playwright(recorder, refuse_headed=True, stop_hangs=True)
         manager = BrowserManager(user_data_dir=tmp_path / "p", headless=True)
 
-        began = time.monotonic()
         with mock.patch(
             "linkedin_mcp_server.core.browser._CLEANUP_TIMEOUT_SECONDS", 0.05
         ):
@@ -442,13 +444,20 @@ class TestTheWindowlessLaunchEndToEnd:
                     playwright.return_value.start = start
                     with pytest.raises(Exception):
                         await manager.start()
-        elapsed = time.monotonic() - began
 
         assert recorder["options"]["headless"] is False
         assert recorder["flags_at_driver_start"] == ["1"]
-        # Both the first stop and the cleanup retry are bounded. The fake hangs
-        # for 30s; anything near that means one of those bounds was skipped.
-        assert elapsed < 5, f"the wedged driver was waited out ({elapsed:.1f}s)"
+        # Both the first stop and the cleanup retry are bounded: each was given
+        # up on rather than waited out, and no second driver started. Read from
+        # the order of events, not the clock, because the close that follows
+        # also drains processes, which takes seconds under load.
+        assert recorder["events"] == [
+            "driver-start",
+            "stop",
+            "stop abandoned",
+            "stop",
+            "stop abandoned",
+        ]
 
     async def test_a_launch_that_fails_either_way_reports_the_first_error(
         self, tmp_path
