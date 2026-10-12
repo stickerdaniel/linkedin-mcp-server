@@ -12,12 +12,17 @@ subprocess boundary is also the frontend's timeout boundary: if state storage is
 stuck in the kernel, the parent can kill the child and prove that no abandoned
 worker can later acquire the lock or publish over an in-process fallback. A
 thread cannot provide that proof because it cannot be killed.
+
+What to do next is decided in ``daemon.core``: the election loop in
+:mod:`~linkedin_mcp_server.daemon.core.election`, each look at the published
+owner in :mod:`~linkedin_mcp_server.daemon.core.lookup`, and each child start in
+:mod:`~linkedin_mcp_server.daemon.core.spawn`. This module carries out their
+effects, reads the clock and feeds back what came of each.
 """
 
 from __future__ import annotations
 
 import contextlib
-import enum
 import logging
 import os
 import queue
@@ -39,6 +44,11 @@ from linkedin_mcp_server.daemon import discovery as daemon_discovery
 from linkedin_mcp_server.daemon import owner as daemon_owner
 from linkedin_mcp_server.daemon import startup
 from linkedin_mcp_server.daemon import version as daemon_version
+from linkedin_mcp_server.daemon.core import election as election_core
+from linkedin_mcp_server.daemon.core import lookup as lookup_core
+from linkedin_mcp_server.daemon.core import spawn as spawn_core
+from linkedin_mcp_server.daemon.core.lookup import Finding, Reach
+from linkedin_mcp_server.daemon.core.spawn import Attempt, Started
 from linkedin_mcp_server.daemon.discovery import (
     Attachment,
     OwnerLookup,
@@ -107,41 +117,14 @@ _OWNER_START_RETRY_SECONDS = 0.5
 _MAX_OWNER_START_RETRY_SECONDS = 8.0
 
 
-def _owner_start_delay_after(starts: int, current: float) -> float:
-    if starts < _OWNER_START_BURST:
-        return current
-    return min(
-        max(current * 2, _OWNER_START_RETRY_SECONDS),
-        _MAX_OWNER_START_RETRY_SECONDS,
+def _pacing() -> election_core.Pacing:
+    """The election's clocks as this module sets them now."""
+    return election_core.Pacing(
+        retry=_RETRY_SECONDS,
+        burst=_OWNER_START_BURST,
+        first_delay=_OWNER_START_RETRY_SECONDS,
+        max_delay=_MAX_OWNER_START_RETRY_SECONDS,
     )
-
-
-class Reach(enum.Enum):
-    """What a probe of a published endpoint established.
-
-    Three answers rather than two, because "it did not answer" covers two
-    situations that call for opposite reactions, and collapsing them is what
-    made a healthy owner unreachable for a whole election.
-
-    A process that is *gone* leaves a closed port, and the kernel refuses the
-    connection at once. A process that is *stalled* still holds its listening
-    socket, so the handshake completes into the backlog and the probe waits out
-    its whole budget. Measured against the real probe with a real descriptor and
-    token: about ten milliseconds for the first, a full five seconds for the
-    second. Three orders of magnitude apart, and the old ``bool`` threw the
-    difference away.
-    """
-
-    #: The endpoint answered an authenticated request. Attach to it.
-    ANSWERED = "answered"
-
-    #: Nothing is serving at that address, or something is and it is not this
-    #: owner. Either way the descriptor is leftovers.
-    REFUSED = "refused"
-
-    #: Something holds the port and did not answer in time. No proof it is
-    #: alive, and no proof it is dead.
-    SILENT = "silent"
 
 
 #: Proves a published endpoint is live within the supplied remaining budget.
@@ -176,11 +159,8 @@ def obtain_owner(
 ) -> ElectionOutcome:
     """Return an owner to talk to, starting one if nobody else has.
 
-    Active election and quiescent settlement have separate budgets. Their global
-    deadlines are fixed from this call's entry. An early terminal local failure
-    gets at most one settlement budget from that failure, capped by the global
-    deadline. Settlement never starts or turns over an owner; it only observes
-    the canonical descriptor and authenticates a compatible endpoint.
+    The loop is :mod:`linkedin_mcp_server.daemon.core.election`'s, including the
+    separate budgets of active election and quiescent settlement.
 
     *buried* names generations the caller has already found unusable, so they
     are never contacted or returned here. A proxy recovering from an owner that
@@ -196,171 +176,78 @@ def obtain_owner(
     # startup: a package replaced later must show up as a difference against
     # this value when an owner is spawned, not become the value.
     daemon_version.build_identity()
-    entered = time.monotonic()
-    active_deadline = entered + max(deadline_seconds, 0.0)
-    settlement_budget = max(settlement_seconds, 0.0)
-    settlement_deadline = active_deadline + settlement_budget
-    started = False
-    starts = 0
-    next_start = 0.0
-    start_retry_seconds = _OWNER_START_RETRY_SECONDS
     reach = connect or _reachable
     inspector = _DescriptorInspector(auth_root, profile, config)
     # A copy, never the caller's own set: `_live_lookup` adds to it.
     buried = set(buried)
-    asked_for_turnover = False
-    last_lookup = OwnerLookup(
-        state=OwnerState.ABSENT,
-        reason="the election ended before daemon state was observed",
+    election, effects = election_core.elect(
+        now=time.monotonic(),
+        deadline_seconds=deadline_seconds,
+        settlement_seconds=settlement_seconds,
+        pacing=_pacing(),
+        nothing_seen=OwnerLookup(
+            state=OwnerState.ABSENT,
+            reason="the election ended before daemon state was observed",
+        ),
     )
-
-    def look(wait_seconds: float = 0.0) -> OwnerLookup:
-        nonlocal asked_for_turnover, last_lookup
-        found, asked, observed = _live_lookup(
-            auth_root,
-            profile,
-            config,
-            reach,
-            buried,
-            inspector=inspector,
-            may_ask_for_turnover=not asked_for_turnover,
-            wait_seconds=wait_seconds,
-            deadline=active_deadline,
-        )
-        asked_for_turnover = asked_for_turnover or asked
-        if observed:
-            last_lookup = found
-        return found
-
-    def settle(*, deadline: float | None = None) -> ElectionOutcome:
-        effective_deadline = (
-            settlement_deadline
-            if deadline is None
-            else min(settlement_deadline, deadline)
-        )
-        return _settle_owner(
-            auth_root,
-            profile,
-            config,
-            reach,
-            buried,
-            inspector=inspector,
-            deadline=effective_deadline,
-            last_lookup=last_lookup,
-            started=started,
-        )
-
-    def settle_terminal_local_result() -> ElectionOutcome:
-        return settle(deadline=time.monotonic() + settlement_budget)
-
     while True:
-        if time.monotonic() >= active_deadline:
-            return settle()
-        lookup = look()
-        if lookup.worth_connecting or lookup.fallback is not None:
-            return ElectionOutcome(lookup, started_owner=started)
-        if time.monotonic() >= active_deadline:
-            return settle()
-
-        now = time.monotonic()
-        may_start = now >= next_start
-        remaining = active_deadline - now
-        if may_start and remaining > 0:
-            starts += 1
-            start_retry_seconds = _owner_start_delay_after(starts, start_retry_seconds)
-            next_start = now + start_retry_seconds
-            try:
-                inspector.require_fresh_inspection()
-                attempt = _start_owner(
+        # Exactly one effect per decision: the election waits on one thing.
+        [effect] = effects
+        match effect:
+            case election_core.Decide(lookup=lookup, started=started):
+                return ElectionOutcome(cast(OwnerLookup, lookup), started_owner=started)
+            case election_core.Look(op=op, may_ask=may_ask, wait=wait, deadline=until):
+                found, asked, observed = _live_lookup(
                     auth_root,
                     profile,
                     config,
-                    timeout=remaining,
+                    reach,
+                    buried,
                     inspector=inspector,
+                    may_ask_for_turnover=may_ask,
+                    wait_seconds=wait,
+                    deadline=until,
                 )
-            except DaemonLockError:
-                logger.warning("The daemon lock is unusable", exc_info=True)
-                return ElectionOutcome(last_lookup, started_owner=started)
-            except OSError:
-                logger.warning("The daemon could not be started", exc_info=True)
-                return settle_terminal_local_result()
-        else:
-            attempt = _Attempt.CONTENDED
-
-        if attempt is _Attempt.ABORTED:
-            logger.warning("A daemon child reported a permanent startup failure")
-            return settle_terminal_local_result()
-        if attempt is _Attempt.FAILED:
-            logger.warning(
-                "A daemon child failed; waiting for any concurrent election winner"
-            )
-        if attempt is _Attempt.STARTED:
-            started = True
-
-        remaining = active_deadline - time.monotonic()
-        if remaining <= 0:
-            return settle()
-        lookup = look(min(_RETRY_SECONDS, remaining))
-        if lookup.worth_connecting or lookup.fallback is not None:
-            return ElectionOutcome(lookup, started_owner=started)
-        if time.monotonic() >= active_deadline:
-            return settle()
+                event: election_core.Event = election_core.Looked(
+                    op,
+                    time.monotonic(),
+                    found,
+                    conclusive=found.worth_connecting or found.fallback is not None,
+                    asked=asked,
+                    observed=observed,
+                )
+            case election_core.StartOwner(op=op, timeout=timeout):
+                event = _start(auth_root, profile, config, op, timeout, inspector)
+        election, effects = election_core.on_event(election, event)
 
 
-def _settle_owner(
+def _start(
     auth_root: Path,
     profile: Path,
     config: AppConfig,
-    reach: Reachable,
-    buried: set[str],
-    *,
+    op: int,
+    timeout: float,
     inspector: _DescriptorInspector,
-    deadline: float,
-    last_lookup: OwnerLookup,
-    started: bool,
-) -> ElectionOutcome:
-    """Observe one quiescent election tail without causing owner-side effects."""
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return ElectionOutcome(last_lookup, started_owner=started)
-        lookup, _asked, observed = _live_lookup(
-            auth_root,
-            profile,
-            config,
-            reach,
-            buried,
-            inspector=inspector,
-            may_ask_for_turnover=False,
-            wait_seconds=min(_RETRY_SECONDS, remaining),
-            deadline=deadline,
+) -> election_core.Event:
+    """Start one child for the election, and say how that ended."""
+    try:
+        inspector.require_fresh_inspection()
+        attempt = _start_owner(
+            auth_root, profile, config, timeout=timeout, inspector=inspector
         )
-        if observed:
-            last_lookup = lookup
-        if lookup.worth_connecting or lookup.fallback is not None:
-            return ElectionOutcome(lookup, started_owner=started)
-
-
-def _wants_a_decision(lookup: OwnerLookup) -> bool:
-    """Whether an unusable reading still needs the election to act on it.
-
-    A control-only pair is not an owner to attach to, but two kinds of it are
-    not merely something to wait out either. A protocol mismatch is an owner to
-    ask to stand down or to write off, and a same-build configuration mismatch
-    is an owner to probe: alive, it is left alone and the caller falls back at
-    once; gone, its descriptor is leftovers like any other. Every other
-    reading is paced exactly as before, which keeps a caller from spinning
-    through its backoff at read speed on a file it cannot use.
-    """
-    attachment = lookup.attachment
-    if attachment is None or not attachment.control_only:
-        return False
-    if lookup.mismatch is daemon_discovery.Mismatch.PROTOCOL:
-        return True
-    return (
-        lookup.mismatch is daemon_discovery.Mismatch.CONFIGURATION
-        and attachment.descriptor.package_version == __version__
-    )
+    except DaemonLockError:
+        logger.warning("The daemon lock is unusable", exc_info=True)
+        return election_core.StartRefused(op, time.monotonic(), lock_unusable=True)
+    except OSError:
+        logger.warning("The daemon could not be started", exc_info=True)
+        return election_core.StartRefused(op, time.monotonic(), lock_unusable=False)
+    if attempt is Attempt.ABORTED:
+        logger.warning("A daemon child reported a permanent startup failure")
+    elif attempt is Attempt.FAILED:
+        logger.warning(
+            "A daemon child failed; waiting for any concurrent election winner"
+        )
+    return election_core.StartEnded(op, time.monotonic(), attempt)
 
 
 def _live_lookup(
@@ -379,18 +266,9 @@ def _live_lookup(
 
     The one place ``ATTACHABLE`` is turned from a claim about a file into a
     claim about a process. Everything in
-    :mod:`linkedin_mcp_server.daemon.discovery` reads disk; this connects.
-
-    A descriptor that fails the probe is downgraded rather than deleted, and the
-    distinction matters: a live owner this client merely cannot reach right now
-    would be stranded by a deletion, along with every other client attached to
-    it. The file is left alone and the *lock* decides what happens next, which
-    is the rule the whole module is built on.
-
-    Failing the probe is itself two things, and only one of them is final. A
-    refusal says nothing usable is at that address, so the instance is buried and
-    not asked again. A silence says only that the answer did not arrive in time,
-    so nothing is recorded and the next pass asks afresh.
+    :mod:`linkedin_mcp_server.daemon.discovery` reads disk; this connects. What
+    each reading calls for is :mod:`linkedin_mcp_server.daemon.core.lookup`'s
+    decision.
 
     Reads stay on the caller's one inspector. A paced pass may re-read the
     canonical descriptor, but returns when that pass's wait ends so the active
@@ -398,271 +276,174 @@ def _live_lookup(
 
     Returns the lookup, whether turnover was requested, and whether the lookup
     came from a completed descriptor read. The last flag lets settlement retain
-    its last concrete observation when a bounded read times out.
+    its last concrete observation when a bounded read times out. Generations the
+    pass writes off are added to *buried*.
     """
     del auth_root, profile, config  # carried by the reusable inspector
-    wait_deadline = min(deadline, time.monotonic() + max(wait_seconds, 0.0))
+    state, effects = lookup_core.look(
+        now=time.monotonic(),
+        deadline=deadline,
+        wait=wait_seconds,
+        may_ask=may_ask_for_turnover,
+        buried=frozenset(buried),
+        timings=lookup_core.Timings(
+            read=daemon_discovery._DESCRIPTOR_READ_SECONDS,
+            poll=daemon_discovery._ATTACH_POLL_SECONDS,
+            probe=_REACHABLE_SECONDS,
+        ),
+    )
+    read = OwnerLookup(state=OwnerState.UNTRUSTED)
+    timed_out = ""
     while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return (
-                OwnerLookup(
-                    state=OwnerState.UNTRUSTED,
-                    reason="the election deadline expired before descriptor read",
-                ),
-                False,
-                False,
-            )
-        try:
-            lookup = inspector.inspect_until(
-                timeout=min(daemon_discovery._DESCRIPTOR_READ_SECONDS, remaining)
-            )
-        except _DescriptorReadTimeout as exc:
-            return (
-                OwnerLookup(state=OwnerState.UNTRUSTED, reason=str(exc)),
-                False,
-                False,
-            )
-        except daemon_descriptor.DescriptorError as exc:
-            # A completed, untrusted read is still a concrete observation. Pace it
-            # like every other unusable canonical state so a persistent parse or
-            # permission failure cannot create one reader thread per loop pass.
-            lookup = OwnerLookup(state=OwnerState.UNTRUSTED, reason=str(exc))
+        event: lookup_core.Event | None = None
+        for effect in effects:
+            match effect:
+                case lookup_core.ReadDescriptor(op=op, timeout=timeout):
+                    try:
+                        read = _read_once(inspector, timeout)
+                    except _DescriptorReadTimeout as exc:
+                        timed_out = str(exc)
+                        event = lookup_core.ReadTimedOut(op, time.monotonic())
+                    else:
+                        event = lookup_core.Read(op, time.monotonic(), _reading(read))
+                case lookup_core.Pause(op=op, seconds=seconds):
+                    time.sleep(seconds)
+                    event = lookup_core.Paused(op, time.monotonic())
+                case lookup_core.Probe(op=op, timeout=timeout):
+                    verdict = reach(_attachment(read), timeout)
+                    event = lookup_core.Probed(op, time.monotonic(), verdict)
+                case lookup_core.AskToStandDown(because=because):
+                    _turn_over(_attachment(read), because)
+                case lookup_core.LeaveAlone():
+                    logger.info(
+                        "The running daemon speaks another protocol and is not "
+                        "older than this build; leaving it alone"
+                    )
+                case lookup_core.Bury(instance=instance):
+                    buried.add(instance)
+                case lookup_core.Conclude(finding=finding, asked=asked, observed=seen):
+                    return _what_was_found(finding, read, timed_out), asked, seen
+        if event is None:
+            raise AssertionError(f"the lookup core left the pass waiting on {effects}")
+        state, effects = lookup_core.on_event(state, event)
 
-        ignored = (
-            lookup.attachment is not None
-            and lookup.attachment.descriptor.instance_id in buried
-        )
-        # Before the generic filter, not after it: a control-only reading is
-        # never worth connecting to, and discarded here it would never reach
-        # the turnover or the liveness probe below.
-        if (lookup.worth_connecting or _wants_a_decision(lookup)) and not ignored:
-            break
-        remaining = min(wait_deadline, deadline) - time.monotonic()
-        if remaining <= 0:
-            if ignored:
-                return (
-                    OwnerLookup(
-                        state=OwnerState.INCOMPATIBLE,
-                        reason="the published daemon was already found unusable",
-                    ),
-                    False,
-                    True,
-                )
-            return lookup, False, True
-        time.sleep(min(daemon_discovery._ATTACH_POLL_SECONDS, remaining))
 
+def _read_once(inspector: _DescriptorInspector, timeout: float) -> OwnerLookup:
+    """One bounded read of the canonical descriptor, on the shared inspector."""
+    try:
+        return inspector.inspect_until(timeout=timeout)
+    except daemon_descriptor.DescriptorError as exc:
+        # A completed, untrusted read is still a concrete observation. Paced like
+        # every other unusable canonical state, so a persistent parse or
+        # permission failure cannot create one reader thread per loop pass.
+        return OwnerLookup(state=OwnerState.UNTRUSTED, reason=str(exc))
+
+
+def _reading(lookup: OwnerLookup) -> lookup_core.Reading:
+    """What the lookup core needs to know about one completed read."""
     attachment = lookup.attachment
-    assert attachment is not None  # both ways out of the loop imply one
-    instance = attachment.descriptor.instance_id
-    if instance in buried:
-        return (
-            OwnerLookup(
-                state=OwnerState.INCOMPATIBLE,
+    if attachment is None:
+        return lookup_core.Reading(attachable=lookup.worth_connecting)
+    descriptor = attachment.descriptor
+    return lookup_core.Reading(
+        instance=descriptor.instance_id,
+        attachable=lookup.worth_connecting,
+        control_only=attachment.control_only,
+        other_protocol=lookup.mismatch is daemon_discovery.Mismatch.PROTOCOL,
+        other_config=lookup.mismatch is daemon_discovery.Mismatch.CONFIGURATION,
+        older=daemon_version.compare(
+            owner=descriptor.package_version, frontend=__version__
+        )
+        is daemon_version.Skew.OWNER_IS_STALE,
+        same_version=descriptor.package_version == __version__,
+    )
+
+
+def _attachment(read: OwnerLookup) -> Attachment:
+    attachment = read.attachment
+    assert attachment is not None  # the core acts only on a reading with one
+    return attachment
+
+
+def _turn_over(attachment: Attachment, because: lookup_core.Turnover) -> None:
+    if because is lookup_core.Turnover.OLDER_BUILD:
+        logger.info(
+            "The running daemon is version %s and this build is %s; asking it "
+            "to hand the browser over",
+            attachment.descriptor.package_version,
+            __version__,
+        )
+    else:
+        logger.info(
+            "The running daemon is version %s and speaks an older protocol; "
+            "asking it to hand the browser over",
+            attachment.descriptor.package_version,
+        )
+    _ask_to_stand_down(attachment)
+
+
+def _what_was_found(finding: Finding, read: OwnerLookup, timed_out: str) -> OwnerLookup:
+    """The lookup a pass reports, and the line it logs, for *finding*."""
+    incompatible = OwnerState.INCOMPATIBLE
+    match finding:
+        case Finding.AS_READ:
+            return read
+        case Finding.NOT_READ:
+            return OwnerLookup(
+                state=OwnerState.UNTRUSTED,
+                reason="the election deadline expired before descriptor read",
+            )
+        case Finding.READ_TIMED_OUT:
+            return OwnerLookup(state=OwnerState.UNTRUSTED, reason=timed_out)
+        case Finding.ALREADY_UNUSABLE:
+            return OwnerLookup(
+                state=incompatible,
                 reason="the published daemon was already found unusable",
-            ),
-            False,
-            True,
-        )
-
-    if attachment.control_only:
-        return _decide_control_only(
-            lookup,
-            attachment,
-            reach,
-            buried,
-            may_ask_for_turnover=may_ask_for_turnover,
-            deadline=deadline,
-        )
-
-    stale = (
-        daemon_version.compare(
-            owner=attachment.descriptor.package_version, frontend=__version__
-        )
-        is daemon_version.Skew.OWNER_IS_STALE
-    )
-    if stale:
-        if may_ask_for_turnover:
-            logger.info(
-                "The running daemon is version %s and this build is %s; asking it "
-                "to hand the browser over",
-                attachment.descriptor.package_version,
-                __version__,
             )
-            _ask_to_stand_down(attachment)
-        # Classification and turnover are separate. Settlement never sends the
-        # request, but it still writes this generation off so its paced reads wait
-        # for a replacement instead of rediscovering the same stale owner at speed.
-        buried.add(instance)
-        return (
-            OwnerLookup(
-                state=OwnerState.INCOMPATIBLE,
+        case Finding.OLDER_BUILD:
+            return OwnerLookup(
+                state=incompatible,
                 reason="the running daemon is older than this build",
-            ),
-            may_ask_for_turnover,
-            True,
-        )
-
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        return (
-            OwnerLookup(
-                state=OwnerState.INCOMPATIBLE,
+            )
+        case Finding.NOT_PROBED:
+            return OwnerLookup(
+                state=incompatible,
                 reason="the published daemon was not probed before the deadline",
-            ),
-            False,
-            True,
-        )
-    verdict = reach(attachment, min(_REACHABLE_SECONDS, remaining))
-    if verdict is Reach.ANSWERED:
-        return lookup, False, True
-
-    if verdict is Reach.SILENT:
-        # Not buried, and that is the whole of the fix. Something holds the port
-        # and did not get to us inside the budget, which is what a paused or
-        # overloaded owner looks like — including one this very election started
-        # and watched report ready. Burying it made every later pass short
-        # circuit, so the owner never got a second chance inside the election it
-        # belonged to, and the frontend spent its whole budget contending for a
-        # lock the healthy owner was still holding.
-        #
-        # Left to the caller's own deadline rather than bounded by a retry
-        # count. Each probe already costs the full budget, so a fixed number of
-        # retries covers a fixed and rather short stall — measured, one retry
-        # rescues a six second freeze and still gives up on a fifteen second
-        # one. The election deadline is what bounds this, as it always was.
-        logger.info("The published daemon has not answered yet; will ask again")
-        return (
-            OwnerLookup(
-                state=OwnerState.INCOMPATIBLE,
+                mismatch=read.mismatch,
+            )
+        case Finding.NOT_ANSWERED_YET:
+            logger.info("The published daemon has not answered yet; will ask again")
+            return OwnerLookup(
+                state=incompatible,
                 reason="the published daemon has not answered yet",
-            ),
-            False,
-            True,
-        )
-
-    buried.add(instance)
-    logger.info("The published daemon is not answering; electing a new one")
-    # Deliberately not ABSENT. The file is still there, and calling it absent
-    # invites a caller to clean it up; this says "not for us", which is what both
-    # a corpse's descriptor and a superseded owner's are.
-    return (
-        OwnerLookup(
-            state=OwnerState.INCOMPATIBLE,
-            reason="the published daemon did not answer, so it is leftovers",
-        ),
-        False,
-        True,
-    )
-
-
-def _decide_control_only(
-    lookup: OwnerLookup,
-    attachment: Attachment,
-    reach: Reachable,
-    buried: set[str],
-    *,
-    may_ask_for_turnover: bool,
-    deadline: float,
-) -> tuple[OwnerLookup, bool, bool]:
-    """Act on an owner this build may control but never give a tool call.
-
-    Nothing returned here is worth connecting to, whatever happens. The pair
-    was proved for its endpoint, profile, runtime and token, and that is enough
-    to send a stand-down request or a probe; it is not enough to forward a call.
-
-    **Another protocol.** An older owner is asked to stand down through the
-    control floor, the one route every protocol keeps. The same or a newer one
-    is left running. Either way this generation is written off, so the election
-    goes to the lock: after a turnover that is where the replacement starts,
-    and otherwise it ends in the caller's own browser for as long as that owner
-    lives.
-
-    **Same build, another configuration.** Probed once, because a descriptor
-    outlives its writer and an owner that went idle leaves one behind on
-    purpose. Refused, it is buried like any leftovers so the lock can be
-    taken. Answering or silent, it is left alone and the election ends in this
-    client's own browser (``OwnerLookup.fallback``), with no turnover request,
-    no owner start and no second probe.
-    """
-    instance = attachment.descriptor.instance_id
-    if lookup.mismatch is daemon_discovery.Mismatch.PROTOCOL:
-        older = (
-            daemon_version.compare(
-                owner=attachment.descriptor.package_version, frontend=__version__
             )
-            is daemon_version.Skew.OWNER_IS_STALE
-        )
-        asked = older and may_ask_for_turnover
-        if asked:
-            logger.info(
-                "The running daemon is version %s and speaks an older protocol; "
-                "asking it to hand the browser over",
-                attachment.descriptor.package_version,
+        case Finding.LEFTOVERS:
+            logger.info("The published daemon is not answering; electing a new one")
+            # Deliberately not ABSENT. The file is still there, and calling it
+            # absent invites a caller to clean it up; this says "not for us",
+            # which is what both a corpse's descriptor and a superseded owner's
+            # are.
+            return OwnerLookup(
+                state=incompatible,
+                reason="the published daemon did not answer, so it is leftovers",
             )
-            _ask_to_stand_down(attachment)
-        elif not older:
-            logger.info(
-                "The running daemon speaks another protocol and is not older than "
-                "this build; leaving it alone"
+        case Finding.WRITTEN_OFF:
+            return OwnerLookup(
+                state=incompatible, reason=read.reason, mismatch=read.mismatch
             )
-        buried.add(instance)
-        return (
-            OwnerLookup(
-                state=OwnerState.INCOMPATIBLE,
-                reason=lookup.reason,
-                mismatch=lookup.mismatch,
-            ),
-            asked,
-            True,
-        )
-
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        return (
-            OwnerLookup(
-                state=OwnerState.INCOMPATIBLE,
-                reason="the published daemon was not probed before the deadline",
-                mismatch=lookup.mismatch,
-            ),
-            False,
-            True,
-        )
-    verdict = reach(attachment, min(_REACHABLE_SECONDS, remaining))
-    if verdict is Reach.REFUSED:
-        # Nothing usable at that address: leftovers, and the lock decides.
-        buried.add(instance)
-        return (
-            OwnerLookup(
-                state=OwnerState.INCOMPATIBLE,
-                reason=lookup.reason,
-                mismatch=lookup.mismatch,
-            ),
-            False,
-            True,
-        )
-    # Answered or silent, the election ends here. Silence proves nothing about
-    # the owner's life and so authorizes no turnover, but it does not make the
-    # owner usable either: waiting out a whole election for a process that
-    # could never serve this configuration buys nothing, and the profile lease
-    # is what keeps the two browsers apart meanwhile. The two are reported
-    # apart, so a log never calls a silent owner alive.
-    fallback = (
-        daemon_discovery.DirectFallback.LIVE_RIVAL
-        if verdict is Reach.ANSWERED
-        else daemon_discovery.DirectFallback.SILENT_RIVAL
-    )
-    logger.info("Leaving the shared browser owner alone: %s", fallback.value)
-    return (
-        OwnerLookup(
-            state=OwnerState.INCOMPATIBLE,
-            reason=fallback.value,
-            mismatch=lookup.mismatch,
-            fallback=fallback,
-        ),
-        False,
-        True,
-    )
+        case Finding.LIVE_RIVAL | Finding.SILENT_RIVAL:
+            fallback = (
+                daemon_discovery.DirectFallback.LIVE_RIVAL
+                if finding is Finding.LIVE_RIVAL
+                else daemon_discovery.DirectFallback.SILENT_RIVAL
+            )
+            logger.info("Leaving the shared browser owner alone: %s", fallback.value)
+            return OwnerLookup(
+                state=incompatible,
+                reason=fallback.value,
+                mismatch=read.mismatch,
+                fallback=fallback,
+            )
 
 
 def _ask_to_stand_down(attachment: Attachment) -> None:
@@ -763,31 +544,6 @@ def _reachable(attachment: Attachment, timeout: float) -> Reach:
         # from ``cli_main`` before any server exists.
         logger.debug("The daemon reachability check could not run", exc_info=True)
         return Reach.REFUSED
-
-
-class _Started(enum.Enum):
-    """What the startup protocol established at the frontend boundary."""
-
-    #: The endpoint answered and the descriptor is published.
-    YES = "yes"
-
-    #: The child could not serve, said so, died trying, or was stopped for
-    #: having said nothing at all.
-    NO = "no"
-
-    #: The child proved a permanent error or could not publish safely.
-    ABORTED = "aborted"
-
-    #: This generation ended safely after releasing its position. Try again while
-    #: the frontend's election budget remains.
-    RETRY = "retry"
-
-    #: Neither, within the budget, before a prepared generation exists.
-    STILL_TRYING = "still_trying"
-
-    #: The COMMIT frame may have reached the lock holder, which settles its own
-    #: lifetime and must not be killed by the parent.
-    UNCERTAIN = "uncertain"
 
 
 @dataclass(frozen=True)
@@ -927,33 +683,6 @@ def _report_child_failure(report: _BootstrapReport) -> None:
         logger.warning("The daemon stopped before its diagnostic log became available")
 
 
-class _Attempt(enum.Enum):
-    """What came of trying to start an owner, in the three ways it can end.
-
-    A boolean cannot carry this, and collapsing it was measured to cost a
-    minute: a child that reported it could not serve read as "somebody is
-    starting", so the caller waited out its whole deadline for a descriptor
-    nothing was going to write.
-    """
-
-    #: An owner is up and has published. Ready to attach.
-    STARTED = "started"
-
-    #: Somebody is starting: another process holds the lock, or the child this
-    #: process started has not answered yet and is still holding one. Wait.
-    CONTENDED = "contended"
-
-    #: The child this process started did not become an owner. Before this
-    #: reaches the caller, ``_spawn`` has issued a hard stop and waited for the
-    #: child. If the kernel cannot finish that stop within the bounded wait,
-    #: ``_stop_child`` logs that the profile may remain locked.
-    FAILED = "failed"
-
-    #: The child proved a permanent startup or publication failure. Retrying the
-    #: same state would only spend the remaining election budget.
-    ABORTED = "aborted"
-
-
 def _start_owner(
     auth_root: Path,
     profile: Path,
@@ -961,7 +690,7 @@ def _start_owner(
     *,
     timeout: float,
     inspector: _DescriptorInspector | None = None,
-) -> _Attempt:
+) -> Attempt:
     """Start a child that owns all potentially blocking state mutations."""
     del profile  # the owner derives it from the configuration it is handed
     return _start_contending_for_the_lock(
@@ -978,24 +707,19 @@ def _start_contending_for_the_lock(
     *,
     timeout: float,
     inspector: _DescriptorInspector | None = None,
-) -> _Attempt:
+) -> Attempt:
     """Start one child that competes for the lock and reports the outcome."""
-    started = _spawn(
-        auth_root,
-        config,
-        timeout=timeout,
-        inspector=inspector,
+    return spawn_core.attempt_after(
+        _spawn(
+            auth_root,
+            config,
+            timeout=timeout,
+            inspector=inspector,
+        )
     )
-    if started is _Started.YES:
-        return _Attempt.STARTED
-    if started is _Started.NO:
-        return _Attempt.FAILED
-    if started is _Started.ABORTED:
-        return _Attempt.ABORTED
-    return _Attempt.CONTENDED
 
 
-def _refusal_before_spawn(config: AppConfig) -> _Started | None:
+def _refusal_before_spawn(config: AppConfig) -> Started | None:
     """Refuse a start that cannot succeed, before there is a child to stop.
 
     Two permanent conditions, both answered with ``ABORTED`` so the election
@@ -1016,7 +740,7 @@ def _refusal_before_spawn(config: AppConfig) -> _Started | None:
             "The installed package could not be read; not starting a daemon",
             exc_info=True,
         )
-        return _Started.ABORTED
+        return Started.ABORTED
     if installed != running:
         logger.warning(
             "The installed package changed after this server started (%s, now "
@@ -1024,14 +748,14 @@ def _refusal_before_spawn(config: AppConfig) -> _Started | None:
             running,
             installed,
         )
-        return _Started.ABORTED
+        return Started.ABORTED
     if not startup.fits(startup.CONFIG, config=daemon_config.encode(config)):
         logger.warning(
             "The configuration is too large to hand to a shared browser owner "
             "(the startup protocol carries at most %d bytes)",
             startup.MAX_FRAME_BYTES,
         )
-        return _Started.ABORTED
+        return Started.ABORTED
     return None
 
 
@@ -1042,13 +766,15 @@ def _spawn(
     timeout: float,
     on_spawned: Callable[[], None] | None = None,
     inspector: _DescriptorInspector | None = None,
-) -> _Started:
+) -> Started:
     """Start a detached owner and atomically commit its prepared descriptor.
 
-    The exchange itself is described in :mod:`linkedin_mcp_server.daemon.startup`.
-    Standard error carries one bounded bootstrap diagnosis until the child opens
-    its own log. Every operation against state storage remains inside the process
-    that a timed-out frontend can kill.
+    The exchange itself is described in :mod:`linkedin_mcp_server.daemon.startup`,
+    and what follows each step of it, including when the child may be stopped, in
+    :mod:`linkedin_mcp_server.daemon.core.spawn`. Standard error carries one
+    bounded bootstrap diagnosis until the child opens its own log. Every
+    operation against state storage remains inside the process that a timed-out
+    frontend can kill.
     """
     refusal = _refusal_before_spawn(config)
     if refusal is not None:
@@ -1096,229 +822,237 @@ def _spawn(
         if windows_job is not None:
             windows_job.close()
         raise
-    channel: startup.FrontendChannel | None = None
-    prepared_instance_id: str | None = None
-    #: Whether the child may already own itself, because a COMMIT frame may
-    #: have reached it. Past this, no exception licenses a kill.
-    owner_may_be_adopted = False
-    assigned = False
-    job_settled = False
+    return _Startup(
+        auth_root,
+        config,
+        child,
+        windows_job=windows_job,
+        gate_nonce=nonce,
+        handshake_nonce=handshake_nonce,
+        bootstrap=bootstrap,
+        inspector=inspector,
+    ).run(timeout=timeout, on_spawned=on_spawned)
 
-    def stop_child() -> None:
-        nonlocal job_settled
+
+class _Startup:
+    """One child's startup exchange, run as ``daemon.core.spawn`` decides.
+
+    The core says what comes next and when the child may be stopped; this runs
+    each step against the child and reports what came of it. Every attempt ends
+    in the core's :func:`~linkedin_mcp_server.daemon.core.spawn.wind_down`,
+    however it ended.
+    """
+
+    def __init__(
+        self,
+        auth_root: Path,
+        config: AppConfig,
+        child: subprocess.Popen[bytes],
+        *,
+        windows_job: WindowsJob | None,
+        gate_nonce: str | None,
+        handshake_nonce: str,
+        bootstrap: _BootstrapReport,
+        inspector: _DescriptorInspector | None,
+    ) -> None:
+        self._auth_root = auth_root
+        self._config = config
+        self._child = child
+        self._job = windows_job
+        self._gate_nonce = gate_nonce
+        self._handshake_nonce = handshake_nonce
+        self._bootstrap = bootstrap
+        self._inspector = inspector
+        self._channel: startup.FrontendChannel | None = None
+        #: Whether the Job owns the child, which is how it must be stopped.
+        self._assigned = False
+        self._state = spawn_core.spawned(
+            contained=windows_job is not None,
+            budgets=spawn_core.Budgets(
+                failure_verdict=_FAILURE_VERDICT_SECONDS,
+                prepared_read=_PREPARED_READ_SECONDS,
+            ),
+        )
+
+    def run(self, *, timeout: float, on_spawned: Callable[[], None] | None) -> Started:
         try:
-            _stop_child(child, windows_job=windows_job, assigned=assigned)
+            effects = self._decide(self._connect(timeout, on_spawned))
+            while True:
+                event: spawn_core.Event | None = None
+                for effect in effects:
+                    match effect:
+                        case spawn_core.Finish(started=started):
+                            return started
+                        case spawn_core.StopChild(silent=silent):
+                            self._stop(silent=silent)
+                        case spawn_core.ReportFailure():
+                            _report_child_failure(self._bootstrap)
+                        case _:
+                            event = self._carry_out(effect)
+                if event is None:
+                    raise AssertionError(
+                        f"the spawn core left the start waiting on {effects}"
+                    )
+                effects = self._decide(event)
         finally:
-            if windows_job is not None:
-                windows_job.close()
-                job_settled = True
+            for effect in spawn_core.wind_down(self._state):
+                self._wind_down(effect)
 
-    def release_job() -> None:
-        nonlocal job_settled
-        if windows_job is not None:
-            windows_job.close()
-            job_settled = True
+    def _decide(self, event: spawn_core.Event) -> list[spawn_core.Effect]:
+        self._state, effects = spawn_core.on_event(self._state, event)
+        return effects
 
-    try:
+    def _connect(
+        self, timeout: float, on_spawned: Callable[[], None] | None
+    ) -> spawn_core.Event:
+        """Hand the child to its Job, open the channel and say when that was."""
         try:
-            if windows_job is not None and nonce is not None:
-                windows_job.assign_popen(child)
-                assigned = True
+            if self._job is not None and self._gate_nonce is not None:
+                self._job.assign_popen(self._child)
+                self._assigned = True
                 # No owner code exists until the parent owns the Job.
-                release_windows_gate(child.stdin, nonce)
+                release_windows_gate(self._child.stdin, self._gate_nonce)
             # Only now, because until the gate is released its input is the one
             # thing that can stop it, and that close belongs to ``_stop_child``.
-            channel = startup.FrontendChannel(child, handshake_nonce)
+            self._channel = startup.FrontendChannel(self._child, self._handshake_nonce)
             if on_spawned is not None:
                 on_spawned()
-            started = time.monotonic()
-            greeting = _greet(channel, timeout=timeout)
         except BaseException:
-            stop_child()
+            self._interrupted(0)
             raise
-        if greeting is not None:
-            # Nothing usable crossed: the configuration is written only after a
-            # matching ACK, so this child holds no settings and no lock it could
-            # have taken with them.
-            stop_child()
-            if greeting is _Started.NO:
-                _report_child_failure(bootstrap)
-            return greeting
+        return spawn_core.Connected(time.monotonic(), timeout)
 
+    def _carry_out(self, effect: spawn_core.Effect) -> spawn_core.Event:
+        """Run one step until it completes, and say how.
+
+        Failures a step expects become its own events. Anything else is an
+        interruption, which the core answers before it propagates.
+        """
+        if not isinstance(effect, spawn_core.WAITS):
+            raise AssertionError(f"not an effect that waits: {effect!r}")
         try:
-            _hand_over_config(
-                channel, config, timeout=timeout - (time.monotonic() - started)
-            )
-        except TimeoutError:
-            logger.warning(
-                "The daemon never read its configuration; stopping it so the "
-                "lock is not held by a process that cannot serve"
-            )
-            verdict = _await_prepared(channel, timeout=_FAILURE_VERDICT_SECONDS)
-            if isinstance(verdict, str):
-                prepared_instance_id = verdict
-            stop_child()
-            _report_child_failure(bootstrap)
-            return _Started.RETRY if verdict is _Started.RETRY else _Started.NO
-        except Exception:
-            logger.warning(
-                "The daemon could not receive its configuration", exc_info=True
-            )
-            verdict = _await_prepared(channel, timeout=_FAILURE_VERDICT_SECONDS)
-            if isinstance(verdict, str):
-                prepared_instance_id = verdict
-            stop_child()
-            _report_child_failure(bootstrap)
-            return _Started.RETRY if verdict is _Started.RETRY else _Started.NO
+            return self._step(effect)
         except BaseException:
-            stop_child()
+            self._interrupted(effect.op)
             raise
 
-        try:
-            verdict = _await_prepared(
-                channel, timeout=timeout - (time.monotonic() - started)
-            )
-        except BaseException:
-            # Still pre-commit. EOF is only a lease once the child has armed its
-            # prepared-state wait; an interrupted or suspended child may never
-            # observe it, so the parent must end the lock holder itself.
-            stop_child()
-            raise
-        if verdict is _Started.STILL_TRYING:
+    def _step(self, effect: spawn_core.Effect) -> spawn_core.Event:
+        channel = self._channel
+        assert channel is not None
+        match effect:
+            case spawn_core.Greet(op=op, timeout=timeout):
+                refusal = _greet(channel, timeout=timeout)
+                return spawn_core.Greeted(op, time.monotonic(), refusal)
+            case spawn_core.HandOver(op=op, timeout=timeout):
+                try:
+                    _hand_over_config(channel, self._config, timeout=timeout)
+                except TimeoutError:
+                    logger.warning(
+                        "The daemon never read its configuration; stopping it so "
+                        "the lock is not held by a process that cannot serve"
+                    )
+                    return spawn_core.HandOverFailed(op, time.monotonic())
+                except Exception:
+                    logger.warning(
+                        "The daemon could not receive its configuration", exc_info=True
+                    )
+                    return spawn_core.HandOverFailed(op, time.monotonic())
+                return spawn_core.HandedOver(op, time.monotonic())
+            case spawn_core.AwaitPrepared(op=op, timeout=timeout):
+                answer = _await_prepared(channel, timeout=timeout)
+                return spawn_core.Prepared(op, time.monotonic(), answer)
+            case spawn_core.Validate(op=op, instance=instance, until=until):
+                try:
+                    profile = _resolve_profile_until(
+                        Path(self._config.browser.user_data_dir),
+                        timeout=until - time.monotonic(),
+                    )
+                    _validate_prepared_until(
+                        self._auth_root,
+                        instance,
+                        profile=profile,
+                        config=self._config,
+                        timeout=until - time.monotonic(),
+                    )
+                except TimeoutError:
+                    return spawn_core.ValidationTimedOut(op, time.monotonic())
+                except Exception:
+                    logger.warning(
+                        "The daemon prepared unusable startup state", exc_info=True
+                    )
+                    return spawn_core.ValidationFailed(op, time.monotonic())
+                return spawn_core.Validated(op, time.monotonic())
+            case spawn_core.SendCommit(op=op, instance=instance, timeout=timeout):
+                try:
+                    _send_commit(channel, instance, timeout=timeout)
+                except Exception:
+                    logger.warning(
+                        "The daemon commit request could not be delivered",
+                        exc_info=True,
+                    )
+                    return spawn_core.CommitUndelivered(op, time.monotonic())
+                return spawn_core.CommitSent(op, time.monotonic())
+            case spawn_core.AwaitVerdict(op=op, timeout=timeout):
+                verdict = _await_committed(channel, timeout=timeout)
+                return spawn_core.Verdict(op, time.monotonic(), verdict)
+            case spawn_core.SettleCommit(op=op, instance=instance, timeout=timeout):
+                verdict = _settle_commit_result(
+                    self._auth_root,
+                    instance,
+                    self._child,
+                    timeout=timeout,
+                    inspector=self._inspector,
+                )
+                return spawn_core.Settled(op, time.monotonic(), verdict)
+        raise AssertionError(f"not an effect that waits: {effect!r}")
+
+    def _interrupted(self, op: int) -> None:
+        """Stop the child for an interruption, if the core says this one may."""
+        for effect in self._decide(spawn_core.Interrupted(op)):
+            if isinstance(effect, spawn_core.StopChild):
+                self._stop(silent=effect.silent)
+
+    def _stop(self, *, silent: bool) -> None:
+        if silent:
             logger.warning(
                 "The daemon did not prepare an endpoint; stopping it so the lock "
                 "is not held by a process that never served"
             )
-            stop_child()
-            _report_child_failure(bootstrap)
-            return _Started.NO
-        if verdict is _Started.NO:
-            stop_child()
-            _report_child_failure(bootstrap)
-            return _Started.NO
-        if verdict is _Started.ABORTED:
-            stop_child()
-            _report_child_failure(bootstrap)
-            return _Started.ABORTED
-        if verdict is _Started.RETRY:
-            stop_child()
-            return _Started.RETRY
-
-        if not isinstance(verdict, str):  # pragma: no cover - handled above
-            raise AssertionError(f"Unexpected startup verdict: {verdict}")
-        prepared_instance_id = verdict
-        prepared_deadline = time.monotonic() + min(
-            _PREPARED_READ_SECONDS,
-            max(timeout - (time.monotonic() - started), 0.0),
-        )
-
         try:
-            profile = _resolve_profile_until(
-                Path(config.browser.user_data_dir),
-                timeout=prepared_deadline - time.monotonic(),
-            )
-            _validate_prepared_until(
-                auth_root,
-                prepared_instance_id,
-                profile=profile,
-                config=config,
-                timeout=prepared_deadline - time.monotonic(),
-            )
-        except TimeoutError:
-            # No COMMIT was sent, so this child cannot become canonical. Waiting
-            # for a verdict would leave it holding the lock until its own
-            # authorization timeout expires.
-            stop_child()
-            return _Started.NO
-        except Exception:
-            logger.warning("The daemon prepared unusable startup state", exc_info=True)
-            # No COMMIT was sent, so the child is killed however its verdict
-            # reads; a handler that raised here would leave it holding the lock.
-            try:
-                verdict = _await_committed(channel, timeout=_FAILURE_VERDICT_SECONDS)
-            finally:
-                stop_child()
-            return _Started.RETRY if verdict is _Started.RETRY else _Started.ABORTED
-        except BaseException:
-            stop_child()
-            raise
+            _stop_child(self._child, windows_job=self._job, assigned=self._assigned)
+        finally:
+            if self._job is not None:
+                self._job.close()
 
-        # COMMIT_ATTEMPTED. The child owns the daemon lock and therefore owns
-        # publication. Once the COMMIT frame may have reached it, no exception
-        # authorizes a kill: the child either commits and serves or observes EOF
-        # and discards its state.
-        owner_may_be_adopted = True
-        try:
-            _send_commit(
-                channel,
-                prepared_instance_id,
-                timeout=timeout - (time.monotonic() - started),
-            )
-        except Exception:
-            logger.warning(
-                "The daemon commit request could not be delivered", exc_info=True
-            )
-            return _settle_commit_result(
-                auth_root,
-                prepared_instance_id,
-                child,
-                timeout=timeout - (time.monotonic() - started),
-                inspector=inspector,
-            )
-
-        committed = _await_committed(
-            channel, timeout=timeout - (time.monotonic() - started)
-        )
-        if committed is _Started.YES:
-            return _Started.YES
-        if committed is _Started.ABORTED:
-            stop_child()
-            _report_child_failure(bootstrap)
-            return _Started.ABORTED
-        if committed is _Started.RETRY:
-            stop_child()
-            return _Started.RETRY
-        if committed is _Started.UNCERTAIN:
-            return _Started.UNCERTAIN
-        return _settle_commit_result(
-            auth_root,
-            prepared_instance_id,
-            child,
-            timeout=timeout - (time.monotonic() - started),
-            inspector=inspector,
-        )
-    finally:
-        if windows_job is not None and not job_settled:
-            if owner_may_be_adopted:
-                # The COMMIT frame precedes owner adoption. Closing this copy
-                # cannot revoke an adopted owner, and kills one that never adopted.
-                release_job()
-            else:
-                stop_child()
-        if channel is not None:
-            # End of file aborts a prepared child that never received COMMIT.
-            # After that frame it is only a lease: the lock holder settles
-            # publication.
-            channel.close()
-        else:
-            # The channel never took the pipes, so no thread is inside them.
-            for stream in (child.stdin, child.stdout):
-                if stream is not None:
-                    with contextlib.suppress(OSError, ValueError):
-                        stream.close()
-        _reap(child)
-        if prepared_instance_id is not None and not owner_may_be_adopted:
-            try:
-                _discard_prepared_until(
-                    auth_root,
-                    prepared_instance_id,
-                    timeout=_PREPARED_CLEANUP_SECONDS,
-                )
-            except Exception:
-                logger.warning(
-                    "The daemon's abandoned prepared state could not be removed",
-                    exc_info=True,
-                )
+    def _wind_down(self, effect: spawn_core.Effect) -> None:
+        match effect:
+            case spawn_core.StopChild(silent=silent):
+                self._stop(silent=silent)
+            case spawn_core.ReleaseJob():
+                if self._job is not None:
+                    self._job.close()
+            case spawn_core.HangUp():
+                if self._channel is not None:
+                    self._channel.close()
+                else:
+                    # The channel never took the pipes, so no thread is inside them.
+                    for stream in (self._child.stdin, self._child.stdout):
+                        if stream is not None:
+                            with contextlib.suppress(OSError, ValueError):
+                                stream.close()
+                _reap(self._child)
+            case spawn_core.DiscardPrepared(instance=instance):
+                try:
+                    _discard_prepared_until(
+                        self._auth_root,
+                        instance,
+                        timeout=_PREPARED_CLEANUP_SECONDS,
+                    )
+                except Exception:
+                    logger.warning(
+                        "The daemon's abandoned prepared state could not be removed",
+                        exc_info=True,
+                    )
 
 
 #: How long to wait for a killed child to be collected. Short by design: this
@@ -1425,7 +1159,7 @@ def _stop_child(
         )
 
 
-def _greet(channel: startup.FrontendChannel, *, timeout: float) -> _Started | None:
+def _greet(channel: startup.FrontendChannel, *, timeout: float) -> Started | None:
     """Send HELLO and accept only an ACK from this build. ``None`` means go on.
 
     The child holds nothing yet: no configuration, no lock. So every way this
@@ -1444,15 +1178,15 @@ def _greet(channel: startup.FrontendChannel, *, timeout: float) -> _Started | No
             "The daemon did not answer its startup greeting; stopping it so the "
             "lock is not held by a process that cannot serve"
         )
-        return _Started.NO
+        return Started.NO
     except (OSError, ValueError):
         logger.info("The daemon could not be greeted", exc_info=True)
-        return _Started.NO
+        return Started.NO
     try:
         ack = startup.expect(answer, startup.ACK, nonce=channel.nonce)
     except startup.ProtocolError:
         logger.info("The daemon did not answer in the startup protocol")
-        return _Started.NO
+        return Started.NO
     running = daemon_version.build_identity()
     if ack["protocol"] != startup.PROTOCOL or ack["build"] != running:
         logger.warning(
@@ -1462,7 +1196,7 @@ def _greet(channel: startup.FrontendChannel, *, timeout: float) -> _Started | No
             ack["build"],
             running,
         )
-        return _Started.ABORTED
+        return Started.ABORTED
     return None
 
 
@@ -1577,7 +1311,7 @@ def _settle_commit_result(
     *,
     timeout: float,
     inspector: _DescriptorInspector | None = None,
-) -> _Started:
+) -> Started:
     """Settle a missing commit verdict through the election's shared inspection."""
     del child  # process state cannot disambiguate an attempted remote rename
     try:
@@ -1591,37 +1325,37 @@ def _settle_commit_result(
                 None if attachment is None else attachment.descriptor.instance_id
             )
     except Exception:
-        return _Started.UNCERTAIN
+        return Started.UNCERTAIN
     if committed_instance == instance_id:
-        return _Started.YES
+        return Started.YES
     # After the COMMIT frame may have arrived, a dead child is not proof of an
     # uncommitted generation. NFS may report a failed rename and keep returning a
     # stale canonical entry until after that child exits. The next successful
     # owner removes abandoned pending files and superseded tokens while holding
     # the lock.
-    return _Started.UNCERTAIN
+    return Started.UNCERTAIN
 
 
-def _await_committed(channel: startup.FrontendChannel, *, timeout: float) -> _Started:
+def _await_committed(channel: startup.FrontendChannel, *, timeout: float) -> Started:
     """Wait for the lock holder's final commit verdict."""
     try:
         answer = channel.receive(timeout=timeout)
     except TimeoutError:
-        return _Started.STILL_TRYING
+        return Started.STILL_TRYING
     try:
         verdict = startup.expect(answer, startup.VERDICT, nonce=channel.nonce)
     except startup.ProtocolError:
-        return _Started.NO
+        return Started.NO
     status = verdict["status"]
     if status == startup.COMMITTED:
-        return _Started.YES
+        return Started.YES
     if status == startup.ABORTED:
-        return _Started.ABORTED
+        return Started.ABORTED
     if status == startup.RETRY:
-        return _Started.RETRY
+        return Started.RETRY
     if status == startup.UNCERTAIN:
-        return _Started.UNCERTAIN
-    return _Started.NO
+        return Started.UNCERTAIN
+    return Started.NO
 
 
 def _spawn_command(*, job_name: str | None = None) -> list[str]:
@@ -1738,15 +1472,15 @@ def _reap(child: subprocess.Popen[bytes]) -> None:
 
 def _await_prepared(
     channel: startup.FrontendChannel, *, timeout: float
-) -> str | _Started:
+) -> str | Started:
     """Wait for a prepared generation id, a failure, or silence."""
     try:
         answer = channel.receive(timeout=timeout)
     except TimeoutError:
-        return _Started.STILL_TRYING
+        return Started.STILL_TRYING
     if answer is None:
         logger.info("The daemon exited before it prepared an endpoint")
-        return _Started.NO
+        return Started.NO
     try:
         if answer.get("type") == startup.PREPARED:
             prepared = startup.expect(answer, startup.PREPARED, nonce=channel.nonce)
@@ -1754,15 +1488,15 @@ def _await_prepared(
         verdict = startup.expect(answer, startup.VERDICT, nonce=channel.nonce)
     except startup.ProtocolError:
         logger.info("The daemon answered outside the startup protocol")
-        return _Started.NO
+        return Started.NO
     status = verdict["status"]
     if status == startup.FAILED:
         logger.info("The daemon reported that it could not start")
-        return _Started.NO
+        return Started.NO
     if status == startup.ABORTED:
         logger.info("The daemon reported a terminal startup failure")
-        return _Started.ABORTED
+        return Started.ABORTED
     if status == startup.RETRY:
         logger.info("The daemon released its startup position for another attempt")
-        return _Started.RETRY
-    return _Started.NO
+        return Started.RETRY
+    return Started.NO

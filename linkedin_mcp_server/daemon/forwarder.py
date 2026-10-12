@@ -537,8 +537,9 @@ class _Hop:
     backend: DaemonProxyBackend
 
     def refuse_if_written_off(self) -> None:
-        if self.wire.dispatch.nothing_was_sent:
-            self.backend.refuse_if_written_off(self.attachment)
+        self.backend.refuse_if_written_off(
+            self.attachment, sent=not self.wire.dispatch.nothing_was_sent
+        )
 
     def fail(self, error: Exception) -> NoReturn:
         """Raise what *error* means to the caller: the owner's answer, or a loss.

@@ -228,14 +228,18 @@ class DaemonProxyBackend:
         self.refuse_if_written_off(attachment)
         return attachment
 
-    def refuse_if_written_off(self, attachment: Attachment) -> None:
+    def refuse_if_written_off(
+        self, attachment: Attachment, *, sent: bool = False
+    ) -> None:
         """Raise if a new request may not go to *attachment*, as of right now.
 
         Asked again at every point a new request could still be stopped: when a
         call picks its owner, after its preflight returns, when its hop is
         opened, and before each request on it. Each of those follows an await during
         which another call can write the owner off, and a check made before the
-        await says nothing about after it.
+        await says nothing about after it. Whether it refuses is
+        ``daemon.core.call.binding_refusal``'s rule; *sent* is whether a request
+        of this call may already have left.
 
         The failure says nothing was sent, which is true: nothing was. It names
         the owner that was written off, not whichever replacement the backend
@@ -243,7 +247,9 @@ class DaemonProxyBackend:
         """
         _refuse_control_only(attachment)
         instance = attachment.descriptor.instance_id
-        written_off = self._unusable.get(instance)
+        written_off = call_core.binding_refusal(
+            instance, written_off=self._unusable, sent=sent
+        )
         if written_off is not None:
             raise OwnerUnreachableError(
                 instance_id=instance,

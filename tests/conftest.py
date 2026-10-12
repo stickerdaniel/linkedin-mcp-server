@@ -1,6 +1,7 @@
 import hashlib
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -296,6 +297,26 @@ def _state_keys(top: Path) -> frozenset[str]:
     return frozenset(keys)
 
 
+#: How long a teardown waits, in total, for the daemon workers a test started.
+_DAEMON_WORKER_GRACE_SECONDS = 2.0
+
+
+def _let_daemon_workers_finish(running: frozenset[threading.Thread]) -> None:
+    """Wait for daemon worker threads the test started, while its home is set.
+
+    The election bounds its filesystem reads by abandoning them, so a read can
+    still be running when ``obtain_owner`` returns. One that resolves daemon
+    storage after the monkeypatch teardown restored the environment does so
+    under the real account home, and after ``_daemon_state_on_the_real_root``
+    has already looked. Bounded, because a test may block a worker for good.
+    """
+    deadline = time.monotonic() + _DAEMON_WORKER_GRACE_SECONDS
+    for thread in threading.enumerate():
+        if thread in running or not thread.name.startswith("daemon-"):
+            continue
+        thread.join(max(deadline - time.monotonic(), 0.0))
+
+
 @pytest.fixture(autouse=True)
 def isolate_daemon_state(
     ignore_the_developers_environment,
@@ -330,12 +351,15 @@ def isolate_daemon_state(
     home = tmp_path_factory.mktemp("account") / "home"
     harden_directory(home)
     monkeypatch.setenv(TEST_ACCOUNT_HOME_ENV, str(home))
+    running = frozenset(threading.enumerate())
     if real_daemon_state_root is None:
         yield
+        _let_daemon_workers_finish(running)
         return
     before = _entries(real_daemon_state_root)
     started_ns = time.time_ns()
     yield
+    _let_daemon_workers_finish(running)
     keys = _state_keys(tmp_path)
     request.node.stash[_DAEMON_STATE_CHECK] = _DaemonStateCheck(
         real_daemon_state_root, started_ns, keys, keys & before
