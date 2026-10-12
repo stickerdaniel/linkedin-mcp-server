@@ -256,8 +256,8 @@ def _bind_loopback() -> socket.socket:
 def _endpoint_host(sock: socket.socket) -> str:
     """The address to publish for *sock*, unbracketed.
 
-    The descriptor brackets the host when it builds a URL, so bracketing here
-    would produce ``[[::1]]``.
+    The descriptor accepts only the bare literal and brackets it itself when it
+    builds a URL, so a bracketed host here would be refused by every client.
     """
     address = sock.getsockname()[0]
     return str(address)

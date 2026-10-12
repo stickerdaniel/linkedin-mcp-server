@@ -21,11 +21,9 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import hmac
-import ipaddress
 import json
 import os
 import secrets
-import socket
 import stat
 import unicodedata
 import uuid
@@ -33,7 +31,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from linkedin_mcp_server.common_utils import (
     is_still_at,
@@ -41,7 +38,7 @@ from linkedin_mcp_server.common_utils import (
     secure_write_text,
     utcnow_iso,
 )
-from linkedin_mcp_server.config.schema import AppConfig, is_loopback_host
+from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.private_state import (
     PrivateStateError,
     harden_created_file,
@@ -92,6 +89,12 @@ _TOKEN_BYTES = 32
 
 #: What a hex digest may contain, for checking one read from a file.
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+#: Every host an owner publishes, exactly as it writes them: the address
+#: ``daemon.owner._bind_loopback`` bound, as the socket names it. Literals
+#: only, so no resolver is asked (it takes no deadline and can answer
+#: ``localhost`` with another machine) and no spelling has to be normalised.
+_ENDPOINT_HOSTS = frozenset({"127.0.0.1", "::1"})
 
 #: Configuration a client must share with the owner to be served by it. Each of
 #: these either changes what the browser *is* (its fingerprint, its exit
@@ -619,10 +622,8 @@ class DaemonDescriptor:
     @property
     def url(self) -> str:
         # An IPv6 literal has to be bracketed, or its colons run into the port.
-        # Bracketed already, or a name, it is left alone.
-        host = self.host
-        if ":" in host and not host.startswith("["):
-            host = f"[{host}]"
+        # The host is stored bare, so bracketing happens here and only here.
+        host = f"[{self.host}]" if ":" in self.host else self.host
         return f"http://{host}:{self.port}{self.path}"
 
     def to_json(self) -> str:
@@ -666,11 +667,16 @@ class DaemonDescriptor:
 
         The file says what was last written to it, and posting the bearer token
         to an unchecked host would hand over the LinkedIn session behind it.
+
+        Only the exact hosts an owner writes pass (:data:`_ENDPOINT_HOSTS`).
+        With the host one of those and the path starting with ``/``, the URL
+        cannot name any other host or port, so nothing is parsed back.
         """
-        if not is_loopback_host(self.host):
+        if self.host not in _ENDPOINT_HOSTS:
             raise DescriptorError(
-                f"The daemon descriptor points at {self.host}, which is not "
-                f"this machine. Refusing to send credentials there."
+                f"The daemon descriptor points at {self.host!r}, which is not "
+                f"this machine's loopback address. Refusing to send "
+                f"credentials there."
             )
         if not 1 <= self.port <= 65535:
             raise DescriptorError(
@@ -682,62 +688,11 @@ class DaemonDescriptor:
 
         # A URL is printable ASCII. A range rather than a list of known-bad
         # characters, so nothing the client would reject gets past here.
-        for name, value in (("host", self.host), ("path", self.path)):
-            if any(character < "\x21" or character > "\x7e" for character in value):
-                raise DescriptorError(
-                    f"The daemon descriptor's {name} contains a character that "
-                    f"cannot appear in a URL, so it cannot name an endpoint"
-                )
-
-        # Individually plausible fields must also compose into a URL a client
-        # can use. urlsplit, so this does not depend on the caller's client.
-        try:
-            parsed = urlsplit(self.url)
-            port_survived = parsed.port == self.port
-            host_survived = (parsed.hostname or "") == self.host.strip("[]").lower()
-        except ValueError as exc:
+        if any(character < "\x21" or character > "\x7e" for character in self.path):
             raise DescriptorError(
-                f"The daemon descriptor describes an endpoint that cannot be "
-                f"used to reach anything: {exc}"
-            ) from exc
-        # The host is read back too: is_loopback_host judged the field, and a
-        # space-padded address can pass it while the URL names another host.
-        if not port_survived or not host_survived or parsed.scheme != "http":
-            raise DescriptorError(
-                f"The daemon descriptor's host, port and path do not compose "
-                f"into a usable address: {self.url!r}"
+                "The daemon descriptor's path contains a character that cannot "
+                "appear in a URL, so it cannot name an endpoint"
             )
-
-        # Finally, what the name resolves to: is_loopback_host accepts
-        # ``localhost`` by name and trailing-dot spellings, which say nothing
-        # about where this machine's resolver sends them.
-        hostname = parsed.hostname or ""
-        try:
-            # A literal is its own answer, and the owner publishes one, so the
-            # common path never reaches getaddrinfo, which takes no deadline.
-            ipaddress.ip_address(hostname)
-            return
-        except ValueError:
-            pass
-
-        try:
-            resolved = socket.getaddrinfo(hostname, self.port, type=socket.SOCK_STREAM)
-        except (OSError, UnicodeError) as exc:
-            raise DescriptorError(
-                f"The daemon descriptor names host {self.host!r}, which does "
-                f"not resolve to an address on this machine: {exc}"
-            ) from exc
-
-        # Every answer, not the first: one loopback answer says nothing about
-        # the one a client picks. The client resolves again when it connects,
-        # so this narrows the gap rather than closing it.
-        for *_, address in resolved:
-            if not is_loopback_host(str(address[0])):
-                raise DescriptorError(
-                    f"The daemon descriptor names host {self.host!r}, which "
-                    f"resolves to {address[0]}, somewhere other than this "
-                    f"machine. Refusing to send credentials there."
-                )
 
     def matches_token(self, token: str) -> bool:
         """Whether *token* is the one this descriptor was published with."""

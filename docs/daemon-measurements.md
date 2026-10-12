@@ -111,39 +111,30 @@ Symbols are named relative to `linkedin_mcp_server`. Tests are named as
 - **A denylist of control characters left thirty-six gaps.** An earlier version
   banned CR, LF, tab and NUL by name and left thirty-six other code points that
   were accepted here and rejected by the client. Justifies the printable-ASCII
-  rule in `daemon.descriptor.DaemonDescriptor.check_endpoint_is_local`. Source
-  `50dfdbf5`, 2026-07-28. Test
-  `tests/test_daemon_descriptor.py::TestEndpointSpelling::test_an_endpoint_that_composes_into_nothing_usable_is_refused`.
-- **Plausible fields composed into unusable endpoints.** Three such descriptors
-  were accepted: `"[::1] "`, a bracketed IPv4, and a path with a newline, each
-  failing later in the client. Justifies the `urlsplit` round trip in
+  rule for the path in
   `daemon.descriptor.DaemonDescriptor.check_endpoint_is_local`. Source
   `50dfdbf5`, 2026-07-28. Test
   `tests/test_daemon_descriptor.py::TestEndpointSpelling::test_an_endpoint_that_composes_into_nothing_usable_is_refused`.
-- **The verified host and the contacted host came apart.** A space-padded
-  address passed as loopback and produced a host of `"%20127.0.0.1%20"`.
-  Justifies reading the host back in
-  `daemon.descriptor.DaemonDescriptor.check_endpoint_is_local`. Source
-  `50dfdbf5`, 2026-07-28. Test
-  `tests/test_daemon_descriptor.py::TestEndpointSpelling::test_an_endpoint_that_composes_into_nothing_usable_is_refused`.
-- **Trailing dots passed the loopback check.** `is_loopback_host` strips
-  trailing dots, so `"127.0.0.1."` and `"localhost.."` passed as loopback while
-  `getaddrinfo` refused them outright. Applies to
-  `daemon.descriptor.DaemonDescriptor.check_endpoint_is_local`. Source
-  `50dfdbf5`, 2026-07-28. Test
-  `tests/test_daemon_descriptor.py::TestEndpointSpelling::test_an_endpoint_that_composes_into_nothing_usable_is_refused`.
-- **The resolver has no deadline.** With a stalled resolver, `getaddrinfo` took
-  two seconds for a two second stall, and is unbounded in principle. Justifies
-  answering address literals without the resolver in
-  `daemon.descriptor.DaemonDescriptor.check_endpoint_is_local`. Source
-  `50dfdbf5`, 2026-07-28.
-- **`localhost` can resolve off this machine.** With the resolver made to
-  answer `203.0.113.9` for `localhost`, the descriptor was accepted and the
-  token would have been posted off this machine. Justifies checking every
-  resolver answer in
-  `daemon.descriptor.DaemonDescriptor.check_endpoint_is_local`. Source
-  `50dfdbf5`, 2026-07-28. Test
-  `tests/test_daemon_descriptor.py::TestEndpointSpelling::test_a_name_resolving_off_this_machine_is_refused`.
+- **Every looser host rule let a wrong host through.** A loopback check plus a
+  `urlsplit` round trip and the resolver accepted, before each was patched:
+  `"[::1] "` and a bracketed IPv4, which failed later in the client; a
+  space-padded address whose URL named `"%20127.0.0.1%20"`; `"127.0.0.1."` and
+  `"localhost.."`, which `is_loopback_host` passed after stripping the dots and
+  `getaddrinfo` refused; and `localhost` with the resolver made to answer
+  `203.0.113.9`, so the token would have been posted off this machine. With a
+  stalled resolver, `getaddrinfo` also took two seconds for a two second stall,
+  and is unbounded in principle. Justifies accepting only the two literals an
+  owner writes, `daemon.descriptor._ENDPOINT_HOSTS`, with no resolver. Source
+  `50dfdbf5`, 2026-07-28. Tests
+  `tests/test_daemon_descriptor.py::TestEndpointSpelling::test_an_endpoint_that_composes_into_nothing_usable_is_refused`
+  and
+  `tests/test_daemon_descriptor.py::TestEndpointSpelling::test_a_loopback_name_or_other_spelling_is_refused`.
+- **The owner publishes `::1` or `127.0.0.1`, unbracketed.** It binds `::1`
+  first and `127.0.0.1` when IPv6 is unavailable, and publishes the address
+  the socket reports. The frozen baseline (`BASELINE_SHA` in
+  `tests/differential/baseline.py`) does the same. Applies to
+  `daemon.owner._endpoint_host`. Source `24e9bf9e`, read 2026-10-12. Test
+  `tests/test_daemon_descriptor.py::TestEndpointSpelling::test_the_address_an_owner_binds_is_published_and_reaches_it`.
 
 ## Election and startup
 
