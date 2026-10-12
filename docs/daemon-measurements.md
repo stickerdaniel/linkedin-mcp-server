@@ -170,8 +170,13 @@ Symbols are named relative to `linkedin_mcp_server`. Tests are named as
   `tests/test_daemon_election_core.py::TestOneLook::test_a_small_wait_is_not_rounded_up_to_a_poll`.
 - **A replacement is read through a dead owner's file.** An owner that crashed
   serving a sibling profile reads as `INCOMPATIBLE` while its replacement is
-  coming up. Justifies waiting out every state but `ATTACHABLE` in
-  `daemon.core.lookup`. Source `98e99338`, 2026-07-28. Test
+  coming up. Justifies `daemon.core.lookup` waiting through an unusable
+  predecessor descriptor for its replacement. The control-only readings in
+  `daemon.core.lookup.wants_a_decision` are decided at once instead: another
+  protocol, or an older owner with another configuration, is asked to stand
+  down or written off, and a same-version owner with another configuration is
+  probed once and, answering or silent, ends as `LIVE_RIVAL` or
+  `SILENT_RIVAL`. Source `98e99338`, 2026-07-28. Test
   `tests/test_daemon_election_core.py::TestOneLook::test_a_replacement_is_seen_through_an_unusable_reading`.
 - **A boolean start result cost a minute.** A child that reported it could not
   serve read as "somebody is starting", so the caller waited out its whole

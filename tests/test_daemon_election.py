@@ -1327,7 +1327,12 @@ class TestFailingFast:
         monkeypatch.setattr(election_module, "_stop_child", timed)
 
         began = time.monotonic()
-        attempt = election_module._start_owner(auth_root, config, timeout=0.5)
+        attempt = election_module._start_owner(
+            auth_root,
+            config,
+            timeout=0.5,
+            inspector=daemon_module._DescriptorInspector(auth_root, profile, config),
+        )
         elapsed = time.monotonic() - began
 
         try:
@@ -1505,7 +1510,14 @@ class TestFailingFast:
         monkeypatch.setattr(election_module.subprocess, "Popen", reports_failure)
 
         try:
-            attempt = election_module._start_owner(auth_root, config, timeout=5.0)
+            attempt = election_module._start_owner(
+                auth_root,
+                config,
+                timeout=5.0,
+                inspector=daemon_module._DescriptorInspector(
+                    auth_root, profile, config
+                ),
+            )
             assert attempt is Attempt.FAILED
             assert [child.returncode for child in children] == [-signal.SIGKILL], (
                 "the child was left alive after reporting startup failure"
@@ -1553,7 +1565,14 @@ class TestFailingFast:
         monkeypatch.setattr(election_module.subprocess, "Popen", reports_failure)
 
         try:
-            attempt = election_module._start_owner(auth_root, config, timeout=5.0)
+            attempt = election_module._start_owner(
+                auth_root,
+                config,
+                timeout=5.0,
+                inspector=daemon_module._DescriptorInspector(
+                    auth_root, profile, config
+                ),
+            )
             assert attempt is Attempt.FAILED
             assert children
             assert pid_file.exists(), "the child never reached its grandchild spawn"
@@ -1599,7 +1618,12 @@ class TestFailingFast:
         monkeypatch.setattr(election_module.subprocess, "Popen", mute)
 
         began = time.monotonic()
-        attempt = election_module._start_owner(auth_root, config, timeout=0.5)
+        attempt = election_module._start_owner(
+            auth_root,
+            config,
+            timeout=0.5,
+            inspector=daemon_module._DescriptorInspector(auth_root, profile, config),
+        )
         elapsed = time.monotonic() - began
 
         try:
@@ -2240,7 +2264,14 @@ class TestWindowsAtomicOwnerHandoff:
                 lambda *args, **kwargs: (events.append("settle"), settlement)[1],
             )
 
-        outcome = election_module._spawn(profile.parent, config, timeout=1.0)
+        outcome = election_module._spawn(
+            profile.parent,
+            config,
+            timeout=1.0,
+            inspector=daemon_module._DescriptorInspector(
+                profile.parent, profile, config
+            ),
+        )
         return outcome, events
 
     def test_success_closes_only_after_the_committed_verdict(
@@ -2506,7 +2537,14 @@ class TestSpawnCleanupBoundary:
         monkeypatch.setattr(election_module, "terminate_process_group", stop)
 
         with pytest.raises(RuntimeError, match="start new thread"):
-            election_module._spawn(profile.parent, config, timeout=5.0)
+            election_module._spawn(
+                profile.parent,
+                config,
+                timeout=5.0,
+                inspector=daemon_module._DescriptorInspector(
+                    profile.parent, profile, config
+                ),
+            )
 
         assert stopped == [child.pid], "the child nobody could configure was stopped"
         assert child.returncode is not None, "and collected"
@@ -2705,7 +2743,14 @@ class TestAtomicStartupCommit:
             lambda root: tmp_path / "daemon.log",
         )
 
-        outcome = election_module._spawn(profile.parent, config, timeout=1.0)
+        outcome = election_module._spawn(
+            profile.parent,
+            config,
+            timeout=1.0,
+            inspector=daemon_module._DescriptorInspector(
+                profile.parent, profile, config
+            ),
+        )
         return outcome, child, events
 
     @pytest.mark.parametrize(
@@ -2938,7 +2983,14 @@ class TestAtomicStartupCommit:
             lambda root: tmp_path / "daemon.log",
         )
 
-        outcome = election_module._spawn(profile.parent, config, timeout=1.0)
+        outcome = election_module._spawn(
+            profile.parent,
+            config,
+            timeout=1.0,
+            inspector=daemon_module._DescriptorInspector(
+                profile.parent, profile, config
+            ),
+        )
 
         assert outcome is Started.NO
         assert child.killed
@@ -2966,7 +3018,15 @@ class TestAtomicStartupCommit:
             lambda root, candidate: discarded.append(candidate),
         )
 
-        outcome = election_module._spawn(profile.parent, _config(profile), timeout=1.0)
+        config = _config(profile)
+        outcome = election_module._spawn(
+            profile.parent,
+            config,
+            timeout=1.0,
+            inspector=daemon_module._DescriptorInspector(
+                profile.parent, profile, config
+            ),
+        )
 
         assert outcome is Started.NO
         assert child.killed
@@ -2992,7 +3052,15 @@ class TestAtomicStartupCommit:
             lambda root: tmp_path / "daemon.log",
         )
 
-        outcome = election_module._spawn(profile.parent, _config(profile), timeout=1.0)
+        config = _config(profile)
+        outcome = election_module._spawn(
+            profile.parent,
+            config,
+            timeout=1.0,
+            inspector=daemon_module._DescriptorInspector(
+                profile.parent, profile, config
+            ),
+        )
 
         assert outcome is Started.RETRY
         assert child.killed
@@ -3016,7 +3084,14 @@ class TestAtomicStartupCommit:
         )
 
         with pytest.raises(KeyboardInterrupt):
-            election_module._spawn(profile.parent, config, timeout=1.0)
+            election_module._spawn(
+                profile.parent,
+                config,
+                timeout=1.0,
+                inspector=daemon_module._DescriptorInspector(
+                    profile.parent, profile, config
+                ),
+            )
 
         assert child.killed
         # Closed by the writer thread that took it, and gone from ``Popen``
@@ -3270,8 +3345,14 @@ class TestAtomicStartupCommit:
             lambda root: pytest.fail("the parent derived the daemon log path"),
         )
 
+        config = _config(profile)
         outcome = election_module._start_owner(
-            profile.parent, _config(profile), timeout=1.0
+            profile.parent,
+            config,
+            timeout=1.0,
+            inspector=daemon_module._DescriptorInspector(
+                profile.parent, profile, config
+            ),
         )
 
         assert outcome is Attempt.STARTED
@@ -3325,8 +3406,14 @@ class TestAtomicStartupCommit:
             lambda _root: pytest.fail("the parent derived the daemon log path"),
         )
         try:
+            config = _config(profile)
             outcome = election_module._start_owner(
-                auth_root, _config(profile), timeout=5.0
+                auth_root,
+                config,
+                timeout=5.0,
+                inspector=daemon_module._DescriptorInspector(
+                    auth_root, profile, config
+                ),
             )
 
             assert outcome is Attempt.FAILED
@@ -3387,8 +3474,14 @@ class TestAtomicStartupCommit:
 
         monkeypatch.setattr(election_module.subprocess, "Popen", capture)
         try:
+            config = _config(profile)
             outcome = election_module._start_owner(
-                auth_root, _config(profile), timeout=5.0
+                auth_root,
+                config,
+                timeout=5.0,
+                inspector=daemon_module._DescriptorInspector(
+                    auth_root, profile, config
+                ),
             )
 
             assert outcome is Attempt.ABORTED
@@ -3415,8 +3508,13 @@ class TestAtomicStartupCommit:
             lambda *a, **k: Started.RETRY,
         )
 
+        profile = _profile(tmp_path)
+        config = _config(profile)
         outcome = election_module._start_owner(
-            tmp_path, _config(_profile(tmp_path)), timeout=1.0
+            tmp_path,
+            config,
+            timeout=1.0,
+            inspector=daemon_module._DescriptorInspector(tmp_path, profile, config),
         )
 
         assert outcome is Attempt.CONTENDED
@@ -3433,7 +3531,14 @@ class TestAtomicStartupCommit:
         )
 
         assert (
-            election_module._start_owner(profile.parent, config, timeout=1.0)
+            election_module._start_owner(
+                profile.parent,
+                config,
+                timeout=1.0,
+                inspector=daemon_module._DescriptorInspector(
+                    profile.parent, profile, config
+                ),
+            )
             is Attempt.ABORTED
         )
 
@@ -3522,7 +3627,14 @@ class TestAtomicStartupCommit:
         )
 
         with pytest.raises(KeyboardInterrupt):
-            election_module._spawn(profile.parent, config, timeout=1.0)
+            election_module._spawn(
+                profile.parent,
+                config,
+                timeout=1.0,
+                inspector=daemon_module._DescriptorInspector(
+                    profile.parent, profile, config
+                ),
+            )
 
         assert startup.COMMIT in [
             frame["type"] for frame in _frames_in(child.input.written)
@@ -3539,9 +3651,9 @@ class TestAtomicStartupCommit:
     ):
         profile = _profile(tmp_path)
         config = _config(profile)
-        instance_id = new_instance_id()
+        # The generation the child committed before its verdict was lost.
+        instance_id = _publish_stale_owner(profile.parent, profile, config)
         child = self._Child(instance_id, final="")
-        canonical = type("Canonical", (), {"instance_id": instance_id})()
         monkeypatch.setattr(election_module.subprocess, "Popen", lambda *a, **k: child)
         monkeypatch.setattr(
             election_module.daemon_descriptor,
@@ -3549,15 +3661,19 @@ class TestAtomicStartupCommit:
             lambda *a, **k: None,
         )
         monkeypatch.setattr(
-            election_module.daemon_descriptor, "read", lambda root: canonical
-        )
-        monkeypatch.setattr(
             election_module.daemon_owner,
             "daemon_log_path",
             lambda root: tmp_path / "daemon.log",
         )
 
-        outcome = election_module._spawn(profile.parent, config, timeout=1.0)
+        outcome = election_module._spawn(
+            profile.parent,
+            config,
+            timeout=1.0,
+            inspector=daemon_module._DescriptorInspector(
+                profile.parent, profile, config
+            ),
+        )
 
         assert outcome is Started.YES
         assert not child.killed
@@ -3565,10 +3681,10 @@ class TestAtomicStartupCommit:
     def test_stale_canonical_state_stays_uncertain(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        instance_id = new_instance_id()
-        monkeypatch.setattr(
-            election_module.daemon_descriptor, "read", lambda root: None
-        )
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        # The predecessor's generation, still canonical.
+        _publish_stale_owner(profile.parent, profile, config)
         monkeypatch.setattr(
             election_module.daemon_descriptor,
             "discard_prepared",
@@ -3576,7 +3692,11 @@ class TestAtomicStartupCommit:
         )
 
         outcome = election_module._settle_commit_result(
-            tmp_path, instance_id, timeout=1.0
+            new_instance_id(),
+            timeout=1.0,
+            inspector=daemon_module._DescriptorInspector(
+                profile.parent, profile, config
+            ),
         )
 
         assert outcome is Started.UNCERTAIN
@@ -3584,7 +3704,8 @@ class TestAtomicStartupCommit:
     def test_unreadable_canonical_state_stays_uncertain(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        instance_id = new_instance_id()
+        profile = _profile(tmp_path)
+        config = _config(profile)
         monkeypatch.setattr(
             election_module.daemon_descriptor,
             "read",
@@ -3599,7 +3720,11 @@ class TestAtomicStartupCommit:
         )
 
         outcome = election_module._settle_commit_result(
-            tmp_path, instance_id, timeout=1.0
+            new_instance_id(),
+            timeout=1.0,
+            inspector=daemon_module._DescriptorInspector(
+                profile.parent, profile, config
+            ),
         )
 
         assert outcome is Started.UNCERTAIN
@@ -3607,6 +3732,8 @@ class TestAtomicStartupCommit:
     def test_canonical_settlement_read_is_bounded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
+        profile = _profile(tmp_path)
+        config = _config(profile)
         blocked = threading.Event()
         release = threading.Event()
 
@@ -3624,12 +3751,18 @@ class TestAtomicStartupCommit:
         fallback.start()
         started = time.monotonic()
         try:
-            with pytest.raises(TimeoutError, match="could not be read in time"):
-                election_module._read_canonical_until(tmp_path, timeout=0.01)
+            outcome = election_module._settle_commit_result(
+                new_instance_id(),
+                timeout=0.01,
+                inspector=daemon_module._DescriptorInspector(
+                    profile.parent, profile, config
+                ),
+            )
         finally:
             release.set()
             fallback.cancel()
 
+        assert outcome is Started.UNCERTAIN
         assert blocked.is_set()
         assert time.monotonic() - started < _BOUNDED_CALL_SECONDS
 
@@ -3836,6 +3969,7 @@ class TestAtomicStartupCommit:
             election_module, "os", SimpleNamespace(name="posix", environ=os.environ)
         )
         profile = _profile(tmp_path)
+        config = _config(profile)
         pipe = self._StalledPipe()
         child = self._StalledChild(pipe)
         monkeypatch.setattr(election_module.subprocess, "Popen", lambda *a, **k: child)
@@ -3851,7 +3985,12 @@ class TestAtomicStartupCommit:
             try:
                 finished.append(
                     election_module._spawn(
-                        profile.parent, _config(profile), timeout=0.5
+                        profile.parent,
+                        config,
+                        timeout=0.5,
+                        inspector=daemon_module._DescriptorInspector(
+                            profile.parent, profile, config
+                        ),
                     )
                 )
             except BaseException as exc:  # noqa: BLE001 - reported by the assertions
@@ -5873,7 +6012,14 @@ class TestBudgets:
         monkeypatch.setattr(election_module, "_hand_over_config", hand_over)
         monkeypatch.setattr(election_module, "_await_prepared", await_prepared)
 
-        verdict = election_module._spawn(profile.parent, config, timeout=budget)
+        verdict = election_module._spawn(
+            profile.parent,
+            config,
+            timeout=budget,
+            inspector=daemon_module._DescriptorInspector(
+                profile.parent, profile, config
+            ),
+        )
 
         assert verdict is Started.RETRY
         assert spawn_kwargs["creationflags"] == (0x7 if platform == "nt" else 0)

@@ -534,8 +534,8 @@ def _verdict(spawn: Spawn, event: Verdict) -> tuple[Spawn, list[Effect]]:
         outcome = Started.RETRY if verdict is Started.RETRY else Started.ABORTED
         return _end(spawn, outcome, stop=True)
     match verdict:
-        case Started.YES | Started.UNCERTAIN:
-            return _end(spawn, verdict)
+        case Started.YES:
+            return _end(spawn, Started.YES)
         case Started.ABORTED:
             # The child's own authenticated word that it did not publish, and
             # the only kind of answer that licenses a stop after COMMIT.

@@ -222,13 +222,6 @@ class TurnOver:
 
 
 @dataclass(frozen=True)
-class Scan:
-    """Write off every call nobody has asked for lately."""
-
-    now: float
-
-
-@dataclass(frozen=True)
 class Tick:
     """One turn of the owner's lifecycle loop, with what the shell observed.
 
@@ -262,7 +255,6 @@ Event = (
     | Retire
     | RetireIfIdle
     | TurnOver
-    | Scan
     | Tick
 )
 
@@ -436,8 +428,6 @@ def on_event(owner: Owner, event: Event) -> tuple[Owner, list[Effect]]:
             return _retire_if_idle(owner, event.reason, background=event.background), []
         case TurnOver():
             return replace(_retire(owner, Retirement.TURNOVER), turnover=True), []
-        case Scan():
-            return _scan(owner, event.now)
         case Tick():
             return _tick(owner, event)
 

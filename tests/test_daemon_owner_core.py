@@ -39,7 +39,6 @@ from linkedin_mcp_server.daemon.core.owner import (
     Retire,
     RetireIfIdle,
     Retirement,
-    Scan,
     StartFailed,
     StartTask,
     Stop,
@@ -143,13 +142,13 @@ class TestHeartbeats:
     def test_a_beat_keeps_a_call_and_silence_expires_it(self):
         owner, heard = admitted(live(), A, 0.0)
         owner, unheard = admitted(owner, B, 0.0)
-        owner = run(owner, Scan(0.5))[0]
+        owner = run(owner, Tick(0.5))[0]
 
-        # Scans every half second, so the owner was running throughout.
+        # Ticks every half second, so the owner was running throughout.
         times = [0.5 * step for step in range(2, int(2 * EXPIRY_SECONDS) + 4)]
         effects: list[Effect] = []
         for now in times:
-            owner, decided = run(owner, Heard(A, now), Scan(now))
+            owner, decided = run(owner, Heard(A, now), Tick(now))
             effects.extend(decided)
 
         assert effects == [Cancel(unheard, B, Fate.ABANDONED)]
@@ -159,8 +158,8 @@ class TestHeartbeats:
 
     def test_a_beat_for_a_call_written_off_does_not_revive_it(self):
         owner, ticket = admitted(live(), A, 0.0)
-        owner = run(owner, Scan(EXPIRY_SECONDS))[0]
-        owner = run(owner, Scan(EXPIRY_SECONDS + 0.5))[0]
+        owner = run(owner, Tick(EXPIRY_SECONDS))[0]
+        owner = run(owner, Tick(EXPIRY_SECONDS + 0.5))[0]
         assert lifecycle.stopped(owner, ticket) is Stopped.ABANDONED
 
         owner = run(owner, Heard(A, EXPIRY_SECONDS + 0.6))[0]
@@ -174,12 +173,12 @@ class TestHeartbeats:
 
     def test_an_owner_that_was_not_running_writes_nobody_off(self):
         owner, _ticket = admitted(live(), A, 0.0)
-        owner = run(owner, Scan(0.1))[0]
+        owner = run(owner, Tick(0.1))[0]
         late = 0.1 + EXPIRY_SECONDS + 5
 
-        # The query agrees with the scan before the scan has run.
+        # The query agrees with the tick's scan before the tick has run.
         assert not lifecycle.abandoned(owner, A, late)
-        owner, effects = run(owner, Scan(late))
+        owner, effects = run(owner, Tick(late))
 
         [forgave] = effects
         assert isinstance(forgave, Forgave)
@@ -188,13 +187,13 @@ class TestHeartbeats:
 
     def test_the_stall_buys_one_expiry_not_immunity(self):
         owner, ticket = admitted(live(), A, 0.0)
-        owner = run(owner, Scan(0.1), Scan(30.0))[0]
+        owner = run(owner, Tick(0.1), Tick(30.0))[0]
 
         now = 30.0
         effects: list[Effect] = []
         while now < 30.0 + EXPIRY_SECONDS + 1:
             now += STALL_SECONDS / 2
-            owner, decided = run(owner, Scan(now))
+            owner, decided = run(owner, Tick(now))
             effects.extend(decided)
 
         assert effects == [Cancel(ticket, A, Fate.ABANDONED)]
