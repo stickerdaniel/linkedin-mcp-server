@@ -82,6 +82,7 @@ import codecs
 import os
 import re
 import secrets
+import selectors
 import signal
 import sqlite3
 import subprocess
@@ -196,6 +197,10 @@ RESCAN_SECONDS = 2.0
 #: end. One kept open by a process nobody could end stays open, and the
 #: command stays unsettled.
 END_OUTPUT_SECONDS = 2.0
+#: How often the reader of a terminal looks for the command's exit while
+#: its own slave descriptor keeps the output
+#: (``TerminalCommand._nothing_queued``).
+DRAIN_POLL_SECONDS = 0.02
 
 LOGOUT_ARGS = ("--logout",)
 LOGIN_ARGS = ("--login",)
@@ -331,10 +336,14 @@ class TerminalCommand:
     or on pipes, its output kept as it came.
 
     On a terminal the child's stdin, stdout and stderr are the slave side of
-    a fresh pseudo-terminal, which the parent closes once the child holds
-    it; the parent reads the master side. On pipes, stdin is a pipe and
-    stdout and stderr one more. A thread of its own reads until the output
-    ends; nothing is ever written but an answer the row gives. On POSIX the
+    a fresh pseudo-terminal; the parent reads the master side, and keeps a
+    slave descriptor of its own until the command has exited and everything
+    it wrote is read (``_nothing_queued``). On macOS the last close of the
+    slave discards whatever the master has not read yet, so a command that
+    prints and exits before the reader runs, as under load, would leave no
+    transcript at all. On pipes, stdin is a pipe and stdout and stderr one
+    more. A thread of its own reads until the output ends; nothing is ever
+    written but an answer the row gives. On POSIX the
     command leads a process group of its own, as a shell's job does, which
     names what it starts apart from its environment (``_marked``). It is
     signalled only by ``interrupt`` (the row's own Ctrl-C) and ``end`` (the
@@ -367,6 +376,9 @@ class TerminalCommand:
         self.overridden = list(overridden)
         self.process: subprocess.Popen[bytes] | None = None
         self._fd: int | None = None
+        #: The parent's own slave descriptor on a terminal, owned by the
+        #: reader once it starts, and closed by it (``_nothing_queued``).
+        self._slave: int | None = None
         self._chunks: list[tuple[int, str]] = []
         self._lock = threading.Lock()
         self._reader: threading.Thread | None = None
@@ -509,11 +521,11 @@ class TerminalCommand:
                 )
             except BaseException:
                 os.close(master)
+                os.close(slave)
                 self.started_ns = None
                 raise
-            finally:
-                os.close(slave)
             self._fd = master
+            self._slave = slave
         else:
             try:
                 self.process = subprocess.Popen(
@@ -535,7 +547,14 @@ class TerminalCommand:
         self._reader = threading.Thread(
             target=self._read, name=f"profile command {self.label}", daemon=True
         )
-        self._reader.start()
+        try:
+            self._reader.start()
+        except BaseException:
+            # Only the reader closes the slave it keeps.
+            if self._slave is not None:
+                os.close(self._slave)
+                self._slave = None
+            raise
 
     def _read(self) -> None:
         """Every byte until the output ends: EOF, or on Linux ``EIO`` once the
@@ -544,6 +563,8 @@ class TerminalCommand:
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         try:
             while True:
+                if self._slave is not None and self._nothing_queued():
+                    continue
                 try:
                     data = os.read(self._fd, 4096)
                 except OSError:
@@ -553,6 +574,9 @@ class TerminalCommand:
                 self._note(decoder.decode(data))
         finally:
             self._note(decoder.decode(b"", final=True))
+            if self._slave is not None:
+                os.close(self._slave)
+                self._slave = None
             if self.terminal:
                 # Closed under the lock an answer writes under, so no answer
                 # ever reaches a descriptor number reused by then.
@@ -561,6 +585,29 @@ class TerminalCommand:
                     self._closed = True
             elif self.process is not None and self.process.stdout is not None:
                 self.process.stdout.close()
+
+    def _nothing_queued(self) -> bool:
+        """Whether no output waits to be read, looked for up to
+        ``DRAIN_POLL_SECONDS`` while the parent's slave descriptor is open.
+
+        The exit is asked before the look: whatever the command wrote before
+        it exited is queued by then, so an empty queue after it means all of
+        it was read, and the descriptor is closed. The output then ends with
+        its last other holder, as it would have without it."""
+        assert self._fd is not None and self._slave is not None
+        assert self.process is not None
+        # Popen's own poll, safe from this thread; the harness's ``_poll``
+        # still stamps the exit when it sees it.
+        exited = self.process.poll() is not None
+        # A selector, since ``select()`` refuses descriptor numbers past 1023.
+        with selectors.DefaultSelector() as queue:
+            queue.register(self._fd, selectors.EVENT_READ)
+            if queue.select(DRAIN_POLL_SECONDS):
+                return False
+        if exited:
+            os.close(self._slave)
+            self._slave = None
+        return True
 
     def _note(self, text: str) -> None:
         # A terminal ends lines with CR LF and echoes the answers back; the

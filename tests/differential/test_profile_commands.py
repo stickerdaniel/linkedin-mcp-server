@@ -218,6 +218,34 @@ async def test_a_command_on_the_terminal_sees_a_terminal_and_is_answered_after_a
     assert record["expected"] == [{"text": "Go on? (y/N): ", "seen_ns": asked}]
 
 
+@posix
+async def test_a_command_that_exits_before_its_reader_runs_keeps_what_it_printed(
+    tmp_path, monkeypatch
+):
+    """Under load the reader may first run after the command printed and
+    exited, as a refusal does at once. macOS discards a terminal's unread
+    output at the last close of its slave side, so the transcript has to
+    outlive the command, and the output still has to end."""
+    read = TerminalCommand._read
+
+    def late_reader(self: TerminalCommand) -> None:
+        assert self.process is not None
+        self.process.wait(30)
+        read(self)
+
+    monkeypatch.setattr(TerminalCommand, "_read", late_reader)
+    command = _driver(tmp_path, "silent", terminal=True)
+    try:
+        await command.wait(30)
+        assert command.settled(10)
+    finally:
+        command.end()
+    record = command.record()
+    assert "tty True True" in [line for _, line in record["lines"]]
+    assert record["returncode"] == 4 and record["output_ended"] is True
+    assert record["ended_by_harness"] is False
+
+
 async def test_a_command_on_pipes_sees_no_terminal_and_is_answered_all_the_same(
     tmp_path,
 ):
