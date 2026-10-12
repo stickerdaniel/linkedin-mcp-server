@@ -68,6 +68,16 @@ def entry_form_urls(vanity: str, kind: str, entry_id: str) -> tuple[str, ...]:
             experience_form_url(vanity, entry_id),
             f"{base}edit/forms/position/{entry_id}/",
         )
+    if kind != "education":
+        section = {
+            "publication": "publications",
+            "certification": "certifications",
+            "language": "languages",
+        }[kind]
+        return (
+            f"{base}details/{section}/edit/forms/{entry_id}/",
+            f"{base}edit/forms/{kind}/{entry_id}/",
+        )
     return (
         f"{base}details/education/edit/forms/{entry_id}/",
         f"{base}edit/forms/education/{entry_id}/",
@@ -95,6 +105,11 @@ NEW_ENTRY_FORM_PATHS: dict[str, tuple[str, ...]] = {
         "edit/forms/publication/new/",
         "details/publications/edit/forms/new/",
     ),
+    "certification": (
+        "edit/forms/certification/new/",
+        "details/certifications/edit/forms/new/",
+    ),
+    "language": ("edit/forms/language/new/", "details/languages/edit/forms/new/"),
 }
 
 
@@ -108,6 +123,8 @@ def entry_list_url(vanity: str, kind: str) -> str:
         "position": "experience",
         "education": "education",
         "publication": "publications",
+        "certification": "certifications",
+        "language": "languages",
     }[kind]
     return f"{profile_url(vanity)}details/{section}/"
 
@@ -194,6 +211,12 @@ LABELS: dict[str, dict[str, tuple[str, ...]]] = {
         "publication.date": ("Publication date",),
         "publication.url": ("Publication URL",),
         "publication.description": ("Description",),
+        "certification.name": ("Name*",),
+        "certification.issuer": ("Issuing organization*",),
+        "certification.credentialId": ("Credential ID",),
+        "certification.credentialUrl": ("Credential URL",),
+        "language.name": ("Language*",),
+        "language.proficiency": ("Proficiency level",),
     },
     # Measured 12 October 2026 (ru UI).
     "ru": {
@@ -238,6 +261,12 @@ ENTRY_EDIT_HREF: dict[str, re.Pattern[str]] = {
     ),
     "publication": re.compile(
         r"/(?:details/publications/edit/forms|edit/forms/publication)/(\d+)"
+    ),
+    "certification": re.compile(
+        r"/(?:details/certifications/edit/forms|edit/forms/certification)/(\d+)"
+    ),
+    "language": re.compile(
+        r"/(?:details/languages/edit/forms|edit/forms/language)/(\d+)"
     ),
 }
 

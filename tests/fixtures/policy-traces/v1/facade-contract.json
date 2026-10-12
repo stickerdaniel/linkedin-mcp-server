@@ -652,6 +652,40 @@
                   ],
                   "default": null
                 },
+                "entryEdits": {
+                  "items": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "entryId": {
+                        "description": "LinkedIn's id of the existing entry.",
+                        "type": "string"
+                      },
+                      "field": {
+                        "description": "education: grade, activities, description; publication: title, publisher, date (mm/dd/yyyy), url, description.",
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "education",
+                          "publication"
+                        ],
+                        "type": "string"
+                      },
+                      "value": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "entryId",
+                      "field",
+                      "value"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 10,
+                  "type": "array"
+                },
                 "experiences": {
                   "items": {
                     "additionalProperties": true,
@@ -780,6 +814,109 @@
                   ],
                   "default": null
                 },
+                "newCertifications": {
+                  "items": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "allowDuplicate": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "credentialId": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "credentialUrl": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "endMonth": {
+                        "anyOf": [
+                          {
+                            "maximum": 12,
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Expiration month."
+                      },
+                      "endYear": {
+                        "anyOf": [
+                          {
+                            "maximum": 2100,
+                            "minimum": 1900,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Expiration year."
+                      },
+                      "issuer": {
+                        "description": "Issuing organization.",
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "startMonth": {
+                        "anyOf": [
+                          {
+                            "maximum": 12,
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Issue month."
+                      },
+                      "startYear": {
+                        "anyOf": [
+                          {
+                            "maximum": 2100,
+                            "minimum": 1900,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Issue year."
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "issuer"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 10,
+                  "type": "array"
+                },
                 "newEducation": {
                   "items": {
                     "additionalProperties": true,
@@ -902,6 +1039,39 @@
                     },
                     "required": [
                       "school"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 10,
+                  "type": "array"
+                },
+                "newLanguages": {
+                  "items": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "allowDuplicate": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "name": {
+                        "description": "Language, as LinkedIn names it (e.g. Kazakh).",
+                        "type": "string"
+                      },
+                      "proficiency": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Elementary, Limited working, Professional working, Full professional or Native or bilingual proficiency (as the form shows it)."
+                      }
+                    },
+                    "required": [
+                      "name"
                     ],
                     "type": "object"
                   },

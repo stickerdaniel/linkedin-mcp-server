@@ -62,6 +62,8 @@ class FakeEditor:
     # (kind, entry id) -> organization text; `pages` are the names LinkedIn suggests.
     organizations: dict[tuple[str, str], str] = field(default_factory=dict)
     pages: set[str] = field(default_factory=lambda: {"Example University, Exampleland"})
+    # (kind, entry id, field) -> text of existing entries' fields.
+    entry_fields: dict[tuple[str, str, str], str] = field(default_factory=dict)
     _next_id: int = 500
 
     def _maybe_fail(self, op: str) -> None:
@@ -204,6 +206,29 @@ class FakeEditor:
             return
         self.organizations[(kind, entry_id)] = page
         self.writes.append(f"org/{entry_id}")
+
+    async def read_entry_field(self, kind: str, entry_id: str, field: str) -> TextField:
+        if (kind, entry_id, field) not in self.entry_fields:
+            raise ProfileEditError(ProfileEditErrorCode.EXPERIENCE_NOT_FOUND)
+        return TextField(self.entry_fields[(kind, entry_id, field)])
+
+    async def write_entry_field(
+        self,
+        kind: str,
+        entry_id: str,
+        field: str,
+        *,
+        expected: str,
+        value: str,
+        dry_run: bool = False,
+    ) -> None:
+        key = (kind, entry_id, field)
+        self._check(f"write_{kind}_{field}", self.entry_fields[key], expected)
+        if dry_run:
+            self.rehearsals.append(f"{kind}/{entry_id}/{field}")
+            return
+        self.entry_fields[key] = self.mangle.get(field, value)
+        self.writes.append(f"{kind}/{entry_id}/{field}")
 
     async def describe_form(self, form: str) -> dict[str, Any]:
         return {"form": form, "dialog": True, "controls": []}

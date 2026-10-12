@@ -35,6 +35,7 @@ from linkedin_mcp_server.profile_edit.errors import (
 )
 from linkedin_mcp_server.profile_edit.changeset import EntryRequest
 from linkedin_mcp_server.profile_edit.service import (
+    EntryFieldEdit,
     ExperienceEdit,
     OrganizationEdit,
     ProfileEditService,
@@ -130,6 +131,47 @@ class NewPublication(BaseModel):
     allowDuplicate: bool = False
 
 
+class NewCertification(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    name: str
+    issuer: str = Field(description="Issuing organization.")
+    startMonth: int | None = Field(
+        default=None, ge=1, le=12, description="Issue month."
+    )
+    startYear: int | None = Field(
+        default=None, ge=1900, le=2100, description="Issue year."
+    )
+    endMonth: int | None = Field(
+        default=None, ge=1, le=12, description="Expiration month."
+    )
+    endYear: int | None = Field(
+        default=None, ge=1900, le=2100, description="Expiration year."
+    )
+    credentialId: str | None = None
+    credentialUrl: str | None = None
+    allowDuplicate: bool = False
+
+
+class NewLanguage(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    name: str = Field(description="Language, as LinkedIn names it (e.g. Kazakh).")
+    proficiency: str | None = Field(
+        default=None,
+        description="Elementary, Limited working, Professional working, Full professional or Native or bilingual proficiency (as the form shows it).",
+    )
+    allowDuplicate: bool = False
+
+
+class EntryFieldChange(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    kind: Literal["education", "publication"]
+    entryId: str = Field(description="LinkedIn's id of the existing entry.")
+    field: str = Field(
+        description="education: grade, activities, description; publication: title, publisher, date (mm/dd/yyyy), url, description."
+    )
+    value: str
+
+
 class OrganizationChange(BaseModel):
     model_config = ConfigDict(extra="allow")
     kind: Literal["position", "education"]
@@ -154,6 +196,11 @@ class ProfileChanges(BaseModel):
     newEducation: list[NewEducation] = Field(default_factory=list, max_length=10)
     newPublications: list[NewPublication] = Field(default_factory=list, max_length=20)
     organizations: list[OrganizationChange] = Field(default_factory=list, max_length=10)
+    newCertifications: list[NewCertification] = Field(
+        default_factory=list, max_length=10
+    )
+    newLanguages: list[NewLanguage] = Field(default_factory=list, max_length=10)
+    entryEdits: list[EntryFieldChange] = Field(default_factory=list, max_length=10)
 
 
 def _entry_requests(changes: ProfileChanges) -> list[EntryRequest]:
@@ -162,6 +209,8 @@ def _entry_requests(changes: ProfileChanges) -> list[EntryRequest]:
         ("position", changes.newPositions),
         ("education", changes.newEducation),
         ("publication", changes.newPublications),
+        ("certification", changes.newCertifications),
+        ("language", changes.newLanguages),
     ):
         for item in items:
             fields = item.model_dump(exclude={"allowDuplicate"}, exclude_none=True)
@@ -178,6 +227,9 @@ def _unsupported_fields(changes: ProfileChanges) -> list[str]:
         ("newPositions", changes.newPositions),
         ("newEducation", changes.newEducation),
         ("newPublications", changes.newPublications),
+        ("newCertifications", changes.newCertifications),
+        ("newLanguages", changes.newLanguages),
+        ("entryEdits", changes.entryEdits),
     ):
         for i, item in enumerate(items):
             found += [f"{name}[{i}].{k}" for k in item.model_extra or {}]
@@ -337,8 +389,10 @@ def register_profile_edit_tools(
         qualifications, skills or achievements. Supported: first and last
         name, headline, about, title and description of an existing
         experience, adding and removing skills, adding new positions,
-        education and publications, and linking an existing position or
-        education entry to an organization's LinkedIn page (organizations). Anything else returns UNSUPPORTED_FIELD.
+        education, publications, certifications and languages, editing
+        text fields of existing education and publication entries
+        (entryEdits), and linking an existing position or education entry to
+        an organization's LinkedIn page (organizations). Anything else returns UNSUPPORTED_FIELD.
         A new entry that resembles an existing one is refused unless
         allowDuplicate is set. Use rehearse_profile_changes to fill the forms
         without saving before applying.
@@ -380,6 +434,10 @@ def register_profile_edit_tools(
             organizations=[
                 OrganizationEdit(o.kind, o.entryId, o.name)
                 for o in changes.organizations
+            ],
+            entry_edits=[
+                EntryFieldEdit(e.kind, e.entryId, e.field, e.value)
+                for e in changes.entryEdits
             ],
         )
         return await _run(ctx, "propose_profile_changes", lambda s: s.propose(proposal))

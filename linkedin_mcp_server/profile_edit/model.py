@@ -26,6 +26,9 @@ DEFAULT_LIMITS: dict[str, int] = {
     "first_name": 100,
     "last_name": 100,
     "organization": 100,
+    # Text fields of existing entries; the form's own limit is passed with each.
+    "entry_text": 255,
+    "entry_text_multiline": 2000,
 }
 
 # Single-line fields; newlines are refused rather than silently joined.
@@ -37,6 +40,7 @@ SINGLE_LINE = frozenset(
         "first_name",
         "last_name",
         "organization",
+        "entry_text",
     }
 )
 
@@ -94,20 +98,62 @@ ENTRY_SPECS: dict[str, tuple[EntryFieldSpec, ...]] = {
         EntryFieldSpec("url", "text", 500),
         EntryFieldSpec("description", "text", 2000, multiline=True),
     ),
+    "certification": (
+        EntryFieldSpec("name", "typeahead", 255, required=True),
+        EntryFieldSpec("issuer", "typeahead", 255, required=True),
+        EntryFieldSpec("startMonth", "month"),
+        EntryFieldSpec("startYear", "year"),
+        EntryFieldSpec("endMonth", "month"),
+        EntryFieldSpec("endYear", "year"),
+        EntryFieldSpec("credentialId", "text", 80),
+        EntryFieldSpec("credentialUrl", "text", 500),
+    ),
+    "language": (
+        EntryFieldSpec("name", "typeahead", 100, required=True),
+        EntryFieldSpec("proficiency", "select"),
+    ),
+}
+
+# Text fields of existing entries that entryEdits may change, with their
+# limits (measured on the edit forms, 12 October 2026) and whether they span
+# lines.
+EDITABLE_ENTRY_FIELDS: dict[str, dict[str, tuple[int, bool]]] = {
+    "education": {
+        "grade": (80, False),
+        "activities": (500, True),
+        "description": (1000, True),
+    },
+    "publication": {
+        "title": (255, False),
+        "publisher": (255, False),
+        "date": (10, False),
+        "url": (500, False),
+        "description": (2000, True),
+    },
 }
 
 # The field that names an entry, used for duplicate checks and verification.
-ENTRY_PRIMARY = {"position": "title", "education": "school", "publication": "title"}
+ENTRY_PRIMARY = {
+    "position": "title",
+    "education": "school",
+    "publication": "title",
+    "certification": "name",
+    "language": "name",
+}
 # A second field that, with the primary one, identifies a likely duplicate.
 ENTRY_SECONDARY = {
     "position": "company",
     "education": "degree",
     "publication": "publisher",
+    "certification": "issuer",
+    "language": "name",
 }
 ENTRY_SECTION_LABEL = {
     "position": "Experience",
     "education": "Education",
     "publication": "Publications",
+    "certification": "Licenses & certifications",
+    "language": "Languages",
 }
 
 

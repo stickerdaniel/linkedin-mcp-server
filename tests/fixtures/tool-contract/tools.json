@@ -824,7 +824,7 @@
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Creates a previewable profile change set. Does not modify LinkedIn.\n\nReads the current values of the targeted fields, validates every\nrequested value (including LinkedIn's character limits; over-long text\nis refused, never truncated), and stores a change set with before and\nafter values and a fingerprint of the profile it was planned against.\nShow the returned diff to the user. Nothing is applied until the user\napproves and apply_profile_changes is called with confirm=true.\n\nOnly send values the user has written or approved. This tool carries\ncontent; it must not be used to invent jobs, employers, dates,\nqualifications, skills or achievements. Supported: first and last\nname, headline, about, title and description of an existing\nexperience, adding and removing skills, adding new positions,\neducation and publications, and linking an existing position or\neducation entry to an organization's LinkedIn page (organizations). Anything else returns UNSUPPORTED_FIELD.\nA new entry that resembles an existing one is refused unless\nallowDuplicate is set. Use rehearse_profile_changes to fill the forms\nwithout saving before applying.",
+    "description": "Creates a previewable profile change set. Does not modify LinkedIn.\n\nReads the current values of the targeted fields, validates every\nrequested value (including LinkedIn's character limits; over-long text\nis refused, never truncated), and stores a change set with before and\nafter values and a fingerprint of the profile it was planned against.\nShow the returned diff to the user. Nothing is applied until the user\napproves and apply_profile_changes is called with confirm=true.\n\nOnly send values the user has written or approved. This tool carries\ncontent; it must not be used to invent jobs, employers, dates,\nqualifications, skills or achievements. Supported: first and last\nname, headline, about, title and description of an existing\nexperience, adding and removing skills, adding new positions,\neducation, publications, certifications and languages, editing\ntext fields of existing education and publication entries\n(entryEdits), and linking an existing position or education entry to\nan organization's LinkedIn page (organizations). Anything else returns UNSUPPORTED_FIELD.\nA new entry that resembles an existing one is refused unless\nallowDuplicate is set. Use rehearse_profile_changes to fill the forms\nwithout saving before applying.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -842,6 +842,40 @@
                 }
               ],
               "default": null
+            },
+            "entryEdits": {
+              "items": {
+                "additionalProperties": true,
+                "properties": {
+                  "entryId": {
+                    "description": "LinkedIn's id of the existing entry.",
+                    "type": "string"
+                  },
+                  "field": {
+                    "description": "education: grade, activities, description; publication: title, publisher, date (mm/dd/yyyy), url, description.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "education",
+                      "publication"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "entryId",
+                  "field",
+                  "value"
+                ],
+                "type": "object"
+              },
+              "maxItems": 10,
+              "type": "array"
             },
             "experiences": {
               "items": {
@@ -971,6 +1005,109 @@
               ],
               "default": null
             },
+            "newCertifications": {
+              "items": {
+                "additionalProperties": true,
+                "properties": {
+                  "allowDuplicate": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "credentialId": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "credentialUrl": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "endMonth": {
+                    "anyOf": [
+                      {
+                        "maximum": 12,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Expiration month."
+                  },
+                  "endYear": {
+                    "anyOf": [
+                      {
+                        "maximum": 2100,
+                        "minimum": 1900,
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Expiration year."
+                  },
+                  "issuer": {
+                    "description": "Issuing organization.",
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "startMonth": {
+                    "anyOf": [
+                      {
+                        "maximum": 12,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Issue month."
+                  },
+                  "startYear": {
+                    "anyOf": [
+                      {
+                        "maximum": 2100,
+                        "minimum": 1900,
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Issue year."
+                  }
+                },
+                "required": [
+                  "name",
+                  "issuer"
+                ],
+                "type": "object"
+              },
+              "maxItems": 10,
+              "type": "array"
+            },
             "newEducation": {
               "items": {
                 "additionalProperties": true,
@@ -1093,6 +1230,39 @@
                 },
                 "required": [
                   "school"
+                ],
+                "type": "object"
+              },
+              "maxItems": 10,
+              "type": "array"
+            },
+            "newLanguages": {
+              "items": {
+                "additionalProperties": true,
+                "properties": {
+                  "allowDuplicate": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "name": {
+                    "description": "Language, as LinkedIn names it (e.g. Kazakh).",
+                    "type": "string"
+                  },
+                  "proficiency": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "Elementary, Limited working, Professional working, Full professional or Native or bilingual proficiency (as the form shows it)."
+                  }
+                },
+                "required": [
+                  "name"
                 ],
                 "type": "object"
               },

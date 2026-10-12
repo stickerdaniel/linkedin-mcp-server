@@ -38,6 +38,7 @@ from linkedin_mcp_server.profile_edit.errors import (
     ProfileEditErrorCode,
 )
 from linkedin_mcp_server.profile_edit.model import (
+    EDITABLE_ENTRY_FIELDS,
     ENTRY_PRIMARY,
     EntrySummary,
     ExperienceForm,
@@ -91,6 +92,19 @@ class ProfileEditorPort(Protocol):
         self, kind: str, values: dict[str, Any], *, dry_run: bool = False
     ) -> dict[str, Any]: ...
     async def read_organization(self, kind: str, entry_id: str) -> TextField: ...
+    async def read_entry_field(
+        self, kind: str, entry_id: str, field: str
+    ) -> TextField: ...
+    async def write_entry_field(
+        self,
+        kind: str,
+        entry_id: str,
+        field: str,
+        *,
+        expected: str,
+        value: str,
+        dry_run: bool = False,
+    ) -> None: ...
     async def write_organization(
         self,
         kind: str,
@@ -126,6 +140,16 @@ class OrganizationEdit:
 
 
 @dataclass(frozen=True, slots=True)
+class EntryFieldEdit:
+    """Replace one text field of an existing education or publication entry."""
+
+    kind: str
+    entry_id: str
+    field: str
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
 class Proposal:
     headline: str | None = None
     about: str | None = None
@@ -136,10 +160,12 @@ class Proposal:
     last_name: str | None = None
     new_entries: Sequence[EntryRequest] = ()
     organizations: Sequence[OrganizationEdit] = ()
+    entry_edits: Sequence[EntryFieldEdit] = ()
 
     def is_empty(self) -> bool:
         return (
             not self.organizations
+            and not self.entry_edits
             and self.headline is None
             and self.about is None
             and self.first_name is None
@@ -412,6 +438,44 @@ class ProfileEditService:
                     now.value,
                     now.max_length,
                     org.entry_id,
+                )
+            )
+        for ed in proposal.entry_edits:
+            spec = EDITABLE_ENTRY_FIELDS.get(ed.kind, {}).get(ed.field)
+            if spec is None:
+                raise ProfileEditError(
+                    ProfileEditErrorCode.UNSUPPORTED_FIELD,
+                    f"'{ed.field}' of a {ed.kind} cannot be edited here.",
+                    editable={k: sorted(v) for k, v in EDITABLE_ENTRY_FIELDS.items()},
+                )
+            if ed.field == "url" and not re.match(r"^https?://\S+$", ed.value.strip()):
+                raise ProfileEditError(
+                    ProfileEditErrorCode.VALIDATION_ERROR,
+                    problems=[
+                        {"field": f"{ed.kind}.url", "reason": "must be an http(s) URL"}
+                    ],
+                )
+            if ed.field == "date" and not re.match(
+                r"^\d{2}/\d{2}/\d{4}$", ed.value.strip()
+            ):
+                raise ProfileEditError(
+                    ProfileEditErrorCode.VALIDATION_ERROR,
+                    problems=[
+                        {"field": f"{ed.kind}.date", "reason": "must be mm/dd/yyyy"}
+                    ],
+                )
+            limit, multiline = spec
+            now = await self._editor.read_entry_field(ed.kind, ed.entry_id, ed.field)
+            texts.append(
+                TextRequest(
+                    f"{ed.kind}/{ed.entry_id}/{ed.field}",
+                    ed.kind,
+                    "entry_text_multiline" if multiline else "entry_text",
+                    f"{ed.kind.capitalize()} {ed.entry_id} {ed.field}",
+                    ed.value,
+                    now.value,
+                    now.max_length or limit,
+                    ed.entry_id,
                 )
             )
         existing: dict[str, list[EntrySummary]] = {}
@@ -753,6 +817,33 @@ class ProfileEditService:
     ) -> dict[str, Any]:
         if change.action == "create":
             return await self._create_entry(change, dry_run=dry_run)
+        if change.kind in {"entry_text", "entry_text_multiline"} and change.target:
+            field_name = change.key.rsplit("/", 1)[1]
+            await self._editor.write_entry_field(
+                change.section,
+                change.target,
+                field_name,
+                expected=change.before or "",
+                value=change.after or "",
+                dry_run=dry_run,
+            )
+            if dry_run:
+                return {
+                    "field": change.key,
+                    "status": "FILLED_NOT_SAVED",
+                    "verified": True,
+                }
+            got = await self._editor.read_entry_field(
+                change.section, change.target, field_name
+            )
+            if not same_saved_text(got.value, change.after or ""):
+                raise ProfileEditError(
+                    ProfileEditErrorCode.VERIFICATION_FAILED,
+                    field=change.key,
+                    expected=change.after,
+                    observed=got.value,
+                )
+            return {"field": change.key, "status": "UPDATED", "verified": True}
         if change.key.endswith("/organization") and change.target:
             await self._editor.write_organization(
                 change.section,
@@ -951,6 +1042,17 @@ class ProfileEditService:
                 names = names or await self._editor.read_name()
                 current[key] = normalize_text(
                     (names[0] if key == "name/first" else names[1]).value
+                )
+            elif (
+                key.split("/", 1)[0] in EDITABLE_ENTRY_FIELDS
+                and key.count("/") == 2
+                and not key.endswith("/organization")
+            ):
+                kind, entry_id, field_name = key.split("/", 2)
+                current[key] = normalize_text(
+                    (
+                        await self._editor.read_entry_field(kind, entry_id, field_name)
+                    ).value
                 )
             elif key.endswith("/organization"):
                 kind, entry_id, _ = key.split("/", 2)

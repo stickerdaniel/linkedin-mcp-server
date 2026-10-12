@@ -346,3 +346,130 @@ class TestOrganizations:
             await s.apply(cs["changeSetId"], confirm=True)
         assert e.value.code is ProfileEditErrorCode.STALE_CHANGE_SET
         assert ed.writes == []
+
+
+class TestCertificationsAndLanguages:
+    CERT = {
+        "name": "Cloud Security Lab",
+        "issuer": "Example University",
+        "startMonth": 6,
+        "startYear": 2023,
+    }
+
+    async def test_a_certification_and_a_language_are_added(self, store):
+        ed = FakeEditor()
+        s = service(ed, store)
+        cs = await s.propose(
+            entries(
+                ("certification", self.CERT),
+                (
+                    "language",
+                    {
+                        "name": "Kazakh",
+                        "proficiency": "Native or bilingual proficiency",
+                    },
+                ),
+            )
+        )
+        assert "+ New language: Kazakh\n" in cs["diff"]
+        out = await s.apply(cs["changeSetId"], confirm=True)
+        assert out["status"] == "APPLIED"
+        assert ed.writes == ["certification+Cloud Security Lab", "language+Kazakh"]
+
+    @pytest.mark.parametrize(
+        ("kind", "values", "reason"),
+        [
+            ("certification", {"name": "X"}, "is required"),
+            (
+                "certification",
+                {**CERT, "credentialUrl": "example.com/c"},
+                "must be an http(s) URL",
+            ),
+            (
+                "language",
+                {"proficiency": "Native or bilingual proficiency"},
+                "is required",
+            ),
+        ],
+    )
+    async def test_invalid_ones_are_refused(self, store, kind, values, reason):
+        problems = await problems_of(
+            service(FakeEditor(), store).propose(entries((kind, values)))
+        )
+        assert any(p["reason"] == reason for p in problems), problems
+
+    async def test_a_language_already_listed_is_refused(self, store):
+        ed = FakeEditor(entries={"language": [("1", {"name": "Kazakh"})]})
+        problems = await problems_of(
+            service(ed, store).propose(entries(("language", {"name": "Kazakh"})))
+        )
+        assert problems[0]["reason"].startswith("looks like an existing entry")
+
+
+class TestEntryEdits:
+    def editor(self) -> FakeEditor:
+        return FakeEditor(
+            entry_fields={
+                ("education", "7", "description"): "",
+                ("publication", "8", "url"): "https://doi.org/10.0000/old",
+            }
+        )
+
+    async def test_existing_entry_fields_are_updated_and_read_back(self, store):
+        from linkedin_mcp_server.profile_edit.service import EntryFieldEdit
+
+        ed = self.editor()
+        s = service(ed, store)
+        cs = await s.propose(
+            Proposal(
+                entry_edits=[
+                    EntryFieldEdit("education", "7", "description", "Focus: security"),
+                    EntryFieldEdit(
+                        "publication", "8", "url", "https://example.org/p/17"
+                    ),
+                ]
+            )
+        )
+        assert [c["before"] for c in cs["changes"]] == [
+            "",
+            "https://doi.org/10.0000/old",
+        ]
+        out = await s.apply(cs["changeSetId"], confirm=True)
+        assert out["status"] == "APPLIED"
+        assert (
+            ed.entry_fields[("publication", "8", "url")] == "https://example.org/p/17"
+        )
+
+    async def test_a_field_that_cannot_be_edited_is_refused(self, store):
+        from linkedin_mcp_server.profile_edit.service import EntryFieldEdit
+
+        with pytest.raises(ProfileEditError) as e:
+            await service(self.editor(), store).propose(
+                Proposal(entry_edits=[EntryFieldEdit("education", "7", "school", "X")])
+            )
+        assert e.value.code is ProfileEditErrorCode.UNSUPPORTED_FIELD
+
+    async def test_a_bad_url_is_refused(self, store):
+        from linkedin_mcp_server.profile_edit.service import EntryFieldEdit
+
+        with pytest.raises(ProfileEditError) as e:
+            await service(self.editor(), store).propose(
+                Proposal(
+                    entry_edits=[EntryFieldEdit("publication", "8", "url", "nope")]
+                )
+            )
+        assert e.value.code is ProfileEditErrorCode.VALIDATION_ERROR
+
+    async def test_a_field_changed_meanwhile_makes_it_stale(self, store):
+        from linkedin_mcp_server.profile_edit.service import EntryFieldEdit
+
+        ed = self.editor()
+        s = service(ed, store)
+        cs = await s.propose(
+            Proposal(entry_edits=[EntryFieldEdit("education", "7", "description", "A")])
+        )
+        ed.entry_fields[("education", "7", "description")] = "edited by hand"
+        with pytest.raises(ProfileEditError) as e:
+            await s.apply(cs["changeSetId"], confirm=True)
+        assert e.value.code is ProfileEditErrorCode.STALE_CHANGE_SET
+        assert ed.writes == []

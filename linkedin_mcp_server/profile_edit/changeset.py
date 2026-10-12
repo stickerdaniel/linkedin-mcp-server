@@ -210,7 +210,9 @@ def _validate_entry(
                 m = _DATE.match(value)
                 if not m or not (1 <= int(m[1]) <= 12 and 1 <= int(m[2]) <= 31):
                     problems.append({"field": where, "reason": "must be mm/dd/yyyy"})
-            if name == "url" and not re.match(r"^https?://\S+$", value):
+            if name in {"url", "credentialUrl"} and not re.match(
+                r"^https?://\S+$", value
+            ):
                 problems.append({"field": where, "reason": "must be an http(s) URL"})
             out[name] = value
     for spec in ENTRY_SPECS[req.kind]:
@@ -260,7 +262,11 @@ def _looks_like(
 
 def entry_label(kind: str, values: Mapping[str, Any]) -> str:
     primary = values.get(ENTRY_PRIMARY[kind], "")
-    secondary = values.get(ENTRY_SECONDARY[kind])
+    secondary = (
+        values.get(ENTRY_SECONDARY[kind])
+        if ENTRY_SECONDARY[kind] != ENTRY_PRIMARY[kind]
+        else None
+    )
     return f"New {kind}: {primary}" + (f" · {secondary}" if secondary else "")
 
 

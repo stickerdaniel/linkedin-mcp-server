@@ -413,8 +413,11 @@ class ProfileEditor:
                 ".map((a) => a.getAttribute('href').split('?')[0]))].slice(0, 40)"
             )
             return {"form": form, "url": self._page.url, "hrefs": hrefs}
-        if form == "intro":
-            urls: tuple[str, ...] = (sel.intro_form_url(vanity),)
+        if form.startswith("edit:"):
+            _, kind, entry_id = form.split(":", 2)
+            urls: tuple[str, ...] = sel.entry_form_urls(vanity, kind, entry_id)
+        elif form == "intro":
+            urls = (sel.intro_form_url(vanity),)
         elif form in sel.NEW_ENTRY_FORM_PATHS:
             urls = sel.new_entry_form_urls(vanity, form)
         else:
@@ -760,6 +763,79 @@ class ProfileEditor:
                 last = e
         assert last is not None
         raise last
+
+    async def _entry_field(
+        self, kind: str, entry_id: str, field: str
+    ) -> tuple[Locator, str]:
+        """Open an existing entry's edit form and return one labelled text field."""
+        urls = sel.entry_form_urls(await self._vanity_name(), kind, entry_id)
+        last: ProfileEditError | None = None
+        for url in urls:
+            try:
+                await self._open_dialog(url, f"{kind} {entry_id}")
+                await self._page.wait_for_timeout(_SETTLE_MS * 2)
+                return await self._labelled(kind, field, url), url
+            except ProfileEditError as e:
+                if e.code is not ProfileEditErrorCode.SELECTOR_NOT_FOUND:
+                    raise
+                last = e
+        assert last is not None
+        raise last
+
+    async def read_entry_field(self, kind: str, entry_id: str, field: str) -> TextField:
+        loc, _ = await self._entry_field(kind, entry_id, field)
+        return await self._read(loc)
+
+    async def write_entry_field(
+        self,
+        kind: str,
+        entry_id: str,
+        field: str,
+        *,
+        expected: str,
+        value: str,
+        dry_run: bool = False,
+    ) -> None:
+        """Replace one text field of an existing entry (education, publication).
+
+        The notify-your-network switch, where the form has one, is turned off
+        and confirmed off first, as for new entries.
+        """
+        loc, url = await self._entry_field(kind, entry_id, field)
+        dialog = self._dialog()
+        switches = dialog.locator(sel.NOTIFY_SWITCH)
+        handles = dialog.locator(sel.NOTIFY_SWITCH_HANDLE)
+        same = await handles.count() == await switches.count()
+        for i in range(await switches.count()):
+            await self._set_switch(
+                switches.nth(i),
+                False,
+                "notify-your-network switch",
+                handles.nth(i) if same else None,
+            )
+        current = normalize_text((await self._read(loc)).value)
+        if current != normalize_text(expected):
+            raise ProfileEditError(
+                ProfileEditErrorCode.STALE_CHANGE_SET,
+                f"The {kind} {field} no longer matches the change set; nothing was typed.",
+                expected=expected,
+                actual=current,
+            )
+        await loc.fill(value)
+        if field == "date":
+            await self._blur()
+        typed = normalize_text(await loc.input_value())
+        if typed != normalize_text(value):
+            raise ProfileEditError(
+                ProfileEditErrorCode.LINKEDIN_SAVE_FAILED,
+                f"The {kind} {field} field did not keep the approved value; nothing was saved.",
+                wanted=value,
+                got=typed,
+            )
+        if dry_run:
+            await self._leave_unsaved()
+            return
+        await self._save(f"{kind} {field}", url)
 
     async def read_organization(self, kind: str, entry_id: str) -> TextField:
         loc, _ = await self._organization_field(kind, entry_id)
