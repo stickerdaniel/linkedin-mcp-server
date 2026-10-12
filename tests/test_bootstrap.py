@@ -1899,13 +1899,19 @@ class TestTwoStageInstall:
 
         stood_down: list[str] = []
 
-        async def never_finishes(**_kwargs: object) -> None:
+        async def never_finishes(
+            *, activity_callback: Callable[[], None], **_kwargs: object
+        ) -> None:
+            # Shortened from inside setup, through the activity reschedule, so
+            # the readiness check before it, which runs in a thread as slowly
+            # as a loaded machine lets it, cannot spend the deadline first.
+            monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.01)
+            activity_callback()
             await asyncio.Event().wait()
 
         config = SimpleNamespace(browser=SimpleNamespace(chrome_path=None))
         monkeypatch.setattr(bootstrap, "get_config", lambda: config)
         monkeypatch.setattr(bootstrap, "_run_browser_setup", never_finishes)
-        monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.01)
         monkeypatch.setattr(bootstrap, "browser_setup_ready", lambda: False)
         monkeypatch.setattr(bootstrap, "process_role", lambda: ServerRole.OWNER)
         monkeypatch.setattr(
@@ -1920,12 +1926,15 @@ class TestTwoStageInstall:
         )
 
         initialize_bootstrap("managed")
-        await start_background_browser_setup_if_needed()
-
-        task = get_bootstrap_state().setup_task
-        assert task is not None
-        with pytest.raises(BrowserSetupFailedError, match="background deadline"):
-            await task
+        # The deadline set at start is the real one, half an hour; only the
+        # reschedule above shortens it. If that stops working, this fails
+        # here, and the timeout cancels the task with it.
+        async with asyncio.timeout(30):
+            await start_background_browser_setup_if_needed()
+            task = get_bootstrap_state().setup_task
+            assert task is not None
+            with pytest.raises(BrowserSetupFailedError, match="background deadline"):
+                await task
         assert not bootstrap.browser_setup_in_progress()
         assert stood_down == []
         with pytest.raises(BrowserSetupFailedError, match="background deadline"):
