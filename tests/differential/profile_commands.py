@@ -82,7 +82,7 @@ import codecs
 import os
 import re
 import secrets
-import select
+import selectors
 import signal
 import sqlite3
 import subprocess
@@ -547,7 +547,14 @@ class TerminalCommand:
         self._reader = threading.Thread(
             target=self._read, name=f"profile command {self.label}", daemon=True
         )
-        self._reader.start()
+        try:
+            self._reader.start()
+        except BaseException:
+            # Only the reader closes the slave it keeps.
+            if self._slave is not None:
+                os.close(self._slave)
+                self._slave = None
+            raise
 
     def _read(self) -> None:
         """Every byte until the output ends: EOF, or on Linux ``EIO`` once the
@@ -592,8 +599,11 @@ class TerminalCommand:
         # Popen's own poll, safe from this thread; the harness's ``_poll``
         # still stamps the exit when it sees it.
         exited = self.process.poll() is not None
-        if select.select([self._fd], [], [], DRAIN_POLL_SECONDS)[0]:
-            return False
+        # A selector, since ``select()`` refuses descriptor numbers past 1023.
+        with selectors.DefaultSelector() as queue:
+            queue.register(self._fd, selectors.EVENT_READ)
+            if queue.select(DRAIN_POLL_SECONDS):
+                return False
         if exited:
             os.close(self._slave)
             self._slave = None
