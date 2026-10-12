@@ -808,18 +808,45 @@ def test_a_root_reaped_after_the_listing_is_gone_not_unreadable(tmp_path):
     assert ends == {"browser-root": "unexpected", "driver": "alive-at-stop"}
 
 
-def test_a_sample_cut_short_by_the_stop_does_not_outweigh_the_closing_one(tmp_path):
+def _unreadable(pid: int) -> Any:
+    def status() -> str:
+        raise psutil.AccessDenied(pid)
+
+    return status
+
+
+_RUNNING = SimpleNamespace(
+    children=lambda recursive: [_listed(4141, lambda: "running")]
+)
+_UNREADABLE = SimpleNamespace(
+    children=lambda recursive: [_listed(4141, _unreadable(4141))]
+)
+
+
+@pytest.mark.parametrize(
+    ("first", "last", "ended"),
+    [
+        # A routine sample the stop request cut short, then the closing one.
+        ((_RUNNING, time.monotonic() - 1), (_RUNNING, None), "alive-at-stop"),
+        # An earlier sample that could not read the driver, then one that did.
+        ((_UNREADABLE, None), (_RUNNING, None), "alive-at-stop"),
+        # The driver seen alive, then a closing sample that could not read it.
+        ((_RUNNING, None), (_UNREADABLE, None), "unknown"),
+    ],
+    ids=["cut-short-then-read", "unreadable-then-read", "read-then-unreadable"],
+)
+def test_only_the_closing_sample_says_whether_a_process_is_alive(
+    tmp_path, first, last, ended
+):
     lifetimes = LifetimeSampler(
-        tmp_path / BROWSER_LIFETIMES_FILE, profile=tmp_path / "profile", label="cut"
+        tmp_path / BROWSER_LIFETIMES_FILE, profile=tmp_path / "profile", label="last"
     )
     lifetimes._track((4141, 1.0), "driver", 0.0)
-    me = SimpleNamespace(children=lambda recursive: [_listed(4141, lambda: "running")])
-    # A routine sample the stop request cut short, then the closing sample.
-    lifetimes._sample(psutil, me, deadline=time.monotonic() - 1)
-    lifetimes._sample(psutil, me)
+    for me, deadline in (first, last):
+        lifetimes._sample(psutil, me, deadline=deadline)
     lifetimes.stop(exc=None, requested={})
     (driver,) = _record(tmp_path / BROWSER_LIFETIMES_FILE)["processes"]
-    assert driver["ended"] == "alive-at-stop"
+    assert driver["ended"] == ended
 
 
 def test_the_origin_record_drops_the_query(tmp_path):
