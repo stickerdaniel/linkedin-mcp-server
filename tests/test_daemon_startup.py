@@ -26,7 +26,7 @@ from test_daemon_config import _Frontend, _greeting
 
 import linkedin_mcp_server
 import linkedin_mcp_server.daemon.descriptor as daemon_descriptor
-import linkedin_mcp_server.daemon.election as election_module
+import linkedin_mcp_server.daemon.spawn as spawn_module
 import zipfile
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon import config as daemon_config
@@ -544,7 +544,7 @@ class _StandIns:
             _await_imports(child, self.out / "imported")
             return child
 
-        monkeypatch.setattr(election_module.subprocess, "Popen", substitute)
+        monkeypatch.setattr(spawn_module.subprocess, "Popen", substitute)
 
     def received(self) -> list[str]:
         """The kinds of the frames the stand-in read after HELLO."""
@@ -615,7 +615,7 @@ class TestARealChildIsRefused:
         stand_ins.mode, stand_ins.fault = mode, fault
         began = time.monotonic()
         try:
-            outcome = election_module._spawn(
+            outcome = spawn_module._spawn(
                 profile.parent,
                 config,
                 timeout=self._BUDGET,
@@ -647,7 +647,7 @@ class TestARealChildIsRefused:
         stand_ins = _StandIns(tmp_path, monkeypatch)
         stand_ins.mode = mode
         try:
-            outcome = election_module._spawn(
+            outcome = spawn_module._spawn(
                 profile.parent,
                 config,
                 timeout=0.5,
@@ -701,7 +701,7 @@ class TestRefusedBeforeSpawning:
     @pytest.fixture
     def no_child(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
-            election_module.subprocess,
+            spawn_module.subprocess,
             "Popen",
             lambda *a, **k: pytest.fail("a child was started for a refused start"),
         )
@@ -746,7 +746,7 @@ class TestRefusedBeforeSpawning:
         config = _config(profile)
 
         assert (
-            election_module._spawn(
+            spawn_module._spawn(
                 profile.parent,
                 config,
                 timeout=5.0,
@@ -764,7 +764,7 @@ class TestRefusedBeforeSpawning:
         config.browser.proxy_bypass = "x" * startup.MAX_FRAME_BYTES
 
         assert (
-            election_module._spawn(
+            spawn_module._spawn(
                 profile.parent,
                 config,
                 timeout=5.0,

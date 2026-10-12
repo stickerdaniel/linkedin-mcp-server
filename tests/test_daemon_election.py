@@ -40,6 +40,7 @@ import linkedin_mcp_server.daemon.discovery as daemon_module
 import linkedin_mcp_server.daemon.config as daemon_config
 import linkedin_mcp_server.daemon.descriptor as daemon_descriptor_module
 import linkedin_mcp_server.daemon.election as election_module
+import linkedin_mcp_server.daemon.spawn as spawn_module
 from linkedin_mcp_server.daemon.core import election as election_core
 import linkedin_mcp_server.daemon.owner as daemon_owner
 from linkedin_mcp_server import __version__
@@ -444,7 +445,7 @@ class TestLiveness:
         # A real start would key its state under the account's own home, out of
         # this test's reach. Failing it leaves the dead endpoint the only one.
         monkeypatch.setattr(
-            election_module, "_start_owner", lambda *a, **k: Attempt.FAILED
+            spawn_module, "_start_owner", lambda *a, **k: Attempt.FAILED
         )
 
         probes: list[Attachment] = []
@@ -597,7 +598,7 @@ class TestSilenceIsNotDeath:
         # so model its ordinary contention verdict directly rather than starting a
         # real subprocess from this isolated in-process state root.
         monkeypatch.setattr(
-            election_module,
+            spawn_module,
             "_start_owner",
             lambda *a, **k: Attempt.CONTENDED,
         )
@@ -662,7 +663,7 @@ class TestSilenceIsNotDeath:
         # A real start would key its state under the account's own home, out of
         # this test's reach. Failing it leaves the buried endpoint the only one.
         monkeypatch.setattr(
-            election_module, "_start_owner", lambda *a, **k: Attempt.FAILED
+            spawn_module, "_start_owner", lambda *a, **k: Attempt.FAILED
         )
 
         probes: list[Attachment] = []
@@ -703,7 +704,7 @@ class TestSilenceIsNotDeath:
         # for it under the account's own home, find none, and leave its state
         # there instead.
         monkeypatch.setattr(
-            election_module, "_start_owner", lambda *a, **k: Attempt.CONTENDED
+            spawn_module, "_start_owner", lambda *a, **k: Attempt.CONTENDED
         )
         try:
             began = time.monotonic()
@@ -770,7 +771,7 @@ class TestRetryPacing:
         monkeypatch.setattr(daemon_module, "_inspect", inspect)
         monkeypatch.setattr(election_module, "_live_lookup", live_lookup)
         monkeypatch.setattr(
-            election_module, "_start_owner", lambda *a, **k: Attempt.FAILED
+            spawn_module, "_start_owner", lambda *a, **k: Attempt.FAILED
         )
         # One start, then nothing but backoff for the rest of the budget. That
         # window is where the spin lived: no start is due, so every pass through
@@ -856,7 +857,7 @@ class TestRetryPacing:
                 else (Reach.ANSWERED)
             )
 
-        monkeypatch.setattr(election_module, "_start_owner", replace_after_burial)
+        monkeypatch.setattr(spawn_module, "_start_owner", replace_after_burial)
         monkeypatch.setattr(election_module, "_OWNER_START_BURST", 1)
         monkeypatch.setattr(election_module, "_OWNER_START_RETRY_SECONDS", 30.0)
         monkeypatch.setattr(election_module, "_MAX_OWNER_START_RETRY_SECONDS", 30.0)
@@ -922,7 +923,7 @@ class TestFailingFast:
             attempts += 1
             return Attempt.FAILED
 
-        monkeypatch.setattr(election_module, "_start_owner", fail)
+        monkeypatch.setattr(spawn_module, "_start_owner", fail)
         monkeypatch.setattr(election_module, "_OWNER_START_BURST", 1)
         monkeypatch.setattr(election_module, "_OWNER_START_RETRY_SECONDS", 0.05)
         monkeypatch.setattr(election_module, "_MAX_OWNER_START_RETRY_SECONDS", 0.2)
@@ -971,7 +972,7 @@ class TestFailingFast:
             attempts += 1
             raise refusal
 
-        monkeypatch.setattr(election_module, "_start_owner", refuse)
+        monkeypatch.setattr(spawn_module, "_start_owner", refuse)
         # Paced as the neighbouring test paces it, so a version that retried
         # would get several attempts inside this budget rather than one.
         monkeypatch.setattr(election_module, "_OWNER_START_BURST", 1)
@@ -1014,7 +1015,7 @@ class TestFailingFast:
         monkeypatch.setattr(daemon_module, "_inspect", inspect)
         monkeypatch.setattr(daemon_module, "_DESCRIPTOR_READ_SECONDS", 0.01)
         monkeypatch.setattr(
-            election_module, "_start_owner", lambda *a, **k: Attempt.FAILED
+            spawn_module, "_start_owner", lambda *a, **k: Attempt.FAILED
         )
         try:
             outcome = obtain_owner(
@@ -1091,7 +1092,7 @@ class TestFailingFast:
 
         monkeypatch.setattr(daemon_module, "_inspect", inspect)
         monkeypatch.setattr(daemon_module, "_DESCRIPTOR_READ_SECONDS", 0.01)
-        monkeypatch.setattr(election_module, "_start_owner", start)
+        monkeypatch.setattr(spawn_module, "_start_owner", start)
         try:
             outcome = obtain_owner(
                 profile.parent,
@@ -1166,7 +1167,7 @@ class TestFailingFast:
             daemon_module._DescriptorInspector, "inspect_until", inspect_until
         )
         monkeypatch.setattr(daemon_module, "_DESCRIPTOR_READ_SECONDS", 0.01)
-        monkeypatch.setattr(election_module, "_start_owner", start)
+        monkeypatch.setattr(spawn_module, "_start_owner", start)
         try:
             outcome = obtain_owner(
                 profile.parent,
@@ -1222,7 +1223,7 @@ class TestFailingFast:
             contender.release()
             return Attempt.STARTED
 
-        monkeypatch.setattr(election_module, "_start_owner", contend)
+        monkeypatch.setattr(spawn_module, "_start_owner", contend)
 
         began = time.monotonic()
         try:
@@ -1263,12 +1264,12 @@ class TestFailingFast:
             return False
 
         process: Any = _Child()
-        monkeypatch.setattr(election_module.time, "monotonic", lambda: clock[0])
+        monkeypatch.setattr(spawn_module.time, "monotonic", lambda: clock[0])
         monkeypatch.setattr(
-            election_module, "terminate_process_group", exhaust_group_budget
+            spawn_module, "terminate_process_group", exhaust_group_budget
         )
 
-        election_module._stop_child(process)
+        spawn_module._stop_child(process)
 
         assert waits == [0.0]
 
@@ -1305,12 +1306,12 @@ class TestFailingFast:
             sleepers.append(child)
             return child
 
-        monkeypatch.setattr(election_module.subprocess, "Popen", deaf)
+        monkeypatch.setattr(spawn_module.subprocess, "Popen", deaf)
 
         # Timed where it happens. The total cannot carry this: see the bound
         # below for what it costs and what it buys.
         stopping: list[float] = []
-        stop = election_module._stop_child
+        stop = spawn_module._stop_child
 
         def timed(
             child: subprocess.Popen[bytes],
@@ -1324,10 +1325,10 @@ class TestFailingFast:
             finally:
                 stopping.append(time.monotonic() - at)
 
-        monkeypatch.setattr(election_module, "_stop_child", timed)
+        monkeypatch.setattr(spawn_module, "_stop_child", timed)
 
         began = time.monotonic()
-        attempt = election_module._start_owner(
+        attempt = spawn_module._start_owner(
             auth_root,
             config,
             timeout=0.5,
@@ -1507,10 +1508,10 @@ class TestFailingFast:
             children.append(child)
             return child
 
-        monkeypatch.setattr(election_module.subprocess, "Popen", reports_failure)
+        monkeypatch.setattr(spawn_module.subprocess, "Popen", reports_failure)
 
         try:
-            attempt = election_module._start_owner(
+            attempt = spawn_module._start_owner(
                 auth_root,
                 config,
                 timeout=5.0,
@@ -1562,10 +1563,10 @@ class TestFailingFast:
             children.append(child)
             return child
 
-        monkeypatch.setattr(election_module.subprocess, "Popen", reports_failure)
+        monkeypatch.setattr(spawn_module.subprocess, "Popen", reports_failure)
 
         try:
-            attempt = election_module._start_owner(
+            attempt = spawn_module._start_owner(
                 auth_root,
                 config,
                 timeout=5.0,
@@ -1615,10 +1616,10 @@ class TestFailingFast:
             started.append(child)
             return child
 
-        monkeypatch.setattr(election_module.subprocess, "Popen", mute)
+        monkeypatch.setattr(spawn_module.subprocess, "Popen", mute)
 
         began = time.monotonic()
-        attempt = election_module._start_owner(
+        attempt = spawn_module._start_owner(
             auth_root,
             config,
             timeout=0.5,
@@ -1686,7 +1687,7 @@ class TestFailingFast:
             attempts += 1
             return Attempt.CONTENDED
 
-        monkeypatch.setattr(election_module, "_start_owner", contended)
+        monkeypatch.setattr(spawn_module, "_start_owner", contended)
 
         started = time.monotonic()
         obtain_owner(
@@ -2059,18 +2060,18 @@ class TestWindowsAtomicOwnerHandoff:
     def test_owner_requests_breakaway_from_the_host_job(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        monkeypatch.setattr(election_module, "_IS_WINDOWS", True)
+        monkeypatch.setattr(spawn_module, "_IS_WINDOWS", True)
         monkeypatch.setattr(
-            election_module.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x1, raising=False
+            spawn_module.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x1, raising=False
         )
         monkeypatch.setattr(
-            election_module.subprocess, "DETACHED_PROCESS", 0x2, raising=False
+            spawn_module.subprocess, "DETACHED_PROCESS", 0x2, raising=False
         )
         monkeypatch.setattr(
-            election_module.subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x4, raising=False
+            spawn_module.subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x4, raising=False
         )
 
-        assert election_module._detachment_flags() == 0x7
+        assert spawn_module._detachment_flags() == 0x7
 
     class _Stream:
         closed = False
@@ -2229,42 +2230,40 @@ class TestWindowsAtomicOwnerHandoff:
             return committed
 
         monkeypatch.setattr(
-            election_module, "os", SimpleNamespace(name="nt", environ=os.environ)
+            spawn_module, "os", SimpleNamespace(name="nt", environ=os.environ)
         )
-        monkeypatch.setattr(election_module, "WindowsJob", _Job)
+        monkeypatch.setattr(spawn_module, "WindowsJob", _Job)
         monkeypatch.setattr(startup, "FrontendChannel", _Channel)
-        monkeypatch.setattr(election_module, "release_nonce", lambda: "nonce")
-        monkeypatch.setattr(election_module, "new_nonce", make_handshake_nonce)
-        monkeypatch.setattr(election_module, "windows_gate_command", gate)
-        monkeypatch.setattr(election_module.subprocess, "Popen", popen)
-        monkeypatch.setattr(election_module, "release_windows_gate", release)
-        monkeypatch.setattr(election_module, "_detachment_flags", lambda: 0)
-        monkeypatch.setattr(election_module, "_greet", greet)
-        monkeypatch.setattr(election_module, "_hand_over_config", hand_over)
-        monkeypatch.setattr(election_module, "_await_prepared", prepared)
+        monkeypatch.setattr(spawn_module, "release_nonce", lambda: "nonce")
+        monkeypatch.setattr(spawn_module, "new_nonce", make_handshake_nonce)
+        monkeypatch.setattr(spawn_module, "windows_gate_command", gate)
+        monkeypatch.setattr(spawn_module.subprocess, "Popen", popen)
+        monkeypatch.setattr(spawn_module, "release_windows_gate", release)
+        monkeypatch.setattr(spawn_module, "_detachment_flags", lambda: 0)
+        monkeypatch.setattr(spawn_module, "_greet", greet)
+        monkeypatch.setattr(spawn_module, "_hand_over_config", hand_over)
+        monkeypatch.setattr(spawn_module, "_await_prepared", prepared)
         monkeypatch.setattr(
-            election_module, "_resolve_profile_until", lambda path, timeout: profile
+            spawn_module, "_resolve_profile_until", lambda path, timeout: profile
         )
-        monkeypatch.setattr(election_module, "_validate_prepared_until", validate)
-        monkeypatch.setattr(election_module, "_send_commit", send_commit)
-        monkeypatch.setattr(election_module, "_await_committed", await_committed)
+        monkeypatch.setattr(spawn_module, "_validate_prepared_until", validate)
+        monkeypatch.setattr(spawn_module, "_send_commit", send_commit)
+        monkeypatch.setattr(spawn_module, "_await_committed", await_committed)
+        monkeypatch.setattr(spawn_module, "_report_child_failure", lambda report: None)
+        monkeypatch.setattr(spawn_module, "_reap", lambda process: None)
         monkeypatch.setattr(
-            election_module, "_report_child_failure", lambda report: None
-        )
-        monkeypatch.setattr(election_module, "_reap", lambda process: None)
-        monkeypatch.setattr(
-            election_module,
+            spawn_module,
             "_discard_prepared_until",
             lambda *args, **kwargs: events.append("discard"),
         )
         if settlement is not None:
             monkeypatch.setattr(
-                election_module,
+                spawn_module,
                 "_settle_commit_result",
                 lambda *args, **kwargs: (events.append("settle"), settlement)[1],
             )
 
-        outcome = election_module._spawn(
+        outcome = spawn_module._spawn(
             profile.parent,
             config,
             timeout=1.0,
@@ -2329,7 +2328,7 @@ class TestWindowsAtomicOwnerHandoff:
             def terminate(self) -> None:  # pragma: no cover - unassigned
                 raise AssertionError("an unassigned Job was terminated")
 
-        election_module._stop_child(
+        spawn_module._stop_child(
             cast(Any, _Child()), windows_job=cast(Any, _Job()), assigned=False
         )
 
@@ -2392,7 +2391,7 @@ class TestWindowsAtomicOwnerHandoff:
                 assert child._handle.closed
                 events.append("drain-job")
 
-        election_module._stop_child(
+        spawn_module._stop_child(
             cast(Any, child), windows_job=cast(Any, _Job()), assigned=True
         )
 
@@ -2445,7 +2444,7 @@ class TestWindowsAtomicOwnerHandoff:
                 events.append("close-job")
 
         with pytest.raises(ProcessTreeError):
-            election_module._stop_child(
+            spawn_module._stop_child(
                 cast(Any, _Child()), windows_job=cast(Any, _Job()), assigned=True
             )
 
@@ -2532,12 +2531,12 @@ class TestSpawnCleanupBoundary:
             stopped.append(pid)
             return True
 
-        monkeypatch.setattr(election_module.subprocess, "Popen", lambda *a, **k: child)
-        monkeypatch.setattr(election_module, "_BootstrapReport", refuse)
-        monkeypatch.setattr(election_module, "terminate_process_group", stop)
+        monkeypatch.setattr(spawn_module.subprocess, "Popen", lambda *a, **k: child)
+        monkeypatch.setattr(spawn_module, "_BootstrapReport", refuse)
+        monkeypatch.setattr(spawn_module, "terminate_process_group", stop)
 
         with pytest.raises(RuntimeError, match="start new thread"):
-            election_module._spawn(
+            spawn_module._spawn(
                 profile.parent,
                 config,
                 timeout=5.0,
@@ -2572,8 +2571,8 @@ class TestAtomicStartupCommit:
             cast(Any, child).kill()
             return True
 
-        monkeypatch.setattr(election_module, "terminate_process_group", stop)
-        monkeypatch.setattr(election_module, "new_nonce", lambda: _HANDSHAKE_NONCE)
+        monkeypatch.setattr(spawn_module, "terminate_process_group", stop)
+        monkeypatch.setattr(spawn_module, "new_nonce", lambda: _HANDSHAKE_NONCE)
 
     class _Input(io.BytesIO):
         def __init__(self) -> None:
@@ -2678,7 +2677,7 @@ class TestAtomicStartupCommit:
             # Strict: production clamps to ``_STOP_CHILD_SECONDS`` before this
             # call (#874). A ULP overshoot must not be absorbed here — that
             # would let the clamp be deleted without failing any test.
-            assert timeout <= election_module._STOP_CHILD_SECONDS
+            assert timeout <= spawn_module._STOP_CHILD_SECONDS
             self.steps.append("drain")
             self.drained = True
             self.closed = True
@@ -2706,7 +2705,7 @@ class TestAtomicStartupCommit:
                 created.append(job)
                 return job
 
-        monkeypatch.setattr(election_module, "WindowsJob", _Injected)
+        monkeypatch.setattr(spawn_module, "WindowsJob", _Injected)
         return created
 
     def _spawn(
@@ -2723,7 +2722,7 @@ class TestAtomicStartupCommit:
         child = self._Child(instance_id, final)
         events: list[str] = []
 
-        monkeypatch.setattr(election_module.subprocess, "Popen", lambda *a, **k: child)
+        monkeypatch.setattr(spawn_module.subprocess, "Popen", lambda *a, **k: child)
         monkeypatch.setattr(
             election_module.daemon_descriptor, "validate_prepared", validate
         )
@@ -2743,7 +2742,7 @@ class TestAtomicStartupCommit:
             lambda root: tmp_path / "daemon.log",
         )
 
-        outcome = election_module._spawn(
+        outcome = spawn_module._spawn(
             profile.parent,
             config,
             timeout=1.0,
@@ -2787,7 +2786,7 @@ class TestAtomicStartupCommit:
                 "daemon_log_path",
                 lambda root: pytest.fail("failure reporting touched daemon state"),
             )
-        election_module._report_child_failure(election_module._BootstrapReport(stream))
+        spawn_module._report_child_failure(spawn_module._BootstrapReport(stream))
 
         assert message in caplog.text
         assert secret not in caplog.text
@@ -2837,8 +2836,8 @@ class TestAtomicStartupCommit:
             ).encode()
         )
 
-        election_module._report_child_failure(
-            election_module._BootstrapReport(stream, handshake_nonce=_HANDSHAKE_NONCE)
+        spawn_module._report_child_failure(
+            spawn_module._BootstrapReport(stream, handshake_nonce=_HANDSHAKE_NONCE)
         )
 
         assert "The daemon could not start; inspect the daemon log" in caplog.text
@@ -2858,8 +2857,8 @@ class TestAtomicStartupCommit:
             ).encode()
         )
 
-        election_module._report_child_failure(
-            election_module._BootstrapReport(stream, handshake_nonce=_HANDSHAKE_NONCE)
+        spawn_module._report_child_failure(
+            spawn_module._BootstrapReport(stream, handshake_nonce=_HANDSHAKE_NONCE)
         )
 
         assert "inspect the daemon log at" not in caplog.text
@@ -2882,7 +2881,7 @@ class TestAtomicStartupCommit:
         write end from outside. It sits above the ceiling, so it ends the test
         rather than rescuing the implementation.
         """
-        monkeypatch.setattr(election_module, "_FAILURE_VERDICT_SECONDS", 30.0)
+        monkeypatch.setattr(spawn_module, "_FAILURE_VERDICT_SECONDS", 30.0)
         reader_fd, writer_fd = os.pipe()
         closed = threading.Lock()
         opened = [writer_fd]
@@ -2893,7 +2892,7 @@ class TestAtomicStartupCommit:
                     os.close(opened.pop())
 
         stream = os.fdopen(reader_fd, "rb", buffering=0)
-        report = election_module._BootstrapReport(stream)
+        report = spawn_module._BootstrapReport(stream)
         fallback = threading.Timer(_BOUNDED_CALL_SECONDS * 2, close_the_write_end)
         fallback.start()
         started = time.monotonic()
@@ -2926,7 +2925,7 @@ class TestAtomicStartupCommit:
                 self.closed = True
 
         stream = _NoisyStream()
-        report = election_module._BootstrapReport(cast(Any, stream))
+        report = spawn_module._BootstrapReport(cast(Any, stream))
         try:
             for _ in range(500):
                 if not stream.chunks:
@@ -2948,7 +2947,7 @@ class TestAtomicStartupCommit:
             terminate_process_group as stop_group,
         )
 
-        monkeypatch.setattr(election_module, "terminate_process_group", stop_group)
+        monkeypatch.setattr(spawn_module, "terminate_process_group", stop_group)
         child = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(600)"],
             stdin=subprocess.DEVNULL,
@@ -2957,7 +2956,7 @@ class TestAtomicStartupCommit:
             start_new_session=True,
         )
         try:
-            election_module._stop_child(child)
+            spawn_module._stop_child(child)
 
             assert child.poll() is not None, "the stopped child remained alive"
         finally:
@@ -2971,9 +2970,9 @@ class TestAtomicStartupCommit:
         profile = _profile(tmp_path)
         config = _config(profile)
         child = self._Child(new_instance_id())
-        monkeypatch.setattr(election_module.subprocess, "Popen", lambda *a, **k: child)
+        monkeypatch.setattr(spawn_module.subprocess, "Popen", lambda *a, **k: child)
         monkeypatch.setattr(
-            election_module,
+            spawn_module,
             "_hand_over_config",
             lambda *a, **k: (_ for _ in ()).throw(BrokenPipeError()),
         )
@@ -2983,7 +2982,7 @@ class TestAtomicStartupCommit:
             lambda root: tmp_path / "daemon.log",
         )
 
-        outcome = election_module._spawn(
+        outcome = spawn_module._spawn(
             profile.parent,
             config,
             timeout=1.0,
@@ -3006,9 +3005,9 @@ class TestAtomicStartupCommit:
         instance_id = new_instance_id()
         child = self._Child(instance_id)
         discarded: list[str] = []
-        monkeypatch.setattr(election_module.subprocess, "Popen", lambda *a, **k: child)
+        monkeypatch.setattr(spawn_module.subprocess, "Popen", lambda *a, **k: child)
         monkeypatch.setattr(
-            election_module,
+            spawn_module,
             "_hand_over_config",
             lambda *a, **k: (_ for _ in ()).throw(failure),
         )
@@ -3019,7 +3018,7 @@ class TestAtomicStartupCommit:
         )
 
         config = _config(profile)
-        outcome = election_module._spawn(
+        outcome = spawn_module._spawn(
             profile.parent,
             config,
             timeout=1.0,
@@ -3040,9 +3039,9 @@ class TestAtomicStartupCommit:
         child.stdout = io.BytesIO(
             _owner_says(_HANDSHAKE_NONCE, (startup.VERDICT, {"status": startup.RETRY}))
         )
-        monkeypatch.setattr(election_module.subprocess, "Popen", lambda *a, **k: child)
+        monkeypatch.setattr(spawn_module.subprocess, "Popen", lambda *a, **k: child)
         monkeypatch.setattr(
-            election_module,
+            spawn_module,
             "_hand_over_config",
             lambda *a, **k: (_ for _ in ()).throw(BrokenPipeError()),
         )
@@ -3053,7 +3052,7 @@ class TestAtomicStartupCommit:
         )
 
         config = _config(profile)
-        outcome = election_module._spawn(
+        outcome = spawn_module._spawn(
             profile.parent,
             config,
             timeout=1.0,
@@ -3071,9 +3070,9 @@ class TestAtomicStartupCommit:
         profile = _profile(tmp_path)
         config = _config(profile)
         child = self._Child(new_instance_id())
-        monkeypatch.setattr(election_module.subprocess, "Popen", lambda *a, **k: child)
+        monkeypatch.setattr(spawn_module.subprocess, "Popen", lambda *a, **k: child)
         monkeypatch.setattr(
-            election_module,
+            spawn_module,
             "_await_prepared",
             lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()),
         )
@@ -3084,7 +3083,7 @@ class TestAtomicStartupCommit:
         )
 
         with pytest.raises(KeyboardInterrupt):
-            election_module._spawn(
+            spawn_module._spawn(
                 profile.parent,
                 config,
                 timeout=1.0,
@@ -3140,21 +3139,21 @@ class TestAtomicStartupCommit:
 
             def wait_until_empty(self, *, timeout: float) -> None:
                 seen.append(timeout)
-                assert timeout <= election_module._STOP_CHILD_SECONDS
+                assert timeout <= spawn_module._STOP_CHILD_SECONDS
 
         now = math.nextafter(256.0, 0.0)
-        unclamped = (now + election_module._STOP_CHILD_SECONDS) - now
+        unclamped = (now + spawn_module._STOP_CHILD_SECONDS) - now
         assert unclamped == 2.0000000000000284
-        assert unclamped > election_module._STOP_CHILD_SECONDS
+        assert unclamped > spawn_module._STOP_CHILD_SECONDS
         monkeypatch.setattr(
-            election_module, "time", SimpleNamespace(monotonic=lambda: now)
+            spawn_module, "time", SimpleNamespace(monotonic=lambda: now)
         )
 
-        election_module._stop_child(
+        spawn_module._stop_child(
             cast(Any, _Child()), windows_job=cast(Any, _Job()), assigned=True
         )
 
-        assert seen == [election_module._STOP_CHILD_SECONDS]
+        assert seen == [spawn_module._STOP_CHILD_SECONDS]
 
     @pytest.mark.parametrize(
         ("wait_at", "drain_at", "wait_budget", "drain_budget"),
@@ -3187,12 +3186,12 @@ class TestAtomicStartupCommit:
 
         times = iter([100.0, wait_at, drain_at])
         monkeypatch.setattr(
-            election_module, "time", SimpleNamespace(monotonic=lambda: next(times))
+            spawn_module, "time", SimpleNamespace(monotonic=lambda: next(times))
         )
         monkeypatch.setattr(child, "wait", wait)
         monkeypatch.setattr(job, "wait_until_empty", drain)
 
-        election_module._stop_child(
+        spawn_module._stop_child(
             cast(Any, child), windows_job=cast(Any, job), assigned=True
         )
 
@@ -3203,12 +3202,12 @@ class TestAtomicStartupCommit:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         monkeypatch.setattr(
-            election_module,
+            spawn_module,
             "_validate_prepared_until",
             lambda *a, **k: (_ for _ in ()).throw(TimeoutError()),
         )
         monkeypatch.setattr(
-            election_module,
+            spawn_module,
             "_await_committed",
             lambda *a, **k: pytest.fail("an unauthorized child cannot commit"),
         )
@@ -3332,9 +3331,9 @@ class TestAtomicStartupCommit:
             calls.append(auth_root)
             return Started.YES
 
-        monkeypatch.setattr(election_module, "_spawn", spawn)
+        monkeypatch.setattr(spawn_module, "_spawn", spawn)
         monkeypatch.setattr(
-            election_module,
+            spawn_module,
             "DaemonLock",
             lambda root: pytest.fail("the parent constructed the daemon lock"),
             raising=False,
@@ -3346,7 +3345,7 @@ class TestAtomicStartupCommit:
         )
 
         config = _config(profile)
-        outcome = election_module._start_owner(
+        outcome = spawn_module._start_owner(
             profile.parent,
             config,
             timeout=1.0,
@@ -3399,7 +3398,7 @@ class TestAtomicStartupCommit:
             _await_fixture_imports(child, imported)
             return child
 
-        monkeypatch.setattr(election_module.subprocess, "Popen", capture)
+        monkeypatch.setattr(spawn_module.subprocess, "Popen", capture)
         monkeypatch.setattr(
             election_module.daemon_owner,
             "daemon_log_path",
@@ -3407,7 +3406,7 @@ class TestAtomicStartupCommit:
         )
         try:
             config = _config(profile)
-            outcome = election_module._start_owner(
+            outcome = spawn_module._start_owner(
                 auth_root,
                 config,
                 timeout=5.0,
@@ -3472,10 +3471,10 @@ class TestAtomicStartupCommit:
             _await_fixture_imports(child, imported)
             return child
 
-        monkeypatch.setattr(election_module.subprocess, "Popen", capture)
+        monkeypatch.setattr(spawn_module.subprocess, "Popen", capture)
         try:
             config = _config(profile)
-            outcome = election_module._start_owner(
+            outcome = spawn_module._start_owner(
                 auth_root,
                 config,
                 timeout=5.0,
@@ -3503,14 +3502,14 @@ class TestAtomicStartupCommit:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         monkeypatch.setattr(
-            election_module,
+            spawn_module,
             "_spawn",
             lambda *a, **k: Started.RETRY,
         )
 
         profile = _profile(tmp_path)
         config = _config(profile)
-        outcome = election_module._start_owner(
+        outcome = spawn_module._start_owner(
             tmp_path,
             config,
             timeout=1.0,
@@ -3525,13 +3524,13 @@ class TestAtomicStartupCommit:
         profile = _profile(tmp_path)
         config = _config(profile)
         monkeypatch.setattr(
-            election_module,
+            spawn_module,
             "_spawn",
             lambda *a, **k: Started.ABORTED,
         )
 
         assert (
-            election_module._start_owner(
+            spawn_module._start_owner(
                 profile.parent,
                 config,
                 timeout=1.0,
@@ -3550,9 +3549,9 @@ class TestAtomicStartupCommit:
         starts: list[bool] = []
         # This is the platform-neutral ABORTED branch. Windows exclusion gating
         # is orthogonal and would prevent the stub from reaching that branch.
-        monkeypatch.setattr(election_module, "_IS_WINDOWS", False)
+        monkeypatch.setattr(spawn_module, "_IS_WINDOWS", False)
         monkeypatch.setattr(
-            election_module,
+            spawn_module,
             "_start_owner",
             lambda *args, **kwargs: (
                 starts.append(True),
@@ -3580,7 +3579,7 @@ class TestAtomicStartupCommit:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         monkeypatch.setattr(
-            election_module,
+            spawn_module,
             "_send_commit",
             lambda *a, **k: (_ for _ in ()).throw(OSError("broken control pipe")),
         )
@@ -3609,14 +3608,14 @@ class TestAtomicStartupCommit:
         profile = _profile(tmp_path)
         config = _config(profile)
         child = self._Child(new_instance_id())
-        monkeypatch.setattr(election_module.subprocess, "Popen", lambda *a, **k: child)
+        monkeypatch.setattr(spawn_module.subprocess, "Popen", lambda *a, **k: child)
         monkeypatch.setattr(
             election_module.daemon_descriptor,
             "validate_prepared",
             lambda *a, **k: None,
         )
         monkeypatch.setattr(
-            election_module,
+            spawn_module,
             "_await_committed",
             lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()),
         )
@@ -3627,7 +3626,7 @@ class TestAtomicStartupCommit:
         )
 
         with pytest.raises(KeyboardInterrupt):
-            election_module._spawn(
+            spawn_module._spawn(
                 profile.parent,
                 config,
                 timeout=1.0,
@@ -3654,7 +3653,7 @@ class TestAtomicStartupCommit:
         # The generation the child committed before its verdict was lost.
         instance_id = _publish_stale_owner(profile.parent, profile, config)
         child = self._Child(instance_id, final="")
-        monkeypatch.setattr(election_module.subprocess, "Popen", lambda *a, **k: child)
+        monkeypatch.setattr(spawn_module.subprocess, "Popen", lambda *a, **k: child)
         monkeypatch.setattr(
             election_module.daemon_descriptor,
             "validate_prepared",
@@ -3666,7 +3665,7 @@ class TestAtomicStartupCommit:
             lambda root: tmp_path / "daemon.log",
         )
 
-        outcome = election_module._spawn(
+        outcome = spawn_module._spawn(
             profile.parent,
             config,
             timeout=1.0,
@@ -3691,7 +3690,7 @@ class TestAtomicStartupCommit:
             lambda *a, **k: pytest.fail("a potentially committed token was deleted"),
         )
 
-        outcome = election_module._settle_commit_result(
+        outcome = spawn_module._settle_commit_result(
             new_instance_id(),
             timeout=1.0,
             inspector=daemon_module._DescriptorInspector(
@@ -3719,7 +3718,7 @@ class TestAtomicStartupCommit:
             lambda *a, **k: pytest.fail("uncertain state was deleted"),
         )
 
-        outcome = election_module._settle_commit_result(
+        outcome = spawn_module._settle_commit_result(
             new_instance_id(),
             timeout=1.0,
             inspector=daemon_module._DescriptorInspector(
@@ -3751,7 +3750,7 @@ class TestAtomicStartupCommit:
         fallback.start()
         started = time.monotonic()
         try:
-            outcome = election_module._settle_commit_result(
+            outcome = spawn_module._settle_commit_result(
                 new_instance_id(),
                 timeout=0.01,
                 inspector=daemon_module._DescriptorInspector(
@@ -3787,7 +3786,7 @@ class TestAtomicStartupCommit:
         started = time.monotonic()
         try:
             with pytest.raises(TimeoutError, match="could not be read in time"):
-                election_module._validate_prepared_until(
+                spawn_module._validate_prepared_until(
                     tmp_path,
                     new_instance_id(),
                     profile=_profile(tmp_path),
@@ -3822,7 +3821,7 @@ class TestAtomicStartupCommit:
         started = time.monotonic()
         try:
             with pytest.raises(TimeoutError, match="could not be resolved in time"):
-                election_module._resolve_profile_until(
+                spawn_module._resolve_profile_until(
                     cast(Path, _BlockedProfile()), timeout=0.01
                 )
         finally:
@@ -3875,9 +3874,7 @@ class TestAtomicStartupCommit:
         bounded_elapsed = float("inf")
         try:
             with pytest.raises(TimeoutError, match="could not be removed in time"):
-                election_module._discard_prepared_until(
-                    auth_root, abandoned, timeout=0.01
-                )
+                spawn_module._discard_prepared_until(auth_root, abandoned, timeout=0.01)
             bounded_elapsed = time.monotonic() - started
             for path in replacement_paths:
                 path.write_text("replacement")
@@ -3966,13 +3963,13 @@ class TestAtomicStartupCommit:
         # Every wait here is bounded, so the mutation of leaving `child.stdin`
         # attached fails this case rather than hanging the suite.
         monkeypatch.setattr(
-            election_module, "os", SimpleNamespace(name="posix", environ=os.environ)
+            spawn_module, "os", SimpleNamespace(name="posix", environ=os.environ)
         )
         profile = _profile(tmp_path)
         config = _config(profile)
         pipe = self._StalledPipe()
         child = self._StalledChild(pipe)
-        monkeypatch.setattr(election_module.subprocess, "Popen", lambda *a, **k: child)
+        monkeypatch.setattr(spawn_module.subprocess, "Popen", lambda *a, **k: child)
         monkeypatch.setattr(
             election_module.daemon_owner,
             "daemon_log_path",
@@ -3984,7 +3981,7 @@ class TestAtomicStartupCommit:
         def run() -> None:
             try:
                 finished.append(
-                    election_module._spawn(
+                    spawn_module._spawn(
                         profile.parent,
                         config,
                         timeout=0.5,
@@ -4043,12 +4040,12 @@ class TestAtomicStartupCommit:
         # fixture fails here rather than only on Windows, where it would fail
         # seventeen cases at once.
         monkeypatch.setattr(
-            election_module, "os", SimpleNamespace(name="nt", environ=os.environ)
+            spawn_module, "os", SimpleNamespace(name="nt", environ=os.environ)
         )
         commands: list[list[str]] = []
-        build = election_module._spawn_command
+        build = spawn_module._spawn_command
         monkeypatch.setattr(
-            election_module,
+            spawn_module,
             "_spawn_command",
             lambda **kwargs: commands.append(build(**kwargs)) or commands[-1],
         )
@@ -4093,7 +4090,7 @@ class TestAtomicStartupCommit:
         from linkedin_mcp_server import process_tree as process_tree_module
 
         monkeypatch.setattr(
-            election_module, "os", SimpleNamespace(name="nt", environ=os.environ)
+            spawn_module, "os", SimpleNamespace(name="nt", environ=os.environ)
         )
 
         outcome, child, _ = self._spawn(
@@ -4691,12 +4688,13 @@ class TestRealOwner:
             "import sys\n"
             "from pathlib import Path\n"
             "import linkedin_mcp_server.daemon.election as election\n"
-            "real = election.subprocess.Popen\n"
+            "import linkedin_mcp_server.daemon.spawn as spawn\n"
+            "real = spawn.subprocess.Popen\n"
             "def substitute(command, **kwargs):\n"
             "    if command[-2:] != ['-m', 'linkedin_mcp_server.daemon.owner']:\n"
             "        return real(command, **kwargs)\n"
             "    return real([command[0], sys.argv[2], sys.argv[3], sys.argv[4]], **kwargs)\n"
-            "election.subprocess.Popen = substitute\n"
+            "spawn.subprocess.Popen = substitute\n"
             "from linkedin_mcp_server.config.schema import AppConfig\n"
             "profile = Path(sys.argv[1])\n"
             "config = AppConfig()\n"
@@ -5754,7 +5752,7 @@ class TestVersionSkew:
         inspect_command = (
             "import json, sys\n"
             f"sys.path[:0] = {import_paths!r}\n"
-            "from linkedin_mcp_server.daemon.election import _spawn_command\n"
+            "from linkedin_mcp_server.daemon.spawn import _spawn_command\n"
             "print(json.dumps(_spawn_command()))\n"
         )
         parent = subprocess.run(
@@ -5795,7 +5793,7 @@ class TestVersionSkew:
         inspect_command = (
             "import json, sys\n"
             f"sys.path[:0] = {import_paths!r}\n"
-            "from linkedin_mcp_server.daemon.election import _spawn_command\n"
+            "from linkedin_mcp_server.daemon.spawn import _spawn_command\n"
             "print(json.dumps(_spawn_command()))\n"
         )
 
@@ -5832,10 +5830,10 @@ class TestVersionSkew:
         # The real command, with `-m <module>` swapped for a `-c` that reports
         # which file that module resolved to. Everything before it, including the
         # interpreter and its flags, is exactly what production uses.
-        command = election_module._spawn_command()
+        command = spawn_module._spawn_command()
         assert command[-2:] == ["-m", "linkedin_mcp_server.daemon.owner"], command
         monkeypatch.setenv("PYTHONPATH", ".")
-        environment = election_module._owner_environment()
+        environment = spawn_module._owner_environment()
         assert "PYTHONPATH" not in environment
         result = subprocess.run(
             [
@@ -5868,7 +5866,7 @@ class TestVersionSkew:
         os_module.environ["PROXY_PASSWORD"] = "hunter2"
         os_module.environ["PROXY_USERNAME"] = "someone"
         try:
-            handed = election_module._owner_environment()
+            handed = spawn_module._owner_environment()
         finally:
             os_module.environ.clear()
             os_module.environ.update(original)
@@ -5977,42 +5975,42 @@ class TestBudgets:
             return Started.RETRY
 
         monkeypatch.setattr(
-            election_module,
+            spawn_module,
             "os",
             SimpleNamespace(name=platform, environ=os.environ),
         )
-        monkeypatch.setattr(election_module, "_IS_WINDOWS", platform == "nt")
+        monkeypatch.setattr(spawn_module, "_IS_WINDOWS", platform == "nt")
         if platform == "nt":
             monkeypatch.setattr(
-                election_module.subprocess,
+                spawn_module.subprocess,
                 "CREATE_NEW_PROCESS_GROUP",
                 0x1,
                 raising=False,
             )
             monkeypatch.setattr(
-                election_module.subprocess, "DETACHED_PROCESS", 0x2, raising=False
+                spawn_module.subprocess, "DETACHED_PROCESS", 0x2, raising=False
             )
             monkeypatch.setattr(
-                election_module.subprocess,
+                spawn_module.subprocess,
                 "CREATE_BREAKAWAY_FROM_JOB",
                 0x4,
                 raising=False,
             )
-        monkeypatch.setattr(election_module, "time", _Clock)
-        monkeypatch.setattr(election_module, "WindowsJob", _Job)
+        monkeypatch.setattr(spawn_module, "time", _Clock)
+        monkeypatch.setattr(spawn_module, "WindowsJob", _Job)
         monkeypatch.setattr(startup, "FrontendChannel", _Channel)
-        monkeypatch.setattr(election_module, "new_nonce", lambda: handshake_nonce)
+        monkeypatch.setattr(spawn_module, "new_nonce", lambda: handshake_nonce)
 
         def popen(*args: object, **kwargs: object) -> _Child:
             spawn_kwargs.update(kwargs)
             return child
 
-        monkeypatch.setattr(election_module.subprocess, "Popen", popen)
-        monkeypatch.setattr(election_module, "_greet", greet)
-        monkeypatch.setattr(election_module, "_hand_over_config", hand_over)
-        monkeypatch.setattr(election_module, "_await_prepared", await_prepared)
+        monkeypatch.setattr(spawn_module.subprocess, "Popen", popen)
+        monkeypatch.setattr(spawn_module, "_greet", greet)
+        monkeypatch.setattr(spawn_module, "_hand_over_config", hand_over)
+        monkeypatch.setattr(spawn_module, "_await_prepared", await_prepared)
 
-        verdict = election_module._spawn(
+        verdict = spawn_module._spawn(
             profile.parent,
             config,
             timeout=budget,
@@ -8277,9 +8275,9 @@ class TestElectionSettlement:
             clock[0] += 0.001
             return now
 
-        monkeypatch.setattr(election_module, "_IS_WINDOWS", False)
+        monkeypatch.setattr(spawn_module, "_IS_WINDOWS", False)
         monkeypatch.setattr(election_module, "_DescriptorInspector", Inspector)
-        monkeypatch.setattr(election_module, "_start_owner", finish)
+        monkeypatch.setattr(spawn_module, "_start_owner", finish)
         monkeypatch.setattr(election_module.time, "monotonic", monotonic)
         outcome = obtain_owner(
             profile.parent,
@@ -8318,9 +8316,9 @@ class TestElectionSettlement:
                 raise failure
             return failure
 
-        monkeypatch.setattr(election_module, "_IS_WINDOWS", False)
+        monkeypatch.setattr(spawn_module, "_IS_WINDOWS", False)
         monkeypatch.setattr(election_module, "_DescriptorInspector", Inspector)
-        monkeypatch.setattr(election_module, "_start_owner", finish)
+        monkeypatch.setattr(spawn_module, "_start_owner", finish)
         monkeypatch.setattr(election_module.time, "monotonic", lambda: clock[0])
         monkeypatch.setattr(
             election_module.time,
@@ -8370,9 +8368,9 @@ class TestElectionSettlement:
                 raise failure
             return failure
 
-        monkeypatch.setattr(election_module, "_IS_WINDOWS", False)
+        monkeypatch.setattr(spawn_module, "_IS_WINDOWS", False)
         monkeypatch.setattr(election_module, "_DescriptorInspector", Inspector)
-        monkeypatch.setattr(election_module, "_start_owner", finish)
+        monkeypatch.setattr(spawn_module, "_start_owner", finish)
         monkeypatch.setattr(election_module.time, "monotonic", lambda: clock[0])
         monkeypatch.setattr(
             election_module.time,
@@ -8417,9 +8415,9 @@ class TestElectionSettlement:
             clock[0] = 90.0
             return Attempt.CONTENDED
 
-        monkeypatch.setattr(election_module, "_IS_WINDOWS", False)
+        monkeypatch.setattr(spawn_module, "_IS_WINDOWS", False)
         monkeypatch.setattr(election_module, "_DescriptorInspector", Inspector)
-        monkeypatch.setattr(election_module, "_start_owner", exhaust_active_budget)
+        monkeypatch.setattr(spawn_module, "_start_owner", exhaust_active_budget)
         monkeypatch.setattr(election_module.time, "monotonic", lambda: clock[0])
         monkeypatch.setattr(
             election_module.time,
@@ -8446,7 +8444,7 @@ class TestElectionSettlement:
         config = _config(profile)
         _publish_stale_owner(profile.parent, profile, config, package_version="1.0.0")
         monkeypatch.setattr(
-            election_module,
+            spawn_module,
             "_start_owner",
             lambda *a, **k: pytest.fail("settlement started an owner"),
         )
@@ -8533,7 +8531,7 @@ class TestElectionSettlement:
 
         monkeypatch.setattr(election_module, "_DescriptorInspector", build_inspector)
         monkeypatch.setattr(
-            election_module, "_start_owner", lambda *a, **k: Attempt.CONTENDED
+            spawn_module, "_start_owner", lambda *a, **k: Attempt.CONTENDED
         )
         obtain_owner(
             profile.parent,
@@ -8564,7 +8562,7 @@ class TestElectionSettlement:
         monkeypatch.setattr(daemon_module, "_inspect", inspect)
         monkeypatch.setattr(daemon_module, "_DESCRIPTOR_READ_SECONDS", 0.005)
         monkeypatch.setattr(
-            election_module, "_start_owner", lambda *a, **k: Attempt.CONTENDED
+            spawn_module, "_start_owner", lambda *a, **k: Attempt.CONTENDED
         )
         try:
             outcome = obtain_owner(
@@ -8605,7 +8603,7 @@ class TestElectionSettlement:
             clock[0] += 0.001
             return now
 
-        monkeypatch.setattr(election_module, "_IS_WINDOWS", False)
+        monkeypatch.setattr(spawn_module, "_IS_WINDOWS", False)
         monkeypatch.setattr(election_module, "_DescriptorInspector", Inspector)
         monkeypatch.setattr(election_module.time, "monotonic", monotonic)
         monkeypatch.setattr(
@@ -8656,7 +8654,7 @@ class TestElectionSettlement:
             clock[0] += 0.001
             return now
 
-        monkeypatch.setattr(election_module, "_IS_WINDOWS", False)
+        monkeypatch.setattr(spawn_module, "_IS_WINDOWS", False)
         monkeypatch.setattr(election_module, "_DescriptorInspector", Inspector)
         monkeypatch.setattr(election_module.time, "monotonic", monotonic)
         monkeypatch.setattr(
@@ -8733,9 +8731,9 @@ class TestElectionSettlement:
             "sleep",
             lambda seconds: clock.__setitem__(0, clock[0] + seconds),
         )
-        monkeypatch.setattr(election_module, "_IS_WINDOWS", False)
+        monkeypatch.setattr(spawn_module, "_IS_WINDOWS", False)
         monkeypatch.setattr(election_module, "_DescriptorInspector", Inspector)
-        monkeypatch.setattr(election_module, "_start_owner", start)
+        monkeypatch.setattr(spawn_module, "_start_owner", start)
 
         outcome = obtain_owner(
             profile.parent,
@@ -9033,7 +9031,7 @@ class TestAnOwnerThisBuildMayOnlyControl:
             contended.append("the lock")
             return Attempt.CONTENDED
 
-        monkeypatch.setattr(election_module, "_start_owner", start)
+        monkeypatch.setattr(spawn_module, "_start_owner", start)
 
         def connect(attachment: Attachment, _timeout: float) -> Reach:
             probed.append(attachment.descriptor.instance_id)

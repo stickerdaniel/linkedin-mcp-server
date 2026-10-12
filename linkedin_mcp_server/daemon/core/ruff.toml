@@ -35,5 +35,6 @@ extend-select = ["TID251", "PTH123"]
 "linkedin_mcp_server.daemon.lock".msg = "Adapters import the core, never the reverse."
 "linkedin_mcp_server.daemon.owner".msg = "Adapters import the core, never the reverse."
 "linkedin_mcp_server.daemon.proxy".msg = "Adapters import the core, never the reverse."
+"linkedin_mcp_server.daemon.spawn".msg = "Adapters import the core, never the reverse."
 "linkedin_mcp_server.daemon.startup".msg = "Adapters import the core, never the reverse."
 "linkedin_mcp_server.daemon.version".msg = "Adapters import the core, never the reverse."

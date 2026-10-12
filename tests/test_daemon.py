@@ -673,6 +673,7 @@ def coordination(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Every daemon coordination effect, recorded and refused if it runs."""
     import linkedin_mcp_server.daemon.election as daemon_election_module
     import linkedin_mcp_server.daemon.lock as daemon_lock_module
+    import linkedin_mcp_server.daemon.spawn as daemon_spawn_module
 
     touched: list[str] = []
 
@@ -686,8 +687,8 @@ def coordination(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     for name in ("prepare_daemon_state", "read", "read_token"):
         monkeypatch.setattr(daemon_descriptor_module, name, forbid(name))
     monkeypatch.setattr(daemon_lock_module.DaemonLock, "__init__", forbid("lock"))
-    for name in ("obtain_owner", "_spawn"):
-        monkeypatch.setattr(daemon_election_module, name, forbid(name))
+    monkeypatch.setattr(daemon_election_module, "obtain_owner", forbid("obtain_owner"))
+    monkeypatch.setattr(daemon_spawn_module, "_spawn", forbid("_spawn"))
     return touched
 
 

@@ -428,9 +428,9 @@ def no_owner_on_the_real_profile(monkeypatch):
     as raised: the election runs in a worker thread whose caller turns any
     failure into "no owner", so a raise alone could pass unseen.
     """
-    from linkedin_mcp_server.daemon import election as daemon_election
+    from linkedin_mcp_server.daemon import spawn as daemon_spawn
 
-    spawn = daemon_election._spawn
+    spawn = daemon_spawn._spawn
     refused: list[str] = []
 
     def guarded(auth_root, config, *args, **kwargs):
@@ -446,7 +446,7 @@ def no_owner_on_the_real_profile(monkeypatch):
                 raise RuntimeError(f"refused to start an owner with {refused[-1]}")
         return spawn(auth_root, config, *args, **kwargs)
 
-    monkeypatch.setattr(daemon_election, "_spawn", guarded)
+    monkeypatch.setattr(daemon_spawn, "_spawn", guarded)
     yield
     if refused:
         pytest.fail(

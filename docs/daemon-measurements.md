@@ -175,7 +175,7 @@ Symbols are named relative to `linkedin_mcp_server`. Tests are named as
   `daemon.core.spawn.Attempt`. Source `6d369701`, 2026-07-29.
 - **No zombie without `_reap`.** A failed election left no zombie with the
   `_reap` call removed, because `subprocess` reaps abandoned children when the
-  next one is created. `daemon.election._reap` stays because that is a
+  next one is created. `daemon.spawn._reap` stays because that is a
   standard-library detail. Source `6d369701`, 2026-07-29.
 - **Closing a parked reader blocks.** `BufferedReader.close()` blocked for 29.27
   of thirty seconds against a silent child. Justifies detaching first in
@@ -184,7 +184,7 @@ Symbols are named relative to `linkedin_mcp_server`. Tests are named as
 - **`start_new_session` does nothing on Windows.** CPython's Windows
   implementation names the parameter `unused_start_new_session` and ignores it
   (`subprocess.py:1461`). Justifies the creation flags in
-  `daemon.election._detachment_flags`. Source `6d369701`, 2026-07-29.
+  `daemon.spawn._detachment_flags`. Source `6d369701`, 2026-07-29.
 - **The election reducers decide what the shell decided before.** Run against
   the code they replaced, the extracted reducers matched its results, ordered
   effects and scripted timing on 1,224 lookup cases, 2,500 election traces and
@@ -201,7 +201,7 @@ Symbols are named relative to `linkedin_mcp_server`. Tests are named as
   installer supervisor exit 70 after a finished install in 44 of 200 loaded
   runs. Justifies waiting out EPERM once a kill has landed in
   `process_tree.terminate_process_group`, through which both the installer
-  supervisor and `daemon.election` stop their children. Source PR #1302,
+  supervisor and `daemon.spawn` stop their children. Source PR #1302,
   2026-10-12. Tests
   `tests/test_process_tree.py::TestPosixProcessGroups::test_eperm_before_the_killed_leader_is_waitable_is_waited_out`
   and
@@ -213,7 +213,7 @@ Symbols are named relative to `linkedin_mcp_server`. Tests are named as
   frontend's whole process group, the owner was still running and had
   reparented to pid 1. On Windows `start_new_session` is POSIX-only
   (`subprocess.py:795`). Applies to the `daemon.owner` docstring and
-  `daemon.election._detachment_flags`. Source `6d369701`, 2026-07-29. Test
+  `daemon.spawn._detachment_flags`. Source `6d369701`, 2026-07-29. Test
   `tests/test_daemon_election.py::TestRealOwner::test_the_owner_outlives_the_client_that_started_it`.
 - **In a container the owner dies with the display.** Inside the image the
   owner had a distinct process group and was still alive when EOF ended the

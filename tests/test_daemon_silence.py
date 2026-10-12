@@ -41,6 +41,7 @@ from test_profile_lease_integration import _hold_profile
 
 from linkedin_mcp_server import __version__
 from linkedin_mcp_server.daemon import election as election_module
+from linkedin_mcp_server.daemon import spawn as spawn_module
 from linkedin_mcp_server.daemon import proxy as proxy_module
 from linkedin_mcp_server.daemon.core.lookup import Reach
 from linkedin_mcp_server.daemon.core.spawn import Attempt
@@ -169,7 +170,7 @@ class _ClockedElection:
         monkeypatch.setattr(election_module, "_reachable", self.reach)
         # Nothing to start: the published owner holds the lock in every case.
         monkeypatch.setattr(
-            election_module, "_start_owner", lambda *a, **k: Attempt.FAILED
+            spawn_module, "_start_owner", lambda *a, **k: Attempt.FAILED
         )
         real = election_module.obtain_owner
         monkeypatch.setattr(
@@ -1197,7 +1198,7 @@ class TestABlockedOwnerLoop:
         monkeypatch.setattr(proxy_module, "HEARTBEAT_SECONDS", _HEARTBEAT_SECONDS)
         monkeypatch.setattr(proxy_module, "_TIMEOUT_MARGIN_SECONDS", 0.0)
         monkeypatch.setattr(
-            election_module, "_start_owner", lambda *a, **k: Attempt.FAILED
+            spawn_module, "_start_owner", lambda *a, **k: Attempt.FAILED
         )
         elect = election_module.obtain_owner
         monkeypatch.setattr(
