@@ -6,19 +6,23 @@ lookup pass whose ``Conclude`` returns as ``Looked``; its ``StartOwner`` runs on
 spawn whose ``Finish`` returns through ``attempt_after``; a pass's turnover
 request reaches the owner it read as ``TurnOver``; a call's ``Attempt`` is bound
 to one owner incarnation and admitted by that owner's reducer; its ``Recover``
-joins its frontend's one election. Every decision is a real reducer's. Process,
-lock, descriptor and incarnation identity live in the world, never in reducer
-state. Bounded, decision-level evidence only.
+joins its frontend's one election, and only that election answers it. Every
+decision is a real reducer's. What the shells keep for themselves stays in the
+world, never in reducer state: process, lock, descriptor and incarnation
+identity, a pass's last read (which it probes, asks to stand down and reports,
+as the election shell does), and the ending an owner's loop carried out.
+Bounded, decision-level evidence only.
 
 **Bounds.** One profile and two frontends, F of build 1 and G of build 2, so at
 most two elections run at once. In the *turnover* world a resident owner R of
 build 1 holds two calls of F: c1, which could change something and whose body
 has begun, and c2, read-only and still on its way. G elects from the start and
-asks R to turn over; F elects when a call needs a recovery. In the *fresh* world
-both frontends elect from the start on an empty profile. Each child prepares a
-generation named after itself, and whichever publishes is the successor.
-Successors never retire, so a schedule has one turnover at most. A call makes at
-most two attempts and one recovery, the call core's own bound. A recovery takes
+asks R to turn over; F elects when a call needs a recovery. In the *fresh*
+worlds both frontends elect from the start on an empty profile, once with G of
+build 2 and once with both of build 1. Each child prepares a generation named
+after itself, and whichever publishes is the successor; G may ask a successor
+F started to turn over, and nothing asks one G started. A call makes at most
+two attempts and one recovery, the call core's own bound. A recovery takes
 its flight's answer; the second flight ``recover`` allows after late burial news
 is not explored. No sign-in, rival configuration or other protocol.
 
@@ -33,10 +37,10 @@ or pause; a probe (a live owner answers, a gone one refuses); COMMIT (it arrives
 and is reported sent); a verdict; a call reaching its owner; a body beginning or
 ending; an answer reaching its frontend; an owner's loop turn, which runs only
 when it can decide (after a turnover request, and when the drain is empty or
-past its cutoff); an owner's exit; a call's expiry. A greeting, the hand-over,
-the prepared answer, the validation, the canonical read after COMMIT and the
-tool's classification are answered inside the move that asked, since nothing
-else can change them meanwhile. Each schedule may spend one fault: a live owner
+past its cutoff); an owner's exit, once its loop chose ``Stop``; a call's
+expiry. A greeting, the hand-over, the prepared answer, the validation, the
+canonical read after COMMIT and the tool's classification are answered inside
+the move that asked, since nothing else can change them meanwhile. Each schedule may spend one fault: a live owner
 silent to a probe, COMMIT arriving unreported or not arriving, or a lost
 verdict. Decisions are atomic, so no yield separates an admission's reservation
 from its task.
@@ -64,13 +68,19 @@ no removal of a published generation, no repeated call.
    acted is admitted again only if it is read-only or its owner said nothing
    ran; an owner says nothing ran only of a body that never began; a call whose
    body began is told "not sent" only after a read-only classification and
-   before its deadline; every call and election ends. Cannot see cookies,
-   persisted sessions or real delivery.
+   before its deadline; every call and election ends, and every owner asked
+   to go exits. Cannot see cookies, persisted sessions or real delivery.
+
+Ticks only move the clock forward, so a move back to a world still on the
+search path is work that never ends, and fails as such: deduplication alone
+would read it as a world already judged.
 
 Every rule but these has a broken reducer below that must produce its
 counterexample: one holder and one published owner, COMMIT and admission only
 by the holder, the ``Cancel`` target, and every call and election ending. Those
-were seen to fail only against faults planted in the world.
+were seen to fail only against faults planted in the world. Routing a
+recovery to its own frontend's election is fidelity rather than a rule: answered
+from G's election instead, no rule here breaks.
 """
 
 from __future__ import annotations
@@ -78,6 +88,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from functools import partial
+from typing import Protocol
 
 import pytest
 
@@ -141,6 +152,8 @@ class _Proc:
     owner: lifecycle.Owner | None = None
     #: A turnover request reached it.
     asked_to_go: bool = False
+    #: The ending its loop carried out, the shell's record rather than the core's.
+    ended_by: lifecycle.Stop | lifecycle.EndpointGone | None = None
 
 
 @dataclass(frozen=True)
@@ -186,6 +199,8 @@ class _Front:
     build: int
     electing: election.Election | None = None
     pass_: lookup.Lookup | None = None
+    #: The pass's last descriptor read, which the shell probes, asks and reports.
+    read: Reading = Reading()
     #: What the pass or the start waits on, and where a pause ends.
     look_wait: lookup.Effect | None = None
     until: float = 0.0
@@ -290,8 +305,8 @@ def _election_effects(
                 buried=front.buried,
                 timings=TIMINGS,
             )
-            world = world.with_front(name, replace(front, pass_=state))
-            return _pass_effects(world, name, out, None)
+            world = world.with_front(name, replace(front, pass_=state, read=Reading()))
+            return _pass_effects(world, name, out)
         case election.StartOwner(timeout=timeout):
             child = f"{name}{front.children + 1}"
             state, out = spawn.on_event(
@@ -317,6 +332,9 @@ def _decided(world: _World, name: str, target: str | None) -> _World:
         attached=found or front.attached,
     )
     world = world.with_front(name, front)
+    if name != "f":
+        # Every call is F's, and only F's own election answers its recovery.
+        return world
     for call, run in world.calls:
         if isinstance(run.wait, calls.Recover):
             event = calls.Recovered(run.wait.op, world.now, found is not None)
@@ -324,19 +342,16 @@ def _decided(world: _World, name: str, target: str | None) -> _World:
     return world
 
 
-def _passed(
-    world: _World, name: str, event: lookup.Event, reading: Reading | None
-) -> _World:
+def _passed(world: _World, name: str, event: lookup.Event) -> _World:
     front = world.front(name)
     assert front.pass_ is not None
+    read = event.reading if isinstance(event, lookup.Read) else front.read
     state, effects = lookup.on_event(front.pass_, event)
-    world = world.with_front(name, replace(front, pass_=state, look_wait=None))
-    return _pass_effects(world, name, effects, reading)
+    front = replace(front, pass_=state, look_wait=None, read=read)
+    return _pass_effects(world.with_front(name, front), name, effects)
 
 
-def _pass_effects(
-    world: _World, name: str, effects: list[lookup.Effect], reading: Reading | None
-) -> _World:
+def _pass_effects(world: _World, name: str, effects: list[lookup.Effect]) -> _World:
     build = world.front(name).build
     for effect in effects:
         front = world.front(name)
@@ -349,13 +364,14 @@ def _pass_effects(
                     name, replace(front, look_wait=effect, until=until)
                 )
             case lookup.AskToStandDown():
-                assert reading is not None and reading.instance is not None
-                proc = world.proc(reading.instance)
+                instance = front.read.instance
+                assert instance is not None
+                proc = world.proc(instance)
                 _expect(proc.build < build, "turnover asked of an owner not older")
                 if proc.alive and proc.owner is not None:
                     owner, _ = _owner_on(proc.owner, lifecycle.TurnOver())
                     proc = replace(proc, owner=owner, asked_to_go=True)
-                    world = world.with_proc(reading.instance, proc)
+                    world = world.with_proc(instance, proc)
             case lookup.Bury(instance=instance):
                 proc = world.proc(instance)
                 _expect(
@@ -364,11 +380,12 @@ def _pass_effects(
                 buried = front.buried | {instance}
                 world = world.with_front(name, replace(front, buried=buried))
             case lookup.Conclude(finding=finding, asked=asked, observed=observed):
-                assert front.pass_ is not None and front.electing is not None
-                probed = front.pass_.probing
-                target = (
-                    probed.instance if probed and finding is Finding.AS_READ else None
-                )
+                assert front.electing is not None
+                # As the shell reports it: the last read, and an owner only if
+                # that read was worth connecting to.
+                read = front.read
+                as_read = finding is Finding.AS_READ and read.attachable
+                target = read.instance if as_read else None
                 world = world.with_front(name, replace(front, pass_=None))
                 looked = election.Looked(
                     front.electing.pending,
@@ -588,13 +605,20 @@ def _finish(world: _World, task: _Task, says: str) -> _World:
 
 
 def _turn(world: _World, name: str) -> _World:
-    """One turn of *name*'s lifecycle loop."""
+    """One turn of *name*'s lifecycle loop, which leaves it at an ending.
+
+    The loop ends at either ending. Only ``Stop`` stops the endpoint, and here
+    the endpoint never stops on its own, so after ``EndpointGone`` it waits for
+    good, as the shell would.
+    """
     proc = world.proc(name)
     assert proc.owner is not None
     owner, effects = _owner_on(proc.owner, lifecycle.Tick(world.now))
     world = world.with_proc(name, replace(proc, owner=owner))
     for effect in effects:
-        if isinstance(effect, lifecycle.Cancel):
+        if isinstance(effect, lifecycle.TERMINAL):
+            world = world.with_proc(name, replace(world.proc(name), ended_by=effect))
+        elif isinstance(effect, lifecycle.Cancel):
             running = [
                 t
                 for t in world.tasks
@@ -656,24 +680,23 @@ def _pass_answers(world: _World, name: str) -> _Moves:
             event = lookup.Read(op, world.now, reading)
             yield (
                 f"reads {reading.instance}",
-                partial(_passed, world, name, event, reading),
+                partial(_passed, world, name, event),
             )
         case lookup.Pause(op=op) if world.now >= front.until:
             event = lookup.Paused(op, world.now)
-            yield "pauses", partial(_passed, world, name, event, None)
+            yield "pauses", partial(_passed, world, name, event)
         case lookup.Probe(op=op):
-            assert front.pass_ is not None and front.pass_.probing is not None
-            target = front.pass_.probing.instance
+            target = front.read.instance
             assert target is not None
             alive = world.proc(target).alive
             reach = Reach.ANSWERED if alive else Reach.REFUSED
             event = lookup.Probed(op, world.now, reach)
-            yield f"probes {target}", partial(_passed, world, name, event, None)
+            yield f"probes {target}", partial(_passed, world, name, event)
             if alive and world.faults:
                 silent = lookup.Probed(op, world.now, Reach.SILENT)
                 yield (
                     f"probes {target}, silent",
-                    partial(_passed, _spend(world), name, silent, None),
+                    partial(_passed, _spend(world), name, silent),
                 )
 
 
@@ -738,9 +761,11 @@ def _urgent(world: _World) -> _Moves:
         owner = proc.owner
         if not proc.alive or owner is None:
             continue
-        if owner.ending is not None:
+        if isinstance(proc.ended_by, lifecycle.Stop):
             yield f"{name} exits", partial(_exit, world, name)
-        elif (owner.turnover and owner.phase is lifecycle.Phase.SERVING) or (
+        if proc.ended_by is not None:
+            continue
+        if (owner.turnover and owner.phase is lifecycle.Phase.SERVING) or (
             owner.phase is lifecycle.Phase.DRAINING
             and (not owner.calls or world.now >= (owner.drain_until or 0.0))
         ):
@@ -768,8 +793,10 @@ def _moves(world: _World) -> list[tuple[str, Callable[[], _World]]]:
         for task in world.tasks
         if task.began and not task.done and world.proc(task.owner).alive
     ]
-    working = any(f.electing for _, f in world.fronts) or any(
-        run.told is None for _, run in world.calls
+    working = (
+        any(f.electing for _, f in world.fronts)
+        or any(run.told is None for _, run in world.calls)
+        or any(p.alive and p.asked_to_go for _, p in world.procs)
     )
     # The last election can begin at a call's deadline and must end inside its
     # own budgets, so a world still working past that never will.
@@ -795,8 +822,8 @@ def _tidy(world: _World) -> _World:
     return world if readable == world.outbox else replace(world, outbox=readable)
 
 
-def _initial(resident: bool) -> _World:
-    world = _World(0.0, (("f", _Front(build=1)), ("g", _Front(build=2))))
+def _initial(resident: bool, g_build: int) -> _World:
+    world = _World(0.0, (("f", _Front(build=1)), ("g", _Front(build=g_build))))
     if not resident:
         return _start_election(_start_election(world, "f"), "g")
     owner = lifecycle.Owner()
@@ -833,9 +860,15 @@ class _Search:
     broken: dict[str, list[str]] = field(default_factory=dict)
 
 
-def _explore(resident: bool, *, stop_at: str | None = None) -> _Search:
-    """Visit every reachable world once, depth first, judging every move."""
-    start = _initial(resident)
+def _explore(
+    resident: bool, *, g_build: int = 2, stop_at: str | None = None
+) -> _Search:
+    """Visit every reachable world once, depth first, judging every move.
+
+    Time only moves forward, so a move back to a world still on the path is
+    work that never ends without the clock ever ticking.
+    """
+    start = _initial(resident, g_build)
     came_from: dict[_World, tuple[_World, str] | None] = {start: None}
     search = _Search()
 
@@ -847,9 +880,7 @@ def _explore(resident: bool, *, stop_at: str | None = None) -> _Search:
             step = came_from[world]
         return moves
 
-    stack = [start]
-    while stack:
-        world = stack.pop()
+    def enter(world: _World) -> Iterator[tuple[str, Callable[[], _World]]]:
         moves = _moves(world)
         if not moves:
             search.ended.append(world)
@@ -861,27 +892,39 @@ def _explore(resident: bool, *, stop_at: str | None = None) -> _Search:
             for call, run in world.calls:
                 if run.told is None:
                     search.broken.setdefault("a call left waiting", trace(world, call))
-        for label, move in moves:
-            try:
-                after = _tidy(move())
-                # Environment: one lock holder, and one live published owner.
-                _expect(
-                    sum(p.holds_lock for _, p in after.procs) <= 1, "two lock holders"
-                )
-                published = sum(p.published and p.alive for _, p in after.procs)
-                _expect(published <= 1, "two published owners")
-            except _Broken as broken:
-                search.broken.setdefault(broken.rule, trace(world, label))
-                if broken.rule == stop_at:
-                    break
-                continue
-            if after not in came_from:
-                if len(came_from) >= MAX_STATES:
-                    pytest.fail(f"incomplete: more than {MAX_STATES} states")
-                came_from[after] = (world, label)
-                stack.append(after)
-        if stop_at in search.broken:
-            break
+            for name, proc in world.procs:
+                if proc.alive and proc.asked_to_go:
+                    search.broken.setdefault(
+                        "an owner asked to go never exited", trace(world, name)
+                    )
+        return iter(moves)
+
+    stack = [(start, enter(start))]
+    on_path = {start}
+    while stack and stop_at not in search.broken:
+        world, moves = stack[-1]
+        step = next(moves, None)
+        if step is None:
+            stack.pop()
+            on_path.discard(world)
+            continue
+        label, move = step
+        try:
+            after = _tidy(move())
+            # Environment: one lock holder, and one live published owner.
+            _expect(sum(p.holds_lock for _, p in after.procs) <= 1, "two lock holders")
+            published = sum(p.published and p.alive for _, p in after.procs)
+            _expect(published <= 1, "two published owners")
+            _expect(after not in on_path, "work that never ends")
+        except _Broken as broken:
+            search.broken.setdefault(broken.rule, trace(world, label))
+            continue
+        if after not in came_from:
+            if len(came_from) >= MAX_STATES:
+                pytest.fail(f"incomplete: more than {MAX_STATES} states")
+            came_from[after] = (world, label)
+            on_path.add(after)
+            stack.append((after, enter(after)))
     search.states = len(came_from)
     return search
 
@@ -908,13 +951,19 @@ def _shared_successor(world: _World) -> bool:
 
 
 @pytest.mark.usefixtures("owner_times")
-@pytest.mark.parametrize("resident", [True, False], ids=["turnover", "fresh"])
-def test_every_composed_schedule_keeps_the_contract(resident: bool):
-    search = _explore(resident)
+@pytest.mark.parametrize(
+    ("resident", "g_build", "floor"),
+    [(True, 2, 20_000), (False, 2, 2_000), (False, 1, 300)],
+    ids=["turnover", "fresh", "fresh-same-build"],
+)
+def test_every_composed_schedule_keeps_the_contract(
+    resident: bool, g_build: int, floor: int
+):
+    search = _explore(resident, g_build=g_build)
 
     assert search.broken == {}
     # Sanity, not contract: the bounds reach the case they exist for.
-    assert search.states > (20_000 if resident else 2_000)
+    assert search.states > floor
     assert any(_shared_successor(world) for world in search.ended)
 
 
@@ -924,7 +973,11 @@ def test_every_composed_schedule_keeps_the_contract(resident: bool):
 # must find the schedule that shows it. Patched on the module, so every caller
 # inside the core sees the break too.
 
-_Break = Callable[[pytest.MonkeyPatch], None]
+
+class _Break(Protocol):
+    __name__: str
+
+    def __call__(self, monkeypatch: pytest.MonkeyPatch, /) -> None: ...
 
 
 def _stop_after_commit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -987,6 +1040,25 @@ def _everyone_older(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(lookup, "_decide", decide)
 
 
+def _read_buried_as_usable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A written-off descriptor reported as read when the pass's wait runs out."""
+    real = lookup._conclude
+
+    def conclude(
+        state: lookup.Lookup,
+        finding: Finding,
+        *,
+        asked: bool = False,
+        observed: bool = True,
+        first: list[lookup.Effect] | None = None,
+    ) -> tuple[lookup.Lookup, list[lookup.Effect]]:
+        if finding is Finding.ALREADY_UNUSABLE:
+            finding = Finding.AS_READ
+        return real(state, finding, asked=asked, observed=observed, first=first)
+
+    monkeypatch.setattr(lookup, "_conclude", conclude)
+
+
 def _admit_while_retiring(monkeypatch: pytest.MonkeyPatch) -> None:
     """Admission that no longer looks at retirement."""
     real = lifecycle._admit
@@ -998,6 +1070,33 @@ def _admit_while_retiring(monkeypatch: pytest.MonkeyPatch) -> None:
         return replace(after, retirement=owner.retirement), effects
 
     monkeypatch.setattr(lifecycle, "_admit", admit)
+
+
+def _drain_without_cutoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A drain that waits for its calls however long they take."""
+    real = lifecycle._drain
+
+    def drain(
+        owner: lifecycle.Owner, tick: lifecycle.Tick
+    ) -> tuple[lifecycle.Owner, list[lifecycle.Effect]]:
+        if owner.calls and tick.wedged is None:
+            return lifecycle._scan(owner, tick.now)
+        return real(owner, tick)
+
+    monkeypatch.setattr(lifecycle, "_drain", drain)
+
+
+def _stop_as_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The drain's end reported as an endpoint that stopped on its own."""
+    real = lifecycle._stop
+
+    def stop(
+        owner: lifecycle.Owner, effects: list[lifecycle.Effect], ending: lifecycle.Stop
+    ) -> tuple[lifecycle.Owner, list[lifecycle.Effect]]:
+        after, out = real(owner, effects, ending)
+        return after, [*out[:-1], lifecycle.EndpointGone()]
+
+    monkeypatch.setattr(lifecycle, "_stop", stop)
 
 
 def _cut_as_not_run(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1042,7 +1141,10 @@ _BREAKS: list[tuple[_Break, str]] = [
     (_bury_silence, "a live owner written off"),
     (_attach_unprobed, "attached to a non-owner"),
     (_everyone_older, "turnover asked of an owner not older"),
+    (_read_buried_as_usable, "attached to a non-owner"),
     (_admit_while_retiring, "admitted after retirement"),
+    (_drain_without_cutoff, "work that never ends"),
+    (_stop_as_gone, "an owner asked to go never exited"),
     (_cut_as_not_run, "said nothing ran after it began"),
     (_replay_a_possible_send, "a mutation run again"),
     (_expire_as_unsent, "told not sent after it began"),
@@ -1051,7 +1153,7 @@ _BREAKS: list[tuple[_Break, str]] = [
 
 @pytest.mark.usefixtures("owner_times")
 @pytest.mark.parametrize(
-    ("break_it", "rule"), _BREAKS, ids=[rule for _, rule in _BREAKS]
+    ("break_it", "rule"), _BREAKS, ids=[b.__name__.lstrip("_") for b, _ in _BREAKS]
 )
 def test_a_broken_reducer_yields_its_counterexample(
     monkeypatch: pytest.MonkeyPatch, break_it: _Break, rule: str
