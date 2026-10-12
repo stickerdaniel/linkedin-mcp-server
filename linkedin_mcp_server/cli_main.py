@@ -59,7 +59,7 @@ from linkedin_mcp_server.server import ServerRole, create_mcp_server
 from linkedin_mcp_server.setup import run_profile_creation
 
 if TYPE_CHECKING:
-    from linkedin_mcp_server.daemon.discovery import Attachment
+    from linkedin_mcp_server.daemon.discovery import Attachment, Unanswered
     from linkedin_mcp_server.daemon.proxy import DaemonProxyBackend
 
 logger = logging.getLogger(__name__)
@@ -664,13 +664,17 @@ def profile_info_and_exit() -> None:
     sys.exit(1)
 
 
-def _obtain_shared_owner(config: AppConfig) -> "DaemonProxyBackend | None":
+def _obtain_shared_owner(
+    config: AppConfig,
+) -> "DaemonProxyBackend | Unanswered | None":
     """Return the shared owner to forward to, starting one if nobody has.
 
-    Off by default, and inert when off. ``None`` means this process serves its
-    own client the way it always has: the flag is off, the transport is HTTP (one
-    server for many clients already, so there is nothing to deduplicate), or no
-    owner could be established at all.
+    Off by default, and inert when off. Anything but a backend means this
+    process serves its own client the way it always has: the flag is off, the
+    transport is HTTP (one server for many clients already, so there is nothing
+    to deduplicate), or no owner could be established at all. That last case
+    returns the election's :class:`Unanswered` when an owner it found did not
+    answer, so a busy browser can be explained by it later.
 
     Never fatal, and that is a decision rather than an oversight. A client that
     refused to start because a shared browser could not be elected would fail
@@ -736,7 +740,7 @@ def _obtain_shared_owner(config: AppConfig) -> "DaemonProxyBackend | None":
         "drive its own browser",
         outcome.attachment_lookup.state.value,
     )
-    return None
+    return outcome.unanswered
 
 
 def get_version() -> str:
@@ -906,16 +910,23 @@ def main(argv: Sequence[str] | None = None) -> None:
             # before this runs: `daemon_would_be_used` asks whether this is a
             # stdio process, and an interactively chosen HTTP server must not
             # elect a daemon.
-            proxy_backend = _obtain_shared_owner(config)
+            shared = _obtain_shared_owner(config)
 
             # Create and run the MCP server
-            if proxy_backend is None:
+            from linkedin_mcp_server.daemon.discovery import Unanswered
+
+            if shared is None:
                 mcp = create_mcp_server(tool_timeout=config.server.tool_timeout_seconds)
+            elif isinstance(shared, Unanswered):
+                mcp = create_mcp_server(
+                    tool_timeout=config.server.tool_timeout_seconds,
+                    silent_owner=shared,
+                )
             else:
                 mcp = create_mcp_server(
                     tool_timeout=config.server.tool_timeout_seconds,
                     role=ServerRole.PROXY,
-                    proxy_backend=proxy_backend,
+                    proxy_backend=shared,
                 )
 
             if transport == "streamable-http":

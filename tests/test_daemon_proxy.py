@@ -473,7 +473,9 @@ class TestServingTheOwnersTools:
         # below are the ones a cache would answer without asking anybody.
         await provider.list_tools()
 
-        assert await backend.recover(elected.descriptor.instance_id) is not None
+        assert (
+            await backend.recover(elected.descriptor.instance_id)
+        ).attachment is not None
 
         served = await provider.get_tool("get_person_profile")
         assert served is not None and served.annotations is not None
@@ -511,7 +513,9 @@ class TestServingTheOwnersTools:
         in_flight = asyncio.create_task(provider.list_tools())
         await asyncio.wait_for(held.reached.wait(), timeout=5)
 
-        assert await backend.recover(elected.descriptor.instance_id) is not None
+        assert (
+            await backend.recover(elected.descriptor.instance_id)
+        ).attachment is not None
 
         # Only now does the old owner's answer arrive, and land in the provider.
         held.release.set()
@@ -574,7 +578,7 @@ class TestServingTheOwnersTools:
         # The owner goes away without publishing anything, as a crash does.
         daemon_descriptor.publish(auth_root, replacement.descriptor, replacement.token)
 
-        recovered = await backend.recover(elected.descriptor.instance_id)
+        recovered = (await backend.recover(elected.descriptor.instance_id)).attachment
         assert recovered is not None
         assert backend.attachment.descriptor.url == replacement.descriptor.url
         # And the token moved with the address rather than being kept.
@@ -606,11 +610,13 @@ class TestServingTheOwnersTools:
 
         monkeypatch.setattr("linkedin_mcp_server.daemon.election.obtain_owner", elect)
 
-        assert await backend.recover(elected.descriptor.instance_id) is not None
+        assert (
+            await backend.recover(elected.descriptor.instance_id)
+        ).attachment is not None
         assert elections == 1
 
         # The same failure arrives again, from a call that was already in flight.
-        again = await backend.recover(elected.descriptor.instance_id)
+        again = (await backend.recover(elected.descriptor.instance_id)).attachment
 
         assert elections == 1, "a late failure elected a second time"
         assert again is not None
@@ -645,7 +651,8 @@ class TestServingTheOwnersTools:
 
         assert elections == 1
         assert all(
-            r is not None and r.descriptor.url == replacement.descriptor.url
+            r.attachment is not None
+            and r.attachment.descriptor.url == replacement.descriptor.url
             for r in results
         )
 
@@ -687,7 +694,7 @@ class TestServingTheOwnersTools:
         for _ in range(20):
             await asyncio.sleep(0)
         holding.set()
-        assert await second is not None
+        assert (await second).attachment is not None
 
         assert elections == 1, "a cancelled caller freed the guard"
 
@@ -2445,8 +2452,9 @@ class TestWritingAnOwnerOff:
 
         assert told_to_bury == [set(), {retiring_id}]
         assert all(
-            r is not None
-            and r.descriptor.instance_id == replacement.descriptor.instance_id
+            r.attachment is not None
+            and r.attachment.descriptor.instance_id
+            == replacement.descriptor.instance_id
             for r in results
         ), "a caller was handed back the owner it had just found retiring"
         assert backend.attachment.descriptor.instance_id == (
@@ -2474,7 +2482,7 @@ class TestWritingAnOwnerOff:
             failed.descriptor.instance_id, classification=OwnerFailure.RETIRING
         )
 
-        assert found is None
+        assert found.attachment is None
         assert elections == [{failed.descriptor.instance_id}]
 
     async def test_a_rejected_token_does_not_come_back_as_the_same_owner(
@@ -2496,7 +2504,7 @@ class TestWritingAnOwnerOff:
             owner.descriptor.instance_id, classification=OwnerFailure.TOKEN_REJECTED
         )
 
-        assert found is None
+        assert found.attachment is None
 
     async def test_a_written_off_owner_gets_no_listing_and_no_new_call(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2632,7 +2640,7 @@ class TestControlOnlyNeverRunsATool:
             lambda *_a, **_k: _elected(self._control_only(tmp_path)),
         )
 
-        assert await backend.recover(failed.descriptor.instance_id) is None
+        assert (await backend.recover(failed.descriptor.instance_id)).attachment is None
         assert backend.attachment is failed
 
     async def test_a_bound_call_cannot_open_a_hop_to_one(

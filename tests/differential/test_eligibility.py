@@ -265,7 +265,7 @@ def test_a_rival_left_alone_says_so_in_the_line_counted_as_its_fallback(
 
     attachment = Attachment(
         descriptor=SimpleNamespace(  # ty: ignore[invalid-argument-type]
-            instance_id="rival", package_version=__version__
+            instance_id="rival", package_version=__version__, pid=1
         ),
         token="t",
         control_only=True,

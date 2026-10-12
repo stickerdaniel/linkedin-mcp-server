@@ -51,6 +51,7 @@ from linkedin_mcp_server.tools.person import register_person_tools
 from linkedin_mcp_server.tools.post import register_post_tools
 
 if TYPE_CHECKING:
+    from linkedin_mcp_server.daemon.discovery import Unanswered
     from linkedin_mcp_server.daemon.proxy import DaemonProxyBackend
 
 logger = logging.getLogger(__name__)
@@ -153,6 +154,7 @@ def create_mcp_server(
     role: ServerRole = ServerRole.DIRECT,
     auth_token: str | None = None,
     proxy_backend: "DaemonProxyBackend | None" = None,
+    silent_owner: "Unanswered | None" = None,
 ) -> FastMCP:
     """Create and configure the MCP server with all LinkedIn tools.
 
@@ -170,6 +172,9 @@ def create_mcp_server(
     using it. The two credentials are kept apart on purpose and must not be
     conflated: *auth_token* is what an owner *demands* of callers, while the
     backend's token is what a proxy *presents* to one.
+
+    *silent_owner* is the shared owner a Direct server fell back from because
+    it did not answer the election, named when the profile stays busy.
     """
     if auth_token is not None and role is not ServerRole.OWNER:
         # A token on a stdio server protects nothing — there is no port to
@@ -189,6 +194,12 @@ def create_mcp_server(
         # Only a proxy forwards. Accepting an owner here would mean a server that
         # was handed a bearer token for a shared browser and quietly ignored it.
         raise ValueError(f"Only a proxy forwards to an owner, not {role.value}")
+    if silent_owner is not None and role is not ServerRole.DIRECT:
+        # Only a Direct server falls back from an owner; an owner or a proxy
+        # naming one would explain its own busy browser by somebody else.
+        raise ValueError(
+            f"Only a Direct server falls back from an owner, not {role.value}"
+        )
 
     # The role is also process state, because the auth gates live in `bootstrap`
     # and are reached from a tool body with no server to ask (`server_role`).
@@ -255,7 +266,7 @@ def create_mcp_server(
     # until its own timeout, or take the lease and leave the process that
     # actually needs it waiting for one held by a caller that never uses it.
     if role.drives_browser:
-        mcp.add_middleware(SequentialToolExecutionMiddleware())
+        mcp.add_middleware(SequentialToolExecutionMiddleware(silent_owner=silent_owner))
     # The notice is appended to one tool result per process, so it belongs
     # wherever a user reads results. On a shared owner it would reach whichever
     # client happened to call first and nobody after that, however many clients

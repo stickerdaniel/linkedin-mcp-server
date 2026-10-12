@@ -1086,7 +1086,9 @@ class TestForwardingToASharedOwner:
 
         # Through the backend the proxy layer is built from, which is what now
         # carries it. The claim is unchanged: the election's answer survives.
-        assert found is not None
+        from linkedin_mcp_server.daemon.proxy import DaemonProxyBackend
+
+        assert isinstance(found, DaemonProxyBackend)
         assert found.attachment is attachment
 
     def test_a_failed_election_leaves_this_process_driving_its_own_browser(
