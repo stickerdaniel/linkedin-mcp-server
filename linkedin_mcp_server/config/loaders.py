@@ -704,6 +704,14 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
         ),
     )
 
+    # Accepted and ignored. They once chose when full Chromium was installed;
+    # there is one browser now, and the README documented them, so an existing
+    # command line keeps working. Hidden from help so nobody adopts them.
+    for retired in ("--eager-full-chromium", "--no-eager-full-chromium"):
+        parser.add_argument(
+            retired, action="store_true", dest="_retired", help=argparse.SUPPRESS
+        )
+
     daemon_group = parser.add_mutually_exclusive_group()
     daemon_group.add_argument(
         "--daemon",

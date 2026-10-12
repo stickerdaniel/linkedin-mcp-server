@@ -343,6 +343,18 @@ class TestUserAgentRefusal:
             load_from_args(AppConfig(), ["--user-agent", "CustomAgent/1.0"])
 
 
+class TestRetiredChromiumFlags:
+    """Once documented, now ignored: a saved command line must still start."""
+
+    @pytest.mark.parametrize(
+        "flag", ["--eager-full-chromium", "--no-eager-full-chromium"]
+    )
+    def test_a_retired_flag_is_accepted_and_changes_nothing(self, flag):
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        assert load_from_args(AppConfig(), [flag]) == load_from_args(AppConfig(), [])
+
+
 class TestLoaders:
     def test_load_from_env_headless_false(self, monkeypatch):
         monkeypatch.setenv("HEADLESS", "false")
