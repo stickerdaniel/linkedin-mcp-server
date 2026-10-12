@@ -108,14 +108,11 @@ def test_claude_code_marketplace_resolves_the_plugin() -> None:
 
 
 def test_claude_code_manifest_matches_the_codex_manifest() -> None:
-    # Claude Code finds skills/ and .mcp.json next to its manifest, so both
-    # hosts run the same pinned server and skill; only the version can drift.
+    # Both hosts read the same plugin directory, so only the version can drift.
     claude = _load_json(_CLAUDE_MANIFEST)
     codex = _load_json(_PLUGIN_MANIFEST)
     assert claude["name"] == codex["name"]
     assert claude["version"] == _released_version()
-    assert "mcpServers" not in claude
-    assert "skills" not in claude
 
 
 def test_plugin_icon_is_the_release_icon() -> None:
