@@ -35,8 +35,12 @@ from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
 from linkedin_mcp_server.daemon.forwarder import (
     HOP_PROTOCOL_VERSION,
     CallBinding,
+    DispatchRecord,
     OwnerForwarder,
     _call_being_made,
+    _ObservedBody,
+    _Reader,
+    _Wire,
     bound_to,
 )
 from linkedin_mcp_server.daemon.proxy import DaemonProxyBackend
@@ -3958,6 +3962,64 @@ class _OwnerOverHttp:
         return answer
 
 
+class _BadlyClosed(httpx2.AsyncByteStream):
+    """A response body whose close fails, and whose reading may fail first."""
+
+    def __init__(
+        self, content: bytes, *, fail_after: bool = False, cancel: bool = False
+    ) -> None:
+        self.content = content
+        self.fail_after = fail_after
+        self.cancel = cancel
+
+    async def __aiter__(self):
+        yield self.content
+        if self.fail_after:
+            raise OSError("the connection dropped after the bytes")
+
+    async def aclose(self) -> None:
+        if self.cancel:
+            raise asyncio.CancelledError
+        raise OSError("closing the body failed")
+
+
+def _complete(body: dict[str, Any], kind: str) -> tuple[int, bytes]:
+    """A status and whole JSON answer of *kind* to *body*."""
+    if kind.startswith("error"):
+        # A refusal before the id was read carries a null one, credited to
+        # the POST it came back on.
+        ident = None if kind == "error, null id" else body["id"]
+        refusal = {"code": -32600, "message": "owner refused"}
+        message = {"jsonrpc": "2.0", "id": ident, "error": refusal}
+        return 400, json.dumps(message).encode()
+    result: dict[str, Any] = {
+        "content": [{"type": "text", "text": "sent"}],
+        "isError": False,
+        "resultType": "complete",
+    }
+    if kind == "bad shape":
+        result = {"content": 17}
+    message = {"jsonrpc": "2.0", "id": body["id"], "result": result}
+    return 200, json.dumps(message).encode()
+
+
+def _closing_badly(
+    content: bytes,
+    *,
+    status: int = 200,
+    fail_after: bool = False,
+    closing_fails: bool = True,
+) -> httpx2.Response:
+    stream = (
+        _BadlyClosed(content, fail_after=fail_after)
+        if closing_fails
+        else httpx2.ByteStream(content)
+    )
+    return httpx2.Response(
+        status, headers={"content-type": "application/json"}, stream=stream
+    )
+
+
 def _serve_over_http(
     monkeypatch: pytest.MonkeyPatch, owner_at: Callable[[str], _OwnerOverHttp]
 ) -> None:
@@ -4371,6 +4433,148 @@ class TestWhatTheOwnerDidBeforeItWentAway:
         assert result.structured_content is not None
         assert result.structured_content["status"] == "outcome_unknown"
         assert result.structured_content["retry_safe"] is False
+
+    async def _answered(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        kind: str,
+        *,
+        closing_fails: bool,
+    ) -> tuple[Any, _OwnerOverHttp, _OwnerOverHttp]:
+        """Call a tool the original owner answers whole with *kind*."""
+        tmp_path.mkdir()
+        original = _OwnerOverHttp()
+
+        def answer(body: dict[str, Any]) -> httpx2.Response:
+            status, content = _complete(body, kind)
+            return _closing_badly(content, status=status, closing_fails=closing_fails)
+
+        original.fail["tools/call"] = original.after_running(answer)
+        replacement = _OwnerOverHttp()
+        backend = self._two_owners(tmp_path, monkeypatch, original, replacement)
+        async with Client(self._proxy(backend)) as client:
+            result = await asyncio.wait_for(
+                client.call_tool("send_connection_request", {}, raise_on_error=False),
+                10,
+            )
+        return result, original, replacement
+
+    @pytest.mark.parametrize("kind", ["result", "error", "error, null id", "bad shape"])
+    async def test_an_answer_that_arrived_whole_survives_a_failing_close(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+    ):
+        """The owner's whole JSON answer is read, then closing its body fails.
+
+        httpx2 closes a body before handing it over, so without care the
+        answer that already arrived would read as a lost owner. The caller sees
+        what the same answer closed cleanly gives it, malformed or not.
+        """
+        clean, _, _ = await self._answered(
+            tmp_path / "clean", monkeypatch, kind, closing_fails=False
+        )
+        result, original, replacement = await self._answered(
+            tmp_path / "failing", monkeypatch, kind, closing_fails=True
+        )
+
+        assert original.effects == 1
+        assert replacement.effects == 0
+        assert "tools/call" not in replacement.methods
+        seen = (result.is_error, result.content, result.structured_content)
+        assert seen == (clean.is_error, clean.content, clean.structured_content)
+        if kind == "result":
+            assert [c.text for c in result.content] == ["sent"]
+
+    @pytest.mark.parametrize("damage", ["truncated", "cut off", "wrong id"])
+    async def test_an_answer_that_did_not_arrive_whole_is_still_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+    ):
+        original = _OwnerOverHttp()
+
+        def damaged(body: dict[str, Any]) -> httpx2.Response:
+            _, complete = _complete(body, "result")
+            if damage == "wrong id":
+                complete = json.dumps(
+                    {**json.loads(complete), "id": "another request"}
+                ).encode()
+            return _closing_badly(
+                complete[:-3] if damage == "truncated" else complete,
+                fail_after=damage == "cut off",
+            )
+
+        original.fail["tools/call"] = original.after_running(damaged)
+        replacement = _OwnerOverHttp()
+        backend = self._two_owners(tmp_path, monkeypatch, original, replacement)
+
+        async with Client(self._proxy(backend)) as client:
+            result = await asyncio.wait_for(
+                client.call_tool("send_connection_request", {}, raise_on_error=False),
+                10,
+            )
+
+        assert original.effects == 1
+        assert replacement.effects == 0, "a call that had run was sent again"
+        assert result.structured_content is not None
+        assert result.structured_content["status"] == "outcome_unknown"
+
+
+class TestClosingAnObservedBody:
+    """The transport boundary itself: which close failures ``aread()`` keeps.
+
+    The caller-level tests above cannot tell an exact guard from one that
+    swallows every close failure, because the SDK later rejects a damaged body
+    anyway. Here the failure has to surface.
+    """
+
+    @staticmethod
+    def _response(
+        content: bytes, media: str = "application/json", **faults: bool
+    ) -> httpx2.Response:
+        wire = _Wire(DispatchRecord())
+        posted, _ = (
+            wire.posted(
+                json.dumps(
+                    {"jsonrpc": "2.0", "id": ident, "method": "tools/call"}
+                ).encode()
+            )
+            for ident in (1, 2)
+        )
+        # Request 2 is in flight on the same wire, so an answer to it is one
+        # the wire knows, but not the answer to this POST.
+        reader = _Reader(wire, posted, media)
+        return httpx2.Response(
+            200, stream=_ObservedBody(_BadlyClosed(content, **faults), reader)
+        )
+
+    async def test_a_whole_answer_is_read(self):
+        whole = b'{"jsonrpc": "2.0", "id": 1, "result": {}}'
+        assert await self._response(whole).aread() == whole
+
+    @pytest.mark.parametrize(
+        "content, fail_after",
+        [
+            (b'{"jsonrpc": "2.0", "id": 1, "res', False),
+            (b'{"jsonrpc": "2.0", "id": 1, "result": {}}', True),
+            (b'{"jsonrpc": "2.0", "id": 2, "result": {}}', False),
+        ],
+        ids=["truncated", "cut off", "another request in flight"],
+    )
+    async def test_a_close_after_anything_less_still_fails(
+        self, content: bytes, fail_after: bool
+    ):
+        with pytest.raises(OSError):
+            await self._response(content, fail_after=fail_after).aread()
+
+    async def test_a_close_after_a_whole_event_still_fails(self):
+        """The SDK delivers an event before the stream ends, so none is kept."""
+        event = b'event: message\ndata: {"jsonrpc": "2.0", "id": 1, "result": {}}\n\n'
+        with pytest.raises(OSError):
+            await self._response(event, media="text/event-stream").aread()
+
+    async def test_cancellation_while_closing_is_never_swallowed(self):
+        whole = b'{"jsonrpc": "2.0", "id": 1, "result": {}}'
+        with pytest.raises(asyncio.CancelledError):
+            await self._response(whole, cancel=True).aread()
 
 
 class TestTheHeadersTheOwnerReceives:
