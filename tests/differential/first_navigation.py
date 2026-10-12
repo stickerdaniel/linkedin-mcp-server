@@ -807,6 +807,7 @@ class LifetimeSampler:
         #: Whether the latest sample read every descendant. Only that one says
         #: what is alive at the stop; an earlier gap was settled by later ones.
         self._complete = False
+        self._last_wall = self._began_wall
         self.document: dict[str, Any] = {
             "label": label,
             "began_wall": self._began_wall,
@@ -824,6 +825,7 @@ class LifetimeSampler:
             "processes": [],
             "dropped_processes": 0,
             "write_failures": 0,
+            "wall_clock_stepped_back": False,
         }
         self._persist()
 
@@ -887,6 +889,11 @@ class LifetimeSampler:
             "identified_ms": now,
             "last_alive_ms": now,
             "gone_ms": None,
+            # The same observations by wall clock, the one a close request in
+            # another process is stamped with. The ms fields are monotonic,
+            # which stops while the machine sleeps.
+            "last_alive_wall": time.time(),
+            "gone_wall": None,
             "ended": None,
             "exit_code": None,
             "exit_code_source": _ROOT_EXIT_CODE
@@ -908,6 +915,13 @@ class LifetimeSampler:
                 self._complete = False
             return
         now = self._ms()
+        wall = time.time()
+        with self._lock:
+            # A wall clock set back puts a later observation before an earlier
+            # request, so no end can be ordered against a close from then on.
+            if wall < self._last_wall:
+                self.document["wall_clock_stepped_back"] = True
+            self._last_wall = wall
         alive: set[tuple[int, float]] = set()
         changed = False
         truncated = False
@@ -961,6 +975,7 @@ class LifetimeSampler:
                         record = self._tracked[key]
                         if record["gone_ms"] is None:
                             record["gone_ms"] = self._ms()
+                            record["gone_wall"] = time.time()
                             record["order_uncertain"] = True
                             changed = True
                 else:
@@ -1010,8 +1025,10 @@ class LifetimeSampler:
             for key, record in self._tracked.items():
                 if key in alive:
                     record["last_alive_ms"] = now
+                    record["last_alive_wall"] = wall
                 elif not truncated and not incomplete and record["gone_ms"] is None:
                     record["gone_ms"] = now
+                    record["gone_wall"] = wall
                     changed = True
             if changed:
                 self._persist()
@@ -1081,12 +1098,11 @@ class LifetimeSampler:
         asked = requested.get(record["role"])
         if asked is None:
             return "unexpected"
-        asked_ms = (asked - self._began_wall) * 1000
-        if record.get("order_uncertain"):
+        if record.get("order_uncertain") or self.document["wall_clock_stepped_back"]:
             return "ambiguous"
-        if record["gone_ms"] <= asked_ms:
+        if record["gone_wall"] <= asked:
             return "unexpected"
-        if record["last_alive_ms"] >= asked_ms:
+        if record["last_alive_wall"] >= asked:
             return "after-close-request"
         return "ambiguous"
 
