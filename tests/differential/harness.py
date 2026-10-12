@@ -85,7 +85,9 @@ serve settles that successor in the identified owner's place. **Rows H-R8 and
 H-R9** (``owner_loss``) lose the owner before a call and after the dispatch of
 a mutating one, through ``OwnerLossSeams``: killed or stopped through the
 handle the row tied it by, or its old address answered by a declared
-responder; a stopped owner is resumed on every path. **Rows H-R10a, H-R10b
+responder; a stopped owner is resumed on every path. **Row H-R6-contended**
+(``crash_overlap``, Windows) kills the same way under a contender armed on the
+profile's lock and asks for a successor's browser at once. **Rows H-R10a, H-R10b
 and H-R15** (``profile_commands``) run the profile commands themselves, the
 row's own command line with ``--logout``, ``--login``,
 ``--import-from-browser`` or ``--status``, on a pseudo-terminal or on pipes,
@@ -157,6 +159,7 @@ from typing_extensions import Unpack
 from differential import (
     auth_repair,
     call_loss,
+    crash_overlap,
     eligibility_rows,
     host_comparison,
     lease_probe,
@@ -6672,6 +6675,18 @@ ROWS: dict[str, RowLifecycle] = {
         owner_loss=True,
         traced=True,
     ),
+    # H-R6-contended: the owner, or Direct's server, killed under a contender
+    # armed on the profile's lock, and a successor asked for at once (#808).
+    crash_overlap.ROW: RowLifecycle(
+        idle_timeout=crash_overlap.IDLE_TIMEOUT_SECONDS,
+        recorded=True,
+        scenarios=False,
+        script=crash_overlap.script,
+        k2=crash_overlap.K2_NOT_APPLICABLE,
+        successor=True,
+        owner_loss=True,
+        traced=True,
+    ),
     # H-R10a, H-R10b and H-R15: profile commands beside a live owner or
     # Direct server, in the calibration's configuration. A confirmed logout
     # is expected to leave the session cleared, and nothing that could sign
@@ -6756,6 +6771,7 @@ ROW_VERDICTS: dict[str, RowVerdict] = {
     },
     **{row: owner_loss.h_r8_problems for row in owner_loss.H_R8_CASES},
     owner_loss.ROW_H_R9: owner_loss.h_r9_problems,
+    crash_overlap.ROW: crash_overlap.problems_for,
     **{row: profile_commands.problems_for for row in profile_commands.CASES},
     **{row: auth_repair.problems_for for row in auth_repair.CASES},
     **{row: eligibility_rows.problems_for for row in eligibility_rows.CASES},

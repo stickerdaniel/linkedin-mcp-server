@@ -525,6 +525,7 @@ _CALL_ROWS = (
     "tests/differential/test_profile_command_rows.py",
     "tests/differential/test_auth_repair_rows.py",
     "tests/differential/test_eligibility_rows.py",
+    "tests/differential/test_crash_overlap_rows.py",
 )
 
 

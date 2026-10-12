@@ -26,6 +26,7 @@ GROUPS = (
     "commands",
     "auth",
     "eligibility",
+    "crash",
 )
 _BROWSERS = {
     "ubuntu-latest": "~/.cache/ms-playwright",
