@@ -74,10 +74,11 @@ def get_trace_dir() -> Path | None:
 def _prune_stale_runs(root: Path) -> None:
     """Remove ``run-*`` directories under *root* untouched for the retention period.
 
-    Only under a profile root this server owns (``require_profile_claim``), and
-    only real directories named the way :func:`get_trace_dir` names them; a
-    symlink is never followed. A live process keeps its own directory fresh
-    with every log line. Best effort: a run that cannot be read or removed stays.
+    Only under a profile root this server owns (``require_profile_claim``), only
+    in a ``trace-runs`` that is not itself a link, and only real directories
+    named the way :func:`get_trace_dir` names them; a symlink is never followed.
+    A live process keeps its own directory fresh with every log line. Best
+    effort: a run that cannot be read or removed stays.
     """
     from linkedin_mcp_server.exceptions import ProfileRootRefusedError
     from linkedin_mcp_server.profile_claim import require_profile_claim
@@ -85,6 +86,9 @@ def _prune_stale_runs(root: Path) -> None:
     try:
         require_profile_claim(_safe_source_profile_dir())
     except ProfileRootRefusedError:
+        return
+    # The claim covers the auth root, not wherever a linked `trace-runs` points.
+    if root.is_symlink() or os.path.isjunction(root):
         return
     cutoff = time.time() - _RETAIN_SECONDS
     try:

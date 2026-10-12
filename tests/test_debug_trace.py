@@ -170,3 +170,14 @@ def test_runs_under_a_root_this_server_does_not_own_are_left_alone(
     get_trace_dir()
 
     assert stale.exists()
+
+
+def test_a_linked_trace_root_is_not_pruned(monkeypatch, tmp_path):
+    _use_profile(monkeypatch, tmp_path / "profile")
+    elsewhere = tmp_path / "elsewhere"
+    stale = _aged_run(elsewhere, "run-stale", days=30)
+    (tmp_path / "trace-runs").symlink_to(elsewhere, target_is_directory=True)
+
+    get_trace_dir()
+
+    assert stale.exists()
