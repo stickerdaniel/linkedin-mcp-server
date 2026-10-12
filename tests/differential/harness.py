@@ -85,7 +85,9 @@ serve settles that successor in the identified owner's place. **Rows H-R8 and
 H-R9** (``owner_loss``) lose the owner before a call and after the dispatch of
 a mutating one, through ``OwnerLossSeams``: killed or stopped through the
 handle the row tied it by, or its old address answered by a declared
-responder; a stopped owner is resumed on every path. **Rows H-R10a, H-R10b
+responder; a stopped owner is resumed on every path. **Row H-R6-contended**
+(``crash_overlap``, Windows) kills the same way under a contender armed on the
+profile's lock and asks for a successor's browser at once. **Rows H-R10a, H-R10b
 and H-R15** (``profile_commands``) run the profile commands themselves, the
 row's own command line with ``--logout``, ``--login``,
 ``--import-from-browser`` or ``--status``, on a pseudo-terminal or on pipes,
@@ -157,6 +159,7 @@ from typing_extensions import Unpack
 from differential import (
     auth_repair,
     call_loss,
+    crash_overlap,
     eligibility_rows,
     host_comparison,
     lease_probe,
@@ -3589,6 +3592,114 @@ def browser_lineage(observed: Iterable[dict[str, Any]]) -> list[list[Any]]:
     the watcher never saw that ancestor. A launch that read a page had a
     browser of its own, so this names which launch could have read what,
     whatever its process timing.
+    """
+    _, browsers, gone, parent_of = _lifetimes(observed)
+    roots = []
+    for key in sorted(browsers, key=lambda key: key[1]):
+        parent = parent_of(key)
+        if parent is not None and parent in browsers:
+            continue
+        launcher = parent_of(parent) if parent is not None else None
+        roots.append(
+            [
+                key[0],
+                key[1],
+                gone.get(key),
+                launcher[0] if launcher is not None else None,
+                launcher[1] if launcher is not None else None,
+            ]
+        )
+    return roots
+
+
+#: Arguments only a Chromium process carries: a child's process type, and
+#: the profile every browser launch names.
+_CHROMIUM_MARKERS = ("--type=", "--user-data-dir")
+
+
+def browser_processes(
+    observed: Iterable[dict[str, Any]], browser_key: str
+) -> list[list[Any]]:
+    """Every browser process the watcher saw this row's actors start, members
+    as well as roots, with its tree's root: ``[pid, start, gone, root pid,
+    root start]``. What a crash row holds an old browser's members to
+    (``crash_overlap``), where ``browser_lineage`` names the roots alone.
+
+    The watcher samples, so this is what its samples saw: a process whose
+    whole lifetime fell between two samples is in no record and not here.
+
+    A process a browser started is a browser too, whatever its command line;
+    *gone* and the parent rule are ``browser_lineage``'s. A browser outside
+    every tree roots one of its own only on proof: a record of it reads a
+    root's command line, ``--user-data-dir`` without ``--type=``, on the
+    profile *browser_key*, or, its arguments withheld, names that profile as
+    the watcher read it. Anything else that reaches no tree, its parent never
+    sampled or no browser, is listed with no root, ``[pid, start, gone, None,
+    None]``, when it could be a browser's helper whose ancestry was lost: it
+    runs a root's image, or its image was never read and its command line
+    carries a Chromium marker or was withheld. So a renderer is never taken
+    for a root, and never for a successor's.
+    """
+    observed = list(observed)
+    first, browsers, gone, parent_of = _lifetimes(observed)
+    # The image each lifetime last ran: the one it became, where it execs.
+    image: dict[tuple[int, float], str] = {}
+    # Lifetimes whose command line may be a Chromium process's.
+    marked: set[tuple[int, float]] = set()
+    # Lifetimes read as a browser root on the profile.
+    proven: set[tuple[int, float]] = set()
+    for record in observed:
+        pid, start, exe = (
+            record.get(name) for name in ("pid", "start_identity", "exe")
+        )
+        if type(pid) is not int or not isinstance(start, (int, float)):
+            continue
+        key = (pid, float(start))
+        if exe:
+            image[key] = str(exe)
+        arguments = record.get("cmdline") or ()
+        if (
+            record.get("cmdline_withheld")
+            or record.get("profile")
+            or any(str(a).startswith(_CHROMIUM_MARKERS) for a in arguments)
+        ):
+            marked.add(key)
+        profile = (
+            record.get("profile")
+            if record.get("cmdline_withheld")
+            else user_data_dir([str(a) for a in arguments])
+        )
+        if profile == browser_key:
+            proven.add(key)
+    root_of: dict[tuple[int, float], tuple[int | None, float | None]] = {}
+    for key in sorted(first, key=lambda key: key[1]):
+        parent = parent_of(key)
+        if parent is not None and parent in root_of:
+            root_of[key] = root_of[parent]
+        elif key in browsers and key in proven:
+            root_of[key] = key
+    roots = {
+        image[key] for key, root in root_of.items() if root == key and key in image
+    }
+    for key in first.keys() - root_of.keys():
+        if image.get(key) in roots or (key not in image and key in marked):
+            root_of[key] = (None, None)
+    return [
+        [key[0], key[1], gone.get(key), *root]
+        for key, root in sorted(root_of.items(), key=lambda item: item[0][1])
+    ]
+
+
+def _lifetimes(
+    observed: Iterable[dict[str, Any]],
+) -> tuple[
+    dict[tuple[int, float], dict[str, Any]],
+    set[tuple[int, float]],
+    dict[tuple[int, float], float],
+    Callable[[tuple[int, float]], tuple[int, float] | None],
+]:
+    """The watcher's records by lifetime: each one's first record, the
+    browsers, when each was seen gone, and each one's parent.
 
     A lifetime is a browser if any record of it says so: a child sampled
     between fork and exec is first seen with its parent's command line and
@@ -3616,30 +3727,18 @@ def browser_lineage(observed: Iterable[dict[str, Any]]) -> list[list[Any]]:
             record.get("t"), (int, float)
         ):
             gone.setdefault(key, float(record["t"]))
+    by_pid: dict[int, list[float]] = {}
+    for pid, start in first:
+        by_pid.setdefault(pid, []).append(start)
 
-    def parent_of(
-        child: tuple[int, float],
-    ) -> tuple[int, float] | None:
+    def parent_of(child: tuple[int, float]) -> tuple[int, float] | None:
         ppid = first[child].get("ppid")
-        found = [key for key in first if key[0] == ppid and key[1] <= child[1]]
-        return max(found, key=lambda key: key[1]) if found else None
+        if type(ppid) is not int:
+            return None
+        starts = [start for start in by_pid.get(ppid, ()) if start <= child[1]]
+        return (ppid, max(starts)) if starts else None
 
-    roots = []
-    for key in sorted(browsers, key=lambda key: key[1]):
-        parent = parent_of(key)
-        if parent is not None and parent in browsers:
-            continue
-        launcher = parent_of(parent) if parent is not None else None
-        roots.append(
-            [
-                key[0],
-                key[1],
-                gone.get(key),
-                launcher[0] if launcher is not None else None,
-                launcher[1] if launcher is not None else None,
-            ]
-        )
-    return roots
+    return first, browsers, gone, parent_of
 
 
 def launch_lifetimes(
@@ -3767,6 +3866,10 @@ _LINEAGE_EXPECTED = {
 }
 
 
+#: ``row_expectations``' O1: two browser roots on the profile in one sample.
+SECOND_BROWSER = "O1: a second browser ran on the profile, or O1 is unknown"
+
+
 def row_expectations(
     vector: RowVector,
     *,
@@ -3792,7 +3895,7 @@ def row_expectations(
     if not vector.browser_seen:
         failures.append("the watcher never saw a browser on the row's profile")
     if not vector.o1_single_browser:
-        failures.append("O1: a second browser ran on the profile, or O1 is unknown")
+        failures.append(SECOND_BROWSER)
     if not vector.origin_saw_feed:
         failures.append("the synthetic origin logged no /feed/ request in the row")
     if not vector.feed_carried_session:
@@ -6672,6 +6775,18 @@ ROWS: dict[str, RowLifecycle] = {
         owner_loss=True,
         traced=True,
     ),
+    # H-R6-contended: the owner, or Direct's server, killed under a contender
+    # armed on the profile's lock, and a successor asked for at once (#808).
+    crash_overlap.ROW: RowLifecycle(
+        idle_timeout=crash_overlap.IDLE_TIMEOUT_SECONDS,
+        recorded=True,
+        scenarios=False,
+        script=crash_overlap.script,
+        k2=crash_overlap.K2_NOT_APPLICABLE,
+        successor=True,
+        owner_loss=True,
+        traced=True,
+    ),
     # H-R10a, H-R10b and H-R15: profile commands beside a live owner or
     # Direct server, in the calibration's configuration. A confirmed logout
     # is expected to leave the session cleared, and nothing that could sign
@@ -6756,6 +6871,7 @@ ROW_VERDICTS: dict[str, RowVerdict] = {
     },
     **{row: owner_loss.h_r8_problems for row in owner_loss.H_R8_CASES},
     owner_loss.ROW_H_R9: owner_loss.h_r9_problems,
+    crash_overlap.ROW: crash_overlap.problems_for,
     **{row: profile_commands.problems_for for row in profile_commands.CASES},
     **{row: auth_repair.problems_for for row in auth_repair.CASES},
     **{row: eligibility_rows.problems_for for row in eligibility_rows.CASES},
@@ -10171,6 +10287,9 @@ async def measure_host_quit_row(
         row_record["owner_processes"] = owners
         row_record["gate_processes"] = gates
         row_record["browser_roots"] = browser_lineage(observed_events)
+        row_record["browser_processes"] = browser_processes(
+            observed_events, account.browser_key
+        )
         # Every server and frontend, each lifetime once: what a browser's
         # launcher is tied to the host that started it by.
         row_record["frontend_processes"] = frontend_lifetimes(

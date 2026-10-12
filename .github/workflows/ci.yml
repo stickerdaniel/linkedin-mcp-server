@@ -363,6 +363,7 @@ jobs:
           tests/differential/test_baseline.py
           tests/differential/test_signals.py
           tests/differential/test_failed_job_query.py
+          tests/differential/test_crash_overlap.py
 
       # The identity gate runs on every leg, because every leg's browser is a
       # different one from the Ubuntu job's. macOS is the only platform with a

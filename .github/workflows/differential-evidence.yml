@@ -31,6 +31,7 @@ on:
           - commands
           - auth
           - eligibility
+          - crash
           - all
 
 # A later dispatch or a push does not cancel evidence that is already running.
@@ -65,7 +66,7 @@ jobs:
     # The camelCase read shims off, for the reason given at `windows-daemon`.
     env:
       FASTMCP_MCP_CAMELCASE_COMPAT: "false"
-    # Seven groups of rows per leg, so no job's bound comes near the hosted
+    # Eight groups of rows per leg, so no job's bound comes near the hosted
     # runner's six hours. The sum of a group's step bounds: 45 for a cold
     # browser download for each runtime and the frozen baseline (bound 15),
     # with room for Windows, the slowest leg, to sync and install twice; then
@@ -79,12 +80,13 @@ jobs:
     # for H-R16's cold and second-frontend cells, 60 for its failed login and
     # 55 for H-R10a's login (265), and `eligibility` 55 for the daemon switched
     # off, 30 for a container, 40 for HTTP, 80 for synced storage, 30 for
-    # unknown storage and 75 for H-R14 (355).
+    # unknown storage and 75 for H-R14 (355), and `crash` 30 for #808's
+    # discriminator on Windows (75).
     # `native` takes 10 for the synthetic origin, 20 for H-R1, 5 for the
     # oracle on Linux, 25 for a custom browser, 45 for H-R3 and H-R2, 25 for
     # the killed owner, 25 for the failed Job query on Windows and 45 for the
     # unconfirmed close (240, from Windows, its largest leg).
-    timeout-minutes: ${{ matrix.rows == 'native' && 240 || matrix.rows == 'pipes' && 165 || matrix.rows == 'processes' && 185 || matrix.rows == 'owner' && 265 || matrix.rows == 'commands' && 185 || matrix.rows == 'auth' && 265 || matrix.rows == 'eligibility' && 355 || 285 }}
+    timeout-minutes: ${{ matrix.rows == 'native' && 240 || matrix.rows == 'pipes' && 165 || matrix.rows == 'processes' && 185 || matrix.rows == 'owner' && 265 || matrix.rows == 'commands' && 185 || matrix.rows == 'auth' && 265 || matrix.rows == 'eligibility' && 355 || matrix.rows == 'crash' && 75 || 285 }}
     strategy:
       fail-fast: false
       matrix:
@@ -640,6 +642,28 @@ jobs:
           LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
         timeout-minutes: 50
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_loss_rows.py -k message
+
+      # Row H-R6-contended, #808's discriminator, Windows only: a contender
+      # armed on the profile's real lock before a hard kill of the frozen
+      # Direct server (K1) or the candidate owner (K3), the old browser's
+      # processes watched through process handles and never a Job handle,
+      # and a successor's read sent at once (tests/differential/
+      # crash_overlap.py). Each cell adds to the calibration's seven minutes:
+      # the tree read twice and the contender's first answer (30s each), the
+      # successor's read through an election (bound 180s) or a fresh host's
+      # (two minutes), the contender's stop (15s), in K3 the successor's idle
+      # exit (60 + 90s), and the residual browser wait (60s). Two cells come
+      # to at most 26 minutes: 30. Other platforms run nothing in this group.
+      - name: Race a contender against a hard kill
+        if: runner.os == 'Windows' && matrix.rows == 'crash'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          DEBUG: ${{ matrix.os == 'windows-latest' && 'pw:browser' || '' }}
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 30
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_crash_overlap_rows.py
 
       # Row H-R10a, a confirmed logout beside an idle owner, on a terminal:
       # K1 frozen after its server settled, K3 retiring the owner, and K0 (K2

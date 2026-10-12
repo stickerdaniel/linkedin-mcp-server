@@ -1,8 +1,8 @@
 """Select the manual differential-evidence matrix.
 
-One platform and one evidence group is one job. ``all`` expands that axis.
-Anything else fails before writing a matrix, so a bad dispatch does not become
-an empty run.
+One platform and one evidence group is one job. ``all`` expands that axis,
+leaving out a group on a platform it does not run on. Anything else fails
+before writing a matrix, so a bad dispatch does not become an empty run.
 """
 
 from __future__ import annotations
@@ -26,7 +26,11 @@ GROUPS = (
     "commands",
     "auth",
     "eligibility",
+    "crash",
 )
+#: Groups whose rows run on some platforms only; elsewhere a job would
+#: prepare browsers and a baseline for nothing.
+_ONLY_ON = {"crash": ("windows-latest",)}
 _BROWSERS = {
     "ubuntu-latest": "~/.cache/ms-playwright",
     "ubuntu-24.04-arm": "~/.cache/ms-playwright",
@@ -53,11 +57,15 @@ def evidence_matrix(platform: str, group: str) -> list[dict[str, str]]:
         groups = [group]
     else:
         raise CiEvidenceError(f"unknown group {group!r}")
-    return [
+    jobs = [
         {"os": name, "rows": rows, "browsers": _BROWSERS[name]}
         for name in platforms
         for rows in groups
+        if name in _ONLY_ON.get(rows, PLATFORMS)
     ]
+    if not jobs:
+        raise CiEvidenceError(f"group {group!r} does not run on {platform!r}")
+    return jobs
 
 
 def _write_output(name: str, value: str) -> None:
