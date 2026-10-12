@@ -594,23 +594,6 @@ def config_fingerprint(config: AppConfig, *, key: str) -> str:
     ).hexdigest()
 
 
-def mismatched_fields(config: AppConfig, other: AppConfig) -> tuple[str, ...]:
-    """Which shared fields differ, for an explanation that names no values.
-
-    A mismatch message has to say enough to act on and nothing more: the values
-    include a proxy password and the path to someone's browser profile.
-    """
-    differing = [
-        name
-        for name in SHARED_CONFIG_FIELDS
-        if _normalize(name, getattr(config.browser, name, None))
-        != _normalize(name, getattr(other.browser, name, None))
-    ]
-    if config.server.tool_timeout_seconds != other.server.tool_timeout_seconds:
-        differing.append("tool_timeout_seconds")
-    return tuple(differing)
-
-
 @dataclass(frozen=True)
 class DaemonDescriptor:
     """Everything a client needs to decide whether to attach, and where."""
@@ -862,23 +845,6 @@ def replace_definitely_failed(exc: BaseException) -> bool:
     )
 
 
-def publish(
-    auth_root: Path, descriptor: DaemonDescriptor, token: str
-) -> tuple[Path, Path]:
-    """Prepare and commit a descriptor for callers that need one operation."""
-    prepare(auth_root, descriptor, token)
-    try:
-        descriptor_file = commit_prepared(auth_root, descriptor.instance_id)
-    except BaseException as exc:
-        # NFS can report a failed rename after the server applied it, while the
-        # next lookup still returns an older cached entry. Only structural path
-        # errors prove that this generation never became canonical.
-        if replace_definitely_failed(exc):
-            discard_prepared(auth_root, descriptor.instance_id)
-        raise
-    return descriptor_file, token_path(auth_root, descriptor.instance_id)
-
-
 #: A descriptor is a few hundred bytes of JSON. Bounded for the same reason the
 #: token read is: whatever sits at the path may not be what this wrote.
 _MAX_DESCRIPTOR_BYTES = 64 * 1024
@@ -1031,7 +997,7 @@ def validate_prepared(
     instance_id: str,
     *,
     profile: Path,
-    config: AppConfig | None,
+    config: AppConfig,
 ) -> DaemonDescriptor:
     """Validate one pending generation before the parent authorizes commit."""
     checked = _checked_instance_id(instance_id)
@@ -1054,9 +1020,7 @@ def validate_prepared(
         raise DescriptorError("The prepared daemon descriptor serves another profile")
 
     token = read_token(auth_root, descriptor)
-    if config is not None and descriptor.config_fingerprint != config_fingerprint(
-        config, key=token
-    ):
+    if descriptor.config_fingerprint != config_fingerprint(config, key=token):
         raise DescriptorError(
             "The prepared daemon descriptor uses a different configuration"
         )

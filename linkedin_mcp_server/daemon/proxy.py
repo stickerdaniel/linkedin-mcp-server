@@ -495,10 +495,11 @@ class FrontendCallMiddleware(Middleware):
     elections; a sign-in adds at most one read-only replay. One client call is
     therefore at most four preflights, four dispatches and four election joins.
 
-    All four listings recover too, because clients list before they call and
-    ``provider_error_strategy = "raise"`` surfaces a departed owner. Resource
-    reads and prompt renders are not covered because no owner registers either;
-    registering one needs ``on_read_resource`` and ``on_get_prompt`` here.
+    The tool listing recovers too, because clients list before they call and
+    ``provider_error_strategy = "raise"`` surfaces a departed owner. Resources
+    and prompts never reach the owner (``OwnerForwarder``), so nothing of theirs
+    needs a recovery; forwarding one again needs its listing and lookup hooks
+    here.
     """
 
     def __init__(self, backend: DaemonProxyBackend, *, budget: float) -> None:
@@ -543,21 +544,6 @@ class FrontendCallMiddleware(Middleware):
             raise _owner_lost_from_a_listing(recovery.unanswered) from again
 
     async def on_list_tools(
-        self, context: MiddlewareContext[Any], call_next: CallNext[Any, Any]
-    ) -> Any:
-        return await self._repeat_the_listing(context, call_next)
-
-    async def on_list_resources(
-        self, context: MiddlewareContext[Any], call_next: CallNext[Any, Any]
-    ) -> Any:
-        return await self._repeat_the_listing(context, call_next)
-
-    async def on_list_resource_templates(
-        self, context: MiddlewareContext[Any], call_next: CallNext[Any, Any]
-    ) -> Any:
-        return await self._repeat_the_listing(context, call_next)
-
-    async def on_list_prompts(
         self, context: MiddlewareContext[Any], call_next: CallNext[Any, Any]
     ) -> Any:
         return await self._repeat_the_listing(context, call_next)

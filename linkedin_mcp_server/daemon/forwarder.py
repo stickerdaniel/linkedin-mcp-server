@@ -52,11 +52,8 @@ from linkedin_mcp_server.daemon.liveness import CALL_HEADER
 if TYPE_CHECKING:
     from types import TracebackType
 
-    from fastmcp.prompts import Prompt
-    from fastmcp.resources import Resource, ResourceTemplate
     from fastmcp.server.context import Context
     from fastmcp.utilities.components import FastMCPComponent
-    from fastmcp.utilities.versions import VersionSpec
     from mcp.client.session import LoggingFnT
     from mcp.shared.dispatcher import ProgressFnT
     from mcp.shared.message import ClientMessageMetadata
@@ -610,6 +607,9 @@ class OwnerForwarder(Provider):
     *timeout* bounds each request on the hop, at the MCP layer and as the HTTP
     read timeout. It has to outlast the owner's own tool timeout, so a tool
     that times out is reported by the owner rather than cut off here.
+
+    Resources and prompts keep the provider's empty defaults: the owner
+    registers none, so no listing or lookup of either reaches it.
     """
 
     def __init__(self, backend: DaemonProxyBackend, *, timeout: float) -> None:
@@ -660,57 +660,6 @@ class OwnerForwarder(Provider):
         would reach for an owner before any call was bound.
         """
         return []
-
-    # The owner registers no resources or prompts. Their listings and lookups
-    # are still asked of it, so a departed owner reads the same to a client
-    # here as it did when FastMCP's own proxy provider forwarded them: as a
-    # failure the frontend's recovery acts on.
-
-    async def list_resources(self) -> Sequence[Resource]:
-        await self._owner_lists_none(_listed_resources)
-        return []
-
-    async def get_resource(
-        self, uri: str, version: VersionSpec | None = None
-    ) -> Resource | None:
-        await self._owner_lists_none(_listed_resources)
-        return None
-
-    async def list_resource_templates(self) -> Sequence[ResourceTemplate]:
-        await self._owner_lists_none(_listed_templates)
-        return []
-
-    async def get_resource_template(
-        self, uri: str, version: VersionSpec | None = None
-    ) -> ResourceTemplate | None:
-        await self._owner_lists_none(_listed_templates)
-        return None
-
-    async def list_prompts(self) -> Sequence[Prompt]:
-        await self._owner_lists_none(_listed_prompts)
-        return []
-
-    async def get_prompt(
-        self, name: str, version: VersionSpec | None = None
-    ) -> Prompt | None:
-        await self._owner_lists_none(_listed_prompts)
-        return None
-
-    async def _owner_lists_none(
-        self, listing: Callable[[ClientSession], Awaitable[Sequence[object]]]
-    ) -> None:
-        try:
-            listed = await self._exchange(listing)
-        except MCPError as answered:
-            if answered.code == mt.METHOD_NOT_FOUND:
-                return
-            raise
-        if listed:
-            logger.warning(
-                "The shared browser owner listed %d entries this frontend does "
-                "not forward",
-                len(listed),
-            )
 
     async def call(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         """Run *name* in the owner and hand back its result as it came."""
@@ -821,18 +770,6 @@ class OwnerForwarder(Provider):
         if decided.error is not None:
             hop.fail(decided.error)
         return decided.value
-
-
-async def _listed_resources(session: ClientSession) -> Sequence[object]:
-    return (await session.list_resources()).resources
-
-
-async def _listed_templates(session: ClientSession) -> Sequence[object]:
-    return (await session.list_resource_templates()).resource_templates
-
-
-async def _listed_prompts(session: ClientSession) -> Sequence[object]:
-    return (await session.list_prompts()).prompts
 
 
 def _frontend_context() -> Context | None:

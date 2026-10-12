@@ -261,7 +261,6 @@ def test_a_rival_left_alone_says_so_in_the_line_counted_as_its_fallback(
         OwnerLookup,
         OwnerState,
     )
-    from linkedin_mcp_server.config.schema import AppConfig
     from linkedin_mcp_server.daemon.election import Reach, _live_lookup
 
     attachment = Attachment(
@@ -279,9 +278,6 @@ def test_a_rival_left_alone_says_so_in_the_line_counted_as_its_fallback(
     inspector = SimpleNamespace(inspect_until=lambda timeout: rival)
     with caplog.at_level(logging.INFO, logger="linkedin_mcp_server.daemon.election"):
         found, asked, _ = _live_lookup(
-            tmp_path,
-            tmp_path / "profile",
-            AppConfig(),
             lambda _attachment, _timeout: getattr(Reach, reach),
             set(),
             inspector=cast(Any, inspector),

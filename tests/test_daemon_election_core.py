@@ -202,6 +202,29 @@ class TestOneLook:
 
         assert isinstance(probe, lookup.Probe)
 
+    def test_a_replacement_is_seen_through_an_unusable_reading(self):
+        # A descriptor outlives its writer: an owner that crashed serving a
+        # sibling profile reads as unusable while its replacement comes up.
+        state, read = passing(look(wait=1.0))
+        state, pause = passing(
+            lookup.on_event(state, lookup.Read(read.op, 0.0, NOTHING))
+        )
+        assert isinstance(pause, lookup.Pause)
+        state, read = passing(lookup.on_event(state, lookup.Paused(pause.op, 0.1)))
+        _, probe = passing(
+            lookup.on_event(state, lookup.Read(read.op, 0.1, ATTACHABLE))
+        )
+
+        assert isinstance(probe, lookup.Probe)
+
+    def test_a_small_wait_is_not_rounded_up_to_a_poll(self):
+        # A flat poll interval once turned a 1 ms budget into 101 ms.
+        state, read = passing(look(wait=0.001))
+        _, pause = passing(lookup.on_event(state, lookup.Read(read.op, 0.0, NOTHING)))
+
+        assert isinstance(pause, lookup.Pause)
+        assert pause.seconds == pytest.approx(0.001)
+
     @pytest.mark.parametrize(
         ("event", "finding"),
         [

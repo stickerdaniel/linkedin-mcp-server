@@ -8,8 +8,8 @@ A file says nothing about whether the process that wrote it still exists. Only
 :meth:`DaemonLock.try_acquire` settles who owns the browser, and only connecting
 settles whether anything listens. An owner publishes only once it listens, so a
 client that just lost the lock race reads its predecessor's leftovers, which is
-why finding an owner takes a wait rather than one read. The entry point returns
-an :class:`OwnerLookup`, never a bare attachment, so no caller acts on "there is
+why the election's lookup waits rather than reading once. Every reading is an
+:class:`OwnerLookup`, never a bare attachment, so no caller acts on "there is
 a daemon" without the state that says what that is worth.
 """
 
@@ -17,11 +17,9 @@ from __future__ import annotations
 
 import enum
 import logging
-import math
 import queue
 import threading
 import time
-from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -34,10 +32,11 @@ from linkedin_mcp_server.storage_class import StorageClass
 
 logger = logging.getLogger(__name__)
 
-#: Re-read this often while waiting. Short enough that the common case (an owner
-#: that is nearly ready) does not feel like a stall. How *long* to wait belongs
-#: to the caller that lost the lock race, not here.
+#: How often the election re-reads while waiting. Short enough that the common
+#: case (an owner that is nearly ready) does not feel like a stall. How *long*
+#: to wait belongs to the caller that lost the lock race, not here.
 _ATTACH_POLL_SECONDS = 0.1
+#: How long one descriptor read may take before it counts as unreadable.
 _DESCRIPTOR_READ_SECONDS = 1.0
 
 
@@ -335,98 +334,28 @@ class _DescriptorInspector:
         return pending
 
 
-def _names_an_ignored_instance(lookup: OwnerLookup, ignored: AbstractSet[str]) -> bool:
-    """Whether this reading is of a generation the caller has already written off."""
-    if not ignored:
-        return False
-    attachment = lookup.attachment
-    return attachment is not None and attachment.descriptor.instance_id in ignored
-
-
 def look_up_owner(
-    auth_root: Path,
-    profile: Path,
-    config: AppConfig,
-    *,
-    wait_seconds: float = 0.0,
-    ignore_instances: AbstractSet[str] = frozenset(),
-    for_retirement: bool = False,
-    _inspector: _DescriptorInspector | None = None,
+    auth_root: Path, profile: Path, config: AppConfig, *, for_retirement: bool = False
 ) -> OwnerLookup:
-    """Read the descriptor until it is compatible or the budget runs out.
+    """Read the descriptor once, within one bounded wait, and say what it means.
 
-    Every state but ``ATTACHABLE`` is waited out, not only ``ABSENT``: a
-    descriptor outlives its writer, so an owner mid-startup can be read
-    through a dead predecessor's ``INCOMPATIBLE`` file. ``ATTACHABLE`` only
-    says a compatible file is on disk; a caller whose connection then fails
-    must go to the lock. With the default of no wait this is a single read.
-
-    *ignore_instances* names generations the caller already judged unusable
-    (by connecting, in :mod:`linkedin_mcp_server.daemon.election`). They are
-    waited out like any unusable state, so a new generation published over
-    them is still seen within one poll and the caller's retry loop does not
-    spin at read speed. When the budget ends, the reading is returned as is.
+    For a profile command, which asks what is recorded now and never waits for
+    an owner to appear. The election waits through
+    :mod:`linkedin_mcp_server.daemon.core.lookup` instead. A read still blocked
+    after :data:`_DESCRIPTOR_READ_SECONDS` is ``UNTRUSTED``, as is one that
+    fails: neither says the profile is free.
 
     *for_retirement* skips the configuration comparison (``_inspect``).
-
-    Raises:
-        ValueError: *wait_seconds* is not finite.
     """
-    # A non-finite budget would never expire, so the stdio process would never
-    # finish starting. Refused rather than clamped, as the configuration
-    # parsers refuse non-finite timeouts. A negative wait is merely no wait.
-    if not math.isfinite(wait_seconds):
-        raise ValueError(f"wait_seconds must be a finite number, got {wait_seconds}")
-
-    wait_budget = max(wait_seconds, 0.0)
-    deadline = time.monotonic() + wait_budget
-    inspector = _inspector or _DescriptorInspector(
+    inspector = _DescriptorInspector(
         auth_root, profile, config, for_retirement=for_retirement
     )
-    last_lookup: OwnerLookup | None = None
-    while True:
-        remaining = deadline - time.monotonic()
-        read_timeout = (
-            _DESCRIPTOR_READ_SECONDS
-            if wait_budget == 0.0
-            else min(_DESCRIPTOR_READ_SECONDS, max(remaining, 0.0))
-        )
-        try:
-            lookup = inspector.inspect_until(timeout=read_timeout)
-        except _DescriptorReadTimeout as exc:
-            return last_lookup or OwnerLookup(
-                state=OwnerState.UNTRUSTED, reason=str(exc)
-            )
-        except DescriptorError as exc:
-            # Distinct from absence so the file is preserved rather than
-            # cleaned up: beside a held lock it belongs to a live daemon. It
-            # says nothing about whether the position is free, which is why
-            # this state still allows an election attempt.
-            lookup = OwnerLookup(state=OwnerState.UNTRUSTED, reason=str(exc))
-
-        last_lookup = lookup
-        if lookup.state is OwnerState.ATTACHABLE and not _names_an_ignored_instance(
-            lookup, ignore_instances
-        ):
-            return lookup
-
-        # Never sleep past the deadline, or a tiny budget overruns by a whole
-        # poll interval.
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            # The state at INFO, the detail at DEBUG. A reason can quote a path
-            # or host out of the descriptor, and "nothing usable was published"
-            # is the part that belongs in a log a user pastes into a report.
-            # An ignored generation is named as such rather than by its state,
-            # which would otherwise print the "attachable" this wait exists to
-            # disbelieve.
-            if _names_an_ignored_instance(lookup, ignore_instances):
-                logger.info("No daemon to attach to (the published one is unusable)")
-            else:
-                logger.info("No daemon to attach to (%s)", lookup.state.value)
-            logger.debug("Daemon lookup detail: %s", lookup.reason)
-            return lookup
-        time.sleep(min(_ATTACH_POLL_SECONDS, remaining))
+    try:
+        return inspector.inspect_until(timeout=_DESCRIPTOR_READ_SECONDS)
+    except (_DescriptorReadTimeout, DescriptorError) as exc:
+        # Distinct from absence so the file is preserved rather than cleaned
+        # up: beside a held lock it belongs to a live daemon.
+        return OwnerLookup(state=OwnerState.UNTRUSTED, reason=str(exc))
 
 
 def daemon_would_be_used(config: AppConfig) -> bool:

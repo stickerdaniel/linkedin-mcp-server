@@ -72,8 +72,7 @@ COMMITTED = "committed"
 FAILED = "failed"
 ABORTED = "aborted"
 RETRY = "retry"
-UNCERTAIN = "uncertain"
-VERDICTS = frozenset({COMMITTED, FAILED, ABORTED, RETRY, UNCERTAIN})
+VERDICTS = frozenset({COMMITTED, FAILED, ABORTED, RETRY})
 
 #: The fields each frame carries besides ``type`` and ``nonce``, exactly.
 _FIELDS: dict[str, frozenset[str]] = {

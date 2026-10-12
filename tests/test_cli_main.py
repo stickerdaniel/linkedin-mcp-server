@@ -1317,24 +1317,22 @@ class _Owner:
         self.port = 49152
         profile.mkdir(parents=True, exist_ok=True)
         auth_root = auth_root_dir(profile)
-        daemon_descriptor.publish(
-            auth_root,
-            daemon_descriptor.build(
-                instance_id=self.instance,
-                package_version="4.20.0",
-                runtime_id=get_runtime_id(),
-                profile=profile,
-                host=self.HOST,
-                port=self.port,
-                path="/mcp",
-                token=self.token,
-                # Another configuration than the client's: retirement is about
-                # the browser, not about whether this client could use it.
-                config=AppConfig(),
-                log_path=auth_root / "daemon.log",
-            ),
-            self.token,
+        descriptor = daemon_descriptor.build(
+            instance_id=self.instance,
+            package_version="4.20.0",
+            runtime_id=get_runtime_id(),
+            profile=profile,
+            host=self.HOST,
+            port=self.port,
+            path="/mcp",
+            token=self.token,
+            # Another configuration than the client's: retirement is about
+            # the browser, not about whether this client could use it.
+            config=AppConfig(),
+            log_path=auth_root / "daemon.log",
         )
+        daemon_descriptor.prepare(auth_root, descriptor, self.token)
+        daemon_descriptor.commit_prepared(auth_root, self.instance)
         self.liveness = daemon_liveness.get_liveness()
         self.liveness.serving_as(self.instance)
 
@@ -1796,7 +1794,7 @@ class TestRetiringASharedBrowser:
 
         assert owner.sent_only_the_idle_only_request()
         assert owner.liveness.retiring is True
-        assert owner.liveness.retire_reason == "retire"
+        assert owner.liveness.state.retirement == "retire"
         assert owner.turnover == ["asked"]
         # One reference, taken once, in the one place the logout takes it.
         assert taken == [1]

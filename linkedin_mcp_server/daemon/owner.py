@@ -1385,8 +1385,6 @@ class Handshake(Protocol):
 
     def retry(self) -> None: ...
 
-    def uncertain(self) -> None: ...
-
     def close(self) -> None: ...
 
 
@@ -1415,9 +1413,6 @@ class _Handshake:
 
     def retry(self) -> None:
         self._send(startup.VERDICT, status=startup.RETRY)
-
-    def uncertain(self) -> None:
-        self._send(startup.VERDICT, status=startup.UNCERTAIN)
 
     def _send(self, kind: str, *, close: bool = True, **fields: object) -> None:
         channel = self._channel

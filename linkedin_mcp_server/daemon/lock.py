@@ -23,7 +23,6 @@ import logging
 import os
 import weakref
 from pathlib import Path
-from types import TracebackType
 
 from linkedin_mcp_server.daemon.descriptor import (
     daemon_dir,
@@ -31,11 +30,7 @@ from linkedin_mcp_server.daemon.descriptor import (
 )
 from linkedin_mcp_server.common_utils import is_still_at
 from linkedin_mcp_server.private_state import harden_created_file, harden_file
-from linkedin_mcp_server.profile_lease import (
-    acquire_locked_fd,
-    open_lock_file,
-    try_lock,
-)
+from linkedin_mcp_server.profile_lease import acquire_locked_fd
 
 logger = logging.getLogger(__name__)
 
@@ -88,9 +83,8 @@ def _harden_existing_lock(path: Path) -> bool:
 class DaemonLock:
     """Exclusive ownership of one auth root's daemon, for as long as it is held.
 
-    Not a context manager by default: an owner takes it at startup and holds it
-    until exit. :meth:`hold` gives a scope, mainly for tests and one-shot
-    commands.
+    Not a context manager: an owner takes it at startup and holds it until
+    exit.
     """
 
     def __init__(self, auth_root: Path) -> None:
@@ -198,14 +192,6 @@ class DaemonLock:
             with contextlib.suppress(OSError):
                 os.close(fd)
 
-    def hold(self) -> _DaemonLockScope:
-        """Take the lock for a scope, raising when another process holds it."""
-        if not self.try_acquire():
-            raise DaemonLockError(
-                f"Another LinkedIn MCP process owns the browser for {self._auth_root}"
-            )
-        return _DaemonLockScope(self)
-
     def _discard_if_forked(self) -> None:
         if self._owner_pid is not None and self._owner_pid != os.getpid():
             logger.debug("Discarding a daemon lock inherited across a fork")
@@ -221,51 +207,5 @@ class DaemonLock:
                     logger.debug("Closing an inherited lock failed", exc_info=True)
 
 
-class _DaemonLockScope:
-    def __init__(self, lock: DaemonLock) -> None:
-        self._lock = lock
-
-    def __enter__(self) -> DaemonLock:
-        return self._lock
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        self._lock.release()
-
-
 if hasattr(os, "register_at_fork"):  # pragma: no branch - POSIX
     os.register_at_fork(after_in_child=_discard_inherited_locks)
-
-
-def daemon_is_running(auth_root: Path) -> bool:
-    """Whether some process appeared to own the daemon for *auth_root*.
-
-    An observation, never a decision: :meth:`DaemonLock.try_acquire` decides,
-    and this answer can change before it is read. ``flock`` cannot test a lock
-    without taking one, so the probe takes a shared lock, which may briefly
-    delay an election (recoverable) where an exclusive probe could be read as
-    an owner by another probe (not recoverable). False means nobody held it a
-    moment ago; True may be another probe. Says nothing about whether a
-    browser still runs.
-    """
-    directory = prepare_daemon_state(auth_root)
-    path = directory / _DAEMON_LOCK_FILE
-    if not _harden_existing_lock(path):
-        return False
-
-    fd = open_lock_file(path)
-    try:
-        if try_lock(fd, exclusive=False):
-            return False
-        return True
-    finally:
-        # Closed without unlocking, which releases whatever this descriptor
-        # holds, and never touches a lock held through another one.
-        try:
-            os.close(fd)
-        except OSError:
-            logger.debug("Closing the probe descriptor failed", exc_info=True)
