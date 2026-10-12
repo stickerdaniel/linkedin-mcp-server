@@ -218,7 +218,10 @@ def test_a_linked_trace_root_is_not_pruned(monkeypatch, tmp_path):
     _use_profile(monkeypatch, tmp_path / "profile")
     elsewhere = tmp_path / "elsewhere"
     stale = _aged_run(elsewhere, "run-stale", days=30)
-    (tmp_path / "trace-runs").symlink_to(elsewhere, target_is_directory=True)
+    try:
+        (tmp_path / "trace-runs").symlink_to(elsewhere, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"this runner cannot create symlinks: {exc}")
 
     get_trace_dir()
 
