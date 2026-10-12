@@ -389,7 +389,10 @@ claude plugin marketplace add stickerdaniel/linkedin-mcp-server
 claude plugin install linkedin-mcp-server@linkedin-mcp-server
 ```
 
-Inside a session, `/plugin marketplace add` and `/plugin install` with the same arguments do the same. The plugin brings the server and the LinkedIn skill and pins a server release. To move to a newer release, run `claude plugin update linkedin-mcp-server@linkedin-mcp-server`. Authentication works as in the [Codex plugin](#codex-plugin).
+The plugin pins a server release. To move to a newer one, run `claude plugin update linkedin-mcp-server@linkedin-mcp-server` and restart Claude Code. On the first tool call that needs authentication, the server reuses a LinkedIn session from a signed-in local browser or opens a login window.
+
+> [!NOTE]
+> Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. Retry the tool call once the browser download or sign-in completes.
 
 <br/>
 <br/>
