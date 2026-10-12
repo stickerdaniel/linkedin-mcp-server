@@ -804,6 +804,9 @@ class LifetimeSampler:
         self._tracked: dict[tuple[int, float], dict[str, Any]] = {}
         #: Descendants established as not the root: Chromium's own children.
         self._settled: set[tuple[int, float]] = set()
+        #: Whether the latest sample read every descendant. Only that one says
+        #: what is alive at the stop; an earlier gap was settled by later ones.
+        self._complete = False
         self.document: dict[str, Any] = {
             "label": label,
             "began_wall": self._began_wall,
@@ -902,6 +905,7 @@ class LifetimeSampler:
         except Exception:  # noqa: BLE001 - not knowing, asked again next time
             with self._lock:
                 self.document["sample_failures"] += 1
+                self._complete = False
             return
         now = self._ms()
         alive: set[tuple[int, float]] = set()
@@ -939,6 +943,10 @@ class LifetimeSampler:
             if key in self._tracked:
                 try:
                     zombie = child.status() == psutil.STATUS_ZOMBIE
+                except psutil.NoSuchProcess:
+                    # Reaped since the listing, which cached its create time:
+                    # gone, not unreadable.
+                    zombie = True
                 except Exception:  # noqa: BLE001 - unreadable, asked again
                     incomplete = True
                     with self._lock:
@@ -998,6 +1006,7 @@ class LifetimeSampler:
             if truncated:
                 # Cut short, so a process not reached is unknown, not gone.
                 self.document["truncated_samples"] += 1
+            self._complete = not truncated and not incomplete
             for key, record in self._tracked.items():
                 if key in alive:
                     record["last_alive_ms"] = now
@@ -1060,9 +1069,7 @@ class LifetimeSampler:
         self, record: Mapping[str, Any], requested: Mapping[str, float | None] | None
     ) -> str:
         if record["gone_ms"] is None:
-            if self.document["truncated_samples"] or self.document["sample_failures"]:
-                return "unknown"
-            return "alive-at-stop"
+            return "alive-at-stop" if self._complete else "unknown"
         if requested is None:
             return "unknown"
         asked = requested.get(record["role"])

@@ -753,6 +753,8 @@ def test_a_cut_short_sample_marks_nothing_gone(tmp_path):
     (record,) = lifetimes.document["processes"]
     assert record["gone_ms"] is None
     assert lifetimes.document["truncated_samples"] == 1
+    lifetimes.stop(exc=None, requested={})
+    assert record["ended"] == "unknown"
 
 
 def test_the_closing_sample_still_reads_after_a_stop_request(tmp_path, monkeypatch):
@@ -774,6 +776,50 @@ def test_the_closing_sample_still_reads_after_a_stop_request(tmp_path, monkeypat
     lifetimes._run()
     (record,) = lifetimes.document["processes"]
     assert (record["role"], record["pid"]) == ("browser-root", 4343)
+
+
+def _listed(pid: int, status: Any) -> SimpleNamespace:
+    """A descendant as ``children`` lists it, with its create time cached."""
+    return SimpleNamespace(pid=pid, create_time=lambda: 1.0, status=status)
+
+
+def _reaped(pid: int) -> Any:
+    def status() -> str:
+        raise psutil.NoSuchProcess(pid)
+
+    return status
+
+
+def test_a_root_reaped_after_the_listing_is_gone_not_unreadable(tmp_path):
+    lifetimes = LifetimeSampler(
+        tmp_path / BROWSER_LIFETIMES_FILE, profile=tmp_path / "profile", label="reaped"
+    )
+    lifetimes._track((4242, 1.0), "browser-root", 0.0)
+    lifetimes._track((4141, 1.0), "driver", 0.0)
+    # The driver reaped the killed root between the listing and the read.
+    listed = [_listed(4242, _reaped(4242)), _listed(4141, lambda: "running")]
+    me = SimpleNamespace(children=lambda recursive: listed)
+    lifetimes._sample(psutil, me)
+    lifetimes.stop(exc=None, requested={})
+    ends = {
+        p["role"]: p["ended"]
+        for p in _record(tmp_path / BROWSER_LIFETIMES_FILE)["processes"]
+    }
+    assert ends == {"browser-root": "unexpected", "driver": "alive-at-stop"}
+
+
+def test_a_sample_cut_short_by_the_stop_does_not_outweigh_the_closing_one(tmp_path):
+    lifetimes = LifetimeSampler(
+        tmp_path / BROWSER_LIFETIMES_FILE, profile=tmp_path / "profile", label="cut"
+    )
+    lifetimes._track((4141, 1.0), "driver", 0.0)
+    me = SimpleNamespace(children=lambda recursive: [_listed(4141, lambda: "running")])
+    # A routine sample the stop request cut short, then the closing sample.
+    lifetimes._sample(psutil, me, deadline=time.monotonic() - 1)
+    lifetimes._sample(psutil, me)
+    lifetimes.stop(exc=None, requested={})
+    (driver,) = _record(tmp_path / BROWSER_LIFETIMES_FILE)["processes"]
+    assert driver["ended"] == "alive-at-stop"
 
 
 def test_the_origin_record_drops_the_query(tmp_path):
