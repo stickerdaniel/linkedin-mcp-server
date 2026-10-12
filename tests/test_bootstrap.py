@@ -1899,13 +1899,19 @@ class TestTwoStageInstall:
 
         stood_down: list[str] = []
 
-        async def never_finishes(**_kwargs: object) -> None:
+        async def never_finishes(
+            *, activity_callback: Callable[[], None], **_kwargs: object
+        ) -> None:
+            # Shortened from inside setup, through the activity reschedule, so
+            # the readiness check before it, which runs in a thread as slowly
+            # as a loaded machine lets it, cannot spend the deadline first.
+            monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.01)
+            activity_callback()
             await asyncio.Event().wait()
 
         config = SimpleNamespace(browser=SimpleNamespace(chrome_path=None))
         monkeypatch.setattr(bootstrap, "get_config", lambda: config)
         monkeypatch.setattr(bootstrap, "_run_browser_setup", never_finishes)
-        monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.01)
         monkeypatch.setattr(bootstrap, "browser_setup_ready", lambda: False)
         monkeypatch.setattr(bootstrap, "process_role", lambda: ServerRole.OWNER)
         monkeypatch.setattr(
