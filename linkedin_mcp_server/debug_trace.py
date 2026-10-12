@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+import time
 from typing import Any, Literal
 
 from linkedin_mcp_server.common_utils import secure_mkdir, slugify_fragment
@@ -19,6 +20,12 @@ _TRACE_COUNTER = itertools.count(1)
 _TRACE_DIR: Path | None = None
 _TRACE_KEEP = False
 _EXPLICIT_TRACE_DIR = False
+
+#: How long a run directory under ``trace-runs`` outlives its last write. Each
+#: process creates one, and a host that kills its server skips the exit-time
+#: cleanup, so without a bound they accumulate (2,546 measured on one machine).
+#: Long enough to attach a retained trace to an issue report.
+_RETAIN_SECONDS = 14 * 24 * 60 * 60
 
 
 def _trace_mode() -> TraceMode:
@@ -58,13 +65,50 @@ def get_trace_dir() -> Path | None:
         return None
 
     if _TRACE_DIR is None:
-        _TRACE_DIR = Path(
-            tempfile.mkdtemp(
-                prefix="run-",
-                dir=_trace_root(),
-            )
-        ).resolve()
+        root = _trace_root()
+        _prune_stale_runs(root)
+        _TRACE_DIR = Path(tempfile.mkdtemp(prefix="run-", dir=root)).resolve()
     return _TRACE_DIR
+
+
+def _prune_stale_runs(root: Path) -> None:
+    """Remove ``run-*`` directories under *root* untouched for the retention period.
+
+    Only under a profile root this server owns (``require_profile_claim``), and
+    only real directories named the way :func:`get_trace_dir` names them; a
+    symlink is never followed. A live process keeps its own directory fresh
+    with every log line. Best effort: a run that cannot be read or removed stays.
+    """
+    from linkedin_mcp_server.exceptions import ProfileRootRefusedError
+    from linkedin_mcp_server.profile_claim import require_profile_claim
+
+    try:
+        require_profile_claim(_safe_source_profile_dir())
+    except ProfileRootRefusedError:
+        return
+    cutoff = time.time() - _RETAIN_SECONDS
+    try:
+        runs = [
+            entry
+            for entry in os.scandir(root)
+            if entry.name.startswith("run-") and entry.is_dir(follow_symlinks=False)
+        ]
+    except OSError:
+        return
+    for run in runs:
+        try:
+            if _last_write(Path(run.path)) < cutoff:
+                shutil.rmtree(run.path)
+        except OSError:
+            continue
+
+
+def _last_write(run: Path) -> float:
+    """The newest modification time of *run* and its direct entries."""
+    newest = run.stat(follow_symlinks=False).st_mtime
+    for entry in os.scandir(run):
+        newest = max(newest, entry.stat(follow_symlinks=False).st_mtime)
+    return newest
 
 
 def mark_trace_for_retention() -> Path | None:

@@ -1,5 +1,7 @@
 import json
+import os
 from pathlib import Path
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -112,3 +114,59 @@ def test_safe_source_profile_dir_ignores_generic_env_fallback(monkeypatch):
     )
 
     assert _safe_source_profile_dir() == Path("~/.linkedin-mcp/profile").expanduser()
+
+
+def _aged_run(root: Path, name: str, *, days: float) -> Path:
+    run = root / name
+    run.mkdir(parents=True)
+    log = run / "server.log"
+    log.write_text("x")
+    stamp = time.time() - days * 24 * 60 * 60
+    os.utime(log, (stamp, stamp))
+    os.utime(run, (stamp, stamp))
+    return run
+
+
+def _use_profile(monkeypatch, profile: Path) -> None:
+    monkeypatch.setattr(
+        "linkedin_mcp_server.debug_trace.get_source_profile_dir", lambda: profile
+    )
+
+
+def test_a_new_run_removes_runs_left_behind_long_ago(monkeypatch, tmp_path):
+    _use_profile(monkeypatch, tmp_path / "profile")
+    root = tmp_path / "trace-runs"
+    stale = _aged_run(root, "run-stale", days=30)
+    recent = _aged_run(root, "run-recent", days=1)
+    foreign = _aged_run(root, "notes", days=30)
+
+    trace_dir = get_trace_dir()
+
+    assert trace_dir is not None and trace_dir.parent == root.resolve()
+    assert not stale.exists()
+    assert recent.exists() and foreign.exists()
+
+
+def test_a_run_still_being_written_is_kept(monkeypatch, tmp_path):
+    _use_profile(monkeypatch, tmp_path / "profile")
+    live = _aged_run(tmp_path / "trace-runs", "run-live", days=30)
+    (live / "server.log").write_text("still logging")
+
+    get_trace_dir()
+
+    assert live.exists()
+
+
+def test_runs_under_a_root_this_server_does_not_own_are_left_alone(
+    monkeypatch, tmp_path
+):
+    # Not tmp_path/profile, which the isolation fixture claims.
+    profile = tmp_path / "elsewhere" / "profile"
+    profile.mkdir(parents=True)
+    (profile / "someone-elses-file").write_text("x")
+    _use_profile(monkeypatch, profile)
+    stale = _aged_run(tmp_path / "elsewhere" / "trace-runs", "run-stale", days=30)
+
+    get_trace_dir()
+
+    assert stale.exists()
