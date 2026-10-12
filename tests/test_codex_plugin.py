@@ -1,4 +1,4 @@
-"""Contract tests for the opt-in Codex plugin package."""
+"""Contract tests for the opt-in Codex and Claude Code plugin package."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ _PLUGIN_ROOT = _REPO_ROOT / "plugins" / "linkedin-mcp-server"
 _PLUGIN_MANIFEST = _PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 _PLUGIN_MCP = _PLUGIN_ROOT / ".mcp.json"
 _MARKETPLACE = _REPO_ROOT / ".agents" / "plugins" / "marketplace.json"
+_CLAUDE_MANIFEST = _PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
+_CLAUDE_MARKETPLACE = _REPO_ROOT / ".claude-plugin" / "marketplace.json"
 _RELEASE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
 
 
@@ -83,16 +85,37 @@ def test_mcp_command_is_version_pinned() -> None:
     _assert_mcp_contract(_load_json(_PLUGIN_MCP), _released_version())
 
 
-def test_release_workflow_updates_and_commits_both_plugin_files() -> None:
+def test_release_workflow_updates_and_commits_every_plugin_file() -> None:
     workflow = _RELEASE_WORKFLOW.read_text(encoding="utf-8")
     for path in (
         "plugins/linkedin-mcp-server/.codex-plugin/plugin.json",
+        "plugins/linkedin-mcp-server/.claude-plugin/plugin.json",
         "plugins/linkedin-mcp-server/.mcp.json",
     ):
         assert workflow.count(path) >= 3
     assert 'args[package_args[0]] = f"mcp-server-linkedin@{version}"' in workflow
     assert '"Codex plugin": [plugin["version"]]' in workflow
     assert '"Codex plugin MCP": [' in workflow
+    assert '"Claude Code plugin": [claude_plugin["version"]]' in workflow
+
+
+def test_claude_code_marketplace_resolves_the_plugin() -> None:
+    marketplace = _load_json(_CLAUDE_MARKETPLACE)
+    assert marketplace["name"] == "linkedin-mcp-server"
+    assert [(p["name"], p["source"]) for p in marketplace["plugins"]] == [
+        ("linkedin-mcp-server", "./plugins/linkedin-mcp-server")
+    ]
+
+
+def test_claude_code_manifest_matches_the_codex_manifest() -> None:
+    # Claude Code finds skills/ and .mcp.json next to its manifest, so both
+    # hosts run the same pinned server and skill; only the version can drift.
+    claude = _load_json(_CLAUDE_MANIFEST)
+    codex = _load_json(_PLUGIN_MANIFEST)
+    assert claude["name"] == codex["name"]
+    assert claude["version"] == _released_version()
+    assert "mcpServers" not in claude
+    assert "skills" not in claude
 
 
 def test_plugin_icon_is_the_release_icon() -> None:
