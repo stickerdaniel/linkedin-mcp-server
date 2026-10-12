@@ -322,8 +322,7 @@ Symbols are named relative to `linkedin_mcp_server`. Tests are named as
   call. An owner whose event loop was blocked, rather than stopped, timed out
   the same way at 1.003 s. Three runs each. Justifies
   `daemon.discovery.Unanswered` and counting only `ReadTimeout` as silence in
-  `daemon.proxy.Responsiveness`. Measured on `5bdef1c9` with the change that
-  adds these tests, 2026-10-12. Tests
+  `daemon.proxy.Responsiveness`. Source #1295 on `3d458d82`, 2026-10-12. Tests
   `tests/test_daemon_silence.py::TestAStoppedRealOwner::test_stopped_before_the_call`,
   `tests/test_daemon_silence.py::TestAStoppedRealOwner::test_stopped_after_the_request_left`
   and
