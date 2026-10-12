@@ -16,6 +16,7 @@ import unicodedata
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -759,10 +760,7 @@ class TestEndpointUrl:
         "host,expected",
         [
             ("127.0.0.1", "http://127.0.0.1:49152/mcp"),
-            ("localhost", "http://localhost:49152/mcp"),
             ("::1", "http://[::1]:49152/mcp"),
-            ("::ffff:127.0.0.1", "http://[::ffff:127.0.0.1]:49152/mcp"),
-            ("[::1]", "http://[::1]:49152/mcp"),
         ],
     )
     def test_every_accepted_host_produces_a_usable_url(
@@ -1227,50 +1225,83 @@ class TestEndpointSpelling:
             descriptor.check_endpoint_is_local()
 
     @pytest.mark.parametrize(
-        "answers",
+        "host",
         [
-            [("203.0.113.9", 49152)],
-            [("127.0.0.1", 49152), ("10.0.0.5", 49152)],
+            "localhost",
+            "LOCALHOST",
+            "[::1]",
+            "0:0:0:0:0:0:0:1",
+            "::ffff:127.0.0.1",
+            "127.0.0.2",
         ],
     )
-    def test_a_name_resolving_off_this_machine_is_refused(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answers: list
+    def test_a_loopback_name_or_other_spelling_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str
     ):
-        # is_loopback_host accepts "localhost" by name, which says nothing
-        # about where the resolver on this machine sends it. Measured with the
-        # resolver answering 203.0.113.9: the descriptor was accepted, and the
-        # bearer token would have been posted off this machine. Every answer is
-        # checked, since one of several being loopback says nothing about the
-        # one a client picks.
+        # Each of these is loopback, and none is what an owner writes. A name
+        # needs the resolver, which takes no deadline and was measured sending
+        # "localhost" to 203.0.113.9; a second spelling of an address is one
+        # more thing to normalise for nothing. The resolver here answers
+        # loopback, so refusing says the name is never asked about.
         import socket
 
-        descriptor = _descriptor(tmp_path, new_token(), host="localhost")
         monkeypatch.setattr(
             socket,
             "getaddrinfo",
             lambda *args, **kwargs: [
-                (socket.AF_INET, socket.SOCK_STREAM, 6, "", answer)
-                for answer in answers
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 49152))
             ],
         )
+        token = new_token()
+        _publish(tmp_path, _descriptor(tmp_path, token, host=host), token)
 
-        with pytest.raises(DescriptorError, match="other than this machine"):
-            descriptor.check_endpoint_is_local()
+        with pytest.raises(DescriptorError, match="not this machine"):
+            read(tmp_path)
 
-    @pytest.mark.parametrize(
-        "host", ["127.0.0.1", "::1", "[::1]", "localhost", "::ffff:127.0.0.1"]
-    )
-    def test_every_spelling_a_daemon_publishes_is_accepted(
-        self, tmp_path: Path, host: str
+    @pytest.mark.parametrize("family", ["IPv6", "IPv4"])
+    def test_the_address_an_owner_binds_is_published_and_reaches_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, family: str
     ):
         # The other half: tightening this must not refuse an endpoint the
-        # daemon itself would write, which is easy to do by accident.
+        # owner itself writes. Bound and named the way the owner does it, read
+        # back the way a client does, and connected to through the URL.
+        import errno
+        import socket
+
         import httpx2
 
-        descriptor = _descriptor(tmp_path, new_token(), host=host)
+        from linkedin_mcp_server.daemon import owner
 
-        descriptor.check_endpoint_is_local()
-        httpx2.URL(descriptor.url)
+        if family == "IPv4":
+            # A host with IPv6 disabled, which the owner falls back from.
+            real_socket = socket.socket
+
+            def without_ipv6(af: int = -1, *args: Any, **kwargs: Any):
+                if af == socket.AF_INET6:
+                    raise OSError(errno.EAFNOSUPPORT, "IPv6 disabled")
+                return real_socket(af, *args, **kwargs)
+
+            monkeypatch.setattr(socket, "socket", without_ipv6)
+
+        sock = owner._bind_loopback()
+        try:
+            if family == "IPv6" and sock.family != socket.AF_INET6:
+                pytest.skip("This machine has no IPv6 loopback")
+            host, port = owner._endpoint_host(sock), sock.getsockname()[1]
+            token = new_token()
+            _publish(
+                tmp_path, _descriptor(tmp_path, token, host=host, port=port), token
+            )
+
+            published = read(tmp_path)
+
+            assert published is not None
+            url = httpx2.URL(published.url)
+            sock.settimeout(5)
+            with socket.create_connection((url.host, url.port), timeout=5):
+                sock.accept()[0].close()
+        finally:
+            sock.close()
 
 
 class TestAuthRootShape:
