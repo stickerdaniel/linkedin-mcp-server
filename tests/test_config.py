@@ -1193,6 +1193,24 @@ class TestProxyMcpbPlaceholders:
         for key in self.PLACEHOLDERS:
             assert key in message
 
+    def test_a_blank_chrome_path_placeholder_keeps_the_bundled_browser(
+        self, monkeypatch
+    ):
+        # A literal reaching chrome_path would launch "${user_config.chrome_path}"
+        # as an executable instead of falling back to the bundled Chromium.
+        monkeypatch.setenv("CHROME_PATH", "${user_config.chrome_path}")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.chrome_path is None
+
+    def test_a_chrome_path_from_the_bundle_settings_is_used(self, monkeypatch):
+        monkeypatch.setenv("CHROME_PATH", "/usr/bin/google-chrome")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.chrome_path == "/usr/bin/google-chrome"
+
     def test_a_real_setting_that_merely_resembles_one_is_kept(self, monkeypatch):
         # Anything that is not the exact literal stays a value and reaches
         # validation, which can explain it.
