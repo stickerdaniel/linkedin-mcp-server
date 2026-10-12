@@ -1391,9 +1391,9 @@ RIVAL_RETRY_OPEN = (
 #: its coverage (``RIVAL_RETRY_OPEN``).
 RIVAL_RETRY_REFERENCES: tuple[str, ...] = (
     "tests/test_daemon_election.py::TestAnOwnerThisBuildMayOnlyControl"
-    "::test_a_live_owner_of_this_build_with_another_configuration_is_left_alone",
+    "::test_a_live_owner_of_this_version_with_another_configuration_is_left_alone",
     "tests/test_daemon_election.py::TestAnOwnerThisBuildMayOnlyControl"
-    "::test_a_silent_owner_of_this_build_with_another_configuration_is_left_alone",
+    "::test_a_silent_owner_of_this_version_with_another_configuration_is_left_alone",
     "tests/test_daemon_election.py::TestAnOwnerThisBuildMayOnlyControl"
     "::test_a_dead_owner_of_another_configuration_is_leftovers",
 )

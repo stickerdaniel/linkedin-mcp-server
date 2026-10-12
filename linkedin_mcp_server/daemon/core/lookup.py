@@ -1,18 +1,27 @@
 """What one look at the published owner establishes, decided without looking.
 
 One pass reads the canonical descriptor, waits a little for a usable one, then
-acts: an attachable owner is probed, an older one asked to stand down, one this
-build may only control asked, written off or probed once, and leftovers buried.
-``daemon.election._live_lookup`` carries out the effects.
+acts: an attachable owner is probed, an older one asked to stand down whatever
+its configuration, one this frontend may only control asked, written off or
+probed once, and leftovers buried. ``daemon.election._live_lookup`` carries out
+the effects.
+
+"Older" and "same version" compare package versions, never build identity: an
+editable install or rebuild keeps its version.
 
 - A descriptor that fails the probe is downgraded, never deleted: deleting it
   would strand a live but unreachable owner and its clients. The lock decides.
   A refusal buries the generation; a silence records nothing, so the next pass
   asks again.
-- An owner of this build with another configuration is probed once. Answering
-  or silent, it is left alone and the election ends in Direct
+- An owner of this version with another configuration is probed once.
+  Answering or silent, it is left alone and the election ends in Direct
   (:attr:`Finding.LIVE_RIVAL`, :attr:`Finding.SILENT_RIVAL`) with no turnover,
   start or second probe. Refused, it is leftovers.
+- An older owner with another configuration is turned over like one with this
+  configuration (docs/decisions/2026-10-12-older-owner-turnover.md). A
+  frontend attached to it with that other configuration gets no continuity:
+  its recovery cannot attach to the successor. Concurrent older frontends are
+  outside the contract's client scope.
 """
 
 from __future__ import annotations
@@ -54,26 +63,27 @@ class Finding(enum.Enum):
     READ_TIMED_OUT = "read_timed_out"
     #: The reading names a generation this election already wrote off.
     ALREADY_UNUSABLE = "already_unusable"
-    #: The owner is an older build, asked to stand down if this pass may ask.
-    OLDER_BUILD = "older_build"
+    #: The owner's version is older, whatever its configuration, and it is asked
+    #: to stand down if this pass may ask.
+    OLDER_VERSION = "older_version"
     #: The deadline passed before the probe could start.
     NOT_PROBED = "not_probed"
     #: The probe was not answered in time. Nothing is recorded.
     NOT_ANSWERED_YET = "not_answered_yet"
     #: The probe was refused, so the descriptor is leftovers.
     LEFTOVERS = "leftovers"
-    #: An owner this build may only control, written off so the lock decides.
+    #: An owner this frontend may only control, written off so the lock decides.
     WRITTEN_OFF = "written_off"
-    #: Same build, another configuration, answered: Direct, at once.
+    #: Same version, another configuration, answered: Direct, at once.
     LIVE_RIVAL = "live_rival"
-    #: Same build, another configuration, silent: Direct, at once.
+    #: Same version, another configuration, silent: Direct, at once.
     SILENT_RIVAL = "silent_rival"
 
 
 class Turnover(enum.Enum):
     """Why an owner is asked to stand down, which is all the shell logs about it."""
 
-    OLDER_BUILD = "older_build"
+    OLDER_VERSION = "older_version"
     OLDER_PROTOCOL = "older_protocol"
 
 
@@ -96,9 +106,9 @@ class Reading:
     other_protocol: bool = False
     #: The owner speaks this protocol with another configuration fingerprint.
     other_config: bool = False
-    #: The owner's package version is older than this build's.
+    #: The owner's package version is older than this frontend's.
     older: bool = False
-    #: The owner's package version is this build's.
+    #: The owner's package version equals this frontend's. Not build identity.
     same_version: bool = False
 
 
@@ -292,14 +302,18 @@ def on_event(lookup: Lookup, event: Event) -> tuple[Lookup, list[Effect]]:
 def wants_a_decision(reading: Reading) -> bool:
     """Whether an unusable reading still needs the election to act on it.
 
-    Two control-only kinds need action rather than waiting: a protocol
-    mismatch (ask to stand down or write off) and a same-build configuration
-    mismatch (probe). Every other reading is paced, so a caller does not spin
+    Three control-only kinds need action rather than waiting: a protocol
+    mismatch (ask to stand down or write off), an older owner with another
+    configuration (ask to stand down) and one of this version with another
+    configuration (probe). A newer or unknown version with another
+    configuration is paced like every other reading, so a caller does not spin
     at read speed on a file it cannot use.
     """
     if not reading.control_only:
         return False
-    return reading.other_protocol or (reading.other_config and reading.same_version)
+    return reading.other_protocol or (
+        reading.other_config and (reading.older or reading.same_version)
+    )
 
 
 def _read(lookup: Lookup, now: float) -> tuple[Lookup, list[Effect]]:
@@ -337,35 +351,40 @@ def _decide(
     instance = reading.instance
     if instance is None:
         raise ValueError("a reading worth deciding on names no instance")
-    if reading.control_only:
-        return _decide_control_only(lookup, reading, instance, now)
-    if reading.older:
+    if reading.older and not reading.other_protocol:
+        # Whatever its configuration: a control-only pair is as proved as an
+        # attachable one, and an older owner left running would keep the
+        # browser from every newer frontend.
+        #
         # Classification and turnover are separate. Settlement never sends the
         # request, but it still writes this generation off so its paced reads
         # wait for a replacement instead of rediscovering the same stale owner
         # at speed.
         ask: list[Effect] = (
-            [AskToStandDown(Turnover.OLDER_BUILD)] if lookup.may_ask else []
+            [AskToStandDown(Turnover.OLDER_VERSION)] if lookup.may_ask else []
         )
         return _conclude(
             lookup,
-            Finding.OLDER_BUILD,
+            Finding.OLDER_VERSION,
             asked=lookup.may_ask,
             first=[*ask, Bury(instance)],
         )
+    if reading.control_only:
+        return _decide_control_only(lookup, reading, instance, now)
     return _probe(lookup, reading, now)
 
 
 def _decide_control_only(
     lookup: Lookup, reading: Reading, instance: str, now: float
 ) -> tuple[Lookup, list[Effect]]:
-    """Act on an owner this build may control but never give a tool call.
+    """Act on an owner this frontend may control but never give a tool call.
 
     Another protocol: an older owner is asked to stand down through the one
     route every protocol keeps; the same or a newer one is left running.
-    Either way the generation is written off and the lock decides. Same build
+    Either way the generation is written off and the lock decides. Same version
     with another configuration: probed once, since a descriptor outlives its
-    writer.
+    writer. An older owner of this protocol is turned over before this, in
+    :func:`_decide`.
     """
     if not reading.other_protocol:
         return _probe(lookup, reading, now)

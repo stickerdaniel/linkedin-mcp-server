@@ -10,7 +10,7 @@ competes for the lock (:mod:`linkedin_mcp_server.daemon.core.spawn`).
   settlement budget from that failure, capped by the global deadline.
   Settlement only observes and authenticates; it never starts or turns over an
   owner.
-- Direct on every refusal: an owner to attach to or a same-build
+- Direct on every refusal: an owner to attach to or a same-version
   ``OwnerLookup.fallback`` ends the election at once, an unusable lock ends it
   with the last thing seen, and a start that produced no child or a permanent
   failure ends it after settlement. Nothing here retries a refusal.
