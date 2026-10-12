@@ -614,6 +614,17 @@
           "type": "object"
         }
       },
+      "list_my_connections": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "preview_profile_changes": {
         "input": {
           "additionalProperties": false,
@@ -1364,6 +1375,40 @@
           },
           "required": [
             "changeSetId"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "remove_connections": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "confirm": {
+              "default": false,
+              "description": "must be true for a real removal; the user's approval",
+              "type": "boolean"
+            },
+            "dryRun": {
+              "default": false,
+              "description": "check without removing anyone",
+              "type": "boolean"
+            },
+            "usernames": {
+              "description": "Usernames (or profile URLs) from list_my_connections.",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 5,
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "usernames"
           ],
           "type": "object"
         },

@@ -36,6 +36,7 @@ from patchright.async_api import Page
 
 from linkedin_mcp_server.linkedin import LinkedInExtractor
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
+from linkedin_mcp_server.linkedin.connection_removal import ConnectionRemover
 from linkedin_mcp_server.linkedin.profile_editor import ProfileEditor
 from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.server_role import (
@@ -239,6 +240,16 @@ async def get_ready_profile_editor(
     """
     session = PageSession(await _get_ready_page(ctx, tool_name=tool_name))
     return ProfileEditor(session, PageNavigator(session))
+
+
+async def get_ready_connection_remover(
+    ctx: Context | None,
+    *,
+    tool_name: str,
+) -> ConnectionRemover:
+    """The same gating as :func:`get_ready_extractor`, for connection removal."""
+    session = PageSession(await _get_ready_page(ctx, tool_name=tool_name))
+    return ConnectionRemover(session, PageNavigator(session))
 
 
 async def _get_ready_page(ctx: Context | None, *, tool_name: str) -> Page:

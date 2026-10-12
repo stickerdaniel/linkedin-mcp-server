@@ -134,6 +134,8 @@ PROFILE_EDIT_TOOLS = {
     "discard_profile_changes",
     "describe_profile_form",
     "rehearse_profile_changes",
+    "list_my_connections",
+    "remove_connections",
 }
 
 

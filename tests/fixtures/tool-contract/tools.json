@@ -783,6 +783,32 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "connections",
+          "person"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "List all of your 1st-degree connections with their usernames. Read-only.\n\nLoads LinkedIn's connections page until the stated total is reached;\n``complete`` says whether every connection was read.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "list_my_connections",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "List My Connections"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "profile-edit"
         ]
       }
@@ -1578,6 +1604,56 @@
       "type": "object"
     },
     "title": "Rehearse Profile Changes"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "actions",
+          "connections"
+        ]
+      }
+    },
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": true
+    },
+    "description": "Removes the given people from your connections. This modifies external state and cannot be undone here.\n\nCall only with people the user explicitly chose to remove. Requires\nconfirm=true and a server started with MCP_LINKEDIN_WRITE_ENABLED=true,\nunless dryRun=true, which only checks that each person is a\nconnection and that the remove option is there. Removes one person at\na time, then reloads the list to verify they are gone; stops at the\nfirst failure. At most 5 people per call.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "confirm": {
+          "default": false,
+          "description": "must be true for a real removal; the user's approval",
+          "type": "boolean"
+        },
+        "dryRun": {
+          "default": false,
+          "description": "check without removing anyone",
+          "type": "boolean"
+        },
+        "usernames": {
+          "description": "Usernames (or profile URLs) from list_my_connections.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 5,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "usernames"
+      ],
+      "type": "object"
+    },
+    "name": "remove_connections",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Remove Connections"
   },
   {
     "_meta": {
