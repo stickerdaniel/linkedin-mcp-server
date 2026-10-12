@@ -45,14 +45,6 @@ Symbols are named relative to `linkedin_mcp_server`. Tests are named as
   process could elect a replacement. Justifies
   `daemon.lock._discard_inherited_locks`. Source `50dfdbf5`, 2026-07-28. Test
   `tests/test_daemon_lock.py::TestFork::test_a_child_that_never_touches_the_lock_does_not_hold_it`.
-- **Neither probe mode is exact.** Probing exclusively, 43 of 400 concurrent
-  probes read a sibling probe as an owner. Probing shared, 11 of 3000 concurrent
-  elections failed against a probe while no owner existed at all. Justifies the
-  shared probe in `daemon.lock.daemon_is_running`. Source `50dfdbf5`,
-  2026-07-28. Tests
-  `tests/test_daemon_lock.py::TestLiveness::test_concurrent_probes_do_not_see_each_other`
-  and
-  `tests/test_daemon_lock.py::TestLiveness::test_the_probe_is_an_observation_not_a_decision`.
 
 ## Descriptor and auth root
 
@@ -163,15 +155,14 @@ Symbols are named relative to `linkedin_mcp_server`. Tests are named as
   `daemon.owner._probe`. Source `b3fcac2e`, 2026-09-27. Test
   `tests/test_daemon_election.py::TestSilenceIsNotDeath::test_a_healthy_owner_answers`.
 - **A flat poll interval overran a small budget.** Before the clamp, a flat
-  poll interval turned a 1 ms budget into 101 ms. Justifies never sleeping past
-  the deadline in `daemon.discovery.look_up_owner`. Source `98e99338`,
-  2026-07-28. Test
-  `tests/test_daemon.py::TestWaitingForAStartingOwner::test_a_small_budget_is_not_rounded_up_to_a_poll`.
+  poll interval turned a 1 ms budget into 101 ms. Justifies never pausing past
+  the wait in `daemon.core.lookup`. Source `98e99338`, 2026-07-28. Test
+  `tests/test_daemon_election_core.py::TestOneLook::test_a_small_wait_is_not_rounded_up_to_a_poll`.
 - **A replacement is read through a dead owner's file.** An owner that crashed
   serving a sibling profile reads as `INCOMPATIBLE` while its replacement is
   coming up. Justifies waiting out every state but `ATTACHABLE` in
-  `daemon.discovery.look_up_owner`. Source `98e99338`, 2026-07-28. Test
-  `tests/test_daemon.py::TestTellingTheRefusalsApart::test_a_replacement_owner_is_seen_through_a_dead_descriptor`.
+  `daemon.core.lookup`. Source `98e99338`, 2026-07-28. Test
+  `tests/test_daemon_election_core.py::TestOneLook::test_a_replacement_is_seen_through_an_unusable_reading`.
 - **A boolean start result cost a minute.** A child that reported it could not
   serve read as "somebody is starting", so the caller waited out its whole
   deadline for a descriptor nothing was going to write. Justifies

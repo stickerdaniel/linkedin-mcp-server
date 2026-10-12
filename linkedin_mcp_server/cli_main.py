@@ -695,7 +695,7 @@ def _obtain_shared_owner(
     That safety net carries weight on every platform, which is worth knowing
     before the flag becomes the default. A frontend takes no lock itself: it
     starts a child that competes for one
-    (``daemon.election._start_contending_for_the_lock``), and only the child that
+    (``daemon.election._start_owner``), and only the child that
     wins holds it and publishes. A local spawn failure is therefore
     indistinguishable from a rival owner that holds the lock and has not
     published yet, so this process can fall back while an owner is in fact

@@ -157,11 +157,6 @@ class CallLiveness:
         return self._state.retirement is not None
 
     @property
-    def retire_reason(self) -> lifecycle.Retirement | None:
-        """Why admission closed. Only the first reason is kept."""
-        return self._state.retirement
-
-    @property
     def instance_id(self) -> str | None:
         """The owner's own instance, named in every refusal."""
         return self._state.instance
@@ -277,10 +272,6 @@ class CallLiveness:
         """
         self._apply(lifecycle.TurnOver())
 
-    def calls_in_flight(self) -> int:
-        """How many admitted calls have not finished yet."""
-        return len(self._state.calls)
-
     def background_activity_finished(self) -> None:
         """Start a fresh quiet period after detached work kept the owner active."""
         self._apply(lifecycle.BackgroundFinished(time.monotonic()))
@@ -292,10 +283,6 @@ class CallLiveness:
         a short timeout expire before the frontend could reach this owner.
         """
         self._apply(lifecycle.Published(time.monotonic()))
-
-    def quiet_for(self) -> float | None:
-        """Seconds since this owner last had anything to do, if it is free now."""
-        return lifecycle.quiet_for(self._state, time.monotonic())
 
     def heard(self, call_id: str) -> bool:
         """Note that somebody is still waiting. False if this call is not watched.
@@ -309,11 +296,6 @@ class CallLiveness:
     def abandoned(self, call_id: str) -> bool:
         """Whether *call_id* may no longer start browser work."""
         return lifecycle.abandoned(self._state, call_id, time.monotonic())
-
-    def cancel_the_abandoned(self) -> list[str]:
-        """Cancel every call nobody has asked for lately, and say which."""
-        effects = self._apply(lifecycle.Scan(time.monotonic()))
-        return [e.call_id for e in effects if isinstance(e, lifecycle.Cancel)]
 
     def tick(
         self,

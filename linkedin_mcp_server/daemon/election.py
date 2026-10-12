@@ -233,9 +233,6 @@ def obtain_owner(
                 )
             case election_core.Look(op=op, may_ask=may_ask, wait=wait, deadline=until):
                 found, asked, observed = _live_lookup(
-                    auth_root,
-                    profile,
-                    config,
                     reach,
                     buried,
                     inspector=inspector,
@@ -253,13 +250,12 @@ def obtain_owner(
                     observed=observed,
                 )
             case election_core.StartOwner(op=op, timeout=timeout):
-                event = _start(auth_root, profile, config, op, timeout, inspector)
+                event = _start(auth_root, config, op, timeout, inspector)
         election, effects = election_core.on_event(election, event)
 
 
 def _start(
     auth_root: Path,
-    profile: Path,
     config: AppConfig,
     op: int,
     timeout: float,
@@ -268,9 +264,7 @@ def _start(
     """Start one child for the election, and say how that ended."""
     try:
         inspector.require_fresh_inspection()
-        attempt = _start_owner(
-            auth_root, profile, config, timeout=timeout, inspector=inspector
-        )
+        attempt = _start_owner(auth_root, config, timeout=timeout, inspector=inspector)
     except DaemonLockError:
         logger.warning("The daemon lock is unusable", exc_info=True)
         return election_core.StartRefused(op, time.monotonic(), lock_unusable=True)
@@ -287,9 +281,6 @@ def _start(
 
 
 def _live_lookup(
-    auth_root: Path,
-    profile: Path,
-    config: AppConfig,
     reach: Reachable,
     buried: set[str],
     *,
@@ -312,7 +303,6 @@ def _live_lookup(
     observation when a read times out. Written-off generations are added to
     *buried*, and what each read and probe heard is told to *witness*.
     """
-    del auth_root, profile, config  # carried by the reusable inspector
     if witness is None:
         witness = _ProbeWitness()
     state, effects = lookup_core.look(
@@ -705,37 +695,18 @@ def _report_child_failure(report: _BootstrapReport) -> None:
 
 def _start_owner(
     auth_root: Path,
-    profile: Path,
     config: AppConfig,
     *,
     timeout: float,
     inspector: _DescriptorInspector | None = None,
 ) -> Attempt:
-    """Start a child that owns all potentially blocking state mutations."""
-    del profile  # the owner derives it from the configuration it is handed
-    return _start_contending_for_the_lock(
-        auth_root,
-        config,
-        timeout=timeout,
-        inspector=inspector,
-    )
+    """Start one child that competes for the lock and reports the outcome.
 
-
-def _start_contending_for_the_lock(
-    auth_root: Path,
-    config: AppConfig,
-    *,
-    timeout: float,
-    inspector: _DescriptorInspector | None = None,
-) -> Attempt:
-    """Start one child that competes for the lock and reports the outcome."""
+    The child owns every potentially blocking state mutation, and derives the
+    profile from the configuration it is handed.
+    """
     return spawn_core.attempt_after(
-        _spawn(
-            auth_root,
-            config,
-            timeout=timeout,
-            inspector=inspector,
-        )
+        _spawn(auth_root, config, timeout=timeout, inspector=inspector)
     )
 
 
@@ -778,7 +749,6 @@ def _spawn(
     config: AppConfig,
     *,
     timeout: float,
-    on_spawned: Callable[[], None] | None = None,
     inspector: _DescriptorInspector | None = None,
 ) -> Started:
     """Start a detached owner and atomically commit its prepared descriptor.
@@ -843,7 +813,7 @@ def _spawn(
         handshake_nonce=handshake_nonce,
         bootstrap=bootstrap,
         inspector=inspector,
-    ).run(timeout=timeout, on_spawned=on_spawned)
+    ).run(timeout=timeout)
 
 
 class _Startup:
@@ -886,9 +856,9 @@ class _Startup:
             ),
         )
 
-    def run(self, *, timeout: float, on_spawned: Callable[[], None] | None) -> Started:
+    def run(self, *, timeout: float) -> Started:
         try:
-            effects = self._decide(self._connect(timeout, on_spawned))
+            effects = self._decide(self._connect(timeout))
             while True:
                 event: spawn_core.Event | None = None
                 for effect in effects:
@@ -914,9 +884,7 @@ class _Startup:
         self._state, effects = spawn_core.on_event(self._state, event)
         return effects
 
-    def _connect(
-        self, timeout: float, on_spawned: Callable[[], None] | None
-    ) -> spawn_core.Event:
+    def _connect(self, timeout: float) -> spawn_core.Event:
         """Hand the child to its Job, open the channel and say when that was."""
         try:
             if self._job is not None and self._gate_nonce is not None:
@@ -927,8 +895,6 @@ class _Startup:
             # Only now, because until the gate is released its input is the one
             # thing that can stop it, and that close belongs to ``_stop_child``.
             self._channel = startup.FrontendChannel(self._child, self._handshake_nonce)
-            if on_spawned is not None:
-                on_spawned()
         except BaseException:
             self._interrupted(0)
             raise
@@ -1011,7 +977,6 @@ class _Startup:
                 verdict = _settle_commit_result(
                     self._auth_root,
                     instance,
-                    self._child,
                     timeout=timeout,
                     inspector=self._inspector,
                 )
@@ -1306,13 +1271,15 @@ def _read_canonical_until(
 def _settle_commit_result(
     auth_root: Path,
     instance_id: str,
-    child: subprocess.Popen[bytes],
     *,
     timeout: float,
     inspector: _DescriptorInspector | None = None,
 ) -> Started:
-    """Settle a missing commit verdict through the election's shared inspection."""
-    del child  # process state cannot disambiguate an attempted remote rename
+    """Settle a missing commit verdict through the election's shared inspection.
+
+    Never from the child's process state, which cannot disambiguate an
+    attempted remote rename.
+    """
     try:
         if inspector is None:
             canonical = _read_canonical_until(auth_root, timeout=timeout)
@@ -1352,8 +1319,6 @@ def _await_committed(channel: startup.FrontendChannel, *, timeout: float) -> Sta
         return Started.ABORTED
     if status == startup.RETRY:
         return Started.RETRY
-    if status == startup.UNCERTAIN:
-        return Started.UNCERTAIN
     return Started.NO
 
 

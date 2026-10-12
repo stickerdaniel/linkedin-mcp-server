@@ -88,6 +88,12 @@ def _attachment(
     return Attachment(descriptor=descriptor, token=token)
 
 
+def _publish(auth_root: Path, attachment: Attachment) -> None:
+    """Make *attachment* the published owner, the two steps an owner takes."""
+    daemon_descriptor.prepare(auth_root, attachment.descriptor, attachment.token)
+    daemon_descriptor.commit_prepared(auth_root, attachment.descriptor.instance_id)
+
+
 def _elected(attachment: Attachment):
     """What `obtain_owner` returns when it found *attachment*."""
     from linkedin_mcp_server.daemon.discovery import OwnerLookup, OwnerState
@@ -567,20 +573,18 @@ class TestServingTheOwnersTools:
         # The election finds the replacement, the way a real one does once the
         # departed owner's lock is free.
         def elect(*_args, **_kwargs):
-            daemon_descriptor.publish(
-                auth_root, replacement.descriptor, replacement.token
-            )
+            _publish(auth_root, replacement)
             return _elected(replacement)
 
         monkeypatch.setattr("linkedin_mcp_server.daemon.election.obtain_owner", elect)
 
-        daemon_descriptor.publish(auth_root, elected.descriptor, elected.token)
+        _publish(auth_root, elected)
         backend = _backend(elected, tmp_path)
         provider = OwnerForwarder(backend, timeout=1.0)
         assert {t.name for t in await provider.list_tools()} == {"get_person_profile"}
 
         # The owner goes away without publishing anything, as a crash does.
-        daemon_descriptor.publish(auth_root, replacement.descriptor, replacement.token)
+        _publish(auth_root, replacement)
 
         recovered = (await backend.recover(elected.descriptor.instance_id)).attachment
         assert recovered is not None
@@ -1840,28 +1844,47 @@ class TestRecoveringThroughTheWholeProxy:
     @pytest.mark.parametrize(
         "listing", ["list_resources", "list_resource_templates", "list_prompts"]
     )
-    async def test_the_other_listings_recover_too(
+    async def test_the_other_listings_answer_without_an_owner(
         self, monkeypatch: pytest.MonkeyPatch, _upgraded, listing: str
     ):
         """A client's opening exchange asks for more than tools.
 
-        This role serves none of these, so the answer is an empty list either
-        way. The provider is still asked in order to give it, and with a departed
-        owner and `provider_error_strategy = "raise"` that empty answer becomes
-        an error the user sees. One case per listing, because a hook left off
-        covers only itself.
+        No owner registers resources or prompts, so their listings are answered
+        here, empty, and a departed owner neither fails one nor costs an
+        election. One case per listing, because forwarding any one of them
+        again would bring the departure back for that one alone.
         """
         backend, elected, _replacement, elections = _upgraded
-        after = self._owner()
-        _reach_owners_in_process(
-            monkeypatch,
-            lambda url: None if url == elected.descriptor.url else after,
-        )
+        # Nothing listens anywhere: an owner asked at all fails the listing.
+        _reach_owners_in_process(monkeypatch, lambda _url: None)
 
         async with Client(self._proxy(backend)) as client:
             assert await getattr(client, listing)() == []
 
-        assert elections() == 1
+        assert elections() == 0
+        assert backend.attachment is elected
+
+    async def test_a_resource_or_prompt_lookup_is_not_found_without_an_owner(
+        self, monkeypatch: pytest.MonkeyPatch, _upgraded
+    ):
+        """A read or render names nothing that exists, owner or not.
+
+        Answered as FastMCP answers any unknown name, never as the departure
+        a tool call would report.
+        """
+        from mcp import MCPError
+
+        backend, elected, _replacement, elections = _upgraded
+        _reach_owners_in_process(monkeypatch, lambda _url: None)
+
+        async with Client(self._proxy(backend)) as client:
+            with pytest.raises(MCPError, match="Resource not found"):
+                await client.read_resource("linkedin://anything")
+            with pytest.raises(MCPError, match="Unknown prompt"):
+                await client.get_prompt("anything")
+
+        assert elections() == 0
+        assert backend.attachment is elected
 
     @pytest.mark.parametrize("stand_in", ["sse ended", "404", "500", "timed out"])
     async def test_a_request_that_never_came_back_is_a_departure(
@@ -4315,14 +4338,13 @@ class TestTheHopsProtocolVersion:
         assert owner.methods == ["server/discover"]
         assert owner.effects == 0
 
-    async def test_an_unsupported_listing_is_an_empty_answer(
+    async def test_only_the_tool_listing_reaches_the_owner(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """An owner with no resources says so, and that is not a departure.
+        """Resources and prompts are answered here, never asked of the owner.
 
-        Its unknown-method answer is a real JSON-RPC error, which the forwarder
-        turns into an empty list; the SDK's own "Not Found" for a 404 shares
-        the code and is the departure instead.
+        The owner registers neither, so the hop would only add a way for an
+        empty answer to fail.
         """
         from linkedin_mcp_server.server import create_mcp_server
         from linkedin_mcp_server.server_role import ServerRole
@@ -4342,9 +4364,11 @@ class TestTheHopsProtocolVersion:
 
         async with Client(proxy) as client:
             assert await client.list_resources() == []
+            assert await client.list_resource_templates() == []
             assert await client.list_prompts() == []
+            await client.list_tools()
 
-        assert "resources/list" in owner.methods
+        assert [m for m in owner.methods if m.endswith("/list")] == ["tools/list"]
         assert elections == []
         assert backend.attachment is elected
 

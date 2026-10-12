@@ -35,14 +35,12 @@ from linkedin_mcp_server.daemon.descriptor import (
     daemon_state_root,
     descriptor_path,
     discard_prepared,
-    mismatched_fields,
     new_instance_id,
     new_token,
     pending_descriptor_path,
     prepare,
     prepare_daemon_state,
     profile_identity,
-    publish,
     read,
     read_token,
     token_path,
@@ -132,11 +130,17 @@ def _descriptor(
     return replace(descriptor, **overrides) if overrides else descriptor
 
 
+def _publish(auth_root: Path, descriptor: DaemonDescriptor, token: str) -> None:
+    """Stage and commit one generation, the two steps an owner takes."""
+    prepare(auth_root, descriptor, token)
+    commit_prepared(auth_root, descriptor.instance_id)
+
+
 class TestRoundTrip:
     def test_a_published_descriptor_reads_back(self, tmp_path: Path):
         token = new_token()
 
-        publish(tmp_path, _descriptor(tmp_path, token), token)
+        _publish(tmp_path, _descriptor(tmp_path, token), token)
         loaded = read(tmp_path)
 
         assert loaded is not None
@@ -151,7 +155,7 @@ class TestRoundTrip:
     def test_the_token_is_written_owner_only(self, tmp_path: Path):
         token = new_token()
 
-        publish(tmp_path, _descriptor(tmp_path, token), token)
+        _publish(tmp_path, _descriptor(tmp_path, token), token)
 
         file = token_path(tmp_path, "11111111-2222-3333-4444-555555555555")
         assert stat.S_IMODE(file.stat().st_mode) == 0o600
@@ -163,7 +167,7 @@ class TestRoundTrip:
     ):
         token = new_token()
         descriptor = _descriptor(tmp_path, token)
-        publish(tmp_path, descriptor, token)
+        _publish(tmp_path, descriptor, token)
         descriptor_file = descriptor_path(tmp_path)
         token_file = token_path(tmp_path, descriptor.instance_id)
         descriptor_file.chmod(0o666)
@@ -184,7 +188,7 @@ class TestRoundTrip:
 
         token = new_token()
         descriptor = _descriptor(tmp_path, token)
-        publish(tmp_path, descriptor, token)
+        _publish(tmp_path, descriptor, token)
 
         for path in (
             descriptor_path(tmp_path),
@@ -199,7 +203,7 @@ class TestRoundTrip:
         # secret must not be in it. Only its digest is.
         token = new_token()
 
-        publish(tmp_path, _descriptor(tmp_path, token), token)
+        _publish(tmp_path, _descriptor(tmp_path, token), token)
 
         assert token not in descriptor_path(tmp_path).read_text()
 
@@ -400,70 +404,6 @@ class TestPreparedCommit:
         assert not published.is_symlink()
         assert read(tmp_path) == descriptor
 
-    def test_publish_keeps_token_when_interrupted_after_replacement(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        token = new_token()
-        descriptor = _descriptor(tmp_path, token)
-        replace = os.replace
-
-        def replace_then_interrupt(
-            source: str | os.PathLike[str], destination: str | os.PathLike[str]
-        ) -> None:
-            replace(source, destination)
-            if Path(destination) == descriptor_path(tmp_path):
-                raise KeyboardInterrupt
-
-        monkeypatch.setattr(
-            daemon_descriptor_module.os, "replace", replace_then_interrupt
-        )
-
-        with pytest.raises(KeyboardInterrupt):
-            publish(tmp_path, descriptor, token)
-
-        assert read(tmp_path) == descriptor
-        assert read_token(tmp_path, descriptor) == token
-
-    def test_publish_keeps_token_when_replace_reports_error_after_success(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        old_token = new_token()
-        old = _descriptor(tmp_path, old_token)
-        publish(tmp_path, old, old_token)
-
-        token = new_token()
-        descriptor = _descriptor(tmp_path, token)
-        replace = os.replace
-
-        def replace_then_error(
-            source: str | os.PathLike[str], destination: str | os.PathLike[str]
-        ) -> None:
-            replace(source, destination)
-            if Path(destination) == descriptor_path(tmp_path):
-                raise OSError("rename result was lost")
-
-        monkeypatch.setattr(daemon_descriptor_module.os, "replace", replace_then_error)
-
-        with pytest.raises(OSError, match="rename result was lost"):
-            publish(tmp_path, descriptor, token)
-
-        assert token_path(tmp_path, descriptor.instance_id).read_text() == token
-        assert descriptor.instance_id in descriptor_path(tmp_path).read_text()
-
-    def test_publish_discards_generation_after_structural_replace_error(
-        self, tmp_path: Path
-    ):
-        token = new_token()
-        descriptor = _descriptor(tmp_path, token)
-        _planted_daemon_dir(tmp_path)
-        descriptor_path(tmp_path).mkdir()
-
-        with pytest.raises(IsADirectoryError):
-            publish(tmp_path, descriptor, token)
-
-        assert not pending_descriptor_path(tmp_path, descriptor.instance_id).exists()
-        assert not token_path(tmp_path, descriptor.instance_id).exists()
-
     def test_validation_rejects_another_profile(self, tmp_path: Path):
         token = new_token()
         profile = tmp_path / "profile"
@@ -475,7 +415,7 @@ class TestPreparedCommit:
                 tmp_path,
                 descriptor.instance_id,
                 profile=tmp_path / "other-profile",
-                config=None,
+                config=_config(user_data_dir=str(profile)),
             )
 
     def test_validation_rejects_another_configuration(self, tmp_path: Path):
@@ -510,7 +450,7 @@ class TestPreparedCommit:
                 tmp_path,
                 descriptor.instance_id,
                 profile=profile,
-                config=None,
+                config=_config(user_data_dir=str(profile)),
             )
 
     def test_validation_rejects_malformed_pending_json(self, tmp_path: Path):
@@ -529,7 +469,7 @@ class TestPreparedCommit:
                 tmp_path,
                 instance_id,
                 profile=tmp_path / "profile",
-                config=None,
+                config=_config(user_data_dir=str(tmp_path / "profile")),
             )
 
     def test_validation_rejects_a_descriptor_for_another_generation(
@@ -549,7 +489,7 @@ class TestPreparedCommit:
                 tmp_path,
                 second_id,
                 profile=Path(first.profile_path),
-                config=None,
+                config=_config(user_data_dir=first.profile_path),
             )
 
     def test_discard_removes_only_its_generation(self, tmp_path: Path):
@@ -594,7 +534,7 @@ class TestRefusals:
         # Refused, not treated as absent. A corrupt descriptor beside a held
         # lock means a live daemon this client cannot talk to, and treating it
         # as absent would elect a second owner against a running browser.
-        publish(tmp_path, _descriptor(tmp_path, new_token()), new_token())
+        _publish(tmp_path, _descriptor(tmp_path, new_token()), new_token())
         descriptor_path(tmp_path).write_text("{ not json")
 
         with pytest.raises(DescriptorError, match="not valid JSON"):
@@ -607,7 +547,7 @@ class TestRefusals:
         # thousand digits: it crossed the boundary before anything could call
         # it a bad descriptor.
         token = new_token()
-        publish(tmp_path, _descriptor(tmp_path, token), token)
+        _publish(tmp_path, _descriptor(tmp_path, token), token)
         descriptor_path(tmp_path).write_text('{"port": ' + "9" * 5000 + "}")
 
         with pytest.raises(DescriptorError, match="not valid JSON"):
@@ -615,7 +555,7 @@ class TestRefusals:
 
     def test_a_missing_field_is_refused(self, tmp_path: Path):
         token = new_token()
-        publish(tmp_path, _descriptor(tmp_path, token), token)
+        _publish(tmp_path, _descriptor(tmp_path, token), token)
         raw = json.loads(descriptor_path(tmp_path).read_text())
         del raw["config_fingerprint"]
         descriptor_path(tmp_path).write_text(json.dumps(raw))
@@ -627,7 +567,7 @@ class TestRefusals:
         # Read field by field rather than unpacked, so a wrong type fails here
         # with something that names the field instead of much later.
         token = new_token()
-        publish(tmp_path, _descriptor(tmp_path, token), token)
+        _publish(tmp_path, _descriptor(tmp_path, token), token)
         raw = json.loads(descriptor_path(tmp_path).read_text())
         raw["port"] = "49152"
         descriptor_path(tmp_path).write_text(json.dumps(raw))
@@ -637,7 +577,7 @@ class TestRefusals:
 
     def test_a_future_schema_is_refused(self, tmp_path: Path):
         token = new_token()
-        publish(tmp_path, _descriptor(tmp_path, token), token)
+        _publish(tmp_path, _descriptor(tmp_path, token), token)
         raw = json.loads(descriptor_path(tmp_path).read_text())
         raw["schema_version"] = SCHEMA_VERSION + 1
         descriptor_path(tmp_path).write_text(json.dumps(raw))
@@ -650,7 +590,7 @@ class TestRefusals:
         # belongs to a different daemon, and using it would authenticate against
         # something other than what the descriptor described.
         token = new_token()
-        publish(tmp_path, _descriptor(tmp_path, token), token)
+        _publish(tmp_path, _descriptor(tmp_path, token), token)
         loaded = read(tmp_path)
         assert loaded is not None
         token_path(tmp_path, loaded.instance_id).write_text(new_token())
@@ -726,7 +666,7 @@ class TestRefusals:
 
     def test_a_token_that_is_not_text_is_refused_as_such(self, tmp_path: Path):
         token = new_token()
-        publish(tmp_path, _descriptor(tmp_path, token), token)
+        _publish(tmp_path, _descriptor(tmp_path, token), token)
         loaded = read(tmp_path)
         assert loaded is not None
         token_path(tmp_path, loaded.instance_id).write_bytes(b"\xff\xfe")
@@ -742,7 +682,7 @@ class TestRefusals:
         # `daemon.discovery._inspect`, which turns it into a control-only pair; this
         # pins that `read` still parses and returns the owner's real protocol.
         token = new_token()
-        publish(tmp_path, _descriptor(tmp_path, token), token)
+        _publish(tmp_path, _descriptor(tmp_path, token), token)
         raw = json.loads(descriptor_path(tmp_path).read_text())
         raw["protocol_version"] = PROTOCOL_VERSION + 1
         descriptor_path(tmp_path).write_text(json.dumps(raw))
@@ -756,7 +696,7 @@ class TestRefusals:
         # Below the floor there is no stand-down route this build can use, so
         # there is nothing it could safely do with the owner at all.
         token = new_token()
-        publish(tmp_path, _descriptor(tmp_path, token), token)
+        _publish(tmp_path, _descriptor(tmp_path, token), token)
         raw = json.loads(descriptor_path(tmp_path).read_text())
         raw["protocol_version"] = CONTROL_FLOOR_PROTOCOL - 1
         descriptor_path(tmp_path).write_text(json.dumps(raw))
@@ -773,7 +713,7 @@ class TestRefusals:
         # a planted one whose target matched the digest would have been read
         # and sent to the endpoint as this client's credential.
         token = new_token()
-        publish(tmp_path, _descriptor(tmp_path, token), token)
+        _publish(tmp_path, _descriptor(tmp_path, token), token)
         loaded = read(tmp_path)
         assert loaded is not None
         elsewhere = tmp_path / "planted"
@@ -793,7 +733,7 @@ class TestRefusals:
         # open(), before any check could run, so the read is opened
         # non-blocking and the file type is confirmed first.
         token = new_token()
-        publish(tmp_path, _descriptor(tmp_path, token), token)
+        _publish(tmp_path, _descriptor(tmp_path, token), token)
         loaded = read(tmp_path)
         assert loaded is not None
         path = token_path(tmp_path, loaded.instance_id)
@@ -805,7 +745,7 @@ class TestRefusals:
 
     def test_a_descriptor_with_no_token_beside_it_is_refused(self, tmp_path: Path):
         token = new_token()
-        publish(tmp_path, _descriptor(tmp_path, token), token)
+        _publish(tmp_path, _descriptor(tmp_path, token), token)
         loaded = read(tmp_path)
         assert loaded is not None
         token_path(tmp_path, loaded.instance_id).unlink()
@@ -878,7 +818,7 @@ class TestStateLocation:
 
         prepare_daemon_state(auth_root)
         token = new_token()
-        publish(auth_root, _descriptor(tmp_path, token, profile=profile), token)
+        _publish(auth_root, _descriptor(tmp_path, token, profile=profile), token)
         assert read(auth_root) is not None
 
         assert marker.read_text() == "an earlier owner's descriptor"
@@ -1374,7 +1314,7 @@ class TestDigestFields:
         # descriptor was accepted and the comparison failed later, outside the
         # DescriptorError every caller of this module expects.
         token = new_token()
-        publish(tmp_path, _descriptor(tmp_path, token), token)
+        _publish(tmp_path, _descriptor(tmp_path, token), token)
         raw = json.loads(descriptor_path(tmp_path).read_text())
         raw[field] = value
         descriptor_path(tmp_path).write_text(json.dumps(raw))
@@ -1475,7 +1415,7 @@ class TestInstanceIdentity:
 
     def test_a_descriptor_with_a_forged_instance_id_is_refused(self, tmp_path: Path):
         token = new_token()
-        publish(tmp_path, _descriptor(tmp_path, token), token)
+        _publish(tmp_path, _descriptor(tmp_path, token), token)
         raw = json.loads(descriptor_path(tmp_path).read_text())
         raw["instance_id"] = "../../secrets"
         descriptor_path(tmp_path).write_text(json.dumps(raw))
@@ -1532,14 +1472,6 @@ class TestProfileIdentity:
         absent = tmp_path / "never-created"
 
         assert not descriptor.serves(absent)
-        assert not absent.exists()
-
-    def test_reporting_a_mismatch_creates_nothing(self, tmp_path: Path):
-        absent = tmp_path / "also-never-created"
-
-        assert mismatched_fields(_config(), _config(user_data_dir=str(absent))) == (
-            "user_data_dir",
-        )
         assert not absent.exists()
 
     def test_a_case_alias_of_the_same_profile_is_served(self, tmp_path: Path):
@@ -1677,20 +1609,3 @@ class TestConfigFingerprint:
         assert config_fingerprint(one, key=token) == config_fingerprint(
             other, key=token
         )
-
-
-class TestMismatchReporting:
-    def test_mismatches_name_fields(self):
-        differing = mismatched_fields(_config(), _config(headless=False))
-
-        assert differing == ("headless",)
-
-    def test_a_mismatch_report_carries_no_values(self):
-        # What gets shown to a user. The values include a proxy password and the
-        # path to someone's browser profile, so the report names fields only.
-        differing = mismatched_fields(
-            _config(proxy_password="hunter2"), _config(proxy_password="letmein")
-        )
-
-        assert differing == ("proxy_password",)
-        assert "hunter2" not in str(differing)

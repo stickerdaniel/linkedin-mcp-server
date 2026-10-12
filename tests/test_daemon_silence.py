@@ -1177,9 +1177,10 @@ class TestABlockedOwnerLoop:
         from linkedin_mcp_server.config.schema import AppConfig
         from linkedin_mcp_server.daemon.descriptor import (
             build,
+            commit_prepared,
             new_instance_id,
             new_token,
-            publish,
+            prepare,
         )
         from linkedin_mcp_server.daemon.proxy import DaemonProxyBackend
         from linkedin_mcp_server.server import create_mcp_server
@@ -1243,7 +1244,8 @@ class TestABlockedOwnerLoop:
                 ),
                 pid=owner.process.pid,
             )
-            publish(profile.parent, descriptor, token)
+            prepare(profile.parent, descriptor, token)
+            commit_prepared(profile.parent, descriptor.instance_id)
             proxy = create_mcp_server(
                 role=ServerRole.PROXY,
                 proxy_backend=DaemonProxyBackend(

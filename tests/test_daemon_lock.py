@@ -31,7 +31,6 @@ from linkedin_mcp_server.daemon.descriptor import daemon_dir, daemon_state_root
 from linkedin_mcp_server.daemon.lock import (
     DaemonLock,
     DaemonLockError,
-    daemon_is_running,
     daemon_lock_path,
 )
 from linkedin_mcp_server.private_state import PrivateStateError
@@ -60,6 +59,15 @@ def _run_child(source: str, *args: str) -> subprocess.CompletedProcess[str]:
         cwd=_REPO_ROOT,
         timeout=30,
     )
+
+
+def _held(auth_root: Path) -> bool:
+    """Whether a contender is refused the lock, as an election would be."""
+    contender = DaemonLock(auth_root)
+    try:
+        return not contender.try_acquire()
+    finally:
+        contender.release()
 
 
 _TRY_ACQUIRE = """
@@ -250,7 +258,6 @@ class TestScope:
 
         assert first.try_acquire()
         try:
-            assert daemon_is_running(auth_root)
             second = DaemonLock(auth_root)
             assert not second.try_acquire()
             second.release()
@@ -308,7 +315,7 @@ class TestRegistry:
         DaemonLock(tmp_path).try_acquire()
         gc.collect()
 
-        assert daemon_is_running(tmp_path)
+        assert _held(tmp_path)
         held = [
             lock for lock in _held_locks if lock.path.parent == daemon_dir(tmp_path)
         ]
@@ -316,7 +323,7 @@ class TestRegistry:
 
         for lock in held:
             lock.release()
-        assert not daemon_is_running(tmp_path)
+        assert not _held(tmp_path)
 
     def test_an_unheld_lock_is_not_kept_alive(self, tmp_path: Path):
         # Only held locks are worth pinning. One that was built and never used
@@ -362,7 +369,7 @@ class TestFork:
             os.read(read_fd, 1)
             lock.release()
 
-            assert not daemon_is_running(tmp_path)
+            assert not _held(tmp_path)
         finally:
             os.close(read_fd)
             os.waitpid(pid, 0)
@@ -387,7 +394,7 @@ class TestReleaseSemantics:
         try:
             # Still held, through the copy. An unlock-then-close release would
             # have freed it here.
-            assert daemon_is_running(tmp_path)
+            assert _held(tmp_path)
         finally:
             os.close(copy)
 
@@ -525,83 +532,3 @@ class TestTheTerminalRelease:
         lock = SimpleNamespace(release_for_exit=release_for_exit)
 
         assert _exit_hard_status(lock) == 1
-
-
-class TestLiveness:
-    def test_no_lock_file_means_no_daemon(self, tmp_path: Path):
-        assert not daemon_is_running(tmp_path)
-
-    def test_probing_does_not_disturb_the_holder(self, tmp_path: Path):
-        # Discovery calls this on every cold start, so it must not briefly
-        # exclude an owner that is starting up.
-        lock = DaemonLock(tmp_path)
-        assert lock.try_acquire()
-        try:
-            assert daemon_is_running(tmp_path)
-            assert daemon_is_running(tmp_path)
-            assert lock.held
-        finally:
-            lock.release()
-
-    def test_concurrent_probes_do_not_see_each_other(self, tmp_path: Path):
-        # The half of the trade the shared probe buys. Measured with an
-        # exclusive probe: 43 of 400 concurrent probes reported a daemon that
-        # did not exist, because one briefly held the lock and the other read
-        # its own sibling as an owner. Inventing an owner is the unrecoverable
-        # direction, which is why shared is preferred despite the cost pinned
-        # in the test below.
-        creator = DaemonLock(tmp_path)
-        assert creator.try_acquire()
-        creator.release()
-
-        answers: list[bool] = []
-        start = threading.Barrier(2)
-
-        def probe() -> None:
-            start.wait()
-            answers.extend(daemon_is_running(tmp_path) for _ in range(200))
-
-        threads = [threading.Thread(target=probe) for _ in range(2)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-
-        assert answers and not any(answers)
-
-    def test_the_probe_is_an_observation_not_a_decision(self, tmp_path: Path):
-        # The other half, and the reason the docstring calls this a hint. There
-        # is no way to ask flock whether a lock is held without taking one, so a
-        # probe contends with a concurrent election: measured, 11 of 3000
-        # elections failed against a probe while no owner existed. Ownership is
-        # therefore decided by try_acquire alone, never by asking this first.
-        creator = DaemonLock(tmp_path)
-        assert creator.try_acquire()
-        creator.release()
-
-        # An election is never wrong when nothing competes with it, which is
-        # the property callers may rely on.
-        for _ in range(50):
-            lock = DaemonLock(tmp_path)
-            assert lock.try_acquire()
-            lock.release()
-
-        # And the probe agrees with a settled state in both directions.
-        assert not daemon_is_running(tmp_path)
-        owner = DaemonLock(tmp_path)
-        assert owner.try_acquire()
-        try:
-            assert daemon_is_running(tmp_path)
-        finally:
-            owner.release()
-
-    def test_a_stale_lock_file_does_not_look_alive(self, tmp_path: Path):
-        # The file is never unlinked, so it outlives the daemon that made it.
-        # Its presence must therefore mean nothing on its own: what counts is
-        # whether the lock inside it can be taken.
-        lock = DaemonLock(tmp_path)
-        assert lock.try_acquire()
-        lock.release()
-
-        assert daemon_lock_path(tmp_path).exists()
-        assert not daemon_is_running(tmp_path)

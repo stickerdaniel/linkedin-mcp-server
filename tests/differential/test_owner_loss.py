@@ -274,7 +274,6 @@ async def test_an_unanswered_preflight_names_no_class(tmp_path):
 
 
 def test_the_elections_probe_lines_are_the_ones_the_rows_count(tmp_path):
-    from linkedin_mcp_server.config.schema import AppConfig
     from linkedin_mcp_server.daemon.discovery import OwnerLookup, OwnerState
     from linkedin_mcp_server.daemon.election import Reach, _live_lookup
 
@@ -288,9 +287,6 @@ def test_the_elections_probe_lines_are_the_ones_the_rows_count(tmp_path):
     with _frontend_lines(lines.append):
         for verdict in (Reach.REFUSED, Reach.SILENT):
             _live_lookup(
-                tmp_path,
-                tmp_path / "profile",
-                AppConfig(),
                 lambda _a, _t, verdict=verdict: verdict,
                 set(),
                 inspector=cast(Any, inspector),

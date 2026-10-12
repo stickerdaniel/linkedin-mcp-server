@@ -54,15 +54,12 @@ from linkedin_mcp_server.daemon.election import (
 from linkedin_mcp_server.daemon.descriptor import (
     CommitPreflightError,
     build,
+    commit_prepared,
     new_instance_id,
     new_token,
-    publish,
+    prepare,
 )
-from linkedin_mcp_server.daemon.lock import (
-    DaemonLock,
-    DaemonLockError,
-    daemon_is_running,
-)
+from linkedin_mcp_server.daemon.lock import DaemonLock, DaemonLockError
 from linkedin_mcp_server.daemon import startup
 from linkedin_mcp_server.daemon import version as daemon_version
 from linkedin_mcp_server.private_state import harden_directory
@@ -205,6 +202,15 @@ def _profile(tmp_path: Path) -> Path:
     return profile
 
 
+def _lock_is_held(auth_root: Path) -> bool:
+    """Whether a contender is refused the daemon lock, as an election would be."""
+    contender = DaemonLock(auth_root)
+    try:
+        return not contender.try_acquire()
+    finally:
+        contender.release()
+
+
 def _publish_stale_owner(
     auth_root: Path,
     profile: Path,
@@ -230,7 +236,8 @@ def _publish_stale_owner(
         config=config,
         log_path=auth_root / "daemon.log",
     )
-    publish(auth_root, descriptor, token)
+    prepare(auth_root, descriptor, token)
+    commit_prepared(auth_root, descriptor.instance_id)
     return descriptor.instance_id
 
 
@@ -1074,13 +1081,10 @@ class TestFailingFast:
             return real_inspect(*cast(Any, args))
 
         def start(
-            auth_root: Path,
-            started_profile: Path,
-            started_config: AppConfig,
-            **_kwargs: object,
+            auth_root: Path, started_config: AppConfig, **_kwargs: object
         ) -> Attempt:
             assert first_read_started.is_set()
-            _publish_stale_owner(auth_root, started_profile, started_config)
+            _publish_stale_owner(auth_root, profile, started_config)
             release_first_read.set()
             assert first_read_returned.wait(timeout=1.0)
             return Attempt.ABORTED
@@ -1151,12 +1155,9 @@ class TestFailingFast:
             return real_inspect_until(self, timeout=timeout)
 
         def start(
-            auth_root: Path,
-            started_profile: Path,
-            started_config: AppConfig,
-            **_kwargs: object,
+            auth_root: Path, started_config: AppConfig, **_kwargs: object
         ) -> Attempt:
-            _publish_stale_owner(auth_root, started_profile, started_config)
+            _publish_stale_owner(auth_root, profile, started_config)
             published.set()
             return Attempt.STARTED
 
@@ -1211,12 +1212,7 @@ class TestFailingFast:
         took_over: list[float] = []
 
         def contend(
-            auth_root: Path,
-            profile: Path,
-            config: AppConfig,
-            *,
-            timeout: float,
-            inspector: object,
+            auth_root: Path, config: AppConfig, *, timeout: float, inspector: object
         ) -> Attempt:
             contender = DaemonLock(auth_root)
             if not contender.try_acquire():
@@ -1331,7 +1327,7 @@ class TestFailingFast:
         monkeypatch.setattr(election_module, "_stop_child", timed)
 
         began = time.monotonic()
-        attempt = election_module._start_owner(auth_root, profile, config, timeout=0.5)
+        attempt = election_module._start_owner(auth_root, config, timeout=0.5)
         elapsed = time.monotonic() - began
 
         try:
@@ -1509,9 +1505,7 @@ class TestFailingFast:
         monkeypatch.setattr(election_module.subprocess, "Popen", reports_failure)
 
         try:
-            attempt = election_module._start_owner(
-                auth_root, profile, config, timeout=5.0
-            )
+            attempt = election_module._start_owner(auth_root, config, timeout=5.0)
             assert attempt is Attempt.FAILED
             assert [child.returncode for child in children] == [-signal.SIGKILL], (
                 "the child was left alive after reporting startup failure"
@@ -1559,9 +1553,7 @@ class TestFailingFast:
         monkeypatch.setattr(election_module.subprocess, "Popen", reports_failure)
 
         try:
-            attempt = election_module._start_owner(
-                auth_root, profile, config, timeout=5.0
-            )
+            attempt = election_module._start_owner(auth_root, config, timeout=5.0)
             assert attempt is Attempt.FAILED
             assert children
             assert pid_file.exists(), "the child never reached its grandchild spawn"
@@ -1607,7 +1599,7 @@ class TestFailingFast:
         monkeypatch.setattr(election_module.subprocess, "Popen", mute)
 
         began = time.monotonic()
-        attempt = election_module._start_owner(auth_root, profile, config, timeout=0.5)
+        attempt = election_module._start_owner(auth_root, config, timeout=0.5)
         elapsed = time.monotonic() - began
 
         try:
@@ -2318,34 +2310,18 @@ class TestWindowsAtomicOwnerHandoff:
             "wait-2",
         ]
 
-    @pytest.mark.parametrize(
-        ("committed", "settlement", "tail"),
-        [
-            (Started.UNCERTAIN, None, ["uncertain"]),
-            (
-                Started.STILL_TRYING,
-                Started.UNCERTAIN,
-                ["still_trying", "settle"],
-            ),
-        ],
-    )
-    def test_both_uncertain_paths_close_without_termination(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        committed: Started,
-        settlement: Started | None,
-        tail: list[str],
+    def test_an_uncertain_settlement_closes_without_termination(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         outcome, events = self._run(
             tmp_path,
             monkeypatch,
-            committed=committed,
-            settlement=settlement,
+            committed=Started.STILL_TRYING,
+            settlement=Started.UNCERTAIN,
         )
 
         assert outcome is Started.UNCERTAIN
-        assert events[-(len(tail) + 1) :] == [*tail, "close-parent-job"]
+        assert events[-3:] == ["still_trying", "settle", "close-parent-job"]
         assert "drain-job" not in events
 
     def test_post_assignment_cleanup_releases_gate_handle_before_drain(self):
@@ -2702,7 +2678,6 @@ class TestAtomicStartupCommit:
         *,
         validate: object,
         final: str = "committed",
-        on_spawned: Callable[[], None] | None = None,
     ) -> tuple[object, _Child, list[str]]:
         profile = _profile(tmp_path)
         config = _config(profile)
@@ -2730,12 +2705,7 @@ class TestAtomicStartupCommit:
             lambda root: tmp_path / "daemon.log",
         )
 
-        outcome = election_module._spawn(
-            profile.parent,
-            config,
-            timeout=1.0,
-            on_spawned=on_spawned,
-        )
+        outcome = election_module._spawn(profile.parent, config, timeout=1.0)
         return outcome, child, events
 
     @pytest.mark.parametrize(
@@ -3243,43 +3213,6 @@ class TestAtomicStartupCommit:
         assert not child.killed
         assert events == []
 
-    def test_parent_relinquishes_its_lock_copies_before_validation(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        events: list[str] = []
-
-        def validate(*args: object, **kwargs: object) -> None:
-            assert events == ["released"]
-
-        outcome, child, _ = self._spawn(
-            tmp_path,
-            monkeypatch,
-            validate=validate,
-            on_spawned=lambda: events.append("released"),
-        )
-
-        assert outcome is Started.YES
-        assert not child.killed
-
-    def test_uncertain_child_verdict_keeps_the_lock_holder_alive(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        monkeypatch.setattr(
-            election_module.daemon_descriptor,
-            "read",
-            lambda root: pytest.fail("an explicit uncertain verdict needs no reread"),
-        )
-        outcome, child, events = self._spawn(
-            tmp_path,
-            monkeypatch,
-            validate=lambda *a, **k: None,
-            final="uncertain",
-        )
-
-        assert outcome is Started.UNCERTAIN
-        assert not child.killed
-        assert events == []
-
     def test_child_retry_verdict_releases_this_attempt(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -3319,7 +3252,6 @@ class TestAtomicStartupCommit:
             config: AppConfig,
             *,
             timeout: float,
-            on_spawned: Callable[[], None] | None = None,
             inspector: object,
         ) -> object:
             calls.append(auth_root)
@@ -3339,7 +3271,7 @@ class TestAtomicStartupCommit:
         )
 
         outcome = election_module._start_owner(
-            profile.parent, profile, _config(profile), timeout=1.0
+            profile.parent, _config(profile), timeout=1.0
         )
 
         assert outcome is Attempt.STARTED
@@ -3394,7 +3326,7 @@ class TestAtomicStartupCommit:
         )
         try:
             outcome = election_module._start_owner(
-                auth_root, profile, _config(profile), timeout=5.0
+                auth_root, _config(profile), timeout=5.0
             )
 
             assert outcome is Attempt.FAILED
@@ -3456,7 +3388,7 @@ class TestAtomicStartupCommit:
         monkeypatch.setattr(election_module.subprocess, "Popen", capture)
         try:
             outcome = election_module._start_owner(
-                auth_root, profile, _config(profile), timeout=5.0
+                auth_root, _config(profile), timeout=5.0
             )
 
             assert outcome is Attempt.ABORTED
@@ -3483,7 +3415,7 @@ class TestAtomicStartupCommit:
             lambda *a, **k: Started.RETRY,
         )
 
-        outcome = election_module._start_contending_for_the_lock(
+        outcome = election_module._start_owner(
             tmp_path, _config(_profile(tmp_path)), timeout=1.0
         )
 
@@ -3501,9 +3433,7 @@ class TestAtomicStartupCommit:
         )
 
         assert (
-            election_module._start_contending_for_the_lock(
-                profile.parent, config, timeout=1.0
-            )
+            election_module._start_owner(profile.parent, config, timeout=1.0)
             is Attempt.ABORTED
         )
 
@@ -3632,12 +3562,10 @@ class TestAtomicStartupCommit:
         assert outcome is Started.YES
         assert not child.killed
 
-    def test_dead_child_with_stale_canonical_state_stays_uncertain(
+    def test_stale_canonical_state_stays_uncertain(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         instance_id = new_instance_id()
-        child = self._Child(instance_id, final="")
-        child.returncode = 1
         monkeypatch.setattr(
             election_module.daemon_descriptor, "read", lambda root: None
         )
@@ -3648,17 +3576,15 @@ class TestAtomicStartupCommit:
         )
 
         outcome = election_module._settle_commit_result(
-            tmp_path, instance_id, cast(Any, child), timeout=1.0
+            tmp_path, instance_id, timeout=1.0
         )
 
         assert outcome is Started.UNCERTAIN
 
-    def test_unreadable_canonical_state_keeps_a_dead_generation_uncertain(
+    def test_unreadable_canonical_state_stays_uncertain(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         instance_id = new_instance_id()
-        child = self._Child(instance_id, final="")
-        child.returncode = 1
         monkeypatch.setattr(
             election_module.daemon_descriptor,
             "read",
@@ -3673,7 +3599,7 @@ class TestAtomicStartupCommit:
         )
 
         outcome = election_module._settle_commit_result(
-            tmp_path, instance_id, cast(Any, child), timeout=1.0
+            tmp_path, instance_id, timeout=1.0
         )
 
         assert outcome is Started.UNCERTAIN
@@ -4294,14 +4220,14 @@ class TestAForwardedCallThroughTheRealOwner:
                 )
                 owner.calls.append(second)
                 await _until(
-                    lambda: get_liveness().calls_in_flight() == 2 or second.done(),
+                    lambda: len(get_liveness().state.calls) == 2 or second.done(),
                     seconds=10,
                 )
                 # The second call was admitted while the first holds the lease,
                 # after the listing its own lookup made had completed, and its
                 # body waits its turn: a listing never queues behind a call.
                 assert not second.done(), _outcome(second)
-                assert get_liveness().calls_in_flight() == 2
+                assert len(get_liveness().state.calls) == 2
                 assert [body["value"] for body in owner.bodies] == ["first"]
                 assert {"bound": True, "while_held": True} in owner.listings, (
                     owner.listings
@@ -4345,7 +4271,7 @@ class TestAForwardedCallThroughTheRealOwner:
         assert refused.is_error is True
         assert refused.meta is not None
         assert refused.meta[REFUSAL_KEY]["daemon"] == UNMARKED_CALL
-        assert get_liveness().calls_in_flight() == 0
+        assert len(get_liveness().state.calls) == 0
         assert owner.elections == [], "a healthy owner was replaced"
 
     async def test_a_queued_call_given_up_is_withdrawn_from_the_owner(
@@ -4378,11 +4304,11 @@ class TestAForwardedCallThroughTheRealOwner:
                 )
                 owner.calls.append(second)
                 await _until(
-                    lambda: get_liveness().calls_in_flight() == 2 or second.done(),
+                    lambda: len(get_liveness().state.calls) == 2 or second.done(),
                     seconds=10,
                 )
                 assert not second.done(), _outcome(second)
-                assert get_liveness().calls_in_flight() == 2
+                assert len(get_liveness().state.calls) == 2
                 assert [body["value"] for body in owner.bodies] == ["first"]
                 assert owner.lease.held
 
@@ -4393,23 +4319,23 @@ class TestAForwardedCallThroughTheRealOwner:
                 # have withdrawn it: a caller's heartbeats stop when it gives
                 # up, and the owner would otherwise cut the call off later.
                 took = await _until(
-                    lambda: get_liveness().calls_in_flight() == 1,
+                    lambda: len(get_liveness().state.calls) == 1,
                     seconds=EXPIRY_SECONDS / 3,
                 )
-                assert get_liveness().calls_in_flight() == 1, (
+                assert len(get_liveness().state.calls) == 1, (
                     f"the queued call was still admitted after {took:.1f}s"
                 )
                 assert owner.lease.held, "the first call lost its lease"
 
                 owner.release.set()
                 answer = await asyncio.wait_for(first, timeout=10)
-                await _until(lambda: get_liveness().calls_in_flight() == 0, seconds=10)
+                await _until(lambda: len(get_liveness().state.calls) == 0, seconds=10)
 
         assert answer.structured_content == {"value": "first"}
         assert [body["value"] for body in owner.bodies] == ["first"], (
             "the cancelled call ran once the lease was free"
         )
-        assert get_liveness().calls_in_flight() == 0
+        assert len(get_liveness().state.calls) == 0
         assert not owner.lease.held
         # Both tool requests left once each, claimed, and nothing was sent again.
         sent = [call for call, _bound, _claimed in owner.leaving]
@@ -4548,7 +4474,7 @@ class TestRealOwner:
         result = _run_frontend(profile)
         pid = result["pid"]
         assert isinstance(pid, int)
-        assert daemon_is_running(auth_root)
+        assert _lock_is_held(auth_root)
 
         _stop(pid)
 
@@ -4591,7 +4517,7 @@ class TestRealOwner:
         _stop(dead)
         # The kernel frees the lock at death; wait for it rather than assuming.
         for _ in range(300):
-            if not daemon_is_running(profile.parent):
+            if not _lock_is_held(profile.parent):
                 break
             time.sleep(0.01)
 
@@ -5072,7 +4998,7 @@ class TestRealOwner:
         assert predecessor is not None
         _stop(first["pid"])
         for _ in range(300):
-            if not daemon_is_running(auth_root):
+            if not _lock_is_held(auth_root):
                 break
             time.sleep(0.01)
         directory = daemon_descriptor_module.daemon_dir(auth_root)
@@ -6292,8 +6218,6 @@ class TestTheHardExitFreesTheElectionFirst:
 
             def retry(self) -> None: ...
 
-            def uncertain(self) -> None: ...
-
             def close(self) -> None: ...
 
         class _CommittingParent:
@@ -6463,9 +6387,6 @@ class TestPublishingLast:
 
             def retry(self) -> None:
                 order.append("retry")
-
-            def uncertain(self) -> None:
-                order.append("uncertain")
 
             def close(self) -> None:
                 return None
@@ -6700,7 +6621,6 @@ class TestPublishingLast:
         ]
         assert "commit" not in order
         assert "committed" not in order
-        assert "uncertain" not in order
 
     def test_a_generic_case_hands_the_owner_the_job_it_needs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

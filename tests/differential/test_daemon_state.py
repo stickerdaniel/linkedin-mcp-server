@@ -53,7 +53,8 @@ def test_the_candidate_reads_this_checkouts_namespace(tmp_path: Path):
     auth_root = _auth_root(tmp_path)
     token = daemon_descriptor.new_token()
     published = _descriptor(auth_root, token)
-    daemon_descriptor.publish(auth_root, published, token)
+    daemon_descriptor.prepare(auth_root, published, token)
+    daemon_descriptor.commit_prepared(auth_root, published.instance_id)
 
     read = CANDIDATE_LAYOUT.read(auth_root)
 
