@@ -304,12 +304,17 @@ class _Wire:
         self.methods[key] = method
         return key
 
-    def heard(self, payload: bytes, posted: str | None) -> None:
-        """Attribute one complete JSON-RPC message, or batch, to its request."""
+    def heard(self, payload: bytes, posted: str | None) -> bool:
+        """Attribute one complete JSON-RPC message, or batch, to its request.
+
+        Whether one of them answers *posted*, the request of the POST it came
+        back on.
+        """
         try:
             message = json.loads(payload)
         except ValueError:
-            return
+            return False
+        answers_posted = False
         for item in message if isinstance(message, list) else [message]:
             if not isinstance(item, dict) or ("result" in item) == ("error" in item):
                 continue
@@ -320,6 +325,7 @@ class _Wire:
             method = self.methods.get(key)
             if method is None:
                 continue
+            answers_posted = answers_posted or (posted is not None and key == posted)
             error = item.get("error")
             if isinstance(error, dict):
                 code, text = error.get("code"), error.get("message")
@@ -327,6 +333,7 @@ class _Wire:
                     self.errors.add((code, text))
             if method == "tools/call":
                 self.dispatch.advance(Dispatch.ANSWERED)
+        return answers_posted
 
     def answered_with(self, error: MCPError) -> bool:
         """Whether *error* is one the owner sent, rather than one the SDK wrote."""
@@ -353,6 +360,9 @@ class _Reader:
         self.pending = b""
         self.after_cr = False
         self.data: list[bytes] = []
+        #: A JSON body read to its end that answers the POST it came back on.
+        #: Never set for an event stream, which the SDK reads before its end.
+        self.answered = False
 
     def feed(self, chunk: bytes) -> None:
         if self.whole:
@@ -377,7 +387,7 @@ class _Reader:
         # An event without its blank line is incomplete and is discarded, as
         # the SDK's own event-stream parser discards it.
         if self.whole:
-            self.wire.heard(self.pending, self.posted)
+            self.answered = self.wire.heard(self.pending, self.posted)
 
 
 class _ObservedBody(httpx2.AsyncByteStream):
@@ -392,7 +402,20 @@ class _ObservedBody(httpx2.AsyncByteStream):
         self.reader.end()
 
     async def aclose(self) -> None:
-        await self.inner.aclose()
+        """Close the body, keeping an answer that already arrived whole.
+
+        httpx2 closes a body before ``aread()`` returns it, and the SDK parses
+        it only after that, so a failing close would turn an answer the owner
+        sent in full into a lost one. Only then is the failure swallowed:
+        read to its end, JSON, and answering this POST. The SDK still parses
+        and validates it as usual. Cancellation is never swallowed.
+        """
+        try:
+            await self.inner.aclose()
+        except Exception:
+            if not self.reader.answered:
+                raise
+            logger.debug("Closing a complete owner answer failed", exc_info=True)
 
 
 class _WatchedTransport(httpx2.AsyncBaseTransport):
