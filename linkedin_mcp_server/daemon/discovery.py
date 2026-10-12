@@ -98,10 +98,10 @@ class DirectFallback(enum.Enum):
     """
 
     #: The owner answered its probe.
-    LIVE_RIVAL = "a live owner of this build uses a different configuration"
+    LIVE_RIVAL = "a live owner of this version uses a different configuration"
     #: The owner held its port and did not answer within the probe's budget.
     SILENT_RIVAL = (
-        "an owner of this build with a different configuration did not answer"
+        "an owner of this version with a different configuration did not answer"
     )
 
 
@@ -160,7 +160,7 @@ class OwnerLookup:
     #: Which check an ``INCOMPATIBLE`` reading failed, where one did.
     mismatch: Mismatch | None = None
     #: Set only by the election, and only after its one bounded probe of an
-    #: owner of this same build with another configuration: this client leaves
+    #: owner of this same version with another configuration: this client leaves
     #: that owner alone and drives its own browser now, rather than waiting on a
     #: lock the owner may hold. Which value says what the probe established.
     fallback: DirectFallback | None = None

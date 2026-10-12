@@ -194,9 +194,10 @@ def obtain_owner(
     names generations the caller already found unusable, which are never
     contacted or returned (a retiring owner still answers the probe).
 
-    Returns at once with a ``fallback`` set when an owner of this build with
+    Returns at once with a ``fallback`` set when an owner of this version with
     another configuration answers its one probe or stays silent through it:
-    that owner is left alone and the caller drives its own browser.
+    that owner is left alone and the caller drives its own browser. An older
+    owner is asked to stand down whatever its configuration.
 
     The outcome's ``unanswered`` names the published generation its probes
     last found silent, whatever the election decided.
@@ -405,9 +406,9 @@ def _attachment(read: OwnerLookup) -> Attachment:
 
 
 def _turn_over(attachment: Attachment, because: lookup_core.Turnover) -> None:
-    if because is lookup_core.Turnover.OLDER_BUILD:
+    if because is lookup_core.Turnover.OLDER_VERSION:
         logger.info(
-            "The running daemon is version %s and this build is %s; asking it "
+            "The running daemon is version %s and this server is %s; asking it "
             "to hand the browser over",
             attachment.descriptor.package_version,
             __version__,
@@ -439,10 +440,10 @@ def _what_was_found(finding: Finding, read: OwnerLookup, timed_out: str) -> Owne
                 state=incompatible,
                 reason="the published daemon was already found unusable",
             )
-        case Finding.OLDER_BUILD:
+        case Finding.OLDER_VERSION:
             return OwnerLookup(
                 state=incompatible,
-                reason="the running daemon is older than this build",
+                reason="the running daemon is an older version than this server",
             )
         case Finding.NOT_PROBED:
             return OwnerLookup(
@@ -486,12 +487,12 @@ def _what_was_found(finding: Finding, read: OwnerLookup, timed_out: str) -> Owne
 
 
 def _ask_to_stand_down(attachment: Attachment) -> None:
-    """Ask an older owner to give up the browser for this build.
+    """Ask an older owner to give up the browser for this server.
 
     Best effort: whatever happens, the caller next tries the lock, and only the
     lock says the browser is free. Sent to the descriptor's instance through
     the one stable route and request version (``daemon.owner.STAND_DOWN_PATH``),
-    whatever its tool protocol.
+    whatever its tool protocol or configuration.
     """
 
     descriptor = attachment.descriptor

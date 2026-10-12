@@ -32,9 +32,11 @@ OLDER = Reading(instance=A, attachable=True, older=True)
 #: An older owner speaking another protocol, and one that is not older.
 OLD_PROTOCOL = Reading(instance=A, control_only=True, other_protocol=True, older=True)
 NEW_PROTOCOL = Reading(instance=A, control_only=True, other_protocol=True)
-#: The same build with another configuration, and an older build with one.
+#: Another configuration: the same version, an older one, and one newer or
+#: not comparable (which reads the same).
 RIVAL = Reading(instance=A, control_only=True, other_config=True, same_version=True)
 OLD_RIVAL = Reading(instance=A, control_only=True, other_config=True, older=True)
+NEW_RIVAL = Reading(instance=A, control_only=True, other_config=True)
 NOTHING = Reading()
 
 
@@ -109,14 +111,21 @@ class TestOneLook:
         assert lookup.Bury(A) in effects
         assert concluded(effects).finding is Finding.LEFTOVERS
 
-    @pytest.mark.parametrize("may_ask", [True, False])
-    def test_an_older_build_is_asked_to_stand_down_and_written_off(self, may_ask: bool):
-        effects = read_then(OLDER, may_ask=may_ask)
+    @pytest.mark.parametrize("may_ask", [True, False], ids=["active", "settling"])
+    @pytest.mark.parametrize("reading", [OLDER, OLD_RIVAL], ids=["same", "other"])
+    def test_an_older_version_is_asked_to_stand_down_and_written_off(
+        self, reading: Reading, may_ask: bool
+    ):
+        # Whatever its configuration: an older owner proved for control only,
+        # because its fingerprint differs, once ended the pass unasked.
+        effects = read_then(reading, may_ask=may_ask)
 
-        asked = lookup.AskToStandDown(lookup.Turnover.OLDER_BUILD) in effects
+        asked = lookup.AskToStandDown(lookup.Turnover.OLDER_VERSION) in effects
         assert asked is may_ask
         assert lookup.Bury(A) in effects
-        assert concluded(effects) == lookup.Conclude(Finding.OLDER_BUILD, asked=may_ask)
+        assert concluded(effects) == lookup.Conclude(
+            Finding.OLDER_VERSION, asked=may_ask
+        )
         assert not any(isinstance(e, lookup.Probe) for e in effects)
 
     def test_an_older_protocol_is_asked_to_stand_down(self):
@@ -139,7 +148,7 @@ class TestOneLook:
         ("reach", "finding"),
         [(Reach.ANSWERED, Finding.LIVE_RIVAL), (Reach.SILENT, Finding.SILENT_RIVAL)],
     )
-    def test_a_same_build_rival_is_left_alone_after_one_probe(
+    def test_a_same_version_rival_is_left_alone_after_one_probe(
         self, reach: Reach, finding: Finding
     ):
         effects = read_then(RIVAL, reach)
@@ -150,17 +159,16 @@ class TestOneLook:
         )
         assert concluded(effects) == lookup.Conclude(finding)
 
-    def test_a_same_build_rival_that_refuses_is_leftovers(self):
+    def test_a_same_version_rival_that_refuses_is_leftovers(self):
         effects = read_then(RIVAL, Reach.REFUSED)
 
         assert lookup.Bury(A) in effects
         assert concluded(effects).finding is Finding.WRITTEN_OFF
 
-    def test_a_rival_of_another_build_is_only_waited_out(self):
-        effects = read_then(OLD_RIVAL)
+    def test_a_newer_rival_is_only_waited_out(self):
+        effects = read_then(NEW_RIVAL)
 
-        assert concluded(effects) == lookup.Conclude(Finding.AS_READ)
-        assert not any(isinstance(e, lookup.Probe) for e in effects)
+        assert effects == [lookup.Conclude(Finding.AS_READ)]
 
     def test_a_buried_generation_is_watched_and_never_probed(self):
         state, read = passing(look(wait=0.3, buried=frozenset({A})))
@@ -829,6 +837,7 @@ _READINGS = [
     NEW_PROTOCOL,
     RIVAL,
     OLD_RIVAL,
+    NEW_RIVAL,
     replace(ATTACHABLE, instance=B),
 ]
 
@@ -931,18 +940,25 @@ def test_every_look_keeps_the_contract(may_ask: bool, buried: frozenset[str]):
         if lookup.LeaveAlone() in decided:
             assert acted_on == NEW_PROTOCOL, where
 
-        # Only an older owner is asked to stand down, only by a pass that may.
+        # Only an older owner is asked to stand down, only by a pass that may,
+        # and never one already written off.
         asks = [e for e in decided if isinstance(e, lookup.AskToStandDown)]
         assert len(asks) <= 1, where
         if asks:
             assert may_ask and acted_on is not None and acted_on.older, where
+            assert acted_on.instance not in buried, where
         assert conclusion.asked == bool(asks), where
+        # And every such owner is, whatever its configuration: one left running
+        # keeps the browser from every newer frontend.
+        if acted_on is not None and acted_on.older and acted_on.instance not in buried:
+            assert asks or not may_ask, where
+            assert lookup.Bury(str(acted_on.instance)) in burials, where
 
         # Attaching needs an answer to a probe.
         if conclusion.finding is Finding.AS_READ and acted_on and acted_on.attachable:
             assert reaches == [Reach.ANSWERED], where
 
-        # A same-build owner of another configuration ends in Direct at once
+        # A same-version owner of another configuration ends in Direct at once
         # whenever it answered or stayed silent, and is left alone.
         if acted_on == RIVAL and acted_on.instance not in buried and reaches:
             if reaches[0] is not Reach.REFUSED:
@@ -953,6 +969,11 @@ def test_every_look_keeps_the_contract(may_ask: bool, buried: frozenset[str]):
                 assert not asks and not burials, where
         if conclusion.finding in (Finding.LIVE_RIVAL, Finding.SILENT_RIVAL):
             assert acted_on == RIVAL and reaches and reaches[0] is not Reach.REFUSED
+
+        # A newer or unknown version of another configuration is only waited
+        # out: never probed, asked or written off.
+        if acted_on == NEW_RIVAL:
+            assert not probes and not asks and not burials, where
 
 
 # --- Schedules: one election -------------------------------------------------------

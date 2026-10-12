@@ -24,7 +24,15 @@ after itself, and whichever publishes is the successor; G may ask a successor
 F started to turn over, and nothing asks one G started. A call makes at most
 two attempts and one recovery, the call core's own bound. A recovery takes
 its flight's answer; the second flight ``recover`` allows after late burial news
-is not explored. No sign-in, rival configuration or other protocol.
+is not explored. No sign-in or other protocol.
+
+**Configurations.** Each frontend and owner process carries a configuration: R
+serves F's, and a child its own frontend's. Each world runs once with G of F's
+configuration and once with another. A pass then reads an owner of the other
+configuration as control only. G asks an older one to turn over all the same,
+after which F's recovery finds no successor it may attach to. A frontend that
+finds one of its own version (*fresh-rival*, both of build 1) leaves it alone
+and ends in Direct.
 
 **Clock and schedules.** One monotone simulated clock stamps every event.
 Completions are instantaneous and interleave in every order within an instant;
@@ -57,8 +65,9 @@ no removal of a published generation, no repeated call.
 
 1. No extra concurrent browser: one lock holder and one live published owner;
    COMMIT only to the holder, admission only by it; attaching only to the owner
-   serving at that moment; a live owner the frontend could attach to is never
-   written off. Cannot see browsers or the lease.
+   serving at that moment, and only to one of the frontend's configuration; a
+   live owner the frontend could attach to is never written off. Cannot see
+   browsers or the lease.
 2. No wrong-target signal: a published child is never stopped; ``Cancel`` names
    a running task of that owner incarnation; turnover is asked only of an older
    owner. Cannot see PIDs, process groups, guardians or Jobs.
@@ -76,11 +85,14 @@ search path is work that never ends, and fails as such: deduplication alone
 would read it as a world already judged.
 
 Every rule but these has a broken reducer below that must produce its
-counterexample: one holder and one published owner, COMMIT and admission only
-by the holder, the ``Cancel`` target, and every call and election ending. Those
-were seen to fail only against faults planted in the world. Routing a
-recovery to its own frontend's election is fidelity rather than a rule: answered
-from G's election instead, no rule here breaks.
+counterexample, in a world of either configuration: one holder and one
+published owner, COMMIT and admission only by the holder, attaching only to the
+frontend's configuration, the ``Cancel`` target, and every call and election
+ending. Those were seen to fail only against faults planted in the world; the
+configuration rule against a pass shell that attaches on an ``AS_READ`` finding
+whether or not its read was worth connecting to. Routing a recovery to its own
+frontend's election is fidelity rather than a rule: answered from G's election
+instead, no rule here breaks.
 """
 
 from __future__ import annotations
@@ -145,6 +157,8 @@ class _Proc:
     """An owner process: R, or the child of one start."""
 
     build: int
+    #: The configuration it serves: R's is F's, a child's its frontend's.
+    config: int = 1
     alive: bool = True
     holds_lock: bool = False
     published: bool = False
@@ -197,6 +211,7 @@ class _CallRun:
 @dataclass(frozen=True)
 class _Front:
     build: int
+    config: int = 1
     electing: election.Election | None = None
     pass_: lookup.Lookup | None = None
     #: The pass's last descriptor read, which the shell probes, asks and reports.
@@ -314,7 +329,8 @@ def _election_effects(
                 spawn.Connected(world.now, timeout),
             )
             front = replace(front, child=child, children=front.children + 1)
-            world = world.with_proc(child, _Proc(front.build)).with_front(name, front)
+            proc = _Proc(front.build, front.config)
+            world = world.with_proc(child, proc).with_front(name, front)
             return _start_effects(world, name, state, out)
         case election.Decide(lookup=target):
             assert target is None or isinstance(target, str)
@@ -324,6 +340,10 @@ def _election_effects(
 def _decided(world: _World, name: str, target: str | None) -> _World:
     _expect(target is None or target == world.serving(), "attached to a non-owner")
     front = world.front(name)
+    _expect(
+        target is None or world.proc(target).config == front.config,
+        "attached to another configuration",
+    )
     found = target if target not in front.written_off else None
     front = replace(
         front,
@@ -382,16 +402,18 @@ def _pass_effects(world: _World, name: str, effects: list[lookup.Effect]) -> _Wo
             case lookup.Conclude(finding=finding, asked=asked, observed=observed):
                 assert front.electing is not None
                 # As the shell reports it: the last read, and an owner only if
-                # that read was worth connecting to.
+                # that read was worth connecting to. A rival left alone ends
+                # the election in Direct at once.
                 read = front.read
                 as_read = finding is Finding.AS_READ and read.attachable
                 target = read.instance if as_read else None
+                rival = finding in (Finding.LIVE_RIVAL, Finding.SILENT_RIVAL)
                 world = world.with_front(name, replace(front, pass_=None))
                 looked = election.Looked(
                     front.electing.pending,
                     world.now,
                     target,
-                    target is not None,
+                    target is not None or rival,
                     asked,
                     observed,
                 )
@@ -670,12 +692,16 @@ def _pass_answers(world: _World, name: str) -> _Moves:
         case lookup.ReadDescriptor(op=op):
             reading = Reading()
             if world.canonical is not None:
-                build = world.proc(world.canonical).build
+                proc = world.proc(world.canonical)
+                # Another configuration is proved for control only.
+                other = proc.config != front.config
                 reading = Reading(
                     instance=world.canonical,
-                    attachable=True,
-                    older=build < front.build,
-                    same_version=build == front.build,
+                    attachable=not other,
+                    control_only=other,
+                    other_config=other,
+                    older=proc.build < front.build,
+                    same_version=proc.build == front.build,
                 )
             event = lookup.Read(op, world.now, reading)
             yield (
@@ -822,8 +848,9 @@ def _tidy(world: _World) -> _World:
     return world if readable == world.outbox else replace(world, outbox=readable)
 
 
-def _initial(resident: bool, g_build: int) -> _World:
-    world = _World(0.0, (("f", _Front(build=1)), ("g", _Front(build=g_build))))
+def _initial(resident: bool, g_build: int, g_config: int) -> _World:
+    g = _Front(build=g_build, config=g_config)
+    world = _World(0.0, (("f", _Front(build=1)), ("g", g)))
     if not resident:
         return _start_election(_start_election(world, "f"), "g")
     owner = lifecycle.Owner()
@@ -861,14 +888,18 @@ class _Search:
 
 
 def _explore(
-    resident: bool, *, g_build: int = 2, stop_at: str | None = None
+    resident: bool,
+    *,
+    g_build: int = 2,
+    g_config: int = 1,
+    stop_at: str | None = None,
 ) -> _Search:
     """Visit every reachable world once, depth first, judging every move.
 
     Time only moves forward, so a move back to a world still on the path is
     work that never ends without the clock ever ticking.
     """
-    start = _initial(resident, g_build)
+    start = _initial(resident, g_build, g_config)
     came_from: dict[_World, tuple[_World, str] | None] = {start: None}
     search = _Search()
 
@@ -950,21 +981,64 @@ def _shared_successor(world: _World) -> bool:
     )
 
 
+def _upgraded_apart(world: _World) -> bool:
+    """G ended on its own successor after an older owner of F's configuration
+    was asked to go, and F is not on that successor."""
+    g = world.front("g")
+    successor = world.serving()
+    if successor is None or g.decided[-1:] != (successor,):
+        return False
+    turned_over = any(p.asked_to_go and p.config != g.config for _, p in world.procs)
+    return turned_over and world.front("f").attached != successor
+
+
+def _left_alone(world: _World) -> bool:
+    """One frontend ended on its successor, and the other, of another
+    configuration, ended without it."""
+    successor = world.serving()
+    if successor is None:
+        return False
+    on, off = ("f", "g") if successor.startswith("f") else ("g", "f")
+    return (
+        world.front(on).decided[-1:] == (successor,)
+        and world.front(off).decided[-1:] == (None,)
+        and world.front(off).config != world.proc(successor).config
+    )
+
+
 @pytest.mark.usefixtures("owner_times")
 @pytest.mark.parametrize(
-    ("resident", "g_build", "floor"),
-    [(True, 2, 20_000), (False, 2, 2_000), (False, 1, 300)],
-    ids=["turnover", "fresh", "fresh-same-build"],
+    ("resident", "g_build", "g_config", "floor", "reached"),
+    [
+        (True, 2, 1, 20_000, _shared_successor),
+        (True, 2, 2, 20_000, _upgraded_apart),
+        (False, 2, 1, 2_000, _shared_successor),
+        (False, 2, 2, 2_000, _upgraded_apart),
+        (False, 1, 1, 300, _shared_successor),
+        (False, 1, 2, 300, _left_alone),
+    ],
+    ids=[
+        "turnover",
+        "turnover-other-config",
+        "fresh",
+        "fresh-other-config",
+        "fresh-same-version",
+        "fresh-rival",
+    ],
 )
 def test_every_composed_schedule_keeps_the_contract(
-    resident: bool, g_build: int, floor: int
+    resident: bool,
+    g_build: int,
+    g_config: int,
+    floor: int,
+    reached: Callable[[_World], bool],
 ):
-    search = _explore(resident, g_build=g_build)
+    search = _explore(resident, g_build=g_build, g_config=g_config)
 
     assert search.broken == {}
     # Sanity, not contract: the bounds reach the case they exist for.
     assert search.states > floor
-    assert any(_shared_successor(world) for world in search.ended)
+    assert any(reached(world) for world in search.ended)
 
 
 # --- Broken reducers ------------------------------------------------------------------
@@ -1152,14 +1226,15 @@ _BREAKS: list[tuple[_Break, str]] = [
 
 
 @pytest.mark.usefixtures("owner_times")
+@pytest.mark.parametrize("g_config", [1, 2], ids=["same-config", "other-config"])
 @pytest.mark.parametrize(
     ("break_it", "rule"), _BREAKS, ids=[b.__name__.lstrip("_") for b, _ in _BREAKS]
 )
 def test_a_broken_reducer_yields_its_counterexample(
-    monkeypatch: pytest.MonkeyPatch, break_it: _Break, rule: str
+    monkeypatch: pytest.MonkeyPatch, break_it: _Break, rule: str, g_config: int
 ):
     break_it(monkeypatch)
 
-    search = _explore(resident=True, stop_at=rule)
+    search = _explore(resident=True, g_config=g_config, stop_at=rule)
 
     assert rule in search.broken, sorted(search.broken)

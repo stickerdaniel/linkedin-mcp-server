@@ -9041,7 +9041,7 @@ class TestAnOwnerThisBuildMayOnlyControl:
         assert outcome.attachment_lookup.fallback is None
         assert contended, "the election did not go on to the lock"
 
-    def test_a_live_owner_of_this_build_with_another_configuration_is_left_alone(
+    def test_a_live_owner_of_this_version_with_another_configuration_is_left_alone(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         # The contract's immediate fallback: probed once, found alive, and the
@@ -9058,7 +9058,7 @@ class TestAnOwnerThisBuildMayOnlyControl:
         )
 
         assert probed == [instance]
-        assert asked == [], "a same-build owner was asked to stand down"
+        assert asked == [], "a same-version owner was asked to stand down"
         assert (
             outcome.attachment_lookup.fallback
             is daemon_module.DirectFallback.LIVE_RIVAL
@@ -9066,7 +9066,7 @@ class TestAnOwnerThisBuildMayOnlyControl:
         assert not outcome.worth_connecting
         assert contended == [], "the election contended for a live rival's lock"
 
-    def test_a_silent_owner_of_this_build_with_another_configuration_is_left_alone(
+    def test_a_silent_owner_of_this_version_with_another_configuration_is_left_alone(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         # Silence proves nothing about the owner's life, so it authorizes no
@@ -9118,17 +9118,47 @@ class TestAnOwnerThisBuildMayOnlyControl:
         assert outcome.attachment_lookup.fallback is None
         assert contended, "the election did not take the lock from a corpse"
 
-    def test_another_builds_configuration_is_not_probed(
+    def test_an_older_owner_of_another_configuration_is_turned_over(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        # Only the same build is a rival to leave alone. Anything else keeps the
-        # behaviour it had: wait on the lock.
+        # Proved for control, an older owner is asked whatever its
+        # configuration. Left running, it kept the browser from every newer
+        # frontend whose fingerprint differed from its own.
         profile = _profile(tmp_path)
         config = _config(profile)
         theirs = _config(profile)
         theirs.browser.headless = not config.browser.headless
         auth_root = profile.parent
-        _publish_stale_owner(auth_root, profile, theirs, package_version="1.0.0")
+        instance = _publish_stale_owner(
+            auth_root, profile, theirs, package_version="1.0.0"
+        )
+
+        outcome, asked, probed, contended = self._elect(
+            auth_root, profile, config, monkeypatch
+        )
+
+        assert asked == [instance], "the older owner was not asked to stand down"
+        assert probed == []
+        assert not outcome.worth_connecting
+        assert outcome.attachment_lookup.attachment is None
+        assert outcome.attachment_lookup.fallback is None
+        assert contended, "the election did not go on to the lock"
+
+    @pytest.mark.parametrize("package_version", ["99.0.0", "local-build"])
+    def test_a_newer_or_unknown_version_of_another_configuration_is_waited_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, package_version: str
+    ):
+        # Neither asked nor probed: only an older owner is turned over and only
+        # this version is a rival to leave alone. The election waits on the
+        # lock.
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        theirs = _config(profile)
+        theirs.browser.headless = not config.browser.headless
+        auth_root = profile.parent
+        _publish_stale_owner(
+            auth_root, profile, theirs, package_version=package_version
+        )
 
         outcome, asked, probed, contended = self._elect(
             auth_root, profile, config, monkeypatch
@@ -9136,6 +9166,43 @@ class TestAnOwnerThisBuildMayOnlyControl:
 
         assert (asked, probed) == ([], [])
         assert outcome.attachment_lookup.fallback is None
+        assert contended
+
+    @pytest.mark.parametrize("unproved", ["runtime", "profile", "token"])
+    def test_an_older_owner_not_proved_for_control_is_never_asked(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        unproved: str,
+    ):
+        # Turnover needs the whole proof a control-only pair carries. An owner
+        # of another runtime or profile, or one whose token does not match its
+        # descriptor, gets no request whatever its version.
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        theirs = _config(profile)
+        theirs.browser.headless = not config.browser.headless
+        auth_root = profile.parent
+        served = profile
+        if unproved == "profile":
+            served = auth_root / "another-profile"
+            served.mkdir()
+        instance = _publish_stale_owner(
+            auth_root, served, theirs, package_version="1.0.0"
+        )
+        if unproved == "runtime":
+            _with_published_fields(auth_root, runtime_id="another-runtime")
+        elif unproved == "token":
+            daemon_descriptor_module.token_path(auth_root, instance).write_text(
+                new_token(), encoding="utf-8"
+            )
+
+        outcome, asked, probed, contended = self._elect(
+            auth_root, profile, config, monkeypatch
+        )
+
+        assert (asked, probed) == ([], [])
+        assert outcome.attachment_lookup.attachment is None
         assert contended
 
     def test_a_buried_owner_is_not_returned_even_though_it_answers(

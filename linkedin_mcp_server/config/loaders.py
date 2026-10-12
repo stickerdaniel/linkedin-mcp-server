@@ -97,14 +97,13 @@ def credential_free_url(value: str) -> str:
 # workers never received the override at all
 # (https://github.com/microsoft/playwright/issues/5237, closed upstream).
 #
-# The second sentence about a running server is not padding. A shared owner
-# started by an older version carries its user agent in the configuration
-# fingerprint, and a client of this version can only compute ``None`` because
-# the setting is refused here. ``daemon/discovery.py`` rejects a fingerprint mismatch
-# before it ever compares package versions, so that owner can no longer be
-# asked to stand down: it keeps running and keeps the profile. Removing the
-# setting is therefore only half the fix, and the other half is invisible
-# unless this message says it.
+# The second sentence about a running server is not padding. Only a release
+# from before this refusal could start a shared owner with a user agent, and
+# those releases keep their daemon state in a directory this version never
+# reads (docs/decisions/2026-10-11-daemon-clean-slate.md), so that owner can
+# never be asked to stand down: it keeps running and keeps the profile.
+# Removing the setting is therefore only half the fix, and the other half is
+# invisible unless this message says it.
 _USER_AGENT_REMOVED = (
     "{setting} is no longer supported and the server will not start with it "
     "set. Overriding the user agent left the browser contradicting itself: the "
