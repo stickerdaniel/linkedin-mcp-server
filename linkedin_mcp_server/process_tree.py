@@ -1534,6 +1534,7 @@ def terminate_process_group(
         raise ProcessTreeError("POSIX child identity cannot be observed safely")
 
     deadline = time.monotonic() + max(timeout, 0.0)
+    signalled = False
     while True:
         try:
             os.killpg(pgid, signal.SIGKILL)
@@ -1543,9 +1544,22 @@ def terminate_process_group(
         except PermissionError as exc:
             if child_exited_without_reaping(child):
                 return _reap_and_wait_for_group(pgid, child, deadline, leader_identity)
-            logger.warning("The process group %s could not be signalled: %s", pgid, exc)
-            return False
+            if not signalled:
+                logger.warning(
+                    "The process group %s could not be signalled: %s", pgid, exc
+                )
+                return False
+            # Darwin's killpg answers EPERM once only exiting or zombie members
+            # remain, and waitid can report the leader's exit a little later.
+            # An earlier kill already reached the leader, so this waits for that
+            # exit rather than report a group nobody can signal, which turned a
+            # finished install into 70. See docs/daemon-measurements.md.
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+            continue
 
+        signalled = True
         if child_exited_without_reaping(child):
             try:
                 os.killpg(pgid, signal.SIGKILL)

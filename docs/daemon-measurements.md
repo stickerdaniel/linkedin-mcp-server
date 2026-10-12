@@ -195,6 +195,20 @@ Symbols are named relative to `linkedin_mcp_server`. Tests are named as
   `daemon.core.spawn` and `daemon.core.election` out of `daemon.election`
   without a behaviour change. Source review of `8bde6775` against `f4073e29`,
   merged as `45d54e18`, 2026-10-12.
+- **Darwin's killpg answers EPERM before waitid sees the kill.** On Darwin
+  27.0.0 under load, after a first `SIGKILL` to a worker group, the next
+  `killpg` raised EPERM while the leader was in state `E` or already a zombie,
+  and `waitid` reported its exit 0 to 47 ms later. XNU's `killpg1` skips
+  zombies in a group and answers EPERM when it found nothing to signal
+  (`bsd/kern/kern_sig.c`). Read as a group nobody can signal, it made the
+  installer supervisor exit 70 after a finished install in 44 of 200 loaded
+  runs. Justifies waiting out EPERM once a kill has landed in
+  `process_tree.terminate_process_group`, through which both the installer
+  supervisor and `daemon.election` stop their children. Source PR #1302,
+  2026-10-12. Tests
+  `tests/test_process_tree.py::TestPosixProcessGroups::test_eperm_before_the_killed_leader_is_waitable_is_waited_out`
+  and
+  `tests/test_installer_supervisor.py::test_a_startup_hook_cannot_spawn_a_pipe_holder_in_the_supervisor`.
 
 ## Owner process and HTTP
 

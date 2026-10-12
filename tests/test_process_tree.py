@@ -1230,6 +1230,104 @@ class TestPosixProcessGroups:
         assert signals == [signal.SIGKILL, signal.SIGKILL]
 
     @_POSIX_ONLY
+    def test_eperm_before_the_killed_leader_is_waitable_is_waited_out(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The loaded-macOS shape: the kill landed, waitid has not caught up.
+
+        See the killpg EPERM entry in docs/daemon-measurements.md.
+        """
+        # Pre-kill check, after the kill, at the first EPERM, at the second.
+        observations = iter([None, None, None, object()])
+        signals: list[int] = []
+        monkeypatch.setattr(
+            process_tree.os,
+            "waitid",
+            lambda *a, **k: next(observations),
+            raising=False,
+        )
+
+        def signal_group(pgid: int, sent: int) -> None:
+            signals.append(sent)
+            if len(signals) > 1:
+                raise PermissionError("only an exiting leader is left")
+
+        monkeypatch.setattr(process_tree.os, "killpg", signal_group)
+        monkeypatch.setattr(process_tree, "process_group_exists", lambda pgid: False)
+        monkeypatch.setattr(process_tree.time, "sleep", lambda seconds: None)
+
+        class _Child:
+            pid = 12345
+            returncode: int | None = None
+
+            def wait(self, timeout: float | None = None) -> int:
+                self.returncode = -signal.SIGKILL
+                return self.returncode
+
+        child = _Child()
+        assert process_tree.terminate_process_group(
+            12345, timeout=1.0, child=cast(Any, child)
+        )
+        assert child.returncode == -signal.SIGKILL
+
+    @_POSIX_ONLY
+    def test_eperm_after_the_kill_still_gives_up_at_the_deadline(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A leader that never becomes waitable cannot hold cleanup forever."""
+        clock = [0.0]
+        signals: list[int] = []
+        monkeypatch.setattr(
+            process_tree.os, "waitid", lambda *a, **k: None, raising=False
+        )
+
+        def signal_group(pgid: int, sent: int) -> None:
+            signals.append(sent)
+            if len(signals) > 1:
+                raise PermissionError("only an exiting leader is left")
+
+        def advance(seconds: float) -> None:
+            clock[0] += seconds
+            assert clock[0] < 60.0, "cleanup kept waiting past its deadline"
+
+        monkeypatch.setattr(process_tree.os, "killpg", signal_group)
+        monkeypatch.setattr(process_tree.time, "monotonic", lambda: clock[0])
+        monkeypatch.setattr(process_tree.time, "sleep", advance)
+
+        class _Child:
+            pid = 12345
+            returncode: int | None = None
+
+        assert not process_tree.terminate_process_group(
+            12345, timeout=1.0, child=cast(Any, _Child())
+        )
+        assert 1.0 <= clock[0] < 2.0
+
+    @_POSIX_ONLY
+    def test_a_group_never_signalled_fails_without_waiting_out_the_budget(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """EPERM on the first kill means no SIGKILL reached the leader."""
+        monkeypatch.setattr(
+            process_tree.os, "waitid", lambda *a, **k: None, raising=False
+        )
+
+        def refuse(pgid: int, sent: int) -> None:
+            raise PermissionError("not ours to signal")
+
+        monkeypatch.setattr(process_tree.os, "killpg", refuse)
+
+        class _Child:
+            pid = 12345
+            returncode: int | None = None
+
+        started = time.monotonic()
+        assert not process_tree.terminate_process_group(
+            12345, timeout=5.0, child=cast(Any, _Child())
+        )
+        assert time.monotonic() - started < 1.0
+
+    @_POSIX_ONLY
     def test_a_reaped_leader_never_authorizes_a_numeric_group_kill(
         self, monkeypatch: pytest.MonkeyPatch
     ):
