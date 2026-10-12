@@ -4274,11 +4274,12 @@ class TestPatchrightInstallStreaming:
                 assert loop.time() < entry_deadline, "the root creation never began"
                 await asyncio.sleep(0.001)
             assert not created.is_set(), "the root was created on the event loop"
-            started = loop.time()
             with pytest.raises(TimeoutError):
                 async with asyncio.timeout(0.01):
                     await installing
-            elapsed = loop.time() - started
+            # Causal, not timed: a timeout that waited for the worker returns
+            # only after the release, which sets this. A wall-clock bound
+            # here measured GC pauses on a loaded machine instead.
             assert not created.is_set(), "the timeout waited for the root"
         finally:
             release.set()
@@ -4287,7 +4288,6 @@ class TestPatchrightInstallStreaming:
             await asyncio.wait({installing}, timeout=1.0)
 
         assert installing.done()
-        assert elapsed < 0.1, f"the timeout took {elapsed:.3f}s"
         assert await asyncio.to_thread(created.wait, 1.0)
         for _ in range(100):
             if not private.exists():
@@ -4330,11 +4330,10 @@ class TestPatchrightInstallStreaming:
                 assert loop.time() < entry_deadline, "the registry read never began"
                 await asyncio.sleep(0.001)
             assert not finished.is_set(), "the registry read ran on the event loop"
-            started = loop.time()
             with pytest.raises(TimeoutError):
                 async with asyncio.timeout(0.01):
                     await installing
-            elapsed = loop.time() - started
+            # Causal for the same reason as the root creation above.
             assert not finished.is_set(), "the timeout waited for the registry read"
         finally:
             release.set()
@@ -4343,7 +4342,6 @@ class TestPatchrightInstallStreaming:
             await asyncio.wait({installing}, timeout=1.0)
 
         assert installing.done()
-        assert elapsed < 0.1, f"the timeout took {elapsed:.3f}s"
 
     @pytest.mark.parametrize("release", [(3, 12, 0), (3, 12, 3), (3, 13, 15)])
     def test_windows_creates_its_own_acl_on_every_supported_python(
