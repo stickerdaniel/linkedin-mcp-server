@@ -90,8 +90,8 @@ def _run(state: str, at: float) -> dict[str, Any]:
 
 #: The lease held before the kill and granted once, 60 ms after it.
 LEASE = [_run(HELD, -500), _run(FREE, 60)]
-#: How long that one grant held the lease.
-HOLD_NS = 100_000
+#: When the row asked for the successor, once the grant was given back.
+ISSUED = 70
 
 
 def _history(watched: list[dict[str, Any]], successor: float | None) -> list[list[Any]]:
@@ -118,7 +118,7 @@ def _record(
     *,
     successor: float | None = 3000,
     lease: list[dict[str, Any]] = LEASE,
-    hold_ns: int | None = HOLD_NS,
+    issued: float | None = ISSUED,
     ready: float = -500,
     history: list[list[Any]] | None = None,
     platform: str = "win32",
@@ -154,11 +154,13 @@ def _record(
             "actor": {"pid": 2, "start": OLD},
             "armed": armed,
             "kill": {"wall_ns": KILL, "monotonic_ns": 1, "exit": "killed"},
+            "successor": {
+                "issued_wall_ns": None if issued is None else KILL + int(issued * MS)
+            },
             "contender": {
                 "error": None,
                 "ready": {"state": HELD, "wall_ns": KILL + int(ready * MS), "ns": 0},
                 "lease": lease,
-                "hold_ns": hold_ns,
                 "watched": watched,
             },
         },
@@ -228,19 +230,21 @@ def test_a_member_seen_alive_within_a_clock_tick_of_the_successor_decides_nothin
     assert "old browser process 12" in reading.reasons[0]
 
 
-def test_a_member_gone_within_what_the_grant_could_postpone_decides_nothing():
-    # Gone 95 ms before the successor's root: a successor the contender's one
-    # grant refused waits a poll, so without it this member could have been
-    # beside the successor.
+def test_the_successor_asked_for_after_the_grant_is_held_to_that_wait():
+    # The row waited 300 ms for the grant before asking: asked for at the
+    # kill, the successor could have begun at 2.7 s, beside this member.
     tree = _settled_tree()
-    tree[4] = _life(12, BROWSER, alive=2900, gone=2905)
-    reading = crash_reading(_record(tree))
+    tree[4] = _life(12, BROWSER, alive=2790, gone=2800)
+    assert crash_reading(_record(tree)).verdict == NO_OVERLAP
+    reading = crash_reading(_record(tree, issued=300))
     assert reading.verdict == INCONCLUSIVE, reading
     assert "old browser process 12" in reading.reasons[0]
-    # A grant that was not timed bounds nothing.
-    untimed = crash_reading(_record(_settled_tree(), hold_ns=None))
-    assert untimed.verdict == INCONCLUSIVE
-    assert "not timed" in untimed.reasons[0]
+    # Asked for before the grant was given back, or never stamped, the
+    # successor may have met the contender on the lock.
+    for issued in (50, None):
+        early = crash_reading(_record(_settled_tree(), issued=issued))
+        assert early.verdict == INCONCLUSIVE, early
+        assert "met the contender" in early.reasons[0]
 
 
 def test_a_member_never_watched_keeps_no_overlap_from_being_claimed():
@@ -254,19 +258,29 @@ def test_a_member_never_watched_keeps_no_overlap_from_being_claimed():
     assert crash_reading(_record(tree)).verdict == NO_OVERLAP
 
 
-def _events(*, late: bool) -> list[dict[str, Any]]:
+#: The browser's image.
+CHROME = "C:\\chrome\\chrome.exe"
+
+
+def _events(
+    *, late: bool, orphans: tuple[tuple[int, str, float, float], ...] = ()
+) -> list[dict[str, Any]]:
     """The watcher's records of the old browser and the successor's. Members
     carry no ``--user-data-dir`` here, as a Chromium child need not; *late*
     adds a renderer the old root started after the row read its tree, alive
-    past the successor's root."""
+    past the successor's root. Each of *orphans*, ``(pid, image, began,
+    gone)`` in ms from the kill, is a helper whose parent was never sampled."""
 
-    def start(actor: str, pid: int, ppid: int, at: float) -> dict[str, Any]:
+    def start(
+        actor: str, pid: int, ppid: int, at: float, exe: str = CHROME
+    ) -> dict[str, Any]:
         return {
             "kind": "process.start",
             "actor": actor,
             "in_row": True,
             "pid": pid,
             "ppid": ppid,
+            "exe": exe,
             "start_identity": at,
             "t": at,
         }
@@ -285,6 +299,12 @@ def _events(*, late: bool) -> list[dict[str, Any]]:
     ]
     if late:
         events += [start("other", 13, ROOT, _at(-200)), exit_(13, _at(-200), _at(3500))]
+    for pid, exe, at, gone in orphans:
+        # Its parent, an old browser process, began and ended between samples.
+        events += [
+            start("other", pid, 13, _at(at), exe),
+            exit_(pid, _at(at), _at(gone)),
+        ]
     return events
 
 
@@ -300,6 +320,21 @@ def test_an_old_member_the_row_never_watched_keeps_no_overlap_from_being_claimed
     assert "old browser process 13" in reading.reasons[0]
     # Without the history nothing says the watch list was whole.
     assert crash_reading(_record(clean, history=[])).verdict == INCONCLUSIVE
+
+
+def test_a_helper_of_the_browsers_image_whose_parent_was_never_sampled_counts():
+    # An old browser process started it and ended between two samples, so no
+    # tree reaches it; it ran the browser's image and outlived the successor.
+    def read(*orphan: tuple[int, str, float, float]) -> str:
+        history = harness.browser_processes(_events(late=False, orphans=orphan))
+        return crash_reading(_record(_settled_tree(), history=history)).verdict
+
+    assert read((14, CHROME, -1, 3500)) == INCONCLUSIVE
+    # Seen gone before the successor could have begun, it decides nothing.
+    assert read((14, CHROME, -1, 40)) == NO_OVERLAP
+    # Neither does another image, nor a process begun after the kill.
+    assert read((14, "C:\\node\\node.exe", -1, 3500)) == NO_OVERLAP
+    assert read((14, CHROME, 20, 3500)) == NO_OVERLAP
 
 
 def test_a_contender_not_armed_before_the_kill_decides_nothing():

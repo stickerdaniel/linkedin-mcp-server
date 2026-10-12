@@ -9,9 +9,10 @@ before the kill, with the primitive the product takes on each platform
 on byte 0 on Windows, and ``flock``, exclusive and non-blocking, on POSIX.
 
 It asks until the first grant and never again. A grant is the real exclusive
-lease until it is given back, so a successor asking in that window is refused
-and waits one poll of its own; one grant bounds that delay, and its hold is
-recorded so the verdict can allow for it (``crash_overlap``).
+lease until it is given back, and a successor refused in that window waits
+for as long as its own caller takes, so the row asks for its successor only
+once the grant is given back and announced (``wait_granted``): the two never
+meet on the lock.
 
 The helper runs as its own process with no site processing, like
 ``lease_probe``. It opens the existing lock file once, never creating,

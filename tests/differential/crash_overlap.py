@@ -17,9 +17,11 @@ After the warm-up read, with the browser live, the row:
    and never a Job handle, and waits for its first answer, which must be
    ``held``;
 3. kills the actor through the handle the row tied it by;
-4. at once asks for a successor's browser: in K3 a read through the same
-   host, whose frontend elects a successor owner; in K1 a fresh host's read,
-   a new Direct server. Neither waits for the old browser;
+4. waits for the contender's one grant of the lease, given back, and only
+   then asks for a successor's browser, so the successor cannot meet the
+   contender on the lock: in K3 a read through the same host, whose frontend
+   elects a successor owner; in K1 a fresh host's read, a new Direct server.
+   Neither waits for the old browser;
 5. stops the contender once that read returned and a second passed.
 
 The verdict (``crash_reading``) reads the raw record alone, after the
@@ -27,13 +29,14 @@ watcher's completed history added every browser process and its tree's root
 (``harness.browser_processes``): **overlap** when a successor root on the
 profile began while an old browser process, root or member, was still seen
 alive after it; **no overlap** when every old browser process was seen gone
-before the successor root began, by more than the contender's one grant of
-the lease could have postponed it; **inconclusive** otherwise, a missing
-successor or an old process the row never watched included. The snapshots
-are not exhaustive; the history is. A lease seen free is never an O1 finding
-by itself; it is reported as a number. The comparison (``o1_findings``) is
-the contract's O1: an overlap in K3 that K1 does not show, the watcher's
-second root included (``lane_failures``). K2 is not applicable.
+before the successor root began, by more than the row waited for the grant
+before asking for it; **inconclusive** otherwise, a missing successor, an
+old process the row never watched and a process of the browser's image
+whose ancestry was lost included. The snapshots are not exhaustive; the
+history is. A lease seen free is never an O1 finding by itself; it is
+reported as a number. The comparison (``o1_findings``) is the contract's O1:
+an overlap in K3 that K1 does not show, the watcher's second root included
+(``lane_failures``). K2 is not applicable.
 """
 
 from __future__ import annotations
@@ -71,7 +74,6 @@ from differential.watcher import (
     read_arguments,
     user_data_dir,
 )
-from linkedin_mcp_server.profile_lease import _POLL_INTERVAL_SECONDS
 
 if TYPE_CHECKING:
     from differential.harness import RowContext
@@ -82,7 +84,7 @@ ROW = "H-R6-contended"
 #: Direct's browser idles out between the warm-up read and the kill.
 IDLE_TIMEOUT_SECONDS = CALIBRATION_IDLE_TIMEOUT_SECONDS
 
-#: How long the contender may take to give its first answer.
+#: How long the contender may take to give its first answer, and its grant.
 READY_SECONDS = 30.0
 #: Between two rounds of the contender: a lock request and one wait per
 #: watched process, each well under a millisecond.
@@ -99,12 +101,6 @@ START_TOLERANCE_SECONDS = 0.05
 #: default Windows clock tick. An old process seen alive within it of the
 #: successor's creation is not shown concurrent.
 CLOCK_TOLERANCE_NS = 16_000_000
-#: How much later than its grant's hold the contender can have made the
-#: successor's lease: a successor refused during the grant asks again one
-#: poll later (``ProfileLease.acquire``), woken within a clock tick, and the
-#: contender never asks again. An old process seen gone within that of the
-#: successor's root might have outlived the successor without the contender.
-POSTPONED_NS = int(_POLL_INTERVAL_SECONDS * 1e9) + CLOCK_TOLERANCE_NS
 
 FEED_ARGUMENTS = {"num_posts": 1}
 
@@ -326,11 +322,22 @@ async def _race(ctx: RowContext, contender: Contender) -> None:
         "owner killed" if ctx.daemon else "server killed",
         fault.get("monotonic_ns"),
     )
+    contended["granted"] = await ctx.run_owned(
+        "the contender's grant",
+        contender.wait_granted,
+        READY_SECONDS,
+        seconds=READY_SECONDS + 15.0,
+    )
+    if contended["granted"] is None:
+        problems.append(f"{INVALID}the contender was never granted the lease")
+        return
+    successor: dict[str, Any] = {"issued_wall_ns": time.time_ns()}
+    contended["successor"] = successor
     if ctx.daemon:
-        contended["successor"] = {"via": "the same frontend"}
+        successor["via"] = "the same frontend"
         await _called(ctx, WARM_TOOL, dict(FEED_ARGUMENTS))
     else:
-        contended["successor"] = {"via": "a fresh host", **await seams.fresh_read()}
+        successor.update(via="a fresh host", **await seams.fresh_read())
     _phase(ctx, "successor returned")
     await asyncio.sleep(TRAIL_SECONDS)
 
@@ -422,14 +429,19 @@ def _successor_root(
 
 
 def _unarmed(
-    record: Mapping[str, Any], kill: int, armed: Sequence[Mapping[str, Any]]
+    record: Mapping[str, Any],
+    kill: int,
+    armed: Sequence[Mapping[str, Any]],
+    before: int,
 ) -> list[int] | None:
-    """The old browser processes, roots and members, that the watcher's
-    completed history (``harness.browser_processes``) does not show gone
-    before the kill and the row never armed; None without that history.
+    """The old browser processes the watcher's completed history
+    (``harness.browser_processes``) holds against the row; None without it.
 
-    Old is in a tree whose root began before the kill, whenever the process
-    itself began: a member started after the row read the tree is old too.
+    A root or member is old in a tree whose root began before the kill,
+    whenever it began itself, and counts when not shown gone before the kill
+    and never armed. A process of the browser's image that history could not
+    put in any tree, begun before the kill, counts when not shown gone
+    *before* that, armed or not: its ancestry was lost, never its age.
     """
     history = _sequence(record.get("browser_processes"))
     if not history:
@@ -440,9 +452,13 @@ def _unarmed(
         if len(entry) < 5 or type(entry[0]) is not int:
             continue
         start, gone, root = _number(entry[1]), _number(entry[2]), _number(entry[4])
-        if start is None or root is None or root * 1e9 >= kill:
+        if start is None:
             continue
-        if gone is not None and gone * 1e9 < kill:
+        if root is None:
+            if start * 1e9 < kill and (gone is None or gone * 1e9 >= before):
+                missed.append(entry[0])
+            continue
+        if root * 1e9 >= kill or (gone is not None and gone * 1e9 < kill):
             continue
         if untracked(armed, [{"pid": entry[0], "start": start}]):
             missed.append(entry[0])
@@ -542,24 +558,28 @@ def crash_reading(record: Mapping[str, Any]) -> Reading:
             "no successor browser root began on the profile after the kill; a "
             "lease seen free alone is not an O1 finding",
         )
-    hold = _ns(contender.get("hold_ns"))
-    # Without the contender's grant the successor could have begun this early.
-    unpostponed = admitted - (hold or 0) - POSTPONED_NS
+    issued = _ns(_mapping(contended.get("successor")).get("issued_wall_ns"))
+    if issued is None or free_at is None or free_at > issued:
+        return reading(
+            INCONCLUSIVE,
+            "the successor was not shown asked for after the contender's grant "
+            "was given back, so it may have met the contender on the lock",
+        )
+    # Asked for at the kill, the successor could have begun this much sooner.
+    unpostponed = admitted - (issued - kill)
     reasons = [
         f"old browser process {life.pid} ({life.kind}) is not shown gone more "
-        f"than {_ms(admitted, unpostponed)} ms before the successor's root "
-        f"began, which the contender's grant could have postponed by that much"
+        f"than {_ms(admitted, unpostponed)} ms, the wait for the grant, before "
+        f"the successor's root began"
         for life in browsers
         if not (life.known and life.gone_by is not None and life.gone_by < unpostponed)
     ]
-    if free_at is not None and hold is None:
-        reasons.append("the contender's grant of the lease was not timed")
-    unarmed = _unarmed(record, kill, armed)
+    unarmed = _unarmed(record, kill, armed, unpostponed)
     if unarmed is None:
         reasons.append("the watcher's history of browser processes is missing")
     reasons += [
-        f"the watcher saw old browser process {pid} live at the kill, which the "
-        f"row never watched"
+        f"the watcher's history holds old browser process {pid}, not shown gone "
+        f"in time and never watched as one"
         for pid in unarmed or ()
     ]
     if reasons:

@@ -3619,16 +3619,34 @@ def browser_processes(observed: Iterable[dict[str, Any]]) -> list[list[Any]]:
     (``crash_overlap``), where ``browser_lineage`` names the roots alone.
 
     A process a browser started is a browser too, whatever its command line;
-    *gone* and the parent rule are ``browser_lineage``'s.
+    *gone* and the parent rule are ``browser_lineage``'s. A process that runs
+    a root's image but reaches no tree, its parent never sampled, is listed
+    with no root, ``[pid, start, gone, None, None]``: a browser's helper
+    whose ancestry was lost is never dropped.
     """
+    observed = list(observed)
     first, browsers, gone, parent_of = _lifetimes(observed)
-    root_of: dict[tuple[int, float], tuple[int, float]] = {}
+    # The image each lifetime last ran: the one it became, where it execs.
+    image: dict[tuple[int, float], str] = {}
+    for record in observed:
+        pid, start, exe = (
+            record.get(name) for name in ("pid", "start_identity", "exe")
+        )
+        if type(pid) is int and isinstance(start, (int, float)) and exe:
+            image[(pid, float(start))] = str(exe)
+    root_of: dict[tuple[int, float], tuple[int | None, float | None]] = {}
     for key in sorted(first, key=lambda key: key[1]):
         parent = parent_of(key)
         if parent is not None and parent in root_of:
             root_of[key] = root_of[parent]
         elif key in browsers:
             root_of[key] = key
+    roots = {
+        image[key] for key, root in root_of.items() if root == key and key in image
+    }
+    for key in first.keys() - root_of.keys():
+        if image.get(key) in roots:
+            root_of[key] = (None, None)
     return [
         [key[0], key[1], gone.get(key), *root]
         for key, root in sorted(root_of.items(), key=lambda item: item[0][1])
