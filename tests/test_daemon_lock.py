@@ -191,10 +191,14 @@ class TestScope:
         worker.start()
         worker.join(timeout=30)
         if worker.is_alive():
-            # A writer releases the blocked open, so the thread ends with the test.
-            with contextlib.suppress(OSError):
-                os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
-            worker.join(timeout=30)
+            # A writer releases the blocked open, so the thread ends with the
+            # test. It is offered until the thread is gone: one offered before
+            # the open is reached finds no reader (ENXIO) and releases nothing.
+            deadline = time.monotonic() + 30
+            while worker.is_alive() and time.monotonic() < deadline:
+                with contextlib.suppress(OSError):
+                    os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
+                worker.join(timeout=0.05)
             pytest.fail("acquiring the lock blocked on the planted FIFO")
 
         assert len(raised) == 1
