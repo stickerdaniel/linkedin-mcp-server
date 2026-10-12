@@ -93,6 +93,7 @@ from differential.test_row_judgement import _healthy
 from differential.unconfirmed_close import R7Setup
 from linkedin_mcp_server.config.loaders import EnvironmentKeys
 from linkedin_mcp_server.core.auth import _LOGIN_TITLE_PATTERNS
+from linkedin_mcp_server.core.proxy_errors import NAVIGATION_BUDGET_MS
 from linkedin_mcp_server.daemon.auth_repair import MARKER_KEY
 from linkedin_mcp_server.daemon.liveness import REFUSAL_KEY
 from linkedin_mcp_server.linkedin.fields import PERSON_SECTIONS
@@ -131,11 +132,14 @@ def origin(certificates) -> Iterator[SyntheticOrigin]:
         served.stop()
 
 
-def _connect(origin: SyntheticOrigin, certificates: Path) -> ssl.SSLSocket:
+def _connect(
+    origin: SyntheticOrigin, certificates: Path, seconds: float = 10.0
+) -> ssl.SSLSocket:
     """A TLS connection to the origin that trusts the run's CA in this
-    context alone: no trust store is touched."""
+    context alone: no trust store is touched. Each of its operations gives
+    up after *seconds*."""
     context = ssl.create_default_context(cafile=str(certificates / CA_FILE))
-    raw = socket.create_connection(("127.0.0.1", origin.port), timeout=10)
+    raw = socket.create_connection(("127.0.0.1", origin.port), timeout=seconds)
     return context.wrap_socket(raw, server_hostname="www.linkedin.com")
 
 
@@ -158,9 +162,13 @@ def _answer(connection: ssl.SSLSocket) -> tuple[int, bytes]:
 
 
 def _get(
-    origin: SyntheticOrigin, certificates: Path, path: str, cookie: str | None = None
+    origin: SyntheticOrigin,
+    certificates: Path,
+    path: str,
+    cookie: str | None = None,
+    seconds: float = 10.0,
 ) -> tuple[int, bytes]:
-    with _connect(origin, certificates) as connection:
+    with _connect(origin, certificates, seconds) as connection:
         _send(connection, path, cookie)
         return _answer(connection)
 
@@ -919,7 +927,16 @@ class _CalibrationScene:
         monkeypatch.setattr(_Watcher, "records", [])
 
     def _read(self, path: str) -> None:
-        status, _ = _get(self.origin, self.certificates, path, self.cookie)
+        # As long as the product's own navigation would wait. A held page is
+        # answered by its gate's deadline, inside that budget, so the gate
+        # and the row's bounds decide how long a hold lasts, never this socket.
+        status, _ = _get(
+            self.origin,
+            self.certificates,
+            path,
+            self.cookie,
+            seconds=NAVIGATION_BUDGET_MS / 1000,
+        )
         assert status == 200, path
 
     async def _call(self, session, name: str, arguments: dict) -> dict:
