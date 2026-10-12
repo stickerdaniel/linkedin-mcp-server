@@ -1,39 +1,24 @@
 """What one forwarded tool call does next, decided without doing any of it.
 
-A call waits on several things before the frontend can answer it: the heartbeat
-preflight and the forwarded request, which includes however long the owner
-queues it; a recovery when the owner went away; a lookup of the tool's
-annotations; a sign-in the owner asked for; and the read-only replay after
-it. Which of these comes next, whether a failed call may run again, and what
-the caller is told when time runs out are decided here, from events alone.
-``daemon.proxy`` runs each effect and feeds back the event that completes it.
+A call may wait on the heartbeat preflight and the forwarded request, a
+recovery, the tool's annotations, a sign-in and the read-only replay after it.
+This module decides which comes next, whether a failed call may run again, and
+what the caller is told when time runs out; ``daemon.proxy`` runs each effect
+and feeds back the event that completes it.
 
-**One deadline per call, fixed at its arrival at the frontend.** :func:`arrive`
-sets it once and nothing restarts it: every wait above ends there at the
-latest, the auth repair and its replay included. A pacing interval in the
-owner's admission path (#860) would be spent inside the forwarded request's
-wait, so it needs nothing from here.
-
-**The deadline ends this call's wait, never shared work.** A recovery is one
-election for every call that needs it, and a sign-in is one login for the
-profile. When the deadline passes, this call stops waiting for them and stops
-issuing new work; it never asks the shell to cancel either.
-
-**Retry eligibility is today's policy, unchanged.** An invocation is at most two
-attempts and one recovery. After an owner failure the call runs again only on a
-replacement and only when nothing was sent or the tool declares itself
-read-only; the read-only answer is looked up once per invocation, after the
-recovery. After a sign-in the call runs again only when the owner said nothing
-had run and the tool is read-only. Everything else is reported.
-
-**A call keeps its owner once a request may have left.** Until then a
-written-off owner is refused at every point a request could still be stopped
-(:func:`binding_refusal`).
-
-**What an expired call is told depends on how far it got.** With an answer in
-hand, that answer. With a request that may have reached an owner,
-``outcome_unknown``. Only a call that provably sent nothing is told it was not
-sent.
+- One deadline per call, set by :func:`arrive` and never restarted; every wait
+  ends there, the auth repair and its replay included.
+- The deadline ends this call's wait, never shared work: an election or a
+  sign-in serves other calls too and is never cancelled for this one.
+- At most two attempts and one recovery per invocation. After an owner failure
+  the call runs again only on a replacement, and only when nothing was sent or
+  the tool is read-only (looked up once, after the recovery). After a sign-in,
+  only when the owner said nothing ran and the tool is read-only.
+- A call keeps its owner once a request may have left
+  (:func:`binding_refusal`).
+- An expired call with an answer gets that answer; one whose request may have
+  reached an owner gets ``outcome_unknown``; only one that provably sent
+  nothing is told it was not sent.
 """
 
 from __future__ import annotations
@@ -368,15 +353,10 @@ def binding_refusal[R](
 ) -> R | None:
     """Why no new request may go to *owner* now, or ``None`` to let it go.
 
-    One rule for every point a call's owner is asked about: when a new call
-    picks the current owner, after its preflight's await, when its hop opens and
-    before each request on it. An owner written off gets nothing new, whatever
-    it answered before. Once a request of the call may have left (*sent*), the
-    call keeps its owner whatever is learned about it later: moving its
-    heartbeats would get it cancelled by the owner running it.
-
-    *written_off* maps each owner this process gave up on to why, which is what
-    a refusal names.
+    The one rule for every point a call's owner is checked. A written-off
+    owner gets nothing new, but once a request may have left (*sent*) the call
+    keeps its owner, since moving its heartbeats would get it cancelled.
+    *written_off* maps each abandoned owner to the reason a refusal names.
     """
     if sent:
         return None
@@ -398,14 +378,10 @@ def arrive(
 def on_event(call: Call, event: Event) -> tuple[Call, list[Effect]]:
     """The call after *event*, and what the shell must do next.
 
-    A completion for anything but the pending operation changes nothing: it
-    answers work this call has already stopped waiting for.
-
-    One that arrives at or after the deadline ends the call as an expiry would,
-    whatever it says, unless it is an answer: the owner's, or the tool's own
-    failure. Otherwise a completion racing the deadline would be told by other
-    rules than the ``Expired`` it raced, and a replay's late failure would
-    replace the answer the call already holds.
+    A completion for anything but the pending operation changes nothing. One
+    arriving at or after the deadline ends the call as an expiry would, unless
+    it is an answer (the owner's or the tool's own failure), so a completion
+    racing the deadline is judged like the ``Expired`` it raced.
     """
     if call.phase is Phase.DONE or event.op != call.pending:
         return call, []

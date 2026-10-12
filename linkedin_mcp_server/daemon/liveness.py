@@ -1,29 +1,16 @@
 """Whether anybody is still waiting for a call the owner is running.
 
-A frontend that gives up does not take its call with it. Cancellation is not
-forwarded across the loopback hop: measured in this repository, the client was
-answered at 0.66s with an error and the effect landed 0.7s later, against a
-LinkedIn account nobody was watching any more. The owner has no way to notice,
-because a call it is already running looks exactly like one somebody wants.
+Cancellation does not cross the loopback hop, so a frontend that gives up
+leaves its call running. The frontend therefore beats for as long as it waits,
+and the owner cancels what nobody waits for. Both ends share these names, and
+``daemon.owner`` and ``server`` must not import each other.
 
-So the frontend says so, repeatedly, for as long as it is still waiting, and the
-owner cancels what nobody is waiting for. Kept in its own module rather than in
-``daemon.owner`` or ``server`` because both ends need the same names and those
-two must not import each other.
-
-**Every call is marked, or it does not run.** A call the owner cannot identify
-is a call it cannot cancel, so the owner refuses one that arrives without a
-marker, and the frontend never forwards a call whose heartbeat preflight failed.
-Both halves are part of the tool protocol (``daemon.descriptor.PROTOCOL_VERSION``),
-so a pair that does not share it never shares tools: a mismatched owner is only
-ever asked to stand down.
-
-**Admission and retirement are one decision**, and it is not taken here.
-:class:`CallLiveness` holds the owner's state and runs what
-``daemon.core.owner`` decides: it creates an admitted call's task, cancels the
-calls written off, and reports back how each ended. Every method that feeds an
-event is plain rather than ``async``, so on one event loop nothing runs between
-a decision and the state it leaves.
+- Every call is marked, or it does not run: the owner refuses an unmarked call,
+  and the frontend never forwards one whose preflight failed. Both halves are
+  tool protocol (``daemon.descriptor.PROTOCOL_VERSION``).
+- Admission and retirement are one decision, ``daemon.core.owner``'s.
+  :class:`CallLiveness` runs its effects, and every method that feeds an event
+  is synchronous, so nothing runs between a decision and the state it leaves.
 """
 
 from __future__ import annotations
@@ -75,18 +62,11 @@ UNKNOWN_OUTCOME_STATUS = "outcome_unknown"
 def unknown_outcome(*, tool: str, reason: str) -> dict[str, Any]:
     """The structured half of a call whose effect nobody can vouch for.
 
-    The field names are `linkedin.contracts.message_action_result`'s, so a client
-    that already reads `status` and `retry_safe` on a send needs nothing new for
-    this one. Built here rather than imported from there because no daemon module
-    reaches into `linkedin/`: this is not a page-read outcome but the transport
-    saying it knows nothing, and it answers for every mutating tool.
-
-    `url`, `sent` and `recipient_selected` are left out rather than set to null.
-    `sent` is the one thing nobody here knows, and a null reads as a "no" to any
-    client that tests the value rather than the key's presence.
-
-    Both ends use it: the frontend when an owner vanished with a call in flight,
-    and the owner when it cut a call off to stand down.
+    Uses `linkedin.contracts.message_action_result`'s field names (`status`,
+    `retry_safe`) without importing from `linkedin/`. `sent` and the other
+    unknowns are omitted rather than null, since a null reads as "no". Used by
+    the frontend when an owner vanished mid-call and by the owner when it cut a
+    call off to stand down.
     """
     return {
         "status": UNKNOWN_OUTCOME_STATUS,
@@ -115,12 +95,9 @@ _MARKER_PREFIX = "v1."
 #: and it is used as a dictionary key on a long-lived process.
 _ID_HEX = 32
 
-#: How often a waiting frontend says it is still there. Measured on this machine
-#: against a server built the way the owner builds one: a heartbeat round trip
-#: costs 0.9ms median while the owner is idle and 1.8ms while it is driving
-#: Chromium, so this cadence occupies an owner about a thousandth of its time
-#: per waiting call. The owner stops a call after several cadences without a
-#: beat (``daemon.core.owner.EXPIRY_SECONDS``).
+#: How often a waiting frontend says it is still there. A beat is a cheap
+#: loopback round trip; the owner stops a call after several cadences without
+#: one (``daemon.core.owner.EXPIRY_SECONDS``).
 HEARTBEAT_SECONDS = 2.0
 
 
@@ -132,11 +109,9 @@ def new_call_id() -> str:
 def call_id_in(header_value: str | None) -> str | None:
     """The call id in *header_value*, or ``None`` if there is not one this build reads.
 
-    Strict rather than forgiving, and every part of it is checked: an older
-    frontend sends nothing, a newer one may send a shape that does not exist yet,
-    and anything on the machine can reach the port and send whatever it likes.
-    A value that is not understood makes the call unmarked, which is the safe
-    answer, because an unmarked call is refused before it runs.
+    Strict, because anything on the machine can reach the port. A value not
+    understood makes the call unmarked, and an unmarked call is refused before
+    it runs.
     """
     if header_value is None:
         return None
@@ -155,10 +130,9 @@ def call_id_in(header_value: str | None) -> str | None:
 class CallLiveness:
     """The owner's admission and lifecycle state, and the tasks it decides about.
 
-    One instance per owner process. Times are monotonic, so a clock the user
-    changes mid-call cannot expire one. Every decision is
+    One per owner process, on monotonic time. Every decision is
     ``daemon.core.owner.on_event``'s: this class reads the clock, runs the
-    effects that concern calls, and hands the lifecycle effects to the serving
+    effects that concern calls, and leaves lifecycle effects to the serving
     loop in ``daemon.owner``.
     """
 
@@ -232,11 +206,9 @@ class CallLiveness:
     ) -> asyncio.Task[_T] | None:
         """Take one marked call, or refuse it because this owner is retiring.
 
-        *start* builds the call's work, and it is called only once the call has
-        been admitted. That order is the point: a refused call has no task, so
-        nothing below this could have been scheduled, and nothing was counted.
-        An admitted call is counted and watched before its task can take a
-        single step, because creating a task only schedules it.
+        *start* is called only after admission, so a refused call has no task,
+        and an admitted call is counted and watched before its task can take a
+        step.
         """
         effects = self._apply(lifecycle.Admit(call_id, time.monotonic()))
         admitted = [e for e in effects if isinstance(e, lifecycle.StartTask)]
@@ -309,12 +281,10 @@ class CallLiveness:
         self._apply(lifecycle.BackgroundFinished(time.monotonic()))
 
     def the_endpoint_is_live(self) -> None:
-        """Start the idle clock, once there is something to be idle *at*.
+        """Start the idle clock once the descriptor is published.
 
-        Called where the descriptor is published rather than at startup. An
-        owner spends its first seconds importing and launching Chromium, and
-        counting that as quiet would let a short timeout expire before the
-        frontend that asked for this owner had any way to reach it.
+        Not at startup: counting import and Chromium launch as quiet would let
+        a short timeout expire before the frontend could reach this owner.
         """
         self._apply(lifecycle.Published(time.monotonic()))
 
@@ -325,10 +295,8 @@ class CallLiveness:
     def heard(self, call_id: str) -> bool:
         """Note that somebody is still waiting. False if this call is not watched.
 
-        Not watched covers a call that already finished, one written off or
-        cut, and one that was never registered, and none is worth
-        distinguishing: the answer to the frontend is the same and it does not
-        get to learn which.
+        A finished, written-off, cut or never registered call all answer the
+        same, and the frontend does not learn which.
         """
         self._apply(lifecycle.Heard(call_id, time.monotonic()))
         return lifecycle.watching(self._state, call_id)
@@ -396,14 +364,11 @@ def reset_liveness_for_testing() -> None:
 def abandoned_before_browser_work() -> bool:
     """Whether the call this task runs for was given up before it began.
 
-    Asked once, after every wait a call can spend queued (the serializing lock
-    and the profile lease) and before it touches the browser. Cancellation
-    already stops an abandoned call at its next suspension; this is the check
-    that holds even for a call whose waits all completed in the tick the expiry
-    fired.
-
-    False on a Direct server, which marks no calls. On an owner a call id that
-    the tracker does not know counts as abandoned (:meth:`CallLiveness.abandoned`).
+    Asked once, after every queued wait (the serializing lock, the profile
+    lease) and before the browser is touched. It catches a call whose waits
+    all completed in the tick its expiry fired, which cancellation alone
+    misses. False on a Direct server; on an owner an unknown call id counts as
+    abandoned.
     """
     call_id = _current_call.get()
     if call_id is None:
@@ -433,9 +398,8 @@ def _refusal(kind: str, message: str) -> ToolResult:
     """An error result proving this call never reached a tool.
 
     Signed with the protocol and this owner's instance, so a frontend accepts
-    it only from the owner it dispatched to. ``is_error`` stays true so a
-    client that reads no metadata still sees a failure rather than a success
-    carrying no data, which is how ``daemon.auth_repair`` marks its own refusals.
+    it only from the owner it dispatched to. ``is_error`` stays true for
+    clients that read no metadata.
     """
     return ToolResult(
         content=[mt.TextContent(type="text", text=message)],
@@ -453,17 +417,10 @@ def _refusal(kind: str, message: str) -> ToolResult:
 class OwnerCallLivenessMiddleware(Middleware):
     """Admit a call only if it is marked and the owner is not retiring.
 
-    Registered outside the serializing middleware, which is deliberate: a call
-    can spend most of its life queued behind another one, and a frontend that
-    gives up while its call is still in the queue is the commonest way to end up
-    with work nobody wants. Inside, the call would only become cancellable once
-    it had already taken the browser, and a queued call would not count as busy
-    when the owner decides whether it may retire.
-
-    A call with no marker this build understands is refused before anything
-    runs. It could not be cancelled when its client went away, and after the
-    protocol bump the only sender of one is a client this owner never promised
-    to serve.
+    Registered outside the serializing middleware on purpose: a call abandoned
+    while queued must be cancellable, and a queued call must count as busy when
+    the owner decides whether it may retire. An unmarked call is refused before
+    anything runs, because it could not be cancelled.
     """
 
     async def on_call_tool(

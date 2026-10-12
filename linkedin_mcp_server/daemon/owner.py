@@ -1,35 +1,18 @@
 """The process that holds the browser and serves it over loopback.
 
-Started by a frontend that wants a shared browser, and from then on independent
-of it: it holds the daemon lock for its lifetime, listens on an ephemeral
-loopback port, and drives the one Chromium every client shares.
+Started by a frontend and independent of it afterwards: it holds the daemon lock
+for its lifetime, listens on an ephemeral loopback port, and drives the one
+Chromium every client shares. Detachment is POSIX-only (``start_new_session``);
+on Windows a job object can still take the child down with its parent.
 
-"Independent" is a POSIX measurement, not a promise on every platform. There the
-child leads its own session, and after ``SIGKILL`` to the frontend's whole
-process group it was still running and had reparented to pid 1. Windows has no
-equivalent in this code: ``start_new_session`` is POSIX-only
-(``subprocess.py:795``), so nothing there detaches the child from a job object
-that takes its parent down. That is worth revisiting before the flag is turned
-on by default, and it is not a regression today, since the feature is opt-in.
+Publication belongs to this lock holder. The child proves its endpoint and
+writes only a pending descriptor; the frontend's COMMIT frame
+(:mod:`linkedin_mcp_server.daemon.startup`) lets it replace the canonical one.
+EOF before COMMIT aborts, parent loss after it cannot revoke the owner.
 
-The startup boundary is load-bearing. This child listens, proves its own
-authenticated endpoint, and writes only a generation-specific pending descriptor.
-The frontend validates that state and sends one COMMIT frame
-(:mod:`linkedin_mcp_server.daemon.startup`). The lock-holding child then performs
-the same-directory replacement: EOF before that frame aborts, while parent loss
-after it cannot revoke an owner that may already be canonical.
-
-The port is chosen by the kernel, so the socket is bound before the descriptor is
-built. The endpoint is proved through the descriptor's own URL and token before
-the child reports `prepared`; no globally discoverable state exists before that
-proof. Publication belongs to the lock holder, so a stale Windows frontend can
-never outlive its child and overwrite the next winner.
-
-The child competes for the lock before opening its own log on every platform.
-Keeping those potentially blocking state-storage operations behind the process
-boundary lets the frontend enforce its deadline by killing this process. A timed-out
-thread could later acquire the lock or publish over an in-process fallback; a
-process with a pending hard kill cannot return to user space and do either.
+Every potentially blocking state access (the lock, the log) happens in this
+process, so the frontend enforces its deadline by killing it. A timed-out thread
+could still acquire the lock or publish later; a killed process cannot.
 """
 
 from __future__ import annotations
@@ -178,9 +161,8 @@ def _publish_windows_daemon_log(log_path: Path) -> None:
 def _attach_daemon_log(auth_root: Path) -> Path:
     """Open the daemon log inside the child and attach both output streams.
 
-    This may block on unavailable state storage. It therefore runs only in the
-    owner process, which the frontend can hard-kill without leaving a worker that
-    might later acquire the lock or publish.
+    May block on unavailable state storage, so it runs only in the owner
+    process, which the frontend can hard-kill.
     """
     directory = daemon_descriptor.prepare_daemon_state(auth_root)
     log_path = directory / _LOG_FILE
@@ -239,13 +221,9 @@ def _attach_daemon_log(auth_root: Path) -> Path:
 def _bind_loopback() -> socket.socket:
     """Bind an ephemeral loopback port, and return the listening socket.
 
-    Bound here rather than by uvicorn because the port has to be known before
-    the descriptor is written, and with port 0 the kernel only settles it at
-    bind time. Uvicorn accepts an already-bound socket and serves it as is.
-
-    IPv6 first, falling back to IPv4. A host with IPv6 disabled is ordinary
-    enough that failing there would be a daemon that cannot start for reasons
-    the user did not choose.
+    Bound here rather than by uvicorn because the descriptor needs the port,
+    which the kernel settles only at bind time. IPv6 first, then IPv4 for hosts
+    with IPv6 disabled.
     """
     for family, host in ((socket.AF_INET6, "::1"), (socket.AF_INET, "127.0.0.1")):
         sock: socket.socket | None = None
@@ -277,9 +255,8 @@ def _bind_loopback() -> socket.socket:
 def _endpoint_host(sock: socket.socket) -> str:
     """The address to publish for *sock*, unbracketed.
 
-    The descriptor stores a bare host and brackets it when it builds a URL
-    (``daemon/descriptor.py:576-585``), so bracketing here would produce
-    ``[[::1]]``.
+    The descriptor brackets the host when it builds a URL, so bracketing here
+    would produce ``[[::1]]``.
     """
     address = sock.getsockname()[0]
     return str(address)
@@ -288,20 +265,11 @@ def _endpoint_host(sock: socket.socket) -> str:
 def direct_http_client(*, timeout: float) -> httpx2.Client:
     """An HTTP client that talks to this machine and nowhere else.
 
-    Every request the daemon makes carries the bearer token for a server driving
-    a logged-in LinkedIn session, and every one of them is addressed to
-    loopback. httpx2 honours ``HTTP_PROXY`` by default, and it does so even for
-    ``127.0.0.1`` unless ``NO_PROXY`` happens to say otherwise. Reproduced
-    against a capture proxy: a request to ``http://127.0.0.1:9/...`` arrived at
-    the proxy complete with ``Authorization: Bearer <token>``.
-
-    So proxies are refused rather than avoided by hoping the environment is
-    configured well. ``trust_env=False`` also drops ``.netrc`` and environment
-    certificate settings, none of which have any business on a loopback hop.
-
-    This is the same distinction the browser configuration already draws: the
-    user's proxy is for LinkedIn's traffic, not for the server's own
-    (``config/schema.py:105-107``).
+    Every daemon request carries the owner's bearer token. httpx2 honours
+    ``HTTP_PROXY`` even for ``127.0.0.1``, which would hand that token to a
+    proxy, so ``trust_env=False`` refuses proxies (and ``.netrc`` and
+    environment certificates) outright. The user's proxy is for LinkedIn's
+    traffic only.
     """
     return httpx2.Client(trust_env=False, timeout=timeout)
 
@@ -314,17 +282,10 @@ def direct_async_http_client(
 ) -> httpx2.AsyncClient:
     """The asynchronous counterpart, shaped as FastMCP's client factory.
 
-    The three named parameters are the ``McpHttpClientFactory`` protocol
-    (``mcp/shared/_httpx_utils.py``). ``**extra`` is there because the protocol
-    is not the whole contract: FastMCP's own transport passes
-    ``follow_redirects`` on top of it and marks the call ``type: ignore``
-    itself (``fastmcp/client/transports/http.py:176-181``), while the SDK's path
-    passes exactly the three. A factory that accepted only the documented
-    signature failed at connect time with an unexpected keyword — measured, and
-    it took every real-owner test with it.
-
-    ``trust_env`` is the one thing a caller may not override, so it is set after
-    the passthrough rather than merged into it.
+    The named parameters are the SDK's ``McpHttpClientFactory`` protocol.
+    ``**extra`` is required too: FastMCP's transport also passes
+    ``follow_redirects``, and a factory without it fails at connect time.
+    ``trust_env`` is the one thing a caller may not override.
     """
     extra.pop("trust_env", None)
     return httpx2.AsyncClient(
@@ -339,17 +300,9 @@ def direct_async_http_client(
 async def _probe(url: str, token: str) -> None:
     """Prove the endpoint answers this token before anything is published.
 
-    An authenticated MCP round trip rather than a bare connection. A TCP connect
-    succeeds the moment the socket is listening, which it is before uvicorn has
-    a single route mounted, and a token that is not accepted would then only
-    surface at the first real tool call, in a different process, as a failure
-    nobody can place.
-
-    A tool listing rather than a ping, because it answers in every protocol era
-    and ping does not: the 2026-07-28 era removed it (SDK
-    ``docs/migration.md:1800``), and a default client negotiates that era with
-    this owner, so a ping would fail against a healthy one. Listing runs no
-    tool and touches no browser.
+    An authenticated MCP round trip, because a TCP connect succeeds before any
+    route is mounted. A tool listing rather than a ping: protocol 2026-07-28
+    removed ping, and listing touches no browser.
     """
     from fastmcp import Client
     from fastmcp.client.transports import StreamableHttpTransport
@@ -388,16 +341,9 @@ _STAND_DOWN_BODY_LIMIT = 1024
 def _matches_token(presented: str, expected: str) -> bool:
     """Whether a presented bearer token is the expected one.
 
-    Through digests rather than by comparing the strings directly, and that is
-    not belt and braces. ``hmac.compare_digest`` refuses two *strings* when
-    either contains a non-ASCII character, and the presented one arrives in an
-    HTTP header from anything that can reach the port. Compared directly, a
-    header of ``Bearer töken`` raises ``TypeError`` inside the route and the
-    caller gets a 500 where it should get a 401 — an unauthenticated request
-    turned into a way to provoke an error. Found by trying it.
-
-    Digesting first also makes the comparison length-independent, so nothing
-    about the real token's length is observable.
+    Compared through digests on purpose: ``hmac.compare_digest`` raises
+    ``TypeError`` on a non-ASCII string, which would turn an unauthenticated
+    header into a 500, and digests hide the real token's length.
     """
     return hmac.compare_digest(
         hashlib.sha256(presented.strip().encode("utf-8", "surrogatepass")).digest(),
@@ -431,10 +377,8 @@ def _unique_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def _stand_down_mode(body: bytes, instance_id: str | None) -> str | None:
     """The mode of *body* if it is exactly a request addressed to this owner.
 
-    Exact, because anything looser is a request this owner would be guessing
-    at, and the only safe answer to a guess is to change nothing. A bool is an
-    ``int`` in Python, so ``version: true`` is refused by type, not by value.
-    An empty body is not a request at all.
+    Anything looser, an empty body included, changes nothing. Types are checked
+    with ``type() is`` because a bool is an ``int``.
     """
     try:
         payload = json.loads(body, object_pairs_hook=_unique_members)
@@ -464,15 +408,9 @@ def create_owner_server(
 ) -> Any:
     """Build the authenticated HTTP server the owner runs.
 
-    Uvicorn directly rather than ``FastMCP.run_http_async``, which would
-    otherwise be the obvious call. It builds its own server, binds its own port
-    and blocks with no handle to stop it (``fastmcp/server/mixins/transport.py``,
-    the ``server.serve`` at the end of ``run_http_async``). This process needs
-    all three: the port before it can publish, the started flag before it can
-    probe, and a handle to stop with — used here by the stand-down turnover, and
-    by the idle exit when that is built. Verified against the installed 3.4.4,
-    including that a lifespan still runs both ways round when driving uvicorn
-    like this.
+    Uvicorn directly rather than ``FastMCP.run_http_async``, which binds its own
+    port and blocks without a handle. This process needs the port before it
+    publishes, the started flag before it probes, and a handle to stop with.
     """
     import uvicorn
     from starlette.requests import Request
@@ -492,16 +430,13 @@ def create_owner_server(
         async def stand_down_route(request: Request) -> JSONResponse:
             """Give up the browser so a newer build can take over.
 
-            Or, in idle-only mode, so a profile command the user confirmed can
-            change the profile: then only if nothing is in flight or queued, and
-            a busy owner answers 409 with nothing changed.
+            In idle-only mode, for a confirmed profile command, only if nothing
+            is in flight or queued; a busy owner answers 409 with nothing
+            changed.
 
-            The token is checked here rather than left to the server's auth
-            provider. Measured on 3.4.4: a custom route is mounted outside the
-            authentication middleware, so an unauthenticated POST to this path
-            was served. Without this check any process on the machine, and any
-            page the user's browser visits, could stop the shared browser at
-            will.
+            FastMCP mounts custom routes outside its authentication middleware,
+            so the token is checked here; without it any local process or web
+            page could stop the shared browser.
             """
             header = request.headers.get("authorization", "")
             scheme, _, presented = header.partition(" ")
@@ -556,21 +491,11 @@ def create_owner_server(
     async def heartbeat_route(request: Request) -> JSONResponse:
         """Note that somebody is still waiting for a call this owner is running.
 
-        The same explicit token check as the route above, for the same measured
-        reason: a custom route is mounted outside the authentication middleware,
-        so without this any process on the machine could keep a call alive that
-        its own frontend had already abandoned.
-
-        A call this owner does not know gets ``watched: false`` rather than an
-        error. It is the ordinary race, not a fault: a beat sent while the call
-        was returning arrives after it was released, and the frontend has
-        nothing useful to do about that. It is also every preflight, which is
-        sent before the call it names exists.
-
-        Except once this owner is retiring: then an unknown call gets 409 and a
-        signed body, so a frontend learns before dispatching anything that the
-        call would be refused. A call already admitted keeps getting 200 for as
-        long as it runs, because its client is still waiting.
+        Checks the token itself, like the stand-down route. An unknown call
+        gets ``watched: false``: a late beat or a preflight, not a fault. Once
+        retiring, an unknown call gets a signed 409 so the frontend learns
+        before dispatching that it would be refused; an admitted call keeps
+        getting 200 while it runs.
         """
         header = request.headers.get("authorization", "")
         scheme, _, presented = header.partition(" ")
@@ -704,14 +629,9 @@ def _start_canonical_read(
 def _exit_uncertain_publication(_reason: str, *, lock: DaemonLock | None) -> NoReturn:
     """Exit without I/O or unwinding after an already logged ambiguity.
 
-    *lock* is handed down rather than looked up, for the reason it is handed
-    down through :func:`_stop_within`: :func:`_exit_hard` frees the election
-    before the process ends.
-
-    Admission closes first, for completeness rather than because a frontend is
-    likely to be there: the endpoint may already be named by a descriptor this
-    process could not confirm, and nothing new should start on the way out.
-    Closing it is a flag and nothing more, so the exit still performs no I/O.
+    *lock* is passed in so :func:`_exit_hard` frees the election before the
+    process ends. Admission closes first (a flag, no I/O), because a descriptor
+    this process could not confirm may already name the endpoint.
     """
     get_liveness().retire(Retirement.UNCERTAIN_PUBLICATION)
     _exit_hard(lock)
@@ -740,14 +660,11 @@ def _require_uncertain_endpoint(
 class _TurnoverDecided(BaseException):
     """A newer build asked this owner to stand down while it was reconciling.
 
-    Raised by the synchronous maintenance step and handled by its asynchronous
-    caller, because the drain that turnover owes admitted calls has to await.
-    A ``BaseException`` so that no ``except Exception`` on the way out can read
-    it as a failed read or commit and retry publication; every broader handler
-    on the path lets it through by name.
-
-    *ending* is the stop the drain already decided on, when it had nothing to
-    wait for.
+    Raised by the synchronous maintenance step so the asynchronous caller can
+    await the drain turnover owes admitted calls. A ``BaseException`` so no
+    ``except Exception`` on the way out reads it as a failed read or commit and
+    retries publication; broader handlers let it through by name. *ending* is
+    the stop the drain already decided on, when it had nothing to wait for.
     """
 
     def __init__(self, ending: Effect | None) -> None:
@@ -763,11 +680,9 @@ def _maintain_uncertain_publication(
 ) -> None:
     """Keep frontend-visible lifecycle controls active before startup completes.
 
-    A stopped endpoint and a browser that cannot be driven still end the owner
-    here and now. Turnover does not: the endpoint may already be named by a
-    descriptor this process could not confirm, so calls can have been admitted,
-    and they are owed the same drain the serving loop gives them. It is reported
-    to the caller instead (:class:`_TurnoverDecided`).
+    A stopped endpoint or an undrivable browser ends the owner here. Turnover
+    is raised as :class:`_TurnoverDecided` instead: an unconfirmed descriptor
+    may already have admitted calls, and they are owed the serving loop's drain.
     """
     _require_uncertain_endpoint(server, serving, lock=lock)
     if stand_down_reason() is not None:
@@ -830,38 +745,20 @@ async def _reconcile_uncertain_publication(
 ) -> None:
     """Keep a live endpoint locked until its publication is provable.
 
-    An error from ``os.replace`` can describe either side of the rename on NFS.
-    Releasing the lock on that evidence lets a successor start before a delayed
-    canonical entry names this endpoint. The lock holder therefore retries the
-    same pending generation until a read observes it or a replacement succeeds.
+    On NFS an ``os.replace`` error can describe either side of the rename, so
+    the lock holder retries the same pending generation until a read observes
+    it or a replacement succeeds. Releasing the lock earlier would let a
+    successor start before a delayed canonical entry names this endpoint.
 
-    Every mutating retry stays synchronously in this task. Once one returns, its
-    storage operation is over; only cached visibility may lag. That ordering lets a
-    later lock holder safely replace this generation after a hard process exit. A
-    worker left running outside this task would break the ordering by publishing
-    after the lock had moved to a successor. Canonical reads are non-mutating, but
-    an unavailable mount can block their native threads, so reconciliation reuses
-    one in-flight read until it settles instead of creating one per retry. Short
-    waits between checks keep call cancellation and stand-down handling alive for
-    a descriptor that became visible before publication could be proved.
-
-    There is deliberately no elapsed-time fallback. A persistent error that is not
-    structurally definitive carries no proof that publication failed, so any timed
-    release can admit a stale generation after its successor. The owner remains
-    undiscoverable and holds the lock until storage recovers. Moving coordination
-    state off remote storage, tracked by #796, is what can add a bounded terminal
-    path without weakening this invariant.
-
-    Every terminal path out of this loop is a hard exit, so *lock* comes in with
-    the call: the exit releases the election before the process ends, and the
-    profile lease alone keeps a successor off the browser.
-
-    Turnover is the one terminal decision that waits first. Once it wins, no
-    further publication is attempted for this generation, admission stays
-    closed, and the calls already admitted get the serving loop's own drain
-    (:func:`_follow_the_lifecycle`) while this process still holds the lock. The
-    hard exit follows that, and follows it even if the drain itself is
-    interrupted.
+    - Every mutating retry runs synchronously in this task, so no worker can
+      publish after the lock moved to a successor. Reads may block in a native
+      thread, so one in-flight read is reused until it settles.
+    - No elapsed-time fallback: a non-definitive error is no proof publication
+      failed, so the lock is held until storage recovers (#796).
+    - Every terminal path is a hard exit given *lock*, which frees the election;
+      the profile lease keeps a successor off the browser.
+    - Turnover drains admitted calls (:func:`_follow_the_lifecycle`) under the
+      lock, then hard-exits even if the drain is interrupted.
     """
     try:
         await _reconcile_until_published(
@@ -1226,18 +1123,13 @@ async def _serve_until_stopped(
 ) -> None:
     """Hold the endpoint open until it stops, or until the owner should go.
 
-    Each turn observes what only this process can see and hands it to the
-    lifecycle core (``daemon.core.owner``), which decides: keep serving, expire
-    the calls nobody waits for, drain for a stand-down, or stop because the
-    owner is idle, wedged or done draining. A stand-down request is noticed
-    here rather than acted on where it arrives, so it gets its reply before
-    this process goes away. Stopping mid-request would leave the caller unable
-    to tell a completed handover from a refusal, and it would then wait for a
-    lock this process had not yet freed.
+    Each turn hands what this process observes to the lifecycle core
+    (``daemon.core.owner``), which decides to serve, expire abandoned calls,
+    drain or stop. A stand-down is acted on here, not where it arrives, so its
+    caller gets a reply before this process exits.
 
-    The stale descriptor is left behind on every way out deliberately: the next
-    election probes it, is refused, and elects a replacement, whereas deleting
-    it here would race whoever publishes next.
+    The descriptor is left behind on every way out: the next election probes
+    and replaces it, while deleting it here would race whoever publishes next.
     """
     await _follow_the_lifecycle(server, serving, idle_timeout, lock=lock)
 
@@ -1335,26 +1227,13 @@ async def _carry_out_ending(
 async def _stop_within(
     serving: asyncio.Task[None], seconds: float, *, lock: DaemonLock | None
 ) -> None:
-    """Let the server finish shutting down, and stop the process if it will not.
+    """Let the server finish shutting down, and exit hard if it will not.
 
-    Ending the *wait* is not the same as ending the process, and the difference
-    is the whole point here. Returning from this leaves the serving task pending;
-    ``asyncio.run`` then cancels it on the way out and waits, without any bound,
-    for that cancellation to complete. A task that suppresses cancellation
-    therefore keeps the interpreter alive, holding the daemon lock, after every
-    timeout above it has already fired.
-
-    That is not a hypothetical shape. ``close_browser`` deliberately holds
-    cancellation back until teardown finishes (``drivers/browser.py:736-757``),
-    because interrupting it half way leaves a Chromium nobody owns, and the
-    export it waits on first is itself unbounded. An unresponsive browser is
-    exactly the case where a stand-down must still end.
-
-    So the last resort is a hard exit. It skips interpreter cleanup, which here
-    means skipping the very teardown that is already stuck. *lock* is handed
-    down so :func:`_exit_hard` frees the election before the process ends.
-    Measured before this existed: the helper returned on time and the process
-    never came out of ``asyncio.run``.
+    Returning on timeout is not enough: ``asyncio.run`` would then wait without
+    bound for the serving task's cancellation, and ``close_browser`` holds
+    cancellation back until teardown finishes, so a stuck browser would keep
+    the daemon lock forever. *lock* is passed so :func:`_exit_hard` frees the
+    election first.
     """
     try:
         await asyncio.wait_for(asyncio.shield(serving), seconds)
@@ -1379,19 +1258,12 @@ async def _stop_within(
 def _exit_hard(lock: DaemonLock | None) -> NoReturn:
     """Leave immediately, without interpreter cleanup and without a signal.
 
-    The owner sends no signal itself. What ends the browser is what ends it
-    when a Direct host quits: on POSIX the crash guardian, which holds its own
-    copy of the profile lease and keeps the profile closed until its marked
-    drain is quiet, and on Windows the per-launch kill-on-close Jobs, which run
-    down when this process's handles close.
-
-    The election reference is released before process exit so a successor can
-    contend for it; browser/profile settlement remains governed by the existing
-    lease, guardian and Job paths. That release is the quiet one, and nothing
-    else runs before the exit: a diagnostic that blocks or raises there would
-    hold the exit, so even a release that raises still ends in ``os._exit``.
-
-    Idempotent, so ``main``'s ``finally`` may still release defensively.
+    The browser ends as it does when a Direct host quits: through the crash
+    guardian, which holds its own profile lease, on POSIX, and the per-launch
+    kill-on-close Jobs on Windows. Only the election lock is released first, so
+    a successor can contend; nothing else runs, and even a release that raises
+    still ends in ``os._exit``. Idempotent, so ``main``'s ``finally`` may still
+    release.
     """
     try:
         if lock is not None:
@@ -1406,18 +1278,11 @@ async def _await_started(
     *,
     timeout: float = _STARTUP_PROBE_SECONDS,
 ) -> None:
-    """Wait until uvicorn reports it is serving, or until it gives up.
+    """Wait until uvicorn reports it is serving, or raise.
 
-    Polled rather than awaited on an event, because uvicorn exposes only the
-    flag. Watching the serving task alongside it is what turns a server that
-    died during startup into an error instead of a wait that never ends.
-
-    Bounded as well, because "died" is not the only way startup fails. An ASGI
-    lifespan that hangs leaves the task pending and the flag false forever, and
-    by this point the child already holds the daemon lock: the frontend would
-    time out and move on while this process kept the position occupied without
-    ever serving anything. Raising here runs the failure path, which stops the
-    server and lets the process exit, and the kernel frees the lock with it.
+    Polls the ``started`` flag, the only signal uvicorn exposes, and watches
+    the task so a server that died fails at once. Bounded because a hung
+    lifespan would otherwise hold the daemon lock without ever serving.
     """
     deadline = time.monotonic() + timeout
     while not getattr(server, "started", False):
@@ -1433,12 +1298,11 @@ async def _await_started(
 
 
 def _forget_superseded_tokens(auth_root: Path) -> None:
-    """Bound old credentials before preparing the next generation.
+    """Remove superseded tokens and abandoned pending files before preparing.
 
     The caller holds the lock, so the canonical descriptor can only name the
-    earlier generation this process is about to replace. Its token remains until
-    the next owner startup. All of this runs before ``prepared`` and publication, while the
-    frontend can still kill a child blocked on state storage.
+    generation about to be replaced, and its token stays. Runs before
+    ``prepared``, while the frontend can still kill a child blocked on storage.
     """
     try:
         canonical = daemon_descriptor.read(auth_root)
@@ -1528,9 +1392,8 @@ class Handshake(Protocol):
 class _Handshake:
     """The frames this process answers the frontend with, after its ACK.
 
-    A pipe rather than a file, because the interesting failure is silence. When
-    this process dies the frontend's read ends at once, so an owner that never
-    reaches a verdict is reported as a failed election rather than waited out.
+    A pipe, so an owner that dies before a verdict ends the frontend's read at
+    once instead of being waited out.
     """
 
     def __init__(self, channel: startup.OwnerChannel | None, nonce: str) -> None:
@@ -1586,15 +1449,10 @@ def _claim_bootstrap_stream() -> TextIO | None:
 def _claim_startup_channel() -> startup.OwnerChannel | None:
     """Take standard input and output for the startup protocol.
 
-    The frontend reads only frames from the output, so anything else written to
-    it would end the exchange. The output also stops being read the moment the
-    frontend has its answer, so a process that kept writing there would
-    eventually block on a full buffer or die of a broken pipe, which for a
-    daemon that outlives its starter is a hang with no visible cause.
+    The frontend reads only frames there and stops reading once answered, so
+    stray output would end the exchange or later block on a full pipe.
     :meth:`startup.OwnerChannel.claim` keeps private copies and points the
-    originals elsewhere; the frontend reads the separate bootstrap pipe for one
-    fixed diagnosis until the child opens the daemon log and attaches both
-    output streams before logging is configured.
+    originals elsewhere.
     """
     try:
         return startup.OwnerChannel.claim()
@@ -1654,11 +1512,9 @@ def main(argv: list[str] | None = None) -> int:
     handshake = _Handshake(channel, handover.handshake_nonce)
     try:
         set_config(config)
-        # Installing the configuration is not enough: the browser mode lives in a
-        # module global that defaults to headless (``drivers/browser.py:63``), and
-        # ``_make_browser`` reads that global rather than the configuration
-        # (``drivers/browser.py:265-283``). The frontend's own entry point sets it
-        # explicitly for the same reason (``cli_main.py:391``).
+        # Installing the configuration is not enough: ``_make_browser`` reads the
+        # browser mode from a module global that defaults to headless, as the
+        # frontend's own entry point does too.
         set_headless(config.browser.headless)
         # Before anything can reach an auth gate. `create_owner_server` records it
         # too, but that runs several steps later, inside `_serve`.

@@ -1,25 +1,19 @@
 """The parent's side of one owner start, decided without touching the child.
 
-A frontend that wins nothing yet starts a child, greets it, hands over the
-configuration, waits for the generation it prepared, checks that generation on
-disk and asks the child to commit it. The exchange is
-:mod:`linkedin_mcp_server.daemon.startup`; which step comes next, when the child
-is stopped and what the attempt reports are decided here, from events alone.
+The frontend starts a child, greets it, hands over the configuration, waits for
+the generation it prepared, checks it on disk and asks the child to commit it.
+The exchange is :mod:`linkedin_mcp_server.daemon.startup`;
 ``daemon.election._Startup`` runs each effect and feeds back what came of it.
 
-**Publication happens only inside the lock-holding child.** The parent writes
-nothing canonical. Its one write is :class:`DiscardPrepared`, which names the
-pending state of the generation its own child prepared, and only while no COMMIT
-can have reached that child. Ignoring a late completion does not cancel a rename,
-so no timeout here leaves a writer behind that could publish later: the only
-writer is the child, and the child is either stopped or owns its own lifetime.
-
-**The termination authority ends where COMMIT may begin.** Before the COMMIT
-frame is attempted, every failure, interruption and silence stops the child.
-From then on the child settles its own lifetime: it commits and serves, or reads
-end of file and discards its state. After that point the parent stops it only on
-the child's authenticated verdict that it did not publish (``ABORTED`` or
-``RETRY``), and never for a timeout, an unreadable answer or an interruption.
+- Publication happens only inside the lock-holding child. The parent's one
+  write is :class:`DiscardPrepared`, of its own child's pending generation and
+  only while no COMMIT can have reached it, so no timeout leaves a writer
+  behind that could publish later.
+- Termination authority ends where COMMIT may begin. Before the COMMIT frame
+  is attempted, every failure, interruption and silence stops the child. After
+  it, the parent stops the child only on its authenticated verdict that it did
+  not publish (``ABORTED`` or ``RETRY``), never for a timeout, an unreadable
+  answer or an interruption.
 """
 
 from __future__ import annotations
@@ -57,10 +51,8 @@ class Started(enum.Enum):
 class Attempt(enum.Enum):
     """What came of trying to start an owner, as the election acts on it.
 
-    A boolean cannot carry this, and collapsing it was measured to cost a
-    minute: a child that reported it could not serve read as "somebody is
-    starting", so the caller waited out its whole deadline for a descriptor
-    nothing was going to write.
+    Not a boolean: a child that reported it could not serve must not read as
+    "somebody is starting", or the caller waits out its whole deadline.
     """
 
     #: An owner is up and has published. Ready to attach.

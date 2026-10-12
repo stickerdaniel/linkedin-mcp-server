@@ -1,38 +1,16 @@
 """Whether a frontend may be served by the owner it found, version-wise.
 
-``@latest`` is the documented install (README.md), so a machine can easily hold
-two versions at once: a long-lived owner from last week and a frontend that was
-downloaded a minute ago. Something has to give, and both obvious answers are
-wrong on their own.
+With ``@latest`` installs an owner and a frontend can run different versions. A
+newer frontend asks the owner to stand down and elects a replacement; an older
+one attaches, since downgrading a shared browser for one stale client is the
+worse trade. Attaching regardless would let an old owner serve every new
+frontend forever, and refusing would wedge the client behind a lock it cannot
+take.
 
-*Attach anyway* is what the shipped code did, because ``package_version`` was
-published and never compared. A months-old owner then serves its own tools to
-every new frontend indefinitely, which is exactly the "a pinned version quietly
-rots" failure the README warns users about — except invisible, because the user
-did update.
-
-*Refuse* wedges the client. A frontend that declines an incompatible owner and
-stops has no way forward: it cannot take the lock, so it cannot start a
-replacement, and the owner it refused will still be there next time.
-
-So the rule is neither. A **newer** frontend asks the owner to stand down and
-elects a replacement; an **older** one attaches, because the owner it found is
-at least as new as it is and downgrading a shared browser to satisfy one stale
-client would be the worse trade. Same version, obviously, attaches.
-
-``protocol_version`` stays a separate and stricter thing (``daemon.discovery._inspect``
-requires equality on it before any tool call, and a mismatch is control only).
-That is for the wire contract, where disagreement means two processes cannot
-share tools. This is for behaviour, where they can talk perfectly well and one of
-them is simply out of date.
-
-Starting an owner is stricter again, and :func:`build_identity` is what it
-compares. A frontend only ever starts an owner of its own build: the owner it
-spawns runs whatever is installed *now*, and a package replaced under a running
-frontend (``pip install -U``, an edited checkout) would otherwise hand the
-browser to code the frontend has never seen. The package version alone cannot
-tell, because an editable install or a rebuild keeps it, so the identity also
-hashes the package's files.
+Two stricter checks sit beside this. ``protocol_version`` must match before any
+tool call (``daemon.discovery._inspect``). And a frontend only starts an owner
+of its own build (:func:`build_identity`), which hashes the package's files
+because an editable install or rebuild keeps the version.
 """
 
 from __future__ import annotations
@@ -67,11 +45,10 @@ def installed_build_identity() -> str:
     """Name the build on disk right now: distribution, version, file digest.
 
     The digest covers every file under the imported package directory except
-    bytecode caches, each with its relative path and length, in path order. Not
-    the installer's ``RECORD``: an editable install's record lists a ``.pth``
-    file and nothing it points to, so an edited source tree keeps it unchanged.
-    Read again on every call, which is the point; see :func:`build_identity` for
-    the value this process runs.
+    bytecode caches, with relative path and length, in path order. Not the
+    installer's ``RECORD``, which for an editable install lists only a ``.pth``
+    file. Read again on every call; :func:`build_identity` is the value this
+    process runs.
     """
     import linkedin_mcp_server
 
@@ -120,11 +97,9 @@ class Skew(enum.Enum):
 def compare(*, owner: str, frontend: str) -> Skew:
     """Say whether *frontend* should be served by an owner running *owner*.
 
-    An unparseable version on either side is treated as serviceable. Both come
-    from installed package metadata, so a value neither ``packaging`` nor this
-    understands is a local build or an editable install rather than a skew, and
-    turning that into a forced restart on every single launch would make the
-    daemon useless exactly where it is being worked on.
+    An unparseable version on either side is serviceable: it is a local or
+    editable build, and forcing a restart on every launch would make the daemon
+    useless where it is being worked on.
     """
     try:
         published, ours = Version(owner), Version(frontend)

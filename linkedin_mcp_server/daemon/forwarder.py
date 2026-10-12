@@ -2,35 +2,22 @@
 
 A FastMCP :class:`~fastmcp.server.providers.Provider` that lists the owner's
 tools and runs each call through an ``mcp.ClientSession`` over streamable HTTP.
-The only FastMCP hook it overrides is the documented ``Provider._list_tools``;
-the only SDK methods it overrides are the public
+It overrides only the documented ``Provider._list_tools`` and the public
 :meth:`~mcp.ClientSession.send_request` and
-:meth:`~mcp.ClientSession.validate_tool_result`. Nothing here reads a private
-attribute of either library, and nothing reads an SDK error message, because
-both change between releases that ``uvx`` resolves fresh on every install
+:meth:`~mcp.ClientSession.validate_tool_result`, and reads no private attribute
+or SDK error message of either library, because ``uvx`` resolves both fresh
 (``tests/test_daemon_forwarder.py`` holds that line).
 
-**One hop per operation.** Every listing and every call opens its own HTTP
-client, session and negotiation against the owner the backend names at that
-moment, and closes them afterwards. A shared session would outlive the owner it
-was opened against, and an upgrade replaces the owner under a running frontend.
-
-**The hop speaks one protocol version** (:data:`HOP_PROTOCOL_VERSION`),
-proposed with ``server/discover`` and checked against the versions the owner
-lists. The external host still negotiates any version with the frontend's own
-server; only this internal hop is pinned, so an SDK upgrade cannot move it
-silently.
-
-**What the caller is told depends on how far the tool request got**, and that
-is read off the wire rather than off an exception. :class:`DispatchRecord` only
-moves forward: unsent until the request enters the session, possibly sent from
-then on, answered once the owner's JSON-RPC response to it was read in full.
-The SDK folds HTTP failures into ``MCPError``\\ s of its own
-(``mcp/client/streamable_http.py``), so an error is the owner's answer only when
-the transport saw the owner send it (:class:`_Wire`).
-
-**No component cache.** A lookup lists afresh, because the ``readOnlyHint`` it
-returns decides whether a call may be repeated against a replacement owner.
+- One hop per operation: every listing and call opens its own client and
+  session against the owner the backend names at that moment, because an
+  upgrade replaces the owner under a running frontend.
+- The hop speaks one protocol version (:data:`HOP_PROTOCOL_VERSION`); the
+  external host still negotiates any version with the frontend.
+- How far a tool request got is read off the wire (:class:`DispatchRecord`,
+  :class:`_Wire`), never off an exception: the SDK folds HTTP failures into
+  ``MCPError``\\ s of its own.
+- No component cache: ``readOnlyHint`` decides whether a call may be repeated
+  against a replacement owner, so a lookup lists afresh.
 """
 
 from __future__ import annotations
@@ -84,15 +71,10 @@ _ResultT = TypeVar("_ResultT", bound="BaseModel")
 
 #: The one MCP protocol version the frontend speaks to its owner. A literal
 #: rather than the SDK's latest, so a dependency upgrade cannot change it.
-#:
-#: The stateless 2026-07-28 era, which is what the owner served frontends
-#: before the hop was pinned. Each request is one POST, answered by the SDK's
-#: single-exchange handler (`mcp/server/_streamable_http_modern.py`), and a
-#: caller that gives up aborts that POST. The handshake eras instead serve
-#: their streams through sse-starlette, which sets a process-wide flag once
-#: any uvicorn server in the process starts shutting down and then ends every
-#: stream it serves without its answer. An owner standing down would lose the
-#: answers it had just cut its calls off with, ahead of uvicorn's grace.
+#: Stateless, because the handshake eras stream through sse-starlette, which
+#: ends every stream once any uvicorn server in the process shuts down, and an
+#: owner standing down would lose its last answers
+#: (docs/decisions/2026-10-12-daemon-core-and-forwarder.md).
 HOP_PROTOCOL_VERSION = "2026-07-28"
 
 #: Who the frontend says it is to the owner.
@@ -143,10 +125,8 @@ class OwnerFailure(enum.Enum):
     def buries(self) -> bool:
         """Whether this instance must never be dispatched to again.
 
-        The failures that say something about the owner rather than about one
-        moment of it. A retiring owner still answers the listing an election
-        probes with, so without this it would be found, attached to, and
-        refused again for as long as it took to leave.
+        A retiring owner still answers the election's probe, so without this
+        it would be found and refused again until it left.
         """
         return self in _BURYING
 
@@ -164,23 +144,13 @@ _BURYING = frozenset(
 class OwnerUnreachableError(Exception):
     """The owner a proxy is attached to could not be reached.
 
-    Raised where the boundary is known rather than diagnosed later, because two
-    things only the frontend can see decide what a caller may do about it:
-    which owner failed, and whether the request had left this process.
-
-    *instance_id* is that owner's identity, so a recovery that has already
-    happened is not repeated for a late failure from a call that started
-    against the old owner.
-
-    *nothing_was_sent* is the whole of the replay question. There is no
-    dispatch acknowledgement in the protocol, so after an ambiguous failure
-    this process cannot tell whether the owner had queued the call, held the
-    profile lease or finished the effect. Only when nothing left is repeating a
-    mutating call safe.
-
-    *classification* decides in :meth:`DaemonProxyBackend.recover` whether the
-    owner is written off. Derived from the cause when not given: a connection
-    that was never established is ``UNREACHABLE``.
+    Raised where the boundary is known, never diagnosed later. *instance_id*
+    names the failed owner, so a late failure does not repeat a recovery that
+    already happened. *nothing_was_sent* is the whole replay question: with no
+    dispatch acknowledgement, only a mutating call that never left may be
+    repeated. *classification* decides whether
+    :meth:`DaemonProxyBackend.recover` writes the owner off; by default a
+    connection never established is ``UNREACHABLE``.
     """
 
     def __init__(
@@ -270,15 +240,10 @@ class DispatchRecord:
 class CallBinding:
     """One call, and the owner it belongs to for as long as it runs.
 
-    The two travel together and must not be read separately. The heartbeats and
-    the request both name an owner, and if they name different ones the owner
-    running the call never hears a beat and cancels it. With no component
-    cache every call lists first, so a replacement adopted between the listing
-    and the call would otherwise move the backend underneath it.
-
-    Until *dispatch* leaves ``UNSENT`` the owner is asked about again before
-    every request, and a written-off owner gets nothing. From then on the call
-    keeps its owner whatever happens to it.
+    Read together: if the heartbeats and the request named different owners,
+    the owner running the call would hear no beat and cancel it. Until
+    *dispatch* leaves ``UNSENT`` the owner is checked before every request and
+    a written-off owner gets nothing; after that the call keeps its owner.
     """
 
     call_id: str
@@ -519,11 +484,10 @@ class _HopSession(ClientSession):
     async def validate_tool_result(self, name: str, result: mt.CallToolResult) -> None:
         """Accept the owner's answer as it arrived.
 
-        The SDK's own check lists tools first whenever this fresh session has
-        no output schema cached, which is every time. A failure in that second
-        request would replace an answer to a call that may already have changed
-        LinkedIn. The owner validates its declared output schemas before
-        answering, and the frontend's own server checks them again.
+        The SDK's check would first list tools on this fresh session, and a
+        failure there would replace an answer to a call that may already have
+        changed LinkedIn. The owner validates its output schemas, and the
+        frontend's server checks them again.
         """
         return None
 
@@ -757,20 +721,12 @@ class OwnerForwarder(Provider):
     ) -> Any:
         """Run *operation* on a fresh session with the owner, and judge the end.
 
-        Addressed to the bound call's owner when there is one, and otherwise to
-        whichever owner a new call would get.
-
-        **Once the operation has an outcome, closing the hop cannot replace
-        it.** A failure while the session and transport shut down is logged
-        and dropped, whether the outcome was an answer or a failure; only a
-        cancellation still leaves, because a caller giving up is not the
-        session's failure. A failure before any outcome, including one that
-        tore the transport down under a request still waiting, is judged like
-        any other: a tool request that had entered the session may have left.
-
-        **A caller that gives up is told to the owner** by the SDK aborting the
-        request's POST, which needs nothing sent; the dispatch record is left
-        as far as it got.
+        Addressed to the bound call's owner, or else to whichever owner a new
+        call would get. Once the operation has an outcome, a failure while the
+        hop closes is logged and dropped; only a cancellation still leaves. A
+        failure before any outcome goes through :meth:`_Hop.fail`, since a tool
+        request that entered the session may have left. A caller giving up
+        reaches the owner through the SDK aborting the request's POST.
         """
         binding = _call_being_made.get()
         if binding is None:

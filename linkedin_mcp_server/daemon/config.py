@@ -1,23 +1,13 @@
 """The configuration a frontend hands to the owner it starts.
 
-The owner cannot simply reload the configuration for itself. Half of it arrives
-on the command line of the process the MCP client spawned, and that process is
-the frontend, not the owner. An owner that re-read only the environment would
-come up with a different browser than the client asked for, and the frontend
-would then refuse to attach to it: ``config_fingerprint`` compares exactly the
-fields that would differ. The result is not a wrong browser but a client that
-elects an owner and then declines to use it, forever.
-
-So the resolved configuration is handed over explicitly, as the CONFIG frame of
-the startup protocol on the child's standard input
-(:mod:`linkedin_mcp_server.daemon.startup`), and only after the child has
-answered in that protocol with this build's identity. Not the environment and
-not the command line, because both are readable by anything running as this
-account (``/proc/<pid>/environ`` and ``ps``), and what travels here includes
-``proxy_password``. A pipe is read once by one process and never lands anywhere.
-
-Input is still parsed as untrusted-shaped data because the reconstructed values
-decide which browser opens against a logged-in session.
+The owner cannot reload it itself: part of it came from the frontend's command
+line, and an owner with a different configuration would fail the frontend's
+``config_fingerprint`` check forever. So the resolved configuration travels as
+the CONFIG frame on the child's standard input
+(:mod:`linkedin_mcp_server.daemon.startup`), never the environment or command
+line, which other processes of this account can read and which would expose
+``proxy_password``. It is parsed strictly, since it decides which browser opens
+against a logged-in session.
 """
 
 from __future__ import annotations
@@ -73,10 +63,8 @@ def encode(config: AppConfig) -> dict[str, object]:
 def decode(payload: object) -> AppConfig:
     """Rebuild the configuration an owner was started with.
 
-    Unknown names are refused rather than skipped. The two ends are one
-    installation, so a name this does not recognise is not a version difference
-    but a blob that did not come from :func:`encode`, and the quiet reading of
-    it would be an owner running on settings nobody chose.
+    Unknown names are refused rather than skipped: both ends are one build, so
+    such a name means the payload did not come from :func:`encode`.
     """
     if not isinstance(payload, dict):
         raise ValueError("The owner configuration is not an object")
@@ -124,11 +112,9 @@ def _apply(
 def _matches(value: object, declared: Any) -> bool:
     """Whether *value* is usable where something of type *declared* belongs.
 
-    Checked against the declared type rather than against the default's runtime
-    type, because the optional settings default to ``None`` and every value
-    would look wrong beside one. JSON is the other half of the reason: it cannot
-    tell seconds from a count, so a string where a float belongs would otherwise
-    surface deep inside a browser launch rather than here.
+    Against the declared type, not the default's runtime type, which is
+    ``None`` for optional settings. A wrong type is refused here rather than
+    deep inside a browser launch.
     """
     origin = get_origin(declared)
     if origin is Literal:
