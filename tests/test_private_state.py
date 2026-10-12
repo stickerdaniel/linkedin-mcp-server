@@ -7,12 +7,15 @@ only assert that the mock was called.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import errno
 import os
 import stat
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -82,6 +85,49 @@ class TestHardeningOnPosix:
         harden_file(target)
 
         assert _mode(target) == 0o600
+
+    @pytest.mark.skipif(
+        not hasattr(os, "mkfifo"), reason="named pipes are a POSIX mechanism"
+    )
+    def test_a_fifo_swapped_in_after_the_check_is_refused_without_blocking(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The swap lands between the type check and the open: the check is
+        # shown a regular file, the open meets a FIFO with no writer.
+        target = tmp_path / "token"
+        os.mkfifo(target)
+        regular = tmp_path / "regular"
+        regular.touch()
+        real_lstat = Path.lstat
+        monkeypatch.setattr(
+            Path,
+            "lstat",
+            lambda self: real_lstat(regular if self == target else self),
+        )
+        raised: list[BaseException] = []
+
+        def harden() -> None:
+            try:
+                harden_file(target)
+            except BaseException as exc:
+                raised.append(exc)
+
+        # The join bounds a wait that would otherwise never end; it makes no
+        # claim about speed. A writer is then offered until the open lets go.
+        worker = threading.Thread(target=harden, daemon=True)
+        worker.start()
+        worker.join(timeout=30)
+        if worker.is_alive():
+            deadline = time.monotonic() + 30
+            while worker.is_alive() and time.monotonic() < deadline:
+                with contextlib.suppress(OSError):
+                    os.close(os.open(target, os.O_WRONLY | os.O_NONBLOCK))
+                worker.join(timeout=0.05)
+            pytest.fail("hardening blocked on a FIFO swapped in after the check")
+
+        assert len(raised) == 1
+        assert isinstance(raised[0], PrivateStateError)
+        assert "not a regular file" in str(raised[0])
 
     @posix_only
     def test_repeated_hardening_is_stable(self, tmp_path: Path):
