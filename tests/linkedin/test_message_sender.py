@@ -1345,11 +1345,13 @@ class TestSendMessageDeadline:
         for longer than the whole reply reserve, and a test then ends at the
         tool deadline instead of the answer it checks.
         """
+        enabled = gc.isenabled()
         gc.disable()
         try:
             yield
         finally:
-            gc.enable()
+            if enabled:
+                gc.enable()
 
     @staticmethod
     async def _call(sender, monkeypatch):
