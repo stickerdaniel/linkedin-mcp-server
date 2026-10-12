@@ -99,6 +99,31 @@ class TestAttaching:
         assert attachment.token == token
         assert attachment.descriptor.url == "http://127.0.0.1:49152/mcp"
 
+    @pytest.mark.parametrize(
+        ("field", "theirs", "ours"),
+        [
+            ("login_timeout_seconds", 1800.0, 600.0),
+            ("login_inline_wait_seconds", 25.0, 0.0),
+            ("auto_import_from_browser", None, False),
+        ],
+    )
+    def test_a_client_with_other_login_settings_shares_the_owner(
+        self, tmp_path: Path, field: str, theirs: object, ours: object
+    ):
+        # The owner never signs in, so how a client would sign in says nothing
+        # about the browser it is served. Refusing over it would give that
+        # client a second browser on the same account for no reason.
+        profile = tmp_path / "profile"
+        token = _publish_owner(
+            tmp_path, profile, config=_config(profile, **{field: theirs})
+        )
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile, **{field: ours}))
+
+        assert lookup.attachment is not None
+        assert lookup.attachment.token == token
+        assert not lookup.attachment.control_only
+
     def test_no_daemon_is_not_an_error(self, tmp_path: Path):
         # The ordinary first-start case. Nothing published, nobody to talk to.
         profile = tmp_path / "profile"
@@ -148,21 +173,22 @@ class TestRefusing:
 
         assert look_up_owner(tmp_path, ours, _config(ours)).attachment is None
 
-    def test_a_daemon_with_a_different_configuration_is_refused(self, tmp_path: Path):
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("proxy_server", "http://proxy.example:8080"), ("headless", False)],
+    )
+    def test_a_daemon_with_a_different_configuration_is_refused(
+        self, tmp_path: Path, field: str, value: object
+    ):
         # Attaching anyway would silently give the client a browser configured
-        # differently from the one it asked for — a different proxy, in this
-        # case, which is the difference between traffic leaving the machine one
-        # way or another.
+        # differently from the one it asked for: traffic leaving the machine
+        # through another address, or a window where none was expected.
         #
         # The pair still comes back, proved but control-only, so the election
         # can ask whether that owner is alive before leaving it alone. Nothing
         # that dispatches a call accepts it.
         profile = tmp_path / "profile"
-        _publish_owner(
-            tmp_path,
-            profile,
-            config=_config(profile, proxy_server="http://proxy.example:8080"),
-        )
+        _publish_owner(tmp_path, profile, config=_config(profile, **{field: value}))
 
         lookup = look_up_owner(tmp_path, profile, _config(profile))
 

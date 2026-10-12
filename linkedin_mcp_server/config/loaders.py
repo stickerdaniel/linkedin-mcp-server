@@ -142,7 +142,6 @@ class EnvironmentKeys:
     BROWSER_IDLE_TIMEOUT = "BROWSER_IDLE_TIMEOUT"
     IMPORT_FROM_BROWSER = "IMPORT_FROM_BROWSER"
     AUTO_IMPORT_FROM_BROWSER = "AUTO_IMPORT_FROM_BROWSER"
-    EAGER_FULL_CHROMIUM = "EAGER_FULL_CHROMIUM"
     DAEMON_ENABLED = "DAEMON_ENABLED"
     INSTALLER_TEMP_DIR = "INSTALLER_TEMP_DIR"
 
@@ -418,14 +417,6 @@ def load_from_env(config: AppConfig) -> AppConfig:
             config.browser.auto_import_from_browser = False
         elif auto_import_value in TRUTHY_VALUES:
             config.browser.auto_import_from_browser = True
-
-    # Install full chromium up front instead of lazily on the first headed login.
-    if eager_full_env := os.environ.get(EnvironmentKeys.EAGER_FULL_CHROMIUM):
-        eager_full_value = _normalize_env(eager_full_env)
-        if eager_full_value in FALSY_VALUES:
-            config.browser.eager_full_chromium = False
-        elif eager_full_value in TRUTHY_VALUES:
-            config.browser.eager_full_chromium = True
 
     # Share one browser-owning process across stdio clients.
     if daemon_env := os.environ.get(EnvironmentKeys.DAEMON_ENABLED):
@@ -713,26 +704,6 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
         ),
     )
 
-    # Accepted and inert. There is one browser now, so "up front" and "lazily"
-    # describe the same install. Kept rather than removed so an existing command
-    # line or compose file does not stop working over a setting that no longer
-    # decides anything; hidden from help so nobody adopts it.
-    eager_full_group = parser.add_mutually_exclusive_group()
-    eager_full_group.add_argument(
-        "--eager-full-chromium",
-        dest="eager_full_chromium",
-        action="store_true",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    eager_full_group.add_argument(
-        "--no-eager-full-chromium",
-        dest="eager_full_chromium",
-        action="store_false",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-
     daemon_group = parser.add_mutually_exclusive_group()
     daemon_group.add_argument(
         "--daemon",
@@ -854,9 +825,6 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
 
     if args.auto_import is not None:
         config.browser.auto_import_from_browser = args.auto_import
-
-    if args.eager_full_chromium is not None:
-        config.browser.eager_full_chromium = args.eager_full_chromium
 
     if args.daemon_enabled is not None:
         config.server.daemon_enabled = args.daemon_enabled

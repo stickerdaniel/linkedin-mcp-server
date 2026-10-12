@@ -31,8 +31,8 @@ that no descriptor was read and no transient lock taken (the coordination
 traps of ``tests/test_daemon.py``), and non-local mounts, for which no
 rootless fixture exists on a hosted runner.
 
-**H-R14.** Host A reads with ``LOGIN_TIMEOUT=1800``; host B starts while A
-is open, with an equal build and ``LOGIN_TIMEOUT=1801``, a fingerprinted
+**H-R14.** Host A reads with ``TIMEOUT=5000``; host B starts while A
+is open, with an equal build and ``TIMEOUT=5001``, a fingerprinted
 field, and the same small ``BROWSER_MIN_HOLD`` in both columns, which is
 not. B reads a person profile of its own and quits; A then reads another.
 K3: B probes the owner A elected once and falls back to Direct (its own
@@ -285,15 +285,16 @@ INELIGIBLE_ROWS = tuple(CASES)
 #: Host A's settings and the owner's, the same in every column. The minimum
 #: hold is small and equal in both hosts: it decides how soon the profile is
 #: handed over and is not in the fingerprint.
-OWNER_LOGIN_TIMEOUT = "1800"
-RIVAL_LOGIN_TIMEOUT = "1801"
+OWNER_PAGE_TIMEOUT = "5000"
+RIVAL_PAGE_TIMEOUT = "5001"
 MIN_HOLD_SECONDS = 2.0
 RIVAL_ENVIRONMENT = {
-    EnvironmentKeys.LOGIN_TIMEOUT: OWNER_LOGIN_TIMEOUT,
+    EnvironmentKeys.TIMEOUT: OWNER_PAGE_TIMEOUT,
     EnvironmentKeys.BROWSER_MIN_HOLD: f"{MIN_HOLD_SECONDS:g}",
 }
-#: Host B's, over the row's: one fingerprinted field, one second apart.
-RIVAL_OVERRIDES = {EnvironmentKeys.LOGIN_TIMEOUT: RIVAL_LOGIN_TIMEOUT}
+#: Host B's, over the row's: one fingerprinted field, one millisecond apart.
+#: A login setting would not do: the owner never signs in, so those are shared.
+RIVAL_OVERRIDES = {EnvironmentKeys.TIMEOUT: RIVAL_PAGE_TIMEOUT}
 #: Each read's own pages, so no request of one stands for another's.
 B_USERNAME = "synthetic-rival"
 A2_USERNAME = "synthetic-rival-again"

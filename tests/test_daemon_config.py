@@ -86,12 +86,10 @@ class TestRoundTrip:
         # just started.
         original = _config(
             headless=False,
-            user_agent="Mozilla/5.0 (test)",
             proxy_server="http://proxy.example:8080",
             proxy_username="user",
             proxy_password="secret",
             viewport_width=1920,
-            login_timeout_seconds=900.0,
         )
 
         restored = daemon_config.decode(daemon_config.encode(original))
@@ -131,7 +129,6 @@ class TestRoundTrip:
         original = _config(
             headless=False,
             slow_mo=25,
-            user_agent="Mozilla/5.0 (test)",
             viewport_width=1920,
             viewport_height=1080,
             default_timeout=9000,
@@ -145,7 +142,6 @@ class TestRoundTrip:
             browser_min_hold_seconds=5.0,
             browser_idle_timeout_seconds=120.0,
             auto_import_from_browser=False,
-            eager_full_chromium=True,
         )
 
         carried = daemon_config.encode(original)
@@ -481,9 +477,11 @@ class TestRefusing:
         assert restored.browser.login_timeout_seconds == 0
 
     def test_an_optional_setting_may_be_unset(self):
-        restored = daemon_config.decode({"browser": {"user_agent": None}, "server": {}})
+        restored = daemon_config.decode(
+            {"browser": {"chrome_path": None}, "server": {}}
+        )
 
-        assert restored.browser.user_agent is None
+        assert restored.browser.chrome_path is None
 
     def test_a_log_level_outside_the_supported_set_is_refused(self):
         with pytest.raises(ValueError, match="wrong type"):

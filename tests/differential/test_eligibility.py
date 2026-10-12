@@ -116,8 +116,9 @@ from differential.test_preservation_gate import (  # noqa: F401 - fixtures
 )
 from differential.test_profile_commands import _functions
 from differential.watcher import OWNER_MODULE
-from linkedin_mcp_server.config.loaders import EnvironmentKeys
+from linkedin_mcp_server.config.loaders import EnvironmentKeys, load_from_env
 from linkedin_mcp_server.config.schema import AppConfig
+from linkedin_mcp_server.daemon.descriptor import config_fingerprint
 from linkedin_mcp_server.logging_config import MCPJSONFormatter
 
 MS = 1_000_000
@@ -1448,7 +1449,7 @@ def test_the_frozen_rival_row_holds_its_observations(change, finding):
             id="no rival",
         ),
         pytest.param(
-            ("rival.environment", {EnvironmentKeys.LOGIN_TIMEOUT: "1800"}),
+            ("rival.environment", {EnvironmentKeys.TIMEOUT: "5000"}),
             "B did not run with its declared difference",
             id="no difference",
         ),
@@ -1478,7 +1479,7 @@ def test_the_frozen_rival_row_holds_its_observations(change, finding):
             id="no owner",
         ),
         pytest.param(
-            ("environment", {EnvironmentKeys.LOGIN_TIMEOUT: "1801"}),
+            ("environment", {EnvironmentKeys.TIMEOUT: "5001"}),
             "the cell did not run its declared configuration",
             id="A's setting",
         ),
@@ -1713,7 +1714,9 @@ def test_k3_is_held_to_k1_only_from_two_valid_records():
 # --- Declarations ----------------------------------------------------------------------
 
 
-def test_every_row_here_is_declared_held_to_direct_or_rival_and_judged():
+def test_every_row_here_is_declared_held_to_direct_or_rival_and_judged(
+    monkeypatch: pytest.MonkeyPatch,
+):
     for row, case in CASES.items():
         declared = harness.ROWS[row]
         assert lifecycle_problems(row, declared) == []
@@ -1730,9 +1733,22 @@ def test_every_row_here_is_declared_held_to_direct_or_rival_and_judged():
     assert (rival.eligible, rival.coordination, rival.rival) == (True, True, True)
     assert rival.environment == RIVAL_ENVIRONMENT
     assert rival.idle_timeout == RIVAL_IDLE_TIMEOUT_SECONDS
-    # One fingerprinted field, one second apart; the minimum hold the same.
-    assert set(RIVAL_OVERRIDES) == {EnvironmentKeys.LOGIN_TIMEOUT}
-    assert RIVAL_OVERRIDES != {k: RIVAL_ENVIRONMENT[k] for k in RIVAL_OVERRIDES}
+    # One field, and one the owner shares by: the row is about a client the
+    # owner refuses, so B's difference has to reach the fingerprint.
+    assert len(RIVAL_OVERRIDES) == 1
+    assert _fingerprint_under(monkeypatch, RIVAL_ENVIRONMENT) != _fingerprint_under(
+        monkeypatch, {**RIVAL_ENVIRONMENT, **RIVAL_OVERRIDES}
+    )
+
+
+def _fingerprint_under(
+    monkeypatch: pytest.MonkeyPatch, environment: dict[str, str]
+) -> str:
+    """The sharing fingerprint of a configuration loaded from *environment*."""
+    with monkeypatch.context() as scoped:
+        for name, value in environment.items():
+            scoped.setenv(name, value)
+        return config_fingerprint(load_from_env(AppConfig()), key="row-key")
 
 
 @pytest.mark.parametrize(
@@ -2075,7 +2091,7 @@ async def test_the_frozen_rival_row_passes_through_the_real_row_entry(scene):
     assert not host_a["rival"] and host_b["rival"]
     for name, value in RIVAL_ENVIRONMENT.items():
         assert host_a["env"][name] == value
-    assert host_b["env"][EnvironmentKeys.LOGIN_TIMEOUT] == "1801"
+    assert host_b["env"][EnvironmentKeys.TIMEOUT] == "5001"
     assert (
         host_b["env"][EnvironmentKeys.BROWSER_MIN_HOLD]
         == RIVAL_ENVIRONMENT[EnvironmentKeys.BROWSER_MIN_HOLD]
