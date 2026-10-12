@@ -2909,13 +2909,26 @@ class TestInstallerSupervisorLaunch:
         Nothing grows here, so the byte ceiling has nothing to refuse and no
         caller is holding an inactivity deadline: the lifetime is the only
         bound left, and without it this install runs forever.
+
+        The lifetime passes on the loop's clock once the installer is running,
+        never in real time: a lifetime short enough for a test was spent on a
+        loaded host by the setup before the spawn, and then there was no
+        installer to reap.
         """
         from linkedin_mcp_server import bootstrap
         from linkedin_mcp_server.exceptions import BrowserSetupFailedError
 
         proc = _NeverExitingProc([], 0)
+        loop = asyncio.get_running_loop()
+        real_time = loop.time
+        skipped = 0.0
+        monkeypatch.setattr(loop, "time", lambda: real_time() + skipped)
 
         async def hanging_lines(stream: object):
+            nonlocal skipped
+            # The installer is running and silent, and the hours pass.
+            skipped = bootstrap._BROWSER_SETUP_LIFETIME_SECONDS
+            hang_guard.reschedule(loop.time() + 30)
             await asyncio.Event().wait()
             if False:  # pragma: no cover - makes this an async generator
                 yield ""
@@ -2924,10 +2937,11 @@ class TestInstallerSupervisorLaunch:
         monkeypatch.setattr(
             asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
         )
-        monkeypatch.setattr(bootstrap, "_BROWSER_SETUP_LIFETIME_SECONDS", 0.05)
 
+        # Only turns a hang into a failure, so it moves with the skipped hours.
         with pytest.raises(BrowserSetupFailedError, match="absolute lifetime"):
-            await asyncio.wait_for(bootstrap._run_patchright_install("--no-shell"), 5)
+            async with asyncio.timeout(30) as hang_guard:
+                await bootstrap._run_patchright_install("--no-shell")
 
         assert proc.waited, "the installer was reaped rather than left running"
 
