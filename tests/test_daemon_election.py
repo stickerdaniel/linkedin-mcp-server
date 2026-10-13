@@ -7652,9 +7652,12 @@ class TestPublishingLast:
                 while time.monotonic() < gives_up:
                     await asyncio.sleep(0.001)
 
-        def exit_hard(lock: object) -> NoReturn:
+        def exit_hard(lock: object) -> None:
             exited.append(lock)
-            raise _ProcessEnded
+            # The watchdog shares this bound and may fire first, from its own
+            # thread, where raising would only print; the owner's exit ends it.
+            if threading.current_thread() is threading.main_thread():
+                raise _ProcessEnded
 
         monkeypatch.setattr(daemon_owner, "_FAILED_STARTUP_SHUTDOWN_SECONDS", 0.05)
         monkeypatch.setattr(daemon_owner, "_exit_hard", exit_hard)
