@@ -1448,11 +1448,14 @@ class TestRetiringASharedBrowser:
     @pytest.fixture(autouse=True)
     def _machine(self, monkeypatch, tmp_path, isolate_profile_dir):
         from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
+        from linkedin_mcp_server.private_state import harden_directory
         from linkedin_mcp_server.storage_class import Classification, StorageClass
 
         # Every daemon file under a home of this test's own, never the real one.
+        # Hardened rather than created: on Windows the daemon refuses a home
+        # whose access list is still inherited, as no real profile root is.
         self.home = tmp_path / "home"
-        self.home.mkdir()
+        harden_directory(self.home)
         monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: self.home)
         monkeypatch.setattr(
             "linkedin_mcp_server.storage_class.classify",

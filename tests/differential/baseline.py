@@ -32,6 +32,11 @@ in ``__PYVENV_LAUNCHER__``, which the watcher records for a server's
 processes as ``launcher`` (``watcher.read_launcher``), so the rule reads that
 as well as ``argv[0]``.
 
+**The pin's own tests get a venv of their own.** The regression witnesses the
+pin carries (``frozen_witnesses``) run under its locked dev dependencies, in
+``tests-venv`` beside the checkout, so the actors' venv keeps runtime
+dependencies only.
+
 Run as a script, it prepares the runtime: ``python baseline.py DIRECTORY``.
 """
 
@@ -176,10 +181,14 @@ def baseline_file(
     return shown
 
 
-def venv_python(checkout: Path) -> Path:
+def _interpreter(venv: Path) -> Path:
     if sys.platform == "win32":
-        return checkout / ".venv" / "Scripts" / "python.exe"
-    return checkout / ".venv" / "bin" / "python"
+        return venv / "Scripts" / "python.exe"
+    return venv / "bin" / "python"
+
+
+def venv_python(checkout: Path) -> Path:
+    return _interpreter(checkout / ".venv")
 
 
 def _checked(result: subprocess.CompletedProcess[str], what: str) -> None:
@@ -188,6 +197,29 @@ def _checked(result: subprocess.CompletedProcess[str], what: str) -> None:
             f"{what} failed with status {result.returncode}: "
             f"{(result.stderr or result.stdout)[-2000:]}"
         )
+
+
+def _pinned_checkout(directory: Path, pinned: str, repo: Path) -> Path:
+    """``directory/checkout``, a detached worktree at *pinned*: added once,
+    fetched first when a shallow clone lacks the pin, verified every time."""
+    directory.mkdir(parents=True, exist_ok=True)
+    checkout = directory / "checkout"
+    if not checkout.exists():
+        if git(repo, "cat-file", "-e", f"{pinned}^{{commit}}") is None:
+            fetched = _run(
+                ["git", "fetch", "--no-tags", "--depth=1", "origin", pinned],
+                cwd=repo,
+                timeout=300,
+            )
+            _checked(fetched, f"fetching {pinned}")
+        added = _run(
+            ["git", "worktree", "add", "--detach", str(checkout), pinned],
+            cwd=repo,
+            timeout=300,
+        )
+        _checked(added, f"adding the baseline worktree at {checkout}")
+    verify_checkout(checkout, pinned)
+    return checkout
 
 
 def prepare_baseline(
@@ -206,26 +238,10 @@ def prepare_baseline(
     everything in place and so verify it, then checks the checkout again.
     """
     timings = {} if timings is None else timings
-    directory.mkdir(parents=True, exist_ok=True)
-    checkout = directory / "checkout"
     browsers = directory / "ms-playwright"
 
     began = time.monotonic()
-    if not checkout.exists():
-        if git(repo, "cat-file", "-e", f"{pinned}^{{commit}}") is None:
-            fetched = _run(
-                ["git", "fetch", "--no-tags", "--depth=1", "origin", pinned],
-                cwd=repo,
-                timeout=300,
-            )
-            _checked(fetched, f"fetching {pinned}")
-        added = _run(
-            ["git", "worktree", "add", "--detach", str(checkout), pinned],
-            cwd=repo,
-            timeout=300,
-        )
-        _checked(added, f"adding the baseline worktree at {checkout}")
-    verify_checkout(checkout, pinned)
+    checkout = _pinned_checkout(directory, pinned, repo)
     timings["checkout"] = round(time.monotonic() - began, 1)
 
     env = {k: v for k, v in os.environ.items() if k not in _FOREIGN_VENV}
@@ -252,6 +268,34 @@ def prepare_baseline(
     # After the venv and the browser: neither may leave the checkout dirty.
     verify_checkout(checkout, pinned)
     return Runtime(str(python), checkout, browsers, pinned)
+
+
+def prepare_frozen_tests(
+    directory: Path, *, pinned: str = BASELINE_SHA, repo: Path = REPO_ROOT
+) -> Runtime:
+    """The pin's own test suite, runnable: its checkout under *directory* and
+    ``directory/tests-venv`` synced with its locked dev dependencies.
+
+    ``--locked`` rather than ``--frozen``: a lock that no longer matches the
+    pin's ``pyproject.toml`` is refused, not installed. A venv of its own, so
+    the actors' ``.venv`` keeps runtime dependencies only. Nothing here
+    installs a browser; ``browsers`` is where the baseline's would be.
+    """
+    checkout = _pinned_checkout(directory, pinned, repo)
+    venv = directory / "tests-venv"
+    env = {k: v for k, v in os.environ.items() if k not in _FOREIGN_VENV}
+    synced = _run(
+        ["uv", "sync", "--locked", "--group", "dev"],
+        cwd=checkout,
+        env={**env, "UV_PROJECT_ENVIRONMENT": str(venv)},
+        timeout=900,
+    )
+    _checked(synced, "uv sync of the pin's dev dependencies")
+    python = _interpreter(venv)
+    if not python.exists():
+        raise BaselineRefused(f"uv sync left no interpreter at {python}")
+    verify_checkout(checkout, pinned)
+    return Runtime(str(python), checkout, directory / "ms-playwright", pinned)
 
 
 def remove_baseline(directory: Path, *, repo: Path = REPO_ROOT) -> None:
