@@ -408,10 +408,10 @@ async def _dismiss_job_scenario() -> dict[str, Any]:
     page.declare_locator("button[data-mcp-dismiss]", "search_card_dismiss")
     page.script(
         "evaluate:job_search_card",
-        {"cards": 1, "matches": 1, "dismiss": 1, "undo": 0},
-        {"cards": 1, "matches": 1, "dismiss": 0, "undo": 1},
-        # The reload lists other jobs, and only that makes the job's absence
-        # a confirmation.
+        {"cards": 25, "matches": 1, "dismiss": 1, "undo": 0},
+        {"cards": 25, "matches": 1, "dismiss": 0, "undo": 1},
+        # The reload lists the other jobs, and only that makes the job's
+        # absence a confirmation.
         {"cards": 24, "matches": 0, "dismiss": 0, "undo": 0},
         {"cards": 24, "matches": 0, "dismiss": 0, "undo": 0},
     )

@@ -136,7 +136,8 @@ async def act(page, html: str, job_id: str) -> str:
             return_value=False,
         ),
     ):
-        return await reader.dismiss_search_card(SEARCH_URL, job_id)
+        outcome, _ = await reader.dismiss_search_card(SEARCH_URL, job_id)
+        return outcome
 
 
 async def chosen(page) -> list[str]:
@@ -225,6 +226,7 @@ async def lists(
     landing: str = SEARCH_URL,
     asked: str = SEARCH_URL,
     scroll_raised: bool = False,
+    min_cards: int = 1,
 ) -> bool:
     """Serve ``html`` at ``landing`` and ask whether the search at ``asked``
     lists ``job_id``."""
@@ -240,12 +242,41 @@ async def lists(
             return_value=scroll_raised,
         ),
     ):
-        return await reader.search_lists_job(asked, job_id)
+        return await reader.search_lists_job(asked, job_id, min_cards)
 
 
 async def test_a_reload_that_rendered_no_card_confirms_nothing(dom_page):
     with pytest.raises(LinkedInOperationError, match="rendered no result cards"):
         await lists(dom_page, search(), "111")
+
+
+async def test_a_reload_that_rendered_fewer_cards_confirms_nothing(dom_page):
+    """A rail that stopped short of the cards it showed before may also stop
+    short of the job's."""
+    with pytest.raises(LinkedInOperationError, match="2 were expected"):
+        await lists(dom_page, search(card("222")), "111", min_cards=2)
+
+
+async def test_a_reload_with_the_other_cards_does_not_list_the_job(dom_page):
+    html = search(card("222"), card("333"))
+
+    assert await lists(dom_page, html, "111", min_cards=2) is False
+
+
+async def test_the_dismissal_reports_the_cards_the_search_showed(dom_page):
+    await dom_page.goto(SEARCH_URL)
+    await dom_page.set_content(search(card("111"), card("222"), card("333")))
+    reader = _reader(dom_page)
+    with (
+        patch.object(reader._navigator, "_navigate_to_page", new_callable=AsyncMock),
+        patch.object(
+            PageSession,
+            "scroll_job_sidebar",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+    ):
+        assert await reader.dismiss_search_card(SEARCH_URL, "222") == ("dismissed", 3)
 
 
 async def test_a_rail_that_could_not_be_scrolled_confirms_nothing(dom_page):
