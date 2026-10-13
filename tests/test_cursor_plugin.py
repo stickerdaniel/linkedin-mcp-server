@@ -60,7 +60,7 @@ def test_readme_cursor_deeplink_matches_pinned_mcp_config() -> None:
     )
     assert match is not None, "README is missing the Cursor MCP install deeplink"
     decoded = json.loads(base64.b64decode(unquote(match.group(1))))
-    assert decoded == {"linkedin": _load_json(_PLUGIN_MCP)["mcpServers"]["linkedin"]}
+    assert decoded == _load_json(_PLUGIN_MCP)["mcpServers"]["linkedin"]
 
 
 def test_release_workflow_updates_and_commits_cursor_manifest() -> None:

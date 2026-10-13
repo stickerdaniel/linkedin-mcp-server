@@ -324,7 +324,7 @@ jobs:
           readme = readme_path.read_text(encoding="utf-8")
           config_b64 = base64.b64encode(
               json.dumps(
-                  {"linkedin": mcp["mcpServers"]["linkedin"]},
+                  mcp["mcpServers"]["linkedin"],
                   separators=(",", ":"),
               ).encode("utf-8")
           ).decode("ascii")
@@ -459,7 +459,7 @@ jobs:
           decoded = json.loads(base64.b64decode(unquote(deeplink_match.group(1))))
           found["README Cursor deeplink"] = [
               value.removeprefix("mcp-server-linkedin@")
-              for value in decoded["linkedin"]["args"]
+              for value in decoded["args"]
               if value.startswith("mcp-server-linkedin@")
           ]
           for site, values in found.items():
