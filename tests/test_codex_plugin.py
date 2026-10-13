@@ -90,6 +90,7 @@ def test_release_workflow_updates_and_commits_every_plugin_file() -> None:
     for path in (
         "plugins/linkedin-mcp-server/.codex-plugin/plugin.json",
         "plugins/linkedin-mcp-server/.claude-plugin/plugin.json",
+        "plugins/linkedin-mcp-server/.cursor-plugin/plugin.json",
         "plugins/linkedin-mcp-server/.mcp.json",
     ):
         assert workflow.count(path) >= 3
@@ -97,6 +98,7 @@ def test_release_workflow_updates_and_commits_every_plugin_file() -> None:
     assert '"Codex plugin": [plugin["version"]]' in workflow
     assert '"Codex plugin MCP": [' in workflow
     assert '"Claude Code plugin": [claude_plugin["version"]]' in workflow
+    assert '"Cursor plugin": [cursor_plugin["version"]]' in workflow
 
 
 def test_claude_code_marketplace_resolves_the_plugin() -> None:
@@ -129,6 +131,7 @@ def test_skill_keeps_unrelated_work_and_writes_out_of_scope() -> None:
     assert "Do not call LinkedIn tools for unrelated" in skill
     assert "exact recipient and action" in skill
     assert "Never enable the plugin or its MCP server" in skill
+    assert "host's plugin configuration" in skill
 
 
 @pytest.mark.parametrize(
