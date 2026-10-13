@@ -273,6 +273,10 @@ SEARCH_CARD_JS = r"""(opts) => {
 }"""
 
 _SEARCH_CARD_SELECTOR = "li[data-occludable-job-id]"
+# The job search parameters a landed search has to keep by value: what the
+# search is about and where. The worldwide `geoId` is ours, never a location
+# string LinkedIn turns into one, so its value is comparable.
+_SEARCH_VALUE_PARAMS = frozenset({"keywords", "geoId"})
 _DISMISS_MARK = "data-mcp-dismiss"
 
 # How long a search gets to render its cards, a found card its buttons, and a
@@ -915,9 +919,11 @@ class JobPageReader:
         offering the page to the auth-barrier check, or on a search that lost
         part of its query: a redirect to the bare search page keeps the route
         and drops the query whole, and its results are an answer to another
-        question. The keywords are compared by value and the other parameters
-        by presence, as `search_jobs` does, since LinkedIn re-encodes some of
-        them and appends `currentJobId` by itself. A search with no results
+        question. The keywords and `geoId` are compared by value, since a
+        search with other words or in another place is not the one asked
+        for, and the other parameters by presence, as `search_jobs` does,
+        since LinkedIn re-encodes some of them. `currentJobId`, which LinkedIn
+        appends by itself, was never asked for and is not compared. A search with no results
         renders no card, so that wait ends in silence.
         """
         await self._navigator._navigate_to_page(url)
@@ -934,7 +940,7 @@ class JobPageReader:
             name
             for name in asked
             if not landed.get(name)
-            or (name == "keywords" and landed[name][0] != asked[name][0])
+            or (name in _SEARCH_VALUE_PARAMS and landed[name][0] != asked[name][0])
         )
         if lost:
             raise LinkedInOperationError(

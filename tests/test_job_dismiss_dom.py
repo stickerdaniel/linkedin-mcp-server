@@ -35,6 +35,7 @@ pytestmark = [
 ]
 
 SEARCH_URL = "https://www.linkedin.com/jobs/search/?keywords=Engineer"
+WORLDWIDE_URL = SEARCH_URL + "&geoId=92000000"
 POSTING_URL = "https://www.linkedin.com/jobs/view/111/"
 
 # A dismiss click records the card in the DOM and swaps the button for the
@@ -222,9 +223,11 @@ async def lists(
     job_id: str,
     *,
     landing: str = SEARCH_URL,
+    asked: str = SEARCH_URL,
     scroll_raised: bool = False,
 ) -> bool:
-    """Serve ``html`` at ``landing`` and ask whether the search lists ``job_id``."""
+    """Serve ``html`` at ``landing`` and ask whether the search at ``asked``
+    lists ``job_id``."""
     await page.goto(landing)
     await page.set_content(html)
     reader = _reader(page)
@@ -237,7 +240,7 @@ async def lists(
             return_value=scroll_raised,
         ),
     ):
-        return await reader.search_lists_job(SEARCH_URL, job_id)
+        return await reader.search_lists_job(asked, job_id)
 
 
 async def test_a_reload_that_rendered_no_card_confirms_nothing(dom_page):
@@ -262,12 +265,28 @@ async def test_a_search_that_lost_its_query_confirms_nothing(dom_page):
         await lists(dom_page, search(card("222")), "111", landing=landing)
 
 
+async def test_a_search_moved_to_another_place_confirms_nothing(dom_page):
+    landing = "https://www.linkedin.com/jobs/search/?keywords=Engineer&geoId=105015875"
+    with pytest.raises(LinkedInOperationError, match="lost its geoId"):
+        await lists(
+            dom_page, search(card("222")), "111", landing=landing, asked=WORLDWIDE_URL
+        )
+
+
+async def test_a_search_that_lost_its_place_confirms_nothing(dom_page):
+    with pytest.raises(LinkedInOperationError, match="lost its geoId"):
+        await lists(dom_page, search(card("222")), "111", asked=WORLDWIDE_URL)
+
+
 async def test_linkedin_may_add_the_current_job_and_move_to_its_redesign(dom_page):
     landing = (
         "https://www.linkedin.com/jobs/search-results/"
-        "?keywords=Engineer&currentJobId=222"
+        "?keywords=Engineer&geoId=92000000&currentJobId=222"
     )
-    assert await lists(dom_page, search(card("222")), "111", landing=landing) is False
+    found = await lists(
+        dom_page, search(card("222")), "111", landing=landing, asked=WORLDWIDE_URL
+    )
+    assert found is False
 
 
 async def read_title(page, landing: str, html: str) -> tuple[str, str]:
