@@ -213,18 +213,25 @@ def _end_marked(*markers: str) -> None:
     # A guardian left running keeps the profile locked after the test.
     # One marker at a time, parents first: a driver still alive between a
     # scan and its kill could launch a browser the scan never saw.
+    # Failures are reported only after every marker, so one marker's failure
+    # never skips the cleanup of the next.
     deadline = time.monotonic() + 30.0
+    failures: list[str] = []
     for marker in markers:
-        while not (
-            scan := process_tree._scan_marked_posix_processes(marker)
-        ).conclusive:
-            if time.monotonic() >= deadline:
-                pytest.fail("no process scan answered, so a marked process may survive")
+        while (
+            not (scan := process_tree._scan_marked_posix_processes(marker)).conclusive
+            and time.monotonic() < deadline
+        ):
             time.sleep(0.1)
+        if not scan.conclusive:
+            failures.append("no process scan answered, so a marked process may survive")
         for pid in scan.processes:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
-        assert _wait_gone(*scan.processes), "a marked process outlived SIGKILL"
+        if not _wait_gone(*scan.processes):
+            failures.append("a marked process outlived SIGKILL")
+    if failures:
+        pytest.fail("; ".join(failures))
 
 
 @pytest.mark.parametrize(("exit_code", "expected"), [(259, True), (7, False)])
