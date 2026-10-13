@@ -408,7 +408,7 @@ The plugin pins a server release. To move to a newer one, run `claude plugin upd
 
 **One-click MCP install** (server only, without the skill):
 
-[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=linkedin&config=eyJsaW5rZWRpbiI6eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJtY3Atc2VydmVyLWxpbmtlZGluQDQuMjcuMCIsIi0tdHJhbnNwb3J0Iiwic3RkaW8iLCItLXRpbWVvdXQiLCIxMDAwMCIsIi0tdG9vbC10aW1lb3V0IiwiMTgwIl0sImVudiI6eyJVVl9IVFRQX1RJTUVPVVQiOiIzMDAifX19)
+[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=linkedin&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJtY3Atc2VydmVyLWxpbmtlZGluQDQuMjcuMCIsIi0tdHJhbnNwb3J0Iiwic3RkaW8iLCItLXRpbWVvdXQiLCIxMDAwMCIsIi0tdG9vbC10aW1lb3V0IiwiMTgwIl0sImVudiI6eyJVVl9IVFRQX1RJTUVPVVQiOiIzMDAifX0%3D)
 
 On the first tool call that needs authentication, the server reuses a LinkedIn session from a signed-in local browser or opens a login window.
 
