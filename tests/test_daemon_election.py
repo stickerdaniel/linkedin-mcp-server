@@ -727,6 +727,246 @@ class TestSilenceIsNotDeath:
         assert elapsed < 15, f"the election ran {elapsed:.1f}s past a 1.0s budget"
 
 
+@contextlib.contextmanager
+def _a_published_owner_on_loopback(
+    profile: Path, config: AppConfig, *, serves_the_pin: bool
+):
+    """A published owner of this build, answering by hand on a loopback socket.
+
+    The answers are a FastMCP owner's, trimmed, on the hop's era and on the
+    handshake era. Without *serves_the_pin* it refuses ``server/discover`` at
+    the hop's version as an owner whose MCP no longer serves it would, and
+    still serves the handshake, which a client negotiating by the SDK's
+    default falls back to. Yields the published attachment and every
+    JSON-RPC method that reached the owner, in order.
+    """
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from linkedin_mcp_server.daemon.forwarder import HOP_PROTOCOL_VERSION
+    from linkedin_mcp_server.daemon.liveness import HEARTBEAT_PATH
+
+    token = new_token()
+    methods: list[str] = []
+
+    class Owner(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+        def respond(self, status: int, body: object = None) -> None:
+            encoded = b"" if body is None else json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def do_GET(self) -> None:
+            self.respond(405)
+
+        def do_DELETE(self) -> None:
+            self.respond(405)
+
+        def do_POST(self) -> None:
+            if self.headers.get("Authorization") != f"Bearer {token}":
+                self.respond(401)
+                return
+            if self.path == HEARTBEAT_PATH:
+                self.respond(200, {"watched": False})
+                return
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if "id" not in body:
+                self.respond(202)
+                return
+            method = body["method"]
+            methods.append(method)
+            modern: dict[str, object] = {
+                "ttlMs": 0,
+                "cacheScope": "private",
+                "resultType": "complete",
+            }
+            if method == "server/discover" and not serves_the_pin:
+                self.respond(
+                    400,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": body["id"],
+                        "error": {
+                            "code": -32022,
+                            "message": "Unsupported protocol version",
+                            "data": {
+                                "supported": ["2025-11-25"],
+                                "requested": HOP_PROTOCOL_VERSION,
+                            },
+                        },
+                    },
+                )
+                return
+            if method == "server/discover":
+                result: dict[str, object] = {
+                    **modern,
+                    "supportedVersions": [HOP_PROTOCOL_VERSION],
+                    "capabilities": {"tools": {}},
+                }
+            elif method == "initialize":
+                result = {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "owner", "version": __version__},
+                }
+            elif method == "tools/list":
+                tool = {"name": "probe_echo", "inputSchema": {"type": "object"}}
+                result = {"tools": [tool], **(modern if serves_the_pin else {})}
+            elif method == "tools/call":
+                result = {
+                    "content": [{"type": "text", "text": "probe ran"}],
+                    "isError": False,
+                    "resultType": "complete",
+                }
+            else:
+                self.respond(
+                    404,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": body["id"],
+                        "error": {"code": -32601, "message": "Method not found"},
+                    },
+                )
+                return
+            self.respond(200, {"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Owner)
+    server.daemon_threads = True
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+    )
+    thread.start()
+    try:
+        auth_root = profile.parent
+        attachment = Attachment(
+            descriptor=build(
+                instance_id=new_instance_id(),
+                package_version=__version__,
+                runtime_id=_RUNTIME,
+                profile=profile,
+                host="127.0.0.1",
+                port=server.server_port,
+                path="/mcp",
+                token=token,
+                config=config,
+                log_path=auth_root / "daemon.log",
+            ),
+            token=token,
+        )
+        prepare(auth_root, attachment.descriptor, token)
+        commit_prepared(auth_root, attachment.descriptor.instance_id)
+        yield attachment, methods
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=_PARKED)
+
+
+async def _call_through_a_frontend(backend: Any) -> Any:
+    """One tool call from an external client, through a proxy around *backend*."""
+    from fastmcp import Client
+
+    from linkedin_mcp_server.server import create_mcp_server
+    from linkedin_mcp_server.server_role import ServerRole
+
+    frontend = create_mcp_server(
+        role=ServerRole.PROXY, proxy_backend=backend, tool_timeout=5.0
+    )
+    async with Client(frontend) as client:
+        return await client.call_tool("probe_echo", {}, raise_on_error=False)
+
+
+class TestTheProbeSpeaksTheHopsVersion:
+    """An owner is attached to only if it serves the version every call proposes.
+
+    The probe once negotiated by the SDK's default, which falls back to the
+    handshake era when the pinned one is refused, while every forwarded call
+    proposes only the pin. An owner of this package version whose MCP served
+    only an older era was selected, failed each call before the tool request
+    left, and was selected again by the recovery, so every call came back as
+    a lost owner. Same package version, different dependencies: a ``uvx``
+    resolve beside a locked install.
+    """
+
+    def test_an_owner_without_the_pinned_version_is_not_attached_to(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server.daemon.forwarder import OwnerFailure
+
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+        # Burying the owner sends the election to start one. The lock is the
+        # owner's in production, so a start contends; failing it here keeps
+        # the published owner the only one.
+        monkeypatch.setattr(
+            spawn_module, "_start_owner", lambda *a, **k: Attempt.FAILED
+        )
+        # The recovery's election, real but on a budget a test can wait for.
+        real = election_module.obtain_owner
+
+        def briefly(*args: Any, **kwargs: Any) -> ElectionOutcome:
+            return real(*args, deadline_seconds=0.5, settlement_seconds=0, **kwargs)
+
+        monkeypatch.setattr(election_module, "obtain_owner", briefly)
+
+        with _a_published_owner_on_loopback(profile, config, serves_the_pin=False) as (
+            attachment,
+            methods,
+        ):
+            outcome = briefly(auth_root, profile, config)
+            # What a proxy already attached to this generation does when a
+            # call fails at entry: an owner error, which buries nothing.
+            backend = _proxy_backend_for(attachment)
+            recovered = asyncio.run(
+                backend.recover(
+                    attachment.descriptor.instance_id,
+                    classification=OwnerFailure.OWNER_ERROR,
+                )
+            )
+            answer = asyncio.run(_call_through_a_frontend(backend))
+
+        assert not outcome.worth_connecting, outcome.attachment_lookup.reason
+        assert recovered.attachment is None, "recovery chose the same owner again"
+        assert answer.is_error
+        assert "server/discover" in methods, "the owner was never asked"
+        assert "tools/call" not in methods
+        assert daemon_descriptor_module.read(auth_root) == attachment.descriptor
+
+    def test_the_same_owner_serving_the_pin_is_attached_to_and_runs_calls(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+
+        def never(*_a: Any, **_k: Any) -> NoReturn:
+            raise AssertionError("an answering owner was replaced")
+
+        monkeypatch.setattr(spawn_module, "_start_owner", never)
+
+        with _a_published_owner_on_loopback(profile, config, serves_the_pin=True) as (
+            attachment,
+            methods,
+        ):
+            outcome = obtain_owner(
+                auth_root, profile, config, deadline_seconds=5.0, settlement_seconds=0
+            )
+            found = outcome.attachment_lookup.attachment
+            assert outcome.worth_connecting, outcome.attachment_lookup.reason
+            assert found is not None
+            answer = asyncio.run(_call_through_a_frontend(_proxy_backend_for(found)))
+
+        assert found.descriptor == attachment.descriptor
+        assert not answer.is_error, answer
+        assert [c.text for c in answer.content] == ["probe ran"]
+        assert methods.count("tools/call") == 1
+
+
 class TestRetryPacing:
     """A buried generation must not turn the retry loop into a spin.
 

@@ -75,5 +75,6 @@ jobs:
           tests/test_server.py
           tests/test_fastmcp_compatibility.py
           tests/test_daemon_election.py::TestAForwardedCallThroughTheRealOwner
+          tests/test_daemon_election.py::TestTheProbeSpeaksTheHopsVersion
 
       - run: uv cache prune --ci
