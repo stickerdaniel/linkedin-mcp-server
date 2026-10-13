@@ -153,7 +153,7 @@ Symbols are named relative to `linkedin_mcp_server`. Tests are named as
   era removed ping (SDK `docs/migration.md:1800`), a default client negotiates
   it with a current owner, and a ping came back as an error from a healthy
   owner. Justifies the tool listing in `daemon.election._reachable` and
-  `daemon.owner._probe`. Source `b3fcac2e`, 2026-09-27. Test
+  `daemon.owner.prove_hop`. Source `b3fcac2e`, 2026-09-27. Test
   `tests/test_daemon_election.py::TestSilenceIsNotDeath::test_a_healthy_owner_answers`.
 - **A default-negotiated probe selected an owner no call could reach.** With
   FastMCP 4.0.10 and MCP 2.2.0, an owner of this package version that refused
