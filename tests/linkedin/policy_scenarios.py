@@ -410,8 +410,10 @@ async def _dismiss_job_scenario() -> dict[str, Any]:
         "evaluate:job_search_card",
         {"cards": 1, "matches": 1, "dismiss": 1, "undo": 0},
         {"cards": 1, "matches": 1, "dismiss": 0, "undo": 1},
-        {"cards": 0, "matches": 0, "dismiss": 0, "undo": 0},
-        {"cards": 0, "matches": 0, "dismiss": 0, "undo": 0},
+        # The reload lists other jobs, and only that makes the job's absence
+        # a confirmation.
+        {"cards": 24, "matches": 0, "dismiss": 0, "undo": 0},
+        {"cards": 24, "matches": 0, "dismiss": 0, "undo": 0},
     )
     page.script("search_card_dismiss.click", None)
     extractor = _extractor(page)
