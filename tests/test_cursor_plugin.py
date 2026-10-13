@@ -19,7 +19,7 @@ _PLUGIN_MCP = _PLUGIN_ROOT / ".mcp.json"
 _README = _REPO_ROOT / "README.md"
 _RELEASE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
 _DEEPLINK_PREFIX = (
-    "cursor://anysphere.cursor-deeplink/mcp/install?name=linkedin&config="
+    "https://cursor.com/en/install-mcp?name=linkedin&config="
 )
 
 

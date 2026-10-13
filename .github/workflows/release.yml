@@ -284,7 +284,7 @@ jobs:
 
           version = sys.argv[1]
           deeplink_prefix = (
-              "cursor://anysphere.cursor-deeplink/mcp/install?name=linkedin&config="
+              "https://cursor.com/en/install-mcp?name=linkedin&config="
           )
           manifest_paths = (
               Path("plugins/linkedin-mcp-server/.codex-plugin/plugin.json"),
@@ -385,7 +385,7 @@ jobs:
 
           version = sys.argv[1]
           deeplink_prefix = (
-              "cursor://anysphere.cursor-deeplink/mcp/install?name=linkedin&config="
+              "https://cursor.com/en/install-mcp?name=linkedin&config="
           )
           server = json.loads(Path(".github/mcp/server.json").read_text(encoding="utf-8"))
           manifest = json.loads(Path("manifest.json").read_text(encoding="utf-8"))

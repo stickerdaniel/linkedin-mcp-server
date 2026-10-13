@@ -408,7 +408,7 @@ The plugin pins a server release. To move to a newer one, run `claude plugin upd
 
 **One-click MCP install** (same pinned server as the plugin):
 
-[Install LinkedIn MCP in Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=linkedin&config=eyJsaW5rZWRpbiI6eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJtY3Atc2VydmVyLWxpbmtlZGluQDQuMjcuMCIsIi0tdHJhbnNwb3J0Iiwic3RkaW8iLCItLXRpbWVvdXQiLCIxMDAwMCIsIi0tdG9vbC10aW1lb3V0IiwiMTgwIl0sImVudiI6eyJVVl9IVFRQX1RJTUVPVVQiOiIzMDAifX19)
+[Install LinkedIn MCP in Cursor](https://cursor.com/en/install-mcp?name=linkedin&config=eyJsaW5rZWRpbiI6eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJtY3Atc2VydmVyLWxpbmtlZGluQDQuMjcuMCIsIi0tdHJhbnNwb3J0Iiwic3RkaW8iLCItLXRpbWVvdXQiLCIxMDAwMCIsIi0tdG9vbC10aW1lb3V0IiwiMTgwIl0sImVudiI6eyJVVl9IVFRQX1RJTUVPVVQiOiIzMDAifX19)
 
 **Manual `mcp.json`:** add the server globally in `~/.cursor/mcp.json` or per project in `.cursor/mcp.json`, then reload Cursor (see [Cursor MCP docs](https://cursor.com/docs/mcp)):
 
