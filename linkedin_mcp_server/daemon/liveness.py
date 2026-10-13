@@ -153,7 +153,11 @@ class CallLiveness:
 
     @property
     def retiring(self) -> bool:
-        """Whether admission is closed. It never reopens in the same process."""
+        """Whether the owner is retiring, which closes admission for good.
+
+        Admission is also closed before publication without retiring; ask
+        ``admitting`` for whether a call would be admitted.
+        """
         return self._state.retirement is not None
 
     @property

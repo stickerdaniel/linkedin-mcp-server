@@ -7519,8 +7519,8 @@ class TestPublishingLast:
             "prepared",
             "control",
             "commit",
-            "diagnostic",
             "failed",
+            "diagnostic",
         ]
         liveness = daemon_owner.get_liveness()
         assert liveness.state.retirement is Retirement.UNCERTAIN_PUBLICATION
@@ -7655,6 +7655,79 @@ class TestPublishingLast:
             )
 
         assert time.monotonic() - started < 2.0
+        # The first exit ends a real process; later ones are reached only
+        # because the test's exit returns control.
+        assert exited and isinstance(exited[0], DaemonLock)
+
+    def test_an_ambiguous_owner_whose_log_stalls_still_exits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The log sits on the storage that stalled the rename.
+
+        FAILED is already out when the diagnostic blocks, and the hard exit
+        arrives from the watchdog, since no await can interrupt the write.
+        """
+        order: list[str] = []
+        exited: list[object] = []
+        released = threading.Event()
+
+        def exit_hard(lock: object) -> None:
+            exited.append(lock)
+            released.set()
+
+        def stalled_log(*args: object, **kwargs: object) -> None:
+            order.append("diagnostic")
+            # Its own deadline, so a missing watchdog fails instead of hanging.
+            released.wait(5.0)
+
+        monkeypatch.setattr(daemon_owner, "_FAILED_STARTUP_SHUTDOWN_SECONDS", 0.05)
+        monkeypatch.setattr(daemon_owner, "_exit_hard", exit_hard)
+        monkeypatch.setattr(daemon_owner.logger, "warning", stalled_log)
+        started = time.monotonic()
+
+        with pytest.raises(OSError, match="rename reply was lost"):
+            self._run_serve(
+                tmp_path,
+                monkeypatch,
+                order,
+                commit_error=OSError("rename reply was lost"),
+            )
+
+        assert time.monotonic() - started < 2.0
+        assert order[-2:] == ["failed", "diagnostic"]
+        assert len(exited) == 1 and isinstance(exited[0], DaemonLock)
+
+    def test_an_ambiguous_owner_cancelled_while_stopping_still_exits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A shutdown signal that cancels the stop does not skip the hard exit."""
+        import asyncio
+
+        exited: list[object] = []
+        stops: list[object] = []
+
+        async def cancelled_stop(*args: object, **kwargs: object) -> None:
+            # Only the first stop is cancelled; the outer handler's own stop is
+            # reached here only because the test's hard exit returns control.
+            stops.append(args)
+            if len(stops) == 1:
+                raise asyncio.CancelledError
+
+        def exit_hard(lock: object) -> NoReturn:
+            exited.append(lock)
+            raise _ProcessEnded
+
+        monkeypatch.setattr(daemon_owner, "_stop_within", cancelled_stop)
+        monkeypatch.setattr(daemon_owner, "_exit_hard", exit_hard)
+
+        with pytest.raises(_ProcessEnded):
+            self._run_serve(
+                tmp_path,
+                monkeypatch,
+                [],
+                commit_error=OSError("rename reply was lost"),
+            )
+
         assert len(exited) == 1 and isinstance(exited[0], DaemonLock)
 
     def test_preflight_failure_aborts_without_reading_canonical_state(

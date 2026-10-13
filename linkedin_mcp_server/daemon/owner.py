@@ -34,7 +34,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, NoReturn, Protocol, TextIO, cast
 
@@ -761,16 +761,27 @@ async def _serve(
             # applied the rename, so the canonical descriptor may already name
             # this endpoint. Admission closes before the first yield: a frontend
             # that reads it is refused with a signed answer and looks for a
-            # successor, and the bounded stop in the handler below frees the
-            # lock for one. FAILED, never ABORTED, which would claim nothing was
+            # successor. FAILED, never ABORTED, which would claim nothing was
             # published; the frontend settles from canonical state. No retry,
             # and the token stays for ordinary successor handling.
             get_liveness().retire(Retirement.UNCERTAIN_PUBLICATION)
-            logger.warning(
-                "Daemon descriptor publication is ambiguous; exiting without serving",
-                exc_info=True,
-            )
-            handshake.fail()
+            # The log sits on the same storage that just stalled the rename, so
+            # the watchdog bounds the synchronous writes too, and FAILED goes
+            # out before them. A cancelled stop still ends in the hard exit,
+            # because only that frees the lock for a successor.
+            with _hard_exit_after(_FAILED_STARTUP_SHUTDOWN_SECONDS, lock):
+                handshake.fail()
+                logger.warning(
+                    "Daemon descriptor publication is ambiguous; exiting without serving",
+                    exc_info=True,
+                )
+                server.should_exit = True
+                try:
+                    await _stop_within(
+                        serving, _FAILED_STARTUP_SHUTDOWN_SECONDS, lock=lock
+                    )
+                except BaseException:
+                    _exit_hard(lock)
             raise
 
         # Publication is now proved. Only in-memory startup state and the verdict
@@ -810,8 +821,8 @@ _STAND_DOWN_POLL_SECONDS = 0.1
 _STAND_DOWN_SHUTDOWN_SECONDS = 30.0
 
 #: The same bound for a startup that failed. Shorter, because nothing is being
-#: preserved: no client was ever told this owner existed, and the descriptor was
-#: never published.
+#: preserved: admission never opened, so no call ran on this owner, even when an
+#: ambiguous commit may have published its descriptor.
 _FAILED_STARTUP_SHUTDOWN_SECONDS = 10.0
 
 
@@ -943,6 +954,22 @@ async def _stop_within(
         return
 
     _exit_hard(lock)
+
+
+@contextlib.contextmanager
+def _hard_exit_after(seconds: float, lock: DaemonLock | None) -> Iterator[None]:
+    """Exit hard from a timer thread unless the block finishes within *seconds*.
+
+    Bounds synchronous work no ``wait_for`` can interrupt, such as a log write
+    to a stalled mount.
+    """
+    watchdog = threading.Timer(seconds, _exit_hard, args=(lock,))
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        yield
+    finally:
+        watchdog.cancel()
 
 
 def _exit_hard(lock: DaemonLock | None) -> NoReturn:
