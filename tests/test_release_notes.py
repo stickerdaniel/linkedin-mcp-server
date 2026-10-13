@@ -1195,7 +1195,7 @@ def test_release_rejects_invalid_restore_input_before_put(
 # The prepare-release job holds the admin token. Intentional strict-policy
 # preservation and file moves update its reviewed digest alongside behavioral coverage.
 _PREPARE_RELEASE_SHA256 = (
-    "2158b86aea7edd465b2140edcf3373c8418671d51bc411f1192fbd16b432f7ba"
+    "16a1fb6d01df92c5d8d903ba10c66b580ab7c3c4730d77e714cc15efb818b6a3"
 )
 
 

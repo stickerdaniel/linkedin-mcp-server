@@ -404,35 +404,13 @@ The plugin pins a server release. To move to a newer one, run `claude plugin upd
 
 ### Installation
 
-**From the Cursor Marketplace** (once listed): open **Customize** in the sidebar, search for **LinkedIn MCP**, and choose **Install**.
+**From the Cursor Marketplace:** open **Customize** in the sidebar, search for **LinkedIn MCP**, and choose **Install**. The plugin pins a server release and bundles the LinkedIn skill.
 
-**One-click MCP install** (same pinned server as the plugin):
+**One-click MCP install** (server only, without the skill):
 
-[Install LinkedIn MCP in Cursor](https://cursor.com/en/install-mcp?name=linkedin&config=eyJsaW5rZWRpbiI6eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJtY3Atc2VydmVyLWxpbmtlZGluQDQuMjcuMCIsIi0tdHJhbnNwb3J0Iiwic3RkaW8iLCItLXRpbWVvdXQiLCIxMDAwMCIsIi0tdG9vbC10aW1lb3V0IiwiMTgwIl0sImVudiI6eyJVVl9IVFRQX1RJTUVPVVQiOiIzMDAifX19)
+[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=linkedin&config=eyJsaW5rZWRpbiI6eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJtY3Atc2VydmVyLWxpbmtlZGluQDQuMjcuMCIsIi0tdHJhbnNwb3J0Iiwic3RkaW8iLCItLXRpbWVvdXQiLCIxMDAwMCIsIi0tdG9vbC10aW1lb3V0IiwiMTgwIl0sImVudiI6eyJVVl9IVFRQX1RJTUVPVVQiOiIzMDAifX19)
 
-**Manual `mcp.json`:** add the server globally in `~/.cursor/mcp.json` or per project in `.cursor/mcp.json`, then reload Cursor (see [Cursor MCP docs](https://cursor.com/docs/mcp)):
-
-```json
-{
-  "mcpServers": {
-    "linkedin": {
-      "command": "uvx",
-      "args": [
-        "mcp-server-linkedin@4.27.0",
-        "--transport",
-        "stdio",
-        "--timeout",
-        "10000",
-        "--tool-timeout",
-        "180"
-      ],
-      "env": { "UV_HTTP_TIMEOUT": "300" }
-    }
-  }
-}
-```
-
-The plugin in this repository pins the same release and bundles the LinkedIn skill. On the first tool call that needs authentication, the server reuses a LinkedIn session from a signed-in local browser or opens a login window.
+On the first tool call that needs authentication, the server reuses a LinkedIn session from a signed-in local browser or opens a login window.
 
 > [!NOTE]
 > Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. Retry the tool call once the browser download or sign-in completes.

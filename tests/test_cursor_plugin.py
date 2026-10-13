@@ -7,6 +7,7 @@ import json
 import re
 import tomllib
 from pathlib import Path
+from urllib.parse import unquote
 from packaging.version import Version
 
 from test_codex_plugin import _assert_mcp_contract, _load_json, _released_version
@@ -18,9 +19,7 @@ _CURSOR_MARKETPLACE = _REPO_ROOT / ".cursor-plugin" / "marketplace.json"
 _PLUGIN_MCP = _PLUGIN_ROOT / ".mcp.json"
 _README = _REPO_ROOT / "README.md"
 _RELEASE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
-_DEEPLINK_PREFIX = (
-    "https://cursor.com/en/install-mcp?name=linkedin&config="
-)
+_DEEPLINK_PREFIX = "https://cursor.com/en/install-mcp?name=linkedin&config="
 
 
 def test_cursor_manifest_matches_the_repository_release() -> None:
@@ -56,11 +55,11 @@ def test_cursor_shares_the_version_pinned_mcp_config() -> None:
 def test_readme_cursor_deeplink_matches_pinned_mcp_config() -> None:
     readme = _README.read_text(encoding="utf-8")
     match = re.search(
-        rf"{re.escape(_DEEPLINK_PREFIX)}([A-Za-z0-9+/=]+)",
+        rf"{re.escape(_DEEPLINK_PREFIX)}([A-Za-z0-9%]+)",
         readme,
     )
     assert match is not None, "README is missing the Cursor MCP install deeplink"
-    decoded = json.loads(base64.b64decode(match.group(1)))
+    decoded = json.loads(base64.b64decode(unquote(match.group(1))))
     assert decoded == {"linkedin": _load_json(_PLUGIN_MCP)["mcpServers"]["linkedin"]}
 
 

@@ -281,6 +281,7 @@ jobs:
           import re
           import sys
           from pathlib import Path
+          from urllib.parse import quote
 
           version = sys.argv[1]
           deeplink_prefix = (
@@ -327,10 +328,11 @@ jobs:
                   separators=(",", ":"),
               ).encode("utf-8")
           ).decode("ascii")
-          deeplink = f"{deeplink_prefix}{config_b64}"
+          # Percent-encoded, because a raw `+` in a query string reads as a space.
+          deeplink = f"{deeplink_prefix}{quote(config_b64, safe='')}"
           deeplink_matches = list(
               re.finditer(
-                  re.escape(deeplink_prefix) + r"[A-Za-z0-9+/=]+",
+                  re.escape(deeplink_prefix) + r"[A-Za-z0-9%]+",
                   readme,
               )
           )
@@ -340,25 +342,6 @@ jobs:
               )
           match = deeplink_matches[0]
           readme = readme[: match.start()] + deeplink + readme[match.end() :]
-
-          manual_marker = "**Manual `mcp.json`:**"
-          manual_idx = readme.find(manual_marker)
-          if manual_idx == -1:
-              raise SystemExit("README is missing the Cursor manual mcp.json section")
-          manual_tail = readme[manual_idx:]
-          package_match = re.search(
-              r"mcp-server-linkedin@[^\s\"]+",
-              manual_tail,
-          )
-          if package_match is None:
-              raise SystemExit(
-                  "README manual mcp.json example is missing a versioned package arg"
-              )
-          readme = (
-              readme[: manual_idx + package_match.start()]
-              + f"mcp-server-linkedin@{version}"
-              + readme[manual_idx + package_match.end() :]
-          )
           readme_path.write_text(readme, encoding="utf-8")
           PY
           echo "✅ Updated the Codex, Claude Code, and Cursor plugins to version $VERSION"
@@ -382,6 +365,7 @@ jobs:
           import sys
           import tomllib
           from pathlib import Path
+          from urllib.parse import unquote
 
           version = sys.argv[1]
           deeplink_prefix = (
@@ -467,30 +451,17 @@ jobs:
           }
           readme = Path("README.md").read_text(encoding="utf-8")
           deeplink_match = re.search(
-              re.escape(deeplink_prefix) + r"([A-Za-z0-9+/=]+)",
+              re.escape(deeplink_prefix) + r"([A-Za-z0-9%]+)",
               readme,
           )
           if deeplink_match is None:
               raise SystemExit("README is missing the Cursor MCP install deeplink")
-          decoded = json.loads(base64.b64decode(deeplink_match.group(1)))
+          decoded = json.loads(base64.b64decode(unquote(deeplink_match.group(1))))
           found["README Cursor deeplink"] = [
               value.removeprefix("mcp-server-linkedin@")
               for value in decoded["linkedin"]["args"]
               if value.startswith("mcp-server-linkedin@")
           ]
-          manual_marker = "**Manual `mcp.json`:**"
-          manual_idx = readme.find(manual_marker)
-          if manual_idx == -1:
-              raise SystemExit("README is missing the Cursor manual mcp.json section")
-          manual_package = re.search(
-              r"mcp-server-linkedin@([^\s\"]+)",
-              readme[manual_idx:],
-          )
-          if manual_package is None:
-              raise SystemExit(
-                  "README manual mcp.json example is missing a versioned package arg"
-              )
-          found["README Cursor manual example"] = [manual_package.group(1)]
           for site, values in found.items():
               if not values:
                   raise SystemExit(f"{site}: no version found; the rewrite missed it")

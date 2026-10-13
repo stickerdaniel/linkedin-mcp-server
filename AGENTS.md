@@ -226,7 +226,7 @@ gt create -m "chore(release): Bump version to X.Y.Z"
 gt submit                        # merge PR to trigger release workflow
 ```
 
-The CI release workflow automatically updates `manifest.json`, `docker-compose.yml`, `.github/mcp/server.json`, the Codex, Claude Code, and Cursor plugin manifests under `plugins/linkedin-mcp-server/` (including the shared `.mcp.json`), and the Cursor one-click install link plus manual `mcp.json` example in `README.md`. Do not update them manually.
+The CI release workflow automatically updates `manifest.json`, `docker-compose.yml`, `.github/mcp/server.json`, the Codex, Claude Code, and Cursor plugin manifests under `plugins/linkedin-mcp-server/` (including the shared `.mcp.json`), and the Cursor one-click install link in `README.md`. Do not update them manually.
 
 After the workflow completes, file a PR against
 [`docker/mcp-registry`](https://github.com/docker/mcp-registry) updating
