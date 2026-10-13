@@ -2697,8 +2697,9 @@ lease = ProfileLease(auth_root)
 assert lease.try_acquire()
 start_browser_guardian(lease.guardian_fd())
 # The test chooses the browser's marker value, so its teardown finds the
-# browser even if this owner stalls before reporting it.
-secrets.token_hex = lambda _nbytes=None: sys.argv[2]
+# browser even if this owner stalls before reporting it. Sized as asked, so a
+# production marker of the wrong length still fails the assert below.
+secrets.token_hex = lambda nbytes: sys.argv[2][: 2 * nbytes]
 marker, marker_environment = new_browser_process_marker()
 assert marker == sys.argv[2]
 environment = dict(os.environ)
@@ -2805,8 +2806,9 @@ lease = ProfileLease(auth_root)
 assert lease.try_acquire()
 start_browser_guardian(lease.guardian_fd())
 # The test chooses the browser's marker value, so its teardown finds the
-# browser even if this owner stalls before reporting it.
-secrets.token_hex = lambda _nbytes=None: sys.argv[5]
+# browser even if this owner stalls before reporting it. Sized as asked, so a
+# production marker of the wrong length still fails the assert below.
+secrets.token_hex = lambda nbytes: sys.argv[5][: 2 * nbytes]
 marker, marker_environment = new_browser_process_marker()
 assert marker == sys.argv[5]
 driver = subprocess.Popen(
