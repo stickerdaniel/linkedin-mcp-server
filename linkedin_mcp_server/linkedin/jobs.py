@@ -778,7 +778,8 @@ class JobReader:
         has no dismiss control. Worldwide, because a search without a location
         is scoped to the account's remembered one. The card turning to its
         undo state is not yet a change LinkedIn kept, so the search is loaded
-        again and must not list the job either. Irreversible: the undo is
+        again and must not list the job either, while rendering the other
+        cards it showed before. Irreversible: the undo is
         offered only in place, before any reload.
 
         A dismissed job and a search that missed it look the same, since
@@ -793,7 +794,7 @@ class JobReader:
         keywords = f"{card_title} {company}"
         url = f"{build_job_search_url(keywords)}&geoId={WORLDWIDE_GEO_ID}"
         await asyncio.sleep(NAV_DELAY)
-        outcome = await self._pages.dismiss_search_card(url, job_id)
+        outcome, cards = await self._pages.dismiss_search_card(url, job_id)
         if outcome == "absent":
             raise LinkedInOperationError(
                 f"Job {job_id} is not on the first page of a worldwide search "
@@ -812,7 +813,7 @@ class JobReader:
             )
         if outcome == "dismissed":
             await asyncio.sleep(NAV_DELAY)
-            if await self._pages.search_lists_job(url, job_id):
+            if await self._pages.search_lists_job(url, job_id, cards - 1):
                 raise LinkedInOperationError(
                     f"Job {job_id} was dismissed, but it was back in the search "
                     "after a reload."

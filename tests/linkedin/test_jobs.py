@@ -3560,7 +3560,7 @@ class TestDismissJob:
             reader._pages,
             "dismiss_search_card",
             new_callable=AsyncMock,
-            return_value=outcome,
+            return_value=(outcome, 25),
         )
         read = patch.object(
             reader._pages,
@@ -3583,7 +3583,7 @@ class TestDismissJob:
 
         titling.assert_awaited_once_with("4400000201")
         acting.assert_awaited_once_with(self.URL, "4400000201")
-        reading.assert_awaited_once_with(self.URL, "4400000201")
+        reading.assert_awaited_once_with(self.URL, "4400000201", 24)
         assert result == {
             "url": self.URL,
             "job_id": "4400000201",

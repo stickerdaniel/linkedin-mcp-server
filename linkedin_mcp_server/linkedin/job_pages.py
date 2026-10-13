@@ -990,13 +990,15 @@ class JobPageReader:
             found = await self._find_search_card(job_id)
         return found
 
-    async def search_lists_job(self, url: str, job_id: str) -> bool:
+    async def search_lists_job(self, url: str, job_id: str, min_cards: int = 1) -> bool:
         """Whether the job search at ``url`` shows a card for ``job_id``.
 
         Only a search that rendered other cards can say the job is not among
         them: a reload that rendered none, blank or still loading, raises
         instead, since reading it as "not listed" would confirm a dismissal
-        nothing confirmed.
+        nothing confirmed. So does one that rendered fewer than ``min_cards``,
+        which the caller sets from what the same search showed before, since
+        a partly rendered rail may stop short of the job's card.
         """
         await self._open_job_search(url)
         found = await self._locate_search_card(job_id)
@@ -1007,22 +1009,32 @@ class JobPageReader:
                 f"The job search at {url} rendered no result cards, so whether "
                 f"it still lists job {job_id} could not be read"
             )
+        if found["cards"] < min_cards:
+            raise LinkedInOperationError(
+                f"The job search at {url} rendered {found['cards']} result cards "
+                f"where {min_cards} were expected, so whether it still lists job "
+                f"{job_id} could not be read"
+            )
         return False
 
-    async def dismiss_search_card(self, url: str, job_id: str) -> SearchCardOutcome:
+    async def dismiss_search_card(
+        self, url: str, job_id: str
+    ) -> tuple[SearchCardOutcome, int]:
         """Click the dismiss button on ``job_id``'s card in the search at ``url``.
 
         Success is the card turning to its undo state; the caller confirms it
-        against a fresh load of the search.
+        against a fresh load of the search, which should render as many cards
+        as this one, returned alongside the outcome, less the job's own.
         """
         await self._open_job_search(url)
         found = await self._locate_search_card(job_id)
+        cards = found["cards"]
         if not found["matches"]:
-            return "absent"
+            return "absent", cards
         if found["dismiss"] != 1:
             if found["matches"] == 1 and found["undo"] and not found["dismiss"]:
-                return "already_dismissed"
-            return "no_button"
+                return "already_dismissed", cards
+            return "no_button", cards
 
         page = self._session.page
         await page.locator(f"button[{_DISMISS_MARK}]").click(timeout=5000)
@@ -1031,5 +1043,5 @@ class JobPageReader:
             await self._session.delay(_SEARCH_POLL)
             found = await self._find_search_card(job_id)
             if found["undo"] and not found["dismiss"]:
-                return "dismissed"
-        return "not_dismissed"
+                return "dismissed", cards
+        return "not_dismissed", cards
