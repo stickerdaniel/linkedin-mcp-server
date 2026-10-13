@@ -157,6 +157,11 @@ class CallLiveness:
         return self._state.retirement is not None
 
     @property
+    def admitting(self) -> bool:
+        """Whether a new call would be admitted: published and not retiring."""
+        return lifecycle.admitting(self._state)
+
+    @property
     def instance_id(self) -> str | None:
         """The owner's own instance, named in every refusal."""
         return self._state.instance
@@ -204,7 +209,7 @@ class CallLiveness:
     def admit(
         self, call_id: str, start: Callable[[], Coroutine[Any, Any, _T]]
     ) -> asyncio.Task[_T] | None:
-        """Take one marked call, or refuse it because this owner is retiring.
+        """Take one marked call, or refuse it: unpublished, or retiring.
 
         *start* is called only after admission, so a refused call has no task,
         and an admitted call is counted and watched before its task can take a
@@ -258,8 +263,9 @@ class CallLiveness:
     def retire(self, reason: lifecycle.Retirement) -> None:
         """Close admission unconditionally, whatever is in flight.
 
-        No I/O, not even a log line: one caller is on its way to a hard exit
-        that must not wait on a diagnostic. Callers say why themselves.
+        No I/O, not even a log line: an owner whose publication is ambiguous
+        closes admission before anything that could block on storage. Callers
+        say why themselves.
         """
         self._apply(lifecycle.Retire(reason))
 
@@ -277,7 +283,7 @@ class CallLiveness:
         self._apply(lifecycle.BackgroundFinished(time.monotonic()))
 
     def the_endpoint_is_live(self) -> None:
-        """Start the idle clock once the descriptor is published.
+        """Open admission and start the idle clock once the descriptor is published.
 
         Not at startup: counting import and Chromium launch as quiet would let
         a short timeout expire before the frontend could reach this owner.
