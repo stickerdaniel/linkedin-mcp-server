@@ -2707,23 +2707,33 @@ time.sleep(600)
 def test_crash_guardian_stops_a_driver_before_its_delayed_browser_launch(
     tmp_path: Path,
 ):
+    # The driver is unmarked, like the Node driver, and hands the marker only to
+    # the browser it launches. It launches once the test holds the profile
+    # again: the latest a surviving driver could, ordered by the lease rather
+    # than by a wall-clock delay that a loaded scheduler can outlast.
     auth_root = tmp_path / "auth"
+    go = tmp_path / "launch"
     launched = tmp_path / "browser-pid"
     driver_code = r"""
+import json
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-time.sleep(0.25)
+go = Path(sys.argv[2])
+while not go.exists():
+    time.sleep(0.01)
+environment = dict(os.environ)
+environment.update(json.loads(sys.argv[3]))
 browser = subprocess.Popen(
     [sys.executable, "-c", "import time; time.sleep(600)"],
     stdin=subprocess.DEVNULL,
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL,
     start_new_session=True,
-    env=dict(os.environ),
+    env=environment,
 )
 marker = Path(sys.argv[1])
 partial = marker.with_name(marker.name + ".partial")
@@ -2732,6 +2742,7 @@ partial.replace(marker)
 time.sleep(600)
 """
     owner_code = r"""
+import json
 import os
 import subprocess
 import sys
@@ -2750,20 +2761,32 @@ lease = ProfileLease(auth_root)
 assert lease.try_acquire()
 start_browser_guardian(lease.guardian_fd())
 _marker, marker_environment = new_browser_process_marker()
-environment = dict(os.environ)
-environment.update(marker_environment)
 driver = subprocess.Popen(
-    [sys.executable, "-c", sys.argv[3], sys.argv[2]],
+    [
+        sys.executable,
+        "-c",
+        sys.argv[4],
+        sys.argv[2],
+        sys.argv[3],
+        json.dumps(marker_environment),
+    ],
     stdin=subprocess.DEVNULL,
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL,
-    env=environment,
 )
 print(os.getpid(), driver.pid, flush=True)
 time.sleep(600)
 """
     process = subprocess.Popen(
-        [sys.executable, "-c", owner_code, str(auth_root), str(launched), driver_code],
+        [
+            sys.executable,
+            "-c",
+            owner_code,
+            str(auth_root),
+            str(launched),
+            str(go),
+            driver_code,
+        ],
         cwd=_REPO_ROOT,
         start_new_session=True,
         stdout=subprocess.PIPE,
@@ -2779,13 +2802,17 @@ time.sleep(600)
         os.kill(process.pid, signal.SIGKILL)
         assert process.wait(timeout=30) == -signal.SIGKILL
 
+        # The guardian holds the profile until a process scan answers, and a
+        # loaded host can keep ps past its one-second bound for as long as the
+        # load lasts. Nothing in the guardian ends that hold, so the wait for
+        # it is a deadline, not a count of polls that lasts a few seconds.
         contender = ProfileLease(auth_root)
-        for _ in range(500):
-            if contender.try_acquire():
-                break
+        deadline = time.monotonic() + 30.0
+        while not contender.try_acquire():
+            if time.monotonic() >= deadline:
+                pytest.fail("the crash guardian did not release the profile")
             time.sleep(0.01)
-        else:
-            pytest.fail("the crash guardian did not release the profile")
+        go.touch()
         assert _wait_gone(driver_pid)
         assert not launched.exists()
     finally:
