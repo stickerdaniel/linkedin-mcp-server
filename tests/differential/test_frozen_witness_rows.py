@@ -21,6 +21,7 @@ import pytest
 from differential.accounting import current
 from differential.baseline import (
     BASELINE_DIR_ENV,
+    REPO_ROOT,
     prepare_frozen_tests,
     remove_baseline,
     verify_checkout,
@@ -48,7 +49,12 @@ pytestmark = pytest.mark.skipif(
 def verdicts(request, tmp_path_factory) -> Iterator[dict[str, Any]]:
     configured = os.environ.get(BASELINE_DIR_ENV)
     directory = Path(configured) if configured else tmp_path_factory.mktemp("baseline")
-    runtime = prepare_frozen_tests(directory)
+    # Pointed at the candidate on purpose: the sync must still bind to the
+    # pin's lock, and `prepare_frozen_tests` refuses a venv that does not
+    # match it, so every run of these rows shows the override was ignored.
+    with pytest.MonkeyPatch.context() as hostile:
+        hostile.setenv("UV_PROJECT", str(REPO_ROOT))
+        runtime = prepare_frozen_tests(directory)
     packet = current(request.config).directory
     recorded = run_witnesses(runtime, packet / "witness-run" / "report.json")
     # The run must not have moved or dirtied the pin it is named after.

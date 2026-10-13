@@ -45,9 +45,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
+import tomllib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,8 +65,16 @@ PACKAGE = "mcp-server-linkedin"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STAGE_SCRIPT = Path(__file__).with_name("baseline_stage.py")
 
-#: Environment that would point ``uv`` at another project's venv.
-_FOREIGN_VENV = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT")
+#: Environment that would point ``uv`` at another project, its venv or its
+#: configuration. ``UV_PROJECT`` set to the candidate binds a sync in the pin's
+#: checkout to the candidate's lock, and the checkout stays clean throughout.
+_FOREIGN_PROJECT = (
+    "VIRTUAL_ENV",
+    "UV_PROJECT_ENVIRONMENT",
+    "UV_PROJECT",
+    "UV_WORKING_DIR",
+    "UV_CONFIG_FILE",
+)
 
 
 class BaselineRefused(RuntimeError):
@@ -244,11 +254,14 @@ def prepare_baseline(
     checkout = _pinned_checkout(directory, pinned, repo)
     timings["checkout"] = round(time.monotonic() - began, 1)
 
-    env = {k: v for k, v in os.environ.items() if k not in _FOREIGN_VENV}
+    env = {k: v for k, v in os.environ.items() if k not in _FOREIGN_PROJECT}
     began = time.monotonic()
     # Runtime dependencies only, exactly as the baseline's lock pins them.
     synced = _run(
-        ["uv", "sync", "--frozen", "--no-dev"], cwd=checkout, env=env, timeout=900
+        ["uv", "sync", "--frozen", "--no-dev", "--project", str(checkout)],
+        cwd=checkout,
+        env=env,
+        timeout=900,
     )
     _checked(synced, "uv sync in the baseline checkout")
     timings["uv_sync"] = round(time.monotonic() - began, 1)
@@ -283,9 +296,9 @@ def prepare_frozen_tests(
     """
     checkout = _pinned_checkout(directory, pinned, repo)
     venv = directory / "tests-venv"
-    env = {k: v for k, v in os.environ.items() if k not in _FOREIGN_VENV}
+    env = {k: v for k, v in os.environ.items() if k not in _FOREIGN_PROJECT}
     synced = _run(
-        ["uv", "sync", "--locked", "--group", "dev"],
+        ["uv", "sync", "--locked", "--group", "dev", "--project", str(checkout)],
         cwd=checkout,
         env={**env, "UV_PROJECT_ENVIRONMENT": str(venv)},
         timeout=900,
@@ -294,8 +307,46 @@ def prepare_frozen_tests(
     python = _interpreter(venv)
     if not python.exists():
         raise BaselineRefused(f"uv sync left no interpreter at {python}")
+    verify_locked_venv(python, checkout / "uv.lock")
     verify_checkout(checkout, pinned)
     return Runtime(str(python), checkout, directory / "ms-playwright", pinned)
+
+
+_INSTALLED_PROGRAM = """
+import json
+from importlib.metadata import distributions
+print(json.dumps({d.metadata["Name"]: d.version for d in distributions()}))
+"""
+
+
+def _normalized(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def verify_locked_venv(python: Path, lock: Path) -> None:
+    """Refuse a venv holding any distribution at a version *lock* does not pin.
+
+    The checkout staying clean proves nothing about the venv: a sync bound to
+    another project's lock leaves the pin's files untouched while installing
+    that project's dependencies. Only what is installed answers that.
+    """
+    locked = {
+        _normalized(package["name"]): package["version"]
+        for package in tomllib.loads(lock.read_text())["package"]
+        if "version" in package
+    }
+    listed = _run([str(python), "-c", _INSTALLED_PROGRAM], timeout=120)
+    _checked(listed, "listing the pin's installed distributions")
+    installed = {_normalized(n): v for n, v in json.loads(listed.stdout).items()}
+    foreign = {
+        name: (version, locked.get(name))
+        for name, version in installed.items()
+        if locked.get(name) != version
+    }
+    if foreign:
+        raise BaselineRefused(
+            f"the pin's venv does not match its lock {lock}: {sorted(foreign.items())}"
+        )
 
 
 def remove_baseline(directory: Path, *, repo: Path = REPO_ROOT) -> None:
