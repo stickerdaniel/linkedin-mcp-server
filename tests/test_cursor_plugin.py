@@ -48,11 +48,11 @@ def test_marketplace_points_at_the_plugin_directory() -> None:
     assert entry["source"] == "plugins/linkedin-mcp-server"
 
 
-def test_cursor_shares_the_version_pinned_mcp_config() -> None:
-    _assert_mcp_contract(_load_json(_PLUGIN_MCP), _released_version())
+def test_cursor_shares_the_plugin_mcp_config() -> None:
+    _assert_mcp_contract(_load_json(_PLUGIN_MCP))
 
 
-def test_readme_cursor_deeplink_matches_pinned_mcp_config() -> None:
+def test_readme_cursor_deeplink_matches_the_plugin_mcp_config() -> None:
     readme = _README.read_text(encoding="utf-8")
     match = re.search(
         rf"{re.escape(_DEEPLINK_PREFIX)}([A-Za-z0-9%]+)",
@@ -69,4 +69,3 @@ def test_release_workflow_updates_and_commits_cursor_manifest() -> None:
     assert workflow.count(cursor_manifest) >= 3
     assert '"Cursor plugin": [cursor_plugin["version"]]' in workflow
     assert "Update plugin versions" in workflow
-    assert "README.md" in workflow

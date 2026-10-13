@@ -369,7 +369,7 @@ codex plugin marketplace add stickerdaniel/linkedin-mcp-server
 codex plugin add linkedin-mcp-server@linkedin-mcp-server
 ```
 
-The plugin pins a server release, and Codex picks up each new one in the background when it starts. On the first tool call that needs authentication, the server reuses a LinkedIn session from a signed-in local browser or opens a login window.
+The plugin runs the latest server release. On the first tool call that needs authentication, the server reuses a LinkedIn session from a signed-in local browser or opens a login window.
 
 > [!NOTE]
 > Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. Retry the tool call once the browser download or sign-in completes.
@@ -390,7 +390,7 @@ claude plugin marketplace add stickerdaniel/linkedin-mcp-server
 claude plugin install linkedin-mcp-server@linkedin-mcp-server
 ```
 
-The plugin pins a server release. To move to a newer one, run `claude plugin update linkedin-mcp-server@linkedin-mcp-server` and restart Claude Code. On the first tool call that needs authentication, the server reuses a LinkedIn session from a signed-in local browser or opens a login window.
+The plugin runs the latest server release. On the first tool call that needs authentication, the server reuses a LinkedIn session from a signed-in local browser or opens a login window.
 
 > [!NOTE]
 > Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. Retry the tool call once the browser download or sign-in completes.
@@ -404,11 +404,11 @@ The plugin pins a server release. To move to a newer one, run `claude plugin upd
 
 ### Installation
 
-**From the Cursor Marketplace:** open **Customize** in the sidebar, search for **LinkedIn MCP**, and choose **Install**. The plugin pins a server release and bundles the LinkedIn skill.
+**From the Cursor Marketplace:** open **Customize** in the sidebar, search for **LinkedIn MCP**, and choose **Install**. The plugin runs the latest server release and bundles the LinkedIn skill.
 
 **One-click MCP install** (server only, without the skill):
 
-[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=linkedin&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJtY3Atc2VydmVyLWxpbmtlZGluQDQuMjcuMCIsIi0tdHJhbnNwb3J0Iiwic3RkaW8iLCItLXRpbWVvdXQiLCIxMDAwMCIsIi0tdG9vbC10aW1lb3V0IiwiMTgwIl0sImVudiI6eyJVVl9IVFRQX1RJTUVPVVQiOiIzMDAifX0%3D)
+[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=linkedin&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJtY3Atc2VydmVyLWxpbmtlZGluQGxhdGVzdCIsIi0tdHJhbnNwb3J0Iiwic3RkaW8iXSwiZW52Ijp7IlVWX0hUVFBfVElNRU9VVCI6IjMwMCJ9fQ%3D%3D)
 
 On the first tool call that needs authentication, the server reuses a LinkedIn session from a signed-in local browser or opens a login window.
 
