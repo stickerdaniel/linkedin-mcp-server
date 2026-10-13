@@ -9,6 +9,10 @@ effect and feed back the event that completes it.
   reads one and writes the other is a single :func:`on_event` call, so either
   the call is admitted and retirement sees it, or retirement wins and the call
   is refused before anything runs.
+- Nothing is admitted before :class:`Published`. A frontend reaches the
+  endpoint only through the canonical descriptor, and an owner whose commit
+  was ambiguous retires instead of publishing, so a call that arrives early
+  is refused like one after retirement.
 - Admission is reserved here, before the shell creates the task; a failed
   start comes back as :class:`StartFailed`. A completion naming a ticket that
   is no longer admitted is stale and changes nothing.
@@ -114,6 +118,8 @@ class Owner:
     instance: str | None = None
     #: Set once and never cleared: a retiring owner admits nothing more.
     retirement: Retirement | None = None
+    #: The endpoint's descriptor is proved canonical. Admission waits for it.
+    published: bool = False
     #: A stand-down was asked for and the drain is owed.
     turnover: bool = False
     phase: Phase = Phase.SERVING
@@ -129,7 +135,8 @@ class Owner:
     calls: Mapping[int, Call] = field(default_factory=dict)
     #: When this owner last did anything for anybody, or ``None`` while a call
     #: is admitted and while the endpoint has not been published. An owner that
-    #: counted its own startup as idle time would exit during it.
+    #: counted its own startup as idle time would exit during it. Not the
+    #: publication flag: it is ``None`` during admitted work too.
     quiet_since: float | None = None
     #: When the owner last asked who was still waiting.
     last_scan: float | None = None
@@ -186,7 +193,7 @@ class BodyBegan:
 
 @dataclass(frozen=True)
 class Published:
-    """The endpoint is live, so idleness starts to mean something."""
+    """The endpoint is live: calls may be admitted, and idleness means something."""
 
     now: float
 
@@ -225,9 +232,7 @@ class TurnOver:
 class Tick:
     """One turn of the owner's lifecycle loop, with what the shell observed.
 
-    The defaults are the observations that do not apply before publication is
-    proved: no idle exit, and a wedge or a stopped endpoint is the shell's own
-    terminal path there.
+    The defaults observe nothing: no idle exit, no wedge, the endpoint serving.
     """
 
     now: float
@@ -271,7 +276,10 @@ class StartTask:
 
 @dataclass(frozen=True)
 class Refused:
-    """The call is not admitted: this owner is retiring. Nothing was counted."""
+    """The call is not admitted: this owner is unpublished or retiring.
+
+    Nothing was counted, and the call never reached a tool.
+    """
 
 
 @dataclass(frozen=True)
@@ -344,6 +352,15 @@ def busy(owner: Owner, *, background: bool = False) -> bool:
     return bool(owner.calls) or background
 
 
+def admitting(owner: Owner) -> bool:
+    """Whether a new call would be admitted now.
+
+    The heartbeat preflight answers from this, so a preflight that passes is
+    never followed by a refused call from the same owner state.
+    """
+    return owner.published and owner.retirement is None
+
+
 def quiet_for(owner: Owner, now: float) -> float | None:
     """Seconds since this owner last had anything to do, if it is free now.
 
@@ -413,9 +430,10 @@ def on_event(owner: Owner, event: Event) -> tuple[Owner, list[Effect]]:
         case BodyBegan():
             return _body_began(owner, event.call_id), []
         case Published():
-            if owner.quiet_since is None and not owner.calls:
-                return replace(owner, quiet_since=event.now), []
-            return owner, []
+            quiet_since = owner.quiet_since
+            if quiet_since is None and not owner.calls:
+                quiet_since = event.now
+            return replace(owner, published=True, quiet_since=quiet_since), []
         case BackgroundFinished():
             # A fresh quiet period, rather than one counted from before the
             # detached work kept the owner active.
@@ -433,7 +451,7 @@ def on_event(owner: Owner, event: Event) -> tuple[Owner, list[Effect]]:
 
 
 def _admit(owner: Owner, event: Admit) -> tuple[Owner, list[Effect]]:
-    if owner.retirement is not None:
+    if not admitting(owner):
         return owner, [Refused()]
     ticket = owner.next_ticket
     # Watched from the moment it is admitted, and already heard: the first

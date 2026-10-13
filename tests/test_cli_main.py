@@ -1335,6 +1335,8 @@ class _Owner:
         daemon_descriptor.commit_prepared(auth_root, self.instance)
         self.liveness = daemon_liveness.get_liveness()
         self.liveness.serving_as(self.instance)
+        # Committed just above, so admission is open, as for the real owner.
+        self.liveness.the_endpoint_is_live()
 
         def stand_down() -> None:
             # What `run_owner`'s own callback does.

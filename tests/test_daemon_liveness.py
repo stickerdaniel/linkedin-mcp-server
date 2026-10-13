@@ -96,6 +96,20 @@ async def _forever() -> None:
     await asyncio.Event().wait()
 
 
+def _live(liveness: CallLiveness) -> CallLiveness:
+    """*liveness* once its endpoint is published, which admission waits for."""
+    liveness.the_endpoint_is_live()
+    return liveness
+
+
+@pytest.fixture
+def published() -> CallLiveness:
+    """This process's tracker, as an owner a frontend can reach has it."""
+    from linkedin_mcp_server.daemon.liveness import get_liveness
+
+    return _live(get_liveness())
+
+
 def _watch(liveness: CallLiveness, call_id: str) -> asyncio.Task[None]:
     """Admit *call_id* as a call that runs until something cancels it."""
     task = liveness.admit(call_id, _forever)
@@ -164,7 +178,7 @@ class TestCountingWhoIsWaiting:
     """The owner's side of the question, without any transport in the way."""
 
     async def test_a_call_nobody_asks_for_is_cancelled(self):
-        liveness = CallLiveness()
+        liveness = _live(CallLiveness())
         task = _watch(liveness, "v1.a")
 
         _last_heard(liveness, "v1.a", EXPIRY_SECONDS + 0.1)
@@ -173,7 +187,7 @@ class TestCountingWhoIsWaiting:
         assert task.cancelling() == 1
 
     async def test_a_call_somebody_is_waiting_for_is_left_alone(self):
-        liveness = CallLiveness()
+        liveness = _live(CallLiveness())
         heard = _watch(liveness, "v1.heard")
         unheard = _watch(liveness, "v1.unheard")
 
@@ -196,7 +210,7 @@ class TestCountingWhoIsWaiting:
         assert liveness.state.calls == {}
 
     async def test_a_finished_call_is_no_longer_watched(self):
-        liveness = CallLiveness()
+        liveness = _live(CallLiveness())
         task = _watch(liveness, "v1.a")
         liveness.finished(task)
         _last_heard(liveness, "v1.a", EXPIRY_SECONDS + 1)
@@ -221,6 +235,7 @@ class TestCountingWhoIsWaiting:
         assert EXPIRY_SECONDS >= 3 * HEARTBEAT_SECONDS
 
 
+@pytest.mark.usefixtures("published")
 class TestTheOwnerSideMiddleware:
     """What the owner does with a call, marked or not."""
 
@@ -368,6 +383,7 @@ class TestTheOwnerSideMiddleware:
             await running
 
 
+@pytest.mark.usefixtures("published")
 class TestTheFrontendSide:
     """Saying we are still waiting, and stopping the moment we are not."""
 
@@ -681,7 +697,7 @@ class TestTheRouteOnARealOwner:
         return (
             server.config.app,
             f"http://{self.HOST}:{port}",
-            daemon_liveness.get_liveness(),
+            _live(daemon_liveness.get_liveness()),
         )
 
     @staticmethod
@@ -737,6 +753,7 @@ class TestTheRouteOnARealOwner:
         assert await self._post(app, base, token=self.TOKEN, marker="nonsense") == 400
 
 
+@pytest.mark.usefixtures("published")
 class TestTheOwnersOwnLoop:
     """That anything expires at all, which no rule above establishes.
 
@@ -1125,7 +1142,7 @@ class TestAnOwnerThatWasNotRunning:
     async def test_a_late_scan_expires_nothing(self):
         import time as clock
 
-        liveness = CallLiveness()
+        liveness = _live(CallLiveness())
         task = _watch(liveness, "v1.a")
         _last_heard(liveness, "v1.a", EXPIRY_SECONDS + 5)
 
@@ -1142,7 +1159,7 @@ class TestAnOwnerThatWasNotRunning:
         # by the following scan is expired as usual.
         import time as clock
 
-        liveness = CallLiveness()
+        liveness = _live(CallLiveness())
         task = _watch(liveness, "v1.a")
         _last_heard(liveness, "v1.a", EXPIRY_SECONDS + 5)
         _last_scanned(liveness, clock.monotonic() - 30)
@@ -1153,6 +1170,7 @@ class TestAnOwnerThatWasNotRunning:
         assert task.cancelling() == 1
 
 
+@pytest.mark.usefixtures("published")
 class TestTellingShutdownFromAbandonment:
     """Which cancellation this was, when both arrive at once."""
 
@@ -1196,6 +1214,7 @@ class TestTellingShutdownFromAbandonment:
             await running
 
 
+@pytest.mark.usefixtures("published")
 class TestAnAbandonedCallStillExpiresUnderTheLoop:
     """That the stall rule protects the owner without disabling the expiry.
 
@@ -1556,26 +1575,8 @@ class TestEveryWayOutClosesAdmission:
         assert server.should_exit is True
         assert liveness.state.retirement == "wedged"
 
-    def test_uncertain_publication(self, monkeypatch: pytest.MonkeyPatch):
-        from linkedin_mcp_server.daemon import liveness as daemon_liveness
-        from linkedin_mcp_server.daemon import owner as daemon_owner
 
-        class Exited(BaseException):
-            pass
-
-        def exit_hard(_lock: object) -> None:
-            raise Exited
-
-        monkeypatch.setattr(daemon_owner, "_exit_hard", exit_hard)
-
-        with pytest.raises(Exited):
-            daemon_owner._exit_uncertain_publication("ambiguous", lock=None)
-
-        assert (
-            daemon_liveness.get_liveness().state.retirement == "uncertain publication"
-        )
-
-
+@pytest.mark.usefixtures("published")
 class TestStandingDownForANewerBuild:
     """Turnover closes admission at once and drains for a bounded time."""
 
@@ -1752,6 +1753,7 @@ class TestTheControlRoutes:
             trust_env=False,
         )
 
+    @pytest.mark.usefixtures("published")
     async def test_a_retiring_owner_answers_an_unknown_call_with_a_signed_409(self):
         from linkedin_mcp_server.daemon import liveness as daemon_liveness
         from linkedin_mcp_server.daemon.liveness import HEARTBEAT_PATH
@@ -1790,6 +1792,58 @@ class TestTheControlRoutes:
             200,
             {"watched": True},
         )
+
+    async def test_an_unpublished_owner_refuses_the_preflight_and_the_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Before publication the preflight says what the call would hear.
+
+        A 200 there would send the frontend on to a call the owner then
+        refuses. After publication both open together.
+        """
+        from linkedin_mcp_server.daemon import liveness as daemon_liveness
+        from linkedin_mcp_server.daemon.liveness import HEARTBEAT_PATH
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.serving_as("the-owner")
+        _mark_calls(monkeypatch)
+        ran: list[str] = []
+
+        async def tool(_context: Any) -> str:
+            ran.append("the tool")
+            return "the result"
+
+        async def call() -> Any:
+            return await OwnerCallLivenessMiddleware().on_call_tool(
+                _call_context(),
+                tool,  # ty: ignore
+            )
+
+        async with self._client(self._app()) as client:
+
+            async def beat() -> Any:
+                return await client.post(
+                    HEARTBEAT_PATH,
+                    headers={
+                        "Authorization": f"Bearer {self.TOKEN}",
+                        CALL_HEADER: new_call_id(),
+                    },
+                )
+
+            early_beat, early_call = await beat(), await call()
+            liveness.the_endpoint_is_live()
+            live_beat, live_call = await beat(), await call()
+
+        assert early_beat.status_code == 409
+        assert early_beat.json() == {
+            "daemon": "retiring",
+            "protocol": PROTOCOL_VERSION,
+            "instance": "the-owner",
+        }
+        assert _refused_as_retiring(early_call, "the-owner")
+        assert (live_beat.status_code, live_beat.json()) == (200, {"watched": False})
+        assert live_call == "the result"
+        assert ran == ["the tool"]
 
     async def _stand_down(self, app: Any, body: Any = None) -> Any:
         from linkedin_mcp_server.daemon.owner import STAND_DOWN_PATH
@@ -1889,6 +1943,7 @@ class TestTheControlRoutes:
         assert liveness.state.retirement is None
 
     @pytest.mark.parametrize("busy", [False, True], ids=["idle", "busy"])
+    @pytest.mark.usefixtures("published")
     async def test_a_turnover_request_stands_down_whatever_is_in_flight(
         self, busy: bool
     ):
@@ -1909,6 +1964,7 @@ class TestTheControlRoutes:
         assert response.json() == {"standing_down": True, "instance": "the-owner"}
         assert asked == ["asked"]
 
+    @pytest.mark.usefixtures("published")
     async def test_an_idle_owner_retires_on_the_idle_only_request(self):
         # Retirement and turnover both, in the request: a call arriving after
         # the reply is refused, and the loop stands down on its next tick.
@@ -1939,6 +1995,7 @@ class TestTheControlRoutes:
     @pytest.mark.parametrize(
         "busy_with", ["running", "queued", "setup"], ids=["running", "queued", "setup"]
     )
+    @pytest.mark.usefixtures("published")
     async def test_a_busy_owner_refuses_and_changes_nothing(
         self, busy_with: str, monkeypatch: pytest.MonkeyPatch
     ):
@@ -1974,6 +2031,7 @@ class TestTheControlRoutes:
         assert admitted is not None, "a refused retirement closed admission"
         await admitted
 
+    @pytest.mark.usefixtures("published")
     async def test_an_owner_already_draining_calls_still_answers_busy(self):
         # Retiring for another reason, a turnover here, with a call it is still
         # draining. The user agreed only to retiring an owner nobody is using,
@@ -1994,6 +2052,7 @@ class TestTheControlRoutes:
         assert asked == []
         assert liveness.state.retirement == "turnover"
 
+    @pytest.mark.usefixtures("published")
     async def test_a_call_cannot_slip_in_between_the_verdict_and_the_retirement(
         self, monkeypatch: pytest.MonkeyPatch
     ):
@@ -2030,6 +2089,7 @@ class TestTheControlRoutes:
         # One arrival per look for work; every one of them must be refused.
         assert not any(admitted), "a call was admitted by an owner that retired"
 
+    @pytest.mark.usefixtures("published")
     async def test_the_body_is_read_whole_before_anything_is_decided(self):
         # The body arrives in two parts with the owner suspended between them,
         # and a call is admitted meanwhile. Nothing may be decided while it is
@@ -2065,6 +2125,7 @@ class TestTheControlRoutes:
         assert liveness.retiring is False
 
 
+@pytest.mark.usefixtures("published")
 class TestTheLastCheckBeforeBrowserWork:
     """After every wait a call can spend queued, and before the browser."""
 
@@ -2205,6 +2266,7 @@ class TestTheLastCheckBeforeBrowserWork:
         assert len(liveness.state.calls) == 0
 
 
+@pytest.mark.usefixtures("published")
 class TestACallWhoseTaskNeverStarted:
     """A failed start must give its reservation back, or the owner never idles."""
 

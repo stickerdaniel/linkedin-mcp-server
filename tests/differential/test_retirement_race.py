@@ -317,6 +317,7 @@ async def test_a_turnover_that_cuts_a_call_is_read_from_the_owners_lines(
 
     monkeypatch.setattr(lifecycle, "TURNOVER_DRAIN_SECONDS", 0.2)
     liveness = daemon_liveness.get_liveness()
+    liveness.the_endpoint_is_live()
 
     async def held() -> None:
         await asyncio.sleep(3600)
