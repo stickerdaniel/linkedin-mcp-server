@@ -153,8 +153,17 @@ Symbols are named relative to `linkedin_mcp_server`. Tests are named as
   era removed ping (SDK `docs/migration.md:1800`), a default client negotiates
   it with a current owner, and a ping came back as an error from a healthy
   owner. Justifies the tool listing in `daemon.election._reachable` and
-  `daemon.owner._probe`. Source `b3fcac2e`, 2026-09-27. Test
+  `daemon.owner.prove_hop`. Source `b3fcac2e`, 2026-09-27. Test
   `tests/test_daemon_election.py::TestSilenceIsNotDeath::test_a_healthy_owner_answers`.
+- **A default-negotiated probe selected an owner no call could reach.** With
+  FastMCP 4.0.10 and MCP 2.2.0, an owner of this package version that refused
+  `2026-07-28` at `server/discover` and served `2025-11-25` passed the probe
+  through the SDK's legacy fallback and was selected in 62 ms. Every forwarded
+  call then failed at the pinned `server/discover`, its recovery selected the
+  same generation, and each call ended as a lost owner in 15 to 30 ms with no
+  tool request sent. Justifies `daemon.election._reachable` negotiating through
+  `daemon.forwarder.pin_hop_version`. Source `b18083a1`, 2026-10-14. Test
+  `tests/test_daemon_election.py::TestTheProbeSpeaksTheHopsVersion::test_an_owner_without_the_pinned_version_is_not_attached_to`.
 - **A flat poll interval overran a small budget.** Before the clamp, a flat
   poll interval turned a 1 ms budget into 101 ms. Justifies never pausing past
   the wait in `daemon.core.lookup`. Source `98e99338`, 2026-07-28. Test

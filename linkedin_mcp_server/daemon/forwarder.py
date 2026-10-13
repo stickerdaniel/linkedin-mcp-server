@@ -553,25 +553,20 @@ class _HopVersionRefused(RuntimeError):
 _NOT_SERVED = frozenset({mt.METHOD_NOT_FOUND, mt.UNSUPPORTED_PROTOCOL_VERSION})
 
 
-async def _pin(session: _HopSession, hop: _Hop) -> None:
+async def pin_hop_version(session: ClientSession) -> None:
     """Settle on :data:`HOP_PROTOCOL_VERSION`, and nothing else, with the owner.
 
     Proposed with ``server/discover``, which sends nothing a tool could act
     on, and adopted only as that one version even when the owner lists newer
-    ones beside it.
+    ones beside it. Every hop and both endpoint probes
+    (``daemon.owner.prove_hop``) negotiate here, so an owner is attached
+    to only if it serves what every forwarded call will propose; the SDK's
+    default would fall back to an older era that no call can use.
+
+    Raises :class:`_HopVersionRefused` for a result without the version, and
+    whatever the SDK raised for a refused or failed proposal.
     """
-    # `send_discover` does not pass through `send_request`, so the check that
-    # every other request gets there is made here.
-    hop.refuse_if_written_off()
-    try:
-        raw = await session.send_discover(HOP_PROTOCOL_VERSION)
-    except MCPError as refused:
-        if refused.code in _NOT_SERVED and hop.wire.answered_with(refused):
-            raise _HopVersionRefused(
-                f"The shared browser owner does not serve protocol "
-                f"{HOP_PROTOCOL_VERSION!r}: {refused}"
-            ) from refused
-        raise
+    raw = await session.send_discover(HOP_PROTOCOL_VERSION)
     result = mt.DiscoverResult.model_validate(raw)
     if HOP_PROTOCOL_VERSION not in result.supported_versions:
         raise _HopVersionRefused(
@@ -581,6 +576,22 @@ async def _pin(session: _HopSession, hop: _Hop) -> None:
     session.adopt(
         result.model_copy(update={"supported_versions": [HOP_PROTOCOL_VERSION]})
     )
+
+
+async def _pin(session: _HopSession, hop: _Hop) -> None:
+    """:func:`pin_hop_version` on one hop, judged against what its wire showed."""
+    # `send_discover` does not pass through `send_request`, so the check that
+    # every other request gets there is made here.
+    hop.refuse_if_written_off()
+    try:
+        await pin_hop_version(session)
+    except MCPError as refused:
+        if refused.code in _NOT_SERVED and hop.wire.answered_with(refused):
+            raise _HopVersionRefused(
+                f"The shared browser owner does not serve protocol "
+                f"{HOP_PROTOCOL_VERSION!r}: {refused}"
+            ) from refused
+        raise
 
 
 @dataclass
