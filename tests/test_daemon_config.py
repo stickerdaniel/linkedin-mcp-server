@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Iterator
 from dataclasses import fields
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -192,6 +194,25 @@ class TestRoundTrip:
         assert restored.server.tool_timeout_seconds == 42.5
 
 
+@pytest.fixture
+def owner_streams(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Give the owner output streams of its own to redirect into the log.
+
+    `_attach_daemon_log` points stdout and stderr at the log with a real
+    `os.dup2`. On the runner's own descriptors that would send pytest's output
+    into a temporary file, and stubbing `os.dup2` instead replaces it for the
+    whole process, so pytest's capture loses the calls that restore its streams.
+    """
+    from linkedin_mcp_server.daemon import owner as daemon_owner
+
+    with open(os.devnull, "w") as stdout, open(os.devnull, "w") as stderr:
+        monkeypatch.setattr(
+            daemon_owner, "sys", SimpleNamespace(stdout=stdout, stderr=stderr)
+        )
+        yield
+
+
+@pytest.mark.usefixtures("owner_streams")
 class TestDaemonLogState:
     @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are required")
     def test_fresh_log_state_is_private_under_umask_zero(
@@ -201,13 +222,6 @@ class TestDaemonLogState:
         from linkedin_mcp_server.daemon import owner as daemon_owner
 
         monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
-        monkeypatch.setattr(daemon_owner.os, "dup2", lambda *args: None)
-        stream = type("Stream", (), {"fileno": lambda self: 1})()
-        monkeypatch.setattr(
-            daemon_owner,
-            "sys",
-            type("Streams", (), {"stdout": stream, "stderr": stream})(),
-        )
         previous = os.umask(0)
         try:
             log_path = daemon_owner._attach_daemon_log(tmp_path / "auth")
@@ -229,13 +243,6 @@ class TestDaemonLogState:
         from linkedin_mcp_server.windows_acl import describe_dacl
 
         monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
-        monkeypatch.setattr(daemon_owner.os, "dup2", lambda *args: None)
-        stream = type("Stream", (), {"fileno": lambda self: 1})()
-        monkeypatch.setattr(
-            daemon_owner,
-            "sys",
-            type("Streams", (), {"stdout": stream, "stderr": stream})(),
-        )
 
         log_path = daemon_owner._attach_daemon_log(tmp_path / "auth")
 
@@ -337,13 +344,6 @@ class TestDaemonLogState:
         from linkedin_mcp_server.daemon import owner as daemon_owner
 
         monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
-        monkeypatch.setattr(daemon_owner.os, "dup2", lambda *args: None)
-        stream = type("Stream", (), {"fileno": lambda self: 1})()
-        monkeypatch.setattr(
-            daemon_owner,
-            "sys",
-            type("Streams", (), {"stdout": stream, "stderr": stream})(),
-        )
         log_path = daemon_owner.daemon_log_path(tmp_path / "auth")
         real_open = os.open
 
@@ -412,13 +412,6 @@ class TestDaemonLogState:
         from linkedin_mcp_server.daemon import owner as daemon_owner
 
         monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
-        monkeypatch.setattr(daemon_owner.os, "dup2", lambda *args: None)
-        stream = type("Stream", (), {"fileno": lambda self: 1})()
-        monkeypatch.setattr(
-            daemon_owner,
-            "sys",
-            type("Streams", (), {"stdout": stream, "stderr": stream})(),
-        )
         directory = daemon_descriptor.daemon_dir(tmp_path / "auth")
         directory.mkdir(parents=True, mode=0o777)
         directory.chmod(0o777)
