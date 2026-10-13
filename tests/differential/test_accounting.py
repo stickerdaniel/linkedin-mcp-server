@@ -76,7 +76,7 @@ def test_two():
 """
 
 
-def _counts(pytester: pytest.Pytester, monkeypatch, source: str, *extra: str) -> dict:
+def _written(pytester: pytest.Pytester, monkeypatch, source: str, *extra: str) -> dict:
     out = pytester.path / "evidence"
     monkeypatch.setenv(OUT_ENV, str(out))
     monkeypatch.setenv("PYTHONPATH", str(TESTS_DIR))
@@ -87,7 +87,11 @@ def _counts(pytester: pytest.Pytester, monkeypatch, source: str, *extra: str) ->
     )
     written = sorted(out.glob(f"*/{COUNTS_FILE}"))
     assert len(written) == 1, sorted(p.name for p in out.glob("**/*"))
-    cells = json.loads(written[0].read_text())["cases"]
+    return json.loads(written[0].read_text())
+
+
+def _counts(pytester: pytest.Pytester, monkeypatch, source: str, *extra: str) -> dict:
+    cells = _written(pytester, monkeypatch, source, *extra)["cases"]
     return {
         cell["experiment"]: (cell["executed"], cell["skipped"], cell["failed"])
         for cell in cells
@@ -108,6 +112,14 @@ def test_an_all_skipped_selection_still_writes_counts(pytester, monkeypatch):
         "K1": (0, 1, 0),
         "K3": (0, 1, 0),
     }
+
+
+def test_each_case_is_kept_by_node_with_the_reason_it_skipped(pytester, monkeypatch):
+    nodes = _written(pytester, monkeypatch, _SKIPPED)["nodes"]
+    assert [(n["node"], n["status"], n["reason"]) for n in nodes] == [
+        ("test_cases.py::test_one", "skipped", "not opted in"),
+        ("test_cases.py::test_two", "skipped", "not opted in"),
+    ]
 
 
 def test_under_xdist_the_controller_counts_every_workers_cases(pytester, monkeypatch):

@@ -212,6 +212,9 @@ EXPERIMENTS = frozenset({"K0", "K1", "K2", "K3"})
 #: them apart so a unit pass never stands in for a missing native one.
 COLUMNS = frozenset({"unit", "integrated", "manual"})
 
+#: What kind of evidence each column is, as a packet's node records label it.
+EVIDENCE = {"unit": "source-model", "integrated": "native", "manual": "manual"}
+
 STATUSES = ("executed", "skipped", "failed")
 
 
@@ -316,9 +319,15 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 @dataclass
 class Counts:
-    """Executed, skipped and failed cases per experiment, row, platform, column."""
+    """Executed, skipped and failed cases per experiment, row, platform, column.
+
+    A case recorded with its *node* id is also kept whole under ``nodes``, with
+    its evidence label and, for a skip, its reason: a count says how many cells
+    ran, the nodes say which tests they were and why one did not.
+    """
 
     _cells: Counter[tuple[str, str, str, str, str]] = field(default_factory=Counter)
+    _nodes: list[dict[str, Any]] = field(default_factory=list)
 
     def record(
         self,
@@ -328,6 +337,8 @@ class Counts:
         column: str,
         status: str,
         platform: str | None = None,
+        node: str | None = None,
+        reason: str | None = None,
     ) -> None:
         if experiment not in EXPERIMENTS:
             raise ValueError(f"unknown experiment {experiment!r}")
@@ -335,8 +346,21 @@ class Counts:
             raise ValueError(f"unknown column {column!r}")
         if status not in STATUSES:
             raise ValueError(f"unknown status {status!r}")
-        key = (experiment, row, platform or current_platform(), column, status)
-        self._cells[key] += 1
+        platform = platform or current_platform()
+        self._cells[(experiment, row, platform, column, status)] += 1
+        if node is not None:
+            self._nodes.append(
+                {
+                    "node": node,
+                    "experiment": experiment,
+                    "row": row,
+                    "platform": platform,
+                    "column": column,
+                    "evidence": EVIDENCE[column],
+                    "status": status,
+                    "reason": reason,
+                }
+            )
 
     def __bool__(self) -> bool:
         return bool(self._cells)
@@ -362,8 +386,12 @@ class Counts:
 
     def write(self, directory: Path) -> Path:
         path = directory / COUNTS_FILE
+        nodes = sorted(self._nodes, key=lambda n: (n["node"], n["experiment"]))
         path.write_text(
-            json.dumps({"cases": self.as_rows()}, indent=2, sort_keys=True) + "\n",
+            json.dumps(
+                {"cases": self.as_rows(), "nodes": nodes}, indent=2, sort_keys=True
+            )
+            + "\n",
             encoding="utf-8",
         )
         return path
@@ -495,6 +523,9 @@ PUBLISHED_FILES = frozenset(
         "first-navigation.json",
         "browser-lifetimes.json",
         "cookie-lineage.json",
+        # K2's source-model witnesses at the pin, judged per node
+        # (``frozen_witnesses``).
+        "witnesses.json",
     }
 )
 

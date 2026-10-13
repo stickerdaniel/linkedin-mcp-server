@@ -272,3 +272,9 @@ def model_rows() -> dict[str, list[str]]:
             if row not in rows:
                 rows.append(row)
     return found
+
+
+if __name__ == "__main__":
+    # One node id a line, for ``pytest @FILE`` in the evidence workflow, which
+    # runs every mapped test on each platform.
+    print("\n".join(model_rows()))
