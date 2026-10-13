@@ -7509,8 +7509,17 @@ class TestPublishingLast:
             "warning",
             lambda *args, **kwargs: order.append("diagnostic"),
         )
+        exited: list[object] = []
 
-        with pytest.raises(type(failure)):
+        def exit_hard(lock: object) -> NoReturn:
+            exited.append(lock)
+            raise _ProcessEnded
+
+        monkeypatch.setattr(daemon_owner, "_exit_hard", exit_hard)
+
+        # Even after the endpoint stopped cleanly: the error would otherwise
+        # travel on to `main`, which logs it with the lock still held.
+        with pytest.raises(_ProcessEnded):
             self._run_serve(tmp_path, monkeypatch, order, commit_failures=[failure])
 
         assert order == [
@@ -7525,6 +7534,7 @@ class TestPublishingLast:
         liveness = daemon_owner.get_liveness()
         assert liveness.state.retirement is Retirement.UNCERTAIN_PUBLICATION
         assert not liveness.admitting
+        assert len(exited) == 1 and isinstance(exited[0], DaemonLock)
 
     def test_a_call_reaching_an_ambiguous_owner_is_refused_unrun(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -7581,7 +7591,12 @@ class TestPublishingLast:
                 while not self.should_exit:
                     await asyncio.sleep(0)
 
-        with pytest.raises(OSError, match="rename reply was lost"):
+        def exit_hard(lock: object) -> NoReturn:
+            raise _ProcessEnded
+
+        monkeypatch.setattr(daemon_owner, "_exit_hard", exit_hard)
+
+        with pytest.raises(_ProcessEnded):
             self._run_serve(
                 tmp_path,
                 monkeypatch,
@@ -7668,12 +7683,16 @@ class TestPublishingLast:
         arrives from the watchdog, since no await can interrupt the write.
         """
         order: list[str] = []
-        exited: list[object] = []
+        exited: list[tuple[threading.Thread, object]] = []
         released = threading.Event()
 
         def exit_hard(lock: object) -> None:
-            exited.append(lock)
+            exited.append((threading.current_thread(), lock))
             released.set()
+            # The watchdog's exit ends a real process from its own thread; here
+            # it only releases the log, and the owner's own exit ends the case.
+            if threading.current_thread() is threading.main_thread():
+                raise _ProcessEnded
 
         def stalled_log(*args: object, **kwargs: object) -> None:
             order.append("diagnostic")
@@ -7685,7 +7704,7 @@ class TestPublishingLast:
         monkeypatch.setattr(daemon_owner.logger, "warning", stalled_log)
         started = time.monotonic()
 
-        with pytest.raises(OSError, match="rename reply was lost"):
+        with pytest.raises(_ProcessEnded):
             self._run_serve(
                 tmp_path,
                 monkeypatch,
@@ -7695,7 +7714,9 @@ class TestPublishingLast:
 
         assert time.monotonic() - started < 2.0
         assert order[-2:] == ["failed", "diagnostic"]
-        assert len(exited) == 1 and isinstance(exited[0], DaemonLock)
+        [(thread, lock), *_] = exited
+        assert thread is not threading.main_thread()
+        assert isinstance(lock, DaemonLock)
 
     def test_an_ambiguous_owner_cancelled_while_stopping_still_exits(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -7708,7 +7729,7 @@ class TestPublishingLast:
 
         async def cancelled_stop(*args: object, **kwargs: object) -> None:
             # Only the first stop is cancelled; the outer handler's own stop is
-            # reached here only because the test's hard exit returns control.
+            # reached only because the test's exit raises instead of ending.
             stops.append(args)
             if len(stops) == 1:
                 raise asyncio.CancelledError

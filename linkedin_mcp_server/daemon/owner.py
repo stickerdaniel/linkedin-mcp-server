@@ -766,9 +766,10 @@ async def _serve(
             # and the token stays for ordinary successor handling.
             get_liveness().retire(Retirement.UNCERTAIN_PUBLICATION)
             # The log sits on the same storage that just stalled the rename, so
-            # the watchdog bounds the synchronous writes too, and FAILED goes
-            # out before them. A cancelled stop still ends in the hard exit,
-            # because only that frees the lock for a successor.
+            # the watchdog bounds every synchronous write, and FAILED goes out
+            # before them. The process ends inside the guard, even after a
+            # clean or cancelled stop: anything later, such as `main` logging
+            # the error, would run with the lock held and nothing bounding it.
             with _hard_exit_after(_FAILED_STARTUP_SHUTDOWN_SECONDS, lock):
                 handshake.fail()
                 logger.warning(
@@ -780,9 +781,8 @@ async def _serve(
                     await _stop_within(
                         serving, _FAILED_STARTUP_SHUTDOWN_SECONDS, lock=lock
                     )
-                except BaseException:
+                finally:
                     _exit_hard(lock)
-            raise
 
         # Publication is now proved. Only in-memory startup state and the verdict
         # follow, so a blocked log or state mount cannot strand a canonical owner
