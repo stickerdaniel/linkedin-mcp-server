@@ -168,6 +168,65 @@ def _wait_gone(*pids: int, within: float = 5.0) -> bool:
         time.sleep(0.01)
 
 
+def _first_line(process: subprocess.Popen[Any], within: float = 30.0) -> str:
+    # The whole line under one deadline: readiness says only that some bytes
+    # arrived, and a process can stall before the newline. Reads the pipe
+    # beneath any text wrapper, so the wrapper must not be read afterwards.
+    assert process.stdout is not None
+    fd = process.stdout.fileno()
+    deadline = time.monotonic() + within
+    line = b""
+    while not line.endswith(b"\n"):
+        left = deadline - time.monotonic()
+        assert left > 0, f"{process.pid} never wrote its first line"
+        ready, _, _ = select.select([fd], [], [], left)
+        if ready:
+            chunk = os.read(fd, 64)
+            assert chunk, f"{process.pid} closed its output before a line"
+            line += chunk
+    return line.decode()
+
+
+def _acquire_within(lease: ProfileLease, within: float = 30.0) -> None:
+    # The crash guardian holds the profile until a process scan answers, and a
+    # loaded host can keep ps past its one-second bound for as long as the
+    # load lasts. Nothing in the guardian ends that hold, so the wait for it is
+    # a deadline, not a count of polls that lasts a few seconds.
+    deadline = time.monotonic() + within
+    while not lease.try_acquire():
+        if time.monotonic() >= deadline:
+            pytest.fail("the crash guardian did not release the profile")
+        time.sleep(0.01)
+
+
+def _marked_environment(marker: str) -> dict[str, str]:
+    # The crash guardian inherits its owner's environment, so a marker given
+    # to the owner names the guardian too, which no argv of it does.
+    return {**os.environ, process_tree._BROWSER_PROCESS_MARKER: marker}
+
+
+def _end_marked(*markers: str) -> None:
+    # Ends whatever still carries one of *markers*. The guardian and a detached
+    # browser lead their own sessions, so the owner's group never reaches them,
+    # and a stalled owner may never name them. A PID reported earlier is no
+    # identity either: once its process exits, the number can belong to anyone.
+    # A guardian left running keeps the profile locked after the test.
+    deadline = time.monotonic() + 30.0
+    found: list[int] = []
+    for marker in markers:
+        while not (
+            scan := process_tree._scan_marked_posix_processes(marker)
+        ).conclusive:
+            if time.monotonic() >= deadline:
+                pytest.fail("no process scan answered, so a marked process may survive")
+            time.sleep(0.1)
+        found.extend(scan.processes)
+    for pid in found:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+    assert _wait_gone(*found), "a marked process outlived SIGKILL"
+
+
 @pytest.mark.parametrize(("exit_code", "expected"), [(259, True), (7, False)])
 def test_windows_liveness_query_does_not_signal(
     exit_code: int, expected: bool, monkeypatch: pytest.MonkeyPatch
@@ -2143,23 +2202,6 @@ def test_marker_drain_buries_a_group_whose_leader_already_exited():
     leaders: list[subprocess.Popen[bytes]] = []
     children: list[int] = []
 
-    def first_line(leader: subprocess.Popen[bytes], within: float) -> bytes:
-        # The whole line under one deadline: readiness says only that some
-        # bytes arrived, and a leader can stall before the newline.
-        assert leader.stdout is not None
-        fd = leader.stdout.fileno()
-        deadline = time.monotonic() + within
-        line = b""
-        while not line.endswith(b"\n"):
-            left = deadline - time.monotonic()
-            assert left > 0, "the leader never named its child"
-            ready, _, _ = select.select([fd], [], [], left)
-            if ready:
-                chunk = os.read(fd, 64)
-                assert chunk, "the leader closed its output without a child"
-                line += chunk
-        return line
-
     def launch(marker: str) -> tuple[int, int]:
         environment = dict(os.environ)
         environment[process_tree._BROWSER_PROCESS_MARKER] = marker
@@ -2170,7 +2212,7 @@ def test_marker_drain_buries_a_group_whose_leader_already_exited():
             env=environment,
         )
         leaders.append(leader)
-        child_pid = int(first_line(leader, 30.0))
+        child_pid = int(_first_line(leader))
         children.append(child_pid)
         # The leader exits at once, exactly as it does once Patchright has
         # closed the browser it spawned; its group outlives it.
@@ -2632,8 +2674,11 @@ def test_crash_guardian_holds_profile_until_detached_browser_is_gone(
     tmp_path: Path,
 ):
     auth_root = tmp_path / "auth"
+    marker = secrets.token_hex(32)
+    browser_marker = secrets.token_hex(32)
     script = r"""
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -2651,7 +2696,11 @@ auth_root.mkdir(parents=True)
 lease = ProfileLease(auth_root)
 assert lease.try_acquire()
 start_browser_guardian(lease.guardian_fd())
+# The test chooses the browser's marker value, so its teardown finds the
+# browser even if this owner stalls before reporting it.
+secrets.token_hex = lambda _nbytes=None: sys.argv[2]
 marker, marker_environment = new_browser_process_marker()
+assert marker == sys.argv[2]
 environment = dict(os.environ)
 environment.update(marker_environment)
 browser = subprocess.Popen(
@@ -2667,31 +2716,24 @@ print(os.getpid(), browser.pid, flush=True)
 time.sleep(600)
 """
     process = subprocess.Popen(
-        [sys.executable, "-c", script, str(auth_root)],
+        [sys.executable, "-c", script, str(auth_root), browser_marker],
         cwd=_REPO_ROOT,
         start_new_session=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=_marked_environment(marker),
     )
     contender = None
-    browser_pid: int | None = None
     try:
-        assert process.stdout is not None
-        reported_owner, browser_pid = map(int, process.stdout.readline().split())
+        reported_owner, browser_pid = map(int, _first_line(process).split())
         assert reported_owner == process.pid
         os.kill(process.pid, signal.SIGKILL)
         assert process.wait(timeout=30) == -signal.SIGKILL
 
         contender = ProfileLease(auth_root)
-        acquired = False
-        for _ in range(500):
-            if contender.try_acquire():
-                acquired = True
-                assert not _alive(browser_pid)
-                break
-            time.sleep(0.01)
-        assert acquired
+        _acquire_within(contender)
+        assert not _alive(browser_pid)
         assert _wait_gone(browser_pid)
     finally:
         if contender is not None:
@@ -2699,8 +2741,7 @@ time.sleep(600)
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=30)
-        if browser_pid is not None and _liveness(browser_pid) is not False:
-            os.killpg(browser_pid, signal.SIGKILL)
+        _end_marked(marker, browser_marker)
 
 
 @_POSIX_ONLY
@@ -2712,6 +2753,8 @@ def test_crash_guardian_stops_a_driver_before_its_delayed_browser_launch(
     # again: the latest a surviving driver could, ordered by the lease rather
     # than by a wall-clock delay that a loaded scheduler can outlast.
     auth_root = tmp_path / "auth"
+    marker = secrets.token_hex(32)
+    browser_marker = secrets.token_hex(32)
     go = tmp_path / "launch"
     launched = tmp_path / "browser-pid"
     driver_code = r"""
@@ -2744,6 +2787,7 @@ time.sleep(600)
     owner_code = r"""
 import json
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -2760,7 +2804,11 @@ auth_root.mkdir(parents=True)
 lease = ProfileLease(auth_root)
 assert lease.try_acquire()
 start_browser_guardian(lease.guardian_fd())
-_marker, marker_environment = new_browser_process_marker()
+# The test chooses the browser's marker value, so its teardown finds the
+# browser even if this owner stalls before reporting it.
+secrets.token_hex = lambda _nbytes=None: sys.argv[5]
+marker, marker_environment = new_browser_process_marker()
+assert marker == sys.argv[5]
 driver = subprocess.Popen(
     [
         sys.executable,
@@ -2786,32 +2834,24 @@ time.sleep(600)
             str(launched),
             str(go),
             driver_code,
+            browser_marker,
         ],
         cwd=_REPO_ROOT,
         start_new_session=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=_marked_environment(marker),
     )
     contender = None
-    driver_pid: int | None = None
     try:
-        assert process.stdout is not None
-        reported_owner, driver_pid = map(int, process.stdout.readline().split())
+        reported_owner, driver_pid = map(int, _first_line(process).split())
         assert reported_owner == process.pid
         os.kill(process.pid, signal.SIGKILL)
         assert process.wait(timeout=30) == -signal.SIGKILL
 
-        # The guardian holds the profile until a process scan answers, and a
-        # loaded host can keep ps past its one-second bound for as long as the
-        # load lasts. Nothing in the guardian ends that hold, so the wait for
-        # it is a deadline, not a count of polls that lasts a few seconds.
         contender = ProfileLease(auth_root)
-        deadline = time.monotonic() + 30.0
-        while not contender.try_acquire():
-            if time.monotonic() >= deadline:
-                pytest.fail("the crash guardian did not release the profile")
-            time.sleep(0.01)
+        _acquire_within(contender)
         go.touch()
         assert _wait_gone(driver_pid)
         assert not launched.exists()
@@ -2821,12 +2861,7 @@ time.sleep(600)
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=30)
-        if driver_pid is not None and _liveness(driver_pid) is not False:
-            os.kill(driver_pid, signal.SIGKILL)
-        if launched.exists():
-            browser_pid = int(launched.read_text())
-            if _liveness(browser_pid) is not False:
-                os.killpg(browser_pid, signal.SIGKILL)
+        _end_marked(marker, browser_marker)
 
 
 @_POSIX_ONLY
