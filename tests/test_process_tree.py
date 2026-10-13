@@ -211,8 +211,9 @@ def _end_marked(*markers: str) -> None:
     # and a stalled owner may never name them. A PID reported earlier is no
     # identity either: once its process exits, the number can belong to anyone.
     # A guardian left running keeps the profile locked after the test.
+    # One marker at a time, parents first: a driver still alive between a
+    # scan and its kill could launch a browser the scan never saw.
     deadline = time.monotonic() + 30.0
-    found: list[int] = []
     for marker in markers:
         while not (
             scan := process_tree._scan_marked_posix_processes(marker)
@@ -220,11 +221,10 @@ def _end_marked(*markers: str) -> None:
             if time.monotonic() >= deadline:
                 pytest.fail("no process scan answered, so a marked process may survive")
             time.sleep(0.1)
-        found.extend(scan.processes)
-    for pid in found:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGKILL)
-    assert _wait_gone(*found), "a marked process outlived SIGKILL"
+        for pid in scan.processes:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+        assert _wait_gone(*scan.processes), "a marked process outlived SIGKILL"
 
 
 @pytest.mark.parametrize(("exit_code", "expected"), [(259, True), (7, False)])
