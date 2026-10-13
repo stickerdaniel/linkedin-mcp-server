@@ -128,7 +128,12 @@ async def act(page, html: str, job_id: str) -> str:
     reader = _reader(page)
     with (
         patch.object(reader._navigator, "_navigate_to_page", new_callable=AsyncMock),
-        patch.object(PageSession, "scroll_job_sidebar", new_callable=AsyncMock),
+        patch.object(
+            PageSession,
+            "scroll_job_sidebar",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
     ):
         return await reader.dismiss_search_card(SEARCH_URL, job_id)
 
@@ -200,10 +205,69 @@ async def test_a_reloaded_search_without_the_card_does_not_list_it(dom_page):
     reader = _reader(dom_page)
     with (
         patch.object(reader._navigator, "_navigate_to_page", new_callable=AsyncMock),
-        patch.object(PageSession, "scroll_job_sidebar", new_callable=AsyncMock),
+        patch.object(
+            PageSession,
+            "scroll_job_sidebar",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
     ):
         assert await reader.search_lists_job(SEARCH_URL, "111") is True
         assert await reader.search_lists_job(SEARCH_URL, "222") is False
+
+
+async def lists(
+    page,
+    html: str,
+    job_id: str,
+    *,
+    landing: str = SEARCH_URL,
+    scroll_raised: bool = False,
+) -> bool:
+    """Serve ``html`` at ``landing`` and ask whether the search lists ``job_id``."""
+    await page.goto(landing)
+    await page.set_content(html)
+    reader = _reader(page)
+    with (
+        patch.object(reader._navigator, "_navigate_to_page", new_callable=AsyncMock),
+        patch.object(
+            PageSession,
+            "scroll_job_sidebar",
+            new_callable=AsyncMock,
+            return_value=scroll_raised,
+        ),
+    ):
+        return await reader.search_lists_job(SEARCH_URL, job_id)
+
+
+async def test_a_reload_that_rendered_no_card_confirms_nothing(dom_page):
+    with pytest.raises(LinkedInOperationError, match="rendered no result cards"):
+        await lists(dom_page, search(), "111")
+
+
+async def test_a_rail_that_could_not_be_scrolled_confirms_nothing(dom_page):
+    with pytest.raises(LinkedInOperationError, match="could not be scrolled"):
+        await lists(dom_page, search(card("222")), "111", scroll_raised=True)
+
+
+async def test_a_search_that_lost_its_keywords_confirms_nothing(dom_page):
+    landing = "https://www.linkedin.com/jobs/search/?keywords=Other"
+    with pytest.raises(LinkedInOperationError, match="lost its keywords"):
+        await lists(dom_page, search(card("222")), "111", landing=landing)
+
+
+async def test_a_search_that_lost_its_query_confirms_nothing(dom_page):
+    landing = "https://www.linkedin.com/jobs/search/"
+    with pytest.raises(LinkedInOperationError, match="lost its keywords"):
+        await lists(dom_page, search(card("222")), "111", landing=landing)
+
+
+async def test_linkedin_may_add_the_current_job_and_move_to_its_redesign(dom_page):
+    landing = (
+        "https://www.linkedin.com/jobs/search-results/"
+        "?keywords=Engineer&currentJobId=222"
+    )
+    assert await lists(dom_page, search(card("222")), "111", landing=landing) is False
 
 
 async def read_title(page, landing: str, html: str) -> tuple[str, str]:

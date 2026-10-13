@@ -15,6 +15,7 @@ import asyncio
 import logging
 import re
 import time
+from urllib.parse import parse_qs, urlparse
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -911,7 +912,12 @@ class JobPageReader:
         """Navigate to a job search and wait for its result cards to render.
 
         Raises when the navigation ends anywhere but a job search, after
-        offering the page to the auth-barrier check. A search with no results
+        offering the page to the auth-barrier check, or on a search that lost
+        part of its query: a redirect to the bare search page keeps the route
+        and drops the query whole, and its results are an answer to another
+        question. The keywords are compared by value and the other parameters
+        by presence, as `search_jobs` does, since LinkedIn re-encodes some of
+        them and appends `currentJobId` by itself. A search with no results
         renders no card, so that wait ends in silence.
         """
         await self._navigator._navigate_to_page(url)
@@ -921,6 +927,18 @@ class JobPageReader:
             await self._navigator._raise_if_auth_barrier(page.url)
             raise LinkedInOperationError(
                 f"The job search navigation ended on {page.url}"
+            )
+        asked = parse_qs(urlparse(url).query)
+        landed = parse_qs(urlparse(page.url).query)
+        lost = sorted(
+            name
+            for name in asked
+            if not landed.get(name)
+            or (name == "keywords" and landed[name][0] != asked[name][0])
+        )
+        if lost:
+            raise LinkedInOperationError(
+                f"The job search lost its {', '.join(lost)} on the way to {page.url}"
             )
         await self._session.dismiss_modal()
         try:
@@ -945,11 +963,16 @@ class JobPageReader:
         """Find ``job_id``'s card, scrolling the rail once when it is not there.
 
         A found card is polled until its buttons render, since an occluded
-        card is an empty `li` until it nears the viewport.
+        card is an empty `li` until it nears the viewport. A scroll that
+        raised leaves the rest of the rail unread, so it is an error rather
+        than a job the search does not list.
         """
         found = await self._find_search_card(job_id)
         if not found["matches"]:
-            await self._session.scroll_job_sidebar(deadline=SCROLL_DEADLINE_MAX)
+            if await self._session.scroll_job_sidebar(deadline=SCROLL_DEADLINE_MAX):
+                raise LinkedInOperationError(
+                    "The job search results could not be scrolled to the end"
+                )
             found = await self._find_search_card(job_id)
         deadline = self._session.monotonic() + _SEARCH_CARD_RENDER_TIMEOUT
         while (
@@ -962,9 +985,23 @@ class JobPageReader:
         return found
 
     async def search_lists_job(self, url: str, job_id: str) -> bool:
-        """Whether the job search at ``url`` shows a card for ``job_id``."""
+        """Whether the job search at ``url`` shows a card for ``job_id``.
+
+        Only a search that rendered other cards can say the job is not among
+        them: a reload that rendered none, blank or still loading, raises
+        instead, since reading it as "not listed" would confirm a dismissal
+        nothing confirmed.
+        """
         await self._open_job_search(url)
-        return bool((await self._locate_search_card(job_id))["matches"])
+        found = await self._locate_search_card(job_id)
+        if found["matches"]:
+            return True
+        if not found["cards"]:
+            raise LinkedInOperationError(
+                f"The job search at {url} rendered no result cards, so whether "
+                f"it still lists job {job_id} could not be read"
+            )
+        return False
 
     async def dismiss_search_card(self, url: str, job_id: str) -> SearchCardOutcome:
         """Click the dismiss button on ``job_id``'s card in the search at ``url``.
