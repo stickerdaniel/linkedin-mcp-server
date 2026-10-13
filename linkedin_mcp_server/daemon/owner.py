@@ -298,22 +298,31 @@ def direct_async_http_client(
     )
 
 
-async def _probe(url: str, token: str) -> None:
-    """Prove the endpoint answers this token before anything is published.
+async def prove_hop(url: str, token: str) -> None:
+    """Prove the endpoint serves the hop a frontend forwards over, or raise.
 
     An authenticated MCP round trip, because a TCP connect succeeds before any
     route is mounted. A tool listing rather than a ping: protocol 2026-07-28
-    removed ping, and listing touches no browser.
+    removed ping, and listing touches no browser. Negotiated as the forwarder
+    negotiates (``forwarder.pin_hop_version``): with the SDK's default, an
+    endpoint whose dependencies no longer serve the pinned version answered
+    through an older era and then failed every call. The owner asks this of
+    itself before publishing; a frontend asks it at discovery.
     """
-    from fastmcp import Client
-    from fastmcp.client.transports import StreamableHttpTransport
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
 
-    async with Client(
-        StreamableHttpTransport(
-            url, auth=token, httpx_client_factory=direct_async_http_client
-        )
-    ) as client:
-        await client.list_tools()
+    from linkedin_mcp_server.daemon.forwarder import pin_hop_version
+
+    async with (
+        # Never through a proxy: this is a loopback hop carrying the token to a
+        # logged-in session. See ``direct_http_client``.
+        direct_async_http_client(headers={"Authorization": f"Bearer {token}"}) as http,
+        streamable_http_client(url, http_client=http) as (read, write),
+        ClientSession(read, write) as session,
+    ):
+        await pin_hop_version(session)
+        await session.list_tools()
 
 
 #: The route a frontend uses to ask an owner to stand down, with the bearer
@@ -1000,7 +1009,7 @@ async def _serve(
         # use was malformed. An IPv6 endpoint is exactly that case, since the
         # literal has to be bracketed.
         await asyncio.wait_for(
-            _probe(descriptor.url, token),
+            prove_hop(descriptor.url, token),
             max(startup_deadline - time.monotonic(), 0.0),
         )
 

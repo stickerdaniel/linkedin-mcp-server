@@ -481,37 +481,18 @@ def _ask_to_stand_down(attachment: Attachment) -> None:
 def _reachable(attachment: Attachment, timeout: float) -> Reach:
     """What the published endpoint says when asked with this token.
 
-    An authenticated tool listing: a TCP connect succeeds against any listener
-    on a reused port, and protocol 2026-07-28 removed ping. Negotiated as the
-    forwarder negotiates (``forwarder.pin_hop_version``): with the SDK's
-    default, an owner whose dependencies no longer serve the pinned version
-    answered here through an older era and then failed every call. A timeout
-    is ``SILENT``, kept apart from a refusal, because a stalled owner may
-    answer a moment later and must not be buried like a dead one.
+    The round trip the owner proved before publishing (``owner.prove_hop``): a
+    TCP connect succeeds against any listener on a reused port, and an owner
+    whose dependencies no longer serve the pinned version would answer an
+    unpinned probe and then fail every call. A timeout is ``SILENT``, kept
+    apart from a refusal, because a stalled owner may answer a moment later
+    and must not be buried like a dead one.
     """
     import asyncio
 
     async def ask() -> Reach:
-        from mcp import ClientSession
-        from mcp.client.streamable_http import streamable_http_client
-
-        from linkedin_mcp_server.daemon.forwarder import pin_hop_version
-
         try:
-            async with (
-                # Never through a proxy: this is a loopback hop carrying the
-                # token to a logged-in session. See ``direct_http_client``.
-                daemon_owner.direct_async_http_client(
-                    headers={"Authorization": f"Bearer {attachment.token}"}
-                ) as http,
-                streamable_http_client(attachment.descriptor.url, http_client=http) as (
-                    read,
-                    write,
-                ),
-                ClientSession(read, write) as session,
-            ):
-                await pin_hop_version(session)
-                await session.list_tools()
+            await daemon_owner.prove_hop(attachment.descriptor.url, attachment.token)
         except Exception:
             # Answered, and wrongly: a refused connection, a rejected token, a
             # stranger on the port, an owner without the pinned version. All

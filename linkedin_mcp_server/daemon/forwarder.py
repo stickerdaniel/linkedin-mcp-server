@@ -558,8 +558,8 @@ async def pin_hop_version(session: ClientSession) -> None:
 
     Proposed with ``server/discover``, which sends nothing a tool could act
     on, and adopted only as that one version even when the owner lists newer
-    ones beside it. Every hop and the election's probe
-    (``daemon.election._reachable``) negotiate here, so an owner is attached
+    ones beside it. Every hop and both endpoint probes
+    (``daemon.owner.prove_hop``) negotiate here, so an owner is attached
     to only if it serves what every forwarded call will propose; the SDK's
     default would fall back to an older era that no call can use.
 

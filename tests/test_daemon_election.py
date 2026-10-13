@@ -35,6 +35,7 @@ from types import SimpleNamespace
 from typing import Any, NoReturn, cast
 
 import pytest
+from mcp import MCPError
 
 import linkedin_mcp_server.daemon.discovery as daemon_module
 import linkedin_mcp_server.daemon.config as daemon_config
@@ -357,9 +358,12 @@ class TestThePublicationProbe:
 
         with _a_healthy_owner(profile, config, monkeypatch) as attachment:
             url = attachment.descriptor.url
-            asyncio.run(daemon_owner._probe(url, attachment.token))
-            with pytest.raises(Exception, match="Server returned an error response"):
-                asyncio.run(daemon_owner._probe(url, new_token()))
+            asyncio.run(daemon_owner.prove_hop(url, attachment.token))
+            with pytest.raises(ExceptionGroup) as refused:
+                asyncio.run(daemon_owner.prove_hop(url, new_token()))
+            assert refused.group_contains(
+                MCPError, match="Server returned an error response", depth=None
+            )
 
 
 class TestLiveness:
@@ -929,6 +933,15 @@ class TestTheProbeSpeaksTheHopsVersion:
                 )
             )
             answer = asyncio.run(_call_through_a_frontend(backend))
+            # The owner asks itself the same before publishing, so one whose own
+            # dependencies lack the pin never advertises an unusable endpoint.
+            with pytest.raises(ExceptionGroup) as refused:
+                asyncio.run(
+                    daemon_owner.prove_hop(attachment.descriptor.url, attachment.token)
+                )
+            assert refused.group_contains(
+                MCPError, match="Unsupported protocol version", depth=None
+            )
 
         assert not outcome.worth_connecting, outcome.attachment_lookup.reason
         assert recovered.attachment is None, "recovery chose the same owner again"
@@ -6610,7 +6623,7 @@ class TestTheHardExitFreesTheElectionFirst:
 
         monkeypatch.setattr(daemon_owner.os, "_exit", exit_now)
         monkeypatch.setattr(daemon_owner, "hard_exit_required", lambda: True)
-        monkeypatch.setattr(daemon_owner, "_probe", probe)
+        monkeypatch.setattr(daemon_owner, "prove_hop", probe)
         monkeypatch.setattr(
             daemon_owner, "_bind_loopback", lambda: _FakeSocket(("127.0.0.1", 49152))
         )
@@ -6797,7 +6810,7 @@ class TestPublishingLast:
         default_server = _StoppedServer()
         servers: list[object] = []
 
-        monkeypatch.setattr(daemon_owner, "_probe", probe)
+        monkeypatch.setattr(daemon_owner, "prove_hop", probe)
         monkeypatch.setattr(daemon_owner.daemon_descriptor, "prepare", prepare)
 
         def no_adoption(name: str) -> None:
