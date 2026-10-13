@@ -182,6 +182,10 @@ jobs:
           tests/test_bootstrap.py::TestInstallerSupervisorLaunch::test_real_cpython_wait_unregister_contract
           tests/test_daemon_descriptor.py::TestPreparedCommit
           tests/test_daemon_descriptor.py::TestStateLocation
+          tests/test_daemon_config.py::TestDaemonLogState::test_log_file_uses_the_private_file_acl
+          tests/test_daemon_config.py::TestDaemonLogState::test_windows_log_is_hardened_before_publication
+          tests/test_daemon_config.py::TestDaemonLogState::test_a_published_windows_log_survives_a_failed_verification
+          tests/test_daemon_config.py::TestDaemonLogState::test_a_windows_log_planted_before_publication_fails_startup
           tests/test_daemon_startup.py
           tests/test_daemon_lock.py
           tests/test_installer_supervisor.py

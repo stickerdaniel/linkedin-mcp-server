@@ -141,18 +141,16 @@ def _publish_windows_daemon_log(log_path: Path) -> None:
     published = False
     try:
         harden_created_file(staged)
-        try:
-            staged.rename(log_path)
-        except FileExistsError:
-            harden_file(log_path)
-            return
+        # Never an overwriting replace: an entry that appeared since the check
+        # above is foreign, and the rename refuses it.
+        staged.rename(log_path)
         published = True
         harden_file(log_path)
     finally:
         # A published log is left where it is, even when the verification after
-        # it failed. Another candidate may already have opened this inode and be
-        # writing its own startup into it, and this process cannot tell; an
-        # empty file hardened before publication is the cheaper thing to leave.
+        # it failed. Once published, the path no longer proves which file it
+        # names, so removing it could take a foreign entry with it; an empty
+        # file hardened before publication is the cheaper thing to leave.
         if not published:
             with contextlib.suppress(OSError):
                 staged.unlink()
@@ -162,7 +160,9 @@ def _attach_daemon_log(auth_root: Path) -> Path:
     """Open the daemon log inside the child and attach both output streams.
 
     May block on unavailable state storage, so it runs only in the owner
-    process, which the frontend can hard-kill.
+    process, which the frontend can hard-kill. Runs only under the daemon lock,
+    so no cooperating owner creates this file at the same time: an entry that
+    appears between the check and the creation is foreign and fails startup.
     """
     directory = daemon_descriptor.prepare_daemon_state(auth_root)
     log_path = directory / _LOG_FILE
@@ -187,17 +187,8 @@ def _attach_daemon_log(auth_root: Path) -> Path:
         | getattr(os, "O_CLOEXEC", 0)
     )
     if created:
-        try:
-            descriptor = os.open(log_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            # A second candidate reached the same absent path. Only the process
-            # that created the file may remove it again below, or a failure here
-            # unlinks the log the candidate that won the lock is writing to.
-            created = False
-            harden_file(log_path)
-            descriptor = os.open(log_path, flags, 0o600)
-    else:
-        descriptor = os.open(log_path, flags, 0o600)
+        flags |= os.O_CREAT | os.O_EXCL
+    descriptor = os.open(log_path, flags, 0o600)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise PrivateStateError(f"{log_path} is not a regular file")
@@ -212,8 +203,8 @@ def _attach_daemon_log(auth_root: Path) -> Path:
         os.dup2(descriptor, sys.stderr.fileno())
     finally:
         # No removal on failure, for the reason _publish_windows_daemon_log
-        # gives: the loser of the creation race above is already appending to
-        # this inode, and an owner-only empty file costs nothing to leave.
+        # gives: the path may no longer name this inode, and an owner-only
+        # empty file costs nothing to leave.
         os.close(descriptor)
     return log_path
 
