@@ -248,6 +248,9 @@ def prepare_baseline(
     everything in place and so verify it, then checks the checkout again.
     """
     timings = {} if timings is None else timings
+    # Absolute: uv reads ``--project`` and ``UV_PROJECT_ENVIRONMENT`` from inside
+    # the checkout, where a relative path names a directory within it.
+    directory = directory.resolve()
     browsers = directory / "ms-playwright"
 
     began = time.monotonic()
@@ -294,6 +297,7 @@ def prepare_frozen_tests(
     the actors' ``.venv`` keeps runtime dependencies only. Nothing here
     installs a browser; ``browsers`` is where the baseline's would be.
     """
+    directory = directory.resolve()  # as in ``prepare_baseline``
     checkout = _pinned_checkout(directory, pinned, repo)
     venv = directory / "tests-venv"
     env = {k: v for k, v in os.environ.items() if k not in _FOREIGN_PROJECT}
@@ -335,7 +339,9 @@ def verify_locked_venv(python: Path, lock: Path) -> None:
         for package in tomllib.loads(lock.read_text())["package"]
         if "version" in package
     }
-    listed = _run([str(python), "-c", _INSTALLED_PROGRAM], timeout=120)
+    # ``-I``, as in ``_ask``: a caller's ``PYTHONPATH`` or working directory
+    # would add distributions that are not in the venv at all.
+    listed = _run([str(python), "-I", "-c", _INSTALLED_PROGRAM], timeout=120)
     _checked(listed, "listing the pin's installed distributions")
     installed = {_normalized(n): v for n, v in json.loads(listed.stdout).items()}
     foreign = {
