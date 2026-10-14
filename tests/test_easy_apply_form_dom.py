@@ -120,14 +120,16 @@ const render = () => {
                 ? !shadow.querySelector(`[name="${el.name}"]:checked`)
                 : !el.value;
             if (!empty || shadow.getElementById(el.id + '-error')) continue;
-            el.setAttribute('aria-describedby', el.id + '-error');
+            el.setAttribute('aria-describedby', [
+                el.getAttribute('aria-describedby'), el.id + '-error',
+            ].filter(Boolean).join(' '));
             const error = document.createElement('div');
             error.id = el.id + '-error';
             error.innerHTML = '<div role="alert">Please enter a valid answer</div>';
             el.after(error);
             valid = false;
         }
-        if (valid) setTimeout(() => { index += 1; render(); }, 100);
+        if (valid) setTimeout(() => { index += 1; render(); }, window.nextDelay || 100);
     });
     const submit = shadow.querySelector('[data-live-test-easy-apply-submit-button]');
     if (submit) submit.addEventListener('click', () => window.log.push('submit'));
@@ -161,14 +163,29 @@ EXTERNAL = (
 )
 
 
-def posting(control: str, steps: list[dict], *, stuck: bool = False) -> str:
+def posting(
+    control: str, steps: list[dict], *, stuck: bool = False, next_delay: int = 100
+) -> str:
     return (
         "<main>"
         f"<h1>AI Engineer</h1><p>Acme</p>{control}"
         "<h2>About the job</h2><p>Build agents.</p>"
         "</main>"
         f"<script>{DIALOG_SCRIPT % json.dumps(steps)}"
-        f"window.stuck = {'true' if stuck else 'false'};</script>"
+        f"window.stuck = {'true' if stuck else 'false'};"
+        f"window.nextDelay = {next_delay};</script>"
+    )
+
+
+def hinted(step: dict[str, Any]) -> dict[str, Any]:
+    """``step`` with its first name described by a hint, as a field may be."""
+    return dict(
+        step,
+        body=step["body"].replace(
+            'value="Ada"></div>',
+            'value="Ada" aria-describedby="first-hint">'
+            '<div id="first-hint">As on your passport</div></div>',
+        ),
     )
 
 
@@ -306,6 +323,30 @@ async def test_a_step_needing_input_ends_the_read_with_its_error(dom_page):
         "error": "Please enter a valid answer",
     }
     assert await log(dom_page) == ["open", "next", "escape", "discard"]
+
+
+async def test_a_hint_is_not_an_error_and_does_not_end_the_read(dom_page):
+    # Next takes longer than two polls, so a hint read as a refusal would
+    # settle on the step being left and end the read there.
+    html = posting(EASY_APPLY, [hinted(CONTACT), QUESTIONS], next_delay=800)
+
+    result = await read(dom_page, html)
+
+    assert result.complete is True
+    assert len(result.steps) == 2
+    assert "error" not in result.steps[0]["fields"][0]
+
+
+async def test_a_refused_step_reports_only_what_the_click_added(dom_page):
+    blocked = hinted(CONTACT)
+    blocked["body"] = blocked["body"].replace(' value="Paris"', "")
+
+    result = await read(dom_page, posting(EASY_APPLY, [blocked, QUESTIONS]))
+
+    assert result.complete is False
+    first, _, city = result.steps[0]["fields"]
+    assert "error" not in first
+    assert city["error"] == "Please enter a valid answer"
 
 
 async def test_submit_is_never_clicked_on_a_one_step_form(dom_page):
