@@ -14,6 +14,7 @@ arms, waits for, loses, releases and watches a real gate.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import os
@@ -1378,9 +1379,17 @@ class _LossScene(_CalibrationScene):
 
     async def _release_after_the_loss(self, gate, monotonic_ns: int) -> None:
         """The row's own release, asked for no sooner than *monotonic_ns* and
-        the owner's expiry window after the loss."""
-        await self.gone.wait()
-        assert self.lost_ns is not None
+        the owner's expiry window after the loss. A loss that has not come
+        within the release's tolerance is not waited for: the release goes as
+        scheduled and the row judges what it recorded."""
+        late = monotonic_ns + int(call_loss.RELEASE_TOLERANCE_SECONDS * 1e9)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(
+                self.gone.wait(), max(0.0, (late - time.monotonic_ns()) / 1e9)
+            )
+        if self.lost_ns is None:
+            await _release_at(gate, monotonic_ns)
+            return
         window = int(call_loss.LOSS_TO_RELEASE_SECONDS * 1e9)
         await _release_at(gate, max(monotonic_ns, self.lost_ns + window))
 
