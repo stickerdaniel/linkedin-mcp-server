@@ -13,10 +13,16 @@ from linkedin_mcp_server.linkedin.session import PageSession
 
 @pytest.mark.browser_dom
 @pytest.mark.parametrize(
-    "locale, action, audience",
-    [("en", "Post", "Anyone"), ("fr", "Publier", "Tout le monde")],
+    "locale, action, audience, delayed",
+    [
+        ("en", "Post", "Anyone", False),
+        ("fr", "Publier", "Tout le monde", False),
+        ("en", "Post", "Anyone", True),
+    ],
 )
-async def test_real_composer_pinned_actions_and_verified_post(locale, action, audience):
+async def test_real_composer_pinned_actions_and_verified_post(
+    locale, action, audience, delayed
+):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True, executable_path=os.getenv("POST_TEST_BROWSER")
@@ -34,6 +40,11 @@ async def test_real_composer_pinned_actions_and_verified_post(locale, action, au
                 <div role="textbox" contenteditable="true"></div>
                 <button onclick="location.href='/feed/update/urn:li:activity:123/'">{action}</button>
                 </dialog></html>'''
+            if delayed and "/feed/update/" not in request.request.url:
+                import json
+
+                dialog_html = html.split("<dialog", 1)[1].split("</dialog>", 1)[0]
+                html = f'<html lang="{locale}"><body><script>setTimeout(() => document.body.insertAdjacentHTML("beforeend", {json.dumps("<dialog" + dialog_html + "</dialog>")}), 150)</script></body></html>'
             await request.fulfill(body=html, content_type="text/html")
 
         await page.route("**/*", route)
@@ -58,7 +69,7 @@ async def test_off_domain_at_mutation_seam_cannot_receive_post(monkeypatch):
         author = "https://www.linkedin.com/in/test-author/"
         html = f'''<html lang="en"><dialog open><a href="{author}">Author</a>
         <button>Anyone</button><div role="textbox" contenteditable="true"></div>
-        <button onclick="window.clicked=true">Post</button></dialog></html>'''
+        <button onclick="document.documentElement.dataset.clicked=1">Post</button></dialog></html>'''
         await page.route(
             "**/*", lambda route: route.fulfill(body=html, content_type="text/html")
         )
@@ -81,5 +92,5 @@ async def test_off_domain_at_mutation_seam_cannot_receive_post(monkeypatch):
         result = await writer.publish(draft, "Must never be typed", confirmed=True)
         assert result["status"] == "outcome_unknown"
         assert await page.locator("div").inner_text() == ""
-        assert await page.evaluate("window.clicked || false") is False
+        assert await page.locator("html").get_attribute("data-clicked") is None
         await browser.close()
