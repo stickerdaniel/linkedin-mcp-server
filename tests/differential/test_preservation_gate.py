@@ -1664,45 +1664,38 @@ def test_a_zombie_leaves_the_census_only_once_the_whole_process_exited(
 ):
     monkeypatch.setattr(harness, "process_user", lambda process: process.user)
     account = harness.ActorAccount(tmp_path / "auth" / "profile")
-    zombie = _process(6, cmdline=[], status="zombie")
-    zombie.info["create_time"] = 50.0
     census = harness.profile_census(
         account,
-        process_iter=lambda *a, **k: [zombie],
+        process_iter=lambda *a, **k: [_process(6, cmdline=[], status="zombie")],
         user=ME,
         linux=linux,
         threads_of=lambda _: threads,
-        # The same lifetime is still listed, so only the count can settle it.
-        open_process=_reopened(50.0),
+        # The zombie is still listed, so only the count can settle it.
+        open_process=_looked_up(None),
     )
     assert census.complete is complete
     assert census.unresolved == ([] if complete else [6])
 
 
-def _reopened(answer: float | BaseException):
-    """``open_process`` whose process at any pid started at *answer*, or
-    whose lookup raises it."""
+def _looked_up(error: BaseException | None):
+    """``open_process`` that finds a process at any pid, or raises *error*."""
 
     def open_process(pid: int) -> Any:
-        if isinstance(answer, BaseException):
-            raise answer
-
-        def create_time() -> float:
-            return answer
-
-        return SimpleNamespace(pid=pid, create_time=create_time)
+        if error is not None:
+            raise error
+        return SimpleNamespace(pid=pid)
 
     return open_process
 
 
 @pytest.mark.parametrize(
-    ("threads", "now", "lifetime"),
+    ("threads", "error", "lookup"),
     [
         pytest.param(None, psutil.NoSuchProcess(6), None, id="reaped-since-the-table"),
         pytest.param(2, psutil.NoSuchProcess(6), None, id="ended-after-a-count"),
-        pytest.param(None, 50.0 + 5.0, None, id="pid-reused-by-a-later-process"),
-        pytest.param(2, 50.0, "present", id="leader-with-live-threads"),
-        pytest.param(None, 50.0, "present", id="count-denied-process-still-there"),
+        pytest.param(2, None, "present", id="leader-with-live-threads"),
+        # Possibly a later process at a reused pid; never told apart by start.
+        pytest.param(None, None, "present", id="count-denied-process-still-there"),
         pytest.param(
             None, psutil.ZombieProcess(6), "present", id="count-denied-still-a-zombie"
         ),
@@ -1714,24 +1707,22 @@ def _reopened(answer: float | BaseException):
         ),
     ],
 )
-def test_a_linux_zombie_is_excluded_only_once_its_lifetime_is_shown_ended(
-    tmp_path, monkeypatch, threads, now, lifetime
+def test_a_linux_zombie_is_excluded_only_once_its_pid_is_gone(
+    tmp_path, monkeypatch, threads, error, lookup
 ):
-    # The table listed a zombie started at 50.0; whatever the count says
-    # short of the dead leader alone, the same lifetime is looked up again.
+    # The table listed a zombie; whatever the count says short of the dead
+    # leader alone, its pid is looked up again.
     monkeypatch.setattr(harness, "process_user", lambda process: process.user)
     account = harness.ActorAccount(tmp_path / "auth" / "profile")
-    zombie = _process(6, cmdline=None, status="zombie")
-    zombie.info["create_time"] = 50.0
     census = harness.profile_census(
         account,
-        process_iter=lambda *a, **k: [zombie],
+        process_iter=lambda *a, **k: [_process(6, cmdline=None, status="zombie")],
         user=ME,
         linux=True,
         threads_of=lambda _: threads,
-        open_process=_reopened(now),
+        open_process=_looked_up(error),
     )
-    if lifetime is None:
+    if lookup is None:
         assert census.complete and census.provenance == []
     else:
         assert census.unresolved == [6]
@@ -1741,34 +1732,9 @@ def test_a_linux_zombie_is_excluded_only_once_its_lifetime_is_shown_ended(
                 "phase": "zombie",
                 "status": psutil.STATUS_ZOMBIE,
                 "threads": threads,
-                "lifetime": lifetime,
+                "lookup": lookup,
             }
         ]
-
-
-@pytest.mark.parametrize(
-    ("now", "complete"),
-    [
-        pytest.param(psutil.NoSuchProcess(6), True, id="nothing-at-the-pid"),
-        pytest.param(50.0, False, id="a-process-at-the-pid"),
-    ],
-)
-def test_a_zombie_whose_start_was_not_captured_is_ended_only_by_an_empty_pid(
-    tmp_path, monkeypatch, now, complete
-):
-    # Without the listed start, a process found at the pid cannot be told
-    # from a later one; only nothing there shows the zombie ended.
-    monkeypatch.setattr(harness, "process_user", lambda process: process.user)
-    account = harness.ActorAccount(tmp_path / "auth" / "profile")
-    census = harness.profile_census(
-        account,
-        process_iter=lambda *a, **k: [_process(6, cmdline=None, status="zombie")],
-        user=ME,
-        linux=True,
-        threads_of=lambda _: None,
-        open_process=_reopened(now),
-    )
-    assert census.complete is complete
 
 
 def _status(pid: int, want: str, seconds: float = 10.0) -> bool:
@@ -1877,9 +1843,10 @@ def test_a_real_fully_exited_unreaped_child_leaves_the_census(tmp_path):
 def test_a_zombie_reaped_after_the_table_was_read_leaves_the_census(
     tmp_path, monkeypatch
 ):
-    # Run 38600969897: the table listed a browser's zombie, its parent reaped
-    # it, and the thread count, read only then, found nothing at all. Judged
-    # as Linux judges a zombie, so the count is what is asked first.
+    # A possible cause of run 38600969897's unresolved pid: the table lists a
+    # browser's zombie, its parent reaps it, and the thread count, read only
+    # then, finds nothing at all. Judged as Linux judges a zombie, so the
+    # count is what is asked first.
     account = harness.ActorAccount(tmp_path / "auth" / "profile")
     child = subprocess.Popen(
         [sys.executable, "-c", "pass", f"--user-data-dir={account.profile}"]

@@ -2668,39 +2668,30 @@ class ProfileCensus:
         self.provenance.append({"pid": pid, **why})
 
 
-#: ``lifetime_state``: the captured lifetime no longer exists.
-LIFETIME_ENDED = "ended"
-#: ``lifetime_state``: the captured lifetime is still in the process table.
-LIFETIME_PRESENT = "present"
+#: ``pid_state``: nothing is at the pid any more.
+PID_GONE = "gone"
+#: ``pid_state``: a process, a zombie included, is at the pid.
+PID_PRESENT = "present"
 
 
-def lifetime_state(
-    pid: int,
-    start: float | None,
-    *,
-    open_process: Callable[[int], Any] = psutil.Process,
-) -> str:
-    """Whether the lifetime (*pid*, *start*) still exists, read now.
+def pid_state(pid: int, *, open_process: Callable[[int], Any] = psutil.Process) -> str:
+    """Whether anything is at *pid*, looked up now.
 
-    ``LIFETIME_ENDED`` when nothing is at *pid* or a process with another
-    start is, ``LIFETIME_PRESENT`` while the same lifetime is listed, a zombie
-    included, and otherwise ``unknown: ...`` with what failed. A zombie read
-    is not an absence even though psutil raises it as a ``NoSuchProcess``.
-    Without *start* a process at *pid* cannot be told from a later one.
+    ``PID_GONE`` only when the lookup finds nothing, ``PID_PRESENT`` for any
+    process there, and otherwise ``unknown: ...`` with what failed. A zombie
+    is present even though psutil raises it as a ``NoSuchProcess``. A later
+    process at a reused pid is present too: telling it apart would take a
+    start time, and the public one moves with the wall clock.
     """
     try:
-        created = open_process(pid).create_time()
+        open_process(pid)
     except psutil.ZombieProcess:
-        return LIFETIME_PRESENT
+        return PID_PRESENT
     except psutil.NoSuchProcess:
-        return LIFETIME_ENDED
+        return PID_GONE
     except (psutil.Error, OSError) as exc:
         return f"unknown: {type(exc).__name__}"
-    if start is None:
-        return "unknown: start not captured"
-    if abs(created - start) > _START_TOLERANCE_SECONDS:
-        return LIFETIME_ENDED
-    return LIFETIME_PRESENT
+    return PID_PRESENT
 
 
 def thread_count(process: Any) -> int | None:
@@ -2738,7 +2729,6 @@ def exited_zombie(
 
 def zombie_unresolved(
     process: Any,
-    start: float | None,
     *,
     linux: bool | None = None,
     threads_of: Callable[[Any], int | None] = thread_count,
@@ -2749,9 +2739,8 @@ def zombie_unresolved(
 
     First ``exited_zombie``. A count that shows nothing on Linux can also mean
     the zombie was reaped after the table was read, which takes its
-    ``/proc/<pid>/task`` with it, so the lifetime the table captured (*start*)
-    is looked up again: excluded only once it is shown ended, never because a
-    read failed.
+    ``/proc/<pid>/task`` with it, so the pid is looked up again: excluded only
+    once nothing is there, never because a read failed.
     """
     counted: list[int | None] = []
 
@@ -2761,14 +2750,14 @@ def zombie_unresolved(
 
     if exited_zombie(process, linux=linux, threads_of=count):
         return None
-    lifetime = lifetime_state(process.pid, start, open_process=open_process)
-    if lifetime == LIFETIME_ENDED:
+    lookup = pid_state(process.pid, open_process=open_process)
+    if lookup == PID_GONE:
         return None
     return {
         "phase": "zombie",
         "status": psutil.STATUS_ZOMBIE,
         "threads": counted[-1] if counted else None,
-        "lifetime": lifetime,
+        "lookup": lookup,
     }
 
 
@@ -2819,9 +2808,7 @@ def profile_census(
     directory = str(browser_dir) if browser_dir is not None else None
     census = ProfileCensus()
     try:
-        processes = list(
-            (process_iter or process_table)(["cmdline", "exe", "status", "create_time"])
-        )
+        processes = list((process_iter or process_table)(["cmdline", "exe", "status"]))
     except psutil.Error as exc:
         census.unresolve(-1, phase="table", error=type(exc).__name__)
         return census
@@ -2835,7 +2822,6 @@ def profile_census(
                 continue
             why = zombie_unresolved(
                 process,
-                info.get("create_time"),
                 linux=linux,
                 threads_of=threads_of,
                 open_process=open_process,
