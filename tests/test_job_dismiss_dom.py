@@ -4,12 +4,16 @@ The unit suite mocks ``page.evaluate``, so the program behind
 ``JobPageReader.dismiss_search_card`` never executes there. These run the whole
 action against a synthetic results list in headless chromium, with the
 navigation stubbed, and read a synthetic posting's document title the way
-``JobPageReader.read_posting_title`` does. The markup carries the structure measured on 2026-09-28:
-each result is an `li[data-occludable-job-id]`, its dismiss control a `button`
-around `[data-test-icon="close-small"]`, some cards also carry a "More options"
-button, and a click swaps the dismiss button for one around `undo-small`. None
-of LinkedIn's classes, so it is a claim about which signals are read, not about
-LinkedIn's layout.
+``JobPageReader.read_posting_title`` does. The markup carries the structure
+measured on both searches. Classic (2026-09-28): each result is an
+`li[data-occludable-job-id]`, its dismiss control a `button` around
+`[data-test-icon="close-small"]`, and some cards also carry a "More options"
+button. Redesigned (2026-10-14): each result is an element keyed
+`componentkey="job-card-component-ref-<id>"` around a nested one with the same
+key, its dismiss control a `button` around `svg#close-small`. In both a click
+swaps the dismiss button for one around `undo-small`. None of LinkedIn's
+classes, so it is a claim about which signals are read, not about LinkedIn's
+layout.
 
 Skipped automatically when chromium is not installed; run locally after
 ``uv run patchright install chromium --no-shell``.
@@ -42,12 +46,15 @@ POSTING_URL = "https://www.linkedin.com/jobs/view/111/"
 # undo one, unless the page says the click is ignored. An attribute rather
 # than a `window` global, because patchright evaluates in an isolated world.
 DISMISS_SCRIPT = """
-for (const icon of document.querySelectorAll('[data-test-icon="close-small"]')) {
+for (const icon of document.querySelectorAll(
+    '[data-test-icon="close-small"], svg#close-small'
+)) {
     const button = icon.closest('button');
     button.addEventListener('click', () => {
-        const card = button.closest('li');
+        const card = button.closest('li, [role="button"]');
         const chosen = JSON.parse(document.body.dataset.chosen || '[]');
-        chosen.push(card.dataset.occludableJobId);
+        chosen.push(card.dataset.occludableJobId
+            ?? card.getAttribute('componentkey').split('-').pop());
         document.body.dataset.chosen = JSON.stringify(chosen);
         if (document.body.hasAttribute('data-ignore')) return;
         button.outerHTML = '<button aria-label="Job is dismissed, undo">'
@@ -76,6 +83,23 @@ def card(job_id: str, buttons: str = MORE + DISMISS) -> str:
         f'<li data-occludable-job-id="{job_id}">'
         f'<a href="https://www.linkedin.com/jobs/view/{job_id}/">Job {job_id}</a>'
         f"<p>Acme · Paris</p>{buttons}</li>"
+    )
+
+
+REDESIGNED_DISMISS = (
+    '<button aria-label="Dismiss Engineer job"><svg id="close-small"></svg></button>'
+)
+REDESIGNED_UNDO = (
+    '<button aria-label="Engineer job is dismissed, undo">'
+    '<svg id="undo-small"></svg></button>'
+)
+
+
+def redesigned_card(job_id: str, buttons: str = REDESIGNED_DISMISS) -> str:
+    key = f"job-card-component-ref-{job_id}"
+    return (
+        f'<div><div role="button" componentkey="{key}"><div componentkey="{key}">'
+        f"<p>Job {job_id}</p><p>Acme · Paris</p>{buttons}</div></div></div>"
     )
 
 
@@ -150,6 +174,28 @@ async def test_the_jobs_own_dismiss_button_is_clicked(dom_page):
     assert await act(dom_page, html, "222") == "dismissed"
     assert await chosen(dom_page) == ["222"]
     assert await dom_page.locator('[data-test-icon="close-small"]').count() == 2
+
+
+async def test_a_redesigned_card_is_dismissed_by_its_own_button(dom_page):
+    html = search(redesigned_card("111"), redesigned_card("222"))
+
+    assert await act(dom_page, html, "222") == "dismissed"
+    assert await chosen(dom_page) == ["222"]
+    assert await dom_page.locator("svg#close-small").count() == 1
+
+
+async def test_a_redesigned_card_in_its_undo_state_is_already_dismissed(dom_page):
+    html = search(redesigned_card("111", REDESIGNED_UNDO))
+
+    assert await act(dom_page, html, "111") == "already_dismissed"
+
+
+async def test_a_redesigned_reload_counts_each_card_once(dom_page):
+    html = search(redesigned_card("222"), redesigned_card("333"))
+
+    assert await lists(dom_page, html, "111", min_cards=2) is False
+    with pytest.raises(LinkedInOperationError, match="3 were expected"):
+        await lists(dom_page, html, "111", min_cards=3)
 
 
 async def test_a_job_only_in_the_detail_pane_is_absent(dom_page):

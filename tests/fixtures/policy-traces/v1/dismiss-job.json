@@ -141,7 +141,7 @@
       "call": "dismiss_job",
       "kind": "wait_for_selector",
       "operation": "job_search_cards",
-      "selector": "li[data-occludable-job-id]",
+      "selector": "li[data-occludable-job-id], [componentkey^=\"job-card-component-ref-\"]",
       "state": "attached",
       "timeout_ms": 10000
     },
@@ -153,7 +153,7 @@
       "call": "dismiss_job",
       "kind": "evaluate",
       "operation": "job_search_card",
-      "program_digest": "47fe41b1b408"
+      "program_digest": "3f48c29d7f4b"
     },
     {
       "call": "dismiss_job",
@@ -182,7 +182,7 @@
       "call": "dismiss_job",
       "kind": "evaluate",
       "operation": "job_search_card",
-      "program_digest": "47fe41b1b408"
+      "program_digest": "3f48c29d7f4b"
     },
     {
       "call": "dismiss_job",
@@ -252,7 +252,7 @@
       "call": "dismiss_job",
       "kind": "wait_for_selector",
       "operation": "job_search_cards",
-      "selector": "li[data-occludable-job-id]",
+      "selector": "li[data-occludable-job-id], [componentkey^=\"job-card-component-ref-\"]",
       "state": "attached",
       "timeout_ms": 10000
     },
@@ -264,7 +264,7 @@
       "call": "dismiss_job",
       "kind": "evaluate",
       "operation": "job_search_card",
-      "program_digest": "47fe41b1b408"
+      "program_digest": "3f48c29d7f4b"
     },
     {
       "actual_scrolls": 2,
@@ -285,7 +285,7 @@
       "call": "dismiss_job",
       "kind": "evaluate",
       "operation": "job_search_card",
-      "program_digest": "47fe41b1b408"
+      "program_digest": "3f48c29d7f4b"
     }
   ],
   "result": {

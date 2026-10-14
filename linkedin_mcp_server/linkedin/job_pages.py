@@ -236,34 +236,50 @@ class JobApplyRead:
     url: str | None = None
 
 
-# A search result card and its dismiss control, measured on 2026-09-28 on a
-# signed-in en-US account. Each result is an `li[data-occludable-job-id]`
-# holding the job id; the job named only by `currentJobId` sits in the detail
-# pane, which has no such card and no dismiss control. The dismiss control is
-# the card's `button` around an icon with `data-test-icon="close-small"` (some
-# cards also carry a "More options" button around `overflow-web-ios-small`).
-# Clicking it keeps the card and swaps the button for one around `undo-small`,
-# which is the only undo there is: a reload drops the job from that search
-# and every later one. Applied jobs carry the same control. The button's
-# `aria-label` names the job in the account's language and is never read.
-# More than one card for the id, or more than one dismiss button in it, is
-# refused rather than guessed at.
+# A search result card and its dismiss control, in both of LinkedIn's job
+# searches, measured on signed-in en-US accounts. The job named only by
+# `currentJobId` sits in the detail pane, which has no card and no dismiss
+# control.
+#
+# - Classic `/jobs/search/` (2026-09-28): each result is an
+#   `li[data-occludable-job-id]` holding the job id. The dismiss control is
+#   the card's `button` around an icon with `data-test-icon="close-small"`
+#   (some cards also carry a "More options" button around
+#   `overflow-web-ios-small`).
+# - Redesigned `/jobs/search-results/` (2026-10-14): each result is an element
+#   whose `componentkey` is `job-card-component-ref-<job id>`, with a nested
+#   element repeating that key, so only the outermost counts. The dismiss
+#   control is its `button` around `svg#close-small`.
+#
+# In both, clicking it keeps the card and swaps the button for one around
+# `undo-small`, which is the only undo there is: a reload drops the job from
+# that search and every later one. Applied jobs carry the same control. The
+# button's `aria-label` names the job in the account's language and is never
+# read. More than one card for the id, or more than one dismiss button in it,
+# is refused rather than guessed at.
 SEARCH_CARD_JS = r"""(opts) => {
     const {jobId, mark} = opts;
     for (const old of document.querySelectorAll('[' + mark + ']')) {
         old.removeAttribute(mark);
     }
-    const cards = [...document.querySelectorAll('li[data-occludable-job-id]')];
-    const own = cards.filter(
-        (card) => card.getAttribute('data-occludable-job-id') === jobId
+    const refKey = '[componentkey^="job-card-component-ref-"]';
+    const classic = [...document.querySelectorAll('li[data-occludable-job-id]')];
+    const redesigned = [...document.querySelectorAll(refKey)].filter(
+        (card) => !card.parentElement || !card.parentElement.closest(refKey)
     );
+    const idOf = (card) => card.getAttribute('data-occludable-job-id')
+        ?? card.getAttribute('componentkey').slice('job-card-component-ref-'.length);
+    const cards = [...classic, ...redesigned];
+    const own = cards.filter((card) => idOf(card) === jobId);
     const result = {cards: cards.length, matches: own.length, dismiss: 0, undo: 0};
     if (own.length !== 1) return result;
     const card = own[0];
     // Occluded cards render their content only near the viewport.
     card.scrollIntoView({block: 'center'});
     const around = (icon) => [...card.querySelectorAll('button')].filter(
-        (button) => button.querySelector('[data-test-icon="' + icon + '"]')
+        (button) => button.querySelector(
+            '[data-test-icon="' + icon + '"], svg#' + icon
+        )
     );
     const dismiss = around('close-small');
     result.dismiss = dismiss.length;
@@ -272,7 +288,9 @@ SEARCH_CARD_JS = r"""(opts) => {
     return result;
 }"""
 
-_SEARCH_CARD_SELECTOR = "li[data-occludable-job-id]"
+_SEARCH_CARD_SELECTOR = (
+    'li[data-occludable-job-id], [componentkey^="job-card-component-ref-"]'
+)
 # The job search parameters a landed search has to keep by value: what the
 # search is about and where. The worldwide `geoId` is ours, never a location
 # string LinkedIn turns into one, so its value is comparable.
@@ -969,7 +987,7 @@ class JobPageReader:
         """Find ``job_id``'s card, scrolling the rail once when it is not there.
 
         A found card is polled until its buttons render, since an occluded
-        card is an empty `li` until it nears the viewport. A scroll that
+        card is empty until it nears the viewport. A scroll that
         raised leaves the rest of the rail unread, so it is an error rather
         than a job the search does not list.
         """
