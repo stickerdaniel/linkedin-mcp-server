@@ -25,6 +25,7 @@ from differential.harness import (
     GUARDIAN_OWNER_GROUP_KILL,
     RowResult,
     associate_server,
+    compare_repeat,
     compare_to_direct,
     guardian_launch,
     judge_row,
@@ -1355,6 +1356,17 @@ def test_unknown_is_recorded_not_failed(profile_pair):
     assert compare_to_direct(held, vector) == []
     violated = dataclasses.replace(held, o2_traced=VIOLATED)
     assert compare_to_direct(violated, vector)
+
+
+@pytest.mark.parametrize("other", [VIOLATED, INCOMPLETE, UNOBSERVED])
+def test_a_repeat_reads_held_against_unknown_as_timing_only(profile_pair, other):
+    vector, _ = judge_row(_healthy(profile_pair, daemon=True))
+    unknown = dataclasses.replace(vector, o2_traced=UNKNOWN)
+    held = dataclasses.replace(vector, o2_traced=HELD)
+    assert compare_repeat(unknown, held) == []
+    assert compare_repeat(unknown, dataclasses.replace(vector, o2_traced=other))
+    # Only the traced state is sampled; the signals sent still count.
+    assert compare_repeat(unknown, dataclasses.replace(held, signal_classes=("x",)))
 
 
 # --- E1EB-02: a group that could not be read is not the last one read ---------------

@@ -255,8 +255,10 @@ from differential.session import (
     write_synthetic_cookie_file,
 )
 from differential.signals import COMPLETE as ORACLE_COMPLETE
+from differential.signals import HELD as O2_HELD
 from differential.signals import INCOMPLETE as O2_INCOMPLETE
 from differential.signals import UNAVAILABLE as ORACLE_UNAVAILABLE
+from differential.signals import UNKNOWN as O2_UNKNOWN
 from differential.signals import UNOBSERVED as O2_UNOBSERVED
 from differential.signals import VIOLATED as O2_VIOLATED
 from differential.signals import (
@@ -5875,13 +5877,20 @@ def bind_responder(
     return responder, found
 
 
+#: Traced O2 states that differ by timing alone (``compare_to_direct``).
+_SAMPLED_ALIKE = frozenset({O2_HELD, O2_UNKNOWN})
+
+
 def compare_repeat(first: RowVector, second: RowVector) -> list[str]:
-    """K0: every field of two runs of the same experiment must agree."""
+    """K0: every field of two runs of the same experiment must agree, except a
+    traced O2 of ``held`` against ``unknown``, which says only whether a
+    recipient outlived the next sample."""
     one, two = asdict(first), asdict(second)
     return [
         f"{name}: {one[name]!r} then {two[name]!r}"
         for name in one
         if one[name] != two[name]
+        and not (name == "o2_traced" and {one[name], two[name]} <= _SAMPLED_ALIKE)
     ]
 
 

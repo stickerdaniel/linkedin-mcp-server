@@ -665,7 +665,7 @@ jobs:
       # successor's read through an election (bound 180s) or a fresh host's
       # (two minutes), the contender's stop (15s), in K3 and K0 the
       # successor's idle exit (60 + 90s), and the residual browser wait
-      # (60s). Three cells come to at most 41 minutes: 45. Other platforms
+      # (60s). Three cells come to at most 43 minutes: 45. Other platforms
       # run nothing in this group.
       - name: Race a contender against a hard kill
         if: runner.os == 'Windows' && matrix.rows == 'crash'
