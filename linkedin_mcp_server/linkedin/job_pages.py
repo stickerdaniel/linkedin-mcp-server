@@ -318,7 +318,9 @@ EASY_APPLY_STEP_JS = (
             const picked = first.options[first.selectedIndex];
             if (picked) field.value = picked.text.trim();
         } else if (isChoice(first)) {
-            field.options = group.map(labelOf);
+            const options = group.map(labelOf);
+            field.options = options.slice(0, maxOptions);
+            if (options.length > maxOptions) field.options_total = options.length;
             field.selected = group.filter((el) => el.checked).map(labelOf);
         } else if (first.type !== 'file' && first.value) {
             field.value = first.value;
@@ -359,6 +361,7 @@ _EASY_APPLY_DISCARD_TIMEOUT = 5.0
 _EASY_APPLY_CLOSE_GRACE = 4 * _EASY_APPLY_DISCARD_TIMEOUT
 _EASY_APPLY_MAX_STEPS = 8
 # A country list runs to 250 options; the prefilled value is still reported.
+# A radio or checkbox group is cut the same way, and keeps every option checked.
 _EASY_APPLY_MAX_OPTIONS = 50
 
 
