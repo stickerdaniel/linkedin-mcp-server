@@ -2370,7 +2370,9 @@ class _BlockedWrites(io.TextIOBase):
         return self._out.write(s)
 
     def flush(self) -> None:
-        self._out.flush()
+        # Collection closes this wrapper too, after the test closed the file.
+        if not self._out.closed:
+            self._out.flush()
 
 
 def test_a_stop_request_publishes_the_whole_summary_behind_a_slow_writer(
