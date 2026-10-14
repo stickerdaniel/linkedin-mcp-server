@@ -386,3 +386,58 @@ Symbols are named relative to `linkedin_mcp_server`. Tests are named as
   `['sent', 'sent']` after the retry. Justifies `COULD_CHANGE` in
   `daemon.auth_repair.say_why`. Source `52370602`, 2026-07-31. Test
   `tests/test_daemon_auth.py::TestTheRepairRunsForReal::test_a_tool_that_changes_something_is_never_replayed`.
+
+## Release gates
+
+- **Gate 1 passes on `f39a2893`.** One dispatch of
+  `.github/workflows/differential-evidence.yml` with `platform=all` and
+  `group=all`, run 38613606587, attempt 1, 38 of 38 jobs successful, reviewed
+  cell by cell against the contract and both Gate 1 decision records. This
+  settles Gate 1 only, not gates 2 to 4. Source run 38613606587 on
+  `f39a28930e54deab30394f04786fa9821344c306`, 2026-10-14.
+  - Candidate and harness revision `f39a2893` (`tests/differential` tree
+    `7a5bdf5a`). `uv.lock` sha256 `26d7c58c3fbed8ea259402c0eaee8c75ecd10ae2f426fc1c6b5513967df4dc24`;
+    Windows hashes the same file to `38dd5e4b...` after its CRLF checkout, the
+    same content. Frozen Direct pin `0253421539fffd4c9b207ca62b6efb41a8905ed3`.
+  - Executed and skipped cases per experiment, failures zero throughout:
+
+    | OS / architecture | K0 | K1 | K2 | K3 |
+    |---|---:|---:|---:|---:|
+    | Linux x86_64 | 41 / 1 | 36 / 8 | 7 / 0 | 150 / 3 |
+    | Linux aarch64 | 41 / 1 | 36 / 8 | 7 / 0 | 150 / 3 |
+    | macOS arm64 | 40 / 2 | 34 / 10 | 4 / 3 | 148 / 5 |
+    | Windows amd64 | 35 / 9 | 30 / 16 | 5 / 3 | 143 / 12 |
+
+    907 executed cases, 471 native and 436 source-model; 509 executed cells
+    of 1,504 combinations, the rest skipped (70) or inapplicable. No required
+    cell is zero.
+  - 159 K0 repeat pairs with no difference, and 148 Direct comparisons with no
+    O1, O3 or O4 difference. 60 required Linux traced O2 scopes, 26 `held` and
+    34 `unknown`, none violated. The nine O4 `lost-silent` labels are
+    H-R10a-login's authorized replacements, each matching Direct.
+  - Every skip is one the decision records allow or a structural
+    inapplicability the contract names: H-R7 on macOS (11), Windows
+    terminal-bound profile commands (12), idle-owner import (4), H-R12-http on
+    Windows (3), the native H-R16 lane (4, its source model runs), and 50 cases
+    with no counterpart on that platform or in Direct.
+  - Every K2 witness reproduced at the pin: H-R12 W-CHROME-PATH on all four
+    platforms, H-R6 owner group natively on both Linux architectures, H-R7 owner
+    sweep three times per Linux architecture, H-R11 on Windows, and
+    W-UNMARKED and W-OWNER-UNMARKED on all four. The H-R16 response-loss
+    witness passed both cuts on every platform, 8 of 8.
+  - One staging relaunch, Windows H-R15 K0: the first browser exhausted the
+    30 s navigation budget before a session was validated, was gone before the
+    second launch, and the row then matched K3. Its cause is not established.
+    No job reran; no census entry stayed unresolved.
+  - Runner images: ubuntu-24.04 `20261004.327.1` (8 jobs) and
+    `20261012.334.1` (2); ubuntu-24.04-arm `20261004.142.1` (4) and
+    `20261012.149.1` (5); macos-26-arm64 `20260907.0351.1` (9);
+    windows-2025-vs2026 `20260925.250.1` (9) and `20261007.264.1` (1).
+    Candidate browser `153.0.8010.12` (patchright 1.63.0) everywhere; frozen
+    browser `149.0.7827.55` (patchright 1.61.2), `149.0.7827.0` on Linux
+    aarch64.
+  - All 37 artifacts were archived before their 2026-10-28 expiry, and the
+    maintainer keeps that archive outside the repository; every zip matched
+    its API digest. The checksum list over the 4,599 extracted files has sha256
+    `c3a53d56588df04614e83d8288b2d7095a72999b224321180837f485b30e796e`, so a
+    copy obtained from the maintainer can be checked against this entry.
