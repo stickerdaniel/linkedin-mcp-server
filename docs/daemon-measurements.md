@@ -436,7 +436,8 @@ Symbols are named relative to `linkedin_mcp_server`. Tests are named as
     Candidate browser `153.0.8010.12` (patchright 1.63.0) everywhere; frozen
     browser `149.0.7827.55` (patchright 1.61.2), `149.0.7827.0` on Linux
     aarch64.
-  - All 37 artifacts were archived before their 2026-10-28 expiry; every zip
-    matched its API digest, and the checksum list over the 4,599 extracted
-    files has sha256
-    `c3a53d56588df04614e83d8288b2d7095a72999b224321180837f485b30e796e`.
+  - All 37 artifacts were archived before their 2026-10-28 expiry, and the
+    maintainer keeps that archive outside the repository; every zip matched
+    its API digest. The checksum list over the 4,599 extracted files has sha256
+    `c3a53d56588df04614e83d8288b2d7095a72999b224321180837f485b30e796e`, so a
+    copy obtained from the maintainer can be checked against this entry.
