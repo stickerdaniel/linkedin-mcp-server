@@ -345,6 +345,62 @@ async def test_a_browser_killed_under_a_living_driver_is_an_unexpected_end(tmp_p
     assert processes["driver"]["ended"] == "alive-at-stop"
 
 
+# --- A relaunch inside one observation --------------------------------------------
+
+
+@_browser_case
+async def test_a_relaunch_keeps_the_first_launch_and_reads_its_own_ends(tmp_path):
+    """Staging's relaunch after a stall: two browsers on one profile, observed
+    by the harness's own ``observing``. The first launch keeps the top level
+    and its stalled navigation; the second is appended, and its browser lost
+    before its own close reads as unexpected, not as ended by the first's."""
+    evidence = tmp_path / "evidence"
+    profile = tmp_path / "profile"
+
+    def roots() -> list[dict[str, Any]]:
+        document = read_document(evidence / BROWSER_LIFETIMES_FILE) or {}
+        found = [
+            p for p in document.get("processes", []) if p["role"] == "browser-root"
+        ]
+        return sorted(found, key=lambda p: p["identified_ms"])
+
+    with _Origin() as origin:
+        with observing(evidence, profile=profile, label="relaunch") as path:
+            async with _browser(profile) as context:
+                with pytest.raises(PlaywrightTimeoutError):
+                    await context.pages[0].goto(
+                        origin.url("/black-hole"), timeout=1_000
+                    )
+                await _until(roots, 15, "the first browser root was not identified")
+            async with _browser(profile) as context:
+                page = context.pages[0]
+                await page.goto(origin.url("/"))
+                second = await _until(
+                    lambda: len(roots()) == 2 and roots()[1],
+                    15,
+                    "the second browser root was not identified",
+                )
+                psutil.Process(second["pid"]).kill()
+                await _until(
+                    lambda: roots()[1]["gone_ms"] is not None,
+                    15,
+                    "the second browser root was not seen gone",
+                )
+    record = _record(path)
+    assert [n["launch"] for n in record["navigations"]] == [1, 2]
+    assert (record["first_failed_navigation"], record["stalled_phase"]) == (
+        0,
+        "response",
+    )
+    (relaunch,) = record["relaunches"]
+    assert record["close_requested_ms"] < relaunch["launch"]["started_ms"]
+    assert relaunch["close_requested_ms"] > relaunch["launch"]["started_ms"]
+    assert record["driver"]["pid"] != relaunch["driver"]["pid"]
+    first, second = (root["ended"] for root in roots())
+    assert first in ("after-close-request", "ambiguous")
+    assert second == "unexpected"
+
+
 # --- Observers that leave ---------------------------------------------------------
 
 
