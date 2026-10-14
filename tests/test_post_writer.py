@@ -40,10 +40,13 @@ def fixture():
         count=AsyncMock(return_value=1),
         is_enabled=AsyncMock(return_value=True),
         click=AsyncMock(),
+        evaluate=AsyncMock(return_value={"ok": True}),
     )
     audience = MagicMock(count=AsyncMock(return_value=1))
     authors = MagicMock(evaluate_all=AsyncMock(return_value=[AUTHOR]))
     dialog = MagicMock(count=AsyncMock(return_value=1))
+    for locator in [dialog, editor, button, audience]:
+        locator.wait_for = AsyncMock()
     dialog.locator.side_effect = lambda selector: (
         authors if selector.startswith("a[") else editor
     )
@@ -103,7 +106,10 @@ async def test_fresh_facade_same_page_keeps_draft_and_clicks_once():
     assert result["status"] == "published" and result["url"] == page.url
     with pytest.raises(ValueError, match="Attempt already"):
         await writer.publish(draft, TEXT, confirmed=True)
-    button.click.assert_awaited_once()
+    assert [call.args[1]["click"] for call in button.evaluate.await_args_list] == [
+        False,
+        True,
+    ]
 
 
 async def test_timeout_remains_unknown_and_blocks_second_attempt():
@@ -115,7 +121,10 @@ async def test_timeout_remains_unknown_and_blocks_second_attempt():
     ] == "outcome_unknown"
     with pytest.raises(ValueError, match="Attempt already"):
         await writer.publish(draft, TEXT, confirmed=True)
-    button.click.assert_awaited_once()
+    assert [call.args[1]["click"] for call in button.evaluate.await_args_list] == [
+        False,
+        True,
+    ]
 
 
 @pytest.mark.parametrize(
@@ -140,7 +149,7 @@ async def test_unsafe_composer_refused_before_fill_or_click(problem):
     with pytest.raises(ValueError):
         await writer.publish(draft, TEXT, confirmed=True)
     editor.fill.assert_not_awaited()
-    button.click.assert_not_awaited()
+    button.evaluate.assert_not_awaited()
 
 
 async def test_concurrent_publish_cannot_double_click():
@@ -152,7 +161,10 @@ async def test_concurrent_publish_cannot_double_click():
         return_exceptions=True,
     )
     assert sum(isinstance(result, ValueError) for result in results) == 1
-    button.click.assert_awaited_once()
+    assert [call.args[1]["click"] for call in button.evaluate.await_args_list] == [
+        False,
+        True,
+    ]
 
 
 async def test_wrong_rendered_post_is_not_a_success():
@@ -163,6 +175,34 @@ async def test_wrong_rendered_post_is_not_a_success():
     assert (await writer.publish(draft, TEXT, confirmed=True))[
         "status"
     ] == "outcome_unknown"
+
+
+@pytest.mark.parametrize("seam", ["navigation", "before_fill", "after_fill"])
+async def test_expiry_rechecked_at_mutation_boundaries(seam):
+    writer, _, _, nav, editor, button, *_ = fixture()
+    draft = writer.prepare(TEXT, AUTHOR)["draft_id"]
+
+    def expire(*args):
+        writer._state.drafts[draft].expires = 0
+        return {"ok": True}
+
+    if seam == "navigation":
+        nav._navigate_to_page.side_effect = expire
+    elif seam == "before_fill":
+        button.evaluate.side_effect = expire
+    else:
+        editor.fill.side_effect = expire
+    if seam == "after_fill":
+        result = await writer.publish(draft, TEXT, confirmed=True)
+        assert (
+            result["status"] == "not_submitted"
+            and result["reason"] == "preview_expired"
+        )
+        assert button.evaluate.await_count == 1
+    else:
+        with pytest.raises(ValueError, match="expired"):
+            await writer.publish(draft, TEXT, confirmed=True)
+        editor.fill.assert_not_awaited()
 
 
 async def test_tool_default_does_not_even_acquire_browser(monkeypatch):
