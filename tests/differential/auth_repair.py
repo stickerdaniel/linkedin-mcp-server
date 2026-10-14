@@ -76,12 +76,13 @@ scenario before a login could be asked for, a finding.
 hop routed through a relay; ``owner_hop_relay`` proves such a relay's
 boundary process-free, but the frontend reaches its owner where the owner's
 own descriptor says, so routing the real hop through the relay means editing
-the product's daemon state (the plan's STOP 10), and the lane stays open
-(``RESPONSE_LOSS_OPEN``) beside its models (``MODEL_COVERAGE``): the latch
-models in ``tests/test_bootstrap.py`` show a later call meets the same
-marker, and no test drops a marker response. The ``browser_open`` marker and
-the import beside an idle owner (``IMPORT_NOT_NATIVE``) are mapped the same
-way.
+the product's daemon state (the plan's STOP 10), and the native lane stays
+open (``RESPONSE_LOSS_OPEN``) beside its model (``MODEL_COVERAGE``), which
+drops a marker the owner produced on the in-process hop: unit coverage, never
+native. The latch models in ``tests/test_bootstrap.py`` show a later call
+meets the same marker and stay references, not response-loss coverage. The
+``browser_open`` marker and the import beside an idle owner
+(``IMPORT_NOT_NATIVE``) are mapped the same way.
 
 K2 is recorded not applicable (``K2_NOT_APPLICABLE``). The scripts run on a
 ``harness.RowContext`` with its ``auth`` seams (and ``commands`` for the
@@ -154,6 +155,9 @@ ROW_COLD = "H-R16-cold"
 ROW_SECOND = "H-R16-second"
 ROW_FAILED = "H-R16-failed"
 ROW_LOGIN = "H-R10a-login"
+#: Counted, never run natively, so it has no lifecycle in ``harness.ROWS``:
+#: its native cell is a skip (``RESPONSE_LOSS_OPEN``), its coverage a model.
+ROW_RESPONSE_LOSS = "H-R16-response-loss"
 
 #: The calibration's idle timeout, the same in K1, K3 and K0: far above the
 #: time from the warm-up read to the cold one, so the owner cannot idle out
@@ -1428,14 +1432,14 @@ def comparison_refusals(
 #: The lane whose native claim needs positive boundary evidence the row
 #: cannot get, and why: the plan's STOP 5 and 10.
 RESPONSE_LOSS_OPEN = (
-    "a marker response dropped on the owner hop is not observed natively: the "
-    "relay's boundary is proved process-free (owner_hop_relay), but the "
-    "frontend reaches its owner at the address the owner's own descriptor "
-    "publishes, so routing the real hop through the relay means editing the "
-    "product's daemon state, a seam the plan stops at (STOP 10); the latch "
-    "models mapped here show a later call meets the same marker and are not "
-    "response-loss tests, and no test drops a marker response, so the lane "
-    "stays open"
+    "native response loss remains unobserved: the relay's boundary is proved "
+    "process-free (owner_hop_relay), but the frontend reaches its owner at the "
+    "address the owner's own descriptor publishes, so routing the real hop "
+    "through the relay means editing the product's daemon state, a seam the "
+    "plan stops at (STOP 10); a source model drops a marker the owner produced "
+    "on the in-process hop and counts as unit coverage, never as native, and "
+    "the latch models referenced here are not response-loss tests, so the "
+    "native lane stays open"
 )
 IMPORT_NOT_NATIVE = (
     "the import asks the OS keystore before it reads a cookie, on every "
@@ -1448,7 +1452,8 @@ IMPORT_NOT_NATIVE = (
 
 #: What the response-loss lane stands beside while it stays open: latch
 #: models, which are not response-loss tests, so never counted as its
-#: coverage (``RESPONSE_LOSS_OPEN``).
+#: coverage (``RESPONSE_LOSS_OPEN``). The model that drops a marker is
+#: mapped in ``MODEL_COVERAGE`` instead.
 RESPONSE_LOSS_REFERENCES: tuple[str, ...] = (
     "tests/test_bootstrap.py::TestTheOwnerStaysQuiescentUntilANewSessionLands"
     "::test_every_later_call_names_the_same_broken_session",

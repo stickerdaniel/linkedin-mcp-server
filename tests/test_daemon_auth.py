@@ -9,15 +9,20 @@ lose the signal or act on it wrongly.
 from __future__ import annotations
 
 import asyncio
+import json
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx2
 import mcp.types as mt
 import pytest
-from fastmcp import Client, FastMCP
+from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
+from owner_hop import Forward, Interceptor, method_of
 
 from linkedin_mcp_server.daemon import auth_repair as daemon_auth
 from linkedin_mcp_server.daemon.auth_repair import (
@@ -66,8 +71,9 @@ def _owner_that_fails_with(
     return owner, calls
 
 
-#: The owner each frontend built here forwards to, by the address it was given.
-_OWNERS: dict[str, FastMCP] = {}
+#: The owner each frontend built here forwards to, or an interceptor around
+#: it, by the address it was given.
+_OWNERS: dict[str, FastMCP | Interceptor] = {}
 _HOME: list[Path] = []
 
 
@@ -805,6 +811,288 @@ class TestTheRepairRunsForReal:
 
         assert calls == [1], "an unannotated tool was replayed"
         assert result.is_error is True
+
+
+def _answer_in(body: bytes, media: str) -> dict[str, Any]:
+    """The JSON-RPC answer in a tool call's response body, JSON or event stream."""
+    if media.startswith("application/json"):
+        return json.loads(body)
+    events = [
+        json.loads(line.removeprefix(b"data:"))
+        for line in body.splitlines()
+        if line.startswith(b"data:")
+    ]
+    (answer,) = [event for event in events if "id" in event and "method" not in event]
+    return answer
+
+
+class _Cut(httpx2.AsyncByteStream):
+    """A body that ends after *delivered*, with *reset* raised there if given."""
+
+    def __init__(self, delivered: bytes, reset: httpx2.ReadError | None) -> None:
+        self.delivered = delivered
+        self.reset = reset
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield self.delivered
+        if self.reset is not None:
+            raise self.reset
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _LosesTheFirstMarker(Interceptor):
+    """An owner whose first auth marker never reaches the frontend whole.
+
+    Every request reaches the owner, and every tool answer is read here in full
+    and kept with its media type. The first one carrying a marker is then
+    delivered cut, as *cut* says: ``"reset"`` resets the body half way,
+    ``"event stream"`` ends the stream without the blank line that would end
+    its last event. Every other answer passes through intact.
+    """
+
+    def __init__(self, owner: FastMCP, *, cut: str) -> None:
+        super().__init__(owner)
+        self.cut = cut
+        #: Each tool answer's media type and marker, as the owner produced them.
+        self.answers: list[tuple[str, dict[str, Any] | None]] = []
+        #: The bytes of the cut answer that never reached the frontend.
+        self.withheld: bytes | None = None
+
+    async def handle(
+        self, message: dict[str, Any] | None, request: httpx2.Request, forward: Forward
+    ) -> httpx2.Response:
+        response = await forward()
+        if method_of(message) != "tools/call":
+            return response
+        body = await response.aread()
+        media = response.headers.get("content-type", "")
+        result = _answer_in(body, media).get("result", {})
+        marker = result.get("_meta", {}).get(MARKER_KEY)
+        self.answers.append((media, marker))
+        if self.withheld is not None or marker is None:
+            return httpx2.Response(
+                response.status_code, headers=response.headers, content=body
+            )
+        reset: httpx2.ReadError | None = None
+        if self.cut == "reset":
+            delivered = body[: len(body) // 2]
+            reset = httpx2.ReadError(
+                "the owner's connection was reset", request=request
+            )
+        else:
+            # The last event's data line keeps its own line break; only the
+            # blank line after it, which completes the event, is withheld.
+            kept = body.rstrip(b"\r\n")
+            delivered = body[: len(kept) + (len(body) - len(kept)) // 2]
+        self.withheld = body[len(delivered) :]
+        headers = [
+            (name, value)
+            for name, value in response.headers.multi_items()
+            if name.lower() != "content-length"
+        ]
+        return httpx2.Response(
+            response.status_code, headers=headers, stream=_Cut(delivered, reset)
+        )
+
+
+class TestALostMarkerResponse:
+    """H-R16: the owner's stale marker is produced, then lost on the hop back.
+
+    The owner has already closed its browser and latched by the time its answer
+    leaves, so losing that answer must leave the decision with the user and the
+    repair with the next call. Production on both sides of the hop: the owner's
+    readiness gate, ``handle_auth_error``, latch and marker, and a proxy as
+    ``create_mcp_server`` assembles it, with a backend whose election finds the
+    same owner again. Only the browser, the login and the socket are stood in.
+    """
+
+    @pytest.fixture
+    def session(self, tmp_path: Path) -> Path:
+        """A working session on disk, under this test's profile only."""
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+        from linkedin_mcp_server.session_state import (
+            portable_cookie_path,
+            write_source_state,
+        )
+
+        profile = tmp_path / "profile"
+        config = AppConfig()
+        config.browser.user_data_dir = str(profile)
+        # Never launched: it only takes the gate past the managed browser
+        # install, straight to the auth check.
+        config.browser.chrome_path = str(tmp_path / "chrome")
+        set_config(config)
+        (profile / "Default").mkdir(parents=True, exist_ok=True)
+        (profile / "Default" / "Cookies").write_text("placeholder")
+        portable_cookie_path(profile).write_text("[]")
+        write_source_state(profile)
+        return profile
+
+    @staticmethod
+    def _session_files(profile: Path) -> dict[Path, bytes]:
+        from linkedin_mcp_server.session_state import (
+            portable_cookie_path,
+            source_state_path,
+        )
+
+        files = (
+            profile / "Default" / "Cookies",
+            portable_cookie_path(profile),
+            source_state_path(profile),
+        )
+        return {path: path.read_bytes() for path in files}
+
+    @pytest.mark.parametrize("cut", ["reset", "event stream"])
+    async def test_the_caller_is_told_it_is_unknown_and_the_next_call_repairs(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, session: Path, cut: str
+    ):
+        from test_daemon_proxy import _attachment, _backend, _elected
+
+        from linkedin_mcp_server import dependencies
+        from linkedin_mcp_server.bootstrap import (
+            RuntimePolicy,
+            current_login_generation,
+            initialize_bootstrap,
+        )
+        from linkedin_mcp_server.core.exceptions import AuthenticationError
+        from linkedin_mcp_server.dependencies import (
+            get_ready_extractor,
+            handle_auth_error,
+        )
+        from linkedin_mcp_server.server import create_mcp_server
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            reset_process_role_for_testing,
+            set_process_role,
+        )
+
+        broken = current_login_generation()
+        assert broken is not None
+        before = self._session_files(session)
+
+        owner = FastMCP("owner", mask_error_details=True)
+        runs: list[str] = []
+        acquired: list[MagicMock] = []
+        # The hop always asks for progress, and the owner answers as an event
+        # stream once it reports some, and as one JSON body otherwise.
+        streams = cut == "event stream"
+
+        # Mutating, so a read-only replay cannot paper over the loss.
+        @owner.tool(annotations={"destructiveHint": True})
+        async def send_message(message: str, ctx: Context) -> str:
+            try:
+                await get_ready_extractor(ctx, tool_name="send_message")
+                runs.append(message)
+                if streams:
+                    await ctx.report_progress(progress=1, total=2, message="sending")
+                # The session dies after the tool has started acting.
+                raise AuthenticationError("LinkedIn signed this session out")
+            except AuthenticationError as e:
+                try:
+                    await handle_auth_error(e, ctx)
+                except Exception as relogin_exc:
+                    raise_tool_error(relogin_exc, "send_message")
+            except Exception as e:
+                raise_tool_error(e, "send_message")
+
+        owner.add_middleware(OwnerAuthSignalMiddleware())
+
+        async def a_live_browser() -> MagicMock:
+            browser = MagicMock()
+            browser.page.is_closed.return_value = False
+            browser.context.browser.is_connected.return_value = True
+            acquired.append(browser)
+            return browser
+
+        monkeypatch.setattr(dependencies, "get_or_create_browser", a_live_browser)
+        monkeypatch.setattr(dependencies, "ensure_authenticated", AsyncMock())
+        initialize_bootstrap(RuntimePolicy.MANAGED)
+
+        attachment = _attachment(tmp_path)
+        hop = _LosesTheFirstMarker(owner, cut=cut)
+        _OWNERS[attachment.descriptor.url] = hop
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon.election.obtain_owner",
+            lambda *_a, **_k: _elected(attachment),
+        )
+        proxy = create_mcp_server(
+            role=ServerRole.PROXY,
+            proxy_backend=_backend(attachment, tmp_path),
+            tool_timeout=10.0,
+        )
+        # One process hosts both halves. The proxy claims its role as it is
+        # assembled and reads none on this path afterwards, while the owner's
+        # gates read theirs at call time.
+        reset_process_role_for_testing()
+        set_process_role(ServerRole.OWNER)
+
+        progress: list[str | None] = []
+
+        async def heard(_progress: float, _total: float | None, text: str | None):
+            progress.append(text)
+
+        with patch.object(
+            daemon_auth, "_repair_auth_locally", new_callable=AsyncMock
+        ) as repair:
+            async with Client(proxy, progress_handler=heard) as client:
+                lost = await asyncio.wait_for(
+                    client.call_tool(
+                        "send_message", {"message": "hi"}, raise_on_error=False
+                    ),
+                    30,
+                )
+
+                # 1. The owner did produce the marker, for the broken session,
+                # as not replayable, and it was the answer that was cut.
+                ((media, produced),) = hop.answers
+                expected = "text/event-stream" if streams else "application/json"
+                assert media.startswith(expected), media
+                assert produced is not None
+                assert produced["reason"] == "stale"
+                assert produced["generation"] == broken
+                assert produced["replayable"] is False
+                if streams:
+                    # Its progress event arrived; only the final event's
+                    # terminating blank line did not.
+                    assert progress == ["sending"]
+                    assert hop.withheld in (b"\r\n", b"\n", b"\r")
+                else:
+                    assert hop.withheld
+                # 2. The caller is told nobody knows, and nothing reads as success.
+                assert lost.is_error is True
+                assert lost.structured_content is not None
+                assert lost.structured_content["status"] == "outcome_unknown"
+                assert lost.structured_content["retry_safe"] is False
+                assert MARKER_KEY not in (lost.meta or {})
+                # 3. Ran once, and the lost marker started no repair.
+                assert runs == ["hi"]
+                repair.assert_not_awaited()
+                # 4. Nothing touched the session it named.
+                assert self._session_files(session) == before
+                assert current_login_generation() == broken
+
+                again = await asyncio.wait_for(
+                    client.call_tool(
+                        "send_message", {"message": "hi"}, raise_on_error=False
+                    ),
+                    30,
+                )
+
+        # 5. The intact answer names the same session, refused before the tool
+        # body, so now replayable, without the browser being taken again.
+        assert len(acquired) == 1, "the latched owner took the browser again"
+        assert runs == ["hi"], "the tool body ran again"
+        assert again.is_error is True
+        assert again.meta is not None
+        marker = again.meta[MARKER_KEY]
+        assert marker["reason"] == "stale"
+        assert marker["generation"] == broken
+        assert marker["replayable"] is True
+        # 6. That answer is the one the repair starts from.
+        repair.assert_awaited_once_with("stale", broken)
 
 
 class TestWhichRolesGetWhichHalf:

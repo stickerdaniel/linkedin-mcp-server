@@ -1327,7 +1327,12 @@ def test_each_mapped_test_models_one_row():
 
 
 def test_each_mapped_branch_names_a_declared_row():
-    assert {row for row, _ in model_coverage.COUNTED.values()} <= set(harness.ROWS)
+    from differential.auth_repair import ROW_RESPONSE_LOSS
+
+    # The response-loss row is counted but never run natively, so it has no
+    # lifecycle in `harness.ROWS`.
+    declared = {*harness.ROWS, ROW_RESPONSE_LOSS}
+    assert {row for row, _ in model_coverage.COUNTED.values()} <= declared
 
 
 def test_the_mapped_tests_count_as_model_coverage_and_nothing_else_does():

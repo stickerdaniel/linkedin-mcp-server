@@ -54,6 +54,7 @@ from differential.auth_repair import (
     ROW_COLD,
     ROW_FAILED,
     ROW_LOGIN,
+    ROW_RESPONSE_LOSS,
     ROW_SECOND,
     comparison_refusals,
     semantic_differences,
@@ -291,7 +292,7 @@ def test_the_sign_in_repeat_reads_as_the_candidate_did(row):
     assert not differences, f"{row} K0 differs from K3: {differences}"
 
 
-@pytest.mark.differential_row(row="H-R16-response-loss", experiment="K3")
+@pytest.mark.differential_row(row=ROW_RESPONSE_LOSS, experiment="K3")
 def test_a_lost_marker_response_is_not_observed_natively():
     pytest.skip(RESPONSE_LOSS_OPEN)
 

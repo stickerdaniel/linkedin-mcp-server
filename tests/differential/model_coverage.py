@@ -110,6 +110,14 @@ AUTH_MODEL_COVERAGE: dict[str, tuple[str, tuple[str, ...]]] = {
             "::test_a_tool_that_changes_something_is_never_replayed",
         ),
     ),
+    # In process only: the native lane stays open (auth_repair.RESPONSE_LOSS_OPEN).
+    "response loss: a stale marker the owner produced, cut on the hop back": (
+        "H-R16-response-loss",
+        (
+            "tests/test_daemon_auth.py::TestALostMarkerResponse"
+            "::test_the_caller_is_told_it_is_unknown_and_the_next_call_repairs",
+        ),
+    ),
     "two frontends meeting one dead session": (
         "H-R16-second",
         (
