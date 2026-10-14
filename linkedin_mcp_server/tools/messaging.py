@@ -311,8 +311,8 @@ def register_messaging_tools(
             again while it is
             false can deliver the message twice. A ``status`` of
             ``outcome_unknown`` is that same warning from the transport rather
-            than the page: the browser process went away with the call in
-            flight, so ``sent`` is absent instead of false and only LinkedIn
+            than the page: the call's answer never arrived from the browser
+            process, so ``sent`` is absent instead of false and only LinkedIn
             itself can say whether the message left.
         """
         try:
