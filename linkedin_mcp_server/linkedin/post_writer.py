@@ -50,8 +50,12 @@ COMPOSER_GUARD_JS = r"""(button, args) => {
     const audiences = all('button,[role="button"]').filter(el =>
         (el.getAttribute('aria-label') || el.innerText).trim() === audience);
     if (audiences.length !== 1) return {ok: false, reason: 'audience_changed'};
+    // Empty rich-text editors may render a blank paragraph as whitespace.
+    // Only the pre-fill check permits it; publication retains exact equality.
+    const body = editor.innerText;
     if (all('[contenteditable="true"][role="textbox"]').length !== 1
-        || editor.innerText !== text) return {ok: false, reason: 'text_changed'};
+        || (click ? body !== text : body.trim() !== ''))
+        return {ok: false, reason: 'text_changed'};
     const media = [...dialog.querySelectorAll('video,audio,iframe,object,embed,canvas,fieldset,table,'
         + '[role="radiogroup"],[role="radio"],a[download]')];
     const images = [...dialog.querySelectorAll('img')].filter(el => !authors.some(a => a.contains(el)));
