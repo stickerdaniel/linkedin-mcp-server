@@ -54,7 +54,15 @@ def _make_mock_extractor(result: dict) -> MagicMock:
     return mock
 
 
-_TOOL_MODULES = ("person", "company", "job", "messaging", "feed", "post")
+_TOOL_MODULES = (
+    "person",
+    "company",
+    "job",
+    "messaging",
+    "feed",
+    "post",
+    "post_publishing",
+)
 
 
 @pytest.fixture
@@ -2445,6 +2453,60 @@ class TestPostTools:
 
         with pytest.raises(ValidationError, match="max_pages"):
             await mcp.call_tool("search_posts", {"keywords": "python", "max_pages": 0})
+
+
+class TestPostPublishingTools:
+    async def test_prepare_via_mcp_call(self, serve_extractor):
+        from linkedin_mcp_server.tools.post_publishing import (
+            register_post_publishing_tools,
+        )
+
+        expected = {"status": "preview", "text": "Exact text", "published": False}
+        extractor = _make_mock_extractor(expected)
+        serve_extractor(extractor)
+        server = FastMCP("test")
+        register_post_publishing_tools(server)
+        result = await server.call_tool("prepare_post", {"text": "Exact text"})
+        assert result.structured_content == expected
+        extractor.prepare_post.assert_awaited_once_with("Exact text")
+
+    async def test_confirmed_publish_via_mcp_call(self, serve_extractor):
+        from linkedin_mcp_server.tools.post_publishing import (
+            register_post_publishing_tools,
+        )
+
+        expected = {
+            "status": "published",
+            "url": "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+        }
+        extractor = _make_mock_extractor(expected)
+        serve_extractor(extractor)
+        server = FastMCP("test")
+        register_post_publishing_tools(server)
+        result = await server.call_tool(
+            "publish_post",
+            {"draft_id": "draft", "approved_text": "Exact text", "confirmed": True},
+        )
+        assert result.structured_content == expected
+        extractor.publish_post.assert_awaited_once_with(
+            "draft", "Exact text", confirmed=True
+        )
+
+    async def test_unconfirmed_publish_via_mcp_call_never_acquires_browser(
+        self, serve_extractor
+    ):
+        from linkedin_mcp_server.tools.post_publishing import (
+            register_post_publishing_tools,
+        )
+
+        ready = serve_extractor(_make_mock_extractor({}))
+        server = FastMCP("test")
+        register_post_publishing_tools(server)
+        result = await server.call_tool(
+            "publish_post", {"draft_id": "draft", "approved_text": "Exact text"}
+        )
+        assert result.structured_content["status"] == "confirmation_required"
+        ready.assert_not_awaited()
 
 
 class TestToolTimeouts:
