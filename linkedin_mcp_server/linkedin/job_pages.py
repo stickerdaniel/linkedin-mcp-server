@@ -326,6 +326,8 @@ EASY_APPLY_STEP_JS = (
             field.value = first.value;
         }
         if (first.maxLength > 0) field.max_length = first.maxLength;
+        // Hints are described too. Which text is an error is the walk's to
+        // say, by what a refused Next added (`_refused_step`).
         const errors = group
             .flatMap((el) => (el.getAttribute('aria-describedby') || '').split(/\s+/))
             .filter(Boolean)
@@ -395,6 +397,37 @@ class EasyApplyDraftLeftError(RuntimeError):
     leave on LinkedIn is what the caller has to act on, and an error of its own
     type keeps that warning's `error_type` instead of the failure's.
     """
+
+
+def _added_errors(before: dict[str, Any], after: dict[str, Any]) -> list[str | None]:
+    """Per field of ``after``, the error text a click on ``before`` added.
+
+    Both reads are of one step, so their fields line up. The text a field
+    describes itself with is LinkedIn's error only when the click put it
+    there: `aria-describedby` also names hints, and a hint is there before
+    any click. Nothing in the markup tells the two apart in every locale; the
+    click does.
+    """
+    return [
+        field.get("error") if field.get("error") != prior.get("error") else None
+        for field, prior in zip(after["fields"], before["fields"], strict=True)
+    ]
+
+
+def _refused_step(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """``after``, the step LinkedIn kept after Next, with only its new errors."""
+    fields = []
+    for field, error in zip(after["fields"], _added_errors(before, after), strict=True):
+        field = {key: value for key, value in field.items() if key != "error"}
+        if error:
+            field["error"] = error
+        fields.append(field)
+    return {**after, "fields": fields}
+
+
+def _unrefused_step(step: dict[str, Any]) -> dict[str, Any]:
+    """``step`` without errors, for a step no click has been refused on."""
+    return _refused_step(step, step)
 
 
 def _public_step(step: dict[str, Any]) -> dict[str, Any]:
@@ -548,7 +581,9 @@ class JobPageReader:
 
         step = await self._read_easy_apply_step(None)
         while True:
-            steps.append(_public_step(step))
+            # Nothing has been asked of this step yet, so nothing on it is an
+            # answer to a click.
+            steps.append(_public_step(_unrefused_step(step)))
             if not step["next"]:
                 return True
             if len(steps) >= _EASY_APPLY_MAX_STEPS:
@@ -559,7 +594,7 @@ class JobPageReader:
             after = await self._read_easy_apply_step(step)
             if after["signature"] == step["signature"]:
                 # Refused: the same step, now carrying LinkedIn's errors.
-                steps[-1] = _public_step(after)
+                steps[-1] = _public_step(_refused_step(step, after))
                 return False
             step = after
 
@@ -569,8 +604,10 @@ class JobPageReader:
         """The step the dialog settles on after ``previous``.
 
         Settled means two reads in a row agree, and they differ from
-        ``previous`` or carry an error. A step that does neither by the
-        deadline is returned as it stands.
+        ``previous`` or carry an error ``previous`` did not. A step that does
+        neither by the deadline is returned as it stands. Text a field already
+        described itself with is a hint, and settling on it would take a step
+        that Next is still moving off for a refused one.
         """
         page = self._session.page
         deadline = self._session.monotonic() + _EASY_APPLY_STEP_TIMEOUT
@@ -580,7 +617,7 @@ class JobPageReader:
             if step is None:
                 raise RuntimeError("The Easy Apply dialog closed while it was read")
             moved = previous is None or step["signature"] != previous["signature"]
-            refused = any("error" in field for field in step["fields"])
+            refused = not moved and any(_added_errors(previous, step))
             if (
                 last is not None
                 and last["signature"] == step["signature"]
