@@ -9,8 +9,12 @@ import asyncio
 import pytest
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    LinkedInOperationError,
+)
 from linkedin_mcp_server.linkedin import job_pages as job_pages_module
+from linkedin_mcp_server.linkedin import session as session_module
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.contracts import (
     RATE_LIMITED_SECTION_TEXT,
@@ -1496,3 +1500,90 @@ class TestExtractJobIds:
             assert await reader._extract_job_ids(scoped=True) == ["101", "999"]
 
         assert "No results rail" in caplog.text
+
+
+class TestOpenJobPosting:
+    async def test_navigates_checks_rate_limit_and_dismisses_modal(self, mock_page):
+        reader = _reader(mock_page)
+        with (
+            patch.object(
+                PageNavigator, "_navigate_to_page", new_callable=AsyncMock
+            ) as navigate,
+            patch.object(
+                session_module, "detect_rate_limit", new_callable=AsyncMock
+            ) as detect,
+            patch.object(
+                session_module,
+                "handle_modal_close",
+                new_callable=AsyncMock,
+            ) as close_modal,
+        ):
+            await reader.open_job_posting("https://www.linkedin.com/jobs/view/12345/")
+
+        navigate.assert_awaited_once_with("https://www.linkedin.com/jobs/view/12345/")
+        detect.assert_awaited_once_with(mock_page)
+        close_modal.assert_awaited_once_with(mock_page)
+
+
+class TestSaveControl:
+    async def test_state_uses_the_fixed_en_us_labels(self, mock_page):
+        """No runtime locale read: the forced en-US labels go straight in."""
+        reader = _reader(mock_page)
+        mock_page.evaluate = AsyncMock(return_value="saved")
+
+        result = await reader.save_control_state()
+
+        assert result == "saved"
+        assert mock_page.evaluate.await_count == 1
+        assert mock_page.evaluate.await_args_list[0].args[1] == {
+            "labels": {"saved": "Saved", "unsaved": "Save"},
+            "waitTimeoutMs": job_pages_module._JOB_SAVE_CONTROL_WAIT_MS,
+        }
+
+    async def test_state_rejects_an_ambiguous_control(self, mock_page):
+        reader = _reader(mock_page)
+        mock_page.evaluate = AsyncMock(return_value=None)
+
+        with (
+            patch.object(
+                PageNavigator, "_raise_if_auth_barrier", new_callable=AsyncMock
+            ),
+            pytest.raises(LinkedInOperationError, match="Could not uniquely identify"),
+        ):
+            await reader.save_control_state()
+
+    async def test_click_targets_the_unsaved_label(self, mock_page):
+        """The click never takes an expected state; it only ever saves."""
+        reader = _reader(mock_page)
+        mock_page.evaluate = AsyncMock(return_value=True)
+
+        assert await reader.click_save_control() is True
+        assert mock_page.evaluate.await_args_list[0].args[1] == {
+            "labels": {"saved": "Saved", "unsaved": "Save"}
+        }
+
+    async def test_click_reports_a_failed_evaluation(self, mock_page):
+        reader = _reader(mock_page)
+        mock_page.evaluate = AsyncMock(
+            side_effect=RuntimeError("Execution context was destroyed")
+        )
+
+        assert await reader.click_save_control() is False
+
+    async def test_wait_for_saved_targets_only_the_saved_transition(self, mock_page):
+        reader = _reader(mock_page)
+        mock_page.evaluate = AsyncMock(return_value="saved")
+
+        assert await reader.save_control_state(wait_for_saved=True) == "saved"
+        assert mock_page.evaluate.await_args_list[0].args[1] == {
+            "labels": {"saved": "Saved", "unsaved": "Save"},
+            "waitTimeoutMs": job_pages_module._JOB_SAVE_CONTROL_WAIT_MS,
+            "target": "saved",
+        }
+
+    async def test_wait_for_saved_reports_an_unchanged_control(self, mock_page):
+        """A control that never transitions comes back unsaved, not raised here."""
+        reader = _reader(mock_page)
+        mock_page.evaluate = AsyncMock(return_value="unsaved")
+
+        assert await reader.save_control_state(wait_for_saved=True) == "unsaved"

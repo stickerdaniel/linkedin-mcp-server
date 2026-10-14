@@ -159,7 +159,7 @@ async def test_tool_schema_trace_keeps_people_boundary_coercion_and_inventory():
         "tool_schemas"
     ]
 
-    assert len(schemas) == 20
+    assert len(schemas) == 21
     network = schemas["search_people"]["input"]["properties"]["network"]
     assert network["anyOf"] == [
         {"items": {"type": "string"}, "type": "array"},
@@ -171,6 +171,10 @@ async def test_tool_schema_trace_keeps_people_boundary_coercion_and_inventory():
         "message",
         "confirm_send",
     ]
+    save_job = schemas["save_job"]["input"]
+    assert save_job["required"] == ["job_id"]
+    assert set(save_job["properties"]) == {"job_id"}
+    assert save_job["properties"]["job_id"]["type"] == "string"
 
 
 async def test_facade_results_keep_raw_values_and_optional_key_shape():

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 from urllib.parse import parse_qs, urlparse
 
 import asyncio
@@ -11,7 +11,10 @@ import pytest
 from patchright.async_api import Error as PatchrightError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    LinkedInOperationError,
+)
 from linkedin_mcp_server.linkedin import jobs as jobs_module
 from linkedin_mcp_server.linkedin.capture import (
     CaptureMode,
@@ -74,6 +77,132 @@ def captured(
         landed_url=page.url,
         scroll_seconds=scroll_seconds,
     )
+
+
+class TestSaveJob:
+    async def test_already_saved_does_not_click(self, mock_page):
+        reader = _reader(mock_page)
+        with (
+            patch.object(reader._pages, "open_job_posting", new_callable=AsyncMock),
+            patch.object(
+                reader._pages,
+                "save_control_state",
+                new_callable=AsyncMock,
+                return_value="saved",
+            ),
+            patch.object(
+                reader._pages, "click_save_control", new_callable=AsyncMock
+            ) as click_save,
+        ):
+            result = await reader.save_job("12345")
+
+        assert result == {
+            "url": "https://www.linkedin.com/jobs/view/12345/",
+            "job_id": "12345",
+            "saved": True,
+            "already_saved": True,
+        }
+        click_save.assert_not_awaited()
+
+    async def test_clicks_save_and_verifies_the_observed_state(self, mock_page):
+        reader = _reader(mock_page)
+        with (
+            patch.object(
+                reader._pages, "open_job_posting", new_callable=AsyncMock
+            ) as open_posting,
+            patch.object(
+                reader._pages,
+                "save_control_state",
+                new_callable=AsyncMock,
+                side_effect=["unsaved", "saved"],
+            ) as save_state,
+            patch.object(
+                reader._pages,
+                "click_save_control",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as click_save,
+        ):
+            result = await reader.save_job("12345")
+
+        assert result == {
+            "url": "https://www.linkedin.com/jobs/view/12345/",
+            "job_id": "12345",
+            "saved": True,
+            "already_saved": False,
+        }
+        open_posting.assert_awaited_once_with(
+            "https://www.linkedin.com/jobs/view/12345/"
+        )
+        click_save.assert_awaited_once_with()
+        save_state.assert_has_awaits([call(), call(wait_for_saved=True)])
+
+    async def test_raises_when_click_does_not_change_state(self, mock_page):
+        reader = _reader(mock_page)
+        with (
+            patch.object(reader._pages, "open_job_posting", new_callable=AsyncMock),
+            patch.object(
+                reader._pages,
+                "save_control_state",
+                new_callable=AsyncMock,
+                side_effect=["unsaved", "unsaved"],
+            ),
+            patch.object(
+                reader._pages,
+                "click_save_control",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            pytest.raises(
+                LinkedInOperationError, match="did not switch to its saved state"
+            ),
+        ):
+            await reader.save_job("12345")
+
+    async def test_normalizes_a_job_reference(self, mock_page):
+        reader = _reader(mock_page)
+        with (
+            patch.object(
+                reader._pages, "open_job_posting", new_callable=AsyncMock
+            ) as open_posting,
+            patch.object(
+                reader._pages,
+                "save_control_state",
+                new_callable=AsyncMock,
+                return_value="saved",
+            ),
+        ):
+            result = await reader.save_job("/jobs/view/4252026496/")
+
+        assert result == {
+            "url": "https://www.linkedin.com/jobs/view/4252026496/",
+            "job_id": "4252026496",
+            "saved": True,
+            "already_saved": True,
+        }
+        open_posting.assert_awaited_once_with(
+            "https://www.linkedin.com/jobs/view/4252026496/"
+        )
+
+    async def test_raises_when_save_control_is_missing(self, mock_page):
+        reader = _reader(mock_page)
+        with (
+            patch.object(reader._pages, "open_job_posting", new_callable=AsyncMock),
+            patch.object(
+                reader._pages,
+                "save_control_state",
+                new_callable=AsyncMock,
+                return_value="unsaved",
+            ),
+            patch.object(
+                reader._pages,
+                "click_save_control",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(LinkedInOperationError, match="Save button"),
+        ):
+            await reader.save_job("12345")
 
 
 class TestReadJob:

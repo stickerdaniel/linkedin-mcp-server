@@ -143,6 +143,41 @@ class JobReader:
             result["section_errors"] = section_errors
         return result
 
+    async def save_job(self, job_id: str) -> dict[str, Any]:
+        """Save one job posting, or report that it was already saved."""
+        job_id = normalize_job_id(job_id)
+        url = job_view_url(job_id, "/")
+        await self._pages.open_job_posting(url)
+
+        if await self._pages.save_control_state() == "saved":
+            return {
+                "url": url,
+                "job_id": job_id,
+                "saved": True,
+                "already_saved": True,
+            }
+
+        if not await self._pages.click_save_control():
+            raise LinkedInOperationError(
+                "Could not find or click the LinkedIn Save button for this job."
+            )
+
+        # A DOM click can dispatch without changing LinkedIn's state. Report
+        # the state observed afterward, not the attempt, and give the control
+        # the same bounded wait to transition to saved as the initial read
+        # gives it to render.
+        if await self._pages.save_control_state(wait_for_saved=True) != "saved":
+            raise LinkedInOperationError(
+                "Clicked the LinkedIn Save button, but the control did not "
+                "switch to its saved state."
+            )
+        return {
+            "url": url,
+            "job_id": job_id,
+            "saved": True,
+            "already_saved": False,
+        }
+
     async def get_job_apply_url(self, job_id: str) -> dict[str, Any]:
         """Read how a posting takes applications and where the employer's form is.
 
