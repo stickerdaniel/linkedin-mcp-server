@@ -634,7 +634,9 @@ def semantic_selector_id(selector: str) -> str:
         "main": "main",
         "[role='menu']": "profile_more_menu",
         "main li label[aria-label]": "conversation_rows",
-        "li[data-occludable-job-id]": "job_search_cards",
+        'li[data-occludable-job-id], [componentkey^="job-card-component-ref-"]': (
+            "job_search_cards"
+        ),
     }
     if selector in selectors:
         return selectors[selector]
