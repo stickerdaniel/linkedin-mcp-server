@@ -3,13 +3,15 @@
 A contender armed on the profile's real lock before a hard kill
 (``crash_overlap``): K1 frozen kills the frozen Direct server and a fresh
 host reads at once; K3 kills the candidate owner and the same host reads at
-once, through a successor. Each lane's reading (``crash_reading``) is
-overlap, no overlap or inconclusive, with the milliseconds from the kill to
-the lease seen free, to the last old process seen gone and to the
-successor's root; it is printed and kept beside the row as ``reading.json``.
-An inconclusive lane fails. The comparison fails only on an overlap K3 shows
-and K1 does not (``o1_findings``); a second root the watcher saw is that
-comparison's, not a lane's failure (``lane_failures``). K2 is not applicable.
+once, through a successor; K0 runs K3 again. Each lane's reading
+(``crash_reading``) is overlap, no overlap or inconclusive, with the
+milliseconds from the kill to the lease seen free, to the last old process
+seen gone and to the successor's root; it is printed and kept beside the row
+as ``reading.json``. An inconclusive lane fails. The comparison fails only on
+an overlap K3 shows and K1 does not (``o1_findings``); a second root the
+watcher saw is that comparison's, not a lane's failure (``lane_failures``).
+K0 must reach K3's verdict (``repeat_findings``) with K3's vector
+(``compare_repeat``). K2 is not applicable.
 
 Native, like ``test_owner_loss_rows``: only where CI opted in after trusting
 the CA, never under xdist, in file order.
@@ -39,9 +41,16 @@ from differential.crash_overlap import (
     crash_reading,
     lane_failures,
     o1_findings,
+    repeat_findings,
 )
 from differential.events import EventLog
-from differential.harness import RowResult, default_browsers_path, measure_host_quit_row
+from differential.harness import (
+    RowResult,
+    RowVector,
+    compare_repeat,
+    default_browsers_path,
+    measure_host_quit_row,
+)
 from differential.synthetic_origin import (
     OPT_IN_ENV,
     EgressProxy,
@@ -67,6 +76,8 @@ pytestmark = [
 
 #: Each lane's reading in this process, recorded whether or not it passed.
 _READINGS: dict[str, Reading] = {}
+#: K3's vector, recorded only once its lane passed.
+_VECTORS: dict[str, RowVector] = {}
 
 
 @pytest.fixture(scope="module")
@@ -160,6 +171,30 @@ async def test_the_candidate_owner_is_killed_under_a_contender(
         monkeypatch=monkeypatch,
     )
     _recorded(result)
+    assert result.vector is not None
+    _VECTORS["K3"] = result.vector
+
+
+@pytest.mark.differential_row(row=ROW, experiment="K0", column="integrated")
+async def test_the_candidate_owner_killed_under_a_contender_repeats(
+    isolate_profile_dir, synthetic_egress, differential_run, monkeypatch
+):
+    reference = _VECTORS.get("K3")
+    if reference is None:
+        pytest.fail("K3 produced no valid result in this run, so nothing to repeat")
+    result = await _run(
+        "K0",
+        daemon=True,
+        profile=isolate_profile_dir,
+        egress=synthetic_egress,
+        log=differential_run,
+        monkeypatch=monkeypatch,
+    )
+    _recorded(result)
+    assert result.vector is not None
+    problems = repeat_findings(_READINGS.get("K3"), _READINGS.get("K0"))
+    problems += compare_repeat(reference, result.vector)
+    assert not problems, f"K0: {problems}\n{result.report()}"
 
 
 def test_no_successor_browser_overlaps_only_under_the_daemon():

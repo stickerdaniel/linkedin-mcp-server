@@ -255,8 +255,10 @@ from differential.session import (
     write_synthetic_cookie_file,
 )
 from differential.signals import COMPLETE as ORACLE_COMPLETE
+from differential.signals import HELD as O2_HELD
 from differential.signals import INCOMPLETE as O2_INCOMPLETE
 from differential.signals import UNAVAILABLE as ORACLE_UNAVAILABLE
+from differential.signals import UNKNOWN as O2_UNKNOWN
 from differential.signals import UNOBSERVED as O2_UNOBSERVED
 from differential.signals import VIOLATED as O2_VIOLATED
 from differential.signals import (
@@ -4047,10 +4049,10 @@ def r6_verdict(
     that witness: K2 needs a complete required trace that shows the class
     ``guardian:principal-group``, while the rest of K2's outcome stays the
     baseline's to record. On macOS the guardian's argv is the witness. K3
-    (candidate daemon) must read ``=`` and have recovered on the second call.
-    K1 (Direct killed) reads ``=`` as the non-leader server a host starts. On
-    Windows there is no guardian, so the reading is not applicable; the kill
-    and K3's recovery still are.
+    (candidate daemon) and K0, its repeat, must read ``=`` and have recovered
+    on the second call. K1 (Direct killed) reads ``=`` as the non-leader
+    server a host starts. On Windows there is no guardian, so the reading is
+    not applicable; the kill and the candidate's recovery still are.
     """
     if linux is None:
         linux = sys.platform.startswith("linux")
@@ -4063,7 +4065,7 @@ def r6_verdict(
     # post; one that failed before reading is not the row this measures.
     if vector is None or not vector.tool_succeeded:
         problems.append("the first call did not read the synthetic post")
-    if experiment == "K3" and (vector is None or vector.recovered is not True):
+    if experiment in ("K3", "K0") and (vector is None or vector.recovered is not True):
         problems.append("the frontend did not recover on the call after the kill")
     if windows:
         return problems
@@ -5038,11 +5040,11 @@ def continuation_problems(
     cleanup, census, installer family, script, runtime, restoration, clock).
     K1 is the reference: Direct has no adopted Job, so no planted failure is
     required, and one reached there is the wrong topology. K2 and K3: the
-    owner that closed and a positive fault witness inside its close. K3 also:
-    core.close's negative consumption, the stand-down, the owner's exit, a
-    post-settlement recovery with nothing protected changed by its boundary,
-    and a successor that served it. No cell says which caller ended an
-    installer.
+    owner that closed and a positive fault witness inside its close. K3, and
+    K0 as its repeat, also: core.close's negative consumption, the
+    stand-down, the owner's exit, a post-settlement recovery with nothing
+    protected changed by its boundary, and a successor that served it. No
+    cell says which caller ended an installer.
     """
     if continuation is None:
         return [f"{experiment} left no native continuation"]
@@ -5155,9 +5157,10 @@ def r11_composition(
     model's conditional branch, calibrated in this process against the exact
     sources the native runtimes imported (the baseline's prohibited
     selection, the candidate's abstention and every positive control); each
-    native continuation of this run through the common gate; and K3 no worse
-    than K1 on O1, O2 and O4. A missing calibration or cell fails it: K1 and
-    K3 selected alone compose nothing. Whole-system O2 stays what the vectors
+    native continuation of this run through the common gate; K3 no worse
+    than K1 on O1, O2 and O4; and K0, K3 repeated, reading as K3 did
+    (``compare_repeat``). A missing calibration or cell fails it: K1 and K3
+    selected alone compose nothing. Whole-system O2 stays what the vectors
     say, unobserved where nothing traced it.
     """
     cells, problems = ledger.take()
@@ -5167,7 +5170,7 @@ def r11_composition(
         if model.evidence != SOURCE_MODEL:
             problems.append(f"the calibration is {model.evidence!r}, not source-model")
         problems += [f"source model: {problem}" for problem in model.problems]
-    for experiment in ("K1", "K2", "K3"):
+    for experiment in ("K1", "K2", "K3", "K0"):
         cell = cells.get(experiment)
         problems += [
             f"{experiment}: {problem}"
@@ -5180,7 +5183,9 @@ def r11_composition(
         ]
         if cell is None or model is None:
             continue
-        modelled = model.sha256.get(CANDIDATE if experiment == "K3" else BASELINE)
+        modelled = model.sha256.get(
+            CANDIDATE if experiment in ("K3", "K0") else BASELINE
+        )
         if cell.process_tree_sha256 != modelled:
             problems.append(
                 f"{experiment}: the actors imported process_tree "
@@ -5194,6 +5199,15 @@ def r11_composition(
             problems += [
                 f"K3 differs from K1 frozen: {difference}"
                 for difference in compare_to_direct(reference.vector, candidate.vector)
+            ]
+    repeat = cells.get("K0")
+    if candidate is not None and repeat is not None:
+        if candidate.vector is None or repeat.vector is None:
+            problems.append("K3 or K0 left no vector to compare")
+        else:
+            problems += [
+                f"K0 differs from K3: {difference}"
+                for difference in compare_repeat(candidate.vector, repeat.vector)
             ]
     return problems
 
@@ -5863,13 +5877,20 @@ def bind_responder(
     return responder, found
 
 
+#: Traced O2 states that differ by timing alone (``compare_to_direct``).
+_SAMPLED_ALIKE = frozenset({O2_HELD, O2_UNKNOWN})
+
+
 def compare_repeat(first: RowVector, second: RowVector) -> list[str]:
-    """K0: every field of two runs of the same experiment must agree."""
+    """K0: every field of two runs of the same experiment must agree, except a
+    traced O2 of ``held`` against ``unknown``, which says only whether a
+    recipient outlived the next sample."""
     one, two = asdict(first), asdict(second)
     return [
         f"{name}: {one[name]!r} then {two[name]!r}"
         for name in one
         if one[name] != two[name]
+        and not (name == "o2_traced" and {one[name], two[name]} <= _SAMPLED_ALIKE)
     ]
 
 

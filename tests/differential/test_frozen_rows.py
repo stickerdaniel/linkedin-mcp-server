@@ -1,4 +1,4 @@
-"""The frozen baseline's columns: K1 frozen on H-R1, and H-R12 in K1, K2 and K3.
+"""The frozen baseline's columns: K1 frozen on H-R1, and H-R12 in K1 to K3 and K0.
 
 **K1 frozen** is the plan's reference column: the server at the pinned
 baseline (``baseline.BASELINE_SHA``), run Direct from its own venv, staged by
@@ -13,7 +13,8 @@ setting differs, and the daemon is enabled. The candidate (K3) must show no
 coordination effect: no owner, no forwarding, no daemon state, and the O1/O4
 of the frozen Direct run with the same setting. The baseline (K2) elects an
 owner regardless (W-CHROME-PATH), so K2 must read ``!``; reading ``=`` there
-is the harness missing a known difference and fails as a harness defect.
+is the harness missing a known difference and fails as a harness defect. K0
+runs K3 again and must read as it did (``harness.repeat_verdict``).
 
 Native, like ``test_host_quit_row``: only where CI opted in after trusting the
 CA, never under xdist, in file order, with only passing results recorded for
@@ -45,6 +46,7 @@ from differential.harness import (
     default_browsers_path,
     k2_r12_verdict,
     measure_host_quit_row,
+    repeat_verdict,
 )
 from differential.synthetic_origin import (
     OPT_IN_ENV,
@@ -264,6 +266,30 @@ async def test_the_candidate_stays_direct_with_a_custom_browser(
     _recorded("H-R12 K3", result)
     assert result.vector is not None
     assert coordination_reading(result.vector) == "="
+
+
+@pytest.mark.differential_row(row=ROW_H_R12, experiment="K0", column="integrated")
+async def test_the_candidate_with_a_custom_browser_repeats(
+    isolate_profile_dir, synthetic_egress, differential_run, monkeypatch
+):
+    reference = _VECTORS.get("H-R12 K3")
+    if reference is None:
+        pytest.fail("K3 produced no valid result in this run, so nothing to repeat")
+    result = await _run(
+        "K0",
+        "K0",
+        row=ROW_H_R12,
+        daemon=True,
+        custom_browser=True,
+        expect_owner=False,
+        reference="candidate daemon, CHROME_PATH, repeated",
+        profile=isolate_profile_dir,
+        egress=synthetic_egress,
+        log=differential_run,
+        monkeypatch=monkeypatch,
+    )
+    problems = repeat_verdict(reference, result)
+    assert not problems, f"K0: {problems}\n{result.report()}"
 
 
 def test_the_candidate_with_a_custom_browser_matches_the_frozen_direct_run():
