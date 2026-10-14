@@ -404,8 +404,12 @@ def register_messaging_tools(
         buttons an InMail shows ("Yes, interested...", "No thanks...") are
         never clicked; a thread that offers only those has no composer and
         returns composer_unavailable. A draft already in the composer is left
-        untouched and returns composer_occupied. No Voyager or other private
-        API is used. This is a write operation when confirm_send is True.
+        untouched and returns composer_occupied. A ``status`` of
+        ``enter_to_send_enabled`` means LinkedIn's "Press Enter to Send"
+        preference hides the Send button; relay the returned instructions as
+        for send_message. The dry run reports it too. No Voyager or other
+        private API is used. This is a write operation when confirm_send is
+        True.
 
         Args:
             thread_id: LinkedIn messaging thread ID, or a /messaging/thread/<id>/

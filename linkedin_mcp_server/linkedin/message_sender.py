@@ -1365,11 +1365,15 @@ class _SendConfirmation:
     thread_id: str | None
 
 
-def _confirmation_from_snapshot(snapshot: Any) -> _SendConfirmation | None:
+def _confirmation_from_snapshot(
+    snapshot: Any, target: _MessageTarget | None = None
+) -> _SendConfirmation | None:
     """Accept only ``{path}`` for a compose or thread route.
 
     ``wait_for_function`` resolves on every truthy value, so a snapshot that
-    is not this shape is not a confirmation.
+    is not this shape is not a confirmation. A reply confirms only on its own
+    thread, in either form of its id: the navigation escapes the padding and
+    LinkedIn may keep that form.
     """
     if (
         not isinstance(snapshot, dict)
@@ -1378,6 +1382,11 @@ def _confirmation_from_snapshot(snapshot: Any) -> _SendConfirmation | None:
     ):
         return None
     path = snapshot["path"]
+    if isinstance(target, _ThreadMessageTarget):
+        match = _THREAD_ROUTE_RE.fullmatch(path)
+        if match is None or unquote(match.group(1)) != target.thread_id:
+            return None
+        return _SendConfirmation(thread_id=target.thread_id)
     if path in {"/messaging/compose/", "/messaging/thread/new/"}:
         return _SendConfirmation(thread_id=None)
     if _MESSAGE_THREAD_PATH_RE.fullmatch(path) is None:
@@ -1475,9 +1484,15 @@ def _send_budget_deadline() -> float:
     )
 
 
-def _enter_to_send_result(url: str) -> dict[str, Any]:
-    """Report LinkedIn's "Press Enter to Send" preference as a user fix."""
-    return contracts.message_action_result(
+def _enter_to_send_result(
+    url: str,
+    respond: Callable[..., dict[str, Any]] = contracts.message_action_result,
+) -> dict[str, Any]:
+    """Report LinkedIn's "Press Enter to Send" preference as a user fix.
+
+    ``respond`` builds the answer, so a reply keeps its thread fields.
+    """
+    return respond(
         url,
         "enter_to_send_enabled",
         "LinkedIn is set to 'Press Enter to Send', which hides the Send "
@@ -1877,7 +1892,7 @@ class MessageSender:
                 "Message confirmation snapshot could not be read", exc_info=True
             )
         else:
-            confirmed = _confirmation_from_snapshot(snapshot)
+            confirmed = _confirmation_from_snapshot(snapshot, target)
             if confirmed is None:
                 logger.debug("Message confirmation snapshot was not a route")
         finally:
@@ -2147,7 +2162,7 @@ class MessageSender:
                 "The verified message composer changed before text entry.",
             )
         if state.get("enterToSend") is True:
-            return _enter_to_send_result(self._page.url)
+            return _enter_to_send_result(self._page.url, respond)
         if state.get("submitCount") != 1:
             return respond(
                 self._page.url,
@@ -2434,7 +2449,16 @@ class MessageSender:
                 "The reply composer could not be tied to the requested thread.",
             )
         participant = await self._read_thread_participant()
+        if self._page.url != expected_route:
+            # The name may belong to whatever thread the page moved to.
+            return respond(
+                self._page.url,
+                "recipient_resolution_failed",
+                "The thread URL changed while its title was read.",
+            )
         respond = respond_for(participant)
+        if state.get("enterToSend") is True:
+            return _enter_to_send_result(self._page.url, respond)
 
         if not confirm_send:
             return respond(
