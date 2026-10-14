@@ -67,6 +67,7 @@ import math
 import os
 import re
 import secrets
+import sys
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
@@ -187,6 +188,17 @@ class StagingError(RuntimeError):
     """The synthetic session could not be established; the row cannot start."""
 
 
+#: Browsers the staging launches before it gives up on ones that send nothing.
+#: A fresh Windows browser has held its first ``/feed/`` request past the
+#: product's ``STARTUP_BUDGET_MS`` and then needed a kill to close. That is the
+#: runner, not the row, which has not started yet: so one more browser, after
+#: that stall only. A rejection, or any other failure, ends staging at once.
+STAGING_LAUNCHES = 2
+
+#: How ``core.proxy_errors`` reports a navigation whose request never left.
+_NEVER_SENT = "before the request was sent"
+
+
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
@@ -276,10 +288,7 @@ async def stage_signed_in_session(
     staged session before the product validates it, so the origin can judge
     the staging requests too.
     """
-    from linkedin_mcp_server.drivers.browser import (
-        get_profile_dir,
-        validate_imported_cookies,
-    )
+    from linkedin_mcp_server.drivers.browser import get_profile_dir
 
     if canonical(get_profile_dir()) != canonical(profile):
         raise StagingError(
@@ -291,13 +300,47 @@ async def stage_signed_in_session(
     staged = write_synthetic_cookie_file(cookie_path)
     if accept is not None:
         accept(staged)
-    if not await validate_imported_cookies(cookie_path, profile):
+    if not await _validate_past_a_stall(cookie_path, profile):
         raise StagingError(
             "the product's own import validation rejected the synthetic "
             "session, so the synthetic /feed/ does not pass its auth check"
         )
     write_source_state(profile)
     return staged
+
+
+async def _validate_past_a_stall(cookie_path: Path, profile: Path) -> bool:
+    """``validate_imported_cookies``, again in a new browser after a stall.
+
+    Only a browser that never sent its request is replaced, and no more than
+    ``STAGING_LAUNCHES`` are launched. The next one reopens the same profile,
+    which the failed validation closed and confirmed closed before it raised;
+    one whose close it could not confirm raises something else and ends here.
+    The row's ``first-navigation.json`` keeps the stalled navigation either way.
+    """
+    from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
+    from linkedin_mcp_server.drivers.browser import validate_imported_cookies
+
+    launches = 0
+    while True:
+        launches += 1
+        try:
+            return await validate_imported_cookies(cookie_path, profile)
+        except PlaywrightTimeoutError as exc:
+            if _NEVER_SENT not in str(exc):
+                raise
+            if launches >= STAGING_LAUNCHES:
+                raise StagingError(
+                    f"none of {launches} staging browsers sent its /feed/ "
+                    f"request: {exc}"
+                ) from exc
+            print(
+                f"staging: browser {launches} of {STAGING_LAUNCHES} sent no "
+                f"/feed/ request ({exc}); launching another",
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 @dataclass(frozen=True)
