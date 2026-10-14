@@ -560,8 +560,8 @@ class TestWhatTheHeartbeatsHeard:
     @pytest.mark.parametrize(
         ("after_dispatch", "owner_clause"),
         [
-            ([_watched()], "went away"),
-            ([httpx2.ReadTimeout("missed one"), _watched()], "went away"),
+            ([_watched()], "stopped answering it"),
+            ([httpx2.ReadTimeout("missed one"), _watched()], "stopped answering it"),
             ([httpx2.ReadTimeout("silent")], "did not respond (pid 4242)"),
         ],
         ids=["answered", "silent then answered", "silent"],
