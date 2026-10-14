@@ -1332,19 +1332,25 @@ class HostQuitTransport(ClientTransport):
         its next write finds the pipe broken: what the kernel does to both
         pipes when a host goes away, named pipe loss here and never host
         death, which ``StubHost`` makes. A failure is ``loss_error``.
+
+        Stdout goes first. Both closes reach their descriptors from the loop's
+        callback queue, which runs in order, so the server cannot read EOF
+        while its stdout still takes a write. Closed after stdin, the server
+        had until this coroutine was next scheduled to answer the EOF with a
+        write that went through.
         """
         process = self.process
         assert process is not None and process.stdin is not None
         self.mark_lost(termination)
         errors = []
-        try:
-            await process.stdin.aclose()
-        except Exception as exc:  # noqa: BLE001 - recorded, and judged by the row
-            errors.append(f"closing stdin: {type(exc).__name__}: {exc}")
         if termination == call_loss.PIPE_LOSS:
             problem = close_read_end(process, 1)
             if problem is not None:
                 errors.append(problem)
+        try:
+            await process.stdin.aclose()
+        except Exception as exc:  # noqa: BLE001 - recorded, and judged by the row
+            errors.append(f"closing stdin: {type(exc).__name__}: {exc}")
         self.loss_error = "; ".join(errors) or None
 
     async def server_exit(self, seconds: float) -> dict[str, Any]:
