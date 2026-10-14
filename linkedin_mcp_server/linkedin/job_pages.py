@@ -17,6 +17,7 @@ import logging
 import re
 import time
 
+import anyio
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import LinkedInOperationError
@@ -351,6 +352,11 @@ EASY_APPLY_DISCARD_SELECTOR = '[data-control-name="discard_application_confirm_b
 _EASY_APPLY_OPEN_TIMEOUT = 10.0
 _EASY_APPLY_STEP_TIMEOUT = 8.0
 _EASY_APPLY_DISCARD_TIMEOUT = 5.0
+# How long closing the dialog may hold the page once the walk has ended, a
+# cancelled walk included: the wait for a dialog still opening, Escape, the
+# Discard click and the wait for the dialog to go, with room for the reads
+# between them.
+_EASY_APPLY_CLOSE_GRACE = 4 * _EASY_APPLY_DISCARD_TIMEOUT
 _EASY_APPLY_MAX_STEPS = 8
 # A country list runs to 250 options; the prefilled value is still reported.
 _EASY_APPLY_MAX_OPTIONS = 50
@@ -503,11 +509,16 @@ class JobPageReader:
         steps: list[dict[str, Any]] = []
         try:
             complete = await self._walk_easy_apply(job_id, steps)
+        except asyncio.CancelledError:
+            # A cancel can land between the click on Easy Apply and the dialog
+            # rendering, and the click goes on without the task that sent it.
+            await self._close_easy_apply(opening=True)
+            raise
         except Exception as e:
-            if not await self._discard_easy_apply():
+            if not await self._close_easy_apply():
                 raise RuntimeError(EASY_APPLY_DRAFT_LEFT) from e
             raise
-        discarded = await self._discard_easy_apply()
+        discarded = await self._close_easy_apply()
         return EasyApplyFormRead("easy_apply", tuple(steps), complete, discarded)
 
     async def _walk_easy_apply(self, job_id: str, steps: list[dict[str, Any]]) -> bool:
@@ -569,17 +580,66 @@ class JobPageReader:
             last = step
             await self._session.delay(_APPLY_POLL)
 
-    async def _discard_easy_apply(self) -> bool:
+    async def _close_easy_apply(self, *, opening: bool = False) -> bool:
+        """Discard the dialog however the walk ended; True once it is gone.
+
+        Shielded from AnyIO as well as from asyncio, for the reason
+        `_let_the_scroll_land` is: a tool timeout cancels the task again on
+        every pass of the event loop, and would end the discard at its first
+        await with the dialog still open on the shared page and a draft that
+        LinkedIn resumes the next time Easy Apply is opened. Bounded by
+        `_EASY_APPLY_CLOSE_GRACE`, so a page that never answers cannot hold
+        the page lock. A cancel that arrives meanwhile is raised once the
+        discard has ended.
+
+        ``opening`` gives a dialog that is not open yet a moment to open first,
+        for a walk cancelled after its click on Easy Apply was sent.
+        """
+        grace = _EASY_APPLY_DISCARD_TIMEOUT if opening else 0.0
+        close = asyncio.ensure_future(self._discard_easy_apply(grace))
+        cancel: asyncio.CancelledError | None = None
+        until = time.monotonic() + _EASY_APPLY_CLOSE_GRACE
+        with anyio.CancelScope(shield=True):
+            while not close.done() and time.monotonic() < until:
+                try:
+                    await asyncio.wait({close}, timeout=until - time.monotonic())
+                except asyncio.CancelledError as e:
+                    cancel = e
+        if close.done():
+            discarded = close.result()
+        else:
+            logger.warning(
+                "The Easy Apply dialog was not closed within %.0fs",
+                _EASY_APPLY_CLOSE_GRACE,
+            )
+            close.cancel()
+            discarded = False
+        if cancel is not None:
+            raise cancel
+        # A deadline that expired inside the shield is delivered here, so a
+        # walk that ends past it does not report a result.
+        await anyio.lowlevel.checkpoint()
+        return discarded
+
+    async def _discard_easy_apply(self, opening_grace: float = 0.0) -> bool:
         """Close the Easy Apply dialog and discard its draft; True once it is gone.
 
         Escape rather than the dialog's close button, which other dialogs carry
         too. LinkedIn answers with "Save this application?", and only its
-        Discard, found by attribute, is clicked.
+        Discard, found by attribute, is clicked. A dialog that is not open is
+        waited for up to ``opening_grace`` seconds before it counts as gone.
         """
         page = self._session.page
         try:
             if not await page.evaluate(EASY_APPLY_OPEN_JS):
-                return True
+                if not opening_grace:
+                    return True
+                try:
+                    await page.wait_for_function(
+                        EASY_APPLY_OPEN_JS, timeout=opening_grace * 1000
+                    )
+                except PlaywrightTimeoutError:
+                    return True
             await page.keyboard.press("Escape")
             with suppress(PlaywrightTimeoutError):
                 await page.locator(EASY_APPLY_DISCARD_SELECTOR).first.click(

@@ -17,8 +17,10 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import asyncio
 import json
 
+import anyio
 import pytest
 from patchright.async_api import async_playwright
 
@@ -204,10 +206,26 @@ async def read(page, html: str) -> EasyApplyFormRead:
     """Serve ``html`` as the posting and read its form the way the workflow does."""
     await page.goto(JOB_URL)
     await page.set_content(html)
+    return await read_served(page)
+
+
+async def read_served(page) -> EasyApplyFormRead:
+    """Read the form of the posting ``page`` already holds."""
     session = PageSession(page)
     reader = JobPageReader(session, PageNavigator(session), PageContentReader(session))
     with patch.object(reader._navigator, "_navigate_to_page", new_callable=AsyncMock):
         return await reader.read_easy_apply_form(JOB_URL, "123", JOB_APPLY_EN_US)
+
+
+async def dialog_open(page) -> bool:
+    return await page.evaluate(job_pages.EASY_APPLY_OPEN_JS)
+
+
+async def until_logged(page, entry: str) -> None:
+    """Wait for ``entry`` to reach the dialog's log."""
+    async with asyncio.timeout(5):
+        while entry not in await log(page):
+            await asyncio.sleep(0.02)
 
 
 async def log(page) -> list[str]:
@@ -329,3 +347,49 @@ async def test_a_posting_without_easy_apply_is_not_opened(dom_page):
 
     assert result == EasyApplyFormRead("external")
     assert await log(dom_page) == []
+
+
+async def serve(page, html: str) -> None:
+    await page.goto(JOB_URL)
+    await page.set_content(html)
+
+
+async def test_a_cancelled_read_still_discards_the_draft(dom_page):
+    await serve(dom_page, posting(EASY_APPLY, [CONTACT, QUESTIONS, RESUME]))
+    task = asyncio.ensure_future(read_served(dom_page))
+    await until_logged(dom_page, "next")
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not await dialog_open(dom_page)
+    assert (await log(dom_page))[-2:] == ["escape", "discard"]
+
+
+async def test_a_read_cancelled_while_the_dialog_opens_discards_it(dom_page):
+    # The dialog renders 100ms after the click, so this cancel lands before it.
+    await serve(dom_page, posting(EASY_APPLY, [CONTACT]))
+    task = asyncio.ensure_future(read_served(dom_page))
+    await until_logged(dom_page, "open")
+    assert not await dialog_open(dom_page)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not await dialog_open(dom_page)
+    assert await log(dom_page) == ["open", "escape", "discard"]
+
+
+async def test_a_read_past_the_tool_deadline_still_discards_the_draft(dom_page):
+    # A tool timeout is an AnyIO scope, which cancels the task again on every
+    # pass of the loop: an unshielded discard ends at its first await. Three
+    # steps take well over a second to read.
+    await serve(dom_page, posting(EASY_APPLY, [CONTACT, QUESTIONS, RESUME]))
+
+    with pytest.raises(TimeoutError):
+        with anyio.fail_after(0.4):
+            await read_served(dom_page)
+
+    assert not await dialog_open(dom_page)
+    assert "open" in await log(dom_page)
+    assert (await log(dom_page))[-2:] == ["escape", "discard"]
