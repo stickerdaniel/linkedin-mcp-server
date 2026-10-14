@@ -1265,7 +1265,7 @@ class JobPageReader:
             raise
         except Exception as e:
             if not await self._close_easy_apply():
-                raise RuntimeError(EASY_APPLY_DRAFT_LEFT) from e
+                raise EasyApplyDraftLeftError(EASY_APPLY_DRAFT_LEFT) from e
             raise
         return EasyApplySubmitRead(
             "easy_apply",

@@ -1540,6 +1540,38 @@ class TestReadEasyApplyForm:
 
         assert raised.value.__cause__ is failure
 
+    async def test_a_failed_answering_walk_that_leaves_a_draft_raises_its_type(
+        self, mock_page
+    ):
+        reader = _reader(mock_page)
+        failure = RuntimeError("The Easy Apply dialog closed while it was read")
+        with (
+            patch.object(
+                reader,
+                "_read_apply_type",
+                new_callable=AsyncMock,
+                return_value=("easy_apply", None),
+            ),
+            patch.object(
+                reader,
+                "_walk_easy_apply_answers",
+                new_callable=AsyncMock,
+                side_effect=failure,
+            ),
+            patch.object(
+                reader,
+                "_discard_easy_apply",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            with pytest.raises(EasyApplyDraftLeftError) as raised:
+                await reader.submit_easy_apply(
+                    self.URL, "123", JOB_APPLY_EN_US, {}, confirm_submit=False
+                )
+
+        assert raised.value.__cause__ is failure
+
 
 class TestAnswerEasyApplyStep:
     """Filling one step of the Easy Apply dialog from label-keyed answers."""
