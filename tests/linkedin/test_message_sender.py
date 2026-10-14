@@ -1,6 +1,7 @@
 """Tests for the browser-UI message sender."""
 
 from contextlib import ExitStack
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,6 +17,7 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 import pytest
 
 from linkedin_mcp_server.core.exceptions import InvalidReferenceError
+from linkedin_mcp_server.linkedin import contracts
 from linkedin_mcp_server.linkedin import message_sender as message_sender_module
 from linkedin_mcp_server.linkedin.message_sender import (
     MessageSender,
@@ -1968,6 +1970,70 @@ class TestReplyThreadRoute:
             "https://www.linkedin.com/messaging/thread/2-abc%3D%3D/"
         )
 
+    @pytest.mark.parametrize(
+        "path", ["/messaging/thread/2-abc==/", "/messaging/thread/2-abc%3D%3D/"]
+    )
+    def test_a_reply_confirms_on_its_thread_in_either_form(self, path):
+        target = message_sender_module._thread_target("2-abc==")
+
+        assert message_sender_module._confirmation_from_snapshot(
+            {"path": path}, target
+        ) == message_sender_module._SendConfirmation(thread_id="2-abc==")
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/messaging/thread/2-other/",
+            "/messaging/compose/",
+            "/messaging/thread/new/",
+            "/messaging/thread/2-abc%2F..%2F/",
+        ],
+    )
+    def test_a_reply_does_not_confirm_elsewhere(self, path):
+        target = message_sender_module._thread_target("2-abc==")
+
+        assert (
+            message_sender_module._confirmation_from_snapshot({"path": path}, target)
+            is None
+        )
+
+    async def test_an_escaped_route_confirms_a_delivered_reply(self, mock_page):
+        """LinkedIn may keep the escaped route the navigation asked for."""
+        sender = _sender(mock_page)
+        target = message_sender_module._thread_target("2-abc==")
+        handle = MagicMock()
+        handle.json_value = AsyncMock(
+            return_value={"path": "/messaging/thread/2-abc%3D%3D/"}
+        )
+        handle.dispose = AsyncMock()
+        mock_page.wait_for_function = AsyncMock(return_value=handle)
+
+        assert await sender._message_send_confirmed(
+            "Hi", target=target, owner=MagicMock(), confirmation="token"
+        ) == message_sender_module._SendConfirmation(thread_id="2-abc==")
+
+    async def test_enter_to_send_keeps_the_reply_fields(self, mock_page):
+        sender = _sender(mock_page)
+        target = message_sender_module._thread_target("2-abc==")
+        mock_page.url = THREAD_ROUTE
+        respond = partial(
+            contracts.reply_action_result, thread_id="2-abc==", participant="Ada"
+        )
+        with patch.object(
+            sender,
+            "_read_message_composer_state",
+            new_callable=AsyncMock,
+            return_value={"status": "valid", "empty": True, "enterToSend": True},
+        ):
+            result = await sender._submit_to_verified_composer(
+                "Hi", target=target, expected_route=THREAD_ROUTE, respond=respond
+            )
+
+        assert result["status"] == "enter_to_send_enabled"
+        assert result["sent"] is False
+        assert result["thread_id"] == "2-abc=="
+        assert result["participant"] == "Ada"
+
     @pytest.mark.parametrize("thread_id", ["2-abc%2Fother", "../../feed", ""])
     def test_an_id_that_is_not_one_segment_is_refused(self, thread_id):
         with pytest.raises(InvalidReferenceError):
@@ -2151,6 +2217,44 @@ class TestReplyToConversation:
         answer = kwargs["respond"](THREAD_ROUTE, "sent", "ok", retry_safe=False)
         assert answer["participant"] == "Ada Lovelace"
         assert answer["thread_id"] == "2-abc=="
+
+    async def test_route_change_while_the_title_is_read_fails_closed(self, mock_page):
+        sender = _sender(mock_page)
+        patches = self._patches(sender, mock_page)
+
+        async def drift():
+            mock_page.url = "https://www.linkedin.com/messaging/thread/2-latest/"
+            return "Someone Else"
+
+        with ExitStack() as stack:
+            *_, participant, submit = [stack.enter_context(p) for p in patches]
+            participant.side_effect = drift
+            result = await sender.reply_to_conversation(
+                "2-abc==", "Hi", confirm_send=False
+            )
+
+        assert result["status"] == "recipient_resolution_failed"
+        assert result["participant"] is None
+        assert "Someone Else" not in result["message"]
+        submit.assert_not_awaited()
+
+    async def test_dry_run_reports_enter_to_send_with_the_thread(self, mock_page):
+        sender = _sender(mock_page)
+        patches = self._patches(
+            sender,
+            mock_page,
+            state={"status": "valid", "empty": True, "enterToSend": True},
+        )
+        with ExitStack() as stack:
+            *_, submit = [stack.enter_context(p) for p in patches]
+            result = await sender.reply_to_conversation(
+                "2-abc==", "Hi", confirm_send=False
+            )
+
+        assert result["status"] == "enter_to_send_enabled"
+        assert result["thread_id"] == "2-abc=="
+        assert result["participant"] == "Ada Lovelace"
+        submit.assert_not_awaited()
 
     async def test_a_thread_url_change_after_typing_is_refused(self, mock_page):
         """The shared submit tail checks the thread route, not a profile URN."""
