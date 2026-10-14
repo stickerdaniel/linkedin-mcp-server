@@ -24,11 +24,13 @@ from linkedin_mcp_server.linkedin.contracts import (
     ExtractedSection,
 )
 from linkedin_mcp_server.linkedin.job_pages import (
+    EasyApplyDraftLeftError,
     EasyApplyFormRead,
     JobApplyRead,
     JobPageCapture,
     JobPageReader,
 )
+from linkedin_mcp_server.linkedin.job_policy import easy_apply_draft_section_error
 from linkedin_mcp_server.linkedin.jobs import JobReader
 from linkedin_mcp_server.linkedin.link_metadata import Reference
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
@@ -342,6 +344,16 @@ class TestGetEasyApplyForm:
 
         assert "form" not in result and "apply" not in result
         assert "form" in result["section_errors"]
+
+    async def test_a_failed_read_that_leaves_a_draft_says_so(self, mock_page):
+        reader = _reader(mock_page)
+        error = EasyApplyDraftLeftError("draft left")
+        error.__cause__ = RuntimeError("dialog closed while it was read")
+        with self._reading(reader, side_effect=error):
+            result = await reader.get_easy_apply_form("12345")
+
+        assert "form" not in result and "apply" not in result
+        assert result["section_errors"] == {"form": easy_apply_draft_section_error()}
 
     async def test_an_expired_session_reaches_the_relogin_path(self, mock_page):
         reader = _reader(mock_page)
