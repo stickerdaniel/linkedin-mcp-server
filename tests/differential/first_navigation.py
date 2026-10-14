@@ -1032,16 +1032,21 @@ class LifetimeSampler:
                         self.document["sample_failures"] += 1
                     continue
                 if zombie:
-                    # The first time it was seen gone, and not ordered against a
-                    # close asked for while this sample was still reading.
+                    # The first time it was seen gone. Stamped after the read,
+                    # not with the sample's start: a close asked for while this
+                    # sample was reading may have come before the death. The
+                    # stamp is checked for a clock set back like a sample's.
                     with self._lock:
                         if self.document["ended_ms"] is not None:
                             return
                         record = self._tracked[key]
                         if record["gone_ms"] is None:
+                            gone_wall = time.time()
+                            if gone_wall < self._last_wall:
+                                self.document["wall_clock_stepped_back"] = True
+                            self._last_wall = gone_wall
                             record["gone_ms"] = self._ms()
-                            record["gone_wall"] = time.time()
-                            record["order_uncertain"] = True
+                            record["gone_wall"] = gone_wall
                             changed = True
                 else:
                     alive.add(key)
@@ -1176,7 +1181,7 @@ class LifetimeSampler:
         asked = requested.get(record["role"])
         if asked is None:
             return "unexpected"
-        if record.get("order_uncertain") or self.document["wall_clock_stepped_back"]:
+        if self.document["wall_clock_stepped_back"]:
             return "ambiguous"
         if record["gone_wall"] <= asked:
             return "unexpected"
