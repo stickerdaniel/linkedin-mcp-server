@@ -1040,6 +1040,30 @@ async def test_a_repeat_cell_fails_only_a_repeat_that_reads_unlike_k3(
         await repeat(dataclasses.replace(vector, o4_session=LOST_SILENT))
 
 
+async def test_the_contended_repeat_fails_a_vector_unlike_k3(profile, monkeypatch):
+    """H-R6-contended's K0 with the same verdict as K3 (its own test judges
+    verdicts) still compares the vectors."""
+    from differential import test_crash_overlap_rows as contended
+
+    vector = _valid_vector(profile)
+    monkeypatch.setattr(contended, "_recorded", lambda result: None)
+    monkeypatch.setattr(contended, "repeat_findings", lambda candidate, repeat: [])
+    monkeypatch.setitem(contended._VECTORS, "K3", vector)
+
+    async def repeat(changed):
+        async def run(*args, **kwargs):
+            return RowResult("K0", "daemon", vector=changed)
+
+        monkeypatch.setattr(contended, "_run", run)
+        await contended.test_the_candidate_owner_killed_under_a_contender_repeats(
+            None, (None, None), None, monkeypatch
+        )
+
+    await repeat(vector)
+    with pytest.raises(AssertionError, match="o4_session"):
+        await repeat(dataclasses.replace(vector, o4_session=LOST_SILENT))
+
+
 # --- The e1cb census model, judged in full -------------------------------------------
 
 
