@@ -13,15 +13,17 @@ from linkedin_mcp_server.linkedin.session import PageSession
 
 @pytest.mark.browser_dom
 @pytest.mark.parametrize(
-    "locale, action, audience, delayed",
+    "locale, action, audience, delayed, empty_html",
     [
-        ("en", "Post", "Anyone", False),
-        ("fr", "Publier", "Tout le monde", False),
-        ("en", "Post", "Anyone", True),
+        ("en", "Post", "Anyone", False, ""),
+        ("fr", "Publier", "Tout le monde", False, ""),
+        ("en", "Post", "Anyone", True, ""),
+        ("en", "Post", "Anyone", False, "<p><br></p>"),
+        ("en", "Post", "Anyone", False, "<p> &nbsp; </p>"),
     ],
 )
 async def test_real_composer_pinned_actions_and_verified_post(
-    locale, action, audience, delayed
+    locale, action, audience, delayed, empty_html
 ):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
@@ -37,7 +39,7 @@ async def test_real_composer_pinned_actions_and_verified_post(
             else:
                 html = f'''<html lang="{locale}"><dialog open>
                 <a href="{author}">Author</a><button>{audience}</button>
-                <div role="textbox" contenteditable="true"></div>
+                <div role="textbox" contenteditable="true">{empty_html}</div>
                 <button onclick="location.href='/feed/update/urn:li:activity:123/'">{action}</button>
                 </dialog></html>'''
             if delayed and "/feed/update/" not in request.request.url:
