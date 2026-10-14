@@ -335,6 +335,28 @@ async def test_long_option_lists_are_cut_with_their_total(dom_page, monkeypatch)
     assert email["value"] == "me@example.com"
 
 
+async def test_long_choice_lists_are_cut_and_keep_what_is_checked(
+    dom_page, monkeypatch
+):
+    monkeypatch.setattr(job_pages, "_EASY_APPLY_MAX_OPTIONS", 1)
+    # "No" is checked and falls past the cut.
+    picked = dict(
+        QUESTIONS,
+        body=QUESTIONS["body"]
+        .replace('name="auth" required checked>', 'name="auth" required>')
+        .replace(
+            'id="no" name="auth" required>', 'id="no" name="auth" required checked>'
+        ),
+    )
+
+    result = await read(dom_page, posting(EASY_APPLY, [picked]))
+
+    auth = result.steps[0]["fields"][0]
+    assert auth["options"] == ["Yes"]
+    assert auth["options_total"] == 2
+    assert auth["selected"] == ["No"]
+
+
 async def test_a_dialog_that_will_not_close_is_reported(dom_page):
     result = await read(dom_page, posting(EASY_APPLY, [RESUME], stuck=True))
 
