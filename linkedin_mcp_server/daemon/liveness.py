@@ -72,7 +72,8 @@ def unknown_outcome(
     did. The default claims no more than the lost answer: the process may still
     be running, as when only the hop dropped its answer or its heartbeats kept
     coming. The frontend replaces it when the owner did not answer its
-    heartbeats either, which still says nothing about whether it is gone.
+    heartbeats or a recovery probe either, which still says nothing about
+    whether it is gone.
     """
     return {
         "status": UNKNOWN_OUTCOME_STATUS,

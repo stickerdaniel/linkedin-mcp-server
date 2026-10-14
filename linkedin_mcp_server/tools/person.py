@@ -273,8 +273,8 @@ def register_person_tools(
             text read from LinkedIn.
 
             A status of ``outcome_unknown`` comes from the transport rather
-            than the page: the browser process went away with the call in
-            flight, so whether the invitation was sent is unknown. It carries
+            than the page: the call's answer never arrived from the browser
+            process, so whether the invitation was sent is unknown. It carries
             ``retry_safe: False`` and no ``note_sent``; check the profile
             before calling again, because a repeat may invite twice.
         """
