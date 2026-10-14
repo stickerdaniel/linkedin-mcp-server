@@ -193,10 +193,10 @@ class StagingError(RuntimeError):
 
 #: Browsers the staging launches before it gives up on ones that stall.
 #: A fresh Windows browser has held its first ``/feed/`` request past the
-#: product's ``STARTUP_BUDGET_MS`` and then needed a kill to close. That is the
-#: runner, not the row, which has not started yet: so one more browser, on a
-#: fresh profile, after that stall only. A rejection, or any other failure,
-#: ends staging at once.
+#: product's ``STARTUP_BUDGET_MS`` and then needed a kill to close. Why is not
+#: established, but it happens before the row starts and before any session is
+#: valid: so one more browser, on a fresh profile, after that stall only. A
+#: rejection, or any other failure, ends staging at once.
 STAGING_LAUNCHES = 2
 
 #: How ``core.proxy_errors`` reports a navigation whose request never left.
