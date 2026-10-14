@@ -21,8 +21,10 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import contextlib
 import json
 
+import anyio
 import pytest
 from patchright.async_api import async_playwright
 
@@ -429,8 +431,12 @@ async def answer(
     posting_delay: int = 300,
     suggest_delay: int = 200,
     pick_answer: str = "commit",
+    deadline: float | None = None,
 ) -> EasyApplySubmitRead:
-    """Answer the synthetic posting's form the way the workflow does."""
+    """Answer the synthetic posting's form the way the workflow does.
+
+    ``deadline`` bounds the walk alone, the way a tool timeout does.
+    """
     await page.goto(JOB_URL)
     await page.set_content(
         posting(
@@ -445,7 +451,13 @@ async def answer(
     )
     session = PageSession(page)
     reader = JobPageReader(session, PageNavigator(session), PageContentReader(session))
-    with patch.object(reader._navigator, "_navigate_to_page", new_callable=AsyncMock):
+    bound = (
+        anyio.fail_after(deadline) if deadline is not None else contextlib.nullcontext()
+    )
+    with (
+        patch.object(reader._navigator, "_navigate_to_page", new_callable=AsyncMock),
+        bound,
+    ):
         return await reader.submit_easy_apply(
             JOB_URL,
             "123",
@@ -548,6 +560,24 @@ async def test_without_the_flag_the_form_is_filled_and_the_draft_discarded(dom_p
     events = await log(dom_page)
     assert "submit" not in events
     assert events[-2:] == ["escape", "discard"]
+
+
+async def test_a_walk_past_the_tool_deadline_still_discards_the_draft(dom_page):
+    # A tool timeout is an AnyIO scope, which cancels the task again on every
+    # pass of the loop: an unshielded discard ends at its first await.
+    with pytest.raises(TimeoutError):
+        await answer(
+            dom_page,
+            [CONTACT, QUESTIONS, RESUME],
+            ALL_ANSWERS,
+            confirm_submit=True,
+            deadline=0.5,
+        )
+
+    events = await log(dom_page)
+    assert "open" in events and "submit" not in events
+    assert events[-2:] == ["escape", "discard"]
+    assert not await dom_page.evaluate(job_pages.EASY_APPLY_OPEN_JS)
 
 
 async def test_a_required_field_nothing_answers_refuses_before_any_click(dom_page):

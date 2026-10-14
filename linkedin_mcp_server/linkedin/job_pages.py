@@ -1258,8 +1258,13 @@ class JobPageReader:
                 confirm_submit=confirm_submit,
                 follow_company=follow_company,
             )
+        except asyncio.CancelledError:
+            # As in `read_easy_apply_form`. Answers already typed stay saved to
+            # the account either way; the draft holding them does not.
+            await self._close_easy_apply(opening=True)
+            raise
         except Exception as e:
-            if not await self._discard_easy_apply():
+            if not await self._close_easy_apply():
                 raise RuntimeError(EASY_APPLY_DRAFT_LEFT) from e
             raise
         return EasyApplySubmitRead(
@@ -1269,7 +1274,7 @@ class JobPageReader:
             submitted=outcome.submitted,
             follow=outcome.follow,
             # A sent application leaves no dialog and no draft to discard.
-            discarded=True if outcome.submitted else await self._discard_easy_apply(),
+            discarded=True if outcome.submitted else await self._close_easy_apply(),
             confirmation=outcome.confirmation,
         )
 
