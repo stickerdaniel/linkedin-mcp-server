@@ -57,7 +57,8 @@ async def test_unapproved_composer_content_is_never_clicked(problem, monkeypatch
             monkeypatch.setattr(
                 "linkedin_mcp_server.linkedin.post_writer.COMPOSER_GUARD_JS",
                 COMPOSER_GUARD_JS.replace(
-                    "Date.now()", "(Date.now() + Number(document.documentElement.dataset.expiryOffset || 0))"
+                    "Date.now()",
+                    "(Date.now() + Number(document.documentElement.dataset.expiryOffset || 0))",
                 ),
             )
         html = f'''<html lang="en"><dialog open><a href="{author}">Author</a>
