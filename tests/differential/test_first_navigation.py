@@ -380,12 +380,21 @@ async def test_a_relaunch_keeps_the_first_launch_and_reads_its_own_ends(tmp_path
                     15,
                     "the second browser root was not identified",
                 )
-                psutil.Process(second["pid"]).kill()
-                await _until(
-                    lambda: roots()[1]["gone_ms"] is not None,
-                    15,
-                    "the second browser root was not seen gone",
-                )
+                root = psutil.Process(second["pid"])
+                # The driver reaps its browser. Held stopped across the kill,
+                # the sampler can only find the root as a zombie, which is the
+                # read the CI runs raced into.
+                reaper = root.parent()
+                reaper.suspend()
+                try:
+                    root.kill()
+                    await _until(
+                        lambda: roots()[1]["gone_ms"] is not None,
+                        15,
+                        "the second browser root was not seen gone",
+                    )
+                finally:
+                    reaper.resume()
     record = _record(path)
     assert [n["launch"] for n in record["navigations"]] == [1, 2]
     assert (record["first_failed_navigation"], record["stalled_phase"]) == (
@@ -1036,33 +1045,50 @@ def test_a_wall_clock_set_back_leaves_the_order_open(tmp_path, monkeypatch):
     assert root["ended"] == "ambiguous"
 
 
-def test_a_death_read_during_a_sample_is_not_ordered_before_a_close(tmp_path):
+@pytest.mark.parametrize(
+    ("while_reading", "ended"),
+    [
+        # Nothing happened between the sample's start and the read.
+        (None, "unexpected"),
+        # The close was asked for after the sample began, before the zombie
+        # was read: the death may have followed it.
+        ("close", "ambiguous"),
+        # The clock was set back after the close, before the zombie was read.
+        ("clock-back", "ambiguous"),
+    ],
+)
+def test_a_zombie_is_ordered_by_when_it_was_read(
+    tmp_path, monkeypatch, while_reading, ended
+):
+    """A root its driver has not reaped yet is gone. Its end is ordered by when
+    the sampler read it, never by when that sample began."""
     lifetimes = LifetimeSampler(
         tmp_path / BROWSER_LIFETIMES_FILE, profile=tmp_path / "profile", label="order"
     )
     lifetimes._track((6161, 1.0), "browser-root", 0.0)
+    asked: dict[str, float] = {}
+    real = time.time
 
-    class DiedWhileReading:
-        pid = 6161
-
-        def create_time(self) -> float:
-            return 1.0
-
-        def status(self) -> str:
-            return psutil.STATUS_ZOMBIE
+    def zombie() -> str:
+        if while_reading is not None and not asked:
+            asked["browser-root"] = real()
+            time.sleep(0.02)
+        if while_reading == "clock-back":
+            monkeypatch.setattr(time, "time", lambda: real() - 60)
+        return psutil.STATUS_ZOMBIE
 
     lifetimes._sample(
-        psutil, SimpleNamespace(children=lambda recursive: [DiedWhileReading()])
+        psutil, SimpleNamespace(children=lambda recursive: [_listed(6161, zombie)])
     )
     (record,) = lifetimes.document["processes"]
-    assert record["order_uncertain"] is True
     first_gone = record["gone_ms"]
     lifetimes._sample(
-        psutil, SimpleNamespace(children=lambda recursive: [DiedWhileReading()])
+        psutil, SimpleNamespace(children=lambda recursive: [_listed(6161, zombie)])
     )
-    assert record["gone_ms"] == first_gone
-    asked = {"browser-root": record["gone_wall"] + 5}
-    assert lifetimes._ended(record, asked, stopped=True) == "ambiguous"
+    assert record["gone_ms"] == first_gone, "only the first read is its end"
+    asked.setdefault("browser-root", real() + 5)
+    lifetimes.stop(exc=None, requested=asked)
+    assert record["ended"] == ended
 
 
 def test_a_sampler_that_cannot_start_does_not_stop_the_launch(tmp_path, monkeypatch):
