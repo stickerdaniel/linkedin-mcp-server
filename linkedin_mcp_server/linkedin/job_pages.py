@@ -385,6 +385,15 @@ class EasyApplyFormRead:
     discarded: bool = True
 
 
+class EasyApplyDraftLeftError(RuntimeError):
+    """A walk failed and its dialog could not be closed after it.
+
+    Raised in place of the failure, which it chains, because the draft it may
+    leave on LinkedIn is what the caller has to act on, and an error of its own
+    type keeps that warning's `error_type` instead of the failure's.
+    """
+
+
 def _public_step(step: dict[str, Any]) -> dict[str, Any]:
     """One read step as returned to the caller, without the walk's bookkeeping."""
     public: dict[str, Any] = {}
@@ -516,7 +525,7 @@ class JobPageReader:
             raise
         except Exception as e:
             if not await self._close_easy_apply():
-                raise RuntimeError(EASY_APPLY_DRAFT_LEFT) from e
+                raise EasyApplyDraftLeftError(EASY_APPLY_DRAFT_LEFT) from e
             raise
         discarded = await self._close_easy_apply()
         return EasyApplyFormRead("easy_apply", tuple(steps), complete, discarded)

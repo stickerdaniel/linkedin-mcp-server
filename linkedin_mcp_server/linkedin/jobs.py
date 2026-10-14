@@ -22,7 +22,10 @@ from linkedin_mcp_server.linkedin.contracts import (
     rate_limited_section_error,
 )
 from linkedin_mcp_server.linkedin.identifiers import job_view_url, normalize_job_id
-from linkedin_mcp_server.linkedin.job_pages import JobPageReader
+from linkedin_mcp_server.linkedin.job_pages import (
+    EasyApplyDraftLeftError,
+    JobPageReader,
+)
 from linkedin_mcp_server.linkedin.job_policy import (
     JOB_SEARCH_PATHS,
     RESULTS_PER_LINKEDIN_PAGE,
@@ -187,7 +190,7 @@ class JobReader:
             {url, apply: {type}, form?: {steps, complete}}, with form present
             for Easy Apply postings only, or {url, section_errors} when the
             form could not be read. A draft left undiscarded is a section
-            error beside the form.
+            error beside the form, or in place of it when the read failed too.
         """
         job_id = normalize_job_id(job_id)
         url = job_view_url(job_id, "/")
@@ -195,6 +198,14 @@ class JobReader:
             read = await self._pages.read_easy_apply_form(url, job_id, self._apply_text)
         except LinkedInOperationError:
             raise
+        except EasyApplyDraftLeftError as e:
+            logger.warning(
+                "Failed to read the Easy Apply form of %s: %s", url, e.__cause__
+            )
+            return {
+                "url": url,
+                "section_errors": {"form": easy_apply_draft_section_error()},
+            }
         except Exception as e:
             logger.warning("Failed to read the Easy Apply form of %s: %s", url, e)
             return {
