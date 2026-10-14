@@ -1095,6 +1095,47 @@ def test_matching_unreadable_snapshots_do_not_prove_restoration_safe(auth, monke
     assert any("cookies.json could not be compared" in p for p in problems)
 
 
+def test_a_live_trace_writers_held_marker_is_compared(auth):
+    """A trace run's empty `.alive`, locked as a live writer locks it, compares
+    as unchanged; on Windows that lock refuses every other handle's read."""
+    from linkedin_mcp_server.profile_lease import try_lock
+
+    profile, _ = auth
+    run = profile.parent / "trace-runs" / "run-live"
+    run.mkdir(parents=True)
+    fd = os.open(run / ".alive", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        assert try_lock(fd, exclusive=True)
+        before, after = auth_files(profile.parent), auth_files(profile.parent)
+    finally:
+        os.close(fd)
+    assert restoration_changes(before, after) == []
+
+
+def test_an_empty_file_compares_without_a_read_and_its_writes_still_count(
+    auth, monkeypatch
+):
+    profile, _ = auth
+    marker = profile / "empty-marker"
+    marker.touch()
+    read = Path.read_bytes
+
+    def refused(path):
+        if path == marker:
+            raise PermissionError("locked test marker")
+        return read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", refused)
+    before = auth_files(profile.parent)
+    assert restoration_changes(before, auth_files(profile.parent)) == []
+    monkeypatch.undo()
+    marker.write_text("written")
+    assert any(
+        "empty-marker changed while" in problem
+        for problem in restoration_changes(before, auth_files(profile.parent))
+    )
+
+
 def test_a_legitimate_export_is_no_protected_change(auth):
     profile, staged = auth
     before = snapshot(profile, expected_digest=staged.li_at_digest)

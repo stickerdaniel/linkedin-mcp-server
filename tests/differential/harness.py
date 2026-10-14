@@ -4605,7 +4605,13 @@ def auth_files(root: Path) -> dict[str, str]:
                     names.remove(name)
             else:
                 try:
-                    files[key] = hashlib.sha256(path.read_bytes()).hexdigest()
+                    # An empty file has nothing to read, and its read may be
+                    # refused: on Windows a live trace writer's exclusive
+                    # byte-range lock on its empty `.alive` marker denies
+                    # every other handle's read.
+                    empty = path.lstat().st_size == 0
+                    content = b"" if empty else path.read_bytes()
+                    files[key] = hashlib.sha256(content).hexdigest()
                 except OSError:
                     files[key] = "unreadable"
     return files
