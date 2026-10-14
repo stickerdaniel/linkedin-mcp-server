@@ -466,6 +466,19 @@ class TestSubmitEasyApply:
         assert "form" not in result and "apply" not in result
         assert "form" in result["section_errors"]
 
+    async def test_a_failed_walk_that_leaves_a_draft_says_so(self, mock_page):
+        reader = _reader(mock_page)
+        error = EasyApplyDraftLeftError("draft left")
+        error.__cause__ = RuntimeError("The Easy Apply dialog did not open")
+        with self._walking(reader, side_effect=error):
+            result = await reader.submit_easy_apply("12345", self.ANSWERS)
+
+        assert result == {
+            "url": self.URL,
+            "submitted": False,
+            "section_errors": {"form": easy_apply_draft_section_error()},
+        }
+
     async def test_a_draft_left_behind_is_reported_beside_the_form(self, mock_page):
         reader = _reader(mock_page)
         read = EasyApplySubmitRead("easy_apply", (self.STEP,), discarded=False)

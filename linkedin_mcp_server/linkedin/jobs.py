@@ -263,6 +263,15 @@ class JobReader:
             )
         except LinkedInOperationError:
             raise
+        except EasyApplyDraftLeftError as e:
+            logger.warning(
+                "Failed to answer the Easy Apply form of %s: %s", url, e.__cause__
+            )
+            return {
+                "url": url,
+                "submitted": False,
+                "section_errors": {"form": easy_apply_draft_section_error()},
+            }
         except Exception as e:
             logger.warning("Failed to answer the Easy Apply form of %s: %s", url, e)
             return {
