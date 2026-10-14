@@ -2649,13 +2649,16 @@ class ProfileCensus:
     ``complete`` only when every process could be judged: its command line
     read, or it established as unrelated the way the watcher establishes it
     (another user, or a readable executable that cannot be the browser), or,
-    for a zombie, the whole process shown to have exited. An empty
-    ``processes`` from an incomplete census is not an empty profile.
+    for a zombie, the whole process shown to have exited (``zombie_unresolved``).
+    An empty ``processes`` from an incomplete census is not an empty profile.
     """
 
     processes: list[Any] = field(default_factory=list)
     #: Processes whose arguments could not be read and that were not excluded.
     unresolved: list[int] = field(default_factory=list)
+    #: Why each of ``unresolved`` was kept, in the same order, each with its
+    #: ``pid`` and the ``phase`` that could not judge it. Evidence only.
+    provenance: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def pids(self) -> list[int]:
@@ -2664,6 +2667,37 @@ class ProfileCensus:
     @property
     def complete(self) -> bool:
         return not self.unresolved
+
+    def unresolve(self, pid: int, **why: Any) -> None:
+        """Keep *pid* unresolved, with what the census read of it."""
+        self.unresolved.append(pid)
+        self.provenance.append({"pid": pid, **why})
+
+
+#: ``pid_state``: nothing is at the pid any more.
+PID_GONE = "gone"
+#: ``pid_state``: a process, a zombie included, is at the pid.
+PID_PRESENT = "present"
+
+
+def pid_state(pid: int, *, open_process: Callable[[int], Any] = psutil.Process) -> str:
+    """Whether anything is at *pid*, looked up now.
+
+    ``PID_GONE`` only when the lookup finds nothing, ``PID_PRESENT`` for any
+    process there, and otherwise ``unknown: ...`` with what failed. A zombie
+    is present even though psutil raises it as a ``NoSuchProcess``. A later
+    process at a reused pid is present too: telling it apart would take a
+    start time, and the public one moves with the wall clock.
+    """
+    try:
+        open_process(pid)
+    except psutil.ZombieProcess:
+        return PID_PRESENT
+    except psutil.NoSuchProcess:
+        return PID_GONE
+    except (psutil.Error, OSError) as exc:
+        return f"unknown: {type(exc).__name__}"
+    return PID_PRESENT
 
 
 def thread_count(process: Any) -> int | None:
@@ -2697,6 +2731,40 @@ def exited_zombie(
     if not (sys.platform.startswith("linux") if linux is None else linux):
         return True
     return threads_of(process) == 1
+
+
+def zombie_unresolved(
+    process: Any,
+    *,
+    linux: bool | None = None,
+    threads_of: Callable[[Any], int | None] = thread_count,
+    open_process: Callable[[int], Any] = psutil.Process,
+) -> dict[str, Any] | None:
+    """Why a zombie the census listed cannot be excluded; None once its whole
+    process is shown to have exited.
+
+    First ``exited_zombie``. A count that shows nothing on Linux can also mean
+    the zombie was reaped after the table was read, which takes its
+    ``/proc/<pid>/task`` with it, so the pid is looked up again: excluded only
+    once nothing is there, never because a read failed.
+    """
+    counted: list[int | None] = []
+
+    def count(target: Any) -> int | None:
+        counted.append(threads_of(target))
+        return counted[-1]
+
+    if exited_zombie(process, linux=linux, threads_of=count):
+        return None
+    lookup = pid_state(process.pid, open_process=open_process)
+    if lookup == PID_GONE:
+        return None
+    return {
+        "phase": "zombie",
+        "status": psutil.STATUS_ZOMBIE,
+        "threads": counted[-1] if counted else None,
+        "lookup": lookup,
+    }
 
 
 def process_table(attrs: Sequence[str]) -> Iterator[Any]:
@@ -2733,6 +2801,9 @@ def profile_census(
     browser_dir: str | Path | None = None,
     process_iter: Callable[..., Iterable[Any]] | None = None,
     user: object | None = None,
+    linux: bool | None = None,
+    threads_of: Callable[[Any], int | None] = thread_count,
+    open_process: Callable[[int], Any] = psutil.Process,
 ) -> ProfileCensus:
     """Every process, root or child, running a browser on this row's profile.
 
@@ -2744,17 +2815,25 @@ def profile_census(
     census = ProfileCensus()
     try:
         processes = list((process_iter or process_table)(["cmdline", "exe", "status"]))
-    except psutil.Error:
-        return ProfileCensus(unresolved=[-1])
+    except psutil.Error as exc:
+        census.unresolve(-1, phase="table", error=type(exc).__name__)
+        return census
     for process in processes:
         info = getattr(process, "info", {}) or {}
         cmdline = info.get("cmdline")
         if info.get("status") == psutil.STATUS_ZOMBIE:
             # Exited and not yet reaped, then nothing is running there; but
             # a zombie leader can still have threads that hold the profile.
-            if exited_zombie(process) or another_user(process_user(process), owner):
+            if another_user(process_user(process), owner):
                 continue
-            census.unresolved.append(process.pid)
+            why = zombie_unresolved(
+                process,
+                linux=linux,
+                threads_of=threads_of,
+                open_process=open_process,
+            )
+            if why is not None:
+                census.unresolve(process.pid, **why)
             continue
         if cmdline is None:
             if another_user(process_user(process), owner):
@@ -2762,7 +2841,9 @@ def profile_census(
             exe = info.get("exe")
             if exe and not possible_browser(exe, browser_exe, directory):
                 continue
-            census.unresolved.append(process.pid)
+            census.unresolve(
+                process.pid, phase="arguments", status=info.get("status"), exe=exe
+            )
             continue
         for argument in cmdline:
             if not argument.startswith(USER_DATA_DIR_FLAG):
@@ -5664,6 +5745,7 @@ def observe_checkpoint(
     point["census"] = {
         "entries": [census_entry(process) for process in census.processes],
         "unresolved": list(census.unresolved),
+        "unresolved_provenance": list(census.provenance),
     }
     roots = host_comparison.census_roots(point["census"], account.browser_key) or []
     point["lineages"] = [
@@ -5747,6 +5829,7 @@ def observe_roots(
     roots = host_comparison.census_roots(found, account.browser_key)
     point["roots"] = [list(root) for root in roots] if roots is not None else None
     point["unresolved"] = list(census.unresolved)
+    point["unresolved_provenance"] = list(census.provenance)
     return point
 
 
@@ -8266,6 +8349,7 @@ async def measure_host_quit_row(
                 comparison["b_settlement"] = {
                     "remaining": census.pids,
                     "unresolved": list(census.unresolved),
+                    "unresolved_provenance": list(census.provenance),
                     "ended_ns": time.monotonic_ns(),
                 }
             except Exception as exc:  # noqa: BLE001 - the settlement's own evidence
@@ -8875,6 +8959,7 @@ async def measure_host_quit_row(
             )
             found["remaining"] = census.pids
             found["unresolved"] = list(census.unresolved)
+            found["unresolved_provenance"] = list(census.provenance)
             lock = await run_owned(
                 "the lock after the loss", read_lock, lock_path, seconds=60.0
             )
