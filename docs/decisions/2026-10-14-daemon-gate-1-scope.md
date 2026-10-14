@@ -22,8 +22,8 @@ Linux is the only platform where the harness traces signals natively (`strace` o
 Each of these keeps the coverage it has and is named in the evidence record rather than counted as a native cell:
 
 - **The unconfirmed close on macOS (H-R7).** The row reads the marked drain's aftermath with a signal tracer, which macOS lacks, so it follows from the signals decision. Linux runs it natively, and its judgement has browser-free tests in `tests/differential/test_unconfirmed_close.py`.
-- **Profile commands under a live owner on Windows.** The rows need a pseudo-terminal, which Windows lacks without a new dependency. The gate 2 manual protocol covers profile commands on a real Windows host.
-- **Import from a browser into an idle owner.** The import asks the OS keystore before it reads a cookie on every platform, so a disposable synthetic profile cannot show it natively anywhere. It stays mapped to its model.
+- **Profile commands that need a terminal, on Windows.** Those cells need a pseudo-terminal, which Windows lacks without a new dependency, and the gate 2 manual protocol covers them on a real Windows host. The cells on pipes, `--status` and the no-terminal cell, stay native there.
+- **Import from a browser into an idle owner.** The import asks the OS keystore before it reads a cookie on every platform, so a disposable synthetic profile cannot show it natively anywhere. Its coverage is `test_import_waits_for_the_profile_after_an_idle_owner_retires` in `tests/test_cli_main.py`, counted under H-R10a-login in `tests/differential/model_coverage.py`.
 
 ## Required before gate 1 passes
 
@@ -31,4 +31,4 @@ Each of these keeps the coverage it has and is named in the evidence record rath
 
 ## Evidence
 
-One dispatch of the evidence workflow on the exact candidate settles the gate. It is reviewed cell by cell, by row, platform, architecture, experiment and column, with node identifiers and skip reasons, and each witness is checked on its own. The candidate SHA, lock hash, harness revision, run identifiers and attempts, runner images and counts go into `docs/daemon-measurements.md`, and the packets are archived with checksums before the workflow's artifacts expire. A retry does not replace an unexplained failure. A change to lifecycle code, the harness or the lock after that dispatch reruns the evidence it affects.
+One dispatch of `.github/workflows/differential-evidence.yml` with `platform=all` and `group=all` on the exact candidate settles the gate; a narrower dispatch does not. It is reviewed cell by cell, by row, platform, architecture, experiment and column, with node identifiers and skip reasons, and each witness is checked on its own. The candidate SHA, lock hash, harness revision, run identifiers and attempts, runner images and counts go into `docs/daemon-measurements.md`, and the packets are archived with checksums before the workflow's artifacts expire. A retry does not replace an unexplained failure. A change to lifecycle code, the harness or the lock after that dispatch reruns the evidence it affects.
