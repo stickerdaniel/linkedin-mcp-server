@@ -887,6 +887,18 @@ def _plan_choice(field: dict[str, Any], answer: EasyApplyAnswer) -> list[EasyApp
     ids: list[str] = field.get("ids") or []
     radio = field["type"] == "radio"
 
+    total = field.get("options_total")
+    if total:
+        # Unlike a select's, a choice is clicked by the control its label
+        # stands for, and the labels past the cut were never read.
+        raise InvalidAnswerError(
+            easy_apply_answer_refused(
+                field,
+                f"It lists {total} options and only the first {len(options)} "
+                "were read, so none can be clicked by name.",
+            )
+        )
+
     if isinstance(answer, bool):
         if len(options) != 1:
             raise InvalidAnswerError(

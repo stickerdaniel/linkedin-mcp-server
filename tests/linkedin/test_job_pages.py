@@ -1845,6 +1845,20 @@ class TestAnswerEasyApplyStep:
         with pytest.raises(InvalidAnswerError, match="No option is labelled"):
             job_pages_module.plan_easy_apply_answer(whole, "France (+33)")
 
+    def test_a_choice_list_the_read_cut_refuses(self):
+        field = {
+            "label": "Country of residence",
+            "type": "radio",
+            "required": True,
+            "options": ["Afghanistan", "Albania"],
+            "options_total": 60,
+            "selected": [],
+            "ids": [f"r{index}" for index in range(60)],
+        }
+
+        with pytest.raises(InvalidAnswerError, match="It lists 60 options"):
+            job_pages_module.plan_easy_apply_answer(field, "Albania")
+
     def test_an_option_no_radio_carries_refuses(self):
         with pytest.raises(InvalidAnswerError, match="No option is labelled 'Maybe'"):
             job_pages_module.plan_easy_apply_answer(self.CONTACT["fields"][2], "Maybe")
