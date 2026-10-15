@@ -873,6 +873,9 @@ def test_a_pilot_dir_in_the_daemon_state_is_refused(
         ("status repaired a loss", "daemon", "incident"),
         ("source trace vanished", "uncertain", "retained"),
         ("captured copy lost", "uncertain", "incident"),
+        # Edited between the attempts: the quiet frontend's copy stays.
+        ("frontend dropped from the manifest", "uncertain", "incident"),
+        ("manifest emptied", "uncertain", "incident"),
     ],
 )
 def test_a_retried_after_judges_its_first_capture(
@@ -894,7 +897,7 @@ def test_a_retried_after_judges_its_first_capture(
     _start_frontend(monkeypatch, profile, _FORWARD)
     log.write_text(f"{_READ}\n")
     known = set(pilot.trace_runs(profile.parent))
-    if retry in ("source trace vanished", "captured copy lost"):
+    if retry not in ("as is", "status repaired a loss"):
         _start_frontend(
             monkeypatch, profile, _FORWARD, log_level="WARNING", transport_fails=True
         )
@@ -923,6 +926,15 @@ def test_a_retried_after_judges_its_first_capture(
         (
             pilot_dir / session / "capture" / "trace-runs" / quiet[0] / "server.log"
         ).unlink()
+    elif retry == "frontend dropped from the manifest":
+        manifest = pilot_dir / session / "capture" / "capture.json"
+        captured = json.loads(manifest.read_text())
+        captured["trace_runs"] = [
+            run for run in captured["trace_runs"] if run["name"] != quiet[0]
+        ]
+        manifest.write_text(json.dumps(captured))
+    elif retry == "manifest emptied":
+        (pilot_dir / session / "capture" / "capture.json").write_text("{}")
 
     assert _after(pilot_dir, session) == 0
     verdict = _record(pilot_dir, session)["judgement"]

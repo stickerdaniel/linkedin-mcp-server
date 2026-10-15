@@ -117,7 +117,8 @@ the `.mcpb` bundle has no daemon setting and does not count.
    say so: `--attest login@2026-10-15T14:05`, once per command. If `after`
    is interrupted, run the same command again: it keeps what it captured
    and repeats only the final status check. One interrupted while it was
-   still capturing records the session as an incident.
+   still capturing records the session as an incident, and so does a
+   capture changed since.
 
 Run `recorder tally --sha "$SHA" "$PILOT"` to see your counts. It counts
 only this candidate's sessions, and exits non-zero until the whole pilot

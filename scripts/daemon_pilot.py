@@ -910,8 +910,6 @@ def _incident_reasons(before: dict[str, Any], after: dict[str, Any]) -> list[str
     old, new = before["baseline"], after["snapshot"]
     if after["status"]["verdict"] != "valid":
         reasons.append(f"the after-status is {after['status']['verdict']}")
-    if after["missing_evidence"]:
-        reasons.append(f"the capture lost {', '.join(after['missing_evidence'])}")
     if after["owner_wait"]["timed_out"]:
         reasons.append("an owner was still alive when the wait ended")
     if after["owner_log"]["state"] in {
@@ -1127,7 +1125,13 @@ def capture_session(
 
 
 def _saved_capture(capture: Path) -> dict[str, Any] | None:
-    """The capture an earlier ``after`` completed, or None if it was cut short."""
+    """The capture an earlier ``after`` completed, or None.
+
+    None also for a ``capture.json`` that is not the shape ``capture_session``
+    writes, or whose runs and log disagree with the copies saved beside it:
+    every saved copy has to be named and every named copy saved, so a capture
+    can be neither shrunk nor emptied into a healthier session.
+    """
     path = capture / "capture.json"
     try:
         if not stat.S_ISREG(path.lstat().st_mode):
@@ -1135,26 +1139,91 @@ def _saved_capture(capture: Path) -> dict[str, Any] | None:
         captured = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return captured if isinstance(captured, dict) else None
+    named = _named_copies(captured)
+    try:
+        saved = _saved_copies(capture)
+    except OSError:
+        return None
+    if named is None or named != saved:
+        return None
+    return captured
 
 
-def _missing_evidence(capture: Path, captured: dict[str, Any]) -> list[str]:
-    """Copies the capture names that are not regular files in it any more."""
-    named = [captured["owner_log"].get("evidence")]
-    named += [run.get("evidence") for run in captured["trace_runs"]]
-    missing = []
-    for evidence in filter(None, named):
-        try:
-            present = stat.S_ISREG((capture / evidence).lstat().st_mode)
-        except OSError:
-            present = False
-        if not present:
-            missing.append(evidence)
-    return missing
+_STORES = ("source_state", "cookies", "profile", "last_version", "quarantines")
+_RUN_KINDS = frozenset({"frontend", "owner", "profile_command", "unknown"})
+_MODES = frozenset({"daemon", "fallback", "uncertain"})
+
+
+def _counts(value: Any) -> bool:
+    return isinstance(value, dict) and all(
+        type(value.get(kind)) is int for kind in ("reading", "writing")
+    )
+
+
+def _named_copies(captured: Any) -> set[str] | None:
+    """The copies a well-formed capture names, or None if it is malformed."""
+    if not isinstance(captured, dict):
+        return None
+    wait, snapshot, log, runs = (
+        captured.get(key)
+        for key in ("owner_wait", "snapshot", "owner_log", "trace_runs")
+    )
+    if (
+        not isinstance(wait, dict)
+        or not isinstance(wait.get("timed_out"), bool)
+        or not isinstance(snapshot, dict)
+        or not all(
+            isinstance(snapshot.get(store), dict)
+            and isinstance(snapshot[store].get("state"), str)
+            for store in _STORES
+        )
+        or not isinstance(log, dict)
+        or not isinstance(log.get("state"), str)
+        or not _counts(log.get("tool_calls"))
+        or not isinstance(runs, list)
+    ):
+        return None
+    named = {"daemon.log"} if "evidence" in log else set()
+    if log.get("evidence", "daemon.log") != "daemon.log":
+        return None
+    for run in runs:
+        if (
+            not isinstance(run, dict)
+            or not isinstance(run.get("name"), str)
+            or run.get("kind") not in _RUN_KINDS
+            or (run["kind"] == "frontend" and run.get("mode") not in _MODES)
+        ):
+            return None
+        if "evidence" in run:
+            evidence = f"trace-runs/{run['name']}/server.log"
+            if run["evidence"] != evidence or evidence in named:
+                return None
+            if not _counts(run.get("tool_calls")):
+                return None
+            named.add(evidence)
+        elif run["kind"] != "unknown":
+            return None
+    return named
+
+
+def _saved_copies(capture: Path) -> set[str] | None:
+    """Every file saved under *capture* but the manifest, or None for a link
+    or anything else that is neither a plain directory nor a regular file."""
+    saved: set[str] = set()
+    for directory, folders, files in os.walk(capture):
+        for name in [*folders, *files]:
+            mode = (Path(directory) / name).lstat().st_mode
+            if name in files and stat.S_ISREG(mode):
+                saved.add((Path(directory) / name).relative_to(capture).as_posix())
+            elif not (name in folders and stat.S_ISDIR(mode)):
+                return None
+    saved.discard("capture.json")
+    return saved
 
 
 def _interrupted_capture(session: str, record_before: dict[str, Any]) -> dict[str, Any]:
-    """The record of a session whose capture was cut short: never retained."""
+    """The record of a session whose capture was cut short or does not hold
+    together: never retained, and never captured again."""
     counted = bool(record_before["counts"])
     return {
         "session": session,
@@ -1166,13 +1235,11 @@ def _interrupted_capture(session: str, record_before: dict[str, Any]) -> dict[st
             "qualifies": False,
             "not_qualifying_because": [
                 *record_before["not_counted_because"],
-                "the capture is incomplete",
+                "the capture is incomplete or inconsistent",
             ],
             "outcome": "incident" if counted else "not_counted",
             "incident_reasons": (
-                ["the capture was interrupted before it was complete"]
-                if counted
-                else []
+                ["the capture is incomplete or inconsistent"] if counted else []
             ),
         },
     }
@@ -1193,9 +1260,8 @@ def after(args: argparse.Namespace) -> int:
         record = _interrupted_capture(args.session, record_before)
         _write_once(folder / "after.json", record, auth_root)
         return _report(record)
-    # Frontends come only from the capture; a copy gone since leaves the
-    # session uncertain and an incident, never smaller.
-    missing = _missing_evidence(capture, captured)
+    # Frontends come only from the capture, which a retry has checked
+    # against its saved copies.
     status = run_status(record_before["candidate"], profile)
     record: dict[str, Any] = {
         "session": args.session,
@@ -1203,9 +1269,8 @@ def after(args: argparse.Namespace) -> int:
         "attestations": args.attest,
         "evidence": _CAPTURE,
         "capture_complete": True,
-        "missing_evidence": missing,
         **captured,
-        "mode": "uncertain" if missing else session_mode(captured["trace_runs"]),
+        "mode": session_mode(captured["trace_runs"]),
         "status": status,
     }
     record["judgement"] = judge(record_before, record)
