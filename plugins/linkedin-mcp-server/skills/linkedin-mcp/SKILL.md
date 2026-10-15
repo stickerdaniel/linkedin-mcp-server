@@ -21,6 +21,9 @@ work, health checks, or background maintenance.
 - `send_message` and `connect_with_person` are write actions. Use them only when
   the user explicitly authorizes the exact recipient and action. Confirm the
   final message or connection note unless the user has already supplied it.
+- `archive_conversation` is a write action too: it moves a thread out of the
+  user's inbox. Use it only when the user explicitly asks to archive that
+  thread.
 - Do not retry a failed write action unless the result proves it was not sent.
 
 ## Browser and authentication
@@ -44,10 +47,9 @@ instances, clear profiles, or replace the user's browser session.
 - Jobs: `search_jobs`, `get_saved_jobs`, `get_job_details`, and
   `get_job_apply_url`.
 - Content: `get_feed` and `search_posts`.
-- Messages: `get_inbox`, `get_conversation`, `search_conversations`, and
-  `archive_conversation`.
-- Writes: `send_message` and `connect_with_person`, subject to the explicit
-  authorization rules above.
+- Messages: `get_inbox`, `get_conversation`, and `search_conversations`.
+- Writes: `send_message`, `connect_with_person`, and `archive_conversation`,
+  subject to the explicit authorization rules above.
 - Cleanup: use `close_session` only when the user asks to end the managed
   browser session or when the current LinkedIn task is finished and no follow-up
   call is expected.
