@@ -16,6 +16,7 @@ import importlib.util
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -439,6 +440,34 @@ def test_the_status_survives_a_console_without_the_check_mark(
     assert status["verdict"] == "valid"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_an_interrupt_after_the_reap_signals_no_group(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class ReapedThenInterrupted(subprocess.Popen):
+        """Ctrl-C lands just after ``communicate`` reaped the leader."""
+
+        interrupted = False
+
+        def _communicate(self, *args: Any, **kwargs: Any) -> Any:
+            # CPython's private step that reads the pipes, then reaps.
+            result = getattr(super(), "_communicate")(*args, **kwargs)
+            if not self.interrupted:
+                self.interrupted = True
+                raise KeyboardInterrupt
+            return result
+
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(pilot.subprocess, "Popen", ReapedThenInterrupted)
+    monkeypatch.setattr(pilot.os, "killpg", lambda *call: signals.append(call))
+
+    with pytest.raises(KeyboardInterrupt):
+        pilot._supervised([sys.executable, "-c", "pass"])
+
+    assert signals == []
+    assert "may still be running" in capsys.readouterr().err
+
+
 def test_a_status_timeout_ends_everything_the_candidate_started(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -836,7 +865,71 @@ def test_a_pilot_dir_in_the_daemon_state_is_refused(
     assert not inside.exists()
 
 
-def test_an_interrupted_after_can_run_again(
+@pytest.mark.parametrize(
+    ("retry", "mode", "outcome"),
+    [
+        ("as is", "daemon", "retained"),
+        # The first capture saw the loss; the status that followed hid it.
+        ("status repaired a loss", "daemon", "incident"),
+        ("source trace vanished", "uncertain", "retained"),
+        ("captured copy lost", "uncertain", "incident"),
+    ],
+)
+def test_a_retried_after_judges_its_first_capture(
+    monkeypatch: pytest.MonkeyPatch,
+    isolate_profile_dir: Path,
+    pilot_dir: Path,
+    candidate: _Candidate,
+    retry: str,
+    mode: str,
+    outcome: str,
+) -> None:
+    profile = isolate_profile_dir
+    _store(profile)
+    log = _publish_owner(profile, _dead_pid(), [])
+    candidate.answer(_valid(profile), _valid(profile))
+    code, session = _before(pilot_dir, candidate, profile)
+    assert code == 0
+    runs = profile.parent / "trace-runs"
+    _start_frontend(monkeypatch, profile, _FORWARD)
+    log.write_text(f"{_READ}\n")
+    known = set(pilot.trace_runs(profile.parent))
+    if retry in ("source trace vanished", "captured copy lost"):
+        _start_frontend(
+            monkeypatch, profile, _FORWARD, log_level="WARNING", transport_fails=True
+        )
+    quiet = sorted(set(pilot.trace_runs(profile.parent)) - known)
+    cookies = portable_cookie_path(profile)
+    kept = cookies.read_bytes()
+    if retry == "status repaired a loss":
+        cookies.write_text("[]")
+
+    def interrupted(*_args: Any) -> None:
+        # Ctrl-C in the final status, which has started a trace run of its
+        # own and, closing the browser, exported the cookies again.
+        (runs / "run-interrupted-status").mkdir()
+        (runs / "run-interrupted-status" / "server.log").write_text("")
+        cookies.write_bytes(kept)
+        raise KeyboardInterrupt
+
+    with (
+        patch.object(pilot, "run_status", interrupted),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        _after(pilot_dir, session)
+    if retry == "source trace vanished":
+        shutil.rmtree(runs / quiet[0])
+    elif retry == "captured copy lost":
+        (
+            pilot_dir / session / "capture" / "trace-runs" / quiet[0] / "server.log"
+        ).unlink()
+
+    assert _after(pilot_dir, session) == 0
+    verdict = _record(pilot_dir, session)["judgement"]
+    assert (verdict["mode"], verdict["outcome"]) == (mode, outcome)
+
+
+def test_a_capture_cut_short_is_an_incident(
     monkeypatch: pytest.MonkeyPatch,
     isolate_profile_dir: Path,
     pilot_dir: Path,
@@ -851,26 +944,18 @@ def test_an_interrupted_after_can_run_again(
     _start_frontend(monkeypatch, profile, _FORWARD)
     log.write_text(f"{_READ}\n")
 
-    def interrupted(*_args: Any) -> None:
-        # Ctrl-C once the evidence is copied, while the final status has
-        # started its trace run and logged nothing yet.
-        status_run = profile.parent / "trace-runs" / "run-interrupted-status"
-        status_run.mkdir()
-        (status_run / "server.log").write_text("")
-        raise KeyboardInterrupt
-
     with (
-        patch.object(pilot, "run_status", interrupted),
+        patch.object(pilot, "copy_trace_runs", side_effect=KeyboardInterrupt),
         pytest.raises(KeyboardInterrupt),
     ):
         _after(pilot_dir, session)
 
     assert _after(pilot_dir, session) == 0
     verdict = _record(pilot_dir, session)["judgement"]
-    assert (verdict["mode"], verdict["outcome"]) == ("daemon", "retained")
+    assert (verdict["mode"], verdict["outcome"]) == ("uncertain", "incident")
 
 
-@pytest.mark.parametrize("link", ["session folder", "evidence file", "attempt"])
+@pytest.mark.parametrize("link", ["session folder", "evidence file", "capture"])
 def test_after_never_writes_through_a_link(
     isolate_profile_dir: Path,
     pilot_dir: Path,
@@ -892,9 +977,9 @@ def test_after_never_writes_through_a_link(
         elif link == "evidence file":
             (folder / "daemon.log").symlink_to(portable_cookie_path(profile))
         else:
-            target = profile.parent / "attempt"
+            target = profile.parent / "capture"
             target.mkdir()
-            (folder / "after-0123abcd").symlink_to(target, target_is_directory=True)
+            (folder / "capture").symlink_to(target, target_is_directory=True)
     except OSError:
         pytest.skip("this account cannot create symlinks")
     stores = _tree(profile.parent)

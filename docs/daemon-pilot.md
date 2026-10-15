@@ -115,7 +115,9 @@ the `.mcpb` bundle has no daemon setting and does not count.
    It waits up to 20 minutes for the shared browser's idle exit, then prints
    the session's mode and outcome. If you did log in, log out or import,
    say so: `--attest login@2026-10-15T14:05`, once per command. If `after`
-   is interrupted, run the same command again.
+   is interrupted, run the same command again: it keeps what it captured
+   and repeats only the final status check. One interrupted while it was
+   still capturing records the session as an incident.
 
 Run `recorder tally --sha "$SHA" "$PILOT"` to see your counts. It counts
 only this candidate's sessions, and exits non-zero until the whole pilot
@@ -124,9 +126,8 @@ passes, which is expected for one tester.
 ## Send back
 
 Zip the session folders under the pilot directory and send them to the
-maintainer privately. Each holds `before.json`, `after.json`, and an
-`after-*` folder with `runs.json`, `daemon.log` and `trace-runs/`;
-`after.json` names the one it used.
+maintainer privately. Each holds `before.json`, `after.json`, and a
+`capture` folder with `capture.json`, `daemon.log` and `trace-runs/`.
 
 The logs contain tool arguments: profile names, search keywords, message
 recipients. Read them first and redact what you do not want to share. Never

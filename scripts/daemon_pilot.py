@@ -30,7 +30,6 @@ import os
 import re
 import secrets
 import shlex
-import signal
 import stat
 import subprocess
 import sys
@@ -78,8 +77,8 @@ _TREE_SECONDS = 10.0
 _STATUS_OUTPUT_CHARS = 20_000
 _DESCRIPTOR_BYTES = 64 * 1024
 _SESSION_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}")
-#: One ``after`` attempt's evidence folder inside a session folder.
-_ATTEMPT = re.compile(r"after-[0-9a-f]{8}")
+#: The folder in a session folder that holds what the host session left.
+_CAPTURE = "capture"
 _ATTESTED = ("login", "logout", "import")
 _CANDIDATE_SHA = re.compile(r"git\+\S+@([0-9a-fA-F]{40})(?![0-9a-zA-Z])")
 
@@ -340,7 +339,13 @@ def _windows_split(command: str) -> list[str]:  # pragma: no cover - Windows onl
 
 
 def _end_tree(child: subprocess.Popen[bytes], job: WindowsJob | None) -> bool:
-    """Kill everything *child* started, and say whether that was proved."""
+    """Kill everything *child* started, and say whether that was proved.
+
+    A POSIX group is signalled only while its leader is unreaped, because
+    only that keeps its number from naming someone else's group. An
+    interruption can land after ``communicate`` reaped the leader; then
+    nothing is signalled and the tree counts as not ended.
+    """
     try:
         if job is not None:
             job.terminate()
@@ -351,16 +356,16 @@ def _end_tree(child: subprocess.Popen[bytes], job: WindowsJob | None) -> bool:
                 child.pid, timeout=_TREE_SECONDS, child=child
             )
     except ProcessTreeError:
-        return False
-    # Reaped already, which only an interruption allows. A group number is not
-    # reused while any member lives, so it still names only this tree.
-    try:
-        os.killpg(child.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return True
-    except PermissionError:
         pass
     return False
+
+
+def _warn_unended() -> None:
+    print(
+        "The status command was stopped and part of it may still be running; "
+        "check for a leftover mcp-server-linkedin process.",
+        file=sys.stderr,
+    )
 
 
 def _supervised(command: list[str]) -> tuple[int | None, bytes, dict[str, Any]]:
@@ -413,6 +418,8 @@ def _supervised(command: list[str]) -> tuple[int | None, bytes, dict[str, Any]]:
         out, err = child.communicate(timeout=_STATUS_SECONDS)
     except BaseException as exc:
         ended = _end_tree(child, job)
+        if not ended:
+            _warn_unended()
         try:
             out, err = child.communicate(timeout=_TREE_SECONDS)
         except subprocess.TimeoutExpired as late:
@@ -444,12 +451,6 @@ def run_status(candidate: str, profile: Path) -> dict[str, Any]:
         output = raw.decode("utf-8", errors="replace")
         if ending["timed_out"]:
             output += "\n[timed out]"
-            if not ending["tree_ended"]:
-                print(
-                    "The status command timed out and part of it may still be "
-                    "running; check for a leftover mcp-server-linkedin process.",
-                    file=sys.stderr,
-                )
     version = _STATUS_VERSION.search(output)
     return {
         "started_at": started,
@@ -909,6 +910,8 @@ def _incident_reasons(before: dict[str, Any], after: dict[str, Any]) -> list[str
     old, new = before["baseline"], after["snapshot"]
     if after["status"]["verdict"] != "valid":
         reasons.append(f"the after-status is {after['status']['verdict']}")
+    if after["missing_evidence"]:
+        reasons.append(f"the capture lost {', '.join(after['missing_evidence'])}")
     if after["owner_wait"]["timed_out"]:
         reasons.append("an owner was still alive when the wait ended")
     if after["owner_log"]["state"] in {
@@ -1062,10 +1065,10 @@ def wait_for_owners(auth_root: Path) -> dict[str, Any]:
 def _session_folder(pilot_dir: Path, session: str) -> tuple[Path, dict[str, Any]]:
     """The session folder and its ``before.json``, as the recorder left them.
 
-    A link in place of the folder or of a file in it, or any entry besides
-    ``before.json`` and the folders of interrupted ``after`` attempts, could
-    aim a write somewhere else, so ``after`` refuses the folder before it
-    writes anything. Attempt folders are never written to again.
+    A link in place of the folder or of an entry in it, or any entry besides
+    ``before.json`` and the capture folder, could aim a write somewhere else,
+    so ``after`` refuses the folder before it writes anything. Nothing is
+    ever written into an existing capture folder.
     """
     folder = pilot_dir / session
     if os.path.lexists(folder / "after.json"):
@@ -1083,9 +1086,7 @@ def _session_folder(pilot_dir: Path, session: str) -> tuple[Path, dict[str, Any]
         name
         for name in os.listdir(folder)
         if name != "before.json"
-        and not (
-            _ATTEMPT.fullmatch(name) and stat.S_ISDIR((folder / name).lstat().st_mode)
-        )
+        and not (name == _CAPTURE and stat.S_ISDIR((folder / name).lstat().st_mode))
     )
     if extra:
         raise RecorderError(
@@ -1095,28 +1096,86 @@ def _session_folder(pilot_dir: Path, session: str) -> tuple[Path, dict[str, Any]
     return folder, json.loads((folder / "before.json").read_text(encoding="utf-8"))
 
 
-def _host_runs(folder: Path, auth_root: Path) -> list[str]:
-    """The trace runs the host session can have left, for this ``after`` attempt.
+def capture_session(
+    folder: Path, record_before: dict[str, Any], profile: Path, auth_root: Path
+) -> dict[str, Any]:
+    """Record what the host session left, once, before any active step.
 
-    The host has quit before ``after`` starts, so its runs are all there when
-    the first attempt begins. Each attempt records that list in ``runs.json``;
-    a run missing from an earlier attempt's list is the status check that
-    attempt started before it was interrupted.
+    The stores, the owner log window and the trace runs go into a new
+    capture folder, and ``capture.json`` is written last, so it exists only
+    for a complete capture. The status check that follows may export the
+    cookies again and leaves a trace run of its own, so a retried ``after``
+    reuses this capture as it is and repeats only the status check.
     """
-    runs = set(trace_runs(auth_root))
-    for entry in sorted(os.listdir(folder)):
-        marker = folder / entry / "runs.json"
-        if not _ATTEMPT.fullmatch(entry):
-            continue
+    owner_wait = wait_for_owners(auth_root)
+    capture = folder / _CAPTURE
+    capture.mkdir()
+    snapshot = passive_snapshot(profile)
+    owner_log, owner_lines = copy_owner_log(
+        record_before["owner_log"], profile, capture, auth_root
+    )
+    runs = copy_trace_runs(auth_root, record_before["trace_runs"], capture, owner_lines)
+    captured = {
+        "captured_at": _now(),
+        "owner_wait": owner_wait,
+        "snapshot": snapshot,
+        "owner_log": owner_log,
+        "trace_runs": runs,
+    }
+    _write_once(capture / "capture.json", captured, auth_root)
+    return captured
+
+
+def _saved_capture(capture: Path) -> dict[str, Any] | None:
+    """The capture an earlier ``after`` completed, or None if it was cut short."""
+    path = capture / "capture.json"
+    try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            return None
+        captured = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return captured if isinstance(captured, dict) else None
+
+
+def _missing_evidence(capture: Path, captured: dict[str, Any]) -> list[str]:
+    """Copies the capture names that are not regular files in it any more."""
+    named = [captured["owner_log"].get("evidence")]
+    named += [run.get("evidence") for run in captured["trace_runs"]]
+    missing = []
+    for evidence in filter(None, named):
         try:
-            if not stat.S_ISREG(marker.lstat().st_mode):
-                continue
-            earlier = json.loads(marker.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(earlier, list):
-            runs &= {name for name in earlier if isinstance(name, str)}
-    return sorted(runs)
+            present = stat.S_ISREG((capture / evidence).lstat().st_mode)
+        except OSError:
+            present = False
+        if not present:
+            missing.append(evidence)
+    return missing
+
+
+def _interrupted_capture(session: str, record_before: dict[str, Any]) -> dict[str, Any]:
+    """The record of a session whose capture was cut short: never retained."""
+    counted = bool(record_before["counts"])
+    return {
+        "session": session,
+        "recorded_at": _now(),
+        "evidence": _CAPTURE,
+        "capture_complete": False,
+        "judgement": {
+            "mode": "uncertain",
+            "qualifies": False,
+            "not_qualifying_because": [
+                *record_before["not_counted_because"],
+                "the capture is incomplete",
+            ],
+            "outcome": "incident" if counted else "not_counted",
+            "incident_reasons": (
+                ["the capture was interrupted before it was complete"]
+                if counted
+                else []
+            ),
+        },
+    }
 
 
 def after(args: argparse.Namespace) -> int:
@@ -1127,40 +1186,37 @@ def after(args: argparse.Namespace) -> int:
     auth_root = Path(record_before["auth_root"])
     _refuse_protected(folder, auth_root)
 
-    owner_wait = wait_for_owners(auth_root)
-    host_runs = _host_runs(folder, auth_root)
-    # A new folder per attempt, so an interrupted one can simply be run again.
-    attempt = folder / f"after-{secrets.token_hex(4)}"
-    attempt.mkdir()
-    _create(attempt / "runs.json", json.dumps(host_runs).encode("utf-8"), auth_root)
-    owner_log, owner_lines = copy_owner_log(
-        record_before["owner_log"], profile, attempt, auth_root
-    )
-    later = sorted(set(trace_runs(auth_root)) - set(host_runs))
-    runs = copy_trace_runs(
-        auth_root, [*record_before["trace_runs"], *later], attempt, owner_lines
-    )
-    snapshot = passive_snapshot(profile)
+    capture = folder / _CAPTURE
+    if not os.path.lexists(capture):
+        captured = capture_session(folder, record_before, profile, auth_root)
+    elif (captured := _saved_capture(capture)) is None:
+        record = _interrupted_capture(args.session, record_before)
+        _write_once(folder / "after.json", record, auth_root)
+        return _report(record)
+    # Frontends come only from the capture; a copy gone since leaves the
+    # session uncertain and an incident, never smaller.
+    missing = _missing_evidence(capture, captured)
     status = run_status(record_before["candidate"], profile)
     record: dict[str, Any] = {
         "session": args.session,
         "recorded_at": _now(),
         "attestations": args.attest,
-        "evidence": attempt.name,
-        "status_runs_of_earlier_attempts": later,
-        "owner_wait": owner_wait,
-        "owner_log": owner_log,
-        "trace_runs": runs,
-        "mode": session_mode(runs),
-        "snapshot": snapshot,
+        "evidence": _CAPTURE,
+        "capture_complete": True,
+        "missing_evidence": missing,
+        **captured,
+        "mode": "uncertain" if missing else session_mode(captured["trace_runs"]),
         "status": status,
     }
     record["judgement"] = judge(record_before, record)
     _write_once(folder / "after.json", record, auth_root)
+    return _report(record)
 
+
+def _report(record: dict[str, Any]) -> int:
     verdict = record["judgement"]
     print(
-        f"Session {args.session}: mode {verdict['mode']}, outcome "
+        f"Session {record['session']}: mode {verdict['mode']}, outcome "
         f"{verdict['outcome']}, qualifies {verdict['qualifies']}."
     )
     for reason in verdict["incident_reasons"]:
