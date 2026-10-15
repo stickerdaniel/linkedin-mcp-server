@@ -1033,27 +1033,57 @@ THREAD_OPTIONS = {
 }
 
 
+CONVERSATIONS_RESPONSE_URL = (
+    "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql"
+    "?queryId=messengerConversations.policy&variables=(conversationIds:List(2-abc))"
+)
+
+
+def _conversation_payload(*categories: str) -> bytes:
+    """The conversations query's answer for thread ``2-abc`` in ``categories``."""
+    conversation = {
+        "_type": "com.linkedin.messenger.Conversation",
+        "backendUrn": "urn:li:messagingThread:2-abc",
+        "categories": list(categories),
+    }
+    return json.dumps(
+        {"data": {"messengerConversationsByIds": [conversation]}}
+    ).encode()
+
+
 async def _archive_conversation_scenario(*, already: bool) -> dict[str, Any]:
     """Archive a thread, or find it archived and leave its menu untouched."""
     outcome = "already_archived" if already else "archived"
-    recorder = TraceRecorder(f"archive_conversation__{outcome}", _COMMON_ALLOWED)
+    recorder = TraceRecorder(
+        f"archive_conversation__{outcome}",
+        _COMMON_ALLOWED | {"response.body.start", "response.body.finish"},
+    )
     clock = FakeClock(recorder)
     page = _page(recorder)
     thread = "https://www.linkedin.com/messaging/thread/2-abc/"
-    loads = 1 if already else 2
-    page.goto_landings.extend([thread] * loads)
-    page.declare_locator("main button[data-mcp-thread-options]", "thread_options")
-    page.script("evaluate:thread_options", *([THREAD_OPTIONS] * loads))
-    page.script("evaluate:thread_menu_survey", *([{"keys": []}] * loads))
-    page.script("thread_options.click", *([None] * loads))
-    archived = {"archive": 0, "restore": 1}
-    if already:
-        page.script("evaluate:thread_menu_items", archived)
-    else:
+    folders = [("ARCHIVE",)] if already else [("INBOX", "PRIMARY_INBOX"), ("ARCHIVE",)]
+    page.goto_landings.extend([thread] * len(folders))
+    page.script(
+        "goto",
+        *(
+            lambda folder=folder: page.emit(
+                "response",
+                ScriptedResponse(
+                    recorder,
+                    CONVERSATIONS_RESPONSE_URL,
+                    _conversation_payload(*folder),
+                ),
+            )
+            for folder in folders
+        ),
+    )
+    page.script("evaluate:thread_options", THREAD_OPTIONS)
+    if not already:
+        page.declare_locator("main button[data-mcp-thread-options]", "thread_options")
         page.declare_locator("[data-mcp-thread-archive]", "thread_archive_item")
-        page.script(
-            "evaluate:thread_menu_items", {"archive": 1, "restore": 0}, archived
-        )
+        page.script("evaluate:thread_menu_survey", {"keys": []})
+        page.script("thread_options.click", None)
+        page.script("evaluate:thread_menu_items", {"archive": 1})
         page.script("thread_archive_item.click", None)
     extractor = _extractor(page)
     arguments = {"thread_id": "2-abc"}
