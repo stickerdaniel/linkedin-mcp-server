@@ -28,7 +28,9 @@ from linkedin_mcp_server.linkedin.conversations import (
     _StoppedRow,
     _ThreadRefScan,
     _ThreadResolution,
+    is_conversations_payload_response,
     strip_select_conversation_prefix,
+    thread_categories,
 )
 from linkedin_mcp_server.linkedin.link_metadata import Reference
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
@@ -1834,3 +1836,72 @@ class TestWaitForMainText:
             await reader._wait_for_main_text(log_context="Messaging inbox")
 
         assert "Messaging inbox content did not appear" in caplog.text
+
+
+_GRAPHQL = "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql"
+
+
+def _conversation(thread_id: str, categories: Any) -> dict[str, Any]:
+    return {
+        "_type": "com.linkedin.messenger.Conversation",
+        "backendUrn": f"urn:li:messagingThread:{thread_id}",
+        "categories": categories,
+    }
+
+
+class TestThreadFolderPayload:
+    """The archive workflow's folder read, from the conversations query's data."""
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            (f"{_GRAPHQL}?queryId=messengerConversations.0d5e&variables=(x:1)", True),
+            (f"{_GRAPHQL}?variables=(x:1)&queryId=messengerConversations.9501", True),
+            (f"{_GRAPHQL}?queryId=messengerMessages.5846&variables=(x:1)", False),
+            (f"{_GRAPHQL}?variables=(queryId:messengerConversations.1)", False),
+            (
+                "https://www.linkedin.com/voyager/api/graphql"
+                "?queryId=messengerConversations.1",
+                False,
+            ),
+            (
+                "https://evil.example/voyager/api/voyagerMessagingGraphQL/graphql"
+                "?queryId=messengerConversations.1",
+                False,
+            ),
+        ],
+    )
+    def test_only_the_conversations_query_is_read(self, url, expected):
+        assert is_conversations_payload_response(url) is expected
+
+    def test_the_thread_is_found_by_its_backend_urn_anywhere_in_the_payload(self):
+        payload = {
+            "data": {
+                "messengerConversationsBySyncToken": {
+                    "elements": [
+                        _conversation("2-other", ["ARCHIVE"]),
+                        _conversation("2-abc==", ["INBOX", "PRIMARY_INBOX"]),
+                    ]
+                }
+            }
+        }
+
+        assert thread_categories(payload, "2-abc==") == ["INBOX", "PRIMARY_INBOX"]
+
+    @pytest.mark.parametrize(
+        "conversation",
+        [
+            _conversation("2-other", ["ARCHIVE"]),
+            _conversation("2-abc", None),
+            _conversation("2-abc", ["ARCHIVE", 1]),
+            {**_conversation("2-abc", ["ARCHIVE"]), "_type": "com.linkedin.Other"},
+            # The message's reference to its thread is not the conversation.
+            {
+                "_type": "com.linkedin.messenger.Message",
+                "backendConversationUrn": "urn:li:messagingThread:2-abc",
+                "categories": ["ARCHIVE"],
+            },
+        ],
+    )
+    def test_anything_but_this_threads_conversation_says_nothing(self, conversation):
+        assert thread_categories({"data": [conversation]}, "2-abc") is None
