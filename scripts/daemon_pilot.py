@@ -78,6 +78,8 @@ _TREE_SECONDS = 10.0
 _STATUS_OUTPUT_CHARS = 20_000
 _DESCRIPTOR_BYTES = 64 * 1024
 _SESSION_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}")
+#: One ``after`` attempt's evidence folder inside a session folder.
+_ATTEMPT = re.compile(r"after-[0-9a-f]{8}")
 _ATTESTED = ("login", "logout", "import")
 _CANDIDATE_SHA = re.compile(r"git\+\S+@([0-9a-fA-F]{40})(?![0-9a-zA-Z])")
 
@@ -1058,11 +1060,12 @@ def wait_for_owners(auth_root: Path) -> dict[str, Any]:
 
 
 def _session_folder(pilot_dir: Path, session: str) -> tuple[Path, dict[str, Any]]:
-    """The session folder and its ``before.json``, as ``before`` left them.
+    """The session folder and its ``before.json``, as the recorder left them.
 
     A link in place of the folder or of a file in it, or any entry besides
-    ``before.json``, could aim a write somewhere else, so ``after`` refuses
-    the folder before it writes anything.
+    ``before.json`` and the folders of interrupted ``after`` attempts, could
+    aim a write somewhere else, so ``after`` refuses the folder before it
+    writes anything. Attempt folders are never written to again.
     """
     folder = pilot_dir / session
     if os.path.lexists(folder / "after.json"):
@@ -1076,10 +1079,18 @@ def _session_folder(pilot_dir: Path, session: str) -> tuple[Path, dict[str, Any]
         raise RecorderError(
             f"{folder} or its before.json is a link or not what before wrote"
         )
-    if extra := sorted(set(os.listdir(folder)) - {"before.json"}):
+    extra = sorted(
+        name
+        for name in os.listdir(folder)
+        if name != "before.json"
+        and not (
+            _ATTEMPT.fullmatch(name) and stat.S_ISDIR((folder / name).lstat().st_mode)
+        )
+    )
+    if extra:
         raise RecorderError(
-            f"{folder} holds {', '.join(extra)} besides before.json, so it is not "
-            "a session before left. Record a new session."
+            f"{folder} holds {', '.join(extra)}, which the recorder did not write. "
+            "Record a new session."
         )
     return folder, json.loads((folder / "before.json").read_text(encoding="utf-8"))
 
@@ -1093,16 +1104,20 @@ def after(args: argparse.Namespace) -> int:
     _refuse_protected(folder, auth_root)
 
     owner_wait = wait_for_owners(auth_root)
+    # A new folder per attempt, so an interrupted one can simply be run again.
+    attempt = folder / f"after-{secrets.token_hex(4)}"
+    attempt.mkdir()
     owner_log, owner_lines = copy_owner_log(
-        record_before["owner_log"], profile, folder, auth_root
+        record_before["owner_log"], profile, attempt, auth_root
     )
-    runs = copy_trace_runs(auth_root, record_before["trace_runs"], folder, owner_lines)
+    runs = copy_trace_runs(auth_root, record_before["trace_runs"], attempt, owner_lines)
     snapshot = passive_snapshot(profile)
     status = run_status(record_before["candidate"], profile)
     record: dict[str, Any] = {
         "session": args.session,
         "recorded_at": _now(),
         "attestations": args.attest,
+        "evidence": attempt.name,
         "owner_wait": owner_wait,
         "owner_log": owner_log,
         "trace_runs": runs,

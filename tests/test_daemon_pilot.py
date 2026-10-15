@@ -789,9 +789,8 @@ def test_an_owner_that_outlives_the_wait_is_an_incident_and_stays_alive(
             "an owner was still alive when the wait ended"
             in (record["judgement"]["incident_reasons"])
         )
-        assert (
-            pilot_dir / record["session"] / "daemon.log"
-        ).read_text() == f"{_READ}\n"
+        evidence = pilot_dir / record["session"] / record["evidence"]
+        assert (evidence / "daemon.log").read_text() == f"{_READ}\n"
     finally:
         owner.kill()
         owner.wait()
@@ -837,7 +836,33 @@ def test_a_pilot_dir_in_the_daemon_state_is_refused(
     assert not inside.exists()
 
 
-@pytest.mark.parametrize("link", ["session folder", "evidence file"])
+def test_an_interrupted_after_can_run_again(
+    monkeypatch: pytest.MonkeyPatch,
+    isolate_profile_dir: Path,
+    pilot_dir: Path,
+    candidate: _Candidate,
+) -> None:
+    profile = isolate_profile_dir
+    _store(profile)
+    log = _publish_owner(profile, _dead_pid(), [])
+    candidate.answer(_valid(profile), _valid(profile), _valid(profile))
+    code, session = _before(pilot_dir, candidate, profile)
+    assert code == 0
+    _start_frontend(monkeypatch, profile, _FORWARD)
+    log.write_text(f"{_READ}\n")
+
+    # Ctrl-C once the evidence is copied, while the final status runs.
+    with (
+        patch.object(pilot, "judge", side_effect=KeyboardInterrupt),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        _after(pilot_dir, session)
+
+    assert _after(pilot_dir, session) == 0
+    assert _record(pilot_dir, session)["judgement"]["outcome"] == "retained"
+
+
+@pytest.mark.parametrize("link", ["session folder", "evidence file", "attempt"])
 def test_after_never_writes_through_a_link(
     isolate_profile_dir: Path,
     pilot_dir: Path,
@@ -856,8 +881,12 @@ def test_after_never_writes_through_a_link(
             moved = profile.parent / "moved-session"
             os.replace(folder, moved)
             folder.symlink_to(moved, target_is_directory=True)
-        else:
+        elif link == "evidence file":
             (folder / "daemon.log").symlink_to(portable_cookie_path(profile))
+        else:
+            target = profile.parent / "attempt"
+            target.mkdir()
+            (folder / "after-0123abcd").symlink_to(target, target_is_directory=True)
     except OSError:
         pytest.skip("this account cannot create symlinks")
     stores = _tree(profile.parent)

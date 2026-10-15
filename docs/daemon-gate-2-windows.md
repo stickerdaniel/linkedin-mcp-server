@@ -114,7 +114,7 @@ Recorder after --pilot-dir $Evidence --session <id>
 `after` waits up to 20 minutes for the owner's idle exit and copies the owner
 log window and the trace runs. Once it has finished, copy
 `%APPDATA%\Claude\logs\mcp*.log` into the session folder; `after` refuses a
-folder that already holds anything besides `before.json`. Note each action's
+folder that already holds anything the recorder did not write. Note each action's
 wall-clock time. Trace runs are pruned after 14 days, so copy evidence out the
 same day.
 
