@@ -125,8 +125,8 @@ passes, which is expected for one tester.
 
 Zip the session folders under the pilot directory and send them to the
 maintainer privately. Each holds `before.json`, `after.json`, and an
-`after-*` folder with `daemon.log` and `trace-runs/`; `after.json` names the
-one it used.
+`after-*` folder with `runs.json`, `daemon.log` and `trace-runs/`;
+`after.json` names the one it used.
 
 The logs contain tool arguments: profile names, search keywords, message
 recipients. Read them first and redact what you do not want to share. Never

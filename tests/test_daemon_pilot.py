@@ -845,21 +845,29 @@ def test_an_interrupted_after_can_run_again(
     profile = isolate_profile_dir
     _store(profile)
     log = _publish_owner(profile, _dead_pid(), [])
-    candidate.answer(_valid(profile), _valid(profile), _valid(profile))
+    candidate.answer(_valid(profile), _valid(profile))
     code, session = _before(pilot_dir, candidate, profile)
     assert code == 0
     _start_frontend(monkeypatch, profile, _FORWARD)
     log.write_text(f"{_READ}\n")
 
-    # Ctrl-C once the evidence is copied, while the final status runs.
+    def interrupted(*_args: Any) -> None:
+        # Ctrl-C once the evidence is copied, while the final status has
+        # started its trace run and logged nothing yet.
+        status_run = profile.parent / "trace-runs" / "run-interrupted-status"
+        status_run.mkdir()
+        (status_run / "server.log").write_text("")
+        raise KeyboardInterrupt
+
     with (
-        patch.object(pilot, "judge", side_effect=KeyboardInterrupt),
+        patch.object(pilot, "run_status", interrupted),
         pytest.raises(KeyboardInterrupt),
     ):
         _after(pilot_dir, session)
 
     assert _after(pilot_dir, session) == 0
-    assert _record(pilot_dir, session)["judgement"]["outcome"] == "retained"
+    verdict = _record(pilot_dir, session)["judgement"]
+    assert (verdict["mode"], verdict["outcome"]) == ("daemon", "retained")
 
 
 @pytest.mark.parametrize("link", ["session folder", "evidence file", "attempt"])

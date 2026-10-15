@@ -1095,6 +1095,30 @@ def _session_folder(pilot_dir: Path, session: str) -> tuple[Path, dict[str, Any]
     return folder, json.loads((folder / "before.json").read_text(encoding="utf-8"))
 
 
+def _host_runs(folder: Path, auth_root: Path) -> list[str]:
+    """The trace runs the host session can have left, for this ``after`` attempt.
+
+    The host has quit before ``after`` starts, so its runs are all there when
+    the first attempt begins. Each attempt records that list in ``runs.json``;
+    a run missing from an earlier attempt's list is the status check that
+    attempt started before it was interrupted.
+    """
+    runs = set(trace_runs(auth_root))
+    for entry in sorted(os.listdir(folder)):
+        marker = folder / entry / "runs.json"
+        if not _ATTEMPT.fullmatch(entry):
+            continue
+        try:
+            if not stat.S_ISREG(marker.lstat().st_mode):
+                continue
+            earlier = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(earlier, list):
+            runs &= {name for name in earlier if isinstance(name, str)}
+    return sorted(runs)
+
+
 def after(args: argparse.Namespace) -> int:
     if not _SESSION_ID.fullmatch(args.session):
         raise RecorderError(f"{args.session!r} is not a session ID")
@@ -1104,13 +1128,18 @@ def after(args: argparse.Namespace) -> int:
     _refuse_protected(folder, auth_root)
 
     owner_wait = wait_for_owners(auth_root)
+    host_runs = _host_runs(folder, auth_root)
     # A new folder per attempt, so an interrupted one can simply be run again.
     attempt = folder / f"after-{secrets.token_hex(4)}"
     attempt.mkdir()
+    _create(attempt / "runs.json", json.dumps(host_runs).encode("utf-8"), auth_root)
     owner_log, owner_lines = copy_owner_log(
         record_before["owner_log"], profile, attempt, auth_root
     )
-    runs = copy_trace_runs(auth_root, record_before["trace_runs"], attempt, owner_lines)
+    later = sorted(set(trace_runs(auth_root)) - set(host_runs))
+    runs = copy_trace_runs(
+        auth_root, [*record_before["trace_runs"], *later], attempt, owner_lines
+    )
     snapshot = passive_snapshot(profile)
     status = run_status(record_before["candidate"], profile)
     record: dict[str, Any] = {
@@ -1118,6 +1147,7 @@ def after(args: argparse.Namespace) -> int:
         "recorded_at": _now(),
         "attestations": args.attest,
         "evidence": attempt.name,
+        "status_runs_of_earlier_attempts": later,
         "owner_wait": owner_wait,
         "owner_log": owner_log,
         "trace_runs": runs,
