@@ -390,7 +390,14 @@ class TestJobSaveTransitionOnPosting:
             url,
             _page_html('<main><button type="button">Save</button></main>'),
         )
-        assert await reader.save_control_state(wait_for_saved=True) == "unsaved"
+        # The configured bound is 50ms; the outer deadline fails fast if a
+        # regression ignored the setting and waited the full default instead.
+        assert (
+            await asyncio.wait_for(
+                reader.save_control_state(wait_for_saved=True), timeout=2
+            )
+            == "unsaved"
+        )
 
     async def test_ambiguous_control_refuses_immediately(self, dom_page):
         """Two Save controls fail closed at once, not after the full wait."""
