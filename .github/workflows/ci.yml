@@ -195,6 +195,8 @@ jobs:
           tests/test_windows_guardian_probe.py
           tests/test_private_state.py
           tests/test_storage_class.py
+          tests/test_daemon_pilot.py::test_the_status_survives_a_console_without_the_check_mark
+          tests/test_daemon_pilot.py::test_a_status_timeout_ends_everything_the_candidate_started
 
       # Only on failure, and tolerant of an empty folder: a Python exception
       # fails this job without ever reaching Windows Error Reporting, and that

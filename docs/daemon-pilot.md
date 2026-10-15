@@ -58,8 +58,10 @@ Invoke-WebRequest "https://raw.githubusercontent.com/stickerdaniel/linkedin-mcp-
 Server --login
 ```
 
-Keep the pilot directory outside `~/.linkedin-mcp`; the recorder refuses one
-inside the auth root.
+Keep the pilot directory outside `~/.linkedin-mcp` and `~/.linkedin-mcp-daemon`;
+the recorder refuses one inside either. Leave the session folders as the
+recorder writes them: `after` refuses a folder that holds a link or anything
+besides `before.json`.
 
 ## Host config
 
@@ -103,7 +105,8 @@ the `.mcpb` bundle has no daemon setting and does not count.
 3. Start the host and use LinkedIn through it as you normally would, with at
    least one read (a profile, the feed, a search). Do not log in, log out or
    import in this session, and run no other server command until `after`:
-   a run that logs nothing makes the session uncertain.
+   the recorder counts every server process it sees as part of the session,
+   and one it cannot place makes the session uncertain.
 4. Quit the host completely.
 5. Record the end:
    ```bash

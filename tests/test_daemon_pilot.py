@@ -1,4 +1,4 @@
-"""The gate 3 pilot recorder, ``scripts/daemon_pilot.py``.
+"""The pilot recorder, ``scripts/daemon_pilot.py``.
 
 Frontends run the production startup path with only the election and the
 transport stubbed, so the decision lines the recorder reads are the ones
@@ -18,6 +18,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
@@ -31,7 +32,11 @@ from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon import descriptor, discovery, election, proxy
 from linkedin_mcp_server.daemon.discovery import OwnerState
 from linkedin_mcp_server.exceptions import BrowserBusyError
-from linkedin_mcp_server.session_state import portable_cookie_path, write_source_state
+from linkedin_mcp_server.session_state import (
+    QUARANTINE_PREFIX,
+    portable_cookie_path,
+    write_source_state,
+)
 
 _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "daemon_pilot.py"
 _SPEC = importlib.util.spec_from_file_location("daemon_pilot", _SCRIPT)
@@ -75,12 +80,12 @@ def _valid(profile: Path) -> dict[str, Any]:
     out = (
         f"Profile mode: source ({profile})\n✅ Session is valid (profile: {profile})\n"
     )
-    return {"exit": 0, "stdout": out, "stderr": _STATUS_ERR}
+    return {"exit": 0, "stdout": out, "stderr": _STATUS_ERR, "profile": str(profile)}
 
 
 def _no_session(profile: Path) -> dict[str, Any]:
     out = f"❌ No valid source session found at {profile}\n"
-    return {"exit": 1, "stdout": out, "stderr": _STATUS_ERR}
+    return {"exit": 1, "stdout": out, "stderr": _STATUS_ERR, "profile": str(profile)}
 
 
 # --- Fixtures ---------------------------------------------------------------
@@ -93,6 +98,7 @@ def _start_frontend(
     *,
     user_data_dir: Path | None = None,
     log_level: Literal["INFO", "WARNING"] = "INFO",
+    transport_fails: bool = False,
 ) -> None:
     """Start one frontend through ``cli_main.main``; *outcome* None means no daemon."""
     monkeypatch.setenv("LINKEDIN_TRACE_MODE", "always")
@@ -102,7 +108,12 @@ def _start_frontend(
     config.server.log_level = log_level
     config.server.transport = "stdio"
     config.is_interactive = False
-    server = SimpleNamespace(run=lambda **_kwargs: None)
+
+    def run(**_kwargs: Any) -> None:
+        if transport_fails:
+            raise RuntimeError("the host closed the connection")
+
+    server = SimpleNamespace(run=run)
     with contextlib.ExitStack() as stack:
         stack.enter_context(patch.object(cli_main, "load_config", return_value=config))
         stack.enter_context(patch.object(cli_main, "configure_browser_environment"))
@@ -170,19 +181,32 @@ def _publish_owner(profile: Path, pid: int, lines: list[str]) -> Path:
     return log
 
 
+def _command_line(*args: str) -> str:
+    return subprocess.list2cmdline(args) if os.name == "nt" else shlex.join(args)
+
+
 class _Candidate:
-    """A stand-in for the uvx command, answering ``--status`` from a script."""
+    """A stand-in for the uvx command, answering ``--status`` from a script.
+
+    Like the real one, it finds a session only in the profile it is given.
+    """
 
     def __init__(self, folder: Path) -> None:
         self._steps = folder / "steps.json"
         self._steps.write_text("[]")
         script = folder / "candidate.py"
         script.write_text(
-            "import json, pathlib, sys\n"
+            "import json, os, pathlib, sys\n"
             "steps = pathlib.Path(sys.argv[1])\n"
             "plan = json.loads(steps.read_text())\n"
             "step = plan.pop(0)\n"
             "steps.write_text(json.dumps(plan))\n"
+            "args = sys.argv[2:]\n"
+            "flag = '--user-data-dir'\n"
+            "given = args[args.index(flag) + 1] if flag in args else ''\n"
+            "if os.path.realpath(given) != os.path.realpath(step['profile']):\n"
+            "    out = f'No valid source session found at {given}\\n'\n"
+            "    step = {'exit': 1, 'stdout': out, 'stderr': ''}\n"
             "if step.get('trace_run'):\n"
             "    run = pathlib.Path(step['trace_run'])\n"
             "    run.mkdir(parents=True)\n"
@@ -191,10 +215,7 @@ class _Candidate:
             "sys.stderr.buffer.write(step['stderr'].encode())\n"
             "sys.exit(step['exit'])\n"
         )
-        args = [sys.executable, str(script), str(self._steps)]
-        self.command = (
-            subprocess.list2cmdline(args) if os.name == "nt" else shlex.join(args)
-        )
+        self.command = _command_line(sys.executable, str(script), str(self._steps))
 
     def answer(self, *steps: dict[str, Any]) -> None:
         self._steps.write_text(json.dumps(list(steps)))
@@ -225,7 +246,9 @@ def _before(pilot_dir: Path, candidate: _Candidate, profile: Path) -> tuple[int,
             str(profile),
         ]
     )
-    sessions = [path.name for path in pilot_dir.iterdir()]
+    sessions = (
+        sorted(path.name for path in pilot_dir.iterdir()) if pilot_dir.exists() else []
+    )
     return code, sessions[-1] if sessions else ""
 
 
@@ -268,11 +291,14 @@ def _run_session(
         (["forward", "alone"], "fallback"),
         (["forward", "undecided"], "uncertain"),
         (["alone", "exits"], "uncertain"),
-        # Below INFO: a forwarding frontend logs nothing, a fallback still warns.
+        # Below INFO a forwarding frontend may log nothing, or only an error.
         (["forward", "quiet-forward"], "uncertain"),
+        (["forward", "quiet-broken"], "uncertain"),
         (["forward", "quiet-alone"], "fallback"),
-        # An owner's run has records but no banner, and decides nothing.
+        # The owner's run repeats its log and decides nothing; the same lines
+        # outside the owner log are some other process.
         (["forward", "owner"], "daemon"),
+        (["forward", "stray"], "uncertain"),
         ([], "uncertain"),
     ],
 )
@@ -284,34 +310,40 @@ def test_a_session_takes_its_mode_from_every_frontend(
     mode: str,
 ) -> None:
     profile = isolate_profile_dir
+    owner_log: list[str] = []
     kinds = []
+    outcomes = {"forward": _FORWARD, "alone": _ALONE, "undecided": None}
     for frontend in frontends:
         if frontend == "exits":
             _exits_before_deciding(monkeypatch, profile)
-        elif frontend == "owner":
-            run = profile.parent / "trace-runs" / "run-owner"
+        elif frontend in ("owner", "stray"):
+            run = profile.parent / "trace-runs" / f"run-{frontend}"
             run.mkdir(parents=True)
             starting = _log_line(
                 "linkedin_mcp_server.server", "LinkedIn MCP Server starting..."
             )
             (run / "server.log").write_text(f"{starting}\n{_READ}\n")
+            if frontend == "owner":
+                owner_log += [starting, "Uvicorn running on 127.0.0.1", _READ]
         else:
-            outcome = {"forward": _FORWARD, "alone": _ALONE, "undecided": None}
             quiet = frontend.startswith("quiet-")
             _start_frontend(
                 monkeypatch,
                 profile,
-                outcome[frontend.removeprefix("quiet-")],
+                outcomes[
+                    "forward"
+                    if frontend == "quiet-broken"
+                    else frontend.removeprefix("quiet-")
+                ],
                 log_level="WARNING" if quiet else "INFO",
+                transport_fails=frontend == "quiet-broken",
             )
         kinds.append(
-            {"owner": "unattributed", "quiet-forward": "unknown"}.get(
-                frontend, "frontend"
-            )
+            {"owner": "owner", "quiet-forward": "unknown"}.get(frontend, "frontend")
         )
 
     runs = pilot.copy_trace_runs(
-        profile.parent, [], tmp_path_factory.mktemp("evidence")
+        profile.parent, [], tmp_path_factory.mktemp("evidence"), owner_log
     )
 
     assert sorted(run["kind"] for run in runs) == sorted(kinds)
@@ -360,6 +392,92 @@ def test_the_status_verdict_reads_the_cli_s_own_output(
     code = exited.value.code
     assert isinstance(code, int)
     assert pilot.classify_status(code, capsys.readouterr().out) == verdict
+
+
+# The real `--status` of an authenticated session, as a candidate process.
+_REAL_STATUS = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+from linkedin_mcp_server import cli_main
+from linkedin_mcp_server.config import set_config
+from linkedin_mcp_server.config.schema import AppConfig
+from linkedin_mcp_server.session_state import portable_cookie_path, write_source_state
+
+profile = Path(sys.argv[sys.argv.index("--user-data-dir") + 1])
+profile.mkdir(parents=True)
+(profile / "Last Version").write_text("146.0.7680.31")
+portable_cookie_path(profile).write_text("[]")
+write_source_state(profile)
+config = AppConfig()
+config.browser.user_data_dir = str(profile)
+config.is_interactive = False
+set_config(config)
+browser = AsyncMock(return_value=SimpleNamespace(is_authenticated=True))
+with (
+    patch.object(cli_main, "get_or_create_browser", browser),
+    patch.object(cli_main, "close_browser", AsyncMock()),
+):
+    cli_main.profile_info_and_exit()
+"""
+
+
+def test_the_status_survives_a_console_without_the_check_mark(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # What a Windows console gives Python by default.
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
+    script = tmp_path / "status.py"
+    script.write_text(_REAL_STATUS)
+
+    status = pilot.run_status(
+        _command_line(sys.executable, str(script)), tmp_path / "auth" / "profile"
+    )
+
+    assert status["verdict"] == "valid"
+
+
+def test_a_status_timeout_ends_everything_the_candidate_started(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    beat = tmp_path / "beat"
+    worker = tmp_path / "worker.py"
+    worker.write_text(
+        "import pathlib, sys, time\n"
+        "beat = pathlib.Path(sys.argv[1])\n"
+        "deadline = time.monotonic() + 30\n"
+        "count = 0\n"
+        "while time.monotonic() < deadline:\n"
+        "    count += 1\n"
+        "    beat.write_text(str(count))\n"
+        "    time.sleep(0.05)\n"
+    )
+    # Like uvx, which runs the candidate as a child of its own.
+    launcher = tmp_path / "launcher.py"
+    launcher.write_text(
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])\n"
+        "time.sleep(30)\n"
+    )
+    # Long enough for three interpreters to start on a slow Windows runner.
+    monkeypatch.setattr(pilot, "_STATUS_SECONDS", 5)
+
+    status = pilot.run_status(
+        _command_line(sys.executable, str(launcher), str(worker), str(beat)),
+        tmp_path / "profile",
+    )
+
+    assert (status["verdict"], status["timed_out"], status["tree_ended"]) == (
+        "error",
+        True,
+        True,
+    )
+    assert beat.exists(), "the worker never started, so nothing was proved"
+    seen = beat.read_text()
+    time.sleep(0.5)
+    assert beat.read_text() == seen
 
 
 # --- One session, before to after ------------------------------------------
@@ -496,6 +614,119 @@ def test_the_owner_s_expiry_line_does_not_close_an_incident(
     assert record["judgement"]["incident_reasons"] == ["the li_at cookie is gone"]
 
 
+def test_an_owner_log_without_a_tool_call_does_not_qualify(
+    monkeypatch: pytest.MonkeyPatch,
+    isolate_profile_dir: Path,
+    pilot_dir: Path,
+    candidate: _Candidate,
+) -> None:
+    profile = isolate_profile_dir
+    _store(profile)
+    log = _publish_owner(profile, _dead_pid(), [])
+    idle = _log_line(
+        "linkedin_mcp_server.daemon.owner",
+        "Nothing has needed the browser in 600s; exiting",
+    )
+
+    def session() -> None:
+        _start_frontend(monkeypatch, profile, _FORWARD)
+        log.write_text(f"{idle}\n")
+
+    verdict = _run_session(pilot_dir, candidate, profile, session)["judgement"]
+
+    assert verdict["outcome"] == "retained"
+    assert verdict["not_qualifying_because"] == [
+        "no LinkedIn-reading tool call was logged"
+    ]
+
+
+def test_a_new_quarantine_is_an_incident(
+    monkeypatch: pytest.MonkeyPatch,
+    isolate_profile_dir: Path,
+    pilot_dir: Path,
+    candidate: _Candidate,
+) -> None:
+    profile = isolate_profile_dir
+    _store(profile)
+    log = _publish_owner(profile, _dead_pid(), [])
+    quarantine = f"{QUARANTINE_PREFIX}20261015T120000Z"
+
+    def session() -> None:
+        _start_frontend(monkeypatch, profile, _FORWARD)
+        log.write_text(f"{_READ}\n")
+        (profile.parent / quarantine).mkdir()
+
+    record = _run_session(pilot_dir, candidate, profile, session)
+
+    assert record["judgement"]["incident_reasons"] == [f"new quarantine {quarantine}"]
+
+
+def test_an_owner_log_cut_short_and_grown_again_is_an_incident(
+    monkeypatch: pytest.MonkeyPatch,
+    isolate_profile_dir: Path,
+    pilot_dir: Path,
+    candidate: _Candidate,
+) -> None:
+    profile = isolate_profile_dir
+    _store(profile)
+    log = _publish_owner(profile, _dead_pid(), ["Traceback (most recent call last):"])
+
+    def session() -> None:
+        _start_frontend(monkeypatch, profile, _FORWARD)
+        # In place: the same file, now longer than it was.
+        log.write_text(f"{_READ}\n{_READ}\n")
+
+    record = _run_session(pilot_dir, candidate, profile, session)
+
+    assert record["judgement"]["incident_reasons"] == ["the owner log was rewritten"]
+
+
+@pytest.mark.parametrize("link", ["trace log", "trace runs", "owner log"])
+def test_a_linked_log_is_never_copied(
+    monkeypatch: pytest.MonkeyPatch,
+    isolate_profile_dir: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    pilot_dir: Path,
+    candidate: _Candidate,
+    link: str,
+) -> None:
+    profile = isolate_profile_dir
+    _store(profile)
+    log = _publish_owner(profile, _dead_pid(), [])
+    secret = log.with_name("token-synthetic")
+    secret.write_text("synthetic-secret")
+
+    def session() -> None:
+        _start_frontend(monkeypatch, profile, _FORWARD)
+        runs = profile.parent / "trace-runs"
+        try:
+            if link == "trace log":
+                (runs / "run-linked").mkdir()
+                (runs / "run-linked" / "server.log").symlink_to(secret)
+            elif link == "trace runs":
+                (runs / "run-linked").mkdir()
+                (runs / "run-linked" / "server.log").write_text("synthetic-secret")
+                elsewhere = tmp_path_factory.mktemp("elsewhere") / "trace-runs"
+                os.replace(runs, elsewhere)
+                runs.symlink_to(elsewhere, target_is_directory=True)
+            else:
+                log.unlink()
+                log.symlink_to(secret)
+        except OSError:
+            pytest.skip("this account cannot create symlinks")
+
+    record = _run_session(pilot_dir, candidate, profile, session)
+
+    copied = (pilot_dir / record["session"]).rglob("*")
+    assert not any(
+        b"synthetic-secret" in path.read_bytes() for path in copied if path.is_file()
+    )
+    if link == "owner log":
+        assert "the owner log was refused" in record["judgement"]["incident_reasons"]
+    else:
+        assert record["judgement"]["mode"] == "uncertain"
+
+
 def test_a_second_after_refuses_and_keeps_the_first(
     monkeypatch: pytest.MonkeyPatch,
     isolate_profile_dir: Path,
@@ -593,6 +824,46 @@ def test_a_pilot_dir_reaching_into_the_auth_root_is_refused(
 
     assert _before(link, candidate, isolate_profile_dir) == (2, "")
     assert list(inside.iterdir()) == []
+
+
+def test_a_pilot_dir_in_the_daemon_state_is_refused(
+    isolate_profile_dir: Path, candidate: _Candidate
+) -> None:
+    _store(isolate_profile_dir)
+    candidate.answer(_valid(isolate_profile_dir))
+    inside = descriptor.daemon_state_root().parent / "pilot"
+
+    assert _before(inside, candidate, isolate_profile_dir) == (2, "")
+    assert not inside.exists()
+
+
+@pytest.mark.parametrize("link", ["session folder", "evidence file"])
+def test_after_never_writes_through_a_link(
+    isolate_profile_dir: Path,
+    pilot_dir: Path,
+    candidate: _Candidate,
+    link: str,
+) -> None:
+    profile = isolate_profile_dir
+    _store(profile)
+    _publish_owner(profile, _dead_pid(), [_READ])
+    candidate.answer(_valid(profile), _valid(profile))
+    code, session = _before(pilot_dir, candidate, profile)
+    assert code == 0
+    folder = pilot_dir / session
+    try:
+        if link == "session folder":
+            moved = profile.parent / "moved-session"
+            os.replace(folder, moved)
+            folder.symlink_to(moved, target_is_directory=True)
+        else:
+            (folder / "daemon.log").symlink_to(portable_cookie_path(profile))
+    except OSError:
+        pytest.skip("this account cannot create symlinks")
+    stores = _tree(profile.parent)
+
+    assert _after(pilot_dir, session) == 2
+    assert _tree(profile.parent) == stores
 
 
 def _tree(root: Path) -> list[tuple[str, int, int]]:

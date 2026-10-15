@@ -11,10 +11,12 @@ Run with the candidate's own interpreter, as ``docs/daemon-pilot.md`` shows:
 How a session is read is decided in
 ``docs/decisions/2026-10-15-daemon-gates-2-and-3-procedure.md``.
 
-Read-only towards the session: nothing is written under the auth root, no
-cookie value is stored, and no helper that prepares, claims, locks or prunes is
-imported. The only writes go to the pilot directory, which may not sit inside
-the auth root. ``--status`` is the one active step, run through the candidate.
+Read-only towards the session: nothing is written under the auth root or the
+daemon state, no cookie value is stored, and no helper that prepares, claims,
+locks or prunes is imported. The only writes are new files in a session
+folder of the pilot directory, never through a link. ``--status`` is the one
+active step, run through the candidate, and its whole process tree ends with
+it.
 """
 
 from __future__ import annotations
@@ -28,15 +30,24 @@ import os
 import re
 import secrets
 import shlex
-import shutil
+import signal
+import stat
 import subprocess
 import sys
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import IO, Any, Literal
 
 from linkedin_mcp_server.daemon.descriptor import daemon_state_root, profile_identity
+from linkedin_mcp_server.process_tree import (
+    ProcessTreeError,
+    WindowsJob,
+    release_nonce,
+    release_windows_gate,
+    terminate_process_group,
+    windows_gate_command,
+)
 from linkedin_mcp_server.session_state import (
     QUARANTINE_PREFIX,
     auth_root_dir,
@@ -62,15 +73,15 @@ _IDLE_WAIT_SECONDS = 20 * 60
 _POLL_SECONDS = 5.0
 #: ``--status`` may install the browser first on a fresh resolution.
 _STATUS_SECONDS = 15 * 60
+#: How long ending the status command's process tree may take.
+_TREE_SECONDS = 10.0
 _STATUS_OUTPUT_CHARS = 20_000
 _DESCRIPTOR_BYTES = 64 * 1024
 _SESSION_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}")
 _ATTESTED = ("login", "logout", "import")
 _CANDIDATE_SHA = re.compile(r"git\+\S+@([0-9a-fA-F]{40})(?![0-9a-zA-Z])")
 
-# The CLI's own lines. Every process `main` starts logs the banner; a profile
-# command logs it again with its mode, so a banner alone is a server frontend.
-_BANNER = re.compile(r"LinkedIn MCP Server v\S+")
+# The CLI's own lines: a profile command logs the banner with its mode.
 _COMMAND = re.compile(r"LinkedIn MCP Server v\S+ - (.+) mode")
 _STATUS_VERSION = re.compile(r"LinkedIn MCP Server v(\S+) - Session Info mode")
 #: Commands that change the session, so a session running one does not qualify.
@@ -107,6 +118,10 @@ class RecorderError(Exception):
     """A refusal, printed without a traceback."""
 
 
+class _Refused(Exception):
+    """A log the recorder will not read: a link, not a file, or out of place."""
+
+
 def _now() -> str:
     return datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -122,12 +137,53 @@ def _inside(path: Path, root: Path) -> bool:
     return child == parent or parent in child.parents
 
 
-def _refuse_inside_auth_root(pilot_dir: Path, auth_root: Path) -> None:
-    if _inside(pilot_dir, auth_root):
-        raise RecorderError(
-            f"The pilot directory {pilot_dir} is inside the auth root {auth_root}. "
-            "Choose a directory outside it."
-        )
+def _refuse_protected(path: Path, auth_root: Path) -> None:
+    """Refuse a destination under the auth root or the account's daemon state.
+
+    Checked for every directory the recorder writes into, with links
+    resolved, so neither a pilot directory nor a link inside it can aim a
+    write at the session stores, a descriptor or a token.
+    """
+    for root in (auth_root, daemon_state_root().parent):
+        if _inside(path, root):
+            raise RecorderError(
+                f"{path} is inside {root}, which the recorder never writes to. "
+                "Choose a pilot directory outside it."
+            )
+
+
+def _create(path: Path, data: bytes, auth_root: Path) -> None:
+    """Write *data* to a new file. Never follows or replaces an existing entry."""
+    _refuse_protected(path.parent, auth_root)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    with open(os.open(path, flags, 0o600), "wb") as handle:
+        handle.write(data)
+
+
+def _open_log(path: Path, root: Path) -> IO[bytes]:
+    """Open a log for reading, if it is a regular file that resolves under *root*.
+
+    Raises ``FileNotFoundError`` when there is none and ``_Refused`` for a
+    link, anything that is not a regular file, or a path whose directories
+    lead out of *root*: copying any of those could put a token or the cookie
+    store into the evidence.
+    """
+    if not stat.S_ISREG(path.lstat().st_mode):
+        raise _Refused("not a regular file")
+    if not _inside(path, root):
+        raise _Refused(f"resolves outside {root}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    handle = open(os.open(path, flags), "rb")
+    if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+        handle.close()
+        raise _Refused("not a regular file")
+    return handle
 
 
 # --- Passive snapshot -------------------------------------------------------
@@ -251,39 +307,147 @@ def classify_status(exit_code: int | None, output: str) -> StatusVerdict:
     return "error"
 
 
-def _command(candidate: str, extra: Sequence[str]) -> str | list[str]:
-    # A Windows command line is a string CreateProcess parses itself, and
-    # shlex would eat the backslashes of a Windows path.
+def _split(candidate: str) -> list[str]:
+    # shlex would eat the backslashes of a Windows path, so there the
+    # command line is split the way Windows itself splits one.
     if os.name == "nt":
-        return f"{candidate} {subprocess.list2cmdline(extra)}"
-    return [*shlex.split(candidate), *extra]
+        return _windows_split(candidate)
+    return shlex.split(candidate)
 
 
-def _text(value: str | bytes | None) -> str:
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value or ""
+def _windows_split(command: str) -> list[str]:  # pragma: no cover - Windows only
+    import ctypes
+    from ctypes import wintypes
+
+    shell32 = getattr(ctypes, "WinDLL")("shell32", use_last_error=True)
+    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+    shell32.CommandLineToArgvW.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.POINTER(ctypes.c_int),
+    ]
+    shell32.CommandLineToArgvW.restype = ctypes.POINTER(wintypes.LPWSTR)
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    count = ctypes.c_int()
+    argv = shell32.CommandLineToArgvW(command, ctypes.byref(count))
+    if not argv:
+        raise RecorderError(f"The candidate {command!r} is not a command line")
+    try:
+        return [argv[index] for index in range(count.value)]
+    finally:
+        kernel32.LocalFree(argv)
+
+
+def _end_tree(child: subprocess.Popen[bytes], job: WindowsJob | None) -> bool:
+    """Kill everything *child* started, and say whether that was proved."""
+    try:
+        if job is not None:
+            job.terminate()
+            job.wait_until_empty(timeout=_TREE_SECONDS)
+            return True
+        if child.returncode is None:
+            return terminate_process_group(
+                child.pid, timeout=_TREE_SECONDS, child=child
+            )
+    except ProcessTreeError:
+        return False
+    # Reaped already, which only an interruption allows. A group number is not
+    # reused while any member lives, so it still names only this tree.
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        pass
+    return False
+
+
+def _supervised(command: list[str]) -> tuple[int | None, bytes, dict[str, Any]]:
+    """Run *command* to its end, or end its whole process tree.
+
+    ``uvx`` starts the candidate as a child of its own, so killing ``uvx``
+    alone would leave the candidate running. The command gets a POSIX session
+    or a Windows Job of its own, and on the timeout or an interruption the
+    whole of it goes. The output is decoded later as UTF-8.
+    """
+    # A cp1252 console would turn the CLI's check mark into an exception and
+    # a valid session into an error.
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    job = WindowsJob.anonymous() if os.name == "nt" else None
+    try:
+        if job is not None:  # pragma: no cover - Windows only
+            # The gate holds the command until it is in the Job, so nothing it
+            # starts can escape. Its input then ends, as DEVNULL would.
+            nonce = release_nonce()
+            child = subprocess.Popen(
+                windows_gate_command(command, nonce),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+            )
+            assert child.stdin is not None
+            try:
+                job.assign_popen(child)
+                release_windows_gate(child.stdin, nonce)
+                child.stdin.close()
+            except BaseException:
+                child.kill()
+                _end_tree(child, job)
+                raise
+        else:
+            child = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                start_new_session=True,
+            )
+    except BaseException:
+        if job is not None:
+            job.close()
+        raise
+    try:
+        out, err = child.communicate(timeout=_STATUS_SECONDS)
+    except BaseException as exc:
+        ended = _end_tree(child, job)
+        try:
+            out, err = child.communicate(timeout=_TREE_SECONDS)
+        except subprocess.TimeoutExpired as late:
+            # Something outside the tree still holds the pipes.
+            out, err = late.stdout or b"", late.stderr or b""
+            child.kill()
+            child.wait()
+        if not isinstance(exc, subprocess.TimeoutExpired):
+            raise
+        return None, out + err, {"timed_out": True, "tree_ended": ended}
+    finally:
+        if job is not None:
+            job.close()
+    return child.returncode, out + err, {"timed_out": False}
 
 
 def run_status(candidate: str, profile: Path) -> dict[str, Any]:
     """Run ``--status`` through the candidate and keep its bounded output."""
     extra = ["--status", "--log-level", "INFO", "--user-data-dir", str(profile)]
-    command = _command(candidate, extra)
+    command = [*_split(candidate), *extra]
     started = _now()
     exit_code: int | None
+    ending: dict[str, Any] = {"timed_out": False}
     try:
-        done = subprocess.run(
-            command,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=_STATUS_SECONDS,
-        )
-    except subprocess.TimeoutExpired as exc:
-        exit_code, output = None, f"{_text(exc.stdout)}{_text(exc.stderr)}\n[timed out]"
-    except OSError as exc:
+        exit_code, raw, ending = _supervised(command)
+    except (OSError, ProcessTreeError) as exc:
         exit_code, output = None, f"[could not start: {exc}]"
     else:
-        exit_code, output = done.returncode, _text(done.stdout) + _text(done.stderr)
+        output = raw.decode("utf-8", errors="replace")
+        if ending["timed_out"]:
+            output += "\n[timed out]"
+            if not ending["tree_ended"]:
+                print(
+                    "The status command timed out and part of it may still be "
+                    "running; check for a leftover mcp-server-linkedin process.",
+                    file=sys.stderr,
+                )
     version = _STATUS_VERSION.search(output)
     return {
         "started_at": started,
@@ -293,6 +457,7 @@ def run_status(candidate: str, profile: Path) -> dict[str, Any]:
         "package_version": version.group(1) if version else None,
         "output": output[-_STATUS_OUTPUT_CHARS:],
         "output_truncated": len(output) > _STATUS_OUTPUT_CHARS,
+        **ending,
     }
 
 
@@ -435,19 +600,40 @@ def _owner_log(profile: Path) -> Path | None:
     return newest.parent / "daemon.log"
 
 
+def _prefix_digest(handle: IO[bytes], length: int) -> str:
+    """SHA-256 of the first *length* bytes behind *handle*."""
+    handle.seek(0)
+    digest = hashlib.sha256()
+    remaining = length
+    while remaining > 0:
+        chunk = handle.read(min(remaining, 1 << 20))
+        if not chunk:
+            break
+        digest.update(chunk)
+        remaining -= len(chunk)
+    return digest.hexdigest()
+
+
 def owner_log_position(profile: Path) -> dict[str, Any]:
-    """Where the owner log of *profile* ends now, and which file that is."""
+    """Where the owner log of *profile* ends now, which file that is, and what
+    it holds up to there, so a log cut short and grown again is told apart
+    from one that only grew."""
     path = _owner_log(profile)
     if path is None:
         return {"path": None}
     try:
-        info = path.stat()
+        with _open_log(path, daemon_state_root()) as handle:
+            info = os.fstat(handle.fileno())
+            prefix = _prefix_digest(handle, info.st_size)
     except FileNotFoundError:
         return {"path": str(path), "identity": None, "offset": 0}
+    except _Refused as exc:
+        return {"path": str(path), "refused": str(exc)}
     return {
         "path": str(path),
         "identity": [info.st_dev, info.st_ino],
         "offset": info.st_size,
+        "prefix_sha256": prefix,
     }
 
 
@@ -489,37 +675,52 @@ def tool_calls(records: Iterable[dict[str, Any]]) -> dict[str, int]:
 
 
 def copy_owner_log(
-    before: dict[str, Any], profile: Path, folder: Path
-) -> dict[str, Any]:
+    before: dict[str, Any], profile: Path, folder: Path, auth_root: Path
+) -> tuple[dict[str, Any], set[str]]:
     """Copy the part of the owner log written since ``before``, and judge the file.
 
-    A different file at that path, a shorter one, or a log in another
-    directory each mean the window cannot be trusted.
+    A different file at that path, a shorter one, one whose bytes up to the
+    old end changed, a log in another directory, or one that is not a regular
+    file each mean the window cannot be trusted. Also returns the window's
+    lines, which attribute the owner's own trace run.
     """
-    now = owner_log_position(profile)
-    result: dict[str, Any] = {"path": now["path"], "state": "absent"}
-    if now["path"] is None or now.get("identity") is None:
-        if before.get("identity") is not None:
+    path = _owner_log(profile)
+    result: dict[str, Any] = {"path": str(path) if path else None, "state": "absent"}
+    result["tool_calls"] = {"reading": 0, "writing": 0}
+    try:
+        if path is None:
+            raise FileNotFoundError
+        handle = _open_log(path, daemon_state_root())
+    except FileNotFoundError:
+        if before.get("identity") is not None or "refused" in before:
             result["state"] = "missing"
-        result["tool_calls"] = {"reading": 0, "writing": 0}
-        return result
-    offset = 0
-    if before["path"] is None or before.get("identity") is None:
-        result["state"] = "created"
-    elif before["path"] != now["path"]:
-        result["state"] = "moved"
-    elif before["identity"] != now["identity"]:
-        result["state"] = "replaced"
-    elif now["offset"] < before["offset"]:
-        result["state"] = "truncated"
-    else:
-        result["state"] = "continued"
-        offset = before["offset"]
-    with open(now["path"], "rb") as handle:
+        return result, set()
+    except _Refused as exc:
+        result.update(state="refused", reason=str(exc))
+        return result, set()
+    with handle:
+        info = os.fstat(handle.fileno())
+        offset = 0
+        if "refused" in before:
+            result["state"] = "refused"
+        elif before["path"] is None or before.get("identity") is None:
+            result["state"] = "created"
+        elif before["path"] != str(path):
+            result["state"] = "moved"
+        elif before["identity"] != [info.st_dev, info.st_ino]:
+            result["state"] = "replaced"
+        elif info.st_size < before["offset"]:
+            result["state"] = "truncated"
+        elif _prefix_digest(handle, before["offset"]) != before.get("prefix_sha256"):
+            result["state"] = "rewritten"
+        else:
+            result["state"] = "continued"
+            offset = before["offset"]
         handle.seek(offset)
         window = handle.read()
-    (folder / "daemon.log").write_bytes(window)
-    records, other = read_log_records(window.decode("utf-8", errors="replace"))
+    _create(folder / "daemon.log", window, auth_root)
+    text = window.decode("utf-8", errors="replace")
+    records, other = read_log_records(text)
     result.update(
         {
             "from_offset": offset,
@@ -530,7 +731,7 @@ def copy_owner_log(
             "tool_calls": tool_calls(records),
         }
     )
-    return result
+    return result, {line for line in text.splitlines() if line.strip()}
 
 
 # --- Frontend lifetimes ----------------------------------------------------
@@ -560,30 +761,32 @@ def _decision(message: str) -> Mode | None:
     return None
 
 
-def classify_run(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
+def classify_run(
+    text: str, owner_lines: Collection[str] = frozenset()
+) -> dict[str, Any]:
     """Say what process wrote one trace run, and a frontend's startup decision.
 
-    The banner and the forwarding line are INFO, so a frontend logging below
-    that has no banner: a fallback warning still names it a frontend, and a
-    run with no record at all is ``unknown``, which makes its session
-    uncertain. A run with records but no banner is unattributed (an owner)
-    and is listed, never dropped.
+    A profile command names itself. A run is the owner's only when every line
+    of it is also in this session's owner log, since the owner writes the same
+    records to both. Any other run with something in it is a frontend, and
+    uncertain unless it logged its decision: one below INFO may log nothing,
+    or only a warning or an error. An empty run is ``unknown``. Uncertain
+    and unknown runs both make the session uncertain.
     """
-    banner = False
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return {"kind": "unknown"}
+    records, _ = read_log_records(text)
     mode: Mode | None = None
-    seen = False
     for record in records:
-        seen = True
         message = record["message"]
         if command := _COMMAND.fullmatch(message):
             return {"kind": "profile_command", "command": command.group(1)}
-        if _BANNER.fullmatch(message):
-            banner = True
-        elif mode is None:
+        if mode is None:
             mode = _decision(message)
-    if banner or mode is not None:
-        return {"kind": "frontend", "mode": mode or "uncertain"}
-    return {"kind": "unattributed" if seen else "unknown"}
+    if mode is None and set(lines) <= set(owner_lines):
+        return {"kind": "owner"}
+    return {"kind": "frontend", "mode": mode or "uncertain"}
 
 
 def session_mode(runs: Iterable[dict[str, Any]]) -> Mode:
@@ -605,32 +808,51 @@ def session_mode(runs: Iterable[dict[str, Any]]) -> Mode:
 
 
 def copy_trace_runs(
-    auth_root: Path, baseline: Iterable[str], folder: Path
+    auth_root: Path,
+    baseline: Iterable[str],
+    folder: Path,
+    owner_lines: Collection[str] = frozenset(),
 ) -> list[dict[str, Any]]:
-    """Copy each trace run created since the baseline, and classify it."""
+    """Copy each trace run created since the baseline into *folder*, and classify it.
+
+    *folder* gets a new ``trace-runs`` directory; a run whose log cannot be
+    read safely is ``unknown`` and copied as nothing.
+    """
     known = set(baseline)
     runs: list[dict[str, Any]] = []
+    copies = folder / "trace-runs"
+    made = False
     for name in trace_runs(auth_root):
         if name in known:
             continue
-        evidence = Path("trace-runs") / name / "server.log"
-        target = folder / evidence
-        target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            shutil.copyfile(auth_root / "trace-runs" / name / "server.log", target)
-            text = target.read_text(encoding="utf-8", errors="replace")
+            with _open_log(
+                auth_root / "trace-runs" / name / "server.log", auth_root
+            ) as log:
+                data = log.read()
+        except _Refused as exc:
+            runs.append({"name": name, "kind": "unknown", "refused": str(exc)})
+            continue
         except OSError as exc:
             runs.append(
                 {"name": name, "kind": "unknown", "missing": type(exc).__name__}
             )
             continue
+        if not made:
+            # Created here, so never an entry someone else put in its place.
+            _refuse_protected(folder, auth_root)
+            copies.mkdir()
+            made = True
+        (copies / name).mkdir()
+        _create(copies / name / "server.log", data, auth_root)
+        text = data.decode("utf-8", errors="replace")
         records, _ = read_log_records(text)
         runs.append(
             {
                 "name": name,
-                **classify_run(records),
+                **classify_run(text, owner_lines),
                 "tool_calls": tool_calls(records),
-                "evidence": evidence.as_posix(),
+                "evidence": f"trace-runs/{name}/server.log",
             }
         )
     return runs
@@ -659,7 +881,9 @@ def judge(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     reads = after["owner_log"]["tool_calls"]["reading"]
     if after["mode"] != "daemon":
         reads += sum(
-            run.get("tool_calls", {}).get("reading", 0) for run in after["trace_runs"]
+            run.get("tool_calls", {}).get("reading", 0)
+            for run in after["trace_runs"]
+            if run["kind"] == "frontend"
         )
     if reads < 1:
         not_qualifying.append("no LinkedIn-reading tool call was logged")
@@ -685,7 +909,14 @@ def _incident_reasons(before: dict[str, Any], after: dict[str, Any]) -> list[str
         reasons.append(f"the after-status is {after['status']['verdict']}")
     if after["owner_wait"]["timed_out"]:
         reasons.append("an owner was still alive when the wait ended")
-    if after["owner_log"]["state"] in {"missing", "moved", "replaced", "truncated"}:
+    if after["owner_log"]["state"] in {
+        "missing",
+        "moved",
+        "replaced",
+        "truncated",
+        "rewritten",
+        "refused",
+    }:
         reasons.append(f"the owner log was {after['owner_log']['state']}")
     for store in ("source_state", "cookies", "profile"):
         if new[store]["state"] != "present":
@@ -713,10 +944,9 @@ def _incident_reasons(before: dict[str, Any], after: dict[str, Any]) -> list[str
 # --- Commands ---------------------------------------------------------------
 
 
-def _write_once(path: Path, record: dict[str, Any]) -> None:
-    with open(path, "x", encoding="utf-8") as handle:
-        json.dump(record, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+def _write_once(path: Path, record: dict[str, Any], auth_root: Path) -> None:
+    text = json.dumps(record, indent=2, sort_keys=True) + "\n"
+    _create(path, text.encode("utf-8"), auth_root)
 
 
 def _version(package: str) -> str | None:
@@ -729,7 +959,7 @@ def _version(package: str) -> str | None:
 def before(args: argparse.Namespace) -> int:
     profile = canonical(Path(args.user_data_dir))
     auth_root = auth_root_dir(profile)
-    _refuse_inside_auth_root(args.pilot_dir, auth_root)
+    _refuse_protected(args.pilot_dir, auth_root)
     if not args.others_stopped:
         raise RecorderError(
             "Stop every other MCP host first, then confirm it with --others-stopped."
@@ -743,8 +973,10 @@ def before(args: argparse.Namespace) -> int:
     session = (
         f"{datetime.datetime.now(datetime.UTC):%Y%m%dT%H%M%SZ}-{secrets.token_hex(4)}"
     )
+    args.pilot_dir.mkdir(parents=True, exist_ok=True)
     folder = args.pilot_dir / session
-    folder.mkdir(parents=True)
+    _refuse_protected(folder, auth_root)
+    folder.mkdir()
 
     first = passive_snapshot(profile)
     status = run_status(args.candidate, profile)
@@ -763,6 +995,8 @@ def before(args: argparse.Namespace) -> int:
             f"the candidate runs {status['package_version']} and this "
             f"interpreter has {package}"
         )
+    if "refused" in log:
+        reasons.append(f"the owner log cannot be read: {log['refused']}")
     record = {
         "session": session,
         "recorded_at": _now(),
@@ -786,7 +1020,7 @@ def before(args: argparse.Namespace) -> int:
         "counts": not reasons,
         "not_counted_because": reasons,
     }
-    _write_once(folder / "before.json", record)
+    _write_once(folder / "before.json", record, auth_root)
     print(f"Session {session}")
     if reasons:
         print(f"This session does not count: {'; '.join(reasons)}.")
@@ -823,23 +1057,46 @@ def wait_for_owners(auth_root: Path) -> dict[str, Any]:
     return {"timed_out": False, "seconds": round(time.monotonic() - started)}
 
 
+def _session_folder(pilot_dir: Path, session: str) -> tuple[Path, dict[str, Any]]:
+    """The session folder and its ``before.json``, as ``before`` left them.
+
+    A link in place of the folder or of a file in it, or any entry besides
+    ``before.json``, could aim a write somewhere else, so ``after`` refuses
+    the folder before it writes anything.
+    """
+    folder = pilot_dir / session
+    if os.path.lexists(folder / "after.json"):
+        raise RecorderError(f"Session {session} already has after.json")
+    try:
+        folder_mode = folder.lstat().st_mode
+        before_mode = (folder / "before.json").lstat().st_mode
+    except FileNotFoundError:
+        raise RecorderError(f"No before.json for session {session}") from None
+    if not stat.S_ISDIR(folder_mode) or not stat.S_ISREG(before_mode):
+        raise RecorderError(
+            f"{folder} or its before.json is a link or not what before wrote"
+        )
+    if extra := sorted(set(os.listdir(folder)) - {"before.json"}):
+        raise RecorderError(
+            f"{folder} holds {', '.join(extra)} besides before.json, so it is not "
+            "a session before left. Record a new session."
+        )
+    return folder, json.loads((folder / "before.json").read_text(encoding="utf-8"))
+
+
 def after(args: argparse.Namespace) -> int:
     if not _SESSION_ID.fullmatch(args.session):
         raise RecorderError(f"{args.session!r} is not a session ID")
-    folder = args.pilot_dir / args.session
-    try:
-        record_before = json.loads((folder / "before.json").read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        raise RecorderError(f"No before.json for session {args.session}") from None
-    if (folder / "after.json").exists():
-        raise RecorderError(f"Session {args.session} already has after.json")
+    folder, record_before = _session_folder(args.pilot_dir, args.session)
     profile = Path(record_before["profile"])
     auth_root = Path(record_before["auth_root"])
-    _refuse_inside_auth_root(args.pilot_dir, auth_root)
+    _refuse_protected(folder, auth_root)
 
     owner_wait = wait_for_owners(auth_root)
-    owner_log = copy_owner_log(record_before["owner_log"], profile, folder)
-    runs = copy_trace_runs(auth_root, record_before["trace_runs"], folder)
+    owner_log, owner_lines = copy_owner_log(
+        record_before["owner_log"], profile, folder, auth_root
+    )
+    runs = copy_trace_runs(auth_root, record_before["trace_runs"], folder, owner_lines)
     snapshot = passive_snapshot(profile)
     status = run_status(record_before["candidate"], profile)
     record: dict[str, Any] = {
@@ -854,7 +1111,7 @@ def after(args: argparse.Namespace) -> int:
         "status": status,
     }
     record["judgement"] = judge(record_before, record)
-    _write_once(folder / "after.json", record)
+    _write_once(folder / "after.json", record, auth_root)
 
     verdict = record["judgement"]
     print(
@@ -920,8 +1177,8 @@ def tally(args: argparse.Namespace) -> int:
         row = rows.setdefault(
             record["os"], {"daemon": 0, "fallback": 0, "uncertain": 0}
         )
-        # Before the qualifying check: a host started without INFO logging
-        # shows neither a decision nor a read, and must still block the gate.
+        # Before the qualifying check: an uncertain session may show no read
+        # at all, and must still block.
         if verdict["mode"] == "uncertain" and verdict["outcome"] != "not_counted":
             row["uncertain"] += 1
             uncertain.append(f"{session} ({folder})")
