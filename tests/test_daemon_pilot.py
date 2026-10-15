@@ -941,6 +941,82 @@ def test_a_retried_after_judges_its_first_capture(
     assert (verdict["mode"], verdict["outcome"]) == (mode, outcome)
 
 
+_ODD_FIELDS: dict[str, tuple[tuple[str | int, ...], Any]] = {
+    "top null": ((), None),
+    "top array": ((), []),
+    "wait null": (("owner_wait",), None),
+    "wait timeout array": (("owner_wait", "timed_out"), []),
+    "snapshot null": (("snapshot",), None),
+    "cookie store null": (("snapshot", "cookies"), None),
+    "source store null": (("snapshot", "source_state"), None),
+    "quarantine names null": (("snapshot", "quarantines", "names"), None),
+    "quarantine names number": (("snapshot", "quarantines", "names"), 7),
+    "quarantine name object": (("snapshot", "quarantines", "names"), [{}]),
+    "runs null": (("trace_runs",), None),
+    "run null": (("trace_runs", 0), None),
+    "run kind array": (("trace_runs", 0, "kind"), []),
+    "run kind object": (("trace_runs", 0, "kind"), {}),
+    "run mode array": (("trace_runs", 0, "mode"), []),
+    "run mode object": (("trace_runs", 0, "mode"), {}),
+    "run command array": (("trace_runs", 0, "command"), []),
+    "run name array": (("trace_runs", 0, "name"), []),
+    "run evidence array": (("trace_runs", 0, "evidence"), []),
+    # The right shape, but not where the copy of that run is written.
+    "run evidence elsewhere": (
+        ("trace_runs", 0, "evidence"),
+        "trace-runs/run-other/server.log",
+    ),
+    "owner log counts null": (("owner_log", "tool_calls"), None),
+    "owner log reading bool": (("owner_log", "tool_calls", "reading"), True),
+}
+_ODD_BYTES = {
+    "not utf-8": b"\xff\xfe\x80",
+    "cut-off json": b'{"owner_wait":',
+    "deeply nested json": b"[" * 1200 + b"null" + b"]" * 1200,
+}
+
+
+@pytest.mark.parametrize("odd", [*_ODD_FIELDS, *_ODD_BYTES])
+def test_an_odd_capture_is_an_incident_and_never_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    isolate_profile_dir: Path,
+    pilot_dir: Path,
+    candidate: _Candidate,
+    odd: str,
+) -> None:
+    profile = isolate_profile_dir
+    _store(profile)
+    log = _publish_owner(profile, _dead_pid(), [])
+    candidate.answer(_valid(profile), _valid(profile))
+    code, session = _before(pilot_dir, candidate, profile)
+    assert code == 0
+    _start_frontend(monkeypatch, profile, _FORWARD)
+    log.write_text(f"{_READ}\n")
+    with (
+        patch.object(pilot, "run_status", side_effect=KeyboardInterrupt),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        _after(pilot_dir, session)
+    manifest = pilot_dir / session / "capture" / "capture.json"
+    if odd in _ODD_BYTES:
+        manifest.write_bytes(_ODD_BYTES[odd])
+    else:
+        path, value = _ODD_FIELDS[odd]
+        captured: Any = json.loads(manifest.read_text())
+        if path:
+            parent = captured
+            for part in path[:-1]:
+                parent = parent[part]
+            parent[path[-1]] = value
+        else:
+            captured = value
+        manifest.write_text(json.dumps(captured))
+
+    assert _after(pilot_dir, session) == 0
+    verdict = _record(pilot_dir, session)["judgement"]
+    assert (verdict["mode"], verdict["outcome"]) == ("uncertain", "incident")
+
+
 def test_a_capture_cut_short_is_an_incident(
     monkeypatch: pytest.MonkeyPatch,
     isolate_profile_dir: Path,

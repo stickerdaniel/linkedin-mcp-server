@@ -36,7 +36,7 @@ import sys
 import time
 from collections.abc import Collection, Iterable, Sequence
 from pathlib import Path
-from typing import IO, Any, Literal
+from typing import IO, Any, Literal, NamedTuple
 
 from linkedin_mcp_server.daemon.descriptor import daemon_state_root, profile_identity
 from linkedin_mcp_server.process_tree import (
@@ -1137,7 +1137,9 @@ def _saved_capture(capture: Path) -> dict[str, Any] | None:
         if not stat.S_ISREG(path.lstat().st_mode):
             return None
         captured = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not _fits(captured, _CAPTURE_SHAPE):
         return None
     named = _named_copies(captured)
     try:
@@ -1149,60 +1151,80 @@ def _saved_capture(capture: Path) -> dict[str, Any] | None:
     return captured
 
 
-_STORES = ("source_state", "cookies", "profile", "last_version", "quarantines")
-_RUN_KINDS = frozenset({"frontend", "owner", "profile_command", "unknown"})
-_MODES = frozenset({"daemon", "fallback", "uncertain"})
+class _Optional(NamedTuple):
+    """A key that may be absent, and has *shape* when present."""
+
+    shape: Any
 
 
-def _counts(value: Any) -> bool:
-    return isinstance(value, dict) and all(
-        type(value.get(kind)) is int for kind in ("reading", "writing")
-    )
+_STORE: dict[str, Any] = {"state": str}
+_COUNTS: dict[str, Any] = {"reading": int, "writing": int}
+#: Every field of ``capture.json`` that ``judge`` and a retry read, with its
+#: type: a dict maps keys to shapes, a one-element list is a list of that
+#: shape, a frozenset is the strings allowed, and ``int`` excludes ``bool``.
+_CAPTURE_SHAPE: dict[str, Any] = {
+    "owner_wait": {"timed_out": bool},
+    "snapshot": {
+        "source_state": {
+            "state": str,
+            "login_generation": _Optional(str),
+            "source_runtime_id": _Optional(str),
+        },
+        "cookies": {"state": str, "li_at": _Optional(bool)},
+        "profile": _STORE,
+        "last_version": _STORE,
+        "quarantines": {"state": str, "names": _Optional([str])},
+    },
+    "owner_log": {"state": str, "tool_calls": _COUNTS, "evidence": _Optional(str)},
+    "trace_runs": [
+        {
+            "name": str,
+            "kind": frozenset({"frontend", "owner", "profile_command", "unknown"}),
+            "mode": _Optional(frozenset({"daemon", "fallback", "uncertain"})),
+            "command": _Optional(str),
+            "tool_calls": _Optional(_COUNTS),
+            "evidence": _Optional(str),
+        }
+    ],
+}
 
 
-def _named_copies(captured: Any) -> set[str] | None:
-    """The copies a well-formed capture names, or None if it is malformed."""
-    if not isinstance(captured, dict):
-        return None
-    wait, snapshot, log, runs = (
-        captured.get(key)
-        for key in ("owner_wait", "snapshot", "owner_log", "trace_runs")
-    )
-    if (
-        not isinstance(wait, dict)
-        or not isinstance(wait.get("timed_out"), bool)
-        or not isinstance(snapshot, dict)
-        or not all(
-            isinstance(snapshot.get(store), dict)
-            and isinstance(snapshot[store].get("state"), str)
-            for store in _STORES
+def _fits(value: Any, shape: Any) -> bool:
+    """Whether *value* has *shape*, as ``_CAPTURE_SHAPE`` spells shapes."""
+    if isinstance(shape, dict):
+        return isinstance(value, dict) and all(
+            (key not in value or _fits(value[key], sub.shape))
+            if isinstance(sub, _Optional)
+            else (key in value and _fits(value[key], sub))
+            for key, sub in shape.items()
         )
-        or not isinstance(log, dict)
-        or not isinstance(log.get("state"), str)
-        or not _counts(log.get("tool_calls"))
-        or not isinstance(runs, list)
-    ):
-        return None
-    named = {"daemon.log"} if "evidence" in log else set()
+    if isinstance(shape, list):
+        return isinstance(value, list) and all(_fits(item, shape[0]) for item in value)
+    if isinstance(shape, frozenset):
+        return isinstance(value, str) and value in shape
+    if shape is int:
+        return type(value) is int
+    return isinstance(value, shape)
+
+
+def _named_copies(captured: dict[str, Any]) -> set[str] | None:
+    """The copies a capture of the right shape names, or None if its runs
+    contradict how ``copy_trace_runs`` writes them."""
+    log = captured["owner_log"]
     if log.get("evidence", "daemon.log") != "daemon.log":
         return None
-    for run in runs:
-        if (
-            not isinstance(run, dict)
-            or not isinstance(run.get("name"), str)
-            or run.get("kind") not in _RUN_KINDS
-            or (run["kind"] == "frontend" and run.get("mode") not in _MODES)
-        ):
+    named = {"daemon.log"} if "evidence" in log else set()
+    for run in captured["trace_runs"]:
+        if run["kind"] == "frontend" and "mode" not in run:
             return None
-        if "evidence" in run:
-            evidence = f"trace-runs/{run['name']}/server.log"
-            if run["evidence"] != evidence or evidence in named:
+        if "evidence" not in run:
+            if run["kind"] != "unknown":
                 return None
-            if not _counts(run.get("tool_calls")):
-                return None
-            named.add(evidence)
-        elif run["kind"] != "unknown":
+            continue
+        evidence = f"trace-runs/{run['name']}/server.log"
+        if run["evidence"] != evidence or evidence in named or "tool_calls" not in run:
             return None
+        named.add(evidence)
     return named
 
 
