@@ -226,7 +226,22 @@ class TestJobSaveClickJs:
         dispatch nothing.
         """
         await dom_page.set_content(_page_html(card))
+        await dom_page.evaluate(
+            """() => {
+                for (const button of document.querySelectorAll('main button')) {
+                    button.addEventListener('click', () => {
+                        button.dataset.clicked = 'true';
+                    });
+                }
+            }"""
+        )
         assert await dom_page.evaluate(_JOB_SAVE_CLICK_JS, {"labels": LABELS}) is False
+        clicked_any = await dom_page.evaluate(
+            """() => Array.from(
+                document.querySelectorAll('main button')
+            ).some((button) => button.dataset.clicked)"""
+        )
+        assert clicked_any is False
 
     async def test_click_refuses_on_mixed_save_and_saved_controls(self, dom_page):
         """One Save and one Saved together is ambiguous, so neither is clicked."""
@@ -313,8 +328,10 @@ class TestJobSaveStateOnPosting:
         )
         await reader.open_job_posting(url)
 
+        # The configured bound is 50ms; the outer deadline fails fast if a
+        # regression ignored the setting and waited the full default instead.
         with pytest.raises(LinkedInOperationError, match="Could not uniquely identify"):
-            await reader.save_control_state()
+            await asyncio.wait_for(reader.save_control_state(), timeout=2)
 
 
 async def _reader_on_posting(dom_page, url: str, body: str) -> JobPageReader:
@@ -353,7 +370,14 @@ class TestJobSaveTransitionOnPosting:
                 document.querySelector('main button').textContent = 'Saved';
             }, 1500)"""
         )
-        assert await reader.save_control_state(wait_for_saved=True) == "saved"
+        # The transition lands at 1.5s, well inside the 10s bound. The outer
+        # deadline turns an unbounded-wait regression into a test failure.
+        assert (
+            await asyncio.wait_for(
+                reader.save_control_state(wait_for_saved=True), timeout=5
+            )
+            == "saved"
+        )
 
     async def test_unchanged_unsaved_state_stops_at_the_timeout(
         self, dom_page, monkeypatch
