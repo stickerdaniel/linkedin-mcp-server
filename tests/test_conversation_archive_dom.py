@@ -3,13 +3,15 @@
 The unit suite mocks ``page.evaluate``, so the programs behind
 ``ConversationReader.archive_conversation`` never execute there. These run the
 whole action against a synthetic thread page in headless chromium, with the
-navigation stubbed so every "reload" reads the same document. The markup
-carries only what the code reads: sidebar rows as ``<li>`` with a
+navigation stubbed so every "reload" reads the same document. Each stubbed
+load fetches LinkedIn's conversations query, answered with the folder the
+page's state implies, the way the thread page loads its conversation. The
+markup carries only what the code reads: sidebar rows as ``<li>`` with a
 ``label[aria-label]`` and an options button of their own, the thread's options
 button named by screen-reader text, and a menu of ``[role="button"]`` items
-whose Archive and Restore swap with the thread's state. None of LinkedIn's
-classes, so it is a claim about which signals are read, not about LinkedIn's
-layout, which is unmeasured for this menu.
+that offers Archive whether or not the thread is archived, as LinkedIn's was
+measured to. Of LinkedIn's classes only the dropdown option's, so it is a
+claim about which signals are read, not about LinkedIn's layout.
 
 Skipped automatically when chromium is not installed; run locally after
 ``uv run patchright install chromium --no-shell``.
@@ -19,6 +21,9 @@ from __future__ import annotations
 
 from typing import Any
 from unittest.mock import AsyncMock, patch
+from urllib.parse import parse_qs, urlparse
+
+import json
 
 import pytest
 from patchright.async_api import async_playwright
@@ -40,9 +45,12 @@ pytestmark = [
 THREAD_URL = "https://www.linkedin.com/messaging/thread/2-abc/"
 PREFIX = CONVERSATION_ACTIONS_EN_US.options_prefix
 ARCHIVE = CONVERSATION_ACTIONS_EN_US.archive_item
-RESTORE = CONVERSATION_ACTIONS_EN_US.restore_item
+CONVERSATIONS_URL = (
+    "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql"
+    "?queryId=messengerConversations.test"
+)
 
-# Any options button opens a menu for its own scope: the thread's toggles
+# Any options button opens a menu for its own scope: the thread's Archive sets
 # `data-archived` on the body, a row's records the click and nothing else.
 # Items carry the dropdown-option class LinkedIn was measured to use, unless
 # the body says `data-plain`; `data-pill` makes the click also reveal an
@@ -62,9 +70,7 @@ for (const button of document.querySelectorAll('main button[data-options]')) {
     button.addEventListener('click', () => {
         document.querySelector('[role="menu"]')?.remove();
         const scope = button.dataset.options;
-        const archived = document.body.hasAttribute('data-archived');
-        const labels = (document.body.dataset.items ||
-            (archived ? 'Mark as unread,RESTORE,Delete' : 'Mark as unread,ARCHIVE,Delete'))
+        const labels = (document.body.dataset.items || 'Mark as unread,ARCHIVE,Delete')
             .split(',');
         const menu = document.createElement('div');
         menu.setAttribute('role', 'menu');
@@ -80,7 +86,6 @@ for (const button of document.querySelectorAll('main button[data-options]')) {
                 menu.remove();
                 if (scope !== 'thread' || document.body.hasAttribute('data-refuse')) return;
                 if (label === 'ARCHIVE') document.body.setAttribute('data-archived', '');
-                if (label === 'RESTORE') document.body.removeAttribute('data-archived');
             });
             menu.appendChild(item);
         }
@@ -96,7 +101,7 @@ for (const button of document.querySelectorAll('main button[data-options]')) {
         }
     });
 }
-""".replace("RESTORE", RESTORE).replace("ARCHIVE", ARCHIVE)
+""".replace("ARCHIVE", ARCHIVE)
 
 
 def options(scope: str, names: str) -> str:
@@ -130,9 +135,29 @@ def thread_page(
     )
 
 
+def conversations_payload(thread_id: str, categories: list[str]) -> str:
+    """The conversations query's answer naming ``thread_id`` in ``categories``."""
+    conversation = {
+        "_type": "com.linkedin.messenger.Conversation",
+        "backendUrn": f"urn:li:messagingThread:{thread_id}",
+        "categories": categories,
+    }
+    return json.dumps({"data": {"messengerConversationsByIds": [conversation]}})
+
+
 @pytest.fixture
 async def dom_page():
     async def answer(route):
+        query = parse_qs(urlparse(route.request.url).query)
+        if "folder" in query:
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=conversations_payload(
+                    query["thread"][0], query["folder"][0].split(",")
+                ),
+            )
+            return
         await route.fulfill(status=200, content_type="text/html", body="<p>ok</p>")
 
     async with async_playwright() as playwright:
@@ -167,6 +192,28 @@ async def serve(page, html: str, url: str = THREAD_URL) -> None:
     await page.set_content(html)
 
 
+async def load_conversation(page, url: str) -> None:
+    """A stubbed load: fetch the conversations query for the served thread.
+
+    The folder is the page's own state: `data-folder` when the body names
+    one, else archived or inbox by `data-archived`. `data-silent` loads no
+    conversation at all.
+    """
+    state = await page.evaluate(
+        """() => ({
+            silent: document.body.hasAttribute('data-silent'),
+            folder: document.body.dataset.folder ||
+                (document.body.hasAttribute('data-archived')
+                    ? 'ARCHIVE' : 'INBOX,PRIMARY_INBOX'),
+        })"""
+    )
+    if state["silent"]:
+        return
+    thread = url.rstrip("/").rsplit("/", 1)[1]
+    query = f"{CONVERSATIONS_URL}&thread={thread}&folder={state['folder']}"
+    await page.evaluate("(url) => fetch(url).then(response => response.text())", query)
+
+
 async def archive(page, thread_id: str = "2-abc") -> dict[str, Any]:
     """Archive on the served page the way the workflow does, reloads stubbed."""
     session = PageSession(page)
@@ -176,7 +223,11 @@ async def archive(page, thread_id: str = "2-abc") -> dict[str, Any]:
         PageContentReader(session),
         ProfilePageReader(session, _no_message_target),
     )
-    with patch.object(reader._navigator, "_navigate_to_page", new_callable=AsyncMock):
+
+    async def navigate(url: str) -> None:
+        await load_conversation(page, url)
+
+    with patch.object(reader._navigator, "_navigate_to_page", side_effect=navigate):
         return await reader.archive_conversation(thread_id)
 
 
@@ -199,18 +250,22 @@ async def test_the_thread_is_archived_from_its_own_menu_and_confirmed(dom_page):
     assert await dom_page.locator("body[data-archived]").count() == 1
 
 
-async def test_a_second_call_never_unarchives(dom_page):
+async def test_a_second_call_clicks_nothing(dom_page):
     await serve(dom_page, thread_page())
 
     await archive(dom_page)
     again = await archive(dom_page)
 
     assert again["status"] == "already_archived"
+    assert again["participant"] == "Ada Lovelace"
     assert await chosen(dom_page) == [["thread", ARCHIVE]]
     assert await dom_page.locator("body[data-archived]").count() == 1
 
 
-async def test_an_archived_thread_is_reported_and_left_alone(dom_page):
+async def test_an_archived_thread_is_left_alone_though_its_menu_offers_archive(
+    dom_page,
+):
+    """LinkedIn's menu offers Archive on an archived thread too; its data decides."""
     await serve(dom_page, thread_page(archived=True))
 
     assert (await archive(dom_page))["status"] == "already_archived"
@@ -218,12 +273,68 @@ async def test_an_archived_thread_is_reported_and_left_alone(dom_page):
     assert await dom_page.locator('[role="menu"]').count() == 0
 
 
+async def test_an_archived_thread_without_an_options_button_is_still_reported(
+    dom_page,
+):
+    await serve(dom_page, thread_page(headers=0, archived=True))
+
+    result = await archive(dom_page)
+
+    assert result["status"] == "already_archived"
+    assert result["participant"] is None
+    assert await chosen(dom_page) == []
+
+
 async def test_a_click_that_did_not_hold_is_not_reported_archived(dom_page):
     await serve(dom_page, thread_page(body=" data-refuse"))
 
-    with pytest.raises(LinkedInOperationError, match="still offers 'Archive'"):
+    with pytest.raises(
+        LinkedInOperationError,
+        match=r"after a reload LinkedIn files it under \['INBOX', 'PRIMARY_INBOX'\]",
+    ):
         await archive(dom_page)
     assert await chosen(dom_page) == [["thread", ARCHIVE]]
+
+
+async def test_a_thread_whose_folder_never_loads_is_not_touched(dom_page):
+    await serve(dom_page, thread_page(body=" data-silent"))
+
+    with pytest.raises(LinkedInOperationError, match="never named its folder"):
+        await archive(dom_page)
+    assert await chosen(dom_page) == []
+    assert await dom_page.locator('[role="menu"]').count() == 0
+
+
+@pytest.mark.parametrize("folder", ["SPAM", "ARCHIVE,INBOX"])
+async def test_a_thread_in_neither_or_both_folders_is_not_touched(dom_page, folder):
+    await serve(dom_page, thread_page(body=f' data-folder="{folder}"'))
+
+    with pytest.raises(LinkedInOperationError, match="exactly one of the inbox"):
+        await archive(dom_page)
+    assert await chosen(dom_page) == []
+    assert await dom_page.locator('[role="menu"]').count() == 0
+
+
+async def test_the_folder_of_another_thread_is_not_read_as_this_ones(dom_page):
+    """Only the conversation naming this thread counts, not one beside it."""
+    await serve(dom_page, thread_page(archived=True))
+    session = PageSession(dom_page)
+    reader = ConversationReader(
+        session,
+        PageNavigator(session),
+        PageContentReader(session),
+        ProfilePageReader(session, _no_message_target),
+    )
+
+    async def navigate(url: str) -> None:
+        await load_conversation(
+            dom_page, "https://www.linkedin.com/messaging/thread/2-other/"
+        )
+
+    with patch.object(reader._navigator, "_navigate_to_page", side_effect=navigate):
+        with pytest.raises(LinkedInOperationError, match="never named its folder"):
+            await reader.archive_conversation("2-abc")
+    assert await chosen(dom_page) == []
 
 
 async def test_a_menu_with_neither_item_chooses_nothing_and_says_what_it_held(
@@ -243,7 +354,7 @@ async def test_a_menu_with_neither_item_chooses_nothing_and_says_what_it_held(
             await archive(dom_page)
 
     message = str(raised.value)
-    assert "did not offer exactly one" in message
+    assert "did not offer exactly one 'Archive'" in message
     assert "Nothing was clicked" in message
     assert "1 options button matched" in message
     option = "div[role=button].msg-thread-actions__dropdown-option"
@@ -284,11 +395,12 @@ async def test_an_archive_control_outside_the_dropdown_is_never_taken(dom_page):
     assert await chosen(dom_page) == []
 
 
-async def test_a_menu_offering_both_items_chooses_nothing(dom_page):
-    await serve(dom_page, thread_page(items=f"{ARCHIVE},{RESTORE}"))
+async def test_a_menu_offering_archive_twice_chooses_nothing(dom_page):
+    await serve(dom_page, thread_page(items=f"{ARCHIVE},{ARCHIVE}"))
 
-    with pytest.raises(LinkedInOperationError, match="did not offer exactly one"):
-        await archive(dom_page)
+    with patch.object(conversations, "record_page_trace", new_callable=AsyncMock):
+        with pytest.raises(LinkedInOperationError, match="did not offer exactly one"):
+            await archive(dom_page)
     assert await chosen(dom_page) == []
 
 
