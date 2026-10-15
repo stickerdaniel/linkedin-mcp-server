@@ -1079,7 +1079,7 @@ async def _archive_conversation_scenario(*, already: bool) -> dict[str, Any]:
     if not already:
         page.declare_locator("main button[data-mcp-thread-options]", "thread_options")
         page.declare_locator("[data-mcp-thread-archive]", "thread_archive_item")
-        page.script("evaluate:thread_menu_survey", {"keys": []})
+        page.script("evaluate:thread_menu_survey", {"seen": 0})
         page.script("thread_options.click", None)
         page.script("evaluate:thread_menu_items", {"archive": 1})
         page.script("thread_archive_item.click", None)

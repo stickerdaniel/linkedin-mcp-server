@@ -10,8 +10,9 @@ markup carries only what the code reads: sidebar rows as ``<li>`` with a
 ``label[aria-label]`` and an options button of their own, the thread's options
 button named by screen-reader text, and a menu of ``[role="button"]`` items
 that offers Archive whether or not the thread is archived, as LinkedIn's was
-measured to. Of LinkedIn's classes only the dropdown option's, so it is a
-claim about which signals are read, not about LinkedIn's layout.
+measured to, opened beside its button as LinkedIn's dropdown is. None of
+LinkedIn's classes, so it is a claim about which signals are read, not about
+LinkedIn's layout.
 
 Skipped automatically when chromium is not installed; run locally after
 ``uv run patchright install chromium --no-shell``.
@@ -52,9 +53,9 @@ CONVERSATIONS_URL = (
 
 # Any options button opens a menu for its own scope: the thread's Archive sets
 # `data-archived` on the body, a row's records the click and nothing else.
-# Items carry the dropdown-option class LinkedIn was measured to use, unless
-# the body says `data-plain`; `data-pill` makes the click also reveal an
-# Archive control outside the dropdown.
+# The menu opens in the button's own wrapper, where LinkedIn's dropdown was
+# measured to be; `data-pill` makes the click also reveal an Archive control
+# elsewhere on the page.
 # Every choice is recorded as an attribute rather than on `window`, because
 # patchright evaluates in an isolated world that never sees the page's globals.
 MENU_SCRIPT = """
@@ -77,9 +78,6 @@ for (const button of document.querySelectorAll('main button[data-options]')) {
         for (const label of labels) {
             const item = document.createElement('div');
             item.setAttribute('role', 'button');
-            if (!document.body.hasAttribute('data-plain')) {
-                item.className = 'msg-thread-actions__dropdown-option';
-            }
             item.innerHTML = '<div><p>' + label + '</p></div>';
             item.addEventListener('click', () => {
                 record([scope, label]);
@@ -89,7 +87,7 @@ for (const button of document.querySelectorAll('main button[data-options]')) {
             });
             menu.appendChild(item);
         }
-        document.body.appendChild(menu);
+        button.parentElement.appendChild(menu);
         if (document.body.hasAttribute('data-pill') && !document.querySelector('[data-pill-item]')) {
             // A control elsewhere on the page that the click happens to reveal.
             const pill = document.createElement('button');
@@ -106,8 +104,9 @@ for (const button of document.querySelectorAll('main button[data-options]')) {
 
 def options(scope: str, names: str) -> str:
     return (
-        f'<button data-options="{scope}"><span style="position:absolute;'
+        f'<div><button data-options="{scope}"><span style="position:absolute;'
         f'width:1px;height:1px;overflow:hidden">{PREFIX} {names}</span>…</button>'
+        "</div>"
     )
 
 
@@ -357,10 +356,10 @@ async def test_a_menu_with_neither_item_chooses_nothing_and_says_what_it_held(
     assert "did not offer exactly one 'Archive'" in message
     assert "Nothing was clicked" in message
     assert "1 options button matched" in message
-    option = "div[role=button].msg-thread-actions__dropdown-option"
     assert (
-        "The dropdown showed 3 visible item(s) in div[role=menu]: "
-        f"'Mark as unread' ({option}), 'Star' ({option}), 'Mute' ({option})."
+        "Its click revealed 3 visible item(s) in div: "
+        "'Mark as unread' (div[role=button]), 'Star' (div[role=button]), "
+        "'Mute' (div[role=button])."
     ) in message
     assert "aria-expanded=None" in message
     assert menus_open == [1]
@@ -368,25 +367,8 @@ async def test_a_menu_with_neither_item_chooses_nothing_and_says_what_it_held(
     assert await chosen(dom_page) == []
 
 
-async def test_without_dropdown_options_the_refusal_quotes_what_the_click_added(
-    dom_page,
-):
-    await serve(dom_page, thread_page(body=" data-plain", items="Mark as unread,Mute"))
-
-    with patch.object(conversations, "record_page_trace", new_callable=AsyncMock):
-        with pytest.raises(LinkedInOperationError) as raised:
-            await archive(dom_page)
-
-    assert (
-        "No dropdown option was visible; its click added 2 visible item(s) in "
-        "div[role=menu]: 'Mark as unread' (div[role=button]), "
-        "'Mute' (div[role=button])."
-    ) in str(raised.value)
-    assert await chosen(dom_page) == []
-
-
 async def test_an_archive_control_outside_the_dropdown_is_never_taken(dom_page):
-    """Only the dropdown's options count, so a revealed pill is not the item."""
+    """Only items beside the button count, so a revealed pill is not the item."""
     await serve(dom_page, thread_page(body=" data-pill", items="Mark as unread"))
 
     with patch.object(conversations, "record_page_trace", new_callable=AsyncMock):
