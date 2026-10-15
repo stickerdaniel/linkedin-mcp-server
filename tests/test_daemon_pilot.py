@@ -968,6 +968,10 @@ _ODD_FIELDS: dict[str, tuple[tuple[str | int, ...], Any]] = {
     ),
     "owner log counts null": (("owner_log", "tool_calls"), None),
     "owner log reading bool": (("owner_log", "tool_calls", "reading"), True),
+    # Keys capture never writes, aimed at fields after sets itself.
+    "attestations null": (("attestations",), None),
+    "attestations emptied": (("attestations",), []),
+    "unknown nested key": (("snapshot", "cookies", "li_at_restored"), True),
 }
 _ODD_BYTES = {
     "not utf-8": b"\xff\xfe\x80",
@@ -1012,9 +1016,13 @@ def test_an_odd_capture_is_an_incident_and_never_raises(
             captured = value
         manifest.write_text(json.dumps(captured))
 
-    assert _after(pilot_dir, session) == 0
-    verdict = _record(pilot_dir, session)["judgement"]
-    assert (verdict["mode"], verdict["outcome"]) == ("uncertain", "incident")
+    assert _after(pilot_dir, session, "login@2026-10-15T10:00Z") == 0
+    record = _record(pilot_dir, session)
+    assert record["attestations"] == ["login@2026-10-15T10:00Z"]
+    assert (record["judgement"]["mode"], record["judgement"]["outcome"]) == (
+        "uncertain",
+        "incident",
+    )
 
 
 def test_a_capture_cut_short_is_an_incident(

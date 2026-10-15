@@ -1157,25 +1157,50 @@ class _Optional(NamedTuple):
     shape: Any
 
 
-_STORE: dict[str, Any] = {"state": str}
+_REASON = _Optional(str)
 _COUNTS: dict[str, Any] = {"reading": int, "writing": int}
-#: Every field of ``capture.json`` that ``judge`` and a retry read, with its
-#: type: a dict maps keys to shapes, a one-element list is a list of that
-#: shape, a frozenset is the strings allowed, and ``int`` excludes ``bool``.
+#: Every key ``capture_session`` writes into ``capture.json``, with its type:
+#: a dict maps keys to shapes and allows no other key, a one-element list is
+#: a list of that shape, a frozenset is the strings allowed, a tuple is any of
+#: its types, and ``int`` excludes ``bool``.
 _CAPTURE_SHAPE: dict[str, Any] = {
-    "owner_wait": {"timed_out": bool},
+    "captured_at": str,
+    "owner_wait": {
+        "timed_out": bool,
+        "seconds": int,
+        "live": _Optional(
+            [{"path": str, "pid": _Optional(int), "unreadable": _REASON}]
+        ),
+    },
     "snapshot": {
+        "taken_at": str,
         "source_state": {
             "state": str,
+            "reason": _REASON,
             "login_generation": _Optional(str),
             "source_runtime_id": _Optional(str),
         },
-        "cookies": {"state": str, "li_at": _Optional(bool)},
-        "profile": _STORE,
-        "last_version": _STORE,
-        "quarantines": {"state": str, "names": _Optional([str])},
+        "cookies": {
+            "state": str,
+            "reason": _REASON,
+            "sha256": _Optional(str),
+            "li_at": _Optional(bool),
+        },
+        "profile": {"state": str, "reason": _REASON},
+        "last_version": {"state": str, "reason": _REASON, "value": _Optional(str)},
+        "quarantines": {"state": str, "reason": _REASON, "names": _Optional([str])},
     },
-    "owner_log": {"state": str, "tool_calls": _COUNTS, "evidence": _Optional(str)},
+    "owner_log": {
+        "path": (str, type(None)),
+        "state": str,
+        "reason": _REASON,
+        "tool_calls": _COUNTS,
+        "from_offset": _Optional(int),
+        "bytes": _Optional(int),
+        "evidence": _Optional(str),
+        "records": _Optional(int),
+        "non_json_lines": _Optional(int),
+    },
     "trace_runs": [
         {
             "name": str,
@@ -1184,6 +1209,8 @@ _CAPTURE_SHAPE: dict[str, Any] = {
             "command": _Optional(str),
             "tool_calls": _Optional(_COUNTS),
             "evidence": _Optional(str),
+            "refused": _REASON,
+            "missing": _REASON,
         }
     ],
 }
@@ -1192,11 +1219,15 @@ _CAPTURE_SHAPE: dict[str, Any] = {
 def _fits(value: Any, shape: Any) -> bool:
     """Whether *value* has *shape*, as ``_CAPTURE_SHAPE`` spells shapes."""
     if isinstance(shape, dict):
-        return isinstance(value, dict) and all(
-            (key not in value or _fits(value[key], sub.shape))
-            if isinstance(sub, _Optional)
-            else (key in value and _fits(value[key], sub))
-            for key, sub in shape.items()
+        return (
+            isinstance(value, dict)
+            and value.keys() <= shape.keys()
+            and all(
+                (key not in value or _fits(value[key], sub.shape))
+                if isinstance(sub, _Optional)
+                else (key in value and _fits(value[key], sub))
+                for key, sub in shape.items()
+            )
         )
     if isinstance(shape, list):
         return isinstance(value, list) and all(_fits(item, shape[0]) for item in value)
@@ -1243,13 +1274,16 @@ def _saved_copies(capture: Path) -> set[str] | None:
     return saved
 
 
-def _interrupted_capture(session: str, record_before: dict[str, Any]) -> dict[str, Any]:
+def _interrupted_capture(
+    session: str, record_before: dict[str, Any], attestations: list[str]
+) -> dict[str, Any]:
     """The record of a session whose capture was cut short or does not hold
     together: never retained, and never captured again."""
     counted = bool(record_before["counts"])
     return {
         "session": session,
         "recorded_at": _now(),
+        "attestations": attestations,
         "evidence": _CAPTURE,
         "capture_complete": False,
         "judgement": {
@@ -1279,7 +1313,7 @@ def after(args: argparse.Namespace) -> int:
     if not os.path.lexists(capture):
         captured = capture_session(folder, record_before, profile, auth_root)
     elif (captured := _saved_capture(capture)) is None:
-        record = _interrupted_capture(args.session, record_before)
+        record = _interrupted_capture(args.session, record_before, args.attest)
         _write_once(folder / "after.json", record, auth_root)
         return _report(record)
     # Frontends come only from the capture, which a retry has checked
@@ -1291,7 +1325,12 @@ def after(args: argparse.Namespace) -> int:
         "attestations": args.attest,
         "evidence": _CAPTURE,
         "capture_complete": True,
-        **captured,
+        # Named one by one, so a capture can never set a field of after's own.
+        "captured_at": captured["captured_at"],
+        "owner_wait": captured["owner_wait"],
+        "snapshot": captured["snapshot"],
+        "owner_log": captured["owner_log"],
+        "trace_runs": captured["trace_runs"],
         "mode": session_mode(captured["trace_runs"]),
         "status": status,
     }
