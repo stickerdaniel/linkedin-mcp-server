@@ -38,7 +38,11 @@ Mode is decided once for each frontend process, from its startup decision.
 - **Fallback.** The frontend logs that it drives its own browser.
 - **Uncertain.** The frontend logs neither.
 
-A proxy that later fails to recover an owner stays in daemon mode, with a failure. A host session counts as daemon only when every frontend in it is daemon. A single fallback frontend makes it fallback. A single uncertain frontend makes it uncertain.
+A proxy that later fails to recover an owner stays in daemon mode, with a failure. A host session's mode follows this precedence:
+
+1. **Uncertain** if any of its frontends is uncertain.
+2. **Fallback** if, otherwise, any frontend falls back.
+3. **Daemon** only when every frontend in it is daemon.
 
 ## Counted sessions and their outcome (gate 3)
 
