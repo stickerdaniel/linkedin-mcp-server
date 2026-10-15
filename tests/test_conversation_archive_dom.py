@@ -54,8 +54,10 @@ CONVERSATIONS_URL = (
 # Any options button opens a menu for its own scope: the thread's Archive sets
 # `data-archived` on the body, a row's records the click and nothing else.
 # The menu opens in the button's own wrapper, where LinkedIn's dropdown was
-# measured to be; `data-pill` makes the click also reveal an Archive control
-# elsewhere on the page.
+# measured to be, unless the body says `data-portal`, which puts it at the end
+# of the body, or `data-late`, which renders it 300 ms after the click;
+# `data-pill` makes the click also reveal an Archive control elsewhere on the
+# page at once.
 # Every choice is recorded as an attribute rather than on `window`, because
 # patchright evaluates in an isolated world that never sees the page's globals.
 MENU_SCRIPT = """
@@ -87,7 +89,10 @@ for (const button of document.querySelectorAll('main button[data-options]')) {
             });
             menu.appendChild(item);
         }
-        button.parentElement.appendChild(menu);
+        const place = () => (document.body.hasAttribute('data-portal')
+            ? document.body : button.parentElement).appendChild(menu);
+        if (document.body.hasAttribute('data-late')) setTimeout(place, 300);
+        else place();
         if (document.body.hasAttribute('data-pill') && !document.querySelector('[data-pill-item]')) {
             // A control elsewhere on the page that the click happens to reveal.
             const pill = document.createElement('button');
@@ -374,6 +379,33 @@ async def test_an_archive_control_outside_the_dropdown_is_never_taken(dom_page):
     with patch.object(conversations, "record_page_trace", new_callable=AsyncMock):
         with pytest.raises(LinkedInOperationError, match="did not offer"):
             await archive(dom_page)
+    assert await chosen(dom_page) == []
+
+
+async def test_a_dropdown_still_rendering_is_waited_for_not_a_control_elsewhere(
+    dom_page,
+):
+    """An Archive control the click reveals first elsewhere is never the item."""
+    await serve(dom_page, thread_page(body=" data-pill data-late"))
+
+    result = await archive(dom_page)
+
+    assert result["status"] == "archived"
+    assert await chosen(dom_page) == [["thread", ARCHIVE]]
+
+
+async def test_a_dropdown_away_from_its_button_is_refused_and_quoted(dom_page):
+    await serve(dom_page, thread_page(body=" data-portal"))
+
+    with patch.object(conversations, "record_page_trace", new_callable=AsyncMock):
+        with pytest.raises(LinkedInOperationError) as raised:
+            await archive(dom_page)
+
+    assert (
+        "Nothing appeared beside it; its click revealed elsewhere 3 visible "
+        "item(s) in div[role=menu]: 'Mark as unread' (div[role=button]), "
+        f"'{ARCHIVE}' (div[role=button]), 'Delete' (div[role=button])."
+    ) in str(raised.value)
     assert await chosen(dom_page) == []
 
 
