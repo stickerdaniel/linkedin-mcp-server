@@ -110,14 +110,14 @@
     },
     {
       "arg": {
-        "before": null,
-        "mark": "data-mcp-thread-options",
-        "optionSelector": ".msg-thread-actions__dropdown-option"
+        "after": false,
+        "seen": "data-mcp-thread-seen",
+        "trigger": "data-mcp-thread-options"
       },
       "call": "archive_conversation",
       "kind": "evaluate",
       "operation": "thread_menu_survey",
-      "program_digest": "7acc4a4518e8"
+      "program_digest": "25826857735b"
     },
     {
       "call": "archive_conversation",
@@ -136,12 +136,13 @@
       "arg": {
         "archive": "Archive",
         "mark": "data-mcp-thread-archive",
-        "optionSelector": ".msg-thread-actions__dropdown-option"
+        "seen": "data-mcp-thread-seen",
+        "trigger": "data-mcp-thread-options"
       },
       "call": "archive_conversation",
       "kind": "evaluate",
       "operation": "thread_menu_items",
-      "program_digest": "0e6751358ed7"
+      "program_digest": "07456e3b75cd"
     },
     {
       "call": "archive_conversation",

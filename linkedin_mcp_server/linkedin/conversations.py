@@ -294,45 +294,18 @@ THREAD_OPTIONS_JS = r"""(opts) => {
     };
 }"""
 
-# The class LinkedIn gives each item of a thread's options dropdown, measured
-# on 2026-09-26: `div[role=button]` items (`div[role=link]` for Manage
-# settings) inside an artdeco dropdown. A class, because the items carry no
-# attribute that tells them from any other `[role=button]` the click reveals,
-# and a page-wide match picked up filter pills, message links and the footer.
-_THREAD_OPTION_SELECTOR = ".msg-thread-actions__dropdown-option"
-
-# The open dropdown's items whose whole text is the archive label, visible and
-# innermost, so an item and its own wrapper count once. Marked for the click
-# only when it is the one match.
-THREAD_MENU_ITEMS_JS = r"""(opts) => {
-    const {archive, optionSelector, mark} = opts;
-    const visible = (el) => {
-        const box = el.getBoundingClientRect();
-        return box.width > 0 && box.height > 0;
-    };
-    const squash = (value) => (value || '').replace(/\s+/g, ' ').trim();
-    for (const old of document.querySelectorAll('[' + mark + ']')) {
-        old.removeAttribute(mark);
-    }
-    const items = [...document.querySelectorAll(optionSelector)].filter(visible);
-    const labelled = (label) => {
-        const found = items.filter(el => squash(el.innerText) === label);
-        return found.filter(el => !found.some(other => other !== el && el.contains(other)));
-    };
-    const archiveItems = labelled(archive);
-    if (archiveItems.length === 1) archiveItems[0].setAttribute(mark, '');
-    return {archive: archiveItems.length};
-}"""
-
-# Evidence for a menu the reads above could not use. With ``before``, it
-# quotes the dropdown's own items when any are visible; otherwise every
-# visible item-like element with short text, innermost, that the click added,
-# found by comparing `tag|role|text` keys against a survey taken before the
-# click, whatever element and role LinkedIn gave the menu. Also describes the
-# quoted items' closest common container and the marked options button. Read
-# only; nothing is clicked or marked.
-THREAD_MENU_SURVEY_JS = r"""(opts) => {
-    const {before, optionSelector, mark} = opts;
+# The thread menu's items, found by structure rather than by LinkedIn's
+# classes: the visible item-like elements with short text, innermost, that the
+# options button's click revealed. They are told from what was already on the
+# page by the ``seen`` attribute the survey puts on every visible item before
+# the click, element by element, because a message in the thread can read the
+# same as a menu item. They are kept only inside the button's nearest ancestor
+# that holds any of them, so a control the click happens to reveal elsewhere
+# on the page is not one of its items. Measured on 2026-09-26 and 2026-10-15,
+# the dropdown is `div[role=button]` items (`div[role=link]` for Manage
+# settings) in the button's own parent. Shared by the two programs below,
+# which start by unpacking ``after``, ``trigger`` and ``seen``.
+_THREAD_MENU_PRELUDE_JS = r"""
     const visible = (el) => {
         const box = el.getBoundingClientRect();
         return box.width > 0 && box.height > 0;
@@ -345,11 +318,47 @@ THREAD_MENU_SURVEY_JS = r"""(opts) => {
         return visible(el) && text && text.length <= 80;
     });
     const items = found.filter(el => !found.some(other => other !== el && el.contains(other)));
-    const keyOf = (el) => [
-        el.tagName.toLowerCase(), el.getAttribute('role') || '', squash(el.innerText),
-    ].join('|');
-    const keys = items.map(keyOf);
-    if (!before) return {keys};
+    const button = document.querySelector('[' + trigger + ']');
+    const revealed = after
+        ? items.filter(el => el !== button && !el.hasAttribute(seen))
+        : [];
+    let menu = button?.parentElement || null;
+    while (menu && !revealed.some(el => menu.contains(el))) menu = menu.parentElement;
+    const menuItems = menu ? revealed.filter(el => menu.contains(el)) : [];
+"""
+
+# The menu's items whose whole text is the archive label. Marked for the
+# click only when it is the one match.
+THREAD_MENU_ITEMS_JS = (
+    r"""(opts) => {
+    const {archive, trigger, seen, mark} = opts;
+    const after = true;
+    for (const old of document.querySelectorAll('[' + mark + ']')) {
+        old.removeAttribute(mark);
+    }"""
+    + _THREAD_MENU_PRELUDE_JS
+    + r"""
+    const archiveItems = menuItems.filter(el => squash(el.innerText) === archive);
+    if (archiveItems.length === 1) archiveItems[0].setAttribute(mark, '');
+    return {archive: archiveItems.length};
+}"""
+)
+
+# Before the click, marks everything already visible as seen. After it, evidence
+# for a menu the read above could not use: the menu's items, the container
+# holding them, and the options button. Nothing is clicked.
+THREAD_MENU_SURVEY_JS = (
+    r"""(opts) => {
+    const {after, trigger, seen} = opts;"""
+    + _THREAD_MENU_PRELUDE_JS
+    + r"""
+    if (!after) {
+        for (const old of document.querySelectorAll('[' + seen + ']')) {
+            old.removeAttribute(seen);
+        }
+        for (const el of items) el.setAttribute(seen, '');
+        return {seen: items.length};
+    }
     const describe = (el) => {
         if (!el) return null;
         const role = el.getAttribute('role');
@@ -357,45 +366,28 @@ THREAD_MENU_SURVEY_JS = r"""(opts) => {
         return el.tagName.toLowerCase() + (role ? '[role=' + role + ']' : '')
             + (el.id ? '#' + el.id : '') + classes;
     };
-    const remaining = new Map();
-    for (const key of before) remaining.set(key, (remaining.get(key) || 0) + 1);
-    const options = [...document.querySelectorAll(optionSelector)].filter(visible);
-    const dropdown = options.filter(el => !options.some(other => other !== el && el.contains(other)));
-    const added = dropdown.length ? dropdown : items.filter(el => {
-        const key = keyOf(el);
-        const left = remaining.get(key) || 0;
-        if (left > 0) {
-            remaining.set(key, left - 1);
-            return false;
-        }
-        return true;
-    });
-    let container = added[0]?.parentElement || null;
-    while (container && !added.every(el => container.contains(el))) {
-        container = container.parentElement;
-    }
-    const trigger = document.querySelector('[' + mark + ']');
-    const controls = trigger?.getAttribute('aria-controls');
+    const added = menuItems;
+    const controls = button?.getAttribute('aria-controls');
     return {
-        keys,
         added: added.slice(0, 25).map(el => ({
             element: describe(el), text: squash(el.innerText),
         })),
         addedTotal: added.length,
-        scope: dropdown.length ? 'dropdown' : 'click',
-        container: describe(container),
-        trigger: trigger ? {
-            element: describe(trigger),
-            expanded: trigger.getAttribute('aria-expanded'),
-            haspopup: trigger.getAttribute('aria-haspopup'),
+        container: describe(menu),
+        trigger: button ? {
+            element: describe(button),
+            expanded: button.getAttribute('aria-expanded'),
+            haspopup: button.getAttribute('aria-haspopup'),
             controls: describe(controls ? document.getElementById(controls) : null),
         } : null,
     };
 }"""
+)
 
 # The attributes that tie a click to the element the read chose.
 _THREAD_OPTIONS_MARK = "data-mcp-thread-options"
 _THREAD_ARCHIVE_MARK = "data-mcp-thread-archive"
+_THREAD_SEEN_MARK = "data-mcp-thread-seen"
 
 # How long the thread gets to load its folder and render its options button,
 # and its menu to open.
@@ -585,17 +577,13 @@ def _menu_evidence(survey: dict[str, Any]) -> str:
     ]
     added = survey.get("added") or []
     if not added:
-        parts.append("Its click added no visible item to the page.")
+        parts.append("Its click revealed no visible item near it.")
     else:
         listed = ", ".join(f"{item['text']!r} ({item['element']})" for item in added)
         total = survey.get("addedTotal", len(added))
-        where = (
-            "The dropdown showed"
-            if survey.get("scope") == "dropdown"
-            else "No dropdown option was visible; its click added"
-        )
         parts.append(
-            f"{where} {total} visible item(s) in {survey.get('container')}: {listed}."
+            f"Its click revealed {total} visible item(s) in "
+            f"{survey.get('container')}: {listed}."
         )
     return " ".join(parts)
 
@@ -1334,12 +1322,12 @@ class ConversationReader:
         if folder == "archived":
             return _ThreadArchiveRead("archived", participant)
 
-        before = await page.evaluate(
+        await page.evaluate(
             THREAD_MENU_SURVEY_JS,
             {
-                "before": None,
-                "optionSelector": _THREAD_OPTION_SELECTOR,
-                "mark": _THREAD_OPTIONS_MARK,
+                "after": False,
+                "trigger": _THREAD_OPTIONS_MARK,
+                "seen": _THREAD_SEEN_MARK,
             },
         )
         await page.locator(f"main button[{_THREAD_OPTIONS_MARK}]").click(timeout=5000)
@@ -1349,7 +1337,8 @@ class ConversationReader:
                 THREAD_MENU_ITEMS_JS,
                 {
                     "archive": text.archive_item,
-                    "optionSelector": _THREAD_OPTION_SELECTOR,
+                    "trigger": _THREAD_OPTIONS_MARK,
+                    "seen": _THREAD_SEEN_MARK,
                     "mark": _THREAD_ARCHIVE_MARK,
                 },
             )
@@ -1361,11 +1350,7 @@ class ConversationReader:
         # The menu is still open: read it and take its picture before closing.
         survey = await page.evaluate(
             THREAD_MENU_SURVEY_JS,
-            {
-                "before": before["keys"],
-                "optionSelector": _THREAD_OPTION_SELECTOR,
-                "mark": _THREAD_OPTIONS_MARK,
-            },
+            {"after": True, "trigger": _THREAD_OPTIONS_MARK, "seen": _THREAD_SEEN_MARK},
         )
         await record_page_trace(page, "archive-conversation-menu", extra=survey)
         await page.keyboard.press("Escape")
