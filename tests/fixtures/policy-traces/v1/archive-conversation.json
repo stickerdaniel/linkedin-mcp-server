@@ -117,7 +117,7 @@
       "call": "archive_conversation",
       "kind": "evaluate",
       "operation": "thread_menu_survey",
-      "program_digest": "25826857735b"
+      "program_digest": "7bc073c95aa3"
     },
     {
       "call": "archive_conversation",
@@ -142,7 +142,7 @@
       "call": "archive_conversation",
       "kind": "evaluate",
       "operation": "thread_menu_items",
-      "program_digest": "07456e3b75cd"
+      "program_digest": "ff9c0eb15ba8"
     },
     {
       "call": "archive_conversation",

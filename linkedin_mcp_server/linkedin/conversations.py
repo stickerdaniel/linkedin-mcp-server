@@ -299,12 +299,13 @@ THREAD_OPTIONS_JS = r"""(opts) => {
 # options button's click revealed. They are told from what was already on the
 # page by the ``seen`` attribute the survey puts on every visible item before
 # the click, element by element, because a message in the thread can read the
-# same as a menu item. They are kept only inside the button's nearest ancestor
-# that holds any of them, so a control the click happens to reveal elsewhere
-# on the page is not one of its items. Measured on 2026-09-26 and 2026-10-15,
-# the dropdown is `div[role=button]` items (`div[role=link]` for Manage
-# settings) in the button's own parent. Shared by the two programs below,
-# which start by unpacking ``after``, ``trigger`` and ``seen``.
+# same as a menu item. Only those inside the button's own parent are its menu:
+# measured on 2026-09-26 and 2026-10-15, the dropdown is `div[role=button]`
+# items (`div[role=link]` for Manage settings) there. The scope never widens,
+# so a control the click reveals elsewhere on the page, while the dropdown is
+# still rendering or because LinkedIn moved it, is never one of its items.
+# Shared by the two programs below, which start by unpacking ``after``,
+# ``trigger`` and ``seen``.
 _THREAD_MENU_PRELUDE_JS = r"""
     const visible = (el) => {
         const box = el.getBoundingClientRect();
@@ -322,8 +323,7 @@ _THREAD_MENU_PRELUDE_JS = r"""
     const revealed = after
         ? items.filter(el => el !== button && !el.hasAttribute(seen))
         : [];
-    let menu = button?.parentElement || null;
-    while (menu && !revealed.some(el => menu.contains(el))) menu = menu.parentElement;
+    const menu = button?.parentElement || null;
     const menuItems = menu ? revealed.filter(el => menu.contains(el)) : [];
 """
 
@@ -345,8 +345,9 @@ THREAD_MENU_ITEMS_JS = (
 )
 
 # Before the click, marks everything already visible as seen. After it, evidence
-# for a menu the read above could not use: the menu's items, the container
-# holding them, and the options button. Nothing is clicked.
+# for a menu the read above could not use: the items beside the button, or
+# when there are none, whatever the click revealed elsewhere, with the
+# container holding them and the options button. Nothing is clicked.
 THREAD_MENU_SURVEY_JS = (
     r"""(opts) => {
     const {after, trigger, seen} = opts;"""
@@ -366,14 +367,20 @@ THREAD_MENU_SURVEY_JS = (
         return el.tagName.toLowerCase() + (role ? '[role=' + role + ']' : '')
             + (el.id ? '#' + el.id : '') + classes;
     };
-    const added = menuItems;
+    const beside = menuItems.length > 0;
+    const added = beside ? menuItems : revealed;
+    let container = beside ? menu : added[0]?.parentElement || null;
+    while (container && !added.every(el => container.contains(el))) {
+        container = container.parentElement;
+    }
     const controls = button?.getAttribute('aria-controls');
     return {
         added: added.slice(0, 25).map(el => ({
             element: describe(el), text: squash(el.innerText),
         })),
         addedTotal: added.length,
-        container: describe(menu),
+        beside,
+        container: describe(container),
         trigger: button ? {
             element: describe(button),
             expanded: button.getAttribute('aria-expanded'),
@@ -577,13 +584,17 @@ def _menu_evidence(survey: dict[str, Any]) -> str:
     ]
     added = survey.get("added") or []
     if not added:
-        parts.append("Its click revealed no visible item near it.")
+        parts.append("Its click revealed no visible item.")
     else:
         listed = ", ".join(f"{item['text']!r} ({item['element']})" for item in added)
         total = survey.get("addedTotal", len(added))
+        where = (
+            "Its click revealed"
+            if survey.get("beside")
+            else "Nothing appeared beside it; its click revealed elsewhere"
+        )
         parts.append(
-            f"Its click revealed {total} visible item(s) in "
-            f"{survey.get('container')}: {listed}."
+            f"{where} {total} visible item(s) in {survey.get('container')}: {listed}."
         )
     return " ".join(parts)
 
