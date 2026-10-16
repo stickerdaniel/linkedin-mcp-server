@@ -253,6 +253,32 @@ _MESSAGING_CHROME_STRINGS: dict[str, _MessagingChromeTable] = {
 }
 
 
+@dataclass(frozen=True)
+class ConversationActionTextTable:
+    """Visible-text policy for acting on an opened conversation thread."""
+
+    # Start of the accessible name of a thread's options button, followed by
+    # the participants. The line the chrome table pins the thread header on;
+    # each sidebar row carries one too.
+    options_prefix: str
+    # Whole visible text of the options menu item that archives the thread,
+    # measured on 2026-10-15 on an inbox thread. The menu does not say whether
+    # the thread is archived: an archived thread opened by its URL offers
+    # Archive too, so the folder is read from LinkedIn's data instead.
+    archive_item: str
+
+
+_CONVERSATION_ACTION_TEXT: dict[str, ConversationActionTextTable] = {
+    "en-US": ConversationActionTextTable(
+        options_prefix=_MESSAGING_CHROME_STRINGS["en"].thread_header_prefix,
+        archive_item="Archive",
+    ),
+}
+
+# Same locale contract as `DETAIL_CAPTURE_EN_US`.
+CONVERSATION_ACTIONS_EN_US = _CONVERSATION_ACTION_TEXT["en-US"]
+
+
 def strip_conversation_chrome(text: str, locale: str = "en") -> str:
     """Trim messaging chrome around an opened conversation thread.
 

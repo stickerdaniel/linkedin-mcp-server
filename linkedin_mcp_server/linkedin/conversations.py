@@ -4,17 +4,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Literal
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
+import asyncio
+import json
 import logging
 import re
 
+import anyio
+import anyio.lowlevel
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import (
     InvalidReferenceError,
     LinkedInOperationError,
 )
+from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.identifiers import (
     messaging_thread_url,
@@ -29,8 +34,10 @@ from linkedin_mcp_server.linkedin.link_metadata import (
 )
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
-from linkedin_mcp_server.linkedin.session import PageSession
+from linkedin_mcp_server.linkedin.session import NAV_DELAY, PageSession
 from linkedin_mcp_server.linkedin.text import (
+    CONVERSATION_ACTIONS_EN_US,
+    ConversationActionTextTable,
     strip_conversation_chrome,
     strip_linkedin_noise,
 )
@@ -244,6 +251,365 @@ def _unverified_index_message(
     return message + " Pass a known thread_id instead."
 
 
+# The opened thread's options button, found by its accessible name: the
+# `aria-label` or the screen-reader text inside it, whichever carries the
+# table's prefix. The chrome table found that name in the page's innerText,
+# so it is at least there as text. Every sidebar row holds one too, inside the `<li>` whose
+# `label[aria-label]` names the row, so those are skipped, and more than one
+# left is refused rather than guessed at. Marked for the click only when
+# exactly one matches.
+THREAD_OPTIONS_JS = r"""(opts) => {
+    const {prefix, mark} = opts;
+    const main = document.querySelector('main');
+    if (!main) return null;
+    const visible = (el) => {
+        const box = el.getBoundingClientRect();
+        return box.width > 0 && box.height > 0;
+    };
+    const inRow = (el) => {
+        const row = el.closest('li');
+        return !!(row && row.querySelector('label[aria-label]'));
+    };
+    const squash = (value) => (value || '').replace(/\s+/g, ' ').trim();
+    for (const old of document.querySelectorAll('[' + mark + ']')) {
+        old.removeAttribute(mark);
+    }
+    const names = [];
+    for (const button of main.querySelectorAll('button')) {
+        if (!visible(button) || inRow(button)) continue;
+        // The shortest match is the name alone, without the icon's text.
+        const name = [
+            button.getAttribute('aria-label'),
+            ...[button, ...button.querySelectorAll('*')].map(el => el.textContent),
+        ]
+            .map(squash)
+            .filter(value => value.startsWith(prefix))
+            .sort((left, right) => left.length - right.length)[0];
+        if (name) names.push([button, name]);
+    }
+    if (names.length === 1) names[0][0].setAttribute(mark, '');
+    return {
+        triggers: names.length,
+        name: names.length === 1 ? names[0][1] : null,
+    };
+}"""
+
+# The thread menu's items, found by structure rather than by LinkedIn's
+# classes: the visible item-like elements with short text, innermost, that the
+# options button's click revealed. They are told from what was already on the
+# page by the ``seen`` attribute the survey puts on every visible item before
+# the click, element by element, because a message in the thread can read the
+# same as a menu item. Only those inside the button's own parent are its menu:
+# measured on 2026-09-26 and 2026-10-15, the dropdown is `div[role=button]`
+# items (`div[role=link]` for Manage settings) there. The scope never widens,
+# so a control the click reveals elsewhere on the page, while the dropdown is
+# still rendering or because LinkedIn moved it, is never one of its items.
+# Shared by the two programs below, which start by unpacking ``after``,
+# ``trigger`` and ``seen``.
+_THREAD_MENU_PRELUDE_JS = r"""
+    const visible = (el) => {
+        const box = el.getBoundingClientRect();
+        return box.width > 0 && box.height > 0;
+    };
+    const squash = (value) => (value || '').replace(/\s+/g, ' ').trim();
+    const itemSelector = '[role="button"], [role="menuitem"], [role="menuitemradio"], '
+        + '[role="menuitemcheckbox"], [role="option"], button, a, li, [tabindex]';
+    const found = [...document.querySelectorAll(itemSelector)].filter(el => {
+        const text = squash(el.innerText);
+        return visible(el) && text && text.length <= 80;
+    });
+    const items = found.filter(el => !found.some(other => other !== el && el.contains(other)));
+    const button = document.querySelector('[' + trigger + ']');
+    const revealed = after
+        ? items.filter(el => el !== button && !el.hasAttribute(seen))
+        : [];
+    const menu = button?.parentElement || null;
+    const menuItems = menu ? revealed.filter(el => menu.contains(el)) : [];
+"""
+
+# The menu's items whose whole text is the archive label. Marked for the
+# click only when it is the one match.
+THREAD_MENU_ITEMS_JS = (
+    r"""(opts) => {
+    const {archive, trigger, seen, mark} = opts;
+    const after = true;
+    for (const old of document.querySelectorAll('[' + mark + ']')) {
+        old.removeAttribute(mark);
+    }"""
+    + _THREAD_MENU_PRELUDE_JS
+    + r"""
+    const archiveItems = menuItems.filter(el => squash(el.innerText) === archive);
+    if (archiveItems.length === 1) archiveItems[0].setAttribute(mark, '');
+    return {archive: archiveItems.length};
+}"""
+)
+
+# Before the click, marks everything already visible as seen. After it, evidence
+# for a menu the read above could not use: the items beside the button, or
+# when there are none, whatever the click revealed elsewhere, with the
+# container holding them and the options button. Nothing is clicked.
+THREAD_MENU_SURVEY_JS = (
+    r"""(opts) => {
+    const {after, trigger, seen} = opts;"""
+    + _THREAD_MENU_PRELUDE_JS
+    + r"""
+    if (!after) {
+        for (const old of document.querySelectorAll('[' + seen + ']')) {
+            old.removeAttribute(seen);
+        }
+        for (const el of items) el.setAttribute(seen, '');
+        return {seen: items.length};
+    }
+    const describe = (el) => {
+        if (!el) return null;
+        const role = el.getAttribute('role');
+        const classes = [...el.classList].slice(0, 3).map(name => '.' + name).join('');
+        return el.tagName.toLowerCase() + (role ? '[role=' + role + ']' : '')
+            + (el.id ? '#' + el.id : '') + classes;
+    };
+    const beside = menuItems.length > 0;
+    const added = beside ? menuItems : revealed;
+    let container = beside ? menu : added[0]?.parentElement || null;
+    while (container && !added.every(el => container.contains(el))) {
+        container = container.parentElement;
+    }
+    const controls = button?.getAttribute('aria-controls');
+    return {
+        added: added.slice(0, 25).map(el => ({
+            element: describe(el), text: squash(el.innerText),
+        })),
+        addedTotal: added.length,
+        beside,
+        container: describe(container),
+        trigger: button ? {
+            element: describe(button),
+            expanded: button.getAttribute('aria-expanded'),
+            haspopup: button.getAttribute('aria-haspopup'),
+            controls: describe(controls ? document.getElementById(controls) : null),
+        } : null,
+    };
+}"""
+)
+
+# The attributes that tie a click to the element the read chose.
+_THREAD_OPTIONS_MARK = "data-mcp-thread-options"
+_THREAD_ARCHIVE_MARK = "data-mcp-thread-archive"
+_THREAD_SEEN_MARK = "data-mcp-thread-seen"
+
+# How long the thread gets to load its folder and render its options button,
+# and its menu to open.
+_THREAD_READY_TIMEOUT = 10.0
+_THREAD_MENU_TIMEOUT = 5.0
+_THREAD_POLL = 0.25
+
+# The folder a thread is in is read from LinkedIn's own messaging data, never
+# from its menu: measured on 2026-10-15, an archived thread opened by its URL
+# still offers Archive in its options menu. The client loads the open thread
+# with the `messengerConversations` query, from the list when the thread is in
+# the loaded window and by id otherwise, and each `Conversation` carries its
+# `categories`: `["ARCHIVE"]` for the archived thread, `["INBOX",
+# "PRIMARY_INBOX"]` for one in the inbox, and `["ARCHIVE", "INMAIL"]` for
+# archived InMails in the same response.
+_CONVERSATIONS_GRAPHQL_PATH = "/voyager/api/voyagerMessagingGraphQL/graphql"
+_CONVERSATIONS_QUERY = "messengerConversations."
+_CONVERSATION_TYPE = "com.linkedin.messenger.Conversation"
+_ARCHIVE_CATEGORY = "ARCHIVE"
+_INBOX_CATEGORY = "INBOX"
+
+_ThreadArchiveState = Literal[
+    # LinkedIn files it in the inbox and its menu offers Archive, marked for
+    # the click.
+    "archivable",
+    # LinkedIn files it as archived. Its menu is not opened.
+    "archived",
+    # LinkedIn's data never named the thread's folder, or named both or
+    # neither of the inbox and the archive.
+    "no_folder",
+    # No single options button could be told to be the thread's.
+    "no_options",
+    # The menu of an inbox thread showed no Archive item, or more than one.
+    "no_item",
+]
+
+
+@dataclass(frozen=True)
+class _ThreadArchiveRead:
+    state: _ThreadArchiveState
+    participant: str | None
+    # For a failed read, what the page showed instead, in error-message words.
+    evidence: str = ""
+
+
+def is_conversations_payload_response(url: str) -> bool:
+    """Whether ``url`` is a messaging query that loads conversations."""
+    parsed = urlparse(url)
+    return (
+        parsed.netloc == "www.linkedin.com"
+        and parsed.path == _CONVERSATIONS_GRAPHQL_PATH
+        and any(
+            query_id.startswith(_CONVERSATIONS_QUERY)
+            for query_id in parse_qs(parsed.query).get("queryId", [])
+        )
+    )
+
+
+def thread_categories(payload: Any, thread_key: str) -> list[str] | None:
+    """The categories ``payload`` gives the conversation ``thread_key``.
+
+    The conversation is the `Conversation` whose `backendUrn` names exactly that
+    thread. None when the payload holds none, or holds it without a list of
+    category strings.
+    """
+    urn = f"urn:li:messagingThread:{thread_key}"
+    found: list[str] | None = None
+    stack = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, list):
+            stack.extend(node)
+            continue
+        if not isinstance(node, dict):
+            continue
+        categories = node.get("categories")
+        if (
+            node.get("_type") == _CONVERSATION_TYPE
+            and node.get("backendUrn") == urn
+            and isinstance(categories, list)
+            and all(isinstance(category, str) for category in categories)
+        ):
+            found = list(categories)
+        stack.extend(node.values())
+    return found
+
+
+class _ThreadFolderListener:
+    """Read one thread's categories from the conversation payloads a load fetches.
+
+    Installed before the navigation, because the open thread's conversation
+    arrives with the page's first queries. Keeps the categories of the last
+    payload that named the thread.
+    """
+
+    _READ_DRAIN_TIMEOUT = 2.0
+    _CANCEL_DRAIN_TIMEOUT = 1.0
+
+    def __init__(self, page: Any, thread_key: str):
+        self._page = page
+        self._thread_key = thread_key
+        self._pending: list[asyncio.Task[None]] = []
+        self.categories: list[str] | None = None
+
+    def install(self) -> None:
+        self._page.on("response", self._handle_response)
+
+    def remove(self) -> None:
+        try:
+            # The registered method itself: Playwright matches listeners by
+            # identity (see feed.py).
+            self._page.remove_listener("response", self._handle_response)
+        except Exception:
+            logger.debug("Failed to remove thread folder listener", exc_info=True)
+
+    def _handle_response(self, response: Any) -> None:
+        if not is_conversations_payload_response(response.url):
+            return
+
+        async def _read() -> None:
+            try:
+                body = await response.body()
+                payload = json.loads(body)
+            except Exception:
+                return
+            categories = thread_categories(payload, self._thread_key)
+            if categories is not None:
+                self.categories = categories
+
+        self._pending.append(asyncio.create_task(_read()))
+
+    async def drain(self) -> None:
+        """Bounded teardown for the response reads, as the permalink listener's."""
+        pending = self._pending
+        if not pending:
+            return
+        try:
+            await asyncio.wait(pending, timeout=self._READ_DRAIN_TIMEOUT)
+        finally:
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            with anyio.CancelScope(shield=True):
+                try:
+                    await asyncio.wait(pending, timeout=self._CANCEL_DRAIN_TIMEOUT)
+                finally:
+                    leftover = [task for task in pending if not task.done()]
+                    for task in pending:
+                        if task.done() and not task.cancelled():
+                            task.exception()
+                    if leftover:
+                        logger.warning(
+                            "Thread folder listener tasks did not drain after "
+                            "cancel; leaking %d task(s)",
+                            len(leftover),
+                        )
+            await anyio.lowlevel.checkpoint()
+        self._pending = [task for task in pending if not task.done()]
+
+
+def _folder_of(categories: list[str] | None) -> Literal["archived", "inbox"] | None:
+    """The one folder ``categories`` put a thread in, or None."""
+    if categories is None:
+        return None
+    archived = _ARCHIVE_CATEGORY in categories
+    inbox = _INBOX_CATEGORY in categories
+    if archived == inbox:
+        return None
+    return "archived" if archived else "inbox"
+
+
+def _folder_finding(categories: list[str] | None) -> str:
+    """Say which folder LinkedIn's data put a thread in, for an error message."""
+    if categories is None:
+        return "LinkedIn's messaging data never named its folder"
+    return f"LinkedIn files it under {categories!r}"
+
+
+def _menu_evidence(survey: dict[str, Any]) -> str:
+    """Say what the options button opened, from a survey taken after its click."""
+    trigger = survey.get("trigger") or {}
+    parts = [
+        f"The options button was {trigger.get('element')} with "
+        f"aria-expanded={trigger.get('expanded')!r}, "
+        f"aria-haspopup={trigger.get('haspopup')!r} and aria-controls naming "
+        f"{trigger.get('controls')}."
+    ]
+    added = survey.get("added") or []
+    if not added:
+        parts.append("Its click revealed no visible item.")
+    else:
+        listed = ", ".join(f"{item['text']!r} ({item['element']})" for item in added)
+        total = survey.get("addedTotal", len(added))
+        where = (
+            "Its click revealed"
+            if survey.get("beside")
+            else "Nothing appeared beside it; its click revealed elsewhere"
+        )
+        parts.append(
+            f"{where} {total} visible item(s) in {survey.get('container')}: {listed}."
+        )
+    return " ".join(parts)
+
+
+def _on_thread(url: str, thread_key: str) -> bool:
+    """Whether ``url`` is the thread ``thread_key``, compared decoded."""
+    parsed = urlparse(url)
+    match = re.fullmatch(r"/messaging/thread/([^/]+)/?", parsed.path)
+    return (
+        parsed.netloc == "www.linkedin.com"
+        and match is not None
+        and unquote(match.group(1)) == thread_key
+    )
+
+
 class ConversationReader:
     """Own every workflow whose subject is a LinkedIn messaging thread.
 
@@ -262,11 +628,13 @@ class ConversationReader:
         navigator: PageNavigator,
         content: PageContentReader,
         profile_page: ProfilePageReader,
+        action_text: ConversationActionTextTable = CONVERSATION_ACTIONS_EN_US,
     ):
         self._session = session
         self._navigator = navigator
         self._content = content
         self._profile_page = profile_page
+        self._action_text = action_text
 
     @staticmethod
     def _single_section_result(
@@ -822,3 +1190,184 @@ class ConversationReader:
         if section_errors:
             result["section_errors"] = section_errors
         return result
+
+    async def archive_conversation(self, thread_id: str) -> dict[str, Any]:
+        """Archive one messaging thread from its own options menu.
+
+        Opens ``/messaging/thread/<id>/``, which marks it read, and reads the
+        thread's folder from the conversation data the page loads before
+        touching anything. The menu cannot tell: an archived thread opened by
+        its URL still offers Archive. A thread already archived is reported as
+        such and its menu is never opened; only one in the inbox has Archive
+        chosen. After the click the thread is loaded again and LinkedIn must
+        file it as archived, because a click the page took is not yet a
+        change LinkedIn kept.
+
+        Returns:
+            {url, thread_id, participant, status: "archived" | "already_archived"}
+        """
+        thread_key = unquote(normalize_thread_id(thread_id))
+        url = messaging_thread_url(thread_key, "/")
+        first = await self._read_thread_archive_state(url, thread_key)
+        status = "already_archived"
+        if first.state == "archivable":
+            if not _on_thread(self._session.page.url, thread_key):
+                await self._session.page.keyboard.press("Escape")
+                raise LinkedInOperationError(
+                    f"Thread {thread_key} was left for {self._session.page.url} "
+                    "before Archive could be chosen. Nothing was clicked."
+                )
+            await self._session.page.locator(f"[{_THREAD_ARCHIVE_MARK}]").click(
+                timeout=5000
+            )
+            await self._session.delay(NAV_DELAY)
+            after = await self._read_thread_folder(url, thread_key)
+            if _folder_of(after) != "archived":
+                raise LinkedInOperationError(
+                    f"Archive was chosen for thread {thread_key}, but after a "
+                    f"reload {_folder_finding(after)}."
+                )
+            status = "archived"
+        elif first.state != "archived":
+            raise LinkedInOperationError(
+                f"Thread {thread_key} was not archived: "
+                f"{self._read_finding(first.state)}.{first.evidence}"
+            )
+        return {
+            "url": url,
+            "thread_id": thread_key,
+            "participant": first.participant,
+            "status": status,
+        }
+
+    def _read_finding(self, state: _ThreadArchiveState) -> str:
+        """What a failed read found, in the words of the error it ends up in."""
+        text = self._action_text
+        if state == "no_options":
+            return (
+                "its options button could not be found: no single button named "
+                f"{text.options_prefix!r} outside the conversation list"
+            )
+        if state == "no_item":
+            return (
+                f"its options menu did not offer exactly one {text.archive_item!r}. "
+                "Nothing was clicked"
+            )
+        return "LinkedIn did not file it in exactly one of the inbox or the archive"
+
+    async def _read_thread_folder(self, url: str, thread_key: str) -> list[str] | None:
+        """Open the thread and read its categories from the conversation data.
+
+        Raises when the navigation ends anywhere but that thread, after
+        offering the page to the auth-barrier check: LinkedIn sends an id it
+        does not know elsewhere, and that page belongs to another thread.
+        Returns None when no payload named the thread before the deadline.
+        """
+        page = self._session.page
+        listener = _ThreadFolderListener(page, thread_key)
+        listener.install()
+        try:
+            await self._navigator._navigate_to_page(url)
+            await self._session.check_rate_limit()
+            if not _on_thread(page.url, thread_key):
+                await self._navigator._raise_if_auth_barrier(page.url)
+                raise LinkedInOperationError(
+                    f"Thread {thread_key} could not be opened: the navigation "
+                    f"ended on {page.url}."
+                )
+            await self._session.dismiss_modal()
+            deadline = self._session.monotonic() + _THREAD_READY_TIMEOUT
+            while listener.categories is None:
+                if self._session.monotonic() >= deadline:
+                    break
+                await self._session.delay(_THREAD_POLL)
+            return listener.categories
+        finally:
+            listener.remove()
+            await listener.drain()
+
+    async def _read_thread_archive_state(
+        self, url: str, thread_key: str
+    ) -> _ThreadArchiveRead:
+        """Read the thread's folder and, in the inbox, its menu's Archive item.
+
+        Leaves the menu open with the Archive item marked when the state is
+        ``archivable``, and closed otherwise. An archived thread's menu is
+        never opened, and a thread whose options button cannot be found is
+        still reported archived when LinkedIn files it so.
+        """
+        text = self._action_text
+        page = self._session.page
+        categories = await self._read_thread_folder(url, thread_key)
+        folder = _folder_of(categories)
+        if folder is None:
+            return _ThreadArchiveRead(
+                "no_folder", None, f" {_folder_finding(categories)}."
+            )
+
+        options: dict[str, Any] = {"triggers": 0, "name": None}
+        deadline = self._session.monotonic() + _THREAD_READY_TIMEOUT
+        while True:
+            found = await page.evaluate(
+                THREAD_OPTIONS_JS,
+                {"prefix": text.options_prefix, "mark": _THREAD_OPTIONS_MARK},
+            )
+            if isinstance(found, dict):
+                options = found
+                if options["triggers"] == 1:
+                    break
+            if self._session.monotonic() >= deadline:
+                if folder == "archived":
+                    return _ThreadArchiveRead("archived", None)
+                await record_page_trace(
+                    page, "archive-conversation-no-options", extra=options
+                )
+                return _ThreadArchiveRead(
+                    "no_options",
+                    None,
+                    f" {options['triggers']} options button(s) matched.",
+                )
+            await self._session.delay(_THREAD_POLL)
+        name = options["name"] or ""
+        participant = name[len(text.options_prefix) :].strip() or None
+        if folder == "archived":
+            return _ThreadArchiveRead("archived", participant)
+
+        await page.evaluate(
+            THREAD_MENU_SURVEY_JS,
+            {
+                "after": False,
+                "trigger": _THREAD_OPTIONS_MARK,
+                "seen": _THREAD_SEEN_MARK,
+            },
+        )
+        await page.locator(f"main button[{_THREAD_OPTIONS_MARK}]").click(timeout=5000)
+        deadline = self._session.monotonic() + _THREAD_MENU_TIMEOUT
+        while True:
+            menu = await page.evaluate(
+                THREAD_MENU_ITEMS_JS,
+                {
+                    "archive": text.archive_item,
+                    "trigger": _THREAD_OPTIONS_MARK,
+                    "seen": _THREAD_SEEN_MARK,
+                    "mark": _THREAD_ARCHIVE_MARK,
+                },
+            )
+            if menu["archive"] == 1:
+                return _ThreadArchiveRead("archivable", participant)
+            if self._session.monotonic() >= deadline:
+                break
+            await self._session.delay(_THREAD_POLL)
+        # The menu is still open: read it and take its picture before closing.
+        survey = await page.evaluate(
+            THREAD_MENU_SURVEY_JS,
+            {"after": True, "trigger": _THREAD_OPTIONS_MARK, "seen": _THREAD_SEEN_MARK},
+        )
+        await record_page_trace(page, "archive-conversation-menu", extra=survey)
+        await page.keyboard.press("Escape")
+        return _ThreadArchiveRead(
+            "no_item",
+            participant,
+            f" 1 options button matched. {_menu_evidence(survey)} A screenshot "
+            "of the open menu is in the trace directory when tracing is on.",
+        )
