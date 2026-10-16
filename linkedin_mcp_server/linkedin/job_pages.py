@@ -141,6 +141,52 @@ PROMOTED_JOB_IDS_JS = (
 }"""
 )
 
+# How many unpromoted results sit above the notice the redesigned search puts
+# where its matches end, or null when no text node reads as the notice. Null
+# rather than zero, because zero is what calls the search a no-match. The
+# notice is looked for in the whole document, the cards only in the rail,
+# each read as `PROMOTED_JOB_IDS_JS` reads it.
+ORGANIC_BEFORE_NOTICE_JS = (
+    r"""(opts) => {
+    const {selector, label, notice} = opts;
+"""
+    + _RAIL_PICK_JS
+    + r"""
+    const scope = pickRail() || document;
+    const cardOf = (node) => {
+        let card = node;
+        while (card.parentElement && card.parentElement !== scope
+               && card.parentElement !== document.body
+               && idsIn(card.parentElement) === 1) {
+            card = card.parentElement;
+        }
+        return card;
+    };
+    const isPromoted = (node) => (cardOf(node).innerText || '').split('\n')
+        .map((line) => line.trim()).includes(label);
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let mark = null;
+    while (walker.nextNode()) {
+        if (walker.currentNode.data.replace(/\s+/g, ' ').trim() === notice) {
+            mark = walker.currentNode;
+            break;
+        }
+    }
+    if (!mark) return null;
+    const seen = new Set();
+    let organic = 0;
+    for (const node of scope.querySelectorAll(selector)) {
+        const id = idOf(node);
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        const above = mark.compareDocumentPosition(node)
+            & Node.DOCUMENT_POSITION_PRECEDING;
+        if (above && !isPromoted(node)) organic += 1;
+    }
+    return organic;
+}"""
+)
+
 # This posting's apply control and state, once they render. Easy Apply comes in
 # two shapes. The anchor into the posting's own `/apply/` route
 # (`<a href=".../jobs/view/<id>/apply/?openSDUIApplyFlow=true">`, measured on
@@ -398,6 +444,23 @@ class JobPageReader:
         if not isinstance(result, list):
             raise TypeError(f"Promoted job ids read returned {type(result).__name__}")
         return [job_id for job_id in result if isinstance(job_id, str)]
+
+    async def _count_organic_before_notice(self, notice: str, label: str) -> int | None:
+        """Unpromoted results above ``notice``, or None without the notice.
+
+        Raises when the page answers with anything else, so a caller treating
+        this as best effort cannot read a failed read as zero, which would
+        discard the page as a no-match.
+        """
+        result = await self._session.run_on_linkedin(
+            ORGANIC_BEFORE_NOTICE_JS,
+            {"selector": _JOB_CARD_SELECTOR, "label": label, "notice": notice},
+        )
+        if result is None:
+            return None
+        if isinstance(result, bool) or not isinstance(result, int):
+            raise TypeError(f"Organic results read returned {type(result).__name__}")
+        return result
 
     async def _extract_search_page(
         self,

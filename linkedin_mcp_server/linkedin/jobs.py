@@ -396,8 +396,9 @@ class JobReader:
                 # LinkedIn merely renamed would return nothing at all.
                 landed_query = parse_qs(parsed_url.query)
                 asked = parse_qs(urlparse(base_url).query)
-                is_no_match = bool(extracted.text) and self._search_text.shows_no_match(
-                    extracted.text
+                is_no_match = bool(extracted.text) and (
+                    self._search_text.shows_no_match(extracted.text)
+                    or await self._matches_none_before_notice(extracted.text)
                 )
                 asked_keywords = asked.get("keywords", [""])[0]
                 landed_keywords = landed_query.get("keywords", [""])[0]
@@ -577,6 +578,33 @@ class JobReader:
         if section_errors:
             result["section_errors"] = section_errors
         return result
+
+    async def _matches_none_before_notice(self, text: str) -> bool:
+        """Whether the redesigned search put no result above its notice.
+
+        That search has no no-match page. A query matching nothing renders
+        the promoted cards, then the notice saying what follows may not be an
+        exact match, then a full page of unrelated postings, under "99+
+        results" like any other search. Measured live on a nonsense query:
+        three promoted cards above the notice. A narrow query put 24 cards
+        above it, and the broad ones never showed it.
+
+        False when the read fails or finds no notice, which keeps the page,
+        as every search was read before.
+        """
+        notice = self._search_text.inexact_notice(text)
+        if notice is None:
+            return False
+        try:
+            organic = await self._pages._count_organic_before_notice(
+                notice, self._search_text.promoted_label
+            )
+        except LinkedInOperationError:
+            raise
+        except Exception as e:
+            logger.debug("Could not read results above the notice: %s", e)
+            return False
+        return organic == 0
 
     async def get_saved_jobs(
         self, max_pages: int = 3, stage: JobsTrackerStage = "saved"
