@@ -156,8 +156,7 @@ def register_job_tools(
         reported in section_errors as filters_dropped. Put the place and work
         type in the keywords instead ("remote python developer in Lyon");
         words such as "senior" or "internship" there narrow the results too.
-        Quotes do not make a phrase exact on that search, and a search that
-        matches nothing returns unrelated postings rather than an error.
+        Quotes do not make a phrase exact on that search.
 
         Args:
             keywords: Search keywords (e.g., "software engineer", "data scientist")
