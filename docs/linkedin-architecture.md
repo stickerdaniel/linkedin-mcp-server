@@ -86,6 +86,7 @@ a page-owning collaborator.
 - `read_company`
 - `read_job`
 - `read_person`
+- `save_job`
 - `search_companies`
 - `search_conversations`
 - `search_jobs`
