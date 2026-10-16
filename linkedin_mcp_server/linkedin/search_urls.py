@@ -64,6 +64,14 @@ CONTENT_DATE_POSTED_MAP = {
 # LinkedIn accepts "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
 NETWORK_TOKENS = ("F", "S", "O")
 
+# The ``connectionOf`` facet takes a member's profile id, the ``ACoA...`` value
+# ``get_person_profile`` returns as ``profile_urn``. A vanity name or any other
+# string is accepted by the URL and then dropped, so it is refused here. The
+# ``urn:li:fsd_profile:`` form is accepted and reduced to the bare id the facet
+# carries.
+_PROFILE_URN_PREFIX = "urn:li:fsd_profile:"
+_CONNECTION_OF_ID = re.compile(r"ACoA[A-Za-z0-9_-]+")
+
 
 def _normalize_csv(value: str, mapping: dict[str, str]) -> str:
     """Normalize and encode each token in a comma-separated filter value."""
@@ -124,14 +132,15 @@ def build_people_search_url(
     location: str | None = None,
     network: list[str] | None = None,
     current_company: str | None = None,
+    connection_of: str | None = None,
 ) -> str:
     """Build a LinkedIn people search URL, refusing filters LinkedIn ignores.
 
-    Both refusals happen before a URL exists, so a workflow calling this can
+    Every refusal happens before a URL exists, so a workflow calling this can
     never navigate on a filter LinkedIn would swallow. An unknown ``network``
-    token and a plain-text ``currentCompany`` are each accepted by the URL and
-    then dropped, which answers with the unfiltered result set while the
-    request still reads as filtered.
+    token, a plain-text ``currentCompany`` and a ``connectionOf`` that is not a
+    profile id are each accepted by the URL and then dropped, which answers
+    with the unfiltered result set while the request still reads as filtered.
     """
     if network is not None:
         invalid = [t for t in network if t not in NETWORK_TOKENS]
@@ -149,6 +158,18 @@ def build_people_search_url(
             f'URN via get_company_profile -> references["about"].'
         )
 
+    connection_of_id = (
+        connection_of.removeprefix(_PROFILE_URN_PREFIX) if connection_of else None
+    )
+    if connection_of_id is not None and not _CONNECTION_OF_ID.fullmatch(
+        connection_of_id
+    ):
+        raise FilterValidationError(
+            f"connection_of must be a LinkedIn profile id (e.g. 'ACoAAB...'); "
+            f"got {connection_of!r}. A vanity name is silently ignored by "
+            f'LinkedIn. Look up the id via get_person_profile -> "profile_urn".'
+        )
+
     params = f"keywords={quote_plus(keywords)}"
     if location:
         params += f"&location={quote_plus(location)}"
@@ -156,6 +177,8 @@ def build_people_search_url(
         params += f"&network={_encode_list_facet(network)}"
     if current_company:
         params += f"&currentCompany={_encode_list_facet([current_company])}"
+    if connection_of_id:
+        params += f"&connectionOf={_encode_list_facet([connection_of_id])}"
 
     return f"https://www.linkedin.com/search/results/people/?{params}"
 

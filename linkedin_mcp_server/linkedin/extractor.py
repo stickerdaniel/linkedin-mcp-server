@@ -201,6 +201,7 @@ class LinkedInExtractor:
         location: str | None = None,
         network: list[str] | None = None,
         current_company: str | None = None,
+        connection_of: str | None = None,
     ) -> dict[str, Any]:
         """Search for people and extract the results page."""
         return await self._person.search_people(
@@ -208,6 +209,7 @@ class LinkedInExtractor:
             location=location,
             network=network,
             current_company=current_company,
+            connection_of=connection_of,
         )
 
     async def search_companies(self, keywords: str) -> dict[str, Any]:
