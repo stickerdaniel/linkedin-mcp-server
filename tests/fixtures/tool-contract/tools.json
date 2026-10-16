@@ -800,7 +800,7 @@
             }
           ],
           "default": null,
-          "description": "Optional profile id (e.g. \"ACoAAB...\") limiting\nresults to that member's connections. Combine with\nnetwork=[\"F\"] to list the mutual connections you share with\nthem; keywords may be \"\". Take the id from get_person_profile's\n\"profile_urn\"; a vanity name is refused, because LinkedIn\nignores it and returns unfiltered results."
+          "description": "Optional profile id (e.g. \"ACoAAB...\") limiting\nresults to that member's connections. Combine with\nnetwork=[\"F\"] to list the mutual connections you share with\nthem; keywords may be \"\". Take the id from get_person_profile's\n\"profile_urn\"; a vanity name is refused, because LinkedIn\nignores it and returns unfiltered results. LinkedIn also\ndrops the filter, without saying so, when the member is\n3rd-degree or beyond (you share no connections): the result\nis then your unfiltered network, not an empty list."
         },
         "current_company": {
           "anyOf": [

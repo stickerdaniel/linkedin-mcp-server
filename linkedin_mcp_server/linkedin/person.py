@@ -495,7 +495,9 @@ class PersonReader:
             connection_of: Optional profile id (``"ACoAAB..."``, as
                 ``get_person_profile`` returns it in ``profile_urn``). Limits
                 results to that member's connections; with ``network=["F"]``
-                that is the mutual connections.
+                that is the mutual connections. LinkedIn drops the facet
+                silently when the member is 3rd-degree or beyond, returning
+                the unfiltered network rather than an empty list.
 
         Returns:
             {url, sections: {name: text}}
