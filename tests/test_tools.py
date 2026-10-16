@@ -102,6 +102,12 @@ def serve_extractor(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], AsyncMoc
             "numeric LinkedIn company URN id",
         ),
         (
+            "person",
+            "search_people",
+            {"keywords": "", "connection_of": "williamhgates"},
+            "LinkedIn profile id",
+        ),
+        (
             "company",
             "get_company_profile",
             {"company_name": "/feed/"},
@@ -586,6 +592,7 @@ class TestPersonTool:
             "New York",
             network=None,
             current_company=None,
+            connection_of=None,
         )
 
     async def test_search_people_with_network_and_company_filters(
@@ -622,6 +629,41 @@ class TestPersonTool:
             None,
             network=["F"],
             current_company="1115",
+            connection_of=None,
+        )
+
+    async def test_search_people_with_connection_of_filter(
+        self, mock_context, serve_extractor
+    ):
+        expected = {
+            "url": (
+                "https://www.linkedin.com/search/results/people/"
+                "?keywords=&network=%5B%22F%22%5D"
+                "&connectionOf=%5B%22ACoAADdZSNYBiaacxEw6je-wVIKjGkKp-it0gD8%22%5D"
+            ),
+            "sections": {"search_results": "Jane Doe\n1st"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "search_people")
+        await tool_fn(
+            "",
+            mock_context,
+            network=["F"],
+            connection_of="ACoAADdZSNYBiaacxEw6je-wVIKjGkKp-it0gD8",
+        )
+        mock_extractor.search_people.assert_awaited_once_with(
+            "",
+            None,
+            network=["F"],
+            current_company=None,
+            connection_of="ACoAADdZSNYBiaacxEw6je-wVIKjGkKp-it0gD8",
         )
 
     @pytest.mark.parametrize(
@@ -684,6 +726,7 @@ class TestPersonTool:
             None,
             network=["F"],
             current_company=None,
+            connection_of=None,
         )
 
     async def test_search_people_validation_error_surfaced_as_tool_error(

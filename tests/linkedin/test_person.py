@@ -1884,6 +1884,29 @@ class TestSearchPeople:
 
         assert "currentCompany" not in result["url"]
 
+    async def test_search_people_connection_of_filter(self, mock_page):
+        reader = _reader(mock_page)
+        profile_id = "ACoAADdZSNYBiaacxEw6je-wVIKjGkKp-it0gD8"
+        with patch.object(
+            reader._capture,
+            "capture",
+            new_callable=AsyncMock,
+            return_value=extracted("Jane Doe"),
+        ):
+            result = await reader.search_people(
+                "", network=["F"], connection_of=profile_id
+            )
+
+        assert f"connectionOf=%5B%22{profile_id}%22%5D" in result["url"]
+        assert "network=%5B%22F%22%5D" in result["url"]
+
+    async def test_search_people_rejects_vanity_connection_of(self, mock_page):
+        reader = _reader(mock_page)
+        with pytest.raises(ValueError, match="LinkedIn profile id"):
+            await reader.search_people("", connection_of="williamhgates")
+
+        mock_page.goto.assert_not_awaited()
+
     async def test_search_people_combines_all_filters(self, mock_page):
         reader = _reader(mock_page)
         with patch.object(

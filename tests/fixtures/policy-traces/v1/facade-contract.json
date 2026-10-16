@@ -86,7 +86,7 @@
       },
       "search_people": {
         "coroutine": true,
-        "signature": "(self, keywords: 'str', location: 'str | None' = None, network: 'list[str] | None' = None, current_company: 'str | None' = None) -> 'dict[str, Any]'"
+        "signature": "(self, keywords: 'str', location: 'str | None' = None, network: 'list[str] | None' = None, current_company: 'str | None' = None, connection_of: 'str | None' = None) -> 'dict[str, Any]'"
       },
       "search_posts": {
         "coroutine": true,
@@ -658,6 +658,18 @@
         "input": {
           "additionalProperties": false,
           "properties": {
+            "connection_of": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional profile id (e.g. \"ACoAAB...\") limiting\nresults to that member's connections. Combine with\nnetwork=[\"F\"] to list the mutual connections you share with\nthem; keywords may be \"\". Take the id from get_person_profile's\n\"profile_urn\"; a vanity name is refused, because LinkedIn\nignores it and returns unfiltered results."
+            },
             "current_company": {
               "anyOf": [
                 {

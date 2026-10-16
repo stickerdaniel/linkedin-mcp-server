@@ -472,6 +472,7 @@ class PersonReader:
         location: str | None = None,
         network: list[str] | None = None,
         current_company: str | None = None,
+        connection_of: str | None = None,
     ) -> dict[str, Any]:
         """Search for people and extract the results page.
 
@@ -491,6 +492,10 @@ class PersonReader:
                 unfiltered result set. Look up a company's URN via
                 ``get_company_profile`` -- it is exposed under
                 ``references["about"]``.
+            connection_of: Optional profile id (``"ACoAAB..."``, as
+                ``get_person_profile`` returns it in ``profile_urn``). Limits
+                results to that member's connections; with ``network=["F"]``
+                that is the mutual connections.
 
         Returns:
             {url, sections: {name: text}}
@@ -502,6 +507,7 @@ class PersonReader:
             location=location,
             network=network,
             current_company=current_company,
+            connection_of=connection_of,
         )
         extracted = await self._capture.capture(
             url,
