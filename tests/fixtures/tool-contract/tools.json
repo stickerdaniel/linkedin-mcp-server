@@ -668,7 +668,7 @@
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Search for jobs on LinkedIn.\n\nReturns job_ids that can be passed to get_job_details for full info.",
+    "description": "Search for jobs on LinkedIn.\n\nReturns job_ids that can be passed to get_job_details for full info.\n\nLinkedIn is moving accounts to a redesigned job search, which keeps\nonly the keywords, date_posted and paging. There, location, job_type,\nexperience_level, work_type, easy_apply and sort_by are dropped and\nreported in section_errors as filters_dropped. Put the place and work\ntype in the keywords instead (\"remote python developer in Lyon\");\nwords such as \"senior\" or \"internship\" there narrow the results too.\nQuotes do not make a phrase exact on that search, and a search that\nmatches nothing returns unrelated postings rather than an error.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
