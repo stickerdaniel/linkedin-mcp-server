@@ -307,7 +307,7 @@ async def _person_sections_scenario() -> dict[str, Any]:
         "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
         "show_more.filtered",
     )
-    page.script("show_more.filtered.count", *([0] * 8))
+    page.script("show_more.filtered.count", *([0] * 9))
     extractor = _extractor(page)
     callbacks = TraceCallbacks(recorder)
     async with boundaries(recorder, clock):
