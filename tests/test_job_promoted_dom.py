@@ -152,6 +152,17 @@ class TestOrganicBeforeNotice:
 
         assert await self._count(dom_page, cards) == 2
 
+    async def test_a_notice_split_across_inline_elements_is_found(self, dom_page):
+        """The visible line is whole while its text sits in several nodes."""
+        head, tail = _NOTICE.split(", but ")
+        cards = (
+            _redesigned_card("801", "Success Engineer", promoted=True)
+            + f"<div><p><span>{head}</span>, <b>but</b> {tail}</p></div>"
+            + _redesigned_card("802", "Solutions Architect")
+        )
+
+        assert await self._count(dom_page, cards) == 0
+
     async def test_a_page_without_the_notice_reads_as_none(self, dom_page):
         """Not zero, which would discard a page of matches as a no-match."""
         cards = _redesigned_card("701", "Python Developer")

@@ -142,10 +142,15 @@ PROMOTED_JOB_IDS_JS = (
 )
 
 # How many unpromoted results sit above the notice the redesigned search puts
-# where its matches end, or null when no text node reads as the notice. Null
-# rather than zero, because zero is what calls the search a no-match. The
+# where its matches end, or null when nothing on the page reads as the notice.
+# Null rather than zero, because zero is what calls the search a no-match. The
 # notice is looked for in the whole document, the cards only in the rail,
 # each read as `PROMOTED_JOB_IDS_JS` reads it.
+#
+# The notice is the smallest element whose text is the whole sentence, reached
+# from a text node that opens it, so a sentence LinkedIn splits across inline
+# elements is still found. Its text only matched when it was one text node,
+# and a page whose notice was split then kept its unrelated postings.
 ORGANIC_BEFORE_NOTICE_JS = (
     r"""(opts) => {
     const {selector, label, notice} = opts;
@@ -164,13 +169,17 @@ ORGANIC_BEFORE_NOTICE_JS = (
     };
     const isPromoted = (node) => (cardOf(node).innerText || '').split('\n')
         .map((line) => line.trim()).includes(label);
+    const norm = (text) => (text || '').replace(/\s+/g, ' ').trim();
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     let mark = null;
-    while (walker.nextNode()) {
-        if (walker.currentNode.data.replace(/\s+/g, ' ').trim() === notice) {
-            mark = walker.currentNode;
-            break;
+    while (!mark && walker.nextNode()) {
+        const piece = norm(walker.currentNode.data);
+        if (!piece || !notice.startsWith(piece)) continue;
+        let node = walker.currentNode;
+        while (node && norm(node.textContent).length < notice.length) {
+            node = node.parentNode;
         }
+        if (node && norm(node.textContent) === notice) mark = node;
     }
     if (!mark) return null;
     const seen = new Set();
