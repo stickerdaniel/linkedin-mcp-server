@@ -506,6 +506,50 @@
           "type": "object"
         }
       },
+      "prepare_post": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "publish_post": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "approved_text": {
+              "type": "string"
+            },
+            "confirmed": {
+              "default": false,
+              "type": "boolean"
+            },
+            "draft_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "draft_id",
+            "approved_text"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "search_companies": {
         "input": {
           "additionalProperties": false,
