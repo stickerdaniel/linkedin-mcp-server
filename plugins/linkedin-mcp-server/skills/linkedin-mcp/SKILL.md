@@ -41,8 +41,10 @@ instances, clear profiles, or replace the user's browser session.
   `get_sidebar_profiles`.
 - Companies: `get_company_profile`, `get_company_posts`, `search_companies`,
   and `get_company_employees`.
-- Jobs: `search_jobs`, `get_saved_jobs`, `get_job_details`, and
-  `get_job_apply_url`.
+- Jobs: `search_jobs`, `get_saved_jobs`, `get_job_details`,
+  `get_job_apply_url` and `get_easy_apply_form`. `get_easy_apply_form` opens
+  the Easy Apply form, so use it only when the user is preparing an
+  application.
 - Content: `get_feed` and `search_posts`.
 - Messages: `get_inbox`, `get_conversation`, and `search_conversations`.
 - Writes: `send_message` and `connect_with_person`, subject to the explicit

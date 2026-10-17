@@ -376,3 +376,21 @@ def apply_link_missing_section_error() -> dict[str, str]:
             "this host's own network, so none is returned."
         ),
     }
+
+
+EASY_APPLY_DRAFT_LEFT = (
+    "The Easy Apply dialog could not be closed and its draft discarded, so "
+    "LinkedIn may keep a saved application for this posting."
+)
+
+
+def easy_apply_draft_section_error() -> dict[str, str]:
+    """The ``section_errors`` entry for an Easy Apply dialog left open.
+
+    A saved draft is resumed, with whatever it holds, the next time Easy Apply
+    is opened on the posting, so the caller has to know one may exist.
+    """
+    return {
+        "error_type": "easy_apply_draft_left",
+        "error_message": EASY_APPLY_DRAFT_LEFT,
+    }

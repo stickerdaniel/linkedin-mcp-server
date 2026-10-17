@@ -151,6 +151,7 @@ Optional additional keys:
 - `references["search_results"]` (search_posts only) — DOM references first, then up to 50 `kind: "feed_post"` permalinks read from the page's JSON/document payload responses (`/feed/update/<urn>/` or `/posts/<slug>`, both valid). Captured permalinks are appended, not aligned to result order.
 - `apply: {type, url?}` (get_job_apply_url, which returns no `sections`) — `type` is `easy_apply`, `external`, `applied`, `closed` or `unknown`; `url` is the employer's application link as LinkedIn gives it, never opened, present for external postings
 - `apply: {type}` (get_job_details) — `type` is `applied` or `closed`, read from the posting's text above its description without clicking; absent for an open posting and for one whose description heading was not captured
+- `form: {steps: [{heading?, progress?, fields: [{label, type, required, options?, options_total?, selected?, value?, max_length?, error?}]}], complete}` (get_easy_apply_form, which returns `apply: {type}` beside it and no `sections`) — present for Easy Apply postings only; `complete` is false when steps after the last one were not read, and `error` marks the fields LinkedIn refused on that step
 
 ## Tests
 

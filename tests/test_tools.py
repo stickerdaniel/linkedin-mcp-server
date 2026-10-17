@@ -35,6 +35,7 @@ def _make_mock_extractor(result: dict) -> MagicMock:
     mock.search_jobs = AsyncMock(return_value=result)
     mock.get_saved_jobs = AsyncMock(return_value=result)
     mock.get_job_apply_url = AsyncMock(return_value=result)
+    mock.get_easy_apply_form = AsyncMock(return_value=result)
     mock.search_people = AsyncMock(return_value=result)
     mock.get_sidebar_profiles = AsyncMock(return_value=result)
     mock.get_inbox = AsyncMock(return_value=result)
@@ -1214,6 +1215,25 @@ class TestJobTools:
         result = await tool_fn("12345", mock_context)
         assert result == expected
         mock_extractor.get_job_apply_url.assert_awaited_once_with("12345")
+
+    async def test_get_easy_apply_form(self, mock_context, serve_extractor):
+        expected = {
+            "url": "https://www.linkedin.com/jobs/view/12345/",
+            "apply": {"type": "easy_apply"},
+            "form": {"steps": [], "complete": True},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "get_easy_apply_form")
+        result = await tool_fn("12345", mock_context)
+        assert result == expected
+        mock_extractor.get_easy_apply_form.assert_awaited_once_with("12345")
 
     async def test_search_jobs(self, mock_context, serve_extractor):
         expected = {
