@@ -1,0 +1,21 @@
+{
+  "call": {
+    "arguments": {
+      "actor": "/in/ada/",
+      "post": "/feed/update/urn:li:activity:123/",
+      "reaction": "unsupported"
+    },
+    "method": "react_to_post"
+  },
+  "events": [],
+  "result": {
+    "acted": false,
+    "message": "Only the like reaction is supported.",
+    "reaction": "unsupported",
+    "retry_safe": true,
+    "status": "invalid_reaction",
+    "url": ""
+  },
+  "scenario": "react_to_post__invalid_input",
+  "schema_version": 1
+}

@@ -1,0 +1,22 @@
+{
+  "call": {
+    "arguments": {
+      "actor": "/in/ada/",
+      "comment_reference": "urn:li:comment:(activity:123,4)",
+      "confirm_reply": true,
+      "post": "/feed/update/urn:li:activity:123/",
+      "reply": " "
+    },
+    "method": "reply_to_comment"
+  },
+  "events": [],
+  "result": {
+    "acted": false,
+    "message": "reply must contain non-whitespace characters.",
+    "retry_safe": true,
+    "status": "invalid_text",
+    "url": "https://www.linkedin.com/feed/update/urn:li:activity:123/"
+  },
+  "scenario": "reply_to_comment__invalid_input",
+  "schema_version": 1
+}

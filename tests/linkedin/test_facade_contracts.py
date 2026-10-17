@@ -45,6 +45,10 @@ from .support.policy_trace import ScriptedPage, TraceRecorder
 
 
 TOOL_DELEGATES = {
+    "get_post_comments": "get_post_comments",
+    "reply_to_comment": "reply_to_comment",
+    "react_to_post": "react_to_post",
+    "comment_on_post": "comment_on_post",
     "connect_with_person": "connect_with_person",
     "get_company_employees": "get_company_employees",
     "get_company_posts": "extract_page",
@@ -102,6 +106,7 @@ async def test_constructor_export_and_dependency_use_the_same_facade(monkeypatch
         "_message_sender",
         "_person",
         "_posts",
+        "_post_actions",
     }
     assert set(vars(extractor)) == expected_state
     assert type(constructed) is LinkedInExtractor
@@ -636,3 +641,61 @@ async def test_submitted_invite_verification_resolves_classifier_at_call_time(
 
     assert result["status"] == "connected"
     assert calls == [connectable, pending]
+
+
+@pytest.mark.parametrize(
+    "method,kwargs",
+    [
+        (
+            "react_to_post",
+            {"actor": "/in/actor/", "reaction": "like", "confirm_reaction": True},
+        ),
+        (
+            "comment_on_post",
+            {
+                "actor": "/company/example/",
+                "confirm_comment": True,
+                "mention_author": True,
+            },
+        ),
+    ],
+)
+async def test_engagement_facade_forwards_actor_and_write_options(method, kwargs):
+    extractor = LinkedInExtractor(cast(Page, SimpleNamespace()))
+    owner = AsyncMock(return_value={"status": "observed"})
+    from linkedin_mcp_server.linkedin.post_actions import PostActions
+
+    args = ("urn:li:activity:123",) + (
+        ("Thank you",) if method == "comment_on_post" else ()
+    )
+    with patch.object(PostActions, method, owner):
+        result = await getattr(extractor, method)(*args, **kwargs)
+    assert result == {"status": "observed"}
+    owner.assert_awaited_once_with(*args, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "method,args,kwargs",
+    [
+        ("get_post_comments", ("urn:li:activity:123",), {"max_comments": 5}),
+        (
+            "reply_to_comment",
+            ("urn:li:activity:123", "urn:li:comment:(activity:123,4)", "Reply"),
+            {
+                "actor": "/company/example/",
+                "confirm_reply": True,
+                "mention_parent_author": True,
+            },
+        ),
+    ],
+)
+async def test_comment_thread_facade_forwards_exact_arguments(method, args, kwargs):
+    from linkedin_mcp_server.linkedin.post_actions import PostActions
+
+    extractor = LinkedInExtractor(cast(Page, SimpleNamespace()))
+    delegate = AsyncMock(return_value={"status": "observed"})
+    with patch.object(PostActions, method, delegate):
+        assert await getattr(extractor, method)(*args, **kwargs) == {
+            "status": "observed"
+        }
+    delegate.assert_awaited_once_with(*args, **kwargs)

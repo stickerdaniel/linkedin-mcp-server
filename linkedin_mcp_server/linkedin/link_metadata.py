@@ -12,6 +12,7 @@ ReferenceKind = Literal[
     "company_urn",
     "job",
     "feed_post",
+    "comment",
     "article",
     "newsletter",
     "school",
