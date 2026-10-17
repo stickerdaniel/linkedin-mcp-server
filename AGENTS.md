@@ -137,7 +137,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Tool Return Format
 
-All tools that read LinkedIn return: `{url, sections: {name: raw_text}}`.
+Section-reading tools return: `{url, sections: {name: raw_text}}`.
+
+The structured own-profile editing reads are `get_my_editable_profile`,
+`get_my_experience`, and `get_my_skills`.
+Follow their [return contract](docs/decisions/2026-10-06-structured-editing-reads.md).
 
 Optional additional keys:
 
