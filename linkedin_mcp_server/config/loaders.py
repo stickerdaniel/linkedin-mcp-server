@@ -166,6 +166,7 @@ class EnvironmentKeys:
 # its own variable's literal. Substituted and unsubstituted are then the same
 # string, and nothing downstream can tell them apart.
 _MCPB_PLACEHOLDERS = {
+    EnvironmentKeys.CHROME_PATH: "${user_config.chrome_path}",
     EnvironmentKeys.PROXY_SERVER: "${user_config.proxy_server}",
     EnvironmentKeys.PROXY_USERNAME: "${user_config.proxy_username}",
     EnvironmentKeys.PROXY_PASSWORD: "${user_config.proxy_password}",
@@ -366,7 +367,7 @@ def load_from_env(config: AppConfig) -> AppConfig:
             )
 
     # Custom Chrome/Chromium executable path
-    if chrome_path_env := os.environ.get(EnvironmentKeys.CHROME_PATH):
+    if chrome_path_env := _env(EnvironmentKeys.CHROME_PATH):
         config.browser.chrome_path = chrome_path_env
 
     # Browser proxy (validated and split in BrowserConfig.validate()). Unlike
@@ -385,7 +386,7 @@ def load_from_env(config: AppConfig) -> AppConfig:
     ]:
         logger.warning(
             "Ignoring %s: the value is an unsubstituted MCPB placeholder, not "
-            "a setting, so no proxy is configured from these. Update the "
+            "a setting, so nothing is configured from these. Update the "
             "extension bundle, and clear the variable from any environment "
             "override set by hand.",
             ", ".join(unsubstituted),
