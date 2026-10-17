@@ -32,6 +32,7 @@ from linkedin_mcp_server.linkedin.job_policy import (
     SCROLL_BUDGET_TOTAL,
     SCROLL_DEADLINE_MAX,
     SEARCH_TIMEOUT_FRACTION,
+    WORLDWIDE_GEO_ID,
     JobsTrackerStage,
     apply_link_missing_section_error,
     dropped_filters_section_error,
@@ -767,3 +768,60 @@ class JobReader:
         if section_errors:
             result["section_errors"] = section_errors
         return result
+
+    async def dismiss_job(self, job_id: str) -> dict[str, Any]:
+        """Dismiss a job from job search, so later searches no longer show it.
+
+        Acts on the job's card in the first page of a worldwide search for
+        the title and company its posting names, which has to list it: a
+        search by `currentJobId` shows the job only in the detail pane, which
+        has no dismiss control. Worldwide, because a search without a location
+        is scoped to the account's remembered one. The card turning to its
+        undo state is not yet a change LinkedIn kept, so the search is loaded
+        again and must not list the job either, while rendering the other
+        cards it showed before. Irreversible: the undo is
+        offered only in place, before any reload.
+
+        A dismissed job and a search that missed it look the same, since
+        neither lists the job, so a job the search does not list is an error
+        naming both.
+
+        Returns:
+            {url, job_id, keywords, dismissed: True, already_dismissed}
+        """
+        job_id = normalize_job_id(job_id)
+        card_title, company = await self._pages.read_posting_title(job_id)
+        keywords = f"{card_title} {company}"
+        url = f"{build_job_search_url(keywords)}&geoId={WORLDWIDE_GEO_ID}"
+        await asyncio.sleep(NAV_DELAY)
+        outcome, cards = await self._pages.dismiss_search_card(url, job_id)
+        if outcome == "absent":
+            raise LinkedInOperationError(
+                f"Job {job_id} is not on the first page of a worldwide search "
+                f"for {keywords!r}. Either it is already dismissed, or that "
+                "search does not list it on its first page."
+            )
+        if outcome == "no_button":
+            raise LinkedInOperationError(
+                f"Job {job_id} is in the search results, but its dismiss button "
+                "could not be found."
+            )
+        if outcome == "not_dismissed":
+            raise LinkedInOperationError(
+                f"The dismiss button of job {job_id} was clicked, but its card "
+                "did not change."
+            )
+        if outcome == "dismissed":
+            await asyncio.sleep(NAV_DELAY)
+            if await self._pages.search_lists_job(url, job_id, cards - 1):
+                raise LinkedInOperationError(
+                    f"Job {job_id} was dismissed, but it was back in the search "
+                    "after a reload."
+                )
+        return {
+            "url": url,
+            "job_id": job_id,
+            "keywords": keywords,
+            "dismissed": True,
+            "already_dismissed": outcome == "already_dismissed",
+        }
