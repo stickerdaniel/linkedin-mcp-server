@@ -477,7 +477,11 @@ class PersonReader:
 
         Args:
             keywords: Free-text query ("software engineer", "recruiter at Google").
-            location: Optional location filter ("New York", "Remote").
+            location: Optional location filter. LinkedIn's ``geoUrn`` facet
+                only filters on the numeric geo URN id (e.g. ``"103644278"``
+                for the United States); plain-text place names are accepted by
+                the URL but ignored by LinkedIn and return the unfiltered
+                result set, so they raise ``FilterValidationError`` here.
             network: Optional connection-degree filter. Each element is one of
                 ``"F"`` (1st-degree), ``"S"`` (2nd-degree), ``"O"`` (3rd-degree
                 and beyond). Example: ``["F"]`` to only return 1st-degree

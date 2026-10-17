@@ -156,7 +156,11 @@ def register_person_tools(
         Args:
             keywords: Search keywords (e.g., "software engineer", "recruiter at Google")
             ctx: FastMCP context for progress reporting
-            location: Optional location filter (e.g., "New York", "Remote")
+            location: Optional location filter, as LinkedIn's numeric geo URN
+                id (e.g., "103644278" for the United States). Plain-text place
+                names are silently ignored by LinkedIn and return unfiltered
+                results, so they are refused here. Use keywords instead when
+                the geo URN is not available.
             network: Optional connection-degree filter. Each element is one of
                 "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
                 Example: ["F"] to only return 1st-degree connections. A single
