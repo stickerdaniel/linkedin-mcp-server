@@ -2593,9 +2593,9 @@ daemon_owner._exit_hard(None)
     )
     try:
         # A deadline, not a count of polls: the child imports the daemon before
-        # it starts anything, which took 11 s at a load average of 70 (measured
-        # 2026-10-20). The marker is checked again once an exit is seen,
-        # because the child exits right after writing it.
+        # it starts anything, which a loaded host stretches to seconds (see
+        # docs/daemon-measurements.md). The marker is checked again once an
+        # exit is seen, because the child exits right after writing it.
         deadline = time.monotonic() + 30.0
         while not marker.exists():
             if process.poll() is not None and not marker.exists():
