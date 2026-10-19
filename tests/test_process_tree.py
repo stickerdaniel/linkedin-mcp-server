@@ -189,8 +189,8 @@ def _first_line(process: subprocess.Popen[Any], within: float = 30.0) -> str:
 
 def _acquire_within(lease: ProfileLease, within: float = 30.0) -> None:
     # The crash guardian holds the profile until a process scan answers, and a
-    # loaded host can keep ps past its one-second bound for as long as the
-    # load lasts. Nothing in the guardian ends that hold, so the wait for it is
+    # loaded host can keep ps past its bound for as long as the load lasts.
+    # Nothing in the guardian ends that hold, so the wait for it is
     # a deadline, not a count of polls that lasts a few seconds.
     deadline = time.monotonic() + within
     while not lease.try_acquire():
@@ -2592,18 +2592,21 @@ daemon_owner._exit_hard(None)
         text=True,
     )
     try:
-        for _ in range(500):
-            if marker.exists():
-                break
-            if process.poll() is not None:
+        # A deadline, not a count of polls: the child imports the daemon before
+        # it starts anything, which a loaded host stretches to seconds (see
+        # docs/daemon-measurements.md). The marker is checked again once an
+        # exit is seen, because the child exits right after writing it.
+        deadline = time.monotonic() + 30.0
+        while not marker.exists():
+            if process.poll() is not None and not marker.exists():
                 stderr = process.stderr.read() if process.stderr is not None else ""
                 pytest.fail(
                     "the daemon exited before creating its descendant: "
                     f"stderr={stderr!r}"
                 )
+            if time.monotonic() >= deadline:
+                pytest.fail("the daemon did not create its descendant")
             time.sleep(0.01)
-        else:
-            pytest.fail("the daemon did not create its descendant")
 
         descendant_pid = int(marker.read_text())
         assert process.wait(timeout=30) == 1
@@ -2674,6 +2677,31 @@ def test_crash_guardian_requires_a_quiet_interval_after_an_empty_scan(
     process_guardian._drain({"marker"})
 
     assert killed == [456]
+
+
+def test_crash_guardian_scan_waits_for_a_ps_slowed_by_load(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A slow ``ps`` still answers, and the guardian has to wait for it.
+
+    A scan cut off by its bound is asked again, so a bound that a loaded host's
+    ``ps`` keeps exceeding never lets the drain see the browser at all: the
+    profile stays held and the browser keeps running.
+    """
+    answers_after = 3.0
+    rows = b"  902   902 /chromium LINKEDIN_MCP_BROWSER_PROCESS_MARKER=marker\n"
+
+    def run(*_args: Any, timeout: float, **_kwargs: Any) -> Any:
+        # What `subprocess.run` does with a child that needs longer than it is
+        # given, without spending the seconds.
+        if timeout < answers_after:
+            raise subprocess.TimeoutExpired(cmd="ps", timeout=timeout)
+        return SimpleNamespace(stdout=rows)
+
+    monkeypatch.setattr(process_guardian.Path, "is_file", lambda _self: True)
+    monkeypatch.setattr(process_guardian.subprocess, "run", run)
+
+    assert process_guardian._ps_groups({"marker"}) == {902}
 
 
 @_POSIX_ONLY
