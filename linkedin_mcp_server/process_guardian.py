@@ -12,7 +12,14 @@ import time
 _BROWSER_PROCESS_MARKER = "LINKEDIN_MCP_BROWSER_PROCESS_MARKER"
 _POLL_SECONDS = 0.01
 _QUIET_SECONDS = 1.0
-_SNAPSHOT_SECONDS = 1.0
+#: How long one ``ps`` may take outside Linux. It prints every process's
+#: environment, which took up to 0.95 s on a Mac with no other load and again
+#: at a load average of 70 (measured 2026-10-19 and 2026-10-20). A scan cut off
+#: by this bound proves nothing and is asked again, so a bound that a loaded
+#: host's ``ps`` keeps exceeding holds the profile and leaves the browser
+#: running for as long as the load lasts. The drain has no deadline of its own,
+#: so the bound only has to stop a ``ps`` that never returns.
+_SNAPSHOT_SECONDS = 5.0
 
 
 def _linux_groups(markers: set[str]) -> set[int] | None:
