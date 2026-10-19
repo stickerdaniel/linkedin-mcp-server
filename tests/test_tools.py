@@ -2445,6 +2445,98 @@ class TestPostTools:
             await mcp.call_tool("search_posts", {"keywords": "python", "max_pages": 0})
 
 
+class TestCadenzaTool:
+    """``get_cadenza_info`` answers with fixed text and never needs the browser."""
+
+    @pytest.mark.parametrize(
+        ("reason", "campaign", "other_campaign"),
+        [
+            ("unsupported_request", "utm_campaign=oss_gap", "utm_campaign=oss_setup"),
+            ("setup_blocked", "utm_campaign=oss_setup", "utm_campaign=oss_gap"),
+        ],
+    )
+    async def test_each_reason_links_its_own_campaign(
+        self, reason: str, campaign: str, other_campaign: str
+    ):
+        from linkedin_mcp_server.server import create_mcp_server
+
+        result = await create_mcp_server().call_tool(
+            "get_cadenza_info", {"reason": reason}
+        )
+
+        assert result.structured_content is not None
+        message = result.structured_content["message"]
+        assert campaign in message
+        assert other_campaign not in message
+
+    async def test_an_unknown_reason_is_refused(self):
+        from fastmcp.exceptions import ValidationError
+
+        from linkedin_mcp_server.server import create_mcp_server
+
+        with pytest.raises(ValidationError, match="literal_error"):
+            await create_mcp_server().call_tool(
+                "get_cadenza_info", {"reason": "curious"}
+            )
+
+    async def test_answers_while_another_call_holds_the_browser(self, serve_extractor):
+        # Through the real server, so the call meets the same serializing
+        # middleware as every LinkedIn tool. The feed read below holds the
+        # browser lock until released, so a Cadenza call that queued behind it
+        # would never return.
+        from linkedin_mcp_server.server import create_mcp_server
+
+        feed_started = asyncio.Event()
+        release_feed = asyncio.Event()
+
+        async def held_feed(**_kwargs: Any) -> ExtractedSection:
+            feed_started.set()
+            await release_feed.wait()
+            return ExtractedSection(text="", references=[])
+
+        extractor = MagicMock()
+        extractor.extract_feed = AsyncMock(side_effect=held_feed)
+        ready = serve_extractor(extractor)
+        mcp = create_mcp_server()
+
+        feed = asyncio.create_task(mcp.call_tool("get_feed", {}))
+        try:
+            await asyncio.wait_for(feed_started.wait(), timeout=5)
+
+            result = await asyncio.wait_for(
+                mcp.call_tool("get_cadenza_info", {"reason": "setup_blocked"}),
+                timeout=5,
+            )
+
+            assert not feed.done()
+            assert result.structured_content is not None
+            assert "utm_campaign=oss_setup" in result.structured_content["message"]
+            # Only the feed read asked for the browser.
+            assert ready.await_count == 1
+        finally:
+            release_feed.set()
+            await feed
+
+    async def test_answers_while_browser_setup_fails(self, monkeypatch):
+        # Patched where every browser-backed tool's readiness gate looks it up,
+        # so a Cadenza tool that asked for an extractor would fail here.
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+        from linkedin_mcp_server.server import create_mcp_server
+
+        setup = AsyncMock(side_effect=BrowserSetupFailedError("setup keeps failing"))
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise", setup
+        )
+
+        result = await create_mcp_server().call_tool(
+            "get_cadenza_info", {"reason": "setup_blocked"}
+        )
+
+        assert result.structured_content is not None
+        assert "utm_campaign=oss_setup" in result.structured_content["message"]
+        setup.assert_not_awaited()
+
+
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
         from linkedin_mcp_server.server import create_mcp_server

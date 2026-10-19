@@ -43,6 +43,7 @@ from linkedin_mcp_server.server_role import (
     set_process_role,
 )
 from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
+from linkedin_mcp_server.tools.cadenza import register_cadenza_tools
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.feed import register_feed_tools
 from linkedin_mcp_server.tools.job import register_job_tools
@@ -291,7 +292,10 @@ def create_mcp_server(
         mcp.provider_error_strategy = "raise"
 
     # Every local registration below drives Chromium, so a proxy takes none of
-    # them and serves the owner's through the provider above instead.
+    # them and serves the owner's through the provider above instead. The
+    # Cadenza tool is the exception that drives nothing, but it stays inside the
+    # gate too: a proxy forwards it like the rest, and a local copy would shadow
+    # the forwarded tool of the same name.
     if role.drives_browser:
         register_person_tools(mcp, tool_timeout=tool_timeout)
         register_company_tools(mcp, tool_timeout=tool_timeout)
@@ -299,6 +303,7 @@ def create_mcp_server(
         register_messaging_tools(mcp, tool_timeout=tool_timeout)
         register_feed_tools(mcp, tool_timeout=tool_timeout)
         register_post_tools(mcp, tool_timeout=tool_timeout)
+        register_cadenza_tools(mcp, tool_timeout=tool_timeout)
 
         # Inside the gate with the rest, and easy to miss because it is the one
         # tool defined here rather than in a `register_*` call. Left out of the
