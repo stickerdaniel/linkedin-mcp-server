@@ -2088,6 +2088,32 @@ class TestTheMarkerScanSeparatesEmptyFromUnanswerable:
             process_tree._MarkerScan((902,), True)
         )
 
+    def test_a_ps_slowed_by_load_still_answers(self, monkeypatch: pytest.MonkeyPatch):
+        """A slow ``ps`` is still a working one, and its answer is still proof.
+
+        Printing every process's environment takes up to about a second on an
+        unloaded Mac, and load stretches it past that. Reading such a scan as
+        unanswerable made a drain report a clean close as unconfirmed, which
+        keeps the profile until the server restarts.
+        """
+        self._bsd(monkeypatch)
+        monkeypatch.setattr(process_tree.Path, "is_file", lambda _self: True)
+        answers_after = 3.0
+        rows = b"  902 /chromium LINKEDIN_MCP_BROWSER_PROCESS_MARKER=marker\n"
+
+        def run(*_args: Any, timeout: float, **_kwargs: Any) -> Any:
+            # What `subprocess.run` does with a child that needs longer than it
+            # is given, without spending the seconds.
+            if timeout < answers_after:
+                raise subprocess.TimeoutExpired(cmd="ps", timeout=timeout)
+            return SimpleNamespace(stdout=rows)
+
+        monkeypatch.setattr(process_tree.subprocess, "run", run)
+
+        assert process_tree._scan_marked_posix_processes("marker") == (
+            process_tree._MarkerScan((902,), True)
+        )
+
     @pytest.mark.parametrize("mode", ["missing", "failing"])
     def test_an_unusable_ps_is_reported_once_rather_than_once_per_poll(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, mode
@@ -2169,10 +2195,10 @@ class TestTheMarkerScanSeparatesEmptyFromUnanswerable:
         is the one assertion that ``ps`` is where the code looks for it and
         speaks the flags it is given.
 
-        A loaded host can hold ``ps`` past its one-second snapshot bound, and
-        the scan then rightly answers inconclusive. So the scan is asked again
-        within the drain's own budget, the way a drain would ask it; a ``ps``
-        that never answers still fails at the deadline.
+        A loaded host can hold ``ps`` past the scan's bound, and the scan then
+        rightly answers inconclusive. So the scan is asked again within the
+        drain's own budget, the way a drain would ask it; a ``ps`` that never
+        answers still fails at the deadline.
         """
         marker = secrets.token_hex(32)
         deadline = time.monotonic() + process_tree._MARKER_DRAIN_SECONDS

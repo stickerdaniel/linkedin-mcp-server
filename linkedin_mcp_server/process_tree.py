@@ -67,6 +67,14 @@ _POSIX_PROCESS_SNAPSHOT_SECONDS = 1.0
 #: enough for a wedged Chromium to answer SIGKILL, short enough that a close
 #: which cannot prove it still returns and lets the caller keep the profile.
 _MARKER_DRAIN_SECONDS = 10.0
+#: How long one marker scan may wait for ``ps`` outside Linux. That ``ps``
+#: prints every process's environment, so it costs far more than the ancestry
+#: snapshot above: 0.1 to 0.95 s on a Mac with about 900 processes and no other
+#: load (measured 2026-10-19). Under the snapshot's one-second bound, a ``ps``
+#: slowed by load timed out on every scan of a drain and a clean close was
+#: reported as unconfirmed. Half the drain, because a drain round scans twice,
+#: so the slowest ``ps`` that still answers can complete one round.
+_MARKER_SCAN_SECONDS = _MARKER_DRAIN_SECONDS / 2
 #: The kernel's own word for "this process has exited and only its unreaped
 #: table entry is left". Nothing else in a process row says it: PID, PGID and
 #: the start timestamp all survive the exit unchanged, which is exactly why the
@@ -373,7 +381,7 @@ def _scan_marked_posix_processes(marker: str) -> _MarkerScan:
             [ps, "eww", "-A", "-o", "pid=", "-o", "command="],
             check=True,
             capture_output=True,
-            timeout=_POSIX_PROCESS_SNAPSHOT_SECONDS,
+            timeout=_MARKER_SCAN_SECONDS,
         ).stdout
     except (OSError, subprocess.SubprocessError) as exc:
         logger.debug(
