@@ -189,8 +189,8 @@ def _first_line(process: subprocess.Popen[Any], within: float = 30.0) -> str:
 
 def _acquire_within(lease: ProfileLease, within: float = 30.0) -> None:
     # The crash guardian holds the profile until a process scan answers, and a
-    # loaded host can keep ps past its one-second bound for as long as the
-    # load lasts. Nothing in the guardian ends that hold, so the wait for it is
+    # loaded host can keep ps past its bound for as long as the load lasts.
+    # Nothing in the guardian ends that hold, so the wait for it is
     # a deadline, not a count of polls that lasts a few seconds.
     deadline = time.monotonic() + within
     while not lease.try_acquire():
