@@ -1607,7 +1607,7 @@ def test_marked_group_kill_revalidates_kernel_identity(
     monkeypatch.setattr(
         process_tree,
         "_scan_marked_posix_processes",
-        lambda _marker: process_tree._MarkerScan((), True),
+        lambda _marker, _deadline=None: process_tree._MarkerScan((), True),
     )
     monkeypatch.setattr(process_tree, "process_group_exists", lambda group: True)
     monkeypatch.setattr(os, "getpgrp", lambda: 100)
@@ -1671,7 +1671,7 @@ def test_marked_kill_rescans_for_later_browser_groups(
     monkeypatch.setattr(
         process_tree,
         "_scan_marked_posix_processes",
-        lambda marker: process_tree._MarkerScan((900,), True),
+        lambda _marker, _deadline=None: process_tree._MarkerScan((900,), True),
     )
     monkeypatch.setattr(
         process_tree,
@@ -1838,7 +1838,7 @@ class TestOneLaunchesResidualBrowser:
         monkeypatch.setattr(
             process_tree,
             "_scan_marked_posix_processes",
-            lambda _m: process_tree._MarkerScan((), True),
+            lambda _m, _deadline=None: process_tree._MarkerScan((), True),
         )
         monkeypatch.setattr(process_tree, "_kernel_start_identity", lambda _p: None)
         monkeypatch.setattr(os, "getpgrp", lambda: 100)
@@ -1946,7 +1946,7 @@ class TestOneLaunchesResidualBrowser:
         monkeypatch.setattr(
             process_tree,
             "_scan_marked_posix_processes",
-            lambda _m: process_tree._MarkerScan((900,), True),
+            lambda _m, _deadline=None: process_tree._MarkerScan((900,), True),
         )
         monkeypatch.setattr(
             process_tree,
@@ -1966,7 +1966,9 @@ class TestOneLaunchesResidualBrowser:
         monkeypatch.setattr(
             process_tree,
             "_scan_marked_posix_processes",
-            lambda _m: pytest.fail("scanned for a marker no browser was given"),
+            lambda _m, _deadline=None: pytest.fail(
+                "scanned for a marker no browser was given"
+            ),
         )
 
         assert process_tree.drain_browser_process_marker("browser") is True
@@ -1984,7 +1986,7 @@ class TestOneLaunchesResidualBrowser:
         monkeypatch.setattr(
             process_tree,
             "_scan_marked_posix_processes",
-            lambda _m: process_tree._MarkerScan((), False),
+            lambda _m, _deadline=None: process_tree._MarkerScan((), False),
         )
         monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
 
@@ -2114,6 +2116,61 @@ class TestTheMarkerScanSeparatesEmptyFromUnanswerable:
             process_tree._MarkerScan((902,), True)
         )
 
+    @pytest.mark.parametrize("survives", [False, True], ids=["gone", "unkillable"])
+    def test_slow_scans_do_not_stretch_the_drain_past_its_budget(
+        self, monkeypatch: pytest.MonkeyPatch, survives: bool
+    ):
+        """A drain says unproven at its deadline, however slow each ``ps`` is.
+
+        One scan may take half the budget, and a drain scans to find its
+        groups, again on every poll while it waits for one, and once more for
+        the proof. Each given its full allowance, a close of an already gone
+        browser took nearly twice its budget to say so. The first
+        ``ps`` answers in 3 s and every later one needs 6, so no proof is
+        possible and only the time it takes to say so is under test.
+        """
+        self._bsd(monkeypatch)
+        monkeypatch.setattr(process_tree.Path, "is_file", lambda _self: True)
+        now = 0.0
+        needs = chain([3.0], repeat(6.0))
+        rows = b"  902 /chromium LINKEDIN_MCP_BROWSER_PROCESS_MARKER=browser\n"
+
+        def run(*_args: Any, timeout: float, **_kwargs: Any) -> Any:
+            nonlocal now
+            need = next(needs)
+            if need > timeout:
+                now += timeout
+                raise subprocess.TimeoutExpired(cmd="ps", timeout=timeout)
+            now += need
+            return SimpleNamespace(stdout=rows if survives else b"")
+
+        def sleep(seconds: float) -> None:
+            nonlocal now
+            now += seconds
+
+        monkeypatch.setattr(process_tree.subprocess, "run", run)
+        # A shim rather than a patch on ``time`` itself, which pytest and
+        # asyncio read as well.
+        monkeypatch.setattr(
+            process_tree, "time", SimpleNamespace(monotonic=lambda: now, sleep=sleep)
+        )
+        monkeypatch.setattr(process_tree, "_registered_browser_markers", {"browser"})
+        monkeypatch.setattr(process_tree, "_registered_posix_groups", {})
+        # The surviving browser sits in group 456, which never empties.
+        monkeypatch.setattr(
+            process_tree,
+            "_posix_process_rows",
+            lambda: {902: (1, 456, "browser-member", "S")} if survives else {},
+        )
+        monkeypatch.setattr(process_tree, "process_group_exists", lambda _group: True)
+        monkeypatch.setattr(process_tree, "_kernel_start_identity", lambda _p: None)
+        monkeypatch.setattr(os, "getpgrp", lambda: 100)
+        monkeypatch.setattr(os, "killpg", lambda _group, _sig: None)
+        monkeypatch.setattr(os, "waitpid", lambda _pid, _options: (0, 0))
+
+        assert process_tree.drain_browser_process_marker("browser") is False
+        assert now <= process_tree._MARKER_DRAIN_SECONDS + 0.1
+
     @pytest.mark.parametrize("mode", ["missing", "failing"])
     def test_an_unusable_ps_is_reported_once_rather_than_once_per_poll(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, mode
@@ -2163,10 +2220,12 @@ class TestTheMarkerScanSeparatesEmptyFromUnanswerable:
         scans = 0
         real_scan = process_tree._scan_marked_posix_processes
 
-        def counting(marker: str) -> process_tree._MarkerScan:
+        def counting(
+            marker: str, deadline: float | None = None
+        ) -> process_tree._MarkerScan:
             nonlocal scans
             scans += 1
-            return real_scan(marker)
+            return real_scan(marker, deadline)
 
         monkeypatch.setattr(process_tree, "_scan_marked_posix_processes", counting)
 
