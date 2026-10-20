@@ -60,7 +60,7 @@ def test_security_floors_are_published() -> None:
     }
     for name, floor in expected_runtime.items():
         assert _minimum(runtime[name]) >= floor
-    assert _minimum(development["aiohttp"]) >= Version("3.14.3")
+    assert _minimum(development["aiohttp"]) >= Version("3.14.4")
 
 
 def test_the_suite_runs_without_the_camelcase_bridge() -> None:
