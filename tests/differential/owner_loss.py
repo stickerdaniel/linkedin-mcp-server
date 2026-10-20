@@ -316,7 +316,7 @@ _BODY_LIMIT = 65536
 
 
 class _ResponderHandler(BaseHTTPRequestHandler):
-    server: DeclaredResponder
+    server: DeclaredResponder  # ty: ignore[invalid-mutable-override]
 
     def _answer(self) -> None:
         try:

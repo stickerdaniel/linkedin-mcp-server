@@ -31,7 +31,7 @@ import contextlib
 import json
 import logging
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -237,7 +237,7 @@ def _settled(profile_dir: Path) -> bool:
 
 
 @contextlib.contextmanager
-def _the_root_to_ourselves(profile_dir: Path) -> Iterator[None]:
+def _the_root_to_ourselves(profile_dir: Path) -> Generator[None]:
     """Serialise the decision and the write against other *claimers*.
 
     Its own lock file rather than the browser lease, and that distinction is the

@@ -748,7 +748,7 @@ class OriginRequest:
 
 
 class _OriginHandler(BaseHTTPRequestHandler):
-    server: SyntheticOrigin
+    server: SyntheticOrigin  # ty: ignore[invalid-mutable-override]
 
     def do_GET(self) -> None:
         origin = self.server
@@ -1125,7 +1125,7 @@ _RELAY_IDLE_SECONDS = 30
 
 
 class _ProxyHandler(BaseHTTPRequestHandler):
-    server: EgressProxy
+    server: EgressProxy  # ty: ignore[invalid-mutable-override]
     protocol_version = "HTTP/1.1"
     # Unbuffered, so reading the CONNECT head cannot swallow the first bytes of
     # the tunnel into a buffer the relay below never sees.

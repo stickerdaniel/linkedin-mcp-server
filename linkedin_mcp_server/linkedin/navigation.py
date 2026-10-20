@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any, Literal
 
@@ -343,7 +343,7 @@ class PageNavigator:
         await self._goto_with_auth_checks(url, deadline=deadline)
 
     @contextmanager
-    def _watching_navigations(self) -> Iterator[list[str]]:
+    def _watching_navigations(self) -> Generator[list[str]]:
         """Record main-frame navigations for the duration of the block.
 
         The address is not the signal. A reload replaces the document and

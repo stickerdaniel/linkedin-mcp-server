@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -161,7 +161,7 @@ class _Retirement:
 
 
 @contextmanager
-def _reporting_a_confirmed_retirement() -> Iterator[_Retirement]:
+def _reporting_a_confirmed_retirement() -> Generator[_Retirement]:
     """Say that retirement may have begun if the command is interrupted after asking.
 
     Wraps the whole of a profile command from the retirement lookup onwards, so

@@ -31,7 +31,7 @@ import contextlib
 import os
 import sys
 import uuid
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -165,7 +165,9 @@ def _point_at(profile: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @contextlib.contextmanager
-def planted(row: str, profile: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+def planted(
+    row: str, profile: Path, monkeypatch: pytest.MonkeyPatch
+) -> Generator[Path]:
     """The cell's provider metadata in place for the whole cell, and the
     profile it runs on; removed exactly afterwards, whatever the cell did.
 

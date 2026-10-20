@@ -22,7 +22,7 @@ import logging
 import socket
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -143,7 +143,7 @@ def _attachment(tmp_path: Path, port: int) -> Any:
 
 
 @contextlib.contextmanager
-def _frontend_lines(sink: Callable[[str], None]) -> Iterator[None]:
+def _frontend_lines(sink: Callable[[str], None]) -> Generator[None]:
     """Every INFO line the frontend's proxy and election log, as its stderr
     shows them, handed to *sink*."""
 

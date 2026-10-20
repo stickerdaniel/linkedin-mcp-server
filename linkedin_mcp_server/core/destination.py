@@ -2,7 +2,7 @@
 
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any, NoReturn
 from urllib.parse import urlsplit
@@ -148,7 +148,7 @@ def raise_if_off_linkedin(url: object) -> None:
 @asynccontextmanager
 async def linkedin_element(
     locator: Any, *, timeout: float | None = None
-) -> AsyncIterator[Any]:
+) -> AsyncGenerator[Any]:
     """Resolve *locator* to one element, yielded only from a LinkedIn document.
 
     Act through the yielded handle, never through the locator. A locator
@@ -169,7 +169,7 @@ async def linkedin_element(
 
 
 @asynccontextmanager
-async def linkedin_handle(handle: Any) -> AsyncIterator[Any]:
+async def linkedin_handle(handle: Any) -> AsyncGenerator[Any]:
     """Yield an element *handle* already resolved, only if its document is LinkedIn's.
 
     For an element no locator names, such as the one that has focus. Disposes

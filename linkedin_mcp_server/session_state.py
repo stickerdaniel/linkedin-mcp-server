@@ -17,7 +17,7 @@ import shutil
 import socket
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -896,7 +896,7 @@ def _take_within(lease: ProfileLease, seconds: float) -> bool:
 @contextmanager
 def _exclusive_profile(
     profile_dir: Path, *, action: str, wait_seconds: float = 0.0
-) -> Iterator[None]:
+) -> Generator[None]:
     """Hold the profile exclusively for the duration of an auth-state mutation.
 
     Checking and then releasing before the move would leave a window in which

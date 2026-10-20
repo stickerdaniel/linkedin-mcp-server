@@ -34,7 +34,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Any, NoReturn, Protocol, TextIO, cast
 
@@ -948,7 +948,7 @@ async def _stop_within(
 
 
 @contextlib.contextmanager
-def _hard_exit_after(seconds: float, lock: DaemonLock | None) -> Iterator[None]:
+def _hard_exit_after(seconds: float, lock: DaemonLock | None) -> Generator[None]:
     """Exit hard from a timer thread unless the block finishes within *seconds*.
 
     Bounds synchronous work no ``wait_for`` can interrupt, such as a log write

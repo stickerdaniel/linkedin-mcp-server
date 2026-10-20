@@ -16,7 +16,7 @@ import threading
 import sys
 import textwrap
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -452,7 +452,7 @@ class _DiagnosticSink(logging.Handler):
 
 
 @contextlib.contextmanager
-def _debug_sink(mode: str) -> Iterator[_DiagnosticSink]:
+def _debug_sink(mode: str) -> Generator[_DiagnosticSink]:
     """Route every DEBUG record from the lock and the owner into one sink."""
     sink = _DiagnosticSink(mode)
     root = logging.getLogger()

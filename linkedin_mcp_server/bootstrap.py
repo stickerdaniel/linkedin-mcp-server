@@ -6,7 +6,7 @@ import asyncio
 import atexit
 import codecs
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Generator, Mapping
 import contextlib
 import errno
 from contextvars import ContextVar
@@ -1140,7 +1140,7 @@ class _SetupLifetimeExceeded(BrowserSetupFailedError):
 
 
 @contextlib.asynccontextmanager
-async def _setup_lifetime() -> AsyncIterator[None]:
+async def _setup_lifetime() -> AsyncGenerator[None]:
     """Bound one managed setup attempt, wherever that attempt is entered."""
     if _setup_lifetime_armed.get():
         yield
@@ -2753,7 +2753,7 @@ def _same_destination(one: object, other: object) -> bool:
 def _log_handlers_follow_the_live_region(
     before: tuple[object, object],
     destination: object,
-) -> Iterator[None]:
+) -> Generator[None]:
     """Let stream log handlers follow the streams rich redirects.
 
     rich swaps ``sys.stdout`` and ``sys.stderr`` for proxies while a live region
@@ -2900,7 +2900,7 @@ class _ConsoleThatGoesQuiet(Console):
 
 
 @contextlib.contextmanager
-def _cli_progress() -> Iterator[Callable[[str], None]]:
+def _cli_progress() -> Generator[Callable[[str], None]]:
     """A live progress bar for a terminal, plain lines for anything else.
 
     Patchright writes to a pipe here, so it picks its newline-delimited

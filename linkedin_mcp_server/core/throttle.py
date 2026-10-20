@@ -28,7 +28,7 @@ not a person.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -86,7 +86,7 @@ _owns_the_browser: ContextVar[bool] = ContextVar("owns_the_browser", default=Fal
 
 
 @contextmanager
-def browser_call_record() -> Iterator[None]:
+def browser_call_record() -> Generator[None]:
     """Start a fresh record for the browser call this block runs.
 
     Entered by the serializing middleware around the tool body, once it holds

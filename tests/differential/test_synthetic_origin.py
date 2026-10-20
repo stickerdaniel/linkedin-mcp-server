@@ -36,7 +36,7 @@ import ipaddress
 import os
 import socket
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -131,7 +131,7 @@ def _not_loopback(host: str) -> list[str]:
 
 
 class _CanaryHandler(BaseHTTPRequestHandler):
-    server: _Canary
+    server: _Canary  # ty: ignore[invalid-mutable-override]
 
     def do_GET(self) -> None:
         self.server.hosts.append(self.headers.get("Host", ""))
@@ -156,7 +156,7 @@ class _Canary(ThreadingHTTPServer):
 
 
 @contextmanager
-def _canary() -> Iterator[_Canary]:
+def _canary() -> Generator[_Canary]:
     server = _Canary()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
