@@ -2580,11 +2580,13 @@ class TestPostTools:
             "Buscamos Unity",
             mock_context,
             date_posted="past-week",
+            content_type="documents",
         )
         assert "search_results" in result["sections"]
         mock_extractor.search_posts.assert_awaited_once_with(
             "Buscamos Unity",
             date_posted="past-week",
+            content_type="documents",
             max_pages=3,
         )
 

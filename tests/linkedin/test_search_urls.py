@@ -16,6 +16,7 @@ import pytest
 from linkedin_mcp_server.linkedin.contracts import FilterValidationError
 from linkedin_mcp_server.linkedin.search_urls import (
     CONTENT_DATE_POSTED_MAP,
+    CONTENT_TYPE_MAP,
     EXPERIENCE_LEVEL_MAP,
     JOB_DATE_POSTED_MAP,
     JOB_TYPE_MAP,
@@ -114,6 +115,62 @@ class TestFilterTables:
             "past-week",
             "past-month",
         }
+
+
+class TestBuildContentSearchUrlContentType:
+    def test_every_content_type_maps_to_the_token_linkedin_writes(self):
+        # Read off the live "Content type" menu: the Images option writes
+        # "photos" and Job posts writes "jobs", so the labels are not the
+        # tokens and each pairing is a measurement.
+        assert CONTENT_TYPE_MAP == {
+            "videos": "videos",
+            "images": "photos",
+            "job_posts": "jobs",
+            "live_videos": "liveVideos",
+            "documents": "documents",
+        }
+
+    def test_content_type_follows_date_posted(self):
+        assert build_content_search_url(
+            "robotics", date_posted="past-week", content_type="documents"
+        ) == (
+            f"{CONTENT}keywords=robotics&origin=FACETED_SEARCH"
+            "&datePosted=%5B%22past-week%22%5D&contentType=%5B%22documents%22%5D"
+        )
+
+    @pytest.mark.parametrize(("content_type", "token"), list(CONTENT_TYPE_MAP.items()))
+    def test_content_type_alone(self, content_type: str, token: str):
+        assert build_content_search_url("robotics", content_type=content_type) == (
+            f"{CONTENT}keywords=robotics&origin=FACETED_SEARCH"
+            f"&contentType=%5B%22{token}%22%5D"
+        )
+
+    def test_padded_content_type_is_trimmed_before_lookup(self):
+        assert build_content_search_url("robotics", content_type=" documents ") == (
+            f"{CONTENT}keywords=robotics&origin=FACETED_SEARCH"
+            "&contentType=%5B%22documents%22%5D"
+        )
+
+    @pytest.mark.parametrize("content_type", [None, "", "   "])
+    def test_absent_content_type_omits_the_facet(self, content_type):
+        assert "contentType" not in build_content_search_url(
+            "robotics", content_type=content_type
+        )
+
+    @pytest.mark.parametrize(
+        "content_type", ["articles", "photos", "jobs", "Documents", "pdf"]
+    )
+    def test_unknown_content_type_is_refused_rather_than_passed_through(
+        self, content_type: str
+    ):
+        # LinkedIn has no Articles option, and the raw tokens are not accepted
+        # as input either: one public spelling per option keeps the schema
+        # honest about what the menu offers.
+        with pytest.raises(FilterValidationError) as error:
+            build_content_search_url("robotics", content_type=content_type)
+
+        assert repr(content_type) in str(error.value)
+        assert "documents" in str(error.value)
 
 
 class TestBuildJobSearchUrl:

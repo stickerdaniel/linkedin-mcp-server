@@ -82,6 +82,19 @@ class TestSearchPosts:
         assert "datePosted=%5B%22past-week%22%5D" in result["url"]
         assert mock_extract.call_args.args[0] == result["url"]
 
+    async def test_the_content_type_filter_reaches_the_url(self, mock_page):
+        search = _search(mock_page)
+        with patch.object(
+            search._capture,
+            "capture",
+            new_callable=AsyncMock,
+            return_value=extracted("post"),
+        ) as mock_extract:
+            result = await search.search_posts("robotics", content_type="documents")
+
+        assert "contentType=%5B%22documents%22%5D" in result["url"]
+        assert mock_extract.call_args.args[0] == result["url"]
+
     async def test_max_pages_buys_a_whole_page_of_scrolls_each(self, mock_page):
         """Two nominal pages are ten scrolls, not two.
 

@@ -35,6 +35,7 @@ class PostSearch:
         keywords: str,
         date_posted: str | None = None,
         max_pages: int = 3,
+        content_type: str | None = None,
     ) -> dict[str, Any]:
         """Search LinkedIn posts/content and extract the results page.
 
@@ -49,6 +50,10 @@ class PostSearch:
                 ``FilterValidationError`` (a ``ValueError`` subclass) rather
                 than reaching LinkedIn, which would ignore them silently and
                 return unfiltered results that look filtered.
+            content_type: Optional "Content type" filter, one of the keys of
+                ``search_urls.CONTENT_TYPE_MAP`` (e.g. "documents" for the
+                PDFs and slide decks people upload). Refused when unknown,
+                like ``date_posted``.
             max_pages: Scroll depth, expressed in result "pages" of roughly
                 ``_CONTENT_SCROLLS_PER_REQUESTED_PAGE`` scrolls each (default
                 3). Content search is an infinite scroll with no per-page URL,
@@ -68,7 +73,9 @@ class PostSearch:
         """
         # Builds before it navigates, so a recency filter LinkedIn would
         # ignore is refused rather than answered with unfiltered results.
-        url = build_content_search_url(keywords, date_posted=date_posted)
+        url = build_content_search_url(
+            keywords, date_posted=date_posted, content_type=content_type
+        )
         max_scrolls = max(1, max_pages) * _CONTENT_SCROLLS_PER_REQUESTED_PAGE
         extracted = await self._capture.capture(
             url,
