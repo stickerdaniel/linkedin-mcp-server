@@ -126,6 +126,22 @@
     {
       "name": "close_session",
       "description": "Properly close browser session and clean up resources"
+    },
+    {
+      "name": "react_to_post",
+      "description": "Add a like to one post as an explicitly selected personal or authorized company actor. Defaults to a dry run; requires confirm_reaction=true. Never toggles off an existing reaction; check retry_safe before retrying."
+    },
+    {
+      "name": "comment_on_post",
+      "description": "Comment on one post as an explicitly selected personal or authorized company actor; optionally prefix a verified author mention. Defaults to a dry run; requires confirm_comment=true. Exact rendered comment text is required for confirmation; check retry_safe before retrying."
+    },
+    {
+      "name": "get_post_comments",
+      "description": "Read up to 50 currently rendered comment bodies with exact component URN references. Relationships are exposed only when rendered ancestry proves them; URLs identify the post."
+    },
+    {
+      "name": "reply_to_comment",
+      "description": "Reply to an exact rendered comment URN as a verified personal or company actor. Requires confirm_reply=true; optionally preserve a verified parent-author mention. Checks a bounded thread for acknowledgment; never automatically retry an uncertain submission."
     }
   ],
   "user_config": {

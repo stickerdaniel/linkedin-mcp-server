@@ -28,6 +28,60 @@
       "fastmcp": {
         "tags": [
           "actions",
+          "post"
+        ]
+      }
+    },
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": true
+    },
+    "description": "Publish a comment on one LinkedIn post, as the explicitly requested personal or company actor.\n\nThis is a write operation when confirm_comment is True, and it is public\nand attributed: the comment carries this account's name and can notify\nthe post's author and other commenters. Call it first with\nconfirm_comment=False to check that the post loads and offers a comment\neditor without typing anything.\n\nConfirmation requires a new unique rendered comment identity with the\nexact body and requested actor's linked identity and avatar. A\n``comment_unconfirmed`` status means the submit was\ndispatched and the text never appeared, which is not the same as a\nfailure \u2014 open the post before retrying.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "description": "Exact personal /in/<member>/ or authorized /company/<company>/ URL.",
+          "type": "string"
+        },
+        "comment": {
+          "description": "Text to publish. Newlines are allowed; every other control\ncharacter is rejected before a browser is touched.",
+          "type": "string"
+        },
+        "confirm_comment": {
+          "default": false,
+          "description": "Must be True to publish the comment",
+          "type": "boolean"
+        },
+        "mention_author": {
+          "default": false,
+          "description": "Prefix a verified rich mention of the post author.\nRefuses when the author or suggestion cannot be identified.",
+          "type": "boolean"
+        },
+        "post": {
+          "description": "Permalink of one post, in either shape ``references`` returns\nfor ``kind: \"feed_post\"``. See react_to_post for the accepted\nforms.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "post",
+        "comment",
+        "actor"
+      ],
+      "type": "object"
+    },
+    "name": "comment_on_post",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Comment On Post"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "actions",
           "person"
         ]
       }
@@ -217,7 +271,7 @@
     "annotations": {
       "openWorldHint": true
     },
-    "description": "Read a specific messaging conversation.\n\nProvide either linkedin_username or thread_id to identify the conversation.\n\nWhen looked up by linkedin_username, resolution searches the messaging\ninbox for the participant's display name and click-visits every\nmatching row to capture its thread ID — LinkedIn's sidebar has no\nanchor hrefs or thread-id attributes, so this is the only available\npath. Each visit selects the row in the LinkedIn UI and may mark it\nas read. Pass thread_id directly to skip this enumeration.\n\nUsername resolution scans matching rows from a requested compose page\nfirst. Its indexable sequence ends before the first unresolved click,\nmissing matching click target, or admitted row that fails the existing\nexact display-name check. An index outside that verified prefix is\nrefused with its reason. Search is a fallback only when the inbox scan\nhas no observed matching result and no such barrier; it never\nsubstitutes a result after a stopped or gapped inbox scan. Pass a known\nthread_id to bypass username/index resolution.",
+    "description": "Read a specific messaging conversation.\n\nProvide either linkedin_username or thread_id to identify the conversation.\n\nWhen looked up by linkedin_username, resolution searches the messaging\ninbox for the participant's display name and click-visits every\nmatching row to capture its thread ID \u2014 LinkedIn's sidebar has no\nanchor hrefs or thread-id attributes, so this is the only available\npath. Each visit selects the row in the LinkedIn UI and may mark it\nas read. Pass thread_id directly to skip this enumeration.\n\nUsername resolution scans matching rows from a requested compose page\nfirst. Its indexable sequence ends before the first unresolved click,\nmissing matching click target, or admitted row that fails the existing\nexact display-name check. An index outside that verified prefix is\nrefused with its reason. Search is a fallback only when the inbox scan\nhas no observed matching result and no such barrier; it never\nsubstitutes a result after a stopped or gapped inbox scan. Pass a known\nthread_id to bypass username/index resolution.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -508,6 +562,45 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "comments",
+          "post"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read currently rendered comment bodies and exact URN references on a post.\n\nThis bounded read does not load all comments or hidden replies. The URL\nin each reference identifies the post, not a fabricated comment permalink.\nPass the reference's value unchanged to reply_to_comment. Parent links\nare reported only where rendered ancestry proves them; otherwise the\nrelationship is not_exposed. max_comments is capped at 50.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "max_comments": {
+          "default": 20,
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "post": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "post"
+      ],
+      "type": "object"
+    },
+    "name": "get_post_comments",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Post Comments"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "job"
         ]
       }
@@ -580,6 +673,110 @@
       "type": "object"
     },
     "title": "Get Sidebar Profiles"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "actions",
+          "post"
+        ]
+      }
+    },
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": true
+    },
+    "description": "React to one LinkedIn post, as the explicitly requested personal or company actor.\n\nThis is a write operation and is publicly attributed: reactions are\nvisible on the post and can appear in other members' feeds. Call first\nwith confirm_reaction=False to inspect without clicking.\n\nReacting is never a toggle here. If this account has already reacted,\nthe tool returns ``already_reacted`` without clicking, because clicking a\npressed reaction control on LinkedIn removes the reaction rather than\nchanging it. To change or remove an existing reaction, do it in LinkedIn.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "description": "Exact personal /in/<member>/ or authorized /company/<company>/ URL.",
+          "type": "string"
+        },
+        "confirm_reaction": {
+          "default": false,
+          "description": "Must be True to add a reaction; defaults to False.",
+          "type": "boolean"
+        },
+        "post": {
+          "description": "Permalink of one post, in either shape ``references`` returns\nfor ``kind: \"feed_post\"`` \u2014 ``/feed/update/<urn>/`` or\n``/posts/<slug>``. An absolute URL on any locale subdomain and a\nbare ``urn:li:{ugcPost,share,activity}:<id>`` are accepted too.",
+          "type": "string"
+        },
+        "reaction": {
+          "const": "like",
+          "default": "like",
+          "description": "Only \"like\" is supported; other reaction types are refused.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "post",
+        "actor"
+      ],
+      "type": "object"
+    },
+    "name": "react_to_post",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "React To Post"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "actions",
+          "comments",
+          "post"
+        ]
+      }
+    },
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": true
+    },
+    "description": "Reply publicly to one exact rendered comment, as a verified member or company.\n\nUse get_post_comments and pass the exact reference value. Only currently\nrendered parents with an unambiguous Reply control and bounded composer\nare supported, including replies where that same structure is exposed.\nactor is an exact /in/<member>/ or authorized /company/<company>/ URL.\nconfirm_reply=False opens and verifies the composer without typing or\npublishing; LinkedIn may insert its own automatic parent mention draft.\nWith confirmation, the automatic mention is cleared by default. Set\nmention_parent_author=True to preserve its verified rich mention of the\nparent comment's author (not the post author). The reply text is otherwise\nexact. English reply labels are currently required.\nretry_safe=False means submission may have occurred: inspect the thread\nbefore retrying, including after an interrupted call.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "type": "string"
+        },
+        "comment_reference": {
+          "type": "string"
+        },
+        "confirm_reply": {
+          "default": false,
+          "type": "boolean"
+        },
+        "mention_parent_author": {
+          "default": false,
+          "type": "boolean"
+        },
+        "post": {
+          "type": "string"
+        },
+        "reply": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "post",
+        "comment_reference",
+        "reply",
+        "actor"
+      ],
+      "type": "object"
+    },
+    "name": "reply_to_comment",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Reply To Comment"
   },
   {
     "_meta": {
