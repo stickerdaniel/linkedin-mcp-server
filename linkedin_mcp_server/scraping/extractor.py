@@ -304,14 +304,14 @@ _LOCALE_JOB_LABELS: dict[str, tuple[str, str]] = {
 }
 
 
-def _get_job_labels() -> tuple[str, str]:
-    """Return (easy_apply, applied) labels for the current locale.
+def _get_job_labels(locale: str = "en") -> tuple[str, str]:
+    """Return (easy_apply, applied) labels for the given locale.
 
     Falls back to English if locale is not in the table.
     """
-    # Could detect locale from page, but LinkedIn UI locale is usually English.
-    labels = _LOCALE_JOB_LABELS.get("en", ("Easy Apply", "Applied"))
-    return labels
+    # TODO: detect locale from the page (e.g. <html lang="..."> or
+    # navigator.language) and pass it here instead of defaulting to "en".
+    return _LOCALE_JOB_LABELS.get(locale, _LOCALE_JOB_LABELS["en"])
 
 
 @dataclass
@@ -3096,29 +3096,20 @@ class LinkedInExtractor:
                 )
 
             # Wait for confirmation: dialog closes or "Applied" badge appears
-            confirmed = await self._page.evaluate(
-                """() => {
-                    // Wait up to 5s for dialog to close or Applied badge
-                    const deadline = Date.now() + 5000;
-                    while (Date.now() < deadline) {
+            try:
+                await self._page.wait_for_function(
+                    """() => {
                         const dialog = document.querySelector('dialog[open], [role="dialog"]');
                         if (!dialog) return true; // Dialog closed = success
-                        const appliedBadge = Array.from(
+                        return Array.from(
                             document.querySelectorAll('main span, main div')
                         ).some(el => /\\bApplied\\b/i.test((el.innerText || '').trim()));
-                        if (appliedBadge) return true;
-                        // Brief sleep to avoid busy-waiting
-                        if (window.Promise) break; // Exit quickly if no async support
-                    }
-                    // Fallback: check if dialog is gone or badge visible
-                    const dialog = document.querySelector('dialog[open], [role="dialog"]');
-                    if (!dialog) return true;
-                    const appliedBadge = Array.from(
-                        document.querySelectorAll('main span, main div')
-                    ).some(el => /\\bApplied\\b/i.test((el.innerText || '').trim()));
-                    return appliedBadge;
-                }"""
-            )
+                    }""",
+                    timeout=5000,
+                )
+                confirmed = True
+            except PlaywrightTimeoutError:
+                confirmed = False
 
             if not confirmed:
                 return self._application_action_result(
@@ -3428,34 +3419,19 @@ class LinkedInExtractor:
         if not resume_path:
             return False
 
-        return await self._page.evaluate(
-            """(resumePath) => {
-                const dialog = document.querySelector('dialog[open], [role="dialog"]');
-                if (!dialog) return false;
+        try:
+            file_input = self._page.locator(
+                'dialog[open] input[type="file"], [role="dialog"] input[type="file"]'
+            )
+            if await file_input.count() > 0:
+                await file_input.first.set_input_files(resume_path)
+                return True
+        except Exception as e:
+            logger.warning("Failed to upload resume to file input: %s", e)
+        return False
 
-                // Find file input (usually labeled "Resume" or "CV")
-                const fileInputs = dialog.querySelectorAll('input[type="file"]');
-                for (const input of fileInputs) {
-                    const label = (input.getAttribute('aria-label') || '').toLowerCase();
-                    const name = (input.getAttribute('name') || '').toLowerCase();
-                    const id = (input.getAttribute('id') || '').toLowerCase();
-
-                    if (label.includes('resume') || label.includes('cv')
-                        || name.includes('resume') || name.includes('cv')
-                        || id.includes('resume') || id.includes('cv')) {
-                        // Set files on the input
-                        const dataTransfer = new DataTransfer();
-                        // Note: Can't actually set file content, just trigger the dialog
-                        // The caller needs to use Playwright's set_input_files
-                        input.dispatchEvent(new Event('change', { bubbles: true }));
-                        return true;
-                    }
-                }
-                return false;
-            }""",
-            resume_path,
-        )
-
+    # TODO: Deferred multi-step auto-fill implementation; register tool when
+    # multi-step review UX is finalized.
     async def easy_apply_full(
         self,
         job_id: str,
@@ -3535,25 +3511,20 @@ class LinkedInExtractor:
                 )
 
             # Wait for confirmation
-            confirmed = await self._page.evaluate(
-                """() => {
-                    const deadline = Date.now() + 5000;
-                    while (Date.now() < deadline) {
+            try:
+                await self._page.wait_for_function(
+                    """() => {
                         const dialog = document.querySelector('dialog[open], [role="dialog"]');
                         if (!dialog) return true;
-                        const appliedBadge = Array.from(
+                        return Array.from(
                             document.querySelectorAll('main span, main div')
                         ).some(el => /\\bApplied\\b/i.test((el.innerText || '').trim()));
-                        if (appliedBadge) return true;
-                        if (window.Promise) break;
-                    }
-                    const dialog = document.querySelector('dialog[open], [role="dialog"]');
-                    if (!dialog) return true;
-                    return Array.from(
-                        document.querySelectorAll('main span, main div')
-                    ).some(el => /\\bApplied\\b/i.test((el.innerText || '').trim()));
-                }"""
-            )
+                    }""",
+                    timeout=5000,
+                )
+                confirmed = True
+            except PlaywrightTimeoutError:
+                confirmed = False
 
             if not confirmed:
                 return self._application_action_result(
