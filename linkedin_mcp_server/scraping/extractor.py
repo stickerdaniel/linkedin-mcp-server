@@ -3180,15 +3180,15 @@ class LinkedInExtractor:
             }
 
         clicked = await self._page.evaluate(
-            """() => {
+            f"""() => {{
                 const btn = Array.from(document.querySelectorAll(
-                    'main button[aria-label*="Easy Apply"]'
+                    'main button[aria-label*="{easy_apply_label}"]'
                 )).find(b => !b.disabled
                     && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
                 if (!btn) return false;
                 btn.click();
                 return true;
-            }"""
+            }}"""
         )
         if not clicked:
             return {
