@@ -179,16 +179,16 @@ def register_person_tools(
             # The builder refuses a filter LinkedIn would ignore. Doing it here
             # keeps that refusal off the browser: get_ready_extractor can install
             # Chromium or rotate a login before this call would have failed.
-            build_people_search_url(
-                keywords,
-                location=location,
-                network=network,
-                current_company=current_company,
-            )
-        except FilterValidationError as e:
-            raise ToolError(str(e)) from e
+            try:
+                build_people_search_url(
+                    keywords,
+                    location=location,
+                    network=network,
+                    current_company=current_company,
+                )
+            except FilterValidationError as e:
+                raise ToolError(str(e)) from e
 
-        try:
             extractor = await get_ready_extractor(ctx, tool_name="search_people")
             logger.info(
                 "Searching people: keywords='%s', location='%s', network=%s, current_company='%s'",
@@ -219,10 +219,6 @@ def register_person_tools(
 
             return result
 
-        except ToolError:
-            # Already a properly formatted client-facing error; do not
-            # log it as "Unexpected error" via raise_tool_error.
-            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)
