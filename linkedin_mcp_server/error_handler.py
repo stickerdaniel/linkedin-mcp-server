@@ -96,11 +96,7 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
         # Already shaped, by an inner call to this very function. A tool wraps its
         # body in `except Exception` while the helpers it calls shape their own
         # failures, so one failure arrives here twice: once as the domain
-        # exception, then again as the ToolError that produced. 16 of the 18 tool
-        # catch sites are like that; `search_people` and `search_posts` already
-        # guard with their own `except ToolError` (`tools/person.py:175`,
-        # `tools/post.py:106`), which is the same conclusion reached one tool at a
-        # time.
+        # exception, then again as the ToolError that produced.
         #
         # The second pass matched none of the branches below and fell through to
         # the catch-all, whose `raise ... from None` severs the chain. Middleware

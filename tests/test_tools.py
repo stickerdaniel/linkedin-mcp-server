@@ -221,33 +221,44 @@ async def test_invalid_reference_is_rejected_before_extractor(
     ready.assert_not_awaited()
 
 
-@pytest.mark.parametrize(
-    ("module_name", "tool_name", "arguments"),
-    [
-        ("person", "get_person_profile", {"linkedin_username": "alice"}),
-        ("person", "search_people", {"keywords": "engineer"}),
-        ("person", "connect_with_person", {"linkedin_username": "alice"}),
-        ("person", "get_sidebar_profiles", {"linkedin_username": "alice"}),
-        ("person", "get_my_profile", {}),
-        ("company", "get_company_profile", {"company_name": "anthropic"}),
-        ("company", "get_company_posts", {"company_name": "anthropic"}),
-        ("company", "search_companies", {"keywords": "fintech"}),
-        ("company", "get_company_employees", {"company_name": "anthropic"}),
-        ("job", "get_job_details", {"job_id": "4252026496"}),
-        ("job", "search_jobs", {"keywords": "python"}),
-        ("job", "get_saved_jobs", {}),
-        ("messaging", "get_inbox", {}),
-        ("messaging", "get_conversation", {"linkedin_username": "alice"}),
-        ("messaging", "search_conversations", {"keywords": "hello"}),
-        (
-            "messaging",
-            "send_message",
-            {"linkedin_username": "alice", "message": "Hello", "confirm_send": False},
-        ),
-        ("feed", "get_feed", {}),
-        ("post", "search_posts", {"keywords": "python"}),
-    ],
-)
+#: One call per registered tool that passes boundary validation, so the tool
+#: reaches its readiness call. `test_the_valid_calls_name_every_tool` keeps it
+#: complete, which is what makes the tests below cover a tool added later.
+_A_VALID_CALL = [
+    ("person", "get_person_profile", {"linkedin_username": "alice"}),
+    ("person", "search_people", {"keywords": "engineer"}),
+    ("person", "connect_with_person", {"linkedin_username": "alice"}),
+    ("person", "get_sidebar_profiles", {"linkedin_username": "alice"}),
+    ("person", "get_my_profile", {}),
+    ("company", "get_company_profile", {"company_name": "anthropic"}),
+    ("company", "get_company_posts", {"company_name": "anthropic"}),
+    ("company", "search_companies", {"keywords": "fintech"}),
+    ("company", "get_company_employees", {"company_name": "anthropic"}),
+    ("job", "get_job_details", {"job_id": "4252026496"}),
+    ("job", "get_job_apply_url", {"job_id": "4252026496"}),
+    ("job", "search_jobs", {"keywords": "python"}),
+    ("job", "get_saved_jobs", {}),
+    ("messaging", "get_inbox", {}),
+    ("messaging", "get_conversation", {"linkedin_username": "alice"}),
+    ("messaging", "search_conversations", {"keywords": "hello"}),
+    (
+        "messaging",
+        "send_message",
+        {"linkedin_username": "alice", "message": "Hello", "confirm_send": False},
+    ),
+    ("feed", "get_feed", {}),
+    ("post", "search_posts", {"keywords": "python"}),
+]
+
+
+def _register(mcp: FastMCP, module_name: str) -> None:
+    import importlib
+
+    module = importlib.import_module(f"linkedin_mcp_server.tools.{module_name}")
+    getattr(module, f"register_{module_name}_tools")(mcp)
+
+
+@pytest.mark.parametrize(("module_name", "tool_name", "arguments"), _A_VALID_CALL)
 async def test_valid_input_reaches_the_patched_readiness_call(
     module_name, tool_name, arguments
 ):
@@ -271,6 +282,71 @@ async def test_valid_input_reaches_the_patched_readiness_call(
     ready.assert_awaited_once()
     assert ready.await_args is not None
     assert ready.await_args.kwargs == {"tool_name": tool_name}
+
+
+async def test_the_valid_calls_name_every_tool():
+    mcp = FastMCP("test")
+    for module_name in _TOOL_MODULES:
+        _register(mcp, module_name)
+
+    registered = {tool.name for tool in await mcp.list_tools()}
+
+    assert registered == {tool_name for _, tool_name, _ in _A_VALID_CALL}
+
+
+@pytest.mark.parametrize(("module_name", "tool_name", "arguments"), _A_VALID_CALL)
+async def test_no_tool_hands_a_proxy_credential_to_the_client(
+    module_name, tool_name, arguments, monkeypatch
+):
+    """An error that is already shaped is still checked for the credentials."""
+    from fastmcp.exceptions import ToolError
+
+    from linkedin_mcp_server.config.schema import AppConfig
+
+    config = AppConfig()
+    config.browser.proxy_server = "http://gate.example:7000"
+    config.browser.proxy_username = "acctzone9"
+    config.browser.proxy_password = "s3cr3t"
+    monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+    mcp = FastMCP("test", mask_error_details=True)
+    _register(mcp, module_name)
+    shaped = ToolError("Proxy refused http://acctzone9:s3cr3t@gate.example:7000")
+
+    with (
+        patch(
+            f"linkedin_mcp_server.tools.{module_name}.get_ready_extractor",
+            AsyncMock(side_effect=shaped),
+        ),
+        pytest.raises(ToolError) as excinfo,
+    ):
+        await mcp.call_tool(tool_name, arguments)
+
+    assert "gate.example:7000" in str(excinfo.value)
+    assert "s3cr3t" not in str(excinfo.value)
+    assert "acctzone9" not in str(excinfo.value)
+
+
+async def test_a_search_filter_refusal_does_not_echo_a_proxy_credential(
+    monkeypatch,
+):
+    """The refusal quotes the filter back, and is answered before readiness."""
+    from fastmcp.exceptions import ToolError
+
+    from linkedin_mcp_server.config.schema import AppConfig
+
+    config = AppConfig()
+    config.browser.proxy_server = "http://gate.example:7000"
+    config.browser.proxy_password = "s3cr3t"
+    monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+    mcp = FastMCP("test", mask_error_details=True)
+    _register(mcp, "person")
+
+    with pytest.raises(ToolError, match="numeric LinkedIn company URN id") as excinfo:
+        await mcp.call_tool(
+            "search_people", {"keywords": "engineer", "current_company": "s3cr3t"}
+        )
+
+    assert "s3cr3t" not in str(excinfo.value)
 
 
 @pytest.mark.parametrize(
