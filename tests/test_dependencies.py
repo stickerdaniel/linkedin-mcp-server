@@ -260,7 +260,7 @@ class TestGetReadyExtractor:
                 AsyncMock(return_value=mock_extractor),
             ),
             patch(
-                "linkedin_mcp_server.tools.person.handle_auth_error",
+                "linkedin_mcp_server.dependencies.handle_auth_error",
                 new_callable=AsyncMock,
                 side_effect=AuthenticationStartedError("login opened"),
             ) as mock_handle,
@@ -292,9 +292,8 @@ class TestGetReadyExtractor:
                 new_callable=AsyncMock,
                 return_value=extractor,
             ),
-            patch.object(
-                feed_tools,
-                "handle_auth_error",
+            patch(
+                "linkedin_mcp_server.dependencies.handle_auth_error",
                 new=AsyncMock(wraps=handle_auth_error),
             ) as routed,
             patch(
