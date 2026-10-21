@@ -67,16 +67,9 @@ _POSIX_PROCESS_SNAPSHOT_SECONDS = 1.0
 #: enough for a wedged Chromium to answer SIGKILL, short enough that a close
 #: which cannot prove it still returns and lets the caller keep the profile.
 _MARKER_DRAIN_SECONDS = 10.0
-#: How long one marker scan may wait for ``ps`` outside Linux. That ``ps``
-#: prints every process's environment, so it costs far more than the ancestry
-#: snapshot above: 0.1 to 0.95 s on a Mac with about 900 processes and no other
-#: load (measured 2026-10-19). Under the snapshot's one-second bound, a ``ps``
-#: slowed by load timed out on every scan of a drain and a clean close was
-#: reported as unconfirmed. Half the drain, because a drain round scans at
-#: least twice, once to find the groups to kill and once for the proof, so the
-#: slowest ``ps`` that still answers can complete one round. A round that waits
-#: for a group scans on every poll as well, so within a drain each scan is cut
-#: to what is left of its budget instead, and none starts once that is spent.
+#: Environment scans need more headroom than ancestry snapshots; see
+#: ``docs/daemon-measurements.md``, Process scans. The per-scan allowance must
+#: still yield to the remaining drain budget, including group-wait polls.
 _MARKER_SCAN_SECONDS = _MARKER_DRAIN_SECONDS / 2
 #: The kernel's own word for "this process has exited and only its unreaped
 #: table entry is left". Nothing else in a process row says it: PID, PGID and
@@ -254,7 +247,7 @@ def _linux_process_rows() -> dict[int, _ProcessRow]:
     return rows
 
 
-def _ps_process_rows() -> dict[int, _ProcessRow]:
+def _ps_process_rows(deadline: float | None = None) -> dict[int, _ProcessRow]:
     """Read process ancestry on POSIX systems without procfs."""
     ps = next(
         (
@@ -266,13 +259,18 @@ def _ps_process_rows() -> dict[int, _ProcessRow]:
     )
     if ps is None:
         return {}
+    timeout = _POSIX_PROCESS_SNAPSHOT_SECONDS
+    if deadline is not None:
+        timeout = min(timeout, deadline - time.monotonic())
+        if timeout <= 0:
+            return {}
     try:
         snapshot = subprocess.run(
             [ps, "-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "state="],
             check=True,
             capture_output=True,
             text=True,
-            timeout=_POSIX_PROCESS_SNAPSHOT_SECONDS,
+            timeout=timeout,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return {}
@@ -296,11 +294,11 @@ def _ps_process_rows() -> dict[int, _ProcessRow]:
     return rows
 
 
-def _posix_process_rows() -> dict[int, _ProcessRow]:
+def _posix_process_rows(deadline: float | None = None) -> dict[int, _ProcessRow]:
     return (
         _linux_process_rows()
         if sys.platform.startswith("linux")
-        else _ps_process_rows()
+        else _ps_process_rows(deadline)
     )
 
 
@@ -649,7 +647,7 @@ def _wait_for_process_groups(
                 with contextlib.suppress(ChildProcessError, OSError):
                     os.waitpid(process, os.WNOHANG)
         try:
-            rows = _posix_process_rows()
+            rows = _posix_process_rows(deadline)
         except OSError:
             rows = {}
         _refresh_marked_process_groups(rows, markers, deadline)
@@ -662,9 +660,12 @@ def _wait_for_process_groups(
             )
         }
         if remaining:
-            if deadline is not None and time.monotonic() >= deadline:
-                return False
-            time.sleep(_JOB_POLL_SECONDS)
+            pause = _JOB_POLL_SECONDS
+            if deadline is not None:
+                pause = min(pause, deadline - time.monotonic())
+                if pause <= 0:
+                    return False
+            time.sleep(pause)
     return True
 
 
@@ -680,7 +681,7 @@ def _kill_marked_process_groups(
     registered.
     """
     try:
-        rows = _posix_process_rows()
+        rows = _posix_process_rows(deadline)
     except OSError:
         rows = {}
     _refresh_marked_process_groups(rows, (marker,), deadline)
@@ -719,14 +720,21 @@ def _drain_marked_posix_groups(marker: str, deadline: float) -> bool:
         scan = _scan_marked_posix_processes(marker, deadline)
         if scan.conclusive and not scan.processes:
             return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        # Capped, and checked again after, so a pause that uses up the budget
+        # ends the drain on the scan that answered rather than on a round
+        # with no time left to scan at all.
+        time.sleep(min(_JOB_POLL_SECONDS, remaining))
         if time.monotonic() >= deadline:
-            if not scan.conclusive:
-                logger.error(
-                    "The browser launch marker could not be scanned for, so "
-                    "this shutdown stays unproven rather than assumed clean."
-                )
-            return False
-        time.sleep(_JOB_POLL_SECONDS)
+            break
+    if not scan.conclusive:
+        logger.error(
+            "The browser launch marker could not be scanned for, so "
+            "this shutdown stays unproven rather than assumed clean."
+        )
+    return False
 
 
 def _drain_exclusions() -> frozenset[int]:
