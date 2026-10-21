@@ -958,10 +958,7 @@ class TestALostMarkerResponse:
             initialize_bootstrap,
         )
         from linkedin_mcp_server.core.exceptions import AuthenticationError
-        from linkedin_mcp_server.dependencies import (
-            get_ready_extractor,
-            handle_auth_error,
-        )
+        from linkedin_mcp_server.dependencies import get_ready_extractor, tool_errors
         from linkedin_mcp_server.server import create_mcp_server
         from linkedin_mcp_server.server_role import (
             ServerRole,
@@ -982,21 +979,14 @@ class TestALostMarkerResponse:
 
         # Mutating, so a read-only replay cannot paper over the loss.
         @owner.tool(annotations={"destructiveHint": True})
+        @tool_errors
         async def send_message(message: str, ctx: Context) -> str:
-            try:
-                await get_ready_extractor(ctx, tool_name="send_message")
-                runs.append(message)
-                if streams:
-                    await ctx.report_progress(progress=1, total=2, message="sending")
-                # The session dies after the tool has started acting.
-                raise AuthenticationError("LinkedIn signed this session out")
-            except AuthenticationError as e:
-                try:
-                    await handle_auth_error(e, ctx)
-                except Exception as relogin_exc:
-                    raise_tool_error(relogin_exc, "send_message")
-            except Exception as e:
-                raise_tool_error(e, "send_message")
+            await get_ready_extractor(ctx, tool_name="send_message")
+            runs.append(message)
+            if streams:
+                await ctx.report_progress(progress=1, total=2, message="sending")
+            # The session dies after the tool has started acting.
+            raise AuthenticationError("LinkedIn signed this session out")
 
         owner.add_middleware(OwnerAuthSignalMiddleware())
 

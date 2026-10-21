@@ -93,10 +93,11 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
     ctx = f" in {context}" if context else ""
 
     if isinstance(exception, ToolError):
-        # Already shaped, by an inner call to this very function. A tool wraps its
-        # body in `except Exception` while the helpers it calls shape their own
-        # failures, so one failure arrives here twice: once as the domain
-        # exception, then again as the ToolError that produced.
+        # Already shaped, by an inner call to this very function or by a tool
+        # body. `tool_errors` catches every `Exception` a tool raises while the
+        # helpers it calls shape their own failures, so one failure arrives here
+        # twice: once as the domain exception, then again as the ToolError that
+        # produced.
         #
         # The second pass matched none of the branches below and fell through to
         # the catch-all, whose `raise ... from None` severs the chain. Middleware

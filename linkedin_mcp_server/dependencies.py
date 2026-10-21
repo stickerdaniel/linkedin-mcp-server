@@ -1,6 +1,9 @@
 """Helpers used by MCP tools after bootstrap gating."""
 
+import functools
+import inspect
 import logging
+from collections.abc import Awaitable, Callable
 from typing import NoReturn
 
 from fastmcp import Context
@@ -77,11 +80,11 @@ async def handle_auth_error(
     *nothing_ran_yet* says whether the tool had done any work before the failure,
     which decides whether a client may safely run the call again after signing in.
     Only :func:`get_ready_extractor` can answer yes: boundary validation may run
-    first, but no tool work has started when it fails. The 18
-    catch sites in the tool bodies leave it at the default, because by then the
-    page read may be part done, and some of these tools send messages and connection
-    requests. A 19th added later is non-replayable until someone says otherwise,
-    which is the safe direction for a default to point.
+    first, but no tool work has started when it fails. :func:`tool_errors`, which
+    catches the failure everywhere else in a tool, leaves it at the default,
+    because by then the page read may be part done, and some tools send messages
+    and connection requests. A new caller is non-replayable until someone says
+    otherwise, which is the safe direction for a default to point.
     """
     if get_runtime_policy() == RuntimePolicy.DOCKER:
         raise DockerHostLoginRequiredError(
@@ -160,6 +163,34 @@ async def handle_auth_error(
     await invalidate_auth_and_trigger_relogin(
         ctx, stale_generation=broken_generation
     )  # always raises
+
+
+def tool_errors[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
+    """Shape a tool's failures for the client, and start a login on a dead session.
+
+    Applied under ``@mcp.tool``, and the failures are reported under
+    ``fn.__name__``. ``functools.wraps`` is what keeps the published schema the
+    body's own: FastMCP reads the signature, docstring and annotations through
+    ``__wrapped__``.
+    """
+    signature = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return await fn(*args, **kwargs)
+        except AuthenticationError as e:
+            # Bound rather than read from kwargs: FastMCP passes every argument
+            # by keyword, but a direct caller may pass ctx by position.
+            ctx = signature.bind_partial(*args, **kwargs).arguments.get("ctx")
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, wrapper.__name__)
+        except Exception as e:
+            raise_tool_error(e, wrapper.__name__)
+
+    return wrapper
 
 
 def _browser_is_unusable(browser: BrowserManager) -> bool:

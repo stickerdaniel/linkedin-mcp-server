@@ -295,6 +295,115 @@ async def test_the_valid_calls_name_every_tool():
 
 
 @pytest.mark.parametrize(("module_name", "tool_name", "arguments"), _A_VALID_CALL)
+async def test_a_session_that_dies_during_a_call_asks_for_a_login(
+    module_name, tool_name, arguments, caplog
+):
+    """Every tool starts a login, and does not claim the call may run again.
+
+    The readiness call is only where the failure is injected, being the one call
+    every tool makes; the real readiness call answers its own auth failures.
+    """
+    from fastmcp import Context
+    from fastmcp.exceptions import ToolError
+
+    from linkedin_mcp_server.core.exceptions import AuthenticationError
+    from linkedin_mcp_server.exceptions import AuthenticationStartedError
+
+    mcp = FastMCP("test", mask_error_details=True)
+    _register(mcp, module_name)
+    signed_out = AuthenticationError("LinkedIn signed this session out")
+
+    with (
+        patch(
+            f"linkedin_mcp_server.tools.{module_name}.get_ready_extractor",
+            AsyncMock(side_effect=signed_out),
+        ),
+        patch(
+            "linkedin_mcp_server.dependencies.handle_auth_error",
+            AsyncMock(side_effect=AuthenticationStartedError("A login window opened")),
+        ) as relogin,
+        caplog.at_level(logging.INFO, logger="linkedin_mcp_server.error_handler"),
+        pytest.raises(ToolError, match="A login window opened"),
+    ):
+        await mcp.call_tool(tool_name, arguments)
+
+    relogin.assert_awaited_once()
+    assert relogin.await_args is not None
+    (failure, ctx), options = relogin.await_args
+    assert failure is signed_out
+    assert isinstance(ctx, Context)
+    assert options.get("nothing_ran_yet", False) is False
+    assert f"Authentication started in {tool_name}:" in caplog.text
+
+
+@pytest.mark.parametrize(("module_name", "tool_name", "arguments"), _A_VALID_CALL)
+async def test_a_known_failure_reaches_a_masked_client_shaped(
+    module_name, tool_name, arguments, caplog
+):
+    from fastmcp.exceptions import ToolError
+
+    from linkedin_mcp_server.core.exceptions import RateLimitError
+
+    mcp = FastMCP("test", mask_error_details=True)
+    _register(mcp, module_name)
+
+    with (
+        patch(
+            f"linkedin_mcp_server.tools.{module_name}.get_ready_extractor",
+            AsyncMock(side_effect=RateLimitError("throttled", suggested_wait_time=60)),
+        ),
+        patch(
+            "linkedin_mcp_server.dependencies.handle_auth_error",
+            new_callable=AsyncMock,
+        ) as relogin,
+        caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.error_handler"),
+        pytest.raises(ToolError, match="Rate limit detected. Wait 60 seconds"),
+    ):
+        await mcp.call_tool(tool_name, arguments)
+
+    relogin.assert_not_awaited()
+    assert f"Rate limit in {tool_name}:" in caplog.text
+
+
+@pytest.mark.parametrize(("module_name", "tool_name", "arguments"), _A_VALID_CALL)
+async def test_a_quiescent_owner_lets_every_tool_be_replayed_after_sign_in(
+    module_name, tool_name, arguments
+):
+    """The readiness refusal crosses the tool with its replay marker intact.
+
+    Readiness runs for real up to the owner's latch, so the refusal says that
+    nothing ran yet from where it was raised, and the marker has to carry that
+    through the tool's own failure handling to the client.
+    """
+    from fastmcp import Client
+
+    from linkedin_mcp_server.bootstrap import go_auth_quiescent
+    from linkedin_mcp_server.daemon.auth_repair import (
+        MARKER_KEY,
+        OwnerAuthSignalMiddleware,
+    )
+    from linkedin_mcp_server.server_role import ServerRole, set_process_role
+
+    set_process_role(ServerRole.OWNER)
+    go_auth_quiescent("broken-generation")
+    mcp = FastMCP("owner", mask_error_details=True)
+    _register(mcp, module_name)
+    mcp.add_middleware(OwnerAuthSignalMiddleware())
+
+    with patch(
+        "linkedin_mcp_server.dependencies.get_or_create_browser",
+        AsyncMock(side_effect=AssertionError("a quiescent owner opened a browser")),
+    ):
+        async with Client(mcp) as client:
+            result = await client.call_tool(tool_name, arguments, raise_on_error=False)
+
+    assert result.is_error
+    marker = (result.meta or {})[MARKER_KEY]
+    assert marker["replayable"] is True
+    assert marker["generation"] == "broken-generation"
+
+
+@pytest.mark.parametrize(("module_name", "tool_name", "arguments"), _A_VALID_CALL)
 async def test_no_tool_hands_a_proxy_credential_to_the_client(
     module_name, tool_name, arguments, monkeypatch
 ):
@@ -408,7 +517,7 @@ async def test_a_landing_off_linkedin_reaches_a_masked_client_by_name(
             AsyncMock(return_value=extractor),
         ),
         patch(
-            f"linkedin_mcp_server.tools.{module_name}.handle_auth_error",
+            "linkedin_mcp_server.dependencies.handle_auth_error",
             new_callable=AsyncMock,
         ) as relogin,
         pytest.raises(ToolError) as excinfo,

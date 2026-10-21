@@ -15,9 +15,7 @@ from pydantic import BeforeValidator, Field
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
-from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
-from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.dependencies import get_ready_extractor, tool_errors
 from linkedin_mcp_server.linkedin import parse_person_sections
 from linkedin_mcp_server.linkedin.contracts import FilterValidationError
 from linkedin_mcp_server.linkedin.identifiers import normalize_person_identifier
@@ -69,6 +67,7 @@ def register_person_tools(
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person"},
     )
+    @tool_errors
     async def get_person_profile(
         linkedin_username: str,
         ctx: Context,
@@ -105,37 +104,28 @@ def register_person_tools(
             Includes unknown_sections when unrecognised names are passed.
             The LLM should parse the raw text in each section.
         """
-        try:
-            linkedin_username = normalize_person_identifier(linkedin_username)
-            extractor = await get_ready_extractor(ctx, tool_name="get_person_profile")
-            requested, unknown = parse_person_sections(sections)
+        linkedin_username = normalize_person_identifier(linkedin_username)
+        extractor = await get_ready_extractor(ctx, tool_name="get_person_profile")
+        requested, unknown = parse_person_sections(sections)
 
-            logger.info(
-                "Reading profile: %s (sections=%s)",
-                linkedin_username,
-                sections,
-            )
+        logger.info(
+            "Reading profile: %s (sections=%s)",
+            linkedin_username,
+            sections,
+        )
 
-            cb = MCPContextProgressCallback(ctx)
-            result = await extractor.read_person(
-                linkedin_username,
-                requested,
-                callbacks=cb,
-                max_scrolls=max_scrolls,
-            )
+        cb = MCPContextProgressCallback(ctx)
+        result = await extractor.read_person(
+            linkedin_username,
+            requested,
+            callbacks=cb,
+            max_scrolls=max_scrolls,
+        )
 
-            if unknown:
-                result["unknown_sections"] = unknown
+        if unknown:
+            result["unknown_sections"] = unknown
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "get_person_profile")
-        except Exception as e:
-            raise_tool_error(e, "get_person_profile")  # NoReturn
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
@@ -143,6 +133,7 @@ def register_person_tools(
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "search"},
     )
+    @tool_errors
     async def search_people(
         keywords: str,
         ctx: Context,
@@ -179,53 +170,44 @@ def register_person_tools(
             # The builder refuses a filter LinkedIn would ignore. Doing it here
             # keeps that refusal off the browser: get_ready_extractor can install
             # Chromium or rotate a login before this call would have failed.
-            try:
-                build_people_search_url(
-                    keywords,
-                    location=location,
-                    network=network,
-                    current_company=current_company,
-                )
-            except FilterValidationError as e:
-                raise ToolError(str(e)) from e
+            build_people_search_url(
+                keywords,
+                location=location,
+                network=network,
+                current_company=current_company,
+            )
+        except FilterValidationError as e:
+            raise ToolError(str(e)) from e
 
-            extractor = await get_ready_extractor(ctx, tool_name="search_people")
-            logger.info(
-                "Searching people: keywords='%s', location='%s', network=%s, current_company='%s'",
+        extractor = await get_ready_extractor(ctx, tool_name="search_people")
+        logger.info(
+            "Searching people: keywords='%s', location='%s', network=%s, current_company='%s'",
+            keywords,
+            location,
+            network,
+            current_company,
+        )
+
+        await ctx.report_progress(
+            progress=0, total=100, message="Starting people search"
+        )
+
+        try:
+            result = await extractor.search_people(
                 keywords,
                 location,
-                network,
-                current_company,
+                network=network,
+                current_company=current_company,
             )
+        except FilterValidationError as e:
+            # Validation messages carry actionable detail; surface
+            # them as ToolError so mask_error_details doesn't reduce
+            # them to "Error calling tool 'search_people'".
+            raise ToolError(str(e)) from e
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Starting people search"
-            )
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            try:
-                result = await extractor.search_people(
-                    keywords,
-                    location,
-                    network=network,
-                    current_company=current_company,
-                )
-            except FilterValidationError as e:
-                # Validation messages carry actionable detail; surface
-                # them as ToolError so mask_error_details doesn't reduce
-                # them to "Error calling tool 'search_people'".
-                raise ToolError(str(e)) from e
-
-            await ctx.report_progress(progress=100, total=100, message="Complete")
-
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "search_people")
-        except Exception as e:
-            raise_tool_error(e, "search_people")  # NoReturn
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
@@ -233,6 +215,7 @@ def register_person_tools(
         annotations={"destructiveHint": True, "openWorldHint": True},
         tags={"person", "actions"},
     )
+    @tool_errors
     async def connect_with_person(
         linkedin_username: str,
         ctx: Context,
@@ -274,37 +257,28 @@ def register_person_tools(
             ``retry_safe: False`` and no ``note_sent``; check the profile
             before calling again, because a repeat may invite twice.
         """
-        try:
-            linkedin_username = normalize_person_identifier(linkedin_username)
-            extractor = await get_ready_extractor(ctx, tool_name="connect_with_person")
-            logger.info(
-                "Connecting with person: %s (note=%s)",
-                linkedin_username,
-                note is not None,
-            )
+        linkedin_username = normalize_person_identifier(linkedin_username)
+        extractor = await get_ready_extractor(ctx, tool_name="connect_with_person")
+        logger.info(
+            "Connecting with person: %s (note=%s)",
+            linkedin_username,
+            note is not None,
+        )
 
-            await ctx.report_progress(
-                progress=0,
-                total=100,
-                message="Starting LinkedIn connection flow",
-            )
+        await ctx.report_progress(
+            progress=0,
+            total=100,
+            message="Starting LinkedIn connection flow",
+        )
 
-            result = await extractor.connect_with_person(
-                linkedin_username,
-                note=note,
-            )
+        result = await extractor.connect_with_person(
+            linkedin_username,
+            note=note,
+        )
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "connect_with_person")
-        except Exception as e:
-            raise_tool_error(e, "connect_with_person")  # NoReturn
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
@@ -312,6 +286,7 @@ def register_person_tools(
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person"},
     )
+    @tool_errors
     async def get_sidebar_profiles(
         linkedin_username: str,
         ctx: Context,
@@ -333,28 +308,19 @@ def register_person_tools(
             Dict with url and sidebar_profiles mapping section key to a list of
             /in/username/ paths. Only sections present on the page are included.
         """
-        try:
-            linkedin_username = normalize_person_identifier(linkedin_username)
-            extractor = await get_ready_extractor(ctx, tool_name="get_sidebar_profiles")
-            logger.info("Getting sidebar profiles for: %s", linkedin_username)
+        linkedin_username = normalize_person_identifier(linkedin_username)
+        extractor = await get_ready_extractor(ctx, tool_name="get_sidebar_profiles")
+        logger.info("Getting sidebar profiles for: %s", linkedin_username)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Extracting sidebar profiles"
-            )
+        await ctx.report_progress(
+            progress=0, total=100, message="Extracting sidebar profiles"
+        )
 
-            result = await extractor.get_sidebar_profiles(linkedin_username)
+        result = await extractor.get_sidebar_profiles(linkedin_username)
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "get_sidebar_profiles")
-        except Exception as e:
-            raise_tool_error(e, "get_sidebar_profiles")  # NoReturn
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
@@ -362,6 +328,7 @@ def register_person_tools(
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person"},
     )
+    @tool_errors
     async def get_my_profile(
         ctx: Context,
         sections: str | None = None,
@@ -393,28 +360,19 @@ def register_person_tools(
             rate-limit retry and stop behavior is retained.
             Includes unknown_sections when unrecognised names are passed.
         """
-        try:
-            extractor = await get_ready_extractor(ctx, tool_name="get_my_profile")
-            requested, unknown = parse_person_sections(sections)
+        extractor = await get_ready_extractor(ctx, tool_name="get_my_profile")
+        requested, unknown = parse_person_sections(sections)
 
-            logger.info("Reading own profile (sections=%s)", sections)
+        logger.info("Reading own profile (sections=%s)", sections)
 
-            cb = MCPContextProgressCallback(ctx)
-            result = await extractor.get_my_profile(
-                sections=requested,
-                callbacks=cb,
-                max_scrolls=max_scrolls,
-            )
+        cb = MCPContextProgressCallback(ctx)
+        result = await extractor.get_my_profile(
+            sections=requested,
+            callbacks=cb,
+            max_scrolls=max_scrolls,
+        )
 
-            if unknown:
-                result["unknown_sections"] = unknown
+        if unknown:
+            result["unknown_sections"] = unknown
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "get_my_profile")
-        except Exception as e:
-            raise_tool_error(e, "get_my_profile")  # NoReturn
+        return result
