@@ -2403,50 +2403,20 @@ class LinkedInExtractor:
         return result
 
     async def _search_people_urns(
-        self, keywords: str, location: str | None = None, limit: int = 10
+        self, keywords: str = "", location: str | None = None, limit: int = 10
     ) -> list[dict[str, Any]]:
-        """Extract profile URNs from search results DOM.
+        """Extract profile URNs from loaded search results DOM.
 
-        Returns list of {urn, name, headline, profileUrl} for use with InMail.
+        Returns list of {urn} for use with InMail.
+        Operates on the currently loaded page without re-navigating.
         """
-        # Navigate directly to search URL with keywords
-        search_params = f"keywords={quote_plus(keywords)}"
-        if location:
-            search_params += f"&location={quote_plus(location)}"
-        search_url = f"https://www.linkedin.com/search/results/people/?{search_params}"
-
-        await self._navigate_to_page(search_url)
-        await detect_rate_limit(self._page)
-        await asyncio.sleep(2)  # Wait for JS to hydrate
-
-        # Extract URNs from DOM - LinkedIn stores profile data in JSON
+        # Extract URNs from DOM script tags
         urns = await self._page.evaluate(
             """({ limit }) => {
                 const results = [];
                 const seen = new Set();
 
-                // Look for profile data in various LinkedIn DOM patterns
-                // Pattern 1: data-urn attributes on search result elements
-                const dataElements = document.querySelectorAll('[data-urn]');
-                for (const el of dataElements) {
-                    const urn = el.getAttribute('data-urn');
-                    if (urn && urn.includes('fsd_profile') && !seen.has(urn)) {
-                        seen.add(urn);
-                        const urnPart = urn.match(/urn:li:fsd_profile:([A-Za-z0-9_-]+)/);
-                        if (urnPart) {
-                            const nameEl = el.querySelector('.actor-name, .search-result__title a, span[aria-label]');
-                            const headlineEl = el.querySelector('.subline-level-1, .search-result__snippet, .entity-result__primary-subtitle');
-                            results.push({
-                                urn: urnPart[1],
-                                name: nameEl?.textContent?.trim() || '',
-                                headline: headlineEl?.textContent?.trim() || '',
-                                profileUrl: nameEl?.href || ''
-                            });
-                        }
-                    }
-                }
-
-                // Pattern 2: Look in script tags with JSON data
+                // Look in script tags with JSON data
                 const scripts = document.querySelectorAll('script');
                 for (const script of scripts) {
                     if (script.textContent && script.textContent.includes('fsd_profile')) {
@@ -2457,34 +2427,8 @@ class LinkedInExtractor:
                                 seen.add(urn);
                                 results.push({
                                     urn: urn,
-                                    name: '',
-                                    headline: '',
-                                    profileUrl: `https://www.linkedin.com/in/${urn}`
                                 });
                             }
-                        }
-                    }
-                }
-
-                // Pattern 3: Look in search result links with tracking params
-                const links = document.querySelectorAll('a[href*="/in/"][data-test-app-aware-link]');
-                for (const link of links) {
-                    const href = link.href;
-                    // Extract public ID from URL pattern like /in/username-123456/
-                    const usernameMatch = href.match(/\/in\/([^\/\?]+)/);
-                    if (usernameMatch) {
-                        const username = usernameMatch[1];
-                        // Generate URN from username - this is a best effort
-                        if (!seen.has(username)) {
-                            seen.add(username);
-                            const parent = link.closest('.search-result, .entity-result');
-                            const name = link.textContent?.trim() || username;
-                            results.push({
-                                urn: username,  // Use username as identifier
-                                name: name,
-                                headline: parent?.querySelector('.entity-result__primary-subtitle')?.textContent?.trim() || '',
-                                profileUrl: href.split('?')[0]
-                            });
                         }
                     }
                 }
@@ -2979,6 +2923,12 @@ class LinkedInExtractor:
                 compose URL directly.
         """
         profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
+        if message and len(message) > 1900:
+            return self._message_action_result(
+                profile_url,
+                "message_too_long",
+                f"InMail message exceeds 1900 characters ({len(message)}).",
+            )
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
 
@@ -3213,13 +3163,36 @@ class LinkedInExtractor:
                 "Could not extract CSRF token from cookies.",
             )
 
-        # Get profile URN or public identifier
+        # Validate 300-char message limit
+        if message and len(message) > 300:
+            return self._message_action_result(
+                profile_url,
+                "message_too_long",
+                f"Connection request message exceeds 300 characters ({len(message)}).",
+                recipient_selected=True,
+            )
+
+        # Get profile URN
         profile_id = profile_urn
         if not profile_id:
             profile_id = await self._extract_profile_urn_from_page()
-            # Fall back to username if no URN found
-            if not profile_id:
-                profile_id = linkedin_username
+
+        if not profile_id:
+            return self._message_action_result(
+                profile_url,
+                "urn_resolution_failed",
+                "Could not extract profile URN required for connection request.",
+                recipient_selected=True,
+            )
+
+        is_urn = bool(re.match(r"^[A-Z][A-Za-z0-9_]{9,}$", profile_id))
+        if not is_urn:
+            return self._message_action_result(
+                profile_url,
+                "invalid_urn",
+                f"Resolved identifier '{profile_id}' is not a valid profile URN.",
+                recipient_selected=True,
+            )
 
         if not confirm_send:
             return self._message_action_result(
@@ -3229,20 +3202,18 @@ class LinkedInExtractor:
                 recipient_selected=True,
             )
 
-        # Send connection request via Voyager API
-        # Use the URN if available, otherwise use the public identifier
-        is_urn = profile_id and profile_id.startswith("ACoAA")
+        # Send connection request via Voyager API with verified URN
         result = await self._page.evaluate(
-            """async ({ csrfToken, profileId, customMessage, isUrn }) => {
+            """async ({ csrfToken, profileId, customMessage }) => {
                 const params = new URLSearchParams({
                     action: "verifyQuotaAndCreate",
                     decorationId: "com.linkedin.voyager.dash.deco.relationships.InvitationCreationResult-2"
                 });
 
-                // Build the body - URN format or plain ID format
-                const body = isUrn
-                    ? { inviteeProfileUrn: `urn:li:fsd_profile:${profileId}`, customMessage: customMessage || "" }
-                    : { trackingId: profileId, customMessage: customMessage || "" };
+                const body = {
+                    inviteeProfileUrn: `urn:li:fsd_profile:${profileId}`,
+                    customMessage: customMessage || ""
+                };
 
                 const response = await fetch(
                     `/voyager/api/voyagerRelationshipsDashMemberRelationships?${params}`,
@@ -3329,7 +3300,8 @@ class LinkedInExtractor:
     async def _resolve_inmail_compose_href(self) -> str | None:
         """Return the direct InMail compose URL from a profile page.
 
-        Looks for InMail-specific buttons or links on the profile page.
+        Looks for InMail-specific links on the profile page.
+        Never falls back to generic message compose links.
         """
         href = await self._page.evaluate(
             """() => {
@@ -3341,25 +3313,19 @@ class LinkedInExtractor:
                             element.getClientRects().length)
                     );
 
-                // Look for InMail button specifically
-                const inmailButton = Array.from(
-                    document.querySelectorAll(
-                        'button[aria-label*="InMail"], button[aria-label*="inMail"],'
-                        + 'button[data-control-name*="inmail"], button[data-control-name*="InMail"]'
-                    )
-                ).find(isVisible);
+                // Look for InMail link specifically (href containing INMAIL or messagingKind)
+                const inmailAnchor = Array.from(
+                    document.querySelectorAll('a[href*="/messaging/compose/"]')
+                ).find(a =>
+                    isVisible(a) &&
+                    (a.href.includes('INMAIL') || a.href.includes('inmail') || a.href.includes('messagingKind'))
+                );
 
-                if (inmailButton) {
-                    const href = inmailButton.getAttribute('href') || inmailButton.dataset.href;
-                    if (href) return href;
+                if (inmailAnchor) {
+                    return inmailAnchor.getAttribute('href') || inmailAnchor.href;
                 }
 
-                // Fall back to any compose link
-                const composeAnchor = Array.from(
-                    document.querySelectorAll('a[href*="/messaging/compose/"]')
-                ).find(isVisible);
-
-                return composeAnchor ? (composeAnchor.getAttribute('href') || composeAnchor.href) : null;
+                return null;
             }"""
         )
         if not isinstance(href, str) or not href.strip():
