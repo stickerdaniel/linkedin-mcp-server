@@ -65,7 +65,7 @@ class LinkedInExtractor:
         )
         job_pages = JobPageReader(session, navigator, content)
         self._jobs = JobReader(navigator, capture, job_pages)
-        self._posts = PostSearch(capture)
+        self._posts = PostSearch(capture, session=session, navigator=navigator)
         self._conversations = ConversationReader(
             session, navigator, content, profile_page
         )
@@ -225,6 +225,19 @@ class LinkedInExtractor:
             keywords,
             date_posted=date_posted,
             max_pages=max_pages,
+        )
+
+    async def post_comment(
+        self,
+        post_permalink: str,
+        comment_text: str,
+        confirm_post: bool = True,
+    ) -> dict[str, Any]:
+        """Post a comment to a LinkedIn post via browser UI automation."""
+        return await self._posts.post_comment(
+            post_permalink,
+            comment_text,
+            confirm_post=confirm_post,
         )
 
     async def get_inbox(self, limit: int = 20) -> dict[str, Any]:
