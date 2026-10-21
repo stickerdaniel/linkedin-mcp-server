@@ -50,8 +50,8 @@ from linkedin_mcp_server.process_tree import _MarkerScan, _scan_marked_posix_pro
 #: fails. Outside Linux a scan is a ``ps`` that can time out on a loaded runner
 #: (measured in CI: an empty inconclusive scan while the browser still answered,
 #: then nine marked processes on the next one). The bound keeps a permanently
-#: unreadable process table a failure within a few seconds, about five ``ps``
-#: timeouts plus the pauses, instead of a hang or a pass.
+#: unreadable process table a failure within about five ``ps`` timeouts plus
+#: the pauses, instead of a hang or a pass.
 _MARKER_SCAN_ATTEMPTS = 5
 _MARKER_SCAN_PAUSE_SECONDS = 0.5
 

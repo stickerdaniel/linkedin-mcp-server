@@ -292,6 +292,19 @@ class BrowserManager:
             raise
         return driver
 
+    async def _remember_detached_groups(self) -> bool:
+        """Register this launch's detached groups, and say whether a cancel came.
+
+        Off the event loop, because outside Linux this waits on a ``ps`` that
+        can take seconds, and every other caller on the loop would wait with
+        it. Cancels are held back until it finishes, because the cleanup they
+        lead to relies on this registration and must not race it.
+        """
+        _, cancelled = await await_deferring_cancels(
+            asyncio.to_thread(remember_detached_process_groups, self._process_marker)
+        )
+        return cancelled
+
     def _begin_a_launch(self) -> None:
         """Take this manager into a new launch, or refuse to.
 
@@ -420,7 +433,8 @@ class BrowserManager:
                 # A launch can leave detached Chromium behind even when Patchright
                 # never returns a context. Retain its group while the Node driver's
                 # ancestry still makes it discoverable.
-                remember_detached_process_groups(self._process_marker)
+                if await self._remember_detached_groups():
+                    raise asyncio.CancelledError
                 # A headed launch needs somewhere to put a window, and whether
                 # this machine has one cannot be decided from the platform name
                 # alone: a Mac reached over SSH, a launchd daemon, or a CI
@@ -528,7 +542,8 @@ class BrowserManager:
             # Patchright starts Chromium in its own POSIX process group. Capture
             # that group before page setup or authentication can fail and before
             # the Node driver can exit and reparent it.
-            remember_detached_process_groups(self._process_marker)
+            if await self._remember_detached_groups():
+                raise asyncio.CancelledError
             logger.info(
                 "Persistent browser launched (headless=%s, user_data_dir=%s)",
                 self.headless,
@@ -560,8 +575,10 @@ class BrowserManager:
         except BaseException as e:
             # A failure before a context was returned can still have spawned a
             # detached browser. This is idempotent with the two launch checkpoints
-            # above and must run before cleanup can make ancestry disappear.
-            remember_detached_process_groups(self._process_marker)
+            # above and must run before cleanup can make ancestry disappear. A
+            # cancel arriving meanwhile is held like one during the close below,
+            # and this handler raises anyway once the profile is settled.
+            await self._remember_detached_groups()
             # BaseException so a cancelled launch is cleaned up too: Chromium may
             # already be running, and leaving it would hold the profile.
             #
