@@ -97,7 +97,7 @@
     },
     {
       "name": "search_people",
-      "description": "Search for people on LinkedIn by keywords, location, connection degree (1st/2nd/3rd), and current company"
+      "description": "Search for people on LinkedIn by keywords, location, connection degree (1st/2nd/3rd), current company, and connections of a member (mutual connections)"
     },
     {
       "name": "get_inbox",
