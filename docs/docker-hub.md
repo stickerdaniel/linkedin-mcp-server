@@ -131,6 +131,7 @@ Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSO
 | `BROWSER_WAIT` | `25` | How long to wait for another server process to hand over the shared browser, in seconds (max 45; `0` = report busy at once). |
 | `BROWSER_MIN_HOLD` | `20` | Shortest time a process keeps the shared browser before handing it over, in seconds. Clamped to 3 seconds below `BROWSER_WAIT`, so raise that one along with it. Higher means fewer browser restarts but longer waits for other clients. |
 | `BROWSER_IDLE_TIMEOUT` | `600` | Close an idle browser and release the profile after this many seconds without a tool call (`0` = keep it open). |
+| `RATE_LIMIT_PAUSE` | `0` | After LinkedIn shows a rate-limit page or restricts the account, refuse every LinkedIn tool for this many seconds, across restarts (`0` = off; `86400` = 24 hours). A successful `--login --login-viewer` ends it sooner, and so does deleting `rate-limit-pause.json` from the mounted `~/.linkedin-mcp`. |
 | `AUTO_IMPORT_FROM_BROWSER` | on | Import a session from a signed-in local browser on the first tool call that needs one. Skipped in containers, which have no host browser or keychain. |
 | `TRANSPORT` | `stdio` | Transport mode: stdio, streamable-http |
 | `HOST` | `127.0.0.1` | HTTP server host (for streamable-http transport) |
