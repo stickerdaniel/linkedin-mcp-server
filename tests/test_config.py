@@ -185,6 +185,58 @@ class TestProfileSharingConfig:
         assert config.browser_idle_timeout_seconds == 86_400
 
 
+class TestToolCallLimitConfig:
+    """``tool_calls_per_minute`` / ``tool_calls_per_day``, both off by default."""
+
+    def test_off_by_default(self):
+        config = BrowserConfig()
+
+        assert (config.tool_calls_per_minute, config.tool_calls_per_day) == (0, 0)
+
+    def test_the_environment_sets_both(self, monkeypatch):
+        monkeypatch.setenv("TOOL_CALLS_PER_MINUTE", "10")
+        monkeypatch.setenv("TOOL_CALLS_PER_DAY", "100")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+
+        assert config.browser.tool_calls_per_minute == 10
+        assert config.browser.tool_calls_per_day == 100
+
+    def test_the_flags_set_both(self):
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = load_from_args(
+            AppConfig(), ["--tool-calls-per-minute", "3", "--tool-calls-per-day", "30"]
+        )
+
+        assert config.browser.tool_calls_per_minute == 3
+        assert config.browser.tool_calls_per_day == 30
+
+    @pytest.mark.parametrize(
+        "variable", ["TOOL_CALLS_PER_MINUTE", "TOOL_CALLS_PER_DAY"]
+    )
+    def test_a_value_that_is_not_a_number_is_named(self, monkeypatch, variable):
+        monkeypatch.setenv(variable, "ten")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        with pytest.raises(ConfigurationError, match=variable):
+            load_from_env(AppConfig())
+
+    @pytest.mark.parametrize("field", ["tool_calls_per_minute", "tool_calls_per_day"])
+    def test_a_negative_limit_is_refused(self, field):
+        config = BrowserConfig()
+        setattr(config, field, -1)
+        with pytest.raises(ConfigurationError, match=field):
+            config.validate()
+
+    def test_a_negative_flag_is_refused(self):
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        with pytest.raises(SystemExit):
+            load_from_args(AppConfig(), ["--tool-calls-per-day", "-1"])
+
+
 class TestServerConfig:
     def test_defaults(self):
         config = ServerConfig()

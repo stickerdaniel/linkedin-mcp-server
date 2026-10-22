@@ -1559,6 +1559,16 @@ class TestConfigFingerprint:
             _config(**{field: value}), key=token
         )
 
+    @pytest.mark.parametrize("field", ["tool_calls_per_minute", "tool_calls_per_day"])
+    def test_a_different_tool_call_limit_does_not_match(self, field: str):
+        # The owner runs the calls and so enforces the limits: a client that
+        # asks for others would be held to the owner's instead.
+        token = new_token()
+
+        assert config_fingerprint(_config(), key=token) != config_fingerprint(
+            _config(**{field: 10}), key=token
+        )
+
     def test_configuration_that_only_affects_the_client_still_matches(self):
         # These describe how one client behaves, not what the browser is, so
         # they must not stop it attaching.

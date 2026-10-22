@@ -98,8 +98,9 @@ _ENDPOINT_HOSTS = frozenset({"127.0.0.1", "::1"})
 
 #: Configuration a client must share with the owner to be served by it. Each of
 #: these either changes what the browser *is* (its fingerprint, its exit
-#: address, where its profile lives) or how long the owner keeps it. Anything
-#: not listed here may differ freely between clients.
+#: address, where its profile lives), how long the owner keeps it, or which
+#: calls the owner refuses. Anything not listed here may differ freely between
+#: clients.
 #:
 #: The login settings (``login_timeout_seconds``, ``login_inline_wait_seconds``,
 #: ``auto_import_from_browser``) are left out on purpose. The owner never signs
@@ -120,6 +121,8 @@ SHARED_CONFIG_FIELDS = (
     "proxy_password",
     "proxy_bypass",
     "browser_idle_timeout_seconds",
+    "tool_calls_per_minute",
+    "tool_calls_per_day",
 )
 
 

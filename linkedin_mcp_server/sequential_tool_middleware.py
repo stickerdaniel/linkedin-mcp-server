@@ -19,8 +19,9 @@ from linkedin_mcp_server.daemon.liveness import (
     abandoned_call_error,
     browser_work_begins,
 )
-from linkedin_mcp_server.exceptions import BrowserBusyError
+from linkedin_mcp_server.exceptions import BrowserBusyError, ToolCallLimitError
 from linkedin_mcp_server.profile_lease import get_profile_lease
+from linkedin_mcp_server.tool_call_limits import admit_tool_call
 
 if TYPE_CHECKING:
     from linkedin_mcp_server.daemon.discovery import Unanswered
@@ -154,6 +155,25 @@ class SequentialToolExecutionMiddleware(Middleware):
             lease.release()
             logger.info("Tool '%s' was abandoned before it began", tool_name)
             raise abandoned_call_error()
+        # Counted here, holding both locks, and nowhere earlier: the lease is
+        # what makes the count's read and write safe across every process on
+        # this profile, a queued call is counted only once it is its turn, and
+        # a refused or abandoned call has not touched the browser.
+        browser = get_config().browser
+        try:
+            admit_tool_call(
+                tool_name,
+                lease.auth_root,
+                per_minute=browser.tool_calls_per_minute,
+                per_day=browser.tool_calls_per_day,
+            )
+        except BaseException as error:
+            lease.release()
+            if not isinstance(error, ToolCallLimitError):
+                raise
+            logger.info("Tool '%s' refused by its call limit", tool_name)
+            # A ToolError for the reason the busy refusal above is one.
+            raise ToolError(str(error)) from None
         # From here on the call may act, so an owner that has to cut it off
         # reports its outcome as unknown rather than as a call that never ran.
         browser_work_begins()

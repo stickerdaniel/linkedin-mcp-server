@@ -59,6 +59,14 @@ def non_negative_float(value: str) -> float:
     return fvalue
 
 
+def non_negative_int(value: str) -> int:
+    """Argparse type for non-negative integers (0 allowed as a sentinel)."""
+    ivalue = int(value)
+    if ivalue < 0:
+        raise argparse.ArgumentTypeError(f"must be non-negative, got {value}")
+    return ivalue
+
+
 def credential_free_url(value: str) -> str:
     """Argparse type for a proxy URL that carries no credentials.
 
@@ -140,6 +148,8 @@ class EnvironmentKeys:
     BROWSER_WAIT = "BROWSER_WAIT"
     BROWSER_MIN_HOLD = "BROWSER_MIN_HOLD"
     BROWSER_IDLE_TIMEOUT = "BROWSER_IDLE_TIMEOUT"
+    TOOL_CALLS_PER_MINUTE = "TOOL_CALLS_PER_MINUTE"
+    TOOL_CALLS_PER_DAY = "TOOL_CALLS_PER_DAY"
     IMPORT_FROM_BROWSER = "IMPORT_FROM_BROWSER"
     AUTO_IMPORT_FROM_BROWSER = "AUTO_IMPORT_FROM_BROWSER"
     DAEMON_ENABLED = "DAEMON_ENABLED"
@@ -326,6 +336,19 @@ def load_from_env(config: AppConfig) -> AppConfig:
                 f"Invalid {env_key}: '{raw}'. Must be a non-negative finite number."
             )
         setattr(config.browser, attribute, value)
+
+    # Per-tool call limits (validated in BrowserConfig.validate())
+    for env_key, attribute in (
+        (EnvironmentKeys.TOOL_CALLS_PER_MINUTE, "tool_calls_per_minute"),
+        (EnvironmentKeys.TOOL_CALLS_PER_DAY, "tool_calls_per_day"),
+    ):
+        if raw := os.environ.get(env_key):
+            try:
+                setattr(config.browser, attribute, int(raw))
+            except ValueError:
+                raise ConfigurationError(
+                    f"Invalid {env_key}: '{raw}'. Must be an integer."
+                )
 
     if os.environ.get(EnvironmentKeys.USER_AGENT):
         raise ConfigurationError(_USER_AGENT_REMOVED.format(setting="USER_AGENT"))
@@ -571,6 +594,27 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
     )
 
     parser.add_argument(
+        "--tool-calls-per-minute",
+        type=non_negative_int,
+        default=None,
+        metavar="N",
+        help=(
+            "Refuse a call of a tool that already made this many in the last "
+            "minute (default: 0 = no limit)"
+        ),
+    )
+    parser.add_argument(
+        "--tool-calls-per-day",
+        type=non_negative_int,
+        default=None,
+        metavar="N",
+        help=(
+            "Refuse a call of a tool that already made this many in the last 24 "
+            "hours (default: 0 = no limit)"
+        ),
+    )
+
+    parser.add_argument(
         "--chrome-path",
         type=str,
         default=None,
@@ -791,6 +835,12 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
 
     if args.browser_idle_timeout is not None:
         config.browser.browser_idle_timeout_seconds = args.browser_idle_timeout
+
+    if args.tool_calls_per_minute is not None:
+        config.browser.tool_calls_per_minute = args.tool_calls_per_minute
+
+    if args.tool_calls_per_day is not None:
+        config.browser.tool_calls_per_day = args.tool_calls_per_day
 
     if args.chrome_path:
         config.browser.chrome_path = args.chrome_path

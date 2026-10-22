@@ -166,6 +166,10 @@ class BrowserConfig:
     browser_min_hold_seconds: float = DEFAULT_BROWSER_MIN_HOLD_SECONDS
     # Close an idle browser after this long; 0 = keep it until the process exits
     browser_idle_timeout_seconds: float = DEFAULT_BROWSER_IDLE_TIMEOUT_SECONDS
+    # Refuse a tool's call once that tool made this many in the last minute or
+    # 24 hours (``tool_call_limits``); 0 = no limit
+    tool_calls_per_minute: int = 0
+    tool_calls_per_day: int = 0
     # Auto-import a LinkedIn session from a locally logged-in browser on the
     # first no-session tool call, before falling back to manual login. On by
     # default: None ("auto") and True both enable it across interactive and
@@ -233,6 +237,11 @@ class BrowserConfig:
             if not (math.isfinite(value) and value >= 0):
                 raise ConfigurationError(
                     f"{name} must be a non-negative finite number, got {value}"
+                )
+        for name in ("tool_calls_per_minute", "tool_calls_per_day"):
+            if getattr(self, name) < 0:
+                raise ConfigurationError(
+                    f"{name} must be a non-negative integer, got {getattr(self, name)}"
                 )
         # Clamped for the same reason as the login inline wait: the wait happens
         # inside a tool call, ahead of the page read.

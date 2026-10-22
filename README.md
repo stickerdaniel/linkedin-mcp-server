@@ -154,6 +154,10 @@ AI agent? Get a quick confirmation from the user before enabling automatic updat
 - `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it over (default: 20). Clamped to 3 seconds below `--browser-wait`, so raise that one along with it. Higher means fewer browser restarts but longer waits for other clients.
 - `--browser-idle-timeout SECONDS` - Close an idle browser and release the profile after this long without a tool call (default: 600; 0 = keep it open)
 
+**Request limits:**
+
+- `--tool-calls-per-minute N` / `--tool-calls-per-day N` - Refuse a call of a tool that already made this many in the last minute or 24 hours, and say when it is allowed again (default: 0 = no limit). Counted per tool, for this account's profile, and kept across restarts; `close_session` is never counted. 10 and 100 are the per-tool limits this project holds its own live checks to.
+
 **Browser:**
 
 - `--no-headless` - Show the browser window (useful for debugging)
@@ -550,6 +554,10 @@ username.
 - `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it over (default: 20). Clamped to 3 seconds below `--browser-wait`, so raise that one along with it. Higher means fewer browser restarts but longer waits for other clients.
 - `--browser-idle-timeout SECONDS` - Close an idle browser and release the profile after this long without a tool call (default: 600; 0 = keep it open)
 
+**Request limits:**
+
+- `--tool-calls-per-minute N` / `--tool-calls-per-day N` - Refuse a call of a tool that already made this many in the last minute or 24 hours, and say when it is allowed again (default: 0 = no limit). Counted per tool, for this account's profile, and kept across restarts; `close_session` is never counted. 10 and 100 are the per-tool limits this project holds its own live checks to.
+
 **Browser:**
 
 - `--chrome-path PATH` - Path to a Chrome/Chromium executable (rarely needed in Docker)
@@ -789,6 +797,10 @@ uv run -m linkedin_mcp_server
 - `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters with several MCP clients running at once.
 - `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it over (default: 20). Clamped to 3 seconds below `--browser-wait`, so raise that one along with it. Higher means fewer browser restarts but longer waits for other clients.
 - `--browser-idle-timeout SECONDS` - Close an idle browser and release the profile after this long without a tool call (default: 600; 0 = keep it open)
+
+**Request limits:**
+
+- `--tool-calls-per-minute N` / `--tool-calls-per-day N` - Refuse a call of a tool that already made this many in the last minute or 24 hours, and say when it is allowed again (default: 0 = no limit). Counted per tool, for this account's profile, and kept across restarts; `close_session` is never counted. 10 and 100 are the per-tool limits this project holds its own live checks to.
 
 **Browser:**
 

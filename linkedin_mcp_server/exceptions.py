@@ -304,3 +304,11 @@ class BrowserBusyError(LinkedInMCPError):
                 "Wait a moment and call this exact tool again."
             )
         )
+
+
+class ToolCallLimitError(LinkedInMCPError):
+    """A tool reached its configured call limit; nothing reached LinkedIn.
+
+    Not an ``AuthenticationError`` either, for the reason ``BrowserBusyError``
+    gives: the session is fine, and nothing about it may be rotated for this.
+    """

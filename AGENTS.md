@@ -205,7 +205,8 @@ same limits. One tool call can cost several browser actions:
 section LinkedIn rate-limits, `send_message` takes three, and
 `connect_with_person` up to seven.
 
-- Per tool: at most 10 calls a minute and 100 a day.
+- Per tool: at most 10 calls a minute and 100 a day. A server started with
+  `TOOL_CALLS_PER_MINUTE=10 TOOL_CALLS_PER_DAY=100` refuses anything beyond.
 - Profiles: at most one page load a second for `get_person_profile` and
   `get_company_profile`, counted per section.
 - Invitations: at most 30 a day, 10 seconds apart. Count every outgoing
