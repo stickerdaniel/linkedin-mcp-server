@@ -1107,6 +1107,8 @@ async def check_rate_limit() -> None:
     Should be called after navigation to detect if LinkedIn is blocking requests.
 
     Raises:
+        AuthenticationError: If the page is a login or challenge route
+        AccountRestrictedError: If the page is the account-restriction route
         RateLimitError: If rate limiting is detected
     """
     browser = await get_or_create_browser()

@@ -4,7 +4,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from linkedin_mcp_server.core.exceptions import RateLimitError
+from linkedin_mcp_server.core.exceptions import (
+    AccountRestrictedError,
+    AuthenticationError,
+    RateLimitError,
+)
 from linkedin_mcp_server.core.utils import detect_rate_limit, scroll_job_sidebar
 
 
@@ -22,15 +26,36 @@ def mock_page():
 
 
 class TestDetectRateLimit:
-    async def test_checkpoint_url_raises(self, mock_page):
-        mock_page.url = "https://www.linkedin.com/checkpoint/challenge/123"
-        with pytest.raises(RateLimitError, match="security checkpoint"):
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.linkedin.com/checkpoint/challenge/123",
+            "https://www.linkedin.com/authwall?trk=login",
+        ],
+    )
+    async def test_challenge_url_needs_login(self, mock_page, url):
+        """Waiting clears no challenge, so it must not read as a rate limit."""
+        mock_page.url = url
+        with pytest.raises(AuthenticationError, match="--login"):
             await detect_rate_limit(mock_page)
 
-    async def test_authwall_url_raises(self, mock_page):
-        mock_page.url = "https://www.linkedin.com/authwall?trk=login"
-        with pytest.raises(RateLimitError, match="security checkpoint"):
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.linkedin.com/flagship-web/login/login-restriction/",
+            # Also a `/login` route, so only the order keeps it a restriction.
+            "https://www.linkedin.com/login/login-restriction/",
+        ],
+    )
+    async def test_restriction_url_is_not_a_login(self, mock_page, url):
+        mock_page.url = url
+        with pytest.raises(AccountRestrictedError):
             await detect_rate_limit(mock_page)
+
+    async def test_challenge_word_in_slug_passes(self, mock_page):
+        """A false match here would retire a working session."""
+        mock_page.url = "https://www.linkedin.com/in/authwall-checkpoint/"
+        await detect_rate_limit(mock_page)
 
     async def test_normal_page_with_main_skips_body_heuristic(self, mock_page):
         """A normal page with <main> should NOT trigger body text checks."""
