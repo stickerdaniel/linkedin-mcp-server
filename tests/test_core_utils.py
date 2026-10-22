@@ -39,8 +39,16 @@ class TestDetectRateLimit:
         with pytest.raises(AuthenticationError, match="--login"):
             await detect_rate_limit(mock_page)
 
-    async def test_restriction_url_is_not_a_login(self, mock_page):
-        mock_page.url = "https://www.linkedin.com/flagship-web/login/login-restriction/"
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.linkedin.com/flagship-web/login/login-restriction/",
+            # Also a `/login` route, so only the order keeps it a restriction.
+            "https://www.linkedin.com/login/login-restriction/",
+        ],
+    )
+    async def test_restriction_url_is_not_a_login(self, mock_page, url):
+        mock_page.url = url
         with pytest.raises(AccountRestrictedError):
             await detect_rate_limit(mock_page)
 
