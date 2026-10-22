@@ -1198,6 +1198,21 @@ async def release_profile_if_idle_or_requested() -> bool:
     # None means no tool call has ever run, which is idle in the strongest sense.
     idle_for = time.monotonic() - _last_activity if _last_activity is not None else None
 
+    # Opt-in (``browser_max_calls``). The page's renderer grows with every
+    # profile it reads, and a client that keeps calling never gives the idle
+    # timeout below a gap, so in a memory-limited container it grows until the
+    # OOM killer ends it. Closing between calls lets the next one start afresh.
+    # Ahead of the handoff below: its hold window keeps a voluntary handoff from
+    # costing a reopen, but a restart that is due costs one anyway.
+    max_calls = config.browser_max_calls
+    if max_calls > 0 and _calls_on_this_browser >= max_calls:
+        logger.info(
+            "Closing the browser after %d tool calls (browser_max_calls); the "
+            "next call starts a new one",
+            _calls_on_this_browser,
+        )
+        return await _close_unless_a_call_arrived()
+
     if lease.handoff_requested():
         # Every handoff costs a reopen, and a reopen re-validates /feed/, so a
         # busy pair of clients trading the browser on every call would multiply
@@ -1221,19 +1236,6 @@ async def release_profile_if_idle_or_requested() -> bool:
             config.browser_min_hold_seconds,
         )
         return False
-
-    # Opt-in (``browser_max_calls``). The page's renderer grows with every
-    # profile it reads, and a client that keeps calling never gives the idle
-    # timeout below a gap, so in a memory-limited container it grows until the
-    # OOM killer ends it. Closing between calls lets the next one start afresh.
-    max_calls = config.browser_max_calls
-    if max_calls > 0 and _calls_on_this_browser >= max_calls:
-        logger.info(
-            "Closing the browser after %d tool calls (browser_max_calls); the "
-            "next call starts a new one",
-            _calls_on_this_browser,
-        )
-        return await _close_unless_a_call_arrived()
 
     timeout = config.browser_idle_timeout_seconds
     if timeout > 0 and idle_for is not None and idle_for >= timeout:

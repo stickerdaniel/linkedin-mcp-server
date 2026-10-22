@@ -130,3 +130,37 @@ async def test_a_call_without_a_browser_does_not_count(
 
     assert not await browser_module.release_profile_if_idle_or_requested()
     fake_browser.close.assert_not_awaited()
+
+
+async def test_a_waiting_process_does_not_delay_a_restart_that_is_due(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, middleware
+) -> None:
+    """The hold window delays a voluntary handoff, not a restart already due."""
+    monkeypatch.setenv("BROWSER_MAX_CALLS", "1")
+    monkeypatch.setenv("BROWSER_MIN_HOLD", "60")
+    reset_config()
+    fake_browser = _open_browser(tmp_path / "profile")
+    monkeypatch.setattr(
+        browser_module._browser_lease, "handoff_requested", lambda: True
+    )
+
+    await _calls(middleware, 1)
+
+    fake_browser.close.assert_awaited_once()
+    assert browser_module._browser is None
+
+
+async def test_the_hold_window_still_delays_a_handoff_within_the_allowance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, middleware
+) -> None:
+    monkeypatch.setenv("BROWSER_MAX_CALLS", "5")
+    monkeypatch.setenv("BROWSER_MIN_HOLD", "60")
+    reset_config()
+    fake_browser = _open_browser(tmp_path / "profile")
+    monkeypatch.setattr(
+        browser_module._browser_lease, "handoff_requested", lambda: True
+    )
+
+    await _calls(middleware, 1)
+
+    fake_browser.close.assert_not_awaited()
