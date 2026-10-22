@@ -1559,6 +1559,15 @@ class TestConfigFingerprint:
             _config(**{field: value}), key=token
         )
 
+    def test_a_different_rate_limit_pause_does_not_match(self):
+        # The owner is the process that refuses calls during a pause, so a
+        # client asking for another one would not get it there.
+        token = new_token()
+
+        assert config_fingerprint(_config(), key=token) != config_fingerprint(
+            _config(rate_limit_pause_seconds=86400.0), key=token
+        )
+
     def test_configuration_that_only_affects_the_client_still_matches(self):
         # These describe how one client behaves, not what the browser is, so
         # they must not stop it attaching.

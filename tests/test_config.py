@@ -125,6 +125,16 @@ class TestProfileSharingConfig:
         with pytest.raises(ConfigurationError, match="browser_idle_timeout_seconds"):
             BrowserConfig(browser_idle_timeout_seconds=bad_value).validate()
 
+    def test_the_rate_limit_pause_is_off_by_default(self):
+        assert BrowserConfig().rate_limit_pause_seconds == 0
+
+    @pytest.mark.parametrize(
+        "bad_value", [-1.0, float("nan"), float("inf"), float("-inf")]
+    )
+    def test_rejects_a_negative_or_non_finite_rate_limit_pause(self, bad_value):
+        with pytest.raises(ConfigurationError, match="rate_limit_pause_seconds"):
+            BrowserConfig(rate_limit_pause_seconds=bad_value).validate()
+
     def test_clamps_wait_to_the_ceiling(self):
         config = BrowserConfig(browser_wait_seconds=120, browser_min_hold_seconds=0)
         config.validate()  # Clamps, does not raise
@@ -632,6 +642,7 @@ class TestLoaders:
             ("BROWSER_WAIT", "browser_wait_seconds"),
             ("BROWSER_MIN_HOLD", "browser_min_hold_seconds"),
             ("BROWSER_IDLE_TIMEOUT", "browser_idle_timeout_seconds"),
+            ("RATE_LIMIT_PAUSE", "rate_limit_pause_seconds"),
         ],
     )
     def test_load_from_env_profile_sharing(self, monkeypatch, env_key, attribute):
@@ -647,6 +658,7 @@ class TestLoaders:
             ("BROWSER_WAIT", "browser_wait_seconds"),
             ("BROWSER_MIN_HOLD", "browser_min_hold_seconds"),
             ("BROWSER_IDLE_TIMEOUT", "browser_idle_timeout_seconds"),
+            ("RATE_LIMIT_PAUSE", "rate_limit_pause_seconds"),
         ],
     )
     def test_load_from_env_profile_sharing_zero(self, monkeypatch, env_key, attribute):
@@ -658,7 +670,13 @@ class TestLoaders:
         assert getattr(config.browser, attribute) == 0.0
 
     @pytest.mark.parametrize(
-        "env_key", ["BROWSER_WAIT", "BROWSER_MIN_HOLD", "BROWSER_IDLE_TIMEOUT"]
+        "env_key",
+        [
+            "BROWSER_WAIT",
+            "BROWSER_MIN_HOLD",
+            "BROWSER_IDLE_TIMEOUT",
+            "RATE_LIMIT_PAUSE",
+        ],
     )
     @pytest.mark.parametrize("bad_value", ["abc", "-5", "nan", "inf", "-inf"])
     def test_load_from_env_invalid_profile_sharing(
@@ -676,6 +694,7 @@ class TestLoaders:
             ("--browser-wait", "browser_wait_seconds"),
             ("--browser-min-hold", "browser_min_hold_seconds"),
             ("--browser-idle-timeout", "browser_idle_timeout_seconds"),
+            ("--rate-limit-pause", "rate_limit_pause_seconds"),
         ],
     )
     def test_load_from_args_profile_sharing(self, monkeypatch, flag, attribute):
