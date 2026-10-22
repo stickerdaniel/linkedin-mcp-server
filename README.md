@@ -153,6 +153,7 @@ AI agent? Get a quick confirmation from the user before enabling automatic updat
 - `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters with several MCP clients running at once.
 - `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it over (default: 20). Clamped to 3 seconds below `--browser-wait`, so raise that one along with it. Higher means fewer browser restarts but longer waits for other clients.
 - `--browser-idle-timeout SECONDS` - Close an idle browser and release the profile after this long without a tool call (default: 600; 0 = keep it open)
+- `--browser-max-calls N` - Close the browser between calls once it has served this many tool calls, so the next call starts a fresh one (default: 0 = no limit). For memory-limited containers, where a long run of calls keeps the idle timeout from ever closing it; each restart loads the feed once more.
 
 **Browser:**
 
@@ -549,6 +550,7 @@ username.
 - `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters with several MCP clients running at once.
 - `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it over (default: 20). Clamped to 3 seconds below `--browser-wait`, so raise that one along with it. Higher means fewer browser restarts but longer waits for other clients.
 - `--browser-idle-timeout SECONDS` - Close an idle browser and release the profile after this long without a tool call (default: 600; 0 = keep it open)
+- `--browser-max-calls N` - Close the browser between calls once it has served this many tool calls, so the next call starts a fresh one (default: 0 = no limit). For memory-limited containers, where a long run of calls keeps the idle timeout from ever closing it; each restart loads the feed once more.
 
 **Browser:**
 
@@ -789,6 +791,7 @@ uv run -m linkedin_mcp_server
 - `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters with several MCP clients running at once.
 - `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it over (default: 20). Clamped to 3 seconds below `--browser-wait`, so raise that one along with it. Higher means fewer browser restarts but longer waits for other clients.
 - `--browser-idle-timeout SECONDS` - Close an idle browser and release the profile after this long without a tool call (default: 600; 0 = keep it open)
+- `--browser-max-calls N` - Close the browser between calls once it has served this many tool calls, so the next call starts a fresh one (default: 0 = no limit). For memory-limited containers, where a long run of calls keeps the idle timeout from ever closing it; each restart loads the feed once more.
 
 **Browser:**
 

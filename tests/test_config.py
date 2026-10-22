@@ -701,6 +701,45 @@ class TestLoaders:
             == MAX_BROWSER_WAIT_SECONDS - BROWSER_HANDOFF_MARGIN_SECONDS
         )
 
+    def test_browser_max_calls_is_off_by_default(self):
+        assert BrowserConfig().browser_max_calls == 0
+
+    def test_load_from_env_browser_max_calls(self, monkeypatch):
+        monkeypatch.setenv("BROWSER_MAX_CALLS", "25")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.browser_max_calls == 25
+
+    @pytest.mark.parametrize("bad_value", ["abc", "2.5"])
+    def test_load_from_env_invalid_browser_max_calls(self, monkeypatch, bad_value):
+        monkeypatch.setenv("BROWSER_MAX_CALLS", bad_value)
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        with pytest.raises(ConfigurationError, match="Invalid BROWSER_MAX_CALLS"):
+            load_from_env(AppConfig())
+
+    def test_a_negative_browser_max_calls_is_refused(self, monkeypatch):
+        monkeypatch.setenv("BROWSER_MAX_CALLS", "-1")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        with pytest.raises(ConfigurationError, match="browser_max_calls"):
+            config.validate()
+
+    def test_load_from_args_browser_max_calls(self):
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = load_from_args(AppConfig(), ["--browser-max-calls", "8"])
+        assert config.browser.browser_max_calls == 8
+
+    @pytest.mark.parametrize("bad_value", ["-1", "abc", "2.5"])
+    def test_load_from_args_invalid_browser_max_calls(self, bad_value):
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        with pytest.raises(SystemExit):
+            load_from_args(AppConfig(), ["--browser-max-calls", bad_value])
+
     @pytest.mark.parametrize(
         ("value", "expected"),
         [("false", False), ("true", True), ("0", False), ("1", True)],

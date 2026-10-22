@@ -1559,6 +1559,15 @@ class TestConfigFingerprint:
             _config(**{field: value}), key=token
         )
 
+    def test_a_different_call_allowance_does_not_match(self):
+        # Like the idle timeout, it decides how long the owner keeps the
+        # browser, so a client asking for another one would be ignored there.
+        token = new_token()
+
+        assert config_fingerprint(_config(), key=token) != config_fingerprint(
+            _config(browser_max_calls=25), key=token
+        )
+
     def test_configuration_that_only_affects_the_client_still_matches(self):
         # These describe how one client behaves, not what the browser is, so
         # they must not stop it attaching.
