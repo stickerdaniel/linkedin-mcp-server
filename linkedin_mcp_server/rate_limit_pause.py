@@ -38,7 +38,7 @@ def _login_generation() -> str | None:
 
 
 def _utc(moment: float) -> str:
-    return datetime.fromtimestamp(moment, UTC).strftime("%Y-%m-%d %H:%M UTC")
+    return datetime.fromtimestamp(moment, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def start_pause(exception: Exception) -> str | None:
