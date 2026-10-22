@@ -137,8 +137,18 @@ def test_several_accounts_publish_no_server_port():
 def test_several_accounts_never_share_a_profile():
     """Two servers on one volume would drive one session as two accounts."""
     servers = _several_accounts_servers()
-    volumes = [service["volumes"][0].split(":")[0] for service in servers.values()]
+    profiles = []
+    for name, service in servers.items():
+        # The mount at the profile path, wherever it is in the list: another
+        # mount listed first must not stand in for it.
+        sources = [
+            mount.split(":")[0]
+            for mount in service.get("volumes", [])
+            if mount.split(":")[1:2] == ["/home/pwuser/.linkedin-mcp"]
+        ]
+        assert len(sources) == 1, f"{name} needs one volume at the profile path"
+        profiles.extend(sources)
     hostnames = [service.get("hostname") for service in servers.values()]
 
-    assert len(set(volumes)) == len(servers), volumes
+    assert len(set(profiles)) == len(servers), profiles
     assert all(hostnames), "each server needs a fixed hostname"
