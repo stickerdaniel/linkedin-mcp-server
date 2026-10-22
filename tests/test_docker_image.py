@@ -557,6 +557,27 @@ def test_the_image_defaults_to_headed_on_a_virtual_display() -> None:
     assert 'Xvfb "$DISPLAY" -screen 0 1920x1080x24 -nolisten tcp' in _ENTRYPOINT
 
 
+def test_the_login_viewer_serves_the_pinned_novnc_release() -> None:
+    """The viewer's web root is noVNC 1.6.0, verified against its checksum.
+
+    `viewer_url` prints that release's `vnc.html`, which the stage unpacks
+    into the directory `websockify --web` serves.
+    """
+    assert (
+        "ADD --checksum=sha256:"
+        "5066103959ef4e9b10f37e5a148627360dd8414e4cf8a7db92bdbd022e728aaa "
+        "https://github.com/novnc/noVNC/archive/refs/tags/v1.6.0.tar.gz "
+        "/tmp/novnc.tar.gz"
+    ) in _DOCKERFILE_INSTRUCTIONS
+    (unpack,) = [
+        instruction
+        for instruction in _DOCKERFILE_INSTRUCTIONS
+        if "tar -xzf /tmp/novnc.tar.gz -C /novnc " in instruction
+    ]
+    assert "noVNC-1.6.0/vnc.html" in unpack
+    assert "COPY --from=novnc /novnc /usr/share/novnc" in _DOCKERFILE_INSTRUCTIONS
+
+
 def test_the_image_seeds_the_default_authentication_root_for_named_volumes() -> None:
     creation = _DOCKERFILE.index(
         "RUN install -d -m 0700 -o pwuser -g pwuser /home/pwuser/.linkedin-mcp"
