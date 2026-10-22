@@ -789,7 +789,7 @@ linkedin.example {
 }
 ```
 
-Each person's client then connects to `https://linkedin.example/mcp` with `Authorization: Bearer <their key>`. To sign an account in, or in again:
+Each person's client then connects to `https://linkedin.example/mcp` with `Authorization: Bearer <their key>`. A client that cannot send a header of its own, such as one that only signs in with OAuth, needs a front that speaks that sign-in instead; behind it, the servers stay as they are. To sign an account in, or in again:
 
 ```bash
 docker compose stop linkedin-a
