@@ -163,7 +163,7 @@ class SequentialToolExecutionMiddleware(Middleware):
         try:
             admit_tool_call(
                 tool_name,
-                lease.auth_root,
+                lease,
                 per_minute=browser.tool_calls_per_minute,
                 per_day=browser.tool_calls_per_day,
             )

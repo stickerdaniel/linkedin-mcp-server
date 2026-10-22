@@ -167,6 +167,18 @@ async def test_the_day_limit_outlasts_the_minute(clock):
     (await _call()).assert_awaited_once()
 
 
+async def test_with_both_limits_reached_the_later_one_is_named(clock):
+    # Naming the minute would send the caller back in a minute to a call the
+    # day limit still refuses.
+    _limits(per_minute=1, per_day=1)
+    await _call()
+    with pytest.raises(ToolError) as refused:
+        await _call()
+
+    assert "TOOL_CALLS_PER_DAY" in str(refused.value)
+    assert "in 24 hours 0 minutes" in str(refused.value)
+
+
 async def test_a_restart_keeps_the_count(clock, isolate_profile_dir):
     _limits(per_day=2)
     for _ in range(2):

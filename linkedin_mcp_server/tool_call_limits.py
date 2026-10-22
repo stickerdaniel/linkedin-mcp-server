@@ -19,9 +19,13 @@ import math
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from linkedin_mcp_server.common_utils import secure_write_text
 from linkedin_mcp_server.exceptions import ToolCallLimitError
+
+if TYPE_CHECKING:
+    from linkedin_mcp_server.profile_lease import ProfileLease
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +36,7 @@ LOCAL_TOOLS = frozenset({"close_session"})
 
 def admit_tool_call(
     tool: str,
-    auth_root: Path,
+    lease: ProfileLease,
     *,
     per_minute: int,
     per_day: int,
@@ -40,7 +44,8 @@ def admit_tool_call(
 ) -> None:
     """Count one call of *tool*, or raise :class:`ToolCallLimitError`.
 
-    The caller holds the profile lease for *auth_root*.
+    The caller holds *lease*. With both limits off nothing is read or written,
+    not even the lease's auth root, so the call path is what it was.
     """
     windows = [
         (limit, variable, seconds, span)
@@ -54,7 +59,7 @@ def admit_tool_call(
         return
     now = time.time() if now is None else now
     kept_for = max(seconds for _, _, seconds, _ in windows)
-    path = auth_root / STATE_FILE
+    path = lease.auth_root / STATE_FILE
     # Wall-clock stamps, because they have to outlive the process. One from
     # the future means the clock went back: it is stored again as made now,
     # so it holds its place for one window rather than until the clock
@@ -65,12 +70,14 @@ def admit_tool_call(
     }
     made = calls.get(tool, [])
     refusal = None
+    latest = now
     for limit, variable, seconds, span in windows:
         inside = [stamp for stamp in made if now - stamp < seconds]
-        if len(inside) >= limit:
-            # Allowed again once the oldest call that keeps it at the limit
-            # leaves the window.
-            allowed_at = inside[-limit] + seconds
+        # Allowed again once the oldest call that keeps it at the limit leaves
+        # the window. With both limits reached, the later of the two decides.
+        allowed_at = inside[-limit] + seconds if len(inside) >= limit else now
+        if allowed_at > latest:
+            latest = allowed_at
             refusal = ToolCallLimitError(
                 f"{tool} reached its limit of {limit} calls in the last {span} "
                 f"({variable}), so this call was refused and nothing was sent "
@@ -78,7 +85,6 @@ def admit_tool_call(
                 f"{_duration(allowed_at - now)}. Other tools are counted "
                 "separately."
             )
-            break
     if refusal is None:
         calls[tool] = [*made, now]
     payload = {"version": 1, "calls": {name: v for name, v in calls.items() if v}}
