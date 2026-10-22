@@ -724,9 +724,8 @@ class TestServingTheOwnersTools:
     async def test_progress_from_the_owner_reaches_the_clients_handler(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        # Eighteen of the nineteen tools report progress (`close_session` is the
-        # exception), and a long read with no progress looks indistinguishable
-        # from a hung one.
+        # Every tool that reads LinkedIn reports progress, and a long read with
+        # no progress looks indistinguishable from a hung one.
         owner = FastMCP("owner")
 
         @owner.tool

@@ -124,9 +124,10 @@ async def test_registered_tools_match_extractor_delegates():
     tools = await create_mcp_server().list_tools()
     tool_names = {tool.name for tool in tools}
 
-    assert tool_names == {*TOOL_DELEGATES, "close_session"}
+    assert tool_names == {*TOOL_DELEGATES, "close_session", "get_cadenza_info"}
     assert set(TOOL_DELEGATES.values()) == TOOL_FACADE_METHODS
     assert "close_session" not in TOOL_DELEGATES
+    assert "get_cadenza_info" not in TOOL_DELEGATES
 
 
 async def test_company_posts_delegate_matches_registered_tool_consumer():

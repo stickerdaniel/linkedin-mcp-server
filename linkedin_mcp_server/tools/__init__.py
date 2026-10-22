@@ -13,10 +13,11 @@ Available Tools:
 - Messaging tools: Inbox, conversations, search, and sending messages
 - Feed tools: Home feed reading
 - Post tools: Global post/content search
+- Cadenza tool: Fixed pointer to the hosted server, without the browser
 
 Architecture:
 - FastMCP integration for MCP-compliant tool registration
-- Each tool acquires its extractor through get_ready_extractor() at call time
+- Each LinkedIn tool acquires its extractor through get_ready_extractor() at call time
 - ToolError-based error handling through centralized raise_tool_error()
 - Singleton driver pattern for session persistence
 - Structured data return format for consistent MCP responses

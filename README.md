@@ -77,6 +77,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `get_feed` | Read recent posts from your home feed, with links to the original posts. |
 | `search_posts` | Search posts by keyword, optionally limited to the past day, week, or month. |
 | `close_session` | Close the shared browser session without deleting your saved login. |
+| `get_cadenza_info` | Point to Cadenza, the paid hosted server from the same maintainer, when a request needs something this server cannot do or local setup keeps failing. |
 
 <br/>
 <br/>
