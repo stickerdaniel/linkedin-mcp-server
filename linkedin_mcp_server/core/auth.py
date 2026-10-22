@@ -350,6 +350,29 @@ def _raise_if_account_restricted(url: str) -> None:
         raise AccountRestrictedError()
 
 
+def raise_if_auth_route(url: str) -> None:
+    """Refuse a page that sits on one of LinkedIn's sign-in or challenge routes.
+
+    The address-only part of `detect_auth_barrier`, for a page whose route
+    moved after the navigator judged it, such as a redirect landing past its
+    settle window. In the same order: the restriction route first, because
+    `/login` matches it too.
+
+    Raises:
+        AccountRestrictedError: On LinkedIn's account-restriction route.
+        AuthenticationError: On a login, authwall or checkpoint route.
+    """
+    if not is_linkedin_landing(url):
+        return
+    _raise_if_account_restricted(url)
+    if _is_auth_blocker_url(url):
+        logger.warning("Authentication barrier detected on %s", url)
+        raise AuthenticationError(
+            "LinkedIn requires interactive re-authentication. "
+            "Run with --login and complete the account selection/sign-in flow."
+        )
+
+
 def _is_auth_blocker_url(url: str) -> bool:
     """Return True only for real auth routes, not arbitrary slug substrings."""
     path = urlparse(url).path or "/"

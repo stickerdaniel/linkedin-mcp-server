@@ -12,6 +12,7 @@ from patchright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
+from .auth import raise_if_auth_route
 from .destination import linkedin_element
 from .exceptions import OffLinkedInLandingError, RateLimitError
 
@@ -276,7 +277,7 @@ async def detect_rate_limit(page: Page) -> None:
     """Detect if LinkedIn has rate-limited or security-challenged the session.
 
     Checks (in order):
-    1. URL contains /checkpoint or /authwall (security challenge)
+    1. URL is a login, authwall or checkpoint route (security challenge)
     2. Body text contains rate-limit phrases on error-shaped pages (throttling)
 
     The body-text heuristic only runs on pages without a ``<main>`` element
@@ -285,16 +286,12 @@ async def detect_rate_limit(page: Page) -> None:
     that happens to contain phrases like "slow down" or "try again later".
 
     Raises:
-        RateLimitError: If any rate-limiting or security challenge is detected
+        AuthenticationError: On a security challenge, which waiting does not
+            clear, so it gets the same re-login as one met on navigation.
+        AccountRestrictedError: On LinkedIn's account-restriction route.
+        RateLimitError: If a throttling page is detected
     """
-    # Check URL for security challenges
-    current_url = page.url
-    if "linkedin.com/checkpoint" in current_url or "authwall" in current_url:
-        raise RateLimitError(
-            "LinkedIn security checkpoint detected. "
-            "You may need to verify your identity or wait before continuing.",
-            suggested_wait_time=30,
-        )
+    raise_if_auth_route(page.url)
 
     # Check for rate limit messages — only on error-shaped pages.
     # Real rate-limit pages have no <main> element and short body text.
