@@ -90,7 +90,7 @@
       },
       "search_posts": {
         "coroutine": true,
-        "signature": "(self, keywords: 'str', date_posted: 'str | None' = None, max_pages: 'int' = 3) -> 'dict[str, Any]'"
+        "signature": "(self, keywords: 'str', date_posted: 'str | None' = None, max_pages: 'int' = 3, content_type: 'str | None' = None) -> 'dict[str, Any]'"
       },
       "send_message": {
         "coroutine": true,
@@ -716,6 +716,18 @@
         "input": {
           "additionalProperties": false,
           "properties": {
+            "content_type": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional \"Content type\" filter. One of\n\"documents\" (PDFs and slide decks people upload), \"images\",\n\"videos\", \"live_videos\", \"job_posts\". Omit for all posts."
+            },
             "date_posted": {
               "anyOf": [
                 {

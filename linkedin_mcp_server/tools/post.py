@@ -38,6 +38,7 @@ def register_post_tools(
         keywords: str,
         ctx: Context,
         date_posted: str | None = None,
+        content_type: str | None = None,
         max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
     ) -> dict[str, Any]:
         """
@@ -56,6 +57,9 @@ def register_post_tools(
                 "past-week", "past-month"; the "past_24_hours" / "past_week" /
                 "past_month" spellings used by search_jobs are accepted too.
                 Omit for any time.
+            content_type: Optional "Content type" filter. One of
+                "documents" (PDFs and slide decks people upload), "images",
+                "videos", "live_videos", "job_posts". Omit for all posts.
             max_pages: Scroll depth as result "pages" of ~5 scrolls each
                 (1-10, default 3). Content search is an infinite scroll, so
                 this caps how far the page is scrolled rather than fetching
@@ -74,9 +78,11 @@ def register_post_tools(
         """
         extractor = await get_ready_extractor(ctx, tool_name="search_posts")
         logger.info(
-            "Searching posts: keywords='%s', date_posted='%s', max_pages=%d",
+            "Searching posts: keywords='%s', date_posted='%s', content_type='%s', "
+            "max_pages=%d",
             keywords,
             date_posted,
+            content_type,
             max_pages,
         )
 
@@ -86,6 +92,7 @@ def register_post_tools(
             result = await extractor.search_posts(
                 keywords,
                 date_posted=date_posted,
+                content_type=content_type,
                 max_pages=max_pages,
             )
         except FilterValidationError as e:

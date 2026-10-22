@@ -60,6 +60,18 @@ CONTENT_DATE_POSTED_MAP = {
     "past_month": "past-month",
 }
 
+# Content-search ``contentType`` facet: the "Content type" menu's options,
+# keyed by their label, valued by the token LinkedIn writes into the URL.
+# Measured on the live menu; the labels are not the tokens ("Images" writes
+# "photos", "Job posts" writes "jobs"). There is no Articles option.
+CONTENT_TYPE_MAP = {
+    "videos": "videos",
+    "images": "photos",
+    "job_posts": "jobs",
+    "live_videos": "liveVideos",
+    "documents": "documents",
+}
+
 # Valid tokens for the people-search ``network`` facet.
 # LinkedIn accepts "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
 NETWORK_TOKENS = ("F", "S", "O")
@@ -177,6 +189,7 @@ def build_company_search_url(keywords: str) -> str:
 def build_content_search_url(
     keywords: str,
     date_posted: str | None = None,
+    content_type: str | None = None,
 ) -> str:
     """Build a LinkedIn content (post) search URL.
 
@@ -191,6 +204,9 @@ def build_content_search_url(
     reaches LinkedIn in the form it recognizes. An unmapped value is refused
     here rather than sent, because LinkedIn ignores one instead of rejecting
     it and answers an unfiltered search that reads as a filtered one.
+
+    ``content_type`` is refused the same way and for the same reason. It is
+    written after ``datePosted``, the order the live page produces.
     """
     if (
         date_posted is not None
@@ -202,8 +218,21 @@ def build_content_search_url(
             f"{list(CONTENT_DATE_POSTED_MAP)!r}."
         )
 
+    if (
+        content_type is not None
+        and content_type.strip()
+        and content_type.strip() not in CONTENT_TYPE_MAP
+    ):
+        raise FilterValidationError(
+            f"Invalid content_type {content_type!r}; expected one of "
+            f"{list(CONTENT_TYPE_MAP)!r}."
+        )
+
     params = f"keywords={quote_plus(keywords)}&origin=FACETED_SEARCH"
     if date_posted and date_posted.strip():
         token = CONTENT_DATE_POSTED_MAP.get(date_posted.strip(), date_posted.strip())
         params += f"&datePosted={_encode_list_facet([token])}"
+    if content_type and content_type.strip():
+        token = CONTENT_TYPE_MAP[content_type.strip()]
+        params += f"&contentType={_encode_list_facet([token])}"
     return f"https://www.linkedin.com/search/results/content/?{params}"
