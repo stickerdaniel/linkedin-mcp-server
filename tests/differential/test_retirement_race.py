@@ -367,6 +367,7 @@ async def test_directs_idle_close_line_is_the_one_the_rows_wait_for(
             browser=SimpleNamespace(
                 browser_idle_timeout_seconds=IDLE_RACE_TIMEOUT_SECONDS,
                 browser_min_hold_seconds=20.0,
+                browser_max_calls=0,
             )
         ),
     )

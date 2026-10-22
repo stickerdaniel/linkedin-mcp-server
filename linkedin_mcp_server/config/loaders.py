@@ -59,6 +59,14 @@ def non_negative_float(value: str) -> float:
     return fvalue
 
 
+def non_negative_int(value: str) -> int:
+    """Argparse type for non-negative integers (0 allowed as a sentinel)."""
+    ivalue = int(value)
+    if ivalue < 0:
+        raise argparse.ArgumentTypeError(f"must be non-negative, got {value}")
+    return ivalue
+
+
 def credential_free_url(value: str) -> str:
     """Argparse type for a proxy URL that carries no credentials.
 
@@ -140,6 +148,7 @@ class EnvironmentKeys:
     BROWSER_WAIT = "BROWSER_WAIT"
     BROWSER_MIN_HOLD = "BROWSER_MIN_HOLD"
     BROWSER_IDLE_TIMEOUT = "BROWSER_IDLE_TIMEOUT"
+    BROWSER_MAX_CALLS = "BROWSER_MAX_CALLS"
     IMPORT_FROM_BROWSER = "IMPORT_FROM_BROWSER"
     AUTO_IMPORT_FROM_BROWSER = "AUTO_IMPORT_FROM_BROWSER"
     DAEMON_ENABLED = "DAEMON_ENABLED"
@@ -326,6 +335,16 @@ def load_from_env(config: AppConfig) -> AppConfig:
                 f"Invalid {env_key}: '{raw}'. Must be a non-negative finite number."
             )
         setattr(config.browser, attribute, value)
+
+    # Close the browser after this many tool calls (validated in
+    # BrowserConfig.validate())
+    if max_calls_env := os.environ.get(EnvironmentKeys.BROWSER_MAX_CALLS):
+        try:
+            config.browser.browser_max_calls = int(max_calls_env)
+        except ValueError:
+            raise ConfigurationError(
+                f"Invalid BROWSER_MAX_CALLS: '{max_calls_env}'. Must be an integer."
+            )
 
     if os.environ.get(EnvironmentKeys.USER_AGENT):
         raise ConfigurationError(_USER_AGENT_REMOVED.format(setting="USER_AGENT"))
@@ -569,6 +588,16 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
             "seconds without a tool call (default: 600; 0 = keep it open)"
         ),
     )
+    parser.add_argument(
+        "--browser-max-calls",
+        type=non_negative_int,
+        default=None,
+        metavar="N",
+        help=(
+            "Close the browser between calls after it has served this many tool "
+            "calls, so the next call starts a fresh one (default: 0 = no limit)"
+        ),
+    )
 
     parser.add_argument(
         "--chrome-path",
@@ -791,6 +820,9 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
 
     if args.browser_idle_timeout is not None:
         config.browser.browser_idle_timeout_seconds = args.browser_idle_timeout
+
+    if args.browser_max_calls is not None:
+        config.browser.browser_max_calls = args.browser_max_calls
 
     if args.chrome_path:
         config.browser.chrome_path = args.chrome_path
