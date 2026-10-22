@@ -35,7 +35,7 @@ from linkedin_mcp_server.exceptions import (
     LinuxBrowserDependencyError,
 )
 from linkedin_mcp_server.profile_lease import get_profile_lease
-from linkedin_mcp_server.rate_limit_pause import raise_if_paused
+from linkedin_mcp_server.rate_limit_pause import is_paused, raise_if_paused
 from linkedin_mcp_server.linkedin import LinkedInExtractor
 from linkedin_mcp_server.server_role import (
     ServerRole,
@@ -193,6 +193,14 @@ def tool_errors[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[
                 raise_tool_error(relogin_exc, wrapper.__name__)
         except Exception as e:
             raise_tool_error(e, wrapper.__name__)
+        finally:
+            # A pause this call started: leave no LinkedIn page open while it
+            # lasts, where the idle close would wait out every refused call.
+            if is_paused():
+                try:
+                    await close_browser()
+                except Exception:
+                    logger.warning("Could not close the browser", exc_info=True)
 
     return wrapper
 

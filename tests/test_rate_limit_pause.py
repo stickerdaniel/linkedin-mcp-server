@@ -34,6 +34,7 @@ class Server:
         browser.context.browser.is_connected.return_value = True
         self.readiness = AsyncMock(return_value=None)
         self.launch = AsyncMock(return_value=browser)
+        self.close = AsyncMock(return_value=None)
         self.extractor = MagicMock()
         self.extractor.read_person = AsyncMock(
             return_value={"url": "https://www.linkedin.com/in/someone/", "sections": {}}
@@ -41,6 +42,7 @@ class Server:
         target = "linkedin_mcp_server.dependencies"
         monkeypatch.setattr(f"{target}.ensure_tool_ready_or_raise", self.readiness)
         monkeypatch.setattr(f"{target}.get_or_create_browser", self.launch)
+        monkeypatch.setattr(f"{target}.close_browser", self.close)
         monkeypatch.setattr(f"{target}.ensure_authenticated", AsyncMock())
         monkeypatch.setattr(f"{target}.LinkedInExtractor", lambda page: self.extractor)
         self.mcp = FastMCP("test", mask_error_details=True)
@@ -82,6 +84,8 @@ async def test_a_rate_limit_page_pauses_every_later_call(monkeypatch, auth_root)
     assert "Nothing was sent to LinkedIn" in str(refused.value)
     assert server.launch.await_count == 1
     assert server.extractor.read_person.await_count == 1
+    # The call that met the page closed the browser; no LinkedIn page stays open.
+    server.close.assert_awaited_once()
 
 
 async def test_a_refused_call_never_asks_for_a_browser_even_after_a_restart(
@@ -118,6 +122,7 @@ async def test_a_restricted_account_pauses_too(monkeypatch, auth_root):
     assert str(first.value).startswith(str(AccountRestrictedError()))
     assert "paused until" in str(first.value)
     assert server.launch.await_count == 1
+    server.close.assert_awaited_once()
 
 
 async def test_off_by_default(monkeypatch, auth_root):
@@ -129,6 +134,7 @@ async def test_off_by_default(monkeypatch, auth_root):
             await server.call()
 
     assert server.launch.await_count == 2
+    server.close.assert_not_awaited()
     assert not (auth_root / PAUSE_FILE).exists()
 
 

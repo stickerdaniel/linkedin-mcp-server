@@ -3,8 +3,9 @@
 AGENTS.md ("Live Request Limits") stops live checks for 24 hours after a
 rate-limit page. ``RATE_LIMIT_PAUSE`` holds the server's own tool calls to that
 rule: a rate-limit page or an account restriction is recorded in the auth root,
-where every process on the profile and every restart finds it, and until the
-pause ends each LinkedIn tool is refused before it asks for a browser.
+where every process on the profile and every restart finds it. The call that
+met the page closes the browser, and until the pause ends each LinkedIn tool is
+refused before it asks for one.
 
 The record names the login generation it was made under, so a new sign-in
 ends the pause: it is the step a person takes after looking at the account.
@@ -69,36 +70,50 @@ def start_pause(exception: Exception) -> str | None:
     )
 
 
+def _active_pause() -> tuple[float, float, bool] | None:
+    """When the recorded pause began and ends, and whether it was a restriction.
+
+    ``None`` when the pause is off, over, superseded by a new sign-in, or the
+    record cannot be read.
+    """
+    seconds = get_config().browser.rate_limit_pause_seconds
+    if not seconds:
+        return None
+    path = auth_root_dir() / PAUSE_FILE
+    try:
+        record = json.loads(path.read_text())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        logger.warning("Ignoring an unreadable %s", path)
+        return None
+    since = record.get("since") if isinstance(record, dict) else None
+    if not isinstance(since, (int, float)) or not math.isfinite(since):
+        return None
+    if record.get("login_generation") != _login_generation():
+        return None
+    until = since + seconds
+    if time.time() >= until:
+        return None
+    return since, until, record.get("restricted") is True
+
+
+def is_paused() -> bool:
+    """Whether LinkedIn tools are paused now."""
+    return _active_pause() is not None
+
+
 def raise_if_paused() -> None:
     """Refuse a LinkedIn tool while a recorded pause lasts.
 
     Raises:
         ToolError: Naming when the pause ends. Nothing was sent to LinkedIn.
     """
-    seconds = get_config().browser.rate_limit_pause_seconds
-    if not seconds:
+    pause = _active_pause()
+    if pause is None:
         return
-    path = auth_root_dir() / PAUSE_FILE
-    try:
-        record = json.loads(path.read_text())
-    except FileNotFoundError:
-        return
-    except (OSError, ValueError):
-        logger.warning("Ignoring an unreadable %s", path)
-        return
-    since = record.get("since") if isinstance(record, dict) else None
-    if not isinstance(since, (int, float)) or not math.isfinite(since):
-        return
-    if record.get("login_generation") != _login_generation():
-        return
-    until = since + seconds
-    if time.time() >= until:
-        return
-    what = (
-        "restricted the account"
-        if record.get("restricted") is True
-        else "showed a rate-limit page"
-    )
+    since, until, restricted = pause
+    what = "restricted the account" if restricted else "showed a rate-limit page"
     raise ToolError(
         f"LinkedIn {what} at {_utc(since)}, so LinkedIn tools are paused until "
         f"{_utc(until)} (RATE_LIMIT_PAUSE). Nothing was sent to LinkedIn. "
