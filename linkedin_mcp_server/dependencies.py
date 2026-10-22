@@ -35,6 +35,7 @@ from linkedin_mcp_server.exceptions import (
     LinuxBrowserDependencyError,
 )
 from linkedin_mcp_server.profile_lease import get_profile_lease
+from linkedin_mcp_server.rate_limit_pause import raise_if_paused
 from linkedin_mcp_server.linkedin import LinkedInExtractor
 from linkedin_mcp_server.server_role import (
     ServerRole,
@@ -177,6 +178,9 @@ def tool_errors[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[
 
     @functools.wraps(fn)
     async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        # Ahead of the body, which is where the browser is asked for, and
+        # outside the try: the refusal is already shaped for the client.
+        raise_if_paused()
         try:
             return await fn(*args, **kwargs)
         except AuthenticationError as e:

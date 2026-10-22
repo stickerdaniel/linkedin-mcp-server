@@ -46,6 +46,7 @@ from linkedin_mcp_server.exceptions import (
     OwnerCannotAuthenticateError,
     SessionExpiredError,
 )
+from linkedin_mcp_server.rate_limit_pause import start_pause
 from linkedin_mcp_server.session_state import PeerSessionInPlaceError
 from linkedin_mcp_server.error_diagnostics import (
     build_issue_diagnostics,
@@ -209,7 +210,9 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
     # way out.
     elif isinstance(exception, AccountRestrictedError):
         logger.warning("LinkedIn account restricted%s", ctx)
-        raise ToolError(str(exception)) from exception
+        pause = start_pause(exception)
+        message = str(exception) if pause is None else f"{exception} {pause}"
+        raise ToolError(message) from exception
 
     elif isinstance(exception, SessionExpiredError):
         logger.warning("Session expired%s: %s", ctx, exception)
@@ -230,9 +233,10 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
     elif isinstance(exception, RateLimitError):
         wait_time = getattr(exception, "suggested_wait_time", 300)
         logger.warning("Rate limit%s: %s (wait=%ds)", ctx, exception, wait_time)
-        raise ToolError(
-            f"Rate limit detected. Wait {wait_time} seconds before trying again."
-        ) from exception
+        advice = start_pause(exception) or (
+            f"Wait {wait_time} seconds before trying again."
+        )
+        raise ToolError(f"Rate limit detected. {advice}") from exception
 
     elif isinstance(exception, ProfileNotFoundError):
         logger.warning("Profile not found%s: %s", ctx, exception)

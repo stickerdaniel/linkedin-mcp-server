@@ -140,6 +140,7 @@ class EnvironmentKeys:
     BROWSER_WAIT = "BROWSER_WAIT"
     BROWSER_MIN_HOLD = "BROWSER_MIN_HOLD"
     BROWSER_IDLE_TIMEOUT = "BROWSER_IDLE_TIMEOUT"
+    RATE_LIMIT_PAUSE = "RATE_LIMIT_PAUSE"
     IMPORT_FROM_BROWSER = "IMPORT_FROM_BROWSER"
     AUTO_IMPORT_FROM_BROWSER = "AUTO_IMPORT_FROM_BROWSER"
     DAEMON_ENABLED = "DAEMON_ENABLED"
@@ -307,12 +308,13 @@ def load_from_env(config: AppConfig) -> AppConfig:
             )
         config.browser.login_inline_wait_seconds = login_inline_wait_value
 
-    # Shared-browser coordination between concurrent server processes
-    # (validated and clamped in BrowserConfig.validate())
+    # Shared-browser coordination between concurrent server processes, and the
+    # rate-limit pause (validated and clamped in BrowserConfig.validate())
     for env_key, attribute in (
         (EnvironmentKeys.BROWSER_WAIT, "browser_wait_seconds"),
         (EnvironmentKeys.BROWSER_MIN_HOLD, "browser_min_hold_seconds"),
         (EnvironmentKeys.BROWSER_IDLE_TIMEOUT, "browser_idle_timeout_seconds"),
+        (EnvironmentKeys.RATE_LIMIT_PAUSE, "rate_limit_pause_seconds"),
     ):
         raw = os.environ.get(env_key)
         if not raw:
@@ -569,6 +571,17 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
             "seconds without a tool call (default: 600; 0 = keep it open)"
         ),
     )
+    parser.add_argument(
+        "--rate-limit-pause",
+        type=non_negative_float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "After LinkedIn shows a rate-limit page or restricts the account, "
+            "refuse every LinkedIn tool for this many seconds, across restarts "
+            "(default: 0 = off; 86400 = 24 hours)"
+        ),
+    )
 
     parser.add_argument(
         "--chrome-path",
@@ -791,6 +804,9 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
 
     if args.browser_idle_timeout is not None:
         config.browser.browser_idle_timeout_seconds = args.browser_idle_timeout
+
+    if args.rate_limit_pause is not None:
+        config.browser.rate_limit_pause_seconds = args.rate_limit_pause
 
     if args.chrome_path:
         config.browser.chrome_path = args.chrome_path

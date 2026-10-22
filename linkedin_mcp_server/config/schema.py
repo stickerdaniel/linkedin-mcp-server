@@ -166,6 +166,9 @@ class BrowserConfig:
     browser_min_hold_seconds: float = DEFAULT_BROWSER_MIN_HOLD_SECONDS
     # Close an idle browser after this long; 0 = keep it until the process exits
     browser_idle_timeout_seconds: float = DEFAULT_BROWSER_IDLE_TIMEOUT_SECONDS
+    # Refuse LinkedIn tools this long after a rate-limit or restriction page,
+    # across restarts (`rate_limit_pause`); 0 = off
+    rate_limit_pause_seconds: float = 0.0
     # Auto-import a LinkedIn session from a locally logged-in browser on the
     # first no-session tool call, before falling back to manual login. On by
     # default: None ("auto") and True both enable it across interactive and
@@ -228,6 +231,7 @@ class BrowserConfig:
             "browser_wait_seconds",
             "browser_min_hold_seconds",
             "browser_idle_timeout_seconds",
+            "rate_limit_pause_seconds",
         ):
             value = getattr(self, name)
             if not (math.isfinite(value) and value >= 0):
