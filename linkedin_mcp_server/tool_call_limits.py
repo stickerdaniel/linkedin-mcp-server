@@ -32,6 +32,9 @@ logger = logging.getLogger(__name__)
 STATE_FILE = "tool-calls.json"
 #: Tools that never load a LinkedIn page, so they spend nothing.
 LOCAL_TOOLS = frozenset({"close_session"})
+#: How long a call is kept, whatever this process limits: another process on
+#: the profile may limit the day, and rewriting the file must not drop its count.
+KEPT_FOR = 86400.0
 
 
 def admit_tool_call(
@@ -58,14 +61,13 @@ def admit_tool_call(
     if tool in LOCAL_TOOLS or not windows:
         return
     now = time.time() if now is None else now
-    kept_for = max(seconds for _, _, seconds, _ in windows)
     path = lease.auth_root / STATE_FILE
     # Wall-clock stamps, because they have to outlive the process. One from
     # the future means the clock went back: it is stored again as made now,
     # so it holds its place for one window rather than until the clock
     # catches up.
     calls = {
-        name: sorted(min(stamp, now) for stamp in stamps if now - stamp < kept_for)
+        name: sorted(min(stamp, now) for stamp in stamps if now - stamp < KEPT_FOR)
         for name, stamps in _read(path).items()
     }
     made = calls.get(tool, [])
@@ -92,8 +94,11 @@ def admit_tool_call(
         secure_write_text(path, json.dumps(payload, sort_keys=True) + "\n")
     except OSError:
         # Fails open, like an unreadable count below: an opt-in limit that
-        # cannot be recorded is no reason to stop the call.
+        # cannot be recorded is no reason to stop the call. Refusing on what
+        # the file last held would also keep a stamp from the future in place
+        # until the clock catches up with it.
         logger.warning("Could not record tool calls in %s", path, exc_info=True)
+        return
     if refusal is not None:
         raise refusal
 

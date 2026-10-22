@@ -179,6 +179,21 @@ async def test_with_both_limits_reached_the_later_one_is_named(clock):
     assert "in 24 hours 0 minutes" in str(refused.value)
 
 
+async def test_a_minute_limit_keeps_the_day_another_server_counts(clock):
+    # Two servers on one profile with different limits share one count file:
+    # the one limiting only the minute must not drop the other's day.
+    _limits(per_day=3)
+    await _call()
+    await _call()
+    clock[0] += 120
+    _limits(per_minute=10)
+    await _call()
+    clock[0] += 60
+    _limits(per_day=3)
+    with pytest.raises(ToolError, match="TOOL_CALLS_PER_DAY"):
+        await _call()
+
+
 async def test_a_restart_keeps_the_count(clock, isolate_profile_dir):
     _limits(per_day=2)
     for _ in range(2):
@@ -229,3 +244,21 @@ async def test_a_call_from_the_future_counts_as_made_now(clock, isolate_profile_
 
     clock[0] += 60
     (await _call()).assert_awaited_once()
+
+
+async def test_a_count_that_cannot_be_recorded_refuses_nothing(
+    clock, monkeypatch, caplog
+):
+    # The clock went back and the file cannot be written: refusing on what it
+    # last held would block the tool for the hour, not for one window.
+    _limits(per_minute=1)
+    await _call()
+    clock[0] -= 3600
+
+    def read_only(*args, **kwargs):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(tool_call_limits, "secure_write_text", read_only)
+
+    (await _call()).assert_awaited_once()
+    assert "Could not record tool calls" in caplog.text
