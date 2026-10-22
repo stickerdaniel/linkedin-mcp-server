@@ -725,6 +725,83 @@ With a paid provider, use a sticky residential session that holds one address (n
 <br/>
 <br/>
 
+## Several accounts
+
+The server drives one LinkedIn account: one profile, one session, one browser. To serve several accounts behind one endpoint, for a household or a small team, run one server per account, side by side, with a reverse proxy in front that authenticates each caller and passes them to their own account's server. The servers share nothing: no account's calls wait for another's, use its session, or count against it.
+
+<details>
+<summary><b>🔧 Configuration</b></summary>
+
+- **One container per account**, each with its own volume at `/home/pwuser/.linkedin-mcp` and a fixed `hostname`. Chromium's profile lock records the host name, and a container recreated under a new one can find its own profile locked.
+- **No published port on any server.** Their endpoints have no authentication, so only the proxy may reach them: it publishes the one port, and each server listens with `--host 0.0.0.0` on the Compose network. Keep anything you do not trust off that network.
+- **The proxy authenticates and routes.** Each person gets their own key, and the proxy forwards a request to the server of the key it carries, answering anything else with `401`. Route only by something the proxy has checked: a header a client chose, such as an account name next to a shared key, would let anyone holding the key pick any account.
+- **The servers check `Host`.** The proxy passes on the name clients use, so name it in each server's `FASTMCP_HTTP_ALLOWED_HOSTS` (HTTP mode under [Setup with Docker](#setup-with-docker)), or every request is refused with `421`.
+- **Each account signs in on its own volume** with the usual `--login --login-viewer`, while that account's server is stopped, since both use its profile. Sessions expire per account; repeat it for the one that asks.
+- **Addresses and limits stay per account.** If the accounts must not leave from one address, give each server its own `PROXY_SERVER` before its first login ([Using a proxy](#using-a-proxy)). LinkedIn judges each account on its own use; to cap a person's calls, rate-limit at the proxy, keyed by the same key as the routing.
+
+```yaml
+services:
+  linkedin-a:  # one service like this per account
+    image: stickerdaniel/linkedin-mcp-server:latest
+    hostname: linkedin-a
+    command: --transport streamable-http --host 0.0.0.0 --port 8000
+    environment:
+      FASTMCP_HTTP_ALLOWED_HOSTS: '["linkedin.example"]'
+    volumes:
+      - linkedin-a:/home/pwuser/.linkedin-mcp
+  linkedin-b:
+    image: stickerdaniel/linkedin-mcp-server:latest
+    hostname: linkedin-b
+    command: --transport streamable-http --host 0.0.0.0 --port 8000
+    environment:
+      FASTMCP_HTTP_ALLOWED_HOSTS: '["linkedin.example"]'
+    volumes:
+      - linkedin-b:/home/pwuser/.linkedin-mcp
+  proxy:
+    image: caddy:2
+    ports:
+      - "443:443"
+    environment:
+      - KEY_A
+      - KEY_B
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+volumes:
+  linkedin-a:
+  linkedin-b:
+```
+
+The `Caddyfile` next to it. Set `KEY_A` and `KEY_B` in the environment Compose runs in, each to its own value from `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`, and never leave one empty: the key is the caller's only credential.
+
+```caddyfile
+linkedin.example {
+	@a header Authorization "Bearer {$KEY_A}"
+	handle @a {
+		reverse_proxy linkedin-a:8000
+	}
+	@b header Authorization "Bearer {$KEY_B}"
+	handle @b {
+		reverse_proxy linkedin-b:8000
+	}
+	handle {
+		respond 401
+	}
+}
+```
+
+Each person's client then connects to `https://linkedin.example/mcp` with `Authorization: Bearer <their key>`. To sign an account in, or in again:
+
+```bash
+docker compose stop linkedin-a
+docker compose run --rm -p 127.0.0.1:6080:6080 linkedin-a --login --login-viewer
+docker compose start linkedin-a
+```
+
+</details>
+
+<br/>
+<br/>
+
 ## Setup from Source (Develop & Contribute)
 
 Contributions are welcome. See [CONTRIBUTING.md](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/.github/CONTRIBUTING.md) for architecture guidelines and checklists. Search existing issues first, then use the [issue forms](https://github.com/stickerdaniel/linkedin-mcp-server/issues/new/choose) for anything new. AI agents follow the [issue-packet skill](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/.agents/skills/issue-packet/SKILL.md).

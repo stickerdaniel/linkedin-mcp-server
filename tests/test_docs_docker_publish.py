@@ -99,3 +99,46 @@ def test_exposure_tradeoff_is_explained_not_just_shown(path: str):
         f"{path} should show the loopback publish form so the safe command is "
         "the one people copy"
     )
+
+
+def _several_accounts_servers() -> dict[str, dict]:
+    """The LinkedIn servers of the README's several-accounts Compose file."""
+    import yaml
+
+    text = _README.read_text(encoding="utf-8")
+    examples = [
+        yaml.safe_load(block)
+        for block in re.findall(r"```yaml\n(.*?)```", text, re.DOTALL)
+        if "streamable-http" in block
+    ]
+    assert len(examples) == 1, "expected one Compose file serving HTTP"
+    servers = {
+        name: service
+        for name, service in examples[0]["services"].items()
+        if "linkedin-mcp-server" in service["image"]
+    }
+    assert len(servers) >= 2, "the example should show more than one account"
+    return servers
+
+
+def test_several_accounts_publish_no_server_port():
+    """Only the proxy in front may reach the servers.
+
+    The same silent mistake as above, one layer in: a published server port
+    would let anyone who reaches the host past the proxy's authentication.
+    """
+    for name, service in _several_accounts_servers().items():
+        assert "ports" not in service, (
+            f"{name} publishes its endpoint, which has no authentication"
+        )
+        assert "--host 0.0.0.0" in service["command"], name
+
+
+def test_several_accounts_never_share_a_profile():
+    """Two servers on one volume would drive one session as two accounts."""
+    servers = _several_accounts_servers()
+    volumes = [service["volumes"][0].split(":")[0] for service in servers.values()]
+    hostnames = [service.get("hostname") for service in servers.values()]
+
+    assert len(set(volumes)) == len(servers), volumes
+    assert all(hostnames), "each server needs a fixed hostname"

@@ -118,6 +118,10 @@ Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSO
 > directory, so do not run `--login` or `--logout` on the host while a
 > container is running.
 
+## Several Accounts
+
+Run one container per account, each with its own volume at `/home/pwuser/.linkedin-mcp`, a fixed `hostname`, and no published port. Put a reverse proxy in front that authenticates each caller and forwards them to their own account's container. Each account signs in with `--login --login-viewer` on its own volume. The [README](https://github.com/stickerdaniel/linkedin-mcp-server#several-accounts) has a Compose file and a Caddy configuration.
+
 ## Environment Variables
 
 | Variable | Default | Description |
