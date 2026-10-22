@@ -127,11 +127,16 @@ def build_people_search_url(
 ) -> str:
     """Build a LinkedIn people search URL, refusing filters LinkedIn ignores.
 
-    Both refusals happen before a URL exists, so a workflow calling this can
+    Every refusal happens before a URL exists, so a workflow calling this can
     never navigate on a filter LinkedIn would swallow. An unknown ``network``
-    token and a plain-text ``currentCompany`` are each accepted by the URL and
-    then dropped, which answers with the unfiltered result set while the
-    request still reads as filtered.
+    token, a plain-text ``location`` and a plain-text ``currentCompany`` are
+    each accepted by the URL and then dropped, which answers with the
+    unfiltered result set while the request still reads as filtered.
+
+    ``location`` is the same shape of mistake as ``currentCompany``: people
+    search filters on the numeric geo URN id via the ``geoUrn`` list facet, and
+    a ``location=`` query parameter is ignored outright -- so a search that
+    reads as scoped to one city returns the whole world.
     """
     if network is not None:
         invalid = [t for t in network if t not in NETWORK_TOKENS]
@@ -140,6 +145,15 @@ def build_people_search_url(
                 "Invalid network token(s) "
                 f"{invalid!r}; expected any of {list(NETWORK_TOKENS)!r}"
             )
+
+    if location and not re.fullmatch(r"[0-9]+", location):
+        raise FilterValidationError(
+            f"location must be a numeric LinkedIn geo URN id "
+            f"(e.g. '103644278' for the United States); got {location!r}. "
+            f"Plain-text place names are silently ignored by LinkedIn and "
+            f"return the unfiltered result set. Use keywords when the geo URN "
+            f"is not available."
+        )
 
     if current_company and not re.fullmatch(r"[0-9]+", current_company):
         raise FilterValidationError(
@@ -151,7 +165,7 @@ def build_people_search_url(
 
     params = f"keywords={quote_plus(keywords)}"
     if location:
-        params += f"&location={quote_plus(location)}"
+        params += f"&geoUrn={_encode_list_facet([location])}"
     if network:
         params += f"&network={_encode_list_facet(network)}"
     if current_company:
