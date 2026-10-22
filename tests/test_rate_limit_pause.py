@@ -54,8 +54,8 @@ class Server:
 
 
 @pytest.fixture
-def auth_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    monkeypatch.setenv("USER_DATA_DIR", str(tmp_path / "profile"))
+def auth_root(tmp_path: Path) -> Path:
+    """Where the record lands: ``isolate_profile_dir`` puts the profile here."""
     return tmp_path
 
 
