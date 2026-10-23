@@ -505,6 +505,31 @@ async def _saved_jobs_scenario() -> dict[str, Any]:
     )
 
 
+async def _save_job_scenario(*, already_saved: bool = False) -> dict[str, Any]:
+    suffix = "already_saved" if already_saved else "clicks_unsaved_control"
+    name = f"save_job__{suffix}"
+    recorder = TraceRecorder(name, _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = ScriptedPage(recorder)
+    page.goto_landings.append("https://www.linkedin.com/jobs/view/123/")
+    if already_saved:
+        page.script("evaluate:job_save_state", "saved")
+    else:
+        # One state read before the click, then one bounded wait for the saved
+        # transition after it. No runtime locale read anywhere.
+        page.script("evaluate:job_save_state", "unsaved", "saved")
+        page.script("evaluate:job_save_click", True)
+    extractor = _extractor(page)
+    async with boundaries(recorder, clock):
+        with recorder.context("save_job", "job"):
+            result = await extractor.save_job("123")
+    page.assert_clean()
+    return recorder.trace(
+        {"method": "save_job", "arguments": {"job_id": "123"}},
+        result,
+    )
+
+
 async def _feed_stale_scenario() -> dict[str, Any]:
     name = "extract_feed__stale_stop"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
@@ -1103,6 +1128,7 @@ TOOL_FACADE_METHODS = {
     "get_job_apply_url",
     "get_my_profile",
     "get_saved_jobs",
+    "save_job",
     "get_sidebar_profiles",
     "read_company",
     "read_job",
@@ -1143,6 +1169,8 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         ),
         "job-search-metadata-upgrade.json": await _job_search_upgrade_scenario(),
         "saved-jobs.json": await _saved_jobs_scenario(),
+        "save-job.json": await _save_job_scenario(),
+        "save-job-already-saved.json": await _save_job_scenario(already_saved=True),
         "feed-stale.json": await _feed_stale_scenario(),
         "feed-response-success.json": await _feed_response_scenario(body_failure=False),
         "feed-response-failure.json": await _feed_response_scenario(body_failure=True),
