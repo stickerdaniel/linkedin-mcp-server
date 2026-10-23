@@ -5,6 +5,39 @@ described on [GitHub Releases](https://github.com/stickerdaniel/linkedin-mcp-ser
 
 <!-- towncrier release notes start -->
 
+## 4.28.0 (2026-10-23)
+
+### Highlights
+
+- **Claude Code and Cursor plugins.** Install the server and its agent skill in one step. ([#1296](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1296))
+- **Proxy credentials stay private.** Search errors no longer quote them. ([#1375](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1375))
+- **Checkpoints ask for a login.** A checkpoint reached mid-call no longer waits 30 s. ([#1379](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1379))
+
+### Features
+
+- Cursor Marketplace plugin adds one-click install and the linkedin-mcp agent skill. ([#1268](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1268))
+- A shared browser process that stops responding is now named, with its pid, in the error. ([#1295](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1295))
+- Claude Code plugin with the same server and skill as the Codex plugin. ([#1296](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1296))
+- The Codex, Claude Code and Cursor plugins now start the latest server release. ([#1322](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1322))
+
+### Bug Fixes
+
+- Trace directories left behind by killed servers are now removed after 14 days. ([#1297](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1297))
+- Tool calls answered in full are no longer reported as possibly lost. ([#1298](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1298))
+- A newer server now retires an older shared browser that uses other settings. ([#1301](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1301))
+- Browser setup on a busy Mac no longer fails after Chromium installed successfully. ([#1302](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1302))
+- Clients differing only in login settings share one browser; EAGER_FULL_CHROMIUM is gone. ([#1304](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1304))
+- A message confirmed just before the deadline is no longer reported as unconfirmed. ([#1305](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1305))
+- Listing resources or prompts no longer fails while the shared browser is unavailable. ([#1311](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1311))
+- Shared browser startup refuses a file swapped for a named pipe instead of hanging. ([#1317](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1317))
+- Tool calls no longer keep failing on a shared browser built with an incompatible MCP. ([#1327](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1327))
+- A call whose answer was lost no longer reports that the shared browser stopped running. ([#1337](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1337))
+- On a busy Mac, a cleanly closed browser no longer reports that it may still be running. ([#1368](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1368))
+- On a busy Mac, a crashed server's browser is now closed and its profile released. ([#1370](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1370))
+- search_people and search_posts no longer show proxy credentials quoted in an error. ([#1375](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1375))
+- A security checkpoint reached mid-call now asks for a new login instead of a 30 s wait. ([#1379](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1379))
+
+
 ## 4.27.0 (2026-10-10)
 
 ### Highlights
