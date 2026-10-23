@@ -25,6 +25,7 @@ from linkedin_mcp_server.linkedin.message_sender import MessageSender
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.person import PersonReader
 from linkedin_mcp_server.linkedin.posts import PostSearch
+from linkedin_mcp_server.linkedin.post_writer import PostWriter
 from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
 from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.linkedin.text import (
@@ -66,6 +67,7 @@ class LinkedInExtractor:
         job_pages = JobPageReader(session, navigator, content)
         self._jobs = JobReader(navigator, capture, job_pages)
         self._posts = PostSearch(capture)
+        self._post_writer = PostWriter(session, navigator)
         self._conversations = ConversationReader(
             session, navigator, content, profile_page
         )
@@ -73,6 +75,19 @@ class LinkedInExtractor:
     async def get_page_text(self) -> str:
         """Extract innerText from the main content area of the current page."""
         return await self._content.get_page_text()
+
+    async def prepare_post(self, text: str) -> dict[str, Any]:
+        """Bind a plain-text preview to the authenticated personal profile."""
+        profile = await self.get_my_profile({"main_profile"})
+        return self._post_writer.prepare(text, profile["url"])
+
+    async def publish_post(
+        self, draft_id: str, approved_text: str, *, confirmed: bool = False
+    ) -> dict[str, Any]:
+        """Publish an unchanged preview once after explicit user approval."""
+        return await self._post_writer.publish(
+            draft_id, approved_text, confirmed=confirmed
+        )
 
     async def click_button_by_text(
         self, text: str, *, scope: str = "main", timeout: int = 5000

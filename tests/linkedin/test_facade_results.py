@@ -23,6 +23,34 @@ def extracted(
     return ExtractedSection(text=text, references=references or [], error=error)
 
 
+class TestPostPublishingDelegates:
+    async def test_prepare_reads_own_author_then_preserves_exact_text(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        author = "https://www.linkedin.com/in/test-author/"
+        with (
+            patch.object(
+                extractor, "get_my_profile", AsyncMock(return_value={"url": author})
+            ) as own,
+            patch.object(
+                extractor._post_writer, "prepare", return_value={"status": "preview"}
+            ) as prepare,
+        ):
+            assert await extractor.prepare_post("Exact\ntext") == {"status": "preview"}
+            own.assert_awaited_once_with({"main_profile"})
+            prepare.assert_called_once_with("Exact\ntext", author)
+
+    async def test_publish_preserves_confirmation_and_error(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor._post_writer,
+            "publish",
+            AsyncMock(side_effect=ValueError("Preview expired")),
+        ) as publish:
+            with pytest.raises(ValueError, match="expired"):
+                await extractor.publish_post("id", "Exact text", confirmed=True)
+            publish.assert_awaited_once_with("id", "Exact text", confirmed=True)
+
+
 class TestSingleSectionRateLimits:
     @pytest.mark.parametrize(
         ("method", "args", "section"),

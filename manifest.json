@@ -126,6 +126,14 @@
     {
       "name": "close_session",
       "description": "Properly close browser session and clean up resources"
+    },
+    {
+      "name": "prepare_post",
+      "description": "Preview a personal text post without publishing"
+    },
+    {
+      "name": "publish_post",
+      "description": "Publish an exact preview once after explicit approval; never retry an uncertain outcome"
     }
   ],
   "user_config": {
