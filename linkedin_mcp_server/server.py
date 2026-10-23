@@ -57,6 +57,31 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Distilled from the plugin skill for clients that never load it. Tool
+# selection and plugin enablement stay in the skill; nothing here reads that
+# file.
+_SERVER_INSTRUCTIONS = """\
+Use this server only when the user explicitly asks for LinkedIn data or a
+LinkedIn action.
+
+Start with the smallest read that can answer the request. Treat profile,
+company, job, post, feed, and message results as live LinkedIn evidence, and
+distinguish retrieved facts from inference. Keep searches and result pages
+modest. Do not collect data in bulk or spam.
+
+send_message and connect_with_person are write actions. Use them only when
+the user authorizes the exact recipient and action. Confirm the final message
+or connection note unless the user has already supplied it. Do not retry a
+failed write unless the result proves it was not sent.
+
+If LinkedIn presents a captcha, two-factor prompt, or other user-owned
+authentication step, stop and ask the user to complete it. If browser setup
+or authentication is still pending, report that state and retry once after it
+finishes. Do not loop, launch extra browsers, clear profiles, or replace the
+user's session.
+"""
+
+
 class _StaticTokenAuth(TokenVerifier):
     """Accepts exactly the one token the owner published, and nothing else.
 
@@ -216,6 +241,10 @@ def create_mcp_server(
     mcp = FastMCP(
         "mcp-server-linkedin",
         version=__version__,
+        # Before any role wiring, and not only on a role that drives a browser.
+        # A proxy registers no local tools, but it is the server the client
+        # initializes, so gating this would leave that client with no rules.
+        instructions=_SERVER_INSTRUCTIONS,
         # Selected here rather than gated inside, because for a proxy every step
         # of it is wrong: it would install a Chromium this process never opens,
         # and then claim to be closing a browser it never had.
