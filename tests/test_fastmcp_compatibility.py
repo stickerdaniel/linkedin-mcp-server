@@ -55,12 +55,14 @@ def test_security_floors_are_published() -> None:
         "fastmcp": Version("4.0.10"),
         "httpx2": Version("2.13.1"),
         "mcp": Version("2.2.0"),
+        "opentelemetry-api": Version("1.45.1"),
         "pydantic-settings": Version("2.14.2"),
         "starlette": Version("1.3.1"),
     }
     for name, floor in expected_runtime.items():
         assert _minimum(runtime[name]) >= floor
     assert _minimum(development["aiohttp"]) >= Version("3.14.4")
+    assert _minimum(development["virtualenv"]) >= Version("21.14.9")
 
 
 def test_the_suite_runs_without_the_camelcase_bridge() -> None:
