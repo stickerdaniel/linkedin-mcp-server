@@ -152,6 +152,8 @@ Optional additional keys:
 - `apply: {type, url?}` (get_job_apply_url, which returns no `sections`) — `type` is `easy_apply`, `external`, `applied`, `closed` or `unknown`; `url` is the employer's application link as LinkedIn gives it, never opened, present for external postings
 - `apply: {type}` (get_job_details) — `type` is `applied` or `closed`, read from the posting's text above its description without clicking; absent for an open posting and for one whose description heading was not captured
 
+A failed call is an error result whose `_meta["linkedin.dev/error"]` is `{v, code, retry_after?}`. `ErrorCode` in `error_handler.py` is the closed set, listed in README. Shape a failure with `raise_tool_error` or `CodedToolError`; a bare `ToolError` reads as `internal`.
+
 ## Tests
 
 - Tests must write artifacts only to temporary directories, including in subprocesses.

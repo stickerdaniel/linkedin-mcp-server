@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 
 import mcp.types as mt
 
-from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
@@ -19,6 +18,7 @@ from linkedin_mcp_server.daemon.liveness import (
     abandoned_call_error,
     browser_work_begins,
 )
+from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode
 from linkedin_mcp_server.exceptions import BrowserBusyError
 from linkedin_mcp_server.profile_lease import get_profile_lease
 
@@ -141,7 +141,9 @@ class SequentialToolExecutionMiddleware(Middleware):
             # thrown in middleware does not pass through raise_tool_error, and
             # mask_error_details would otherwise hide the explanation.
             logger.info("Tool '%s' gave up waiting for the shared browser", tool_name)
-            raise ToolError(str(BrowserBusyError(self._busy_because())))
+            raise CodedToolError(
+                str(BrowserBusyError(self._busy_because())), ErrorCode.BROWSER_BUSY
+            )
         # For good: the startup observation no longer describes the holder.
         self._silent_owner = None
 

@@ -10,12 +10,12 @@ import logging
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
-from fastmcp.exceptions import ToolError
 from pydantic import BeforeValidator, Field
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.dependencies import get_ready_extractor, tool_errors
+from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode
 from linkedin_mcp_server.linkedin import parse_person_sections
 from linkedin_mcp_server.linkedin.contracts import FilterValidationError
 from linkedin_mcp_server.linkedin.identifiers import normalize_person_identifier
@@ -177,7 +177,7 @@ def register_person_tools(
                 current_company=current_company,
             )
         except FilterValidationError as e:
-            raise ToolError(str(e)) from e
+            raise CodedToolError(str(e), ErrorCode.INVALID_ARGUMENT) from e
 
         extractor = await get_ready_extractor(ctx, tool_name="search_people")
         logger.info(
@@ -203,7 +203,7 @@ def register_person_tools(
             # Validation messages carry actionable detail; surface
             # them as ToolError so mask_error_details doesn't reduce
             # them to "Error calling tool 'search_people'".
-            raise ToolError(str(e)) from e
+            raise CodedToolError(str(e), ErrorCode.INVALID_ARGUMENT) from e
 
         await ctx.report_progress(progress=100, total=100, message="Complete")
 

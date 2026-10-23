@@ -78,6 +78,21 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `search_posts` | Search posts by keyword, optionally limited to the past day, week, or month. |
 | `close_session` | Close the shared browser session without deleting your saved login. |
 
+A failed call is an error result (`isError`) with the usual message. For programs that branch on the kind of failure, its `_meta["linkedin.dev/error"]` is `{"v": 1, "code": ...}`, and `rate_limited` adds `retry_after` in seconds:
+
+| Code | Meaning |
+|------|---------|
+| `auth_required` | No usable LinkedIn session. Someone has to sign in; a login window may already be open. |
+| `account_restricted` | LinkedIn restricted the account. Signing in again cannot lift it. |
+| `rate_limited` | LinkedIn is limiting requests. Wait `retry_after` seconds. |
+| `not_found` | The profile or page does not exist. |
+| `page_unreadable` | The page could not be read; LinkedIn's layout may have changed. |
+| `invalid_argument` | An argument is unusable; the message says how to correct it. |
+| `network` | LinkedIn could not be reached: the connection, a proxy or a captive portal. |
+| `browser_busy` | Another call or client is using or changing the browser. Call again shortly. |
+| `browser_unavailable` | The browser cannot run yet: still installing, failed to set up, or older than the profile. |
+| `internal` | Anything else, including failures the server does not classify. |
+
 <br/>
 <br/>
 
