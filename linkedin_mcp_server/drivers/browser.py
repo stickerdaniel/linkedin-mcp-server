@@ -101,6 +101,10 @@ _last_activity: float | None = None
 # Tool calls currently driving the browser. The background handoff poll must not
 # close a browser out from under a running call: the tool holds a Page from it.
 _calls_in_flight: int = 0
+# Tool calls finished while the current browser was open, for
+# ``browser_max_calls``. Cleared with every close, so each browser gets the
+# whole allowance.
+_calls_on_this_browser: int = 0
 # Serializes close against create. close_browser() clears _browser and then
 # awaits the cookie export and Chromium teardown; without this a tool call
 # arriving in that window would see no browser and launch a second Chromium on
@@ -995,12 +999,14 @@ def _settle_the_profile(*, confirmed: bool) -> None:
 async def _close_browser_locked() -> None:
     """Tear the browser down; the caller holds the lifecycle lock."""
     global _browser, _browser_cookie_export_path, _last_activity
+    global _calls_on_this_browser
 
     browser = _browser
     cookie_export_path = _browser_cookie_export_path
     _browser = None
     _browser_cookie_export_path = None
     _last_activity = None
+    _calls_on_this_browser = 0
 
     if browser is None:
         return
@@ -1122,10 +1128,13 @@ def note_call_started() -> None:
 
 
 def note_activity() -> None:
-    """Record that a tool call just finished, for the idle timer."""
-    global _last_activity, _calls_in_flight
+    """Record that a tool call just finished, for the idle timer and call cap."""
+    global _last_activity, _calls_in_flight, _calls_on_this_browser
     _last_activity = time.monotonic()
     _calls_in_flight = max(0, _calls_in_flight - 1)
+    # Only a call that leaves a browser open counts against that browser.
+    if _browser is not None:
+        _calls_on_this_browser += 1
 
 
 # Interval of the background handoff poll. A probe costs about 40 microseconds,
@@ -1156,7 +1165,7 @@ async def watch_for_handoff_requests() -> None:
 
 
 async def release_profile_if_idle_or_requested() -> bool:
-    """Close the browser when another process wants it, or when we are idle.
+    """Close the browser for a waiting process, when idle, or at the call cap.
 
     Called after each tool call and from a background poller. Polling matters:
     if the owner only checked between calls, a waiter that announces *after* the
@@ -1188,6 +1197,21 @@ async def release_profile_if_idle_or_requested() -> bool:
     lease = _browser_lease
     # None means no tool call has ever run, which is idle in the strongest sense.
     idle_for = time.monotonic() - _last_activity if _last_activity is not None else None
+
+    # Opt-in (``browser_max_calls``). The page's renderer grows with every
+    # profile it reads, and a client that keeps calling never gives the idle
+    # timeout below a gap, so in a memory-limited container it grows until the
+    # OOM killer ends it. Closing between calls lets the next one start afresh.
+    # Ahead of the handoff below: its hold window keeps a voluntary handoff from
+    # costing a reopen, but a restart that is due costs one anyway.
+    max_calls = config.browser_max_calls
+    if max_calls > 0 and _calls_on_this_browser >= max_calls:
+        logger.info(
+            "Closing the browser after %d tool calls (browser_max_calls); the "
+            "next call starts a new one",
+            _calls_on_this_browser,
+        )
+        return await _close_unless_a_call_arrived()
 
     if lease.handoff_requested():
         # Every handoff costs a reopen, and a reopen re-validates /feed/, so a
@@ -1289,10 +1313,11 @@ def reset_browser_for_testing() -> None:
     that reports itself free while the kernel lock is still open.
     """
     global _browser, _browser_cookie_export_path, _headless
-    global _browser_lease, _last_activity, _calls_in_flight
+    global _browser_lease, _last_activity, _calls_in_flight, _calls_on_this_browser
     _browser = None
     _browser_cookie_export_path = None
     _headless = True
     _browser_lease = None
     _last_activity = None
     _calls_in_flight = 0
+    _calls_on_this_browser = 0

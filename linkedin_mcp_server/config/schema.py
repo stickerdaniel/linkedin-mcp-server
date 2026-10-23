@@ -74,6 +74,13 @@ AUTH_REPAIR_LOGIN_WAIT_FRACTION: float = 5 / 6
 # long: a reopen costs one more LinkedIn request. 0 disables it.
 DEFAULT_BROWSER_IDLE_TIMEOUT_SECONDS: float = 600.0
 
+# Close the browser between calls once it has served this many, so the next call
+# starts a fresh one. Off by default: a reopen re-validates /feed/, which is one
+# more LinkedIn request. It exists for memory-limited containers, where a busy
+# client never leaves the idle timeout a gap and the page's renderer grows with
+# every profile it reads until the kernel's OOM killer ends it. 0 disables it.
+DEFAULT_BROWSER_MAX_CALLS: int = 0
+
 #: The one profile root this server may destroy without being told it owns it.
 #: Spelled with ``~`` rather than resolved here so it follows the account that
 #: runs the process: on the host that is the user's home, and in the published
@@ -166,6 +173,8 @@ class BrowserConfig:
     browser_min_hold_seconds: float = DEFAULT_BROWSER_MIN_HOLD_SECONDS
     # Close an idle browser after this long; 0 = keep it until the process exits
     browser_idle_timeout_seconds: float = DEFAULT_BROWSER_IDLE_TIMEOUT_SECONDS
+    # Close the browser after this many tool calls; 0 = no limit
+    browser_max_calls: int = DEFAULT_BROWSER_MAX_CALLS
     # Auto-import a LinkedIn session from a locally logged-in browser on the
     # first no-session tool call, before falling back to manual login. On by
     # default: None ("auto") and True both enable it across interactive and
@@ -234,6 +243,11 @@ class BrowserConfig:
                 raise ConfigurationError(
                     f"{name} must be a non-negative finite number, got {value}"
                 )
+        if self.browser_max_calls < 0:
+            raise ConfigurationError(
+                "browser_max_calls must be a non-negative integer, "
+                f"got {self.browser_max_calls}"
+            )
         # Clamped for the same reason as the login inline wait: the wait happens
         # inside a tool call, ahead of the page read.
         if self.browser_wait_seconds > MAX_BROWSER_WAIT_SECONDS:
