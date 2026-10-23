@@ -31,6 +31,10 @@ from linkedin_mcp_server.session_state import auth_root_dir, load_source_state
 logger = logging.getLogger(__name__)
 
 PAUSE_FILE = "rate-limit-pause.json"
+# How far a record's start may lie ahead of this clock: a pause cannot begin in
+# the future, but another process's clock, or this one after a correction, can
+# run a little ahead.
+_CLOCK_TOLERANCE_SECONDS = 300.0
 
 
 def _login_generation() -> str | None:
@@ -89,6 +93,11 @@ def _active_pause() -> tuple[float, float, bool] | None:
         return None
     since = record.get("since") if isinstance(record, dict) else None
     if not isinstance(since, (int, float)) or not math.isfinite(since):
+        return None
+    if since > time.time() + _CLOCK_TOLERANCE_SECONDS:
+        # A start in the future is a damaged record, and one far enough ahead
+        # cannot be shown as a date at all: ignored like any unreadable record.
+        logger.warning("Ignoring %s: its pause begins in the future", path)
         return None
     if record.get("login_generation") != _login_generation():
         return None

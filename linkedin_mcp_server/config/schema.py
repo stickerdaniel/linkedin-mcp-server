@@ -28,6 +28,9 @@ MAX_LOGIN_INLINE_WAIT_SECONDS: float = 45.0
 # spent inside one tool call, ahead of the page read itself.
 DEFAULT_BROWSER_WAIT_SECONDS: float = 25.0
 MAX_BROWSER_WAIT_SECONDS: float = 45.0
+# Longest RATE_LIMIT_PAUSE. A pause's end is shown as a date in every refused
+# call, and a pause measured in years is a mistyped value, not a rule.
+MAX_RATE_LIMIT_PAUSE_SECONDS: float = 365 * 24 * 3600.0
 # Shortest time an owner keeps the browser before honouring a handoff request.
 # Every handoff costs a reopen, and a reopen re-validates /feed/, so handing over
 # on literally every call would multiply LinkedIn requests. Matched to the wait
@@ -238,6 +241,12 @@ class BrowserConfig:
                 raise ConfigurationError(
                     f"{name} must be a non-negative finite number, got {value}"
                 )
+        if self.rate_limit_pause_seconds > MAX_RATE_LIMIT_PAUSE_SECONDS:
+            raise ConfigurationError(
+                "rate_limit_pause_seconds must be at most "
+                f"{MAX_RATE_LIMIT_PAUSE_SECONDS:.0f} (a year), "
+                f"got {self.rate_limit_pause_seconds}"
+            )
         # Clamped for the same reason as the login inline wait: the wait happens
         # inside a tool call, ahead of the page read.
         if self.browser_wait_seconds > MAX_BROWSER_WAIT_SECONDS:

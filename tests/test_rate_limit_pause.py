@@ -174,13 +174,26 @@ async def test_the_pause_lasts_its_configured_length(
 
 
 @pytest.mark.parametrize(
-    "content", ["not json", "[]", '{"since": "yesterday"}', '{"since": NaN}']
+    "content",
+    ["not json", "[]", '{"since": "yesterday"}', '{"since": NaN}', '{"since": 1e20}'],
 )
 async def test_a_record_that_cannot_be_read_pauses_nothing(
     monkeypatch, auth_root, content: str
 ):
     _pause_for(monkeypatch, DAY)
     (auth_root / PAUSE_FILE).write_text(content)
+    server = Server(monkeypatch)
+
+    await server.call()
+
+    assert server.launch.await_count == 1
+
+
+async def test_a_pause_that_begins_in_the_future_pauses_nothing(monkeypatch, auth_root):
+    """A damaged clock or record, not a pause: the tool runs."""
+    _pause_for(monkeypatch, DAY)
+    record = {"since": time.time() + DAY, "restricted": False, "login_generation": None}
+    (auth_root / PAUSE_FILE).write_text(json.dumps(record))
     server = Server(monkeypatch)
 
     await server.call()

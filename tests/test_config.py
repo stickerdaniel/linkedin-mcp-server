@@ -135,6 +135,14 @@ class TestProfileSharingConfig:
         with pytest.raises(ConfigurationError, match="rate_limit_pause_seconds"):
             BrowserConfig(rate_limit_pause_seconds=bad_value).validate()
 
+    def test_rejects_a_rate_limit_pause_longer_than_a_year(self):
+        year = 365 * 24 * 3600.0
+        BrowserConfig(rate_limit_pause_seconds=year).validate()
+        with pytest.raises(ConfigurationError, match="at most 31536000"):
+            BrowserConfig(rate_limit_pause_seconds=year + 1).validate()
+        with pytest.raises(ConfigurationError, match="at most 31536000"):
+            BrowserConfig(rate_limit_pause_seconds=1e18).validate()
+
     def test_clamps_wait_to_the_ceiling(self):
         config = BrowserConfig(browser_wait_seconds=120, browser_min_hold_seconds=0)
         config.validate()  # Clamps, does not raise

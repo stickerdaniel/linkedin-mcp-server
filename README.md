@@ -135,7 +135,7 @@ AI agent? Get a quick confirmation from the user before enabling automatic updat
 - `--login-viewer` - Docker only: show the `--login` browser at a token-protected URL on port 6080 (see [Authentication](#authentication))
 - `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
 - `--claim-profile-root` - Take over a profile directory the server will not claim on its own, such as one whose parent already holds other files. Needed once per directory.
-- `--rate-limit-pause SECONDS` - After LinkedIn shows a rate-limit page or restricts the account, refuse every LinkedIn tool for this long, without opening the browser and across restarts (default: 0 = off; 86400 = 24 hours). A successful `--login` ends the pause sooner, and so does deleting `rate-limit-pause.json` next to the profile directory.
+- `--rate-limit-pause SECONDS` - After LinkedIn shows a rate-limit page or restricts the account, refuse every LinkedIn tool for this long, without opening the browser and across restarts (default: 0 = off; 86400 = 24 hours; at most a year). A successful `--login` ends the pause sooner, and so does deleting `rate-limit-pause.json` next to the profile directory.
 
 **Transport:**
 
@@ -532,7 +532,7 @@ username.
 - `--login-viewer` - With `--login`, show the login browser at a token-protected URL on port 6080. Needs the profile mount from [Authentication](#authentication).
 - `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
 - `--claim-profile-root` - Take over a profile directory the server will not claim on its own, such as one whose parent already holds other files. Needed once per directory.
-- `--rate-limit-pause SECONDS` - After LinkedIn shows a rate-limit page or restricts the account, refuse every LinkedIn tool for this long, without opening the browser and across restarts (default: 0 = off; 86400 = 24 hours). A successful `--login` ends the pause sooner, and so does deleting `rate-limit-pause.json` next to the profile directory.
+- `--rate-limit-pause SECONDS` - After LinkedIn shows a rate-limit page or restricts the account, refuse every LinkedIn tool for this long, without opening the browser and across restarts (default: 0 = off; 86400 = 24 hours; at most a year). A successful `--login` ends the pause sooner, and so does deleting `rate-limit-pause.json` next to the profile directory.
 
 **Transport:**
 
@@ -773,7 +773,7 @@ uv run -m linkedin_mcp_server
 - `--logout` - Clear the stored session
 - `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
 - `--claim-profile-root` - Take over a profile directory the server will not claim on its own, such as one whose parent already holds other files. Needed once per directory.
-- `--rate-limit-pause SECONDS` - After LinkedIn shows a rate-limit page or restricts the account, refuse every LinkedIn tool for this long, without opening the browser and across restarts (default: 0 = off; 86400 = 24 hours). A successful `--login` ends the pause sooner, and so does deleting `rate-limit-pause.json` next to the profile directory.
+- `--rate-limit-pause SECONDS` - After LinkedIn shows a rate-limit page or restricts the account, refuse every LinkedIn tool for this long, without opening the browser and across restarts (default: 0 = off; 86400 = 24 hours; at most a year). A successful `--login` ends the pause sooner, and so does deleting `rate-limit-pause.json` next to the profile directory.
 
 **Transport:**
 
