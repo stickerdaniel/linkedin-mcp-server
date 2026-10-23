@@ -80,6 +80,31 @@ _THE_OWNER_IS_GONE = (
 )
 
 
+#: The rules initialize hands a client. Written here, not imported from the
+#: server: the contract is this text, including the failed-write retry limit
+#: and the user-owned authentication boundary.
+_THE_OPERATING_RULES = """\
+Use this server only when the user explicitly asks for LinkedIn data or a
+LinkedIn action.
+
+Start with the smallest read that can answer the request. Treat profile,
+company, job, post, feed, and message results as live LinkedIn evidence, and
+distinguish retrieved facts from inference. Keep searches and result pages
+modest. Do not collect data in bulk or spam.
+
+send_message and connect_with_person are write actions. Use them only when
+the user authorizes the exact recipient and action. Confirm the final message
+or connection note unless the user has already supplied it. Do not retry a
+failed write unless the result proves it was not sent.
+
+If LinkedIn presents a captcha, two-factor prompt, or other user-owned
+authentication step, stop and ask the user to complete it. If browser setup
+or authentication is still pending, report that state and retry once after it
+finishes. Do not loop, launch extra browsers, clear profiles, or replace the
+user's session.
+"""
+
+
 def _no_replacement_to_find(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1191,6 +1216,38 @@ class TestBrowserLifespan:
                 raise RuntimeError("boom")
 
         close_browser.assert_awaited_once()
+
+
+class TestServerInstructions:
+    """Every client is told how to use LinkedIn, plugin or not.
+
+    The skill never reaches uvx, Docker, MCPB, or an install link, and a
+    client on the daemon proxy talks to a process that registers no tools of
+    its own. Both eras are read through ``Client.instructions``: a legacy
+    handshake carries them on ``InitializeResult``, while auto negotiates
+    ``server/discover`` and has no initialize result to read.
+    """
+
+    @pytest.mark.parametrize("role", list(ServerRole))
+    @_BOTH_ERAS
+    async def test_every_role_sends_the_same_operating_rules(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        role: ServerRole,
+        mode: str,
+        protocol: str,
+    ):
+        _stand_in_the_lifespan(monkeypatch)
+
+        async with Client(_server_for(role), mode=mode) as client:
+            assert client.protocol_version == protocol
+            # Legacy initialization returns the rules on the handshake itself.
+            # Modern mode raises from initialize(); Client.instructions is the
+            # access both eras populate.
+            if mode == "legacy":
+                handshake = await client.initialize()
+                assert handshake.instructions == _THE_OPERATING_RULES
+            assert client.instructions == _THE_OPERATING_RULES
 
 
 class TestServerVersion:
