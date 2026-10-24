@@ -219,6 +219,7 @@ def register_messaging_tools(
         },
         tags={"messaging", "actions"},
     )
+    @tool_errors
     async def archive_conversation(
         thread_id: str,
         ctx: Context,
@@ -242,28 +243,17 @@ def register_messaging_tools(
             Dict with url, thread_id, participant (the thread's names, or null)
             and status: "archived" or "already_archived".
         """
-        try:
-            thread_id = normalize_thread_id(thread_id)
-            extractor = await get_ready_extractor(ctx, tool_name="archive_conversation")
-            logger.info("Archiving conversation: %s", thread_id)
+        thread_id = normalize_thread_id(thread_id)
+        extractor = await get_ready_extractor(ctx, tool_name="archive_conversation")
+        logger.info("Archiving conversation: %s", thread_id)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Opening conversation"
-            )
+        await ctx.report_progress(progress=0, total=100, message="Opening conversation")
 
-            result = await extractor.archive_conversation(thread_id)
+        result = await extractor.archive_conversation(thread_id)
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "archive_conversation")
-        except Exception as e:
-            raise_tool_error(e, "archive_conversation")  # NoReturn
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
