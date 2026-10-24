@@ -203,6 +203,10 @@ uvx mcp-server-linkedin@latest --log-level DEBUG
 uvx mcp-server-linkedin@latest --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
 ```
 
+Set `HTTP_AUTH_TOKEN` in the environment to require it as a bearer token on
+every request (HTTP mode under [Setup with Docker](#setup-with-docker) has the
+details).
+
 Runtime server logs are emitted by FastMCP/Uvicorn.
 
 Tool calls are serialized to protect the shared LinkedIn browser session, both
@@ -224,8 +228,9 @@ while a container is running.
 2. Click pre-filled token url to open the inspector in your browser
 3. Select `Streamable HTTP` as `Transport Type`
 4. Set `URL` to `http://localhost:8080/mcp`
-5. Connect
-6. Test tools
+5. With `HTTP_AUTH_TOKEN` set, enter it as the bearer token in the inspector's authentication settings
+6. Connect
+7. Test tools
 
 </details>
 
@@ -619,9 +624,25 @@ serve it under:
 FASTMCP_HTTP_ALLOWED_HOSTS='["mcp.example"]'
 ```
 
-That permits exactly that name and keeps refusing everything else. The endpoint
-still has no authentication, so anything reachable beyond your own machine
-belongs behind something that provides it.
+That permits exactly that name and keeps refusing everything else. Neither
+check is authentication, so anything reachable beyond your own machine belongs
+behind something that provides it.
+
+**Requiring a token:** with `HTTP_AUTH_TOKEN` set, every request must carry it
+as `Authorization: Bearer <token>`, and anything else is refused with `401`. It
+is read from the environment only, like `PROXY_PASSWORD`, because command-line
+arguments are visible to every user on the machine, and it must be at least 32
+characters:
+
+```bash
+export HTTP_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+```
+
+Add `-e HTTP_AUTH_TOKEN` to the `docker run` above and give the same value to
+the client, or to the proxy in front of the server. Unset, nothing changes. The
+server speaks plain HTTP, so the token is only as private as the network it
+crosses: keep the port on loopback or a private network, and terminate TLS in
+front of anything wider.
 
 **Test with mcp inspector:**
 
@@ -629,8 +650,9 @@ belongs behind something that provides it.
 2. Click pre-filled token url to open the inspector in your browser
 3. Select `Streamable HTTP` as `Transport Type`
 4. Set `URL` to `http://localhost:8080/mcp`
-5. Connect
-6. Test tools
+5. With `HTTP_AUTH_TOKEN` set, enter it as the bearer token in the inspector's authentication settings
+6. Connect
+7. Test tools
 
 </details>
 

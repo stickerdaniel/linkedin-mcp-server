@@ -74,6 +74,11 @@ AUTH_REPAIR_LOGIN_WAIT_FRACTION: float = 5 / 6
 # long: a reopen costs one more LinkedIn request. 0 disables it.
 DEFAULT_BROWSER_IDLE_TIMEOUT_SECONDS: float = 600.0
 
+# Shortest HTTP_AUTH_TOKEN accepted. Nothing slows down guessing over the
+# network, so the token's length is its whole strength; 32 characters of a
+# random token are far beyond any guessing.
+MIN_HTTP_AUTH_TOKEN_LENGTH: int = 32
+
 #: The one profile root this server may destroy without being told it owns it.
 #: Spelled with ``~`` rather than resolved here so it follows the account that
 #: runs the process: on the host that is the user's home, and in the published
@@ -418,6 +423,10 @@ class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 8000
     path: str = "/mcp"
+    # Bearer token every HTTP request must carry; None leaves the endpoint open.
+    # Environment-only, like proxy_password: an argument is readable by every
+    # user on the machine. Out of the repr for the same reason as that one.
+    http_auth_token: str | None = field(default=None, repr=False)
     tool_timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS
     # Serve every stdio client from one browser-owning process instead of
     # giving each its own. Off while the supervision and liveness work is
@@ -433,6 +442,19 @@ class ServerConfig:
         ):
             raise ConfigurationError(
                 f"tool_timeout_seconds must be a positive finite number, got {self.tool_timeout_seconds}"
+            )
+        token = self.http_auth_token
+        # Never quoted: the message reaches the console. Visible ASCII only,
+        # because HTTP trims the spaces around a header value and a token that
+        # depends on them could never match.
+        if token is not None and (
+            len(token) < MIN_HTTP_AUTH_TOKEN_LENGTH
+            or any(character < "\x21" or character > "\x7e" for character in token)
+        ):
+            raise ConfigurationError(
+                f"HTTP_AUTH_TOKEN must be at least {MIN_HTTP_AUTH_TOKEN_LENGTH} "
+                "characters of visible ASCII, without spaces. Generate one with: "
+                'python -c "import secrets; print(secrets.token_urlsafe(32))"'
             )
         if self.login_viewer:
             if not self.login:
@@ -497,6 +519,19 @@ class AppConfig:
             # LINKEDIN_MCP_CONTAINER is a full override and therefore not a
             # security boundary. So the honest thing is to say what it costs and
             # name both remedies.
+            if self.server.http_auth_token is not None:
+                # Still a warning: the token is the only gate left, and plain
+                # HTTP carries it in the clear past this machine.
+                logger.warning(
+                    "HTTP transport is binding to %s, which is reachable from "
+                    "outside this machine. Every request must carry the "
+                    "HTTP_AUTH_TOKEN bearer token, so whoever holds it can use "
+                    "your LinkedIn session. The server speaks plain HTTP: keep "
+                    "it on loopback or a private network, and put anything "
+                    "wider behind a proxy that terminates TLS.",
+                    self.server.host,
+                )
+                return
             logger.warning(
                 "HTTP transport is binding to %s, which is reachable from "
                 "outside this machine. The MCP endpoint has no authentication, "
@@ -506,7 +541,8 @@ class AppConfig:
                 "someone who can reach the address. Outside Docker, use "
                 "--host 127.0.0.1. In Docker, keep --host 0.0.0.0 and publish "
                 "to loopback instead: -p 127.0.0.1:PORT:PORT. For remote "
-                "access, forward the port over SSH rather than exposing it.",
+                "access, forward the port over SSH rather than exposing it, "
+                "or set HTTP_AUTH_TOKEN to require a bearer token.",
                 self.server.host,
             )
 
