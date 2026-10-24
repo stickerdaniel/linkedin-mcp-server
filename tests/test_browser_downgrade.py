@@ -638,6 +638,9 @@ def _fake_playwright(
     class _Page:
         url = "about:blank"
 
+        def on(self, event, handler):
+            pass
+
         async def close(self):
             return None
 
