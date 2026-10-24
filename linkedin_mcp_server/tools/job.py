@@ -131,6 +131,14 @@ def register_job_tools(
 
         Returns job_ids that can be passed to get_job_details for full info.
 
+        LinkedIn is moving accounts to a redesigned job search, which keeps
+        only the keywords, date_posted and paging. There, location, job_type,
+        experience_level, work_type, easy_apply and sort_by are dropped and
+        reported in section_errors as filters_dropped. Put the place and work
+        type in the keywords instead ("remote python developer in Lyon");
+        words such as "senior" or "internship" there narrow the results too.
+        Quotes do not make a phrase exact on that search.
+
         Args:
             keywords: Search keywords (e.g., "software engineer", "data scientist")
             ctx: FastMCP context for progress reporting
