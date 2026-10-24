@@ -167,10 +167,15 @@ _PROBE_IMAGE = (
 
 # `test_the_built_project_records_the_pinned_backend` builds the builder stage,
 # so a missing input fails it: that stage is where the pin is decided and it is
-# cheap to build. `scripts/docker-entrypoint.sh` is the exception, copied in the second
-# stage, which only a full image build would reach. Excluding it produced a
-# green suite and a broken `docker build .`, so it is named here.
-_CONTEXT_INPUTS = ("requirements/build-constraints.txt", "scripts/docker-entrypoint.sh")
+# cheap to build. `scripts/docker-entrypoint.sh` and `scripts/novnc-paste.js` are
+# the exception, copied in later stages, which only a full image build would
+# reach. Excluding the first produced a green suite and a broken
+# `docker build .`, so both are named here.
+_CONTEXT_INPUTS = (
+    "requirements/build-constraints.txt",
+    "scripts/docker-entrypoint.sh",
+    "scripts/novnc-paste.js",
+)
 
 # These must not reach the build. The environment names cover the root, a
 # suffix and a nested directory, which is the whole of what `**/.env*` claims.
@@ -555,6 +560,23 @@ def test_the_image_defaults_to_headed_on_a_virtual_display() -> None:
     assert "ENV HEADLESS=false" in _DOCKERFILE
     assert "ENV DISPLAY=:99" in _DOCKERFILE
     assert 'Xvfb "$DISPLAY" -screen 0 1920x1080x24 -nolisten tcp' in _ENTRYPOINT
+
+
+def test_the_login_viewer_loads_the_paste_add_on() -> None:
+    """`vnc.html` gets one `<script>` tag for the add-on, or the build fails.
+
+    The add-on calls 1.6.0's keyboard (Debian's 1.3.0 has no
+    `_interruptAltGrSequence`), so it ships only with the pinned release.
+    """
+    (unpack,) = [
+        instruction
+        for instruction in _DOCKERFILE_INSTRUCTIONS
+        if "tar -xzf /tmp/novnc.tar.gz -C /novnc " in instruction
+    ]
+    tag = '<script type="module" src="paste.js"></script>'
+    assert f"s|</head>|{tag}</head>|' /novnc/vnc.html" in unpack
+    assert unpack.endswith("&& grep -q 'src=\"paste.js\"' /novnc/vnc.html")
+    assert "COPY scripts/novnc-paste.js /novnc/paste.js" in _DOCKERFILE_INSTRUCTIONS
 
 
 def test_the_image_seeds_the_default_authentication_root_for_named_volumes() -> None:
