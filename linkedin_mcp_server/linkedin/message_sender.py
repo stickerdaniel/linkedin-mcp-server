@@ -729,36 +729,51 @@ _MESSAGE_CONFIRMATION_READY_JS = (
             ).length === 1;
         };
         const itemSelector = '[data-view-name="message-list-item"]';
-        const linksRecipient = anchor => {
+        const profileIdentifier = anchor => {
             let path;
             try {
                 path = new URL(
                     anchor.getAttribute('href') || '', window.location.href
                 ).pathname;
             } catch {
-                return false;
+                return null;
             }
-            const identifier = /^\/in\/([^/]+)/.exec(path)?.[1];
+            return /^\/in\/([^/]+)/.exec(path)?.[1] || null;
+        };
+        const linksRecipient = anchor => {
+            const identifier = profileIdentifier(anchor);
             return !!identifier && (
                 identifier === arg.profileUrn || `/in/${identifier}/` === arg.profilePath
             );
         };
+        // A reply names a thread, not a person. Its other participants are
+        // the profiles the pane links outside the messages, its header.
+        const participants = scope => new Set(
+            Array.from(scope.querySelectorAll('a[href*="/in/"]'))
+                .filter(anchor => !anchor.closest(itemSelector))
+                .map(profileIdentifier)
+                .filter(Boolean)
+        );
         // LinkedIn heads a message with links to its sender's profile
         // (measured). A follow-up from the same sender is assumed to be
         // unheaded, so the sender of a node is the nearest item at or before
         // it that links a profile. A
         // message from the recipient can carry the same text without this
         // submission ever reaching LinkedIn, so refuse a node the recipient
-        // sent, or one whose sender cannot be found. Only the link path
-        // counts, never its text.
+        // sent, or one whose sender cannot be found. In a thread, refuse one
+        // a participant sent, or any node when the pane links no participant.
+        // Only the link path counts, never its text.
         const sentByRecipient = (scope, node) => {
             const all = Array.from(scope.querySelectorAll(itemSelector));
             const sender = all.slice(0, all.indexOf(node) + 1).reverse().find(
                 item => item.querySelector('a[href*="/in/"]')
             );
-            return !sender || Array.from(
-                sender.querySelectorAll('a[href*="/in/"]')
-            ).some(linksRecipient);
+            if (!sender) return true;
+            const links = Array.from(sender.querySelectorAll('a[href*="/in/"]'));
+            if (!arg.threadKey) return links.some(linksRecipient);
+            const others = participants(scope);
+            return others.size === 0 ||
+                links.some(anchor => others.has(profileIdentifier(anchor)));
         };
         // LinkedIn acknowledges a send by rendering a node whose event ID is
         // a server message URN. In an open thread it inserts that node and
