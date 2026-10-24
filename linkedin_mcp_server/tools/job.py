@@ -118,6 +118,7 @@ def register_job_tools(
         },
         tags={"job"},
     )
+    @tool_errors
     async def get_easy_apply_form(
         job_id: str,
         ctx: Context,
@@ -144,27 +145,16 @@ def register_job_tools(
             on that step carry its error. section_errors reports a form that
             could not be read or a draft that could not be discarded.
         """
-        try:
-            extractor = await get_ready_extractor(ctx, tool_name="get_easy_apply_form")
-            logger.info("Reading Easy Apply form: %s", job_id)
+        extractor = await get_ready_extractor(ctx, tool_name="get_easy_apply_form")
+        logger.info("Reading Easy Apply form: %s", job_id)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Opening job posting"
-            )
+        await ctx.report_progress(progress=0, total=100, message="Opening job posting")
 
-            result = await extractor.get_easy_apply_form(job_id)
+        result = await extractor.get_easy_apply_form(job_id)
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "get_easy_apply_form")
-        except Exception as e:
-            raise_tool_error(e, "get_easy_apply_form")  # NoReturn
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
