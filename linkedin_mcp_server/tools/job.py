@@ -167,6 +167,7 @@ def register_job_tools(
         },
         tags={"job"},
     )
+    @tool_errors
     async def submit_easy_apply(
         job_id: str,
         ctx: Context,
@@ -219,31 +220,18 @@ def register_job_tools(
             section_errors reports a form that could not be answered or a draft
             that could not be discarded.
         """
-        try:
-            extractor = await get_ready_extractor(ctx, tool_name="submit_easy_apply")
-            logger.info(
-                "Answering Easy Apply form: %s (submit=%s)", job_id, confirm_submit
-            )
+        extractor = await get_ready_extractor(ctx, tool_name="submit_easy_apply")
+        logger.info("Answering Easy Apply form: %s (submit=%s)", job_id, confirm_submit)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Opening job posting"
-            )
+        await ctx.report_progress(progress=0, total=100, message="Opening job posting")
 
-            result = await extractor.submit_easy_apply(
-                job_id, answers, follow_company, confirm_submit
-            )
+        result = await extractor.submit_easy_apply(
+            job_id, answers, follow_company, confirm_submit
+        )
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "submit_easy_apply")
-        except Exception as e:
-            raise_tool_error(e, "submit_easy_apply")  # NoReturn
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
