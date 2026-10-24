@@ -38,21 +38,29 @@ _ORIGIN = "https://viewer.invalid"
 # Shared through the DOM, which the page and patchright's isolated evaluation
 # world both see: the text the stand-in RFB typed, each key the stand-in
 # keyboard pressed or released with how much text was typed by then, how often
-# the clipboard was read, and what that read returns or whether it is refused.
+# the clipboard was read, and what that read returns, whether it is refused, and
+# whether it is held.
 _VIEWER = """<!DOCTYPE html>
 <html><head>
 <script type="module">
   import UI from "./app/ui.js";
   const state = document.documentElement.dataset;
-  Object.assign(state, { typed: "", keys: "[]", reads: "0", clipboard: "", refused: "" });
+  Object.assign(state, { typed: "", keys: "[]", reads: "0", clipboard: "", refused: "", held: "" });
   Object.defineProperty(navigator, "clipboard", {
     configurable: true,
     value: {
+      // A held read answers, with the clipboard as it was, once the hold ends,
+      // as a read waiting on a permission prompt does.
       readText() {
         state.reads = String(Number(state.reads) + 1);
-        return state.refused
-          ? Promise.reject(new DOMException("Read permission denied.", "NotAllowedError"))
-          : Promise.resolve(state.clipboard);
+        if (state.refused) {
+          return Promise.reject(new DOMException("Read permission denied.", "NotAllowedError"));
+        }
+        const text = state.clipboard;
+        return new Promise(resolve => {
+          const answer = () => (state.held ? setTimeout(answer, 10) : resolve(text));
+          answer();
+        });
       },
     },
   });
@@ -156,12 +164,14 @@ async def _state(page: Page, name: str) -> str:
     return await page.evaluate(f"document.documentElement.dataset.{name}")
 
 
-async def _set_clipboard(page: Page, text: str, *, refused: bool = False) -> None:
+async def _set_clipboard(
+    page: Page, text: str, *, refused: bool = False, held: bool = False
+) -> None:
     await page.evaluate(
-        """([text, refused]) => Object.assign(document.documentElement.dataset, {
-          clipboard: text, refused: refused ? "1" : "",
+        """([text, refused, held]) => Object.assign(document.documentElement.dataset, {
+          clipboard: text, refused: refused ? "1" : "", held: held ? "1" : "",
         })""",
-        [text, refused],
+        [text, refused, held],
     )
 
 
@@ -202,6 +212,24 @@ async def test_a_refused_clipboard_read_holds_back_no_paste(viewer, next_ctrl_v)
     if next_ctrl_v:
         await viewer.evaluate(_CTRL_V)
     await viewer.evaluate(_PASTE, "correct horse")
+    await _settle(viewer)
+
+    assert await _state(viewer, "typed") == "correct horse"
+
+
+async def test_a_read_that_answers_after_the_next_ctrl_v_is_not_typed(viewer):
+    """A fallback still reading when Ctrl+V comes again gives way to it.
+
+    Typed late, its text would land wherever the person had moved on to.
+    """
+    await _set_clipboard(viewer, "user@example.com", held=True)
+    await viewer.evaluate(_CTRL_V)  # no paste event: the read starts and waits
+    await viewer.wait_for_function("document.documentElement.dataset.reads === '1'")
+
+    await viewer.evaluate(_CTRL_V)
+    await viewer.evaluate(_PASTE, "correct horse")
+    await _settle(viewer)
+    await _set_clipboard(viewer, "correct horse")  # the first read answers now
     await _settle(viewer)
 
     assert await _state(viewer, "typed") == "correct horse"
