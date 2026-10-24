@@ -54,6 +54,8 @@ docker run -it --rm `
 
 Open the full URL the command prints (it carries the access token) and sign in. The viewer closes itself afterwards; let the command exit on its own so the session is stored completely. It gives up after 30 minutes.
 
+The viewer shows LinkedIn's sign-in full screen, without an address bar or tabs, and the browser never offers to save your password. Sign in with your password and the code or approval LinkedIn asks for: a passkey cannot reach the container, so skip LinkedIn's passkey option.
+
 Keep the same host directory mounted at `/home/pwuser/.linkedin-mcp` on every later `docker run`. A session created on the host with `uvx mcp-server-linkedin@latest --login` works too, and the container then rebuilds its own profile from those cookies on each start.
 
 If an older rootful Docker run left that host directory owned by root, repair it with `sudo chown -R "$(id -u):$(id -g)" ~/.linkedin-mcp`.
