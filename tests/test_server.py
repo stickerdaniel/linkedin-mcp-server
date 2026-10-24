@@ -819,11 +819,13 @@ class TestProxyRole:
 
 
 class TestOwnerAuthentication:
-    """Only the shared owner authenticates, and it does so with one token.
+    """A server that listens authenticates with one token; a proxy never does.
 
     The owner listens on a loopback port, which every process on the machine can
     reach and which a browser reaches on behalf of any page the user visits. The
-    token is what stands between that and a logged-in LinkedIn session.
+    token is what stands between that and a logged-in LinkedIn session. A Direct
+    server is given one when it serves HTTP with ``HTTP_AUTH_TOKEN`` set
+    (``tests/test_http_auth_token.py``).
     """
 
     def test_an_owner_with_a_token_requires_one(self):
@@ -840,19 +842,20 @@ class TestOwnerAuthentication:
         assert _server_for(ServerRole.DIRECT).auth is None
         assert _server_for(ServerRole.OWNER).auth is None
 
-    def test_a_token_on_a_role_that_cannot_use_one_is_refused(self):
-        # Passing a token to a stdio server is a caller that believes it built
-        # the owner. Ignoring it quietly would leave an endpoint that was meant
-        # to be authenticated serving anyone who finds it.
-        #
-        # A proxy is the case worth spelling out, because it is the one role that
-        # legitimately handles a token — the owner's, outbound. Accepting one
-        # here would be a caller confusing the credential it *presents* with the
-        # one an owner *demands*, and narrowing this guard to DIRECT alone would
-        # let that through.
-        for role in (ServerRole.DIRECT, ServerRole.PROXY):
-            with pytest.raises(ValueError, match="daemon owner"):
-                create_mcp_server(role=role, auth_token="a-token")
+    def test_a_token_on_a_proxy_is_refused(self):
+        # A proxy is the one role that legitimately handles a token, the
+        # owner's, outbound. Accepting one here would be a caller confusing the
+        # credential it *presents* with the one a server *demands*. Ignoring it
+        # quietly would leave an endpoint that was meant to be authenticated
+        # serving anyone who finds it.
+        with pytest.raises(ValueError, match="daemon owner"):
+            create_mcp_server(role=ServerRole.PROXY, auth_token="a-token")
+
+    def test_a_direct_server_with_a_token_requires_one(self):
+        # What an HTTP server started with HTTP_AUTH_TOKEN is built as.
+        direct = create_mcp_server(role=ServerRole.DIRECT, auth_token="a-token")
+
+        assert direct.auth is not None
 
     async def test_the_wrong_token_is_refused_and_the_right_one_accepted(self):
         owner = create_mcp_server(role=ServerRole.OWNER, auth_token="the-token")

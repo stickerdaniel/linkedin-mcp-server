@@ -1176,7 +1176,9 @@ class TestForwardingToASharedOwner:
 
         cli_main.main([])
 
-        assert set(built) == {"tool_timeout"}
+        # No token either: a stdio server has no port for one to protect.
+        assert set(built) == {"tool_timeout", "auth_token"}
+        assert built["auth_token"] is None
 
     def test_an_interactively_chosen_http_transport_elects_no_daemon(
         self, monkeypatch: pytest.MonkeyPatch

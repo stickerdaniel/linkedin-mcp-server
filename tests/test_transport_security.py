@@ -18,8 +18,11 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastmcp import FastMCP
 from starlette.testclient import TestClient
 
+import linkedin_mcp_server.cli_main as cli_main
+from linkedin_mcp_server.config.loaders import load_config
 from linkedin_mcp_server.server import create_mcp_server
 
 _INITIALIZE = {
@@ -60,11 +63,12 @@ def base_url(request: pytest.FixtureRequest) -> str:
 
 
 @pytest.fixture
-def post(base_url: str, monkeypatch: pytest.MonkeyPatch):
-    """POST an initialize request through the real app, returning the status."""
-    # The lifespan starts browser setup and a handoff poller, neither of which
-    # this file is about; stubbing them keeps the request path real while the
-    # server startup stays offline.
+def offline_lifespan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the request path real and server startup offline.
+
+    The lifespan starts browser setup and a handoff poller, neither of which
+    this file is about.
+    """
     import linkedin_mcp_server.server as server_module
 
     monkeypatch.setattr(server_module, "initialize_bootstrap", MagicMock())
@@ -74,6 +78,11 @@ def post(base_url: str, monkeypatch: pytest.MonkeyPatch):
     )
     monkeypatch.setattr(server_module, "watch_for_handoff_requests", AsyncMock())
     monkeypatch.setattr(server_module, "close_browser", AsyncMock())
+
+
+@pytest.fixture
+def post(base_url: str, offline_lifespan: None):
+    """POST an initialize request through the real app, returning the status."""
 
     def _post(headers: dict[str, str]) -> int:
         app = create_mcp_server().http_app(
@@ -213,3 +222,139 @@ class TestLegitimateClientsStillWork:
         host = base_url.removeprefix("http://")
         assert post({"Host": host}) == 200
         assert post({"Host": host, "Origin": base_url}) == 200
+
+
+TOKEN = "a-token-of-forty-characters-0123456789ab"
+
+
+def _started(
+    monkeypatch: pytest.MonkeyPatch, *argv: str, token: str | None = TOKEN
+) -> FastMCP:
+    """The server ``cli_main.main`` builds for *argv*, with ``run`` replaced."""
+    if token is not None:
+        monkeypatch.setenv("HTTP_AUTH_TOKEN", token)
+    config = load_config(list(argv))
+    config.is_interactive = False
+    monkeypatch.setattr(cli_main, "load_config", lambda _argv: config)
+    monkeypatch.setattr(cli_main, "get_config", lambda: config)
+    monkeypatch.setattr(cli_main, "configure_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(cli_main, "set_headless", lambda _headless: None)
+    built: list[FastMCP] = []
+
+    def build(**kwargs):
+        server = create_mcp_server(**kwargs)
+        server.run = MagicMock()
+        built.append(server)
+        return server
+
+    monkeypatch.setattr(cli_main, "create_mcp_server", build)
+
+    cli_main.main(list(argv))
+
+    (server,) = built
+    return server
+
+
+def _http(monkeypatch: pytest.MonkeyPatch, token: str | None = TOKEN):
+    """POST initialize to an exposed HTTP server; return the poster and the app."""
+    server = _started(
+        monkeypatch,
+        "--transport",
+        "streamable-http",
+        "--host",
+        "0.0.0.0",
+        token=token,
+    )
+    run_kwargs = server.run.call_args.kwargs  # ty: ignore[unresolved-attribute]
+    app = server.http_app(
+        path=run_kwargs["path"],
+        host_origin_protection=run_kwargs["host_origin_protection"],
+    )
+
+    def post(headers: dict[str, str]) -> int:
+        with TestClient(
+            app, base_url=_EXPOSED_URL, raise_server_exceptions=False
+        ) as client:
+            return client.post(
+                f"{_EXPOSED_URL}/mcp",
+                json=_INITIALIZE,
+                headers={**_ACCEPT, **headers},
+            ).status_code
+
+    return post, app
+
+
+@pytest.mark.usefixtures("offline_lifespan")
+class TestHttpAuthToken:
+    """What an HTTP server started with ``HTTP_AUTH_TOKEN`` answers.
+
+    Built the way an operator builds one: the token in the environment, the
+    transport on the command line, and ``cli_main.main`` constructing the
+    server. Only ``run`` is replaced, and the requests go through the app it
+    would have served, reached at an exposed address.
+    """
+
+    def test_a_request_without_the_token_is_refused(self, monkeypatch):
+        post, _app = _http(monkeypatch)
+
+        assert post({}) == 401
+
+    @pytest.mark.parametrize(
+        "authorization",
+        [
+            "Bearer not-the-token-but-just-as-long-0123456789",
+            # A comparison that stopped at the shorter length would accept
+            # every prefix, which turns guessing into a search per character.
+            f"Bearer {TOKEN[:-1]}",
+            f"Basic {TOKEN}",
+        ],
+        ids=["wrong", "prefix", "other-scheme"],
+    )
+    def test_a_wrong_token_is_refused(self, monkeypatch, authorization):
+        post, _app = _http(monkeypatch)
+
+        assert post({"Authorization": authorization}) == 401
+
+    def test_the_token_is_accepted(self, monkeypatch):
+        post, _app = _http(monkeypatch)
+
+        assert post({"Authorization": f"Bearer {TOKEN}"}) == 200
+
+    def test_the_token_does_not_switch_off_host_checking(self, monkeypatch):
+        # A page that learned the token still cannot reach the server through
+        # a name of its own.
+        post, _app = _http(monkeypatch)
+
+        assert (
+            post({"Authorization": f"Bearer {TOKEN}", "Host": "attacker.example"})
+            == 421
+        )
+
+    def test_no_route_is_left_outside_the_token(self, monkeypatch):
+        # FastMCP mounts custom routes outside its authentication, and an OAuth
+        # provider would add discovery routes. A Direct server has neither: the
+        # MCP endpoint is all it serves, with or without a token.
+        _post, app = _http(monkeypatch)
+
+        assert [getattr(route, "path", None) for route in app.routes] == ["/mcp"]
+        with TestClient(app, base_url=_EXPOSED_URL) as client:
+            response = client.get(
+                f"{_EXPOSED_URL}/.well-known/oauth-protected-resource"
+            )
+        assert response.status_code == 404
+
+    def test_without_the_variable_the_endpoint_stays_open(self, monkeypatch):
+        # Off by default, so every existing HTTP setup keeps working.
+        post, _app = _http(monkeypatch, token=None)
+
+        assert post({}) == 200
+
+    def test_a_stdio_server_takes_no_token(self, monkeypatch):
+        # A stdio server has no port to protect; the variable may still be set
+        # for a container whose one-shot commands share its environment.
+        server = _started(monkeypatch, "--transport", "stdio")
+
+        assert server.auth is None
+        server.run.assert_called_once_with(  # ty: ignore[unresolved-attribute]
+            transport="stdio"
+        )
