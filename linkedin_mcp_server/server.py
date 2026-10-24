@@ -42,6 +42,7 @@ from linkedin_mcp_server.server_role import (
     process_role,
     set_process_role,
 )
+from linkedin_mcp_server.session_status import session_status
 from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.feed import register_feed_tools
@@ -320,5 +321,24 @@ def create_mcp_server(
                 }
             except Exception as e:
                 raise_tool_error(e, "close_session")  # NoReturn
+
+        @mcp.tool(
+            timeout=tool_timeout,
+            title="Get Session Status",
+            annotations={"readOnlyHint": True, "openWorldHint": False},
+            tags={"session"},
+        )
+        async def get_session_status() -> dict[str, Any]:
+            """Report whether a LinkedIn session is stored, without opening a browser.
+
+            Reads local files and this server's own state only: it starts no
+            browser, setup or login and sends nothing to LinkedIn, so it says
+            whether a session is stored, not whether LinkedIn still accepts it.
+            It answers while another call is using the browser.
+            """
+            try:
+                return session_status()
+            except Exception as e:
+                raise_tool_error(e, "get_session_status")  # NoReturn
 
     return mcp
