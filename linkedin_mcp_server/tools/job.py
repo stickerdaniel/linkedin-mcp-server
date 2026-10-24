@@ -153,6 +153,11 @@ def register_job_tools(
             A search with no matches returns empty job_ids and a
             section_errors entry of type no_matching_jobs, rather than the
             unrelated recommendations LinkedIn shows in its place.
+            pagination ({pages_fetched, next_offset, reason}) says why paging
+            stopped: complete (the results ran out), max_pages, time_budget
+            (the tool timeout was near, so more results may exist) or
+            no_new_ids (a page repeated earlier results). It is absent when a
+            failure stopped the search, which section_errors then explains.
         """
         # Before the browser, because FastMCP is already timing this call
         # and the extractor's budget is a fraction of the same figure. A

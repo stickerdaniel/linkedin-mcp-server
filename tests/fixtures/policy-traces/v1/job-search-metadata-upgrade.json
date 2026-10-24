@@ -315,6 +315,11 @@
     "job_ids": [
       "101"
     ],
+    "pagination": {
+      "next_offset": 2,
+      "pages_fetched": 2,
+      "reason": "no_new_ids"
+    },
     "promoted_job_ids": [],
     "references": {
       "search_results": [
