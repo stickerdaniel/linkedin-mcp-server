@@ -128,6 +128,17 @@ connection, after a trusted click, and after disconnect:
 | Chromium active | yes | yes |
 | Trusted click reached page | yes | yes |
 
+The viewer's browser now runs in kiosk mode (`VIEWER_BROWSER_ARGS`), which
+fills the display. Measured 2026-10-23 on amd64, Chrome for Testing
+153.0.8010.12, with the same stack and a page reading the values itself: screen
+1920x1080, outer window 1920x1080, inner 1920x1080, device pixel ratio 1, focus
+`true` / `visible`, `navigator.webdriver` `false`. The outer window still does
+not exceed the screen. arm64 was not measured again.
+
+Unmeasured: the four detectors above against the kiosk launch, and against the
+image's other launches, which all run under the managed policy in
+`scripts/chromium-policy.json`.
+
 The client scales the fixed framebuffer locally. x11vnc remote resize remains
 disabled, so connecting cannot change Chromium's reported screen. The package
 closure adds 107.2 MiB to Docker's image-inspect content size on amd64 and
