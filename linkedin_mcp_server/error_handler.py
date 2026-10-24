@@ -46,6 +46,7 @@ from linkedin_mcp_server.exceptions import (
     OwnerCannotAuthenticateError,
     SessionExpiredError,
 )
+from linkedin_mcp_server.core.throttle import throttle_evidence
 from linkedin_mcp_server.session_state import PeerSessionInPlaceError
 from linkedin_mcp_server.error_diagnostics import (
     build_issue_diagnostics,
@@ -73,6 +74,47 @@ def _raise_tool_error_with_diagnostics(
 
 
 def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
+    """Shape the failure, then say so when LinkedIn was throttling this call.
+
+    The evidence is appended rather than substituted: throttling explains why
+    a call failed, but the shaped message is what says *which* call and what it
+    was doing, and a session that expired while LinkedIn happened to refuse one
+    beacon is still an expired session.
+
+    An unclassified exception is the case this exists for. It is re-raised for
+    ``mask_error_details`` to reduce to "Error calling tool", which is the
+    right answer for an internal error and the wrong one for a throttled
+    LinkedIn: the diagnosis was in the browser and reaching the client with
+    nothing is what makes throttling read as a parser bug. When the record has
+    something to say, it is said as a ``ToolError``, which survives masking;
+    the underlying exception still goes nowhere.
+    """
+    try:
+        _shape_tool_error(exception, context=context)
+    except ToolError as shaped:
+        evidence = throttle_evidence()
+        if evidence is None or evidence in str(shaped):
+            raise
+        # `from shaped.__cause__`, not `from shaped`: a chain walked by the
+        # daemon middleware has to keep reaching the domain exception in one
+        # hop, which `tests/test_error_handler.py` pins.
+        raise ToolError(f"{shaped}\n\n{evidence}") from (shaped.__cause__ or shaped)
+    except Exception as unclassified:
+        evidence = throttle_evidence()
+        if evidence is None:
+            raise
+        logger.warning(
+            "Masked failure%s arrived while LinkedIn was throttling",
+            f" in {context}" if context else "",
+        )
+        # Chained to what the catch-all raised, which is already the redacted
+        # copy with its own chain severed, so no credential is reachable here.
+        # It keeps the failure's type one hop from the ToolError, where the
+        # daemon middleware walks `__cause__` to classify it.
+        raise ToolError(evidence) from unclassified
+
+
+def _shape_tool_error(exception: Exception, context: str = "") -> NoReturn:
     """
     Raise a ToolError for known LinkedIn exceptions, or re-raise unknown ones.
 
