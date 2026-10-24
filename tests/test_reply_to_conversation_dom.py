@@ -69,6 +69,55 @@ SEND_JS = """
 """
 
 
+# A send button SEND_JS leaves alone, for scripts that stand in for LinkedIn's
+# answer to the submit.
+SILENT_COMPOSER = COMPOSER.replace('id="send"', 'id="silent-send"')
+
+# The submit renders a client placeholder, then LinkedIn inserts a separate
+# node under a server message URN, headed by a link to its sender. With
+# ``echo`` false the submit is ignored and only the sender's message arrives,
+# carrying the same text.
+SERVER_ARM_JS = """
+  function serverMessage({sender, echo}) {
+    document.getElementById('silent-send').addEventListener('click', event => {
+      event.preventDefault();
+      const composer = document.getElementById('composer');
+      const text = composer.innerText;
+      const thread = document.getElementById('thread');
+      const placeholder = document.createElement('div');
+      placeholder.dataset.viewName = 'message-list-item';
+      placeholder.dataset.eventUrn = 'client-uuid';
+      placeholder.textContent = text;
+      if (echo) {
+        thread.appendChild(placeholder);
+        composer.textContent = '';
+      }
+      setTimeout(() => {
+        const entry = document.createElement('div');
+        entry.dataset.viewName = 'message-list-item';
+        entry.dataset.eventUrn = 'urn:li:msg_message:(thread,server-new)';
+        const link = document.createElement('a');
+        link.href = `https://www.linkedin.com/in/${sender}/`;
+        entry.appendChild(link);
+        const unit = document.createElement('span');
+        unit.textContent = text;
+        entry.appendChild(unit);
+        thread.appendChild(entry);
+        placeholder.remove();
+      }, 50);
+    });
+  }
+"""
+
+
+def server_arm_page(*, sender: str, echo: bool) -> str:
+    script = (
+        f"<script>{SERVER_ARM_JS}"
+        f"serverMessage({{sender: '{sender}', echo: {str(echo).lower()}}});</script>"
+    )
+    return thread_page(composer=SILENT_COMPOSER, outside_main=script)
+
+
 def thread_page(
     *, composer: str = COMPOSER, extras: str = "", outside_main: str = ""
 ) -> str:
@@ -231,3 +280,33 @@ class TestReplyToConversationDom:
 
         assert result["status"] == "confirmation_required"
         assert result["participant"] is None
+
+    async def test_own_reply_under_a_server_urn_is_confirmed(self, dom_page):
+        result = await reply(
+            dom_page, server_arm_page(sender="grace-hopper-example", echo=True)
+        )
+
+        assert result["status"] == "sent", result
+        assert result["sent"] is True
+
+    async def test_participant_message_with_the_same_text_is_not_confirmed(
+        self, dom_page
+    ):
+        """A reply names no recipient, so the header's participant stands in."""
+        result = await reply(
+            dom_page, server_arm_page(sender="ada-lovelace", echo=False)
+        )
+
+        assert result["status"] == "send_unconfirmed", result
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+
+    async def test_a_pane_linking_no_participant_confirms_nothing(self, dom_page):
+        html = server_arm_page(sender="grace-hopper-example", echo=True).replace(
+            '<a href="https://www.linkedin.com/in/ada-lovelace/">View profile</a>', ""
+        )
+
+        result = await reply(dom_page, html)
+
+        assert result["status"] == "send_unconfirmed", result
+        assert result["sent"] is False
