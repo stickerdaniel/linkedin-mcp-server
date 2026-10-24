@@ -19,6 +19,12 @@ from linkedin_mcp_server.session_state import canonical
 
 VIEWER_WALL_SECONDS = 1800.0
 VIEWER_PORT = 6080
+# The viewer's browser is there to sign in to LinkedIn, so it is a kiosk: no
+# address bar, tab strip or menu to leave the sign-in through, DevTools closed,
+# and the window fills the 1920x1080 display instead of sitting in one part of
+# the scaled view. Only this launch: the profile's later readers are unchanged,
+# and the window is still never larger than the screen it reports.
+VIEWER_BROWSER_ARGS = ("--kiosk",)
 _MOUNT_ESCAPE = re.compile(r"\\([0-7]{3})")
 # A filesystem held in RAM answers every question a bind mount answers: it is a
 # distinct mount, it is writable, and it is not the container root. It still
