@@ -24,7 +24,11 @@ from linkedin_mcp_server.core import (
     wait_for_manual_login,
 )
 from linkedin_mcp_server.exceptions import BrowserBusyError
-from linkedin_mcp_server.login_viewer import LoginViewer, VIEWER_WALL_SECONDS
+from linkedin_mcp_server.login_viewer import (
+    VIEWER_BROWSER_ARGS,
+    VIEWER_WALL_SECONDS,
+    LoginViewer,
+)
 from linkedin_mcp_server.process_tree import (
     release_browser_guardian,
     start_browser_guardian,
@@ -278,6 +282,13 @@ async def _login_into_fresh_profile(
     # here, so a setting cannot apply to page reading but not to the login that
     # created the session.
     launch_options, viewport = build_launch_options(config.browser)
+    if login_viewer:
+        # The window only, never where the browser connects from: kiosk mode
+        # for the browser behind the viewer (VIEWER_BROWSER_ARGS).
+        launch_options = {
+            **launch_options,
+            "args": [*launch_options.get("args", ()), *VIEWER_BROWSER_ARGS],
+        }
     describe_launch(launch_options)
 
     manager = BrowserManager(

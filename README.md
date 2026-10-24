@@ -467,6 +467,8 @@ docker run -it --rm `
 
 Open the full URL the command prints (it carries the access token) and sign in. Ctrl+V (Cmd+V on a Mac) pastes plain ASCII text, such as a password from your password manager, into the login browser. The viewer closes itself afterwards; let the command exit on its own so the session is stored completely. It gives up after 30 minutes.
 
+The viewer shows LinkedIn's sign-in full screen, without an address bar or tabs, and the browser never offers to save your password. Sign in with your password and the code or approval LinkedIn asks for: a passkey cannot reach the container, so skip LinkedIn's passkey option.
+
 Keep the same host directory mounted at `/home/pwuser/.linkedin-mcp` on every later `docker run`, otherwise the server cannot find the session.
 
 **Add to your MCP client's `mcpServers` configuration**
