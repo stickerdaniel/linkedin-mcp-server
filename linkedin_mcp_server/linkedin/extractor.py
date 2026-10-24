@@ -162,6 +162,10 @@ class LinkedInExtractor:
         """Read how a job posting takes applications and the employer's link."""
         return await self._jobs.get_job_apply_url(job_id)
 
+    async def get_easy_apply_form(self, job_id: str) -> dict[str, Any]:
+        """Read the questions of a job posting's Easy Apply form."""
+        return await self._jobs.get_easy_apply_form(job_id)
+
     async def search_jobs(
         self,
         keywords: str,
