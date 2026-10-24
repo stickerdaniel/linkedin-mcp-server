@@ -20,7 +20,7 @@ const LATE_PASTE_MS = 5000;
 const SPECIAL = { "\n": KeyTable.XK_Return, "\t": KeyTable.XK_Tab };
 
 let typing = false;
-let attempt = null;  // the latest Ctrl+V: when it was pressed, its fallback timer, and whether its text was typed
+let attempt = null;  // the latest Ctrl+V: when it was pressed, its fallback timer, whether it was typed or replaced
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -81,14 +81,18 @@ document.addEventListener("keydown", event => {
   // Not preventDefault: the browser's paste must still happen. Only noVNC must not see this key.
   event.stopPropagation();
   // Each Ctrl+V is an attempt of its own, so what an earlier one did never holds this one back. An earlier one whose
-  // fallback is still waiting gives way to it.
-  if (attempt) clearTimeout(attempt.timer);
-  const current = { at: Date.now(), timer: null, typed: false };
+  // fallback is still waiting or still reading gives way to it.
+  if (attempt) {
+    clearTimeout(attempt.timer);
+    attempt.replaced = true;
+  }
+  const current = { at: Date.now(), timer: null, typed: false, replaced: false };
   attempt = current;
   current.timer = setTimeout(() => {
     if (!navigator.clipboard || !navigator.clipboard.readText) return;
     navigator.clipboard.readText().then(text => {
-      if (current.typed || !text) return;  // its paste event came first after all, or there is no text
+      // Its paste event came first after all, a later Ctrl+V replaced it while it read, or there is no text.
+      if (current.typed || current.replaced || !text) return;
       current.typed = true;
       type(text);
     }, () => {});  // refused: nothing typed, so this Ctrl+V's paste event may still type its text
