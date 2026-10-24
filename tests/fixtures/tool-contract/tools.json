@@ -73,6 +73,41 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "job"
+        ]
+      }
+    },
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Dismiss a job from LinkedIn job search so later searches never show it.\n\nFor jobs already applied to or rejected. Reads the job's title and\ncompany from its posting, clicks the dismiss button on its card in a\nworldwide search for them, then reloads that search to confirm the job\nis gone. Irreversible: LinkedIn offers no undo after a reload. A job\nthat search does not list on its first page is an error, since an\nalready dismissed job and a search that missed it look the same.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "job_id": {
+          "description": "LinkedIn job ID (e.g., \"4252026496\", \"3856789012\")",
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "type": "object"
+    },
+    "name": "dismiss_job",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Dismiss Job"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "company"
         ]
       }

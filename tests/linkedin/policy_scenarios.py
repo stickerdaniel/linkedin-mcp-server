@@ -394,6 +394,37 @@ async def _job_search_scenario(route: str = "/jobs/search/") -> dict[str, Any]:
     )
 
 
+async def _dismiss_job_scenario() -> dict[str, Any]:
+    recorder = TraceRecorder("dismiss_job__dismissed", _COMMON_ALLOWED | {"title"})
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    posting = "https://www.linkedin.com/jobs/view/123/"
+    search = (
+        "https://www.linkedin.com/jobs/search/"
+        "?keywords=Applied+AI+Engineer+Acme&geoId=92000000"
+    )
+    page.goto_landings.extend([posting, search, search])
+    page.script("title", "LinkedIn", "(3) Applied AI Engineer | Acme | LinkedIn")
+    page.declare_locator("button[data-mcp-dismiss]", "search_card_dismiss")
+    page.script(
+        "evaluate:job_search_card",
+        {"cards": 25, "matches": 1, "dismiss": 1, "undo": 0},
+        {"cards": 25, "matches": 1, "dismiss": 0, "undo": 1},
+        # The reload lists the other jobs, and only that makes the job's
+        # absence a confirmation.
+        {"cards": 24, "matches": 0, "dismiss": 0, "undo": 0},
+        {"cards": 24, "matches": 0, "dismiss": 0, "undo": 0},
+    )
+    page.script("search_card_dismiss.click", None)
+    extractor = _extractor(page)
+    arguments = {"job_id": "123"}
+    async with boundaries(recorder, clock):
+        with recorder.context("dismiss_job"):
+            result = await extractor.dismiss_job(**arguments)
+    page.assert_clean()
+    return recorder.trace({"method": "dismiss_job", "arguments": arguments}, result)
+
+
 async def _job_search_upgrade_scenario() -> dict[str, Any]:
     recorder = TraceRecorder(
         "search_jobs__stopping_page_metadata_upgrade", _COMMON_ALLOWED
@@ -1095,6 +1126,7 @@ async def _facade_contract_trace() -> dict[str, Any]:
 
 TOOL_FACADE_METHODS = {
     "connect_with_person",
+    "dismiss_job",
     "extract_feed",
     "extract_page",
     "get_company_employees",
@@ -1143,6 +1175,7 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         ),
         "job-search-metadata-upgrade.json": await _job_search_upgrade_scenario(),
         "saved-jobs.json": await _saved_jobs_scenario(),
+        "dismiss-job.json": await _dismiss_job_scenario(),
         "feed-stale.json": await _feed_stale_scenario(),
         "feed-response-success.json": await _feed_response_scenario(body_failure=False),
         "feed-response-failure.json": await _feed_response_scenario(body_failure=True),
