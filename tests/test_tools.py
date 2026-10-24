@@ -245,6 +245,7 @@ _A_VALID_CALL = [
     ("job", "get_job_apply_url", {"job_id": "4252026496"}),
     ("job", "search_jobs", {"keywords": "python"}),
     ("job", "get_saved_jobs", {}),
+    ("job", "get_easy_apply_form", {"job_id": "4252026496"}),
     ("messaging", "get_inbox", {}),
     ("messaging", "get_conversation", {"linkedin_username": "alice"}),
     ("messaging", "search_conversations", {"keywords": "hello"}),
