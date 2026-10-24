@@ -1,7 +1,8 @@
 """
 LinkedIn messaging tools.
 
-Provides inbox listing, conversation reading, message search, and sending.
+Provides inbox listing, conversation reading, message search, archiving and
+sending.
 """
 
 import logging
@@ -202,6 +203,53 @@ def register_messaging_tools(
         await ctx.report_progress(progress=0, total=100, message="Searching messages")
 
         result = await extractor.search_conversations(keywords, limit=limit)
+
+        await ctx.report_progress(progress=100, total=100, message="Complete")
+
+        return result
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Archive Conversation",
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
+        tags={"messaging", "actions"},
+    )
+    @tool_errors
+    async def archive_conversation(
+        thread_id: str,
+        ctx: Context,
+    ) -> dict[str, Any]:
+        """
+        Archive one LinkedIn messaging thread, InMail included, by thread ID.
+
+        Opens the thread, which marks it read, and chooses Archive from its
+        options menu. A thread LinkedIn already files as archived is left
+        alone and reported already_archived, so a repeated call clicks
+        nothing. The change is confirmed by loading the thread again.
+        Reversible on LinkedIn; a new message moves the thread back to the
+        inbox.
+
+        Args:
+            thread_id: LinkedIn messaging thread ID, as get_inbox,
+                search_conversations or get_conversation return it
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, thread_id, participant (the thread's names, or null)
+            and status: "archived" or "already_archived".
+        """
+        thread_id = normalize_thread_id(thread_id)
+        extractor = await get_ready_extractor(ctx, tool_name="archive_conversation")
+        logger.info("Archiving conversation: %s", thread_id)
+
+        await ctx.report_progress(progress=0, total=100, message="Opening conversation")
+
+        result = await extractor.archive_conversation(thread_id)
 
         await ctx.report_progress(progress=100, total=100, message="Complete")
 

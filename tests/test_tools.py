@@ -40,6 +40,7 @@ def _make_mock_extractor(result: dict) -> MagicMock:
     mock.get_inbox = AsyncMock(return_value=result)
     mock.get_conversation = AsyncMock(return_value=result)
     mock.search_conversations = AsyncMock(return_value=result)
+    mock.archive_conversation = AsyncMock(return_value=result)
     mock.send_message = AsyncMock(return_value=result)
     mock.get_my_profile = AsyncMock(return_value=result)
     mock.search_companies = AsyncMock(return_value=result)
@@ -241,6 +242,7 @@ _A_VALID_CALL = [
     ("messaging", "get_inbox", {}),
     ("messaging", "get_conversation", {"linkedin_username": "alice"}),
     ("messaging", "search_conversations", {"keywords": "hello"}),
+    ("messaging", "archive_conversation", {"thread_id": "2-abc123"}),
     (
         "messaging",
         "send_message",
@@ -1713,6 +1715,44 @@ class TestMessagingTools:
         assert result["sections"]["search_results"] == "Result 1\nResult 2"
         mock_extractor.search_conversations.assert_awaited_once_with("hello", limit=20)
 
+    async def test_archive_conversation_normalizes_the_thread_id(
+        self, mock_context, serve_extractor
+    ):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/2-abc/",
+            "thread_id": "2-abc",
+            "participant": "Ada Lovelace",
+            "status": "archived",
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "archive_conversation")
+        result = await tool_fn("/messaging/thread/2-abc/", mock_context)
+
+        assert result == expected
+        mock_extractor.archive_conversation.assert_awaited_once_with("2-abc")
+
+    async def test_archive_conversation_refuses_a_path_before_the_browser(self):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+        ready = AsyncMock(side_effect=AssertionError("get_ready_extractor was called"))
+
+        with patch("linkedin_mcp_server.tools.messaging.get_ready_extractor", ready):
+            with pytest.raises(ToolError, match="thread_id is not a LinkedIn id"):
+                await mcp.call_tool("archive_conversation", {"thread_id": "../feed"})
+
+        ready.assert_not_awaited()
+
     @pytest.mark.parametrize(
         ("tool", "section"),
         [("get_inbox", "inbox"), ("search_conversations", "search_results")],
@@ -2651,6 +2691,7 @@ class TestToolTimeouts:
             "get_inbox",
             "get_conversation",
             "search_conversations",
+            "archive_conversation",
             "send_message",
             "get_feed",
             "search_posts",
@@ -2685,6 +2726,7 @@ class TestToolTimeouts:
             "get_inbox",
             "get_conversation",
             "search_conversations",
+            "archive_conversation",
             "send_message",
             "get_feed",
             "search_posts",
