@@ -29,8 +29,8 @@ from linkedin_mcp_server.login_viewer import (
     [
         (
             "abc_123-XYZ",
-            "http://127.0.0.1:6080/vnc_lite.html#?"
-            "path=websockify%3Ftoken%3Dabc_123-XYZ&scale=true",
+            "http://127.0.0.1:6080/vnc.html#"
+            "autoconnect=1&resize=scale&path=websockify%3Ftoken%3Dabc_123-XYZ",
         )
     ],
 )
@@ -38,16 +38,20 @@ def test_viewer_url_is_an_exact_token_private_fragment(
     token: str, expected: str
 ) -> None:
     assert viewer_url(token) == expected
-    assert "?token=" not in expected.split("#", 1)[0]
-    assert "scale=true" in expected
-    assert "resize=" not in expected
+    page, fragment = expected.split("#", 1)
+    assert page.endswith("/vnc.html")
+    assert "token" not in page
 
-    # Debian Bookworm's vnc_lite.html uses this exact `[?&]` parser. The `?`
-    # after `#` is load-bearing: a fragment beginning with bare `#path=` does
-    # not match even though the upstream source comment suggests it does.
-    match = re.match(r".*[?&]path=([^&#]*)", expected)
-    assert match is not None
-    assert unquote(match.group(1)) == f"websockify?token={token}"
+    # noVNC 1.6.0's vnc.html reads its settings with `getHashVar`
+    # (app/webutil.js), which matches this pattern against the fragment. It
+    # connects only for autoconnect 1 or true, and fits the window for scale.
+    def setting(name: str) -> str | None:
+        match = re.match(rf".*[&#]{name}=([^&]*)", f"#{fragment}")
+        return unquote(match.group(1)) if match else None
+
+    assert setting("path") == f"websockify?token={token}"
+    assert setting("autoconnect") == "1"
+    assert setting("resize") == "scale"
 
 
 def test_mountinfo_decodes_escaped_mount_paths() -> None:
@@ -293,9 +297,14 @@ def test_dockerfile_installs_viewer_packages_without_x11_utils() -> None:
     dockerfile = (Path(__file__).resolve().parent.parent / "Dockerfile").read_text(
         encoding="utf-8"
     )
-    for package in ("openbox", "x11vnc", "novnc", "websockify"):
-        assert package in dockerfile
-    assert "--no-install-recommends" in dockerfile
+    install = re.search(r"--no-install-recommends\s*\\\s*([^&]+)&&", dockerfile)
+    assert install is not None
+    packages = install.group(1).split()
+    for package in ("openbox", "x11vnc", "websockify"):
+        assert package in packages
+    # The viewer's noVNC is the pinned 1.6.0 release, not Debian's 1.3.0
+    # (tests/test_docker_image.py).
+    assert "novnc" not in packages
     assert "chown -R pwuser:pwuser /opt/patchright" in dockerfile
     assert "x11-utils" not in dockerfile
 
