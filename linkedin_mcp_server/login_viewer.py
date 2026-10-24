@@ -171,9 +171,16 @@ def _require_a_writable_auth_root(auth_root: Path, *, profile: Path) -> None:
 
 
 def viewer_url(token: str) -> str:
-    """Build the token-private noVNC URL understood by Debian vnc_lite.html."""
+    """Build the token-private URL of the image's noVNC 1.6.0 ``vnc.html``.
+
+    Every setting sits in the fragment, which the browser never sends, so the
+    token reaches only the WebSocket the page opens.
+    """
     path = quote(f"websockify?token={token}", safe="")
-    return f"http://127.0.0.1:{VIEWER_PORT}/vnc_lite.html#?path={path}&scale=true"
+    return (
+        f"http://127.0.0.1:{VIEWER_PORT}/vnc.html"
+        f"#autoconnect=1&resize=scale&path={path}"
+    )
 
 
 class LoginViewer:
