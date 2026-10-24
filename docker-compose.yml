@@ -1,6 +1,10 @@
 services:
   linkedin-mcp:
     image: stickerdaniel/linkedin-mcp-server:4.28.0
+    # Fixed, so a recreated container can clear the profile lock a killed one
+    # left behind: Chromium refuses a lock that names another host, and Docker
+    # gives every new container a new host name.
+    hostname: linkedin-mcp
     volumes:
       - ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp
     environment:
