@@ -1,0 +1,122 @@
+{
+  "call": {
+    "arguments": {
+      "confirm_send": false,
+      "message": "New text",
+      "thread_id": "2-policy-thread=="
+    },
+    "method": "reply_to_conversation"
+  },
+  "events": [
+    {
+      "call": "reply_to_conversation",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/thread/2-policy-thread%3D%3D/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/messaging/thread/2-policy-thread==/",
+      "requested_url": "https://www.linkedin.com/messaging/thread/2-policy-thread%3D%3D/",
+      "section": "message",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "reply_to_conversation",
+      "description": "goto https://www.linkedin.com/messaging/thread/2-policy-thread%3D%3D/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/thread/2-policy-thread%3D%3D/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "kind": "boundary.rate_limit",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "message",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "arg": {
+        "threadKey": "2-policy-thread=="
+      },
+      "call": "reply_to_conversation",
+      "kind": "wait_for_function",
+      "operation": "message_composer_ready",
+      "program_digest": "c0ae47ce4773",
+      "section": "message",
+      "timeout_ms": null
+    },
+    {
+      "arg": {
+        "threadKey": "2-policy-thread=="
+      },
+      "call": "reply_to_conversation",
+      "kind": "evaluate",
+      "operation": "message_composer_state",
+      "program_digest": "db45c394114f",
+      "section": "message"
+    },
+    {
+      "call": "reply_to_conversation",
+      "kind": "evaluate",
+      "operation": "thread_participant",
+      "program_digest": "fd0a4f49a0af",
+      "section": "message"
+    }
+  ],
+  "result": {
+    "message": "Nothing was sent. The message would go to Ada Lovelace as a reply in this thread; set confirm_send=true to send it.",
+    "participant": "Ada Lovelace",
+    "recipient_selected": true,
+    "retry_safe": true,
+    "sent": false,
+    "status": "confirmation_required",
+    "thread_id": "2-policy-thread==",
+    "url": "https://www.linkedin.com/messaging/thread/2-policy-thread==/"
+  },
+  "scenario": "reply_to_conversation__dry_run",
+  "schema_version": 1
+}
