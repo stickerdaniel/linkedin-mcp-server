@@ -126,6 +126,7 @@ class EnvironmentKeys:
     HOST = "HOST"
     PORT = "PORT"
     HTTP_PATH = "HTTP_PATH"
+    HTTP_AUTH_TOKEN = "HTTP_AUTH_TOKEN"
     SLOW_MO = "SLOW_MO"
     VIEWPORT = "VIEWPORT"
     CHROME_PATH = "CHROME_PATH"
@@ -344,6 +345,12 @@ def load_from_env(config: AppConfig) -> AppConfig:
     # HTTP server path
     if path_env := os.environ.get(EnvironmentKeys.HTTP_PATH):
         config.server.path = path_env
+
+    # Bearer token for the HTTP endpoint (validated in ServerConfig.validate()).
+    # No flag, for the reason PROXY_PASSWORD has none: an argument is visible in
+    # the process list.
+    if http_auth_token_env := _env(EnvironmentKeys.HTTP_AUTH_TOKEN):
+        config.server.http_auth_token = http_auth_token_env
 
     # Slow motion delay for debugging (validated in BrowserConfig.validate())
     if slow_mo_env := os.environ.get(EnvironmentKeys.SLOW_MO):

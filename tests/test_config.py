@@ -288,6 +288,70 @@ class TestExposedBindWarning:
         """Anything not positively loopback counts as reachable."""
         assert is_loopback_host(host) is expected
 
+    def test_with_a_token_the_warning_says_what_still_guards_it(self, caplog):
+        config = AppConfig()
+        config.server.transport = "streamable-http"
+        config.server.host = "0.0.0.0"
+        config.server.http_auth_token = "t" * 32
+        with caplog.at_level(
+            logging.WARNING, logger="linkedin_mcp_server.config.schema"
+        ):
+            config.validate()
+
+        assert "0.0.0.0" in caplog.text
+        assert "HTTP_AUTH_TOKEN" in caplog.text
+        assert "no authentication" not in caplog.text
+        assert "t" * 32 not in caplog.text
+
+
+class TestHttpAuthToken:
+    SECRET = "a-token-of-forty-characters-0123456789ab"
+
+    def test_the_environment_sets_it(self, monkeypatch):
+        monkeypatch.setenv("HTTP_AUTH_TOKEN", self.SECRET)
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        assert load_from_env(AppConfig()).server.http_auth_token == self.SECRET
+
+    def test_unset_leaves_the_endpoint_open(self):
+        assert ServerConfig().http_auth_token is None
+
+    def test_there_is_no_flag(self):
+        # An argument is visible in the process list, like a proxy password.
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        with pytest.raises(SystemExit):
+            load_from_args(AppConfig(), ["--http-auth-token", self.SECRET])
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "too-short",
+            "x" * 31,
+            # HTTP trims the spaces around a header value, so these could
+            # never match what a client sends.
+            " " + "x" * 40,
+            "x" * 20 + " " + "x" * 20,
+            "x" * 40 + "\n",
+        ],
+        ids=["short", "one-short", "leading-space", "inner-space", "newline"],
+    )
+    def test_an_unusable_token_is_refused_without_quoting_it(self, token):
+        with pytest.raises(ConfigurationError, match="HTTP_AUTH_TOKEN") as excinfo:
+            ServerConfig(http_auth_token=token).validate()
+
+        assert token.strip() not in str(excinfo.value)
+
+    def test_a_long_enough_token_is_accepted(self):
+        ServerConfig(http_auth_token="x" * 32).validate()
+
+    def test_the_token_never_appears_in_repr(self):
+        # cli_main logs the whole config at DEBUG level, and users paste those
+        # logs into issue reports.
+        config = AppConfig(server=ServerConfig(http_auth_token=self.SECRET))
+
+        assert self.SECRET not in repr(config)
+
 
 class TestConfigSingleton:
     def test_get_config_ignores_host_process_arguments(self, monkeypatch):

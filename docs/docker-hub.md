@@ -104,8 +104,9 @@ Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSO
 >
 > **Note:** `stdio` is the default transport. Add `--transport streamable-http` only when you specifically want HTTP mode.
 >
-> **Note:** In HTTP mode the endpoint has no authentication, so the address it
-> is published on is the only thing limiting who can use your LinkedIn session.
+> **Note:** In HTTP mode the endpoint has no authentication unless you set
+> `HTTP_AUTH_TOKEN`. Without it, the address it is published on is the only
+> thing limiting who can use your LinkedIn session.
 > Publish to loopback: `-p 127.0.0.1:8080:8080` together with
 > `--host 0.0.0.0`. The wildcard host is required for the server to be reachable
 > inside the container at all; the `127.0.0.1:` prefix on `-p` is what keeps it
@@ -136,6 +137,7 @@ Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSO
 | `HOST` | `127.0.0.1` | HTTP server host (for streamable-http transport) |
 | `PORT` | `8000` | HTTP server port (for streamable-http transport) |
 | `HTTP_PATH` | `/mcp` | HTTP server path (for streamable-http transport) |
+| `HTTP_AUTH_TOKEN` | - | Require this bearer token (`Authorization: Bearer <token>`) on every HTTP request, at least 32 characters; others get `401`. Env-only, since command-line arguments are readable by every user on the machine. Plain HTTP carries it in the clear, so terminate TLS in front of anything beyond a private network. |
 | `SLOW_MO` | `0` | Delay between browser actions in ms (debugging) |
 | `HEADLESS` | `false` | Docker runs full headed Chromium on a virtual display. Set `true` only for Chromium's real headless mode, which identifies itself as `HeadlessChrome`. |
 | `DAEMON_ENABLED` | `false` | The experimental shared-browser daemon is ignored in Docker. |

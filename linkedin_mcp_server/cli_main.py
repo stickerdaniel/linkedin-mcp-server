@@ -915,12 +915,25 @@ def main(argv: Sequence[str] | None = None) -> None:
             # Create and run the MCP server
             from linkedin_mcp_server.daemon.discovery import Unanswered
 
+            # HTTP only. A stdio server has no port for a token to protect, and
+            # an HTTP server is never a proxy (`daemon_would_be_used` asks for
+            # stdio), so the proxy branch below never sees one.
+            auth_token = (
+                config.server.http_auth_token
+                if transport == "streamable-http"
+                else None
+            )
+
             if shared is None:
-                mcp = create_mcp_server(tool_timeout=config.server.tool_timeout_seconds)
+                mcp = create_mcp_server(
+                    tool_timeout=config.server.tool_timeout_seconds,
+                    auth_token=auth_token,
+                )
             elif isinstance(shared, Unanswered):
                 mcp = create_mcp_server(
                     tool_timeout=config.server.tool_timeout_seconds,
                     silent_owner=shared,
+                    auth_token=auth_token,
                 )
             else:
                 mcp = create_mcp_server(

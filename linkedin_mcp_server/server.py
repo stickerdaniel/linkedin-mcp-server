@@ -58,13 +58,14 @@ logger = logging.getLogger(__name__)
 
 
 class _StaticTokenAuth(TokenVerifier):
-    """Accepts exactly the one token the owner published, and nothing else.
+    """Accepts exactly one token, and nothing else.
 
-    A whole OAuth flow would be ceremony here: both ends are this installation,
-    the token is minted at startup, never reused, and written to a file only
-    this account can read. What it has to be is unguessable and compared without
-    leaking where two tokens diverge, which is what the digest comparison below
-    is for.
+    A whole OAuth flow would be ceremony here. For a daemon owner both ends are
+    this installation, the token is minted at startup, never reused, and written
+    to a file only this account can read. For a Direct HTTP server the operator
+    sets it (``HTTP_AUTH_TOKEN``) and hands it to whatever sits in front. What it
+    has to be is unguessable and compared without leaking where two tokens
+    diverge, which is what the digest comparison below is for.
     """
 
     def __init__(self, token: str) -> None:
@@ -162,9 +163,12 @@ def create_mcp_server(
     :attr:`ServerRole.DIRECT`, which is exactly the historical server, so every
     existing caller keeps what it had.
 
-    *auth_token* is the bearer token a daemon owner requires. Only an owner has
-    one: it listens on a loopback port that every process on the machine can
-    reach, and a browser the user merely points at a page can reach it too.
+    *auth_token* is the bearer token the server requires of every request. An
+    owner always has one: it listens on a loopback port that every process on
+    the machine can reach, and a browser the user merely points at a page can
+    reach it too. A Direct server has one when it serves HTTP and the operator
+    set ``HTTP_AUTH_TOKEN``; ``cli_main`` passes it for that transport only,
+    because a stdio server has no port to protect.
 
     *proxy_backend* is the owner a proxy forwards to, held as an object rather
     than as a bare attachment because which owner that is can change: an upgrade
@@ -176,13 +180,15 @@ def create_mcp_server(
     *silent_owner* is the shared owner a Direct server fell back from because
     it did not answer the election, named when the profile stays busy.
     """
-    if auth_token is not None and role is not ServerRole.OWNER:
-        # A token on a stdio server protects nothing — there is no port to
-        # protect — and passing one is a caller that believes it built the
-        # owner. Refused rather than ignored, because the mistake it describes
-        # is an endpoint that was meant to be authenticated.
+    if auth_token is not None and role is ServerRole.PROXY:
+        # A proxy only ever *presents* a token, the owner's, on the outbound
+        # hop; its own callers are on stdio. Passing one here is a caller
+        # confusing that credential with one a server demands. Refused rather
+        # than ignored, because the mistake it describes is an endpoint that was
+        # meant to be authenticated.
         raise ValueError(
-            f"Only a daemon owner authenticates requests, not {role.value}"
+            "Only a daemon owner or a Direct server authenticates requests, "
+            f"not {role.value}"
         )
     if role is ServerRole.PROXY and proxy_backend is None:
         # A proxy registers no tools of its own, so without an owner it would
