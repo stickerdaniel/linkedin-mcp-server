@@ -248,6 +248,7 @@ _A_VALID_CALL = [
     ("messaging", "get_inbox", {}),
     ("messaging", "get_conversation", {"linkedin_username": "alice"}),
     ("messaging", "search_conversations", {"keywords": "hello"}),
+    ("messaging", "archive_conversation", {"thread_id": "2-abc123"}),
     (
         "messaging",
         "send_message",
