@@ -552,6 +552,31 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "session"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Report whether a LinkedIn session is stored, without opening a browser.\n\nReads local files and this server's own state only: it starts no\nbrowser, setup or login and sends nothing to LinkedIn, so it says\nwhether a session is stored, not whether LinkedIn still accepts it.\nIt answers while another call is using the browser.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_session_status",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Session Status"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "person"
         ]
       }
