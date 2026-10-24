@@ -90,11 +90,13 @@ class TestHandleAuthError:
 def _a_live_browser() -> MagicMock:
     """A browser double the dead-browser check reads as live.
 
-    A bare mock answers ``is_closed()`` with something truthy, which reads as a
-    closed page and sends the call down the shutdown path instead.
+    A bare mock answers ``is_closed()`` and ``page_crashed`` with something
+    truthy, which reads as a dead page and sends the call down the shutdown
+    path instead.
     """
     browser = MagicMock()
     browser.page.is_closed.return_value = False
+    browser.page_crashed = False
     browser.context.browser.is_connected.return_value = True
     return browser
 
@@ -1286,6 +1288,7 @@ class _Browser:
 
     def __init__(self) -> None:
         self.page_closed: object = False
+        self.page_crashed = False
         self.connected: object = True
         self.context_error: Exception | None = None
         self.verdict: object = True
@@ -1422,13 +1425,14 @@ class TestADeadBrowserIsNoticedBeforeTheCall:
         ("state", "shut_down"),
         [
             ({"page_closed": True}, True),
+            # A renderer crash leaves the page open and the browser connected.
+            ({"page_crashed": True}, True),
             ({"connected": False}, True),
             # The page decides alone: once teardown has begun the context read
             # can raise, and that must not erase what the page already said.
             ({"page_closed": True, "context_error": RuntimeError("gone")}, True),
-            # The coverage boundary. A dead Node driver and a renderer crash
-            # that leaves the page open both read as live here, and fail
-            # inside the tool as they did before.
+            # The coverage boundary. A dead Node driver reads as live here,
+            # and fails inside the tool as it did before.
             ({}, False),
             ({"connected": None}, False),
             ({"page_closed": RuntimeError("unreadable")}, False),
@@ -1437,6 +1441,7 @@ class TestADeadBrowserIsNoticedBeforeTheCall:
         ],
         ids=[
             "closed-page",
+            "crashed-page",
             "disconnected",
             "closed-page-unreadable-context",
             "both-live",

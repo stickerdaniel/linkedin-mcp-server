@@ -993,6 +993,7 @@ class TestALostMarkerResponse:
         async def a_live_browser() -> MagicMock:
             browser = MagicMock()
             browser.page.is_closed.return_value = False
+            browser.page_crashed = False
             browser.context.browser.is_connected.return_value = True
             acquired.append(browser)
             return browser

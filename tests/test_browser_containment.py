@@ -504,16 +504,18 @@ def _assert_nothing_of_it_runs(manager: BrowserManager) -> None:
         assert not processes, f"still running: {processes}"
 
 
-@pytest.mark.parametrize("fault", ["chromium-killed", "page-closed"])
+@pytest.mark.parametrize("fault", ["chromium-killed", "page-closed", "page-crashed"])
 async def test_a_browser_that_stopped_is_drained_and_started_again(
     tmp_path, isolate_profile_dir, monkeypatch, fault
 ):
     """The call that finds it dead drains it; only the next call launches.
 
-    Two faults, because they leave different things behind. Killing Chromium
+    Three faults, because they leave different things behind. Killing Chromium
     leaves the Node driver reporting a disconnected browser. Closing the active
     page leaves Chromium itself running, on a second page kept open, so the
-    drain has a live root to end rather than one already gone.
+    drain has a live root to end rather than one already gone. Crashing the
+    renderer leaves Chromium running and the page open and connected, so only
+    the page's crash event says it is dead.
 
     Everything the driver does to launch is real except signing in, which would
     visit LinkedIn: the shipped options, the lease, the guardian and the
@@ -583,6 +585,14 @@ async def test_a_browser_that_stopped_is_drained_and_started_again(
         if fault == "page-closed":
             await first.context.new_page()
             await first.page.close()
+        elif fault == "page-crashed":
+            crashed = asyncio.Event()
+            first.page.on("crash", lambda _page: crashed.set())
+            with contextlib.suppress(Exception):
+                await first.page.goto("chrome://crash")
+            await asyncio.wait_for(crashed.wait(), timeout=10)
+            assert not first.page.is_closed(), "the crash closed the page"
+            assert not _reports_stopped(first), "the crash looks like a stop"
         else:
             for process in [*root.children(recursive=True), root]:
                 with contextlib.suppress(psutil.NoSuchProcess):
@@ -594,10 +604,11 @@ async def test_a_browser_that_stopped_is_drained_and_started_again(
                     break
                 await asyncio.sleep(0.01)
         # What the fault ended and what it left, observed apart.
-        assert _reports_stopped(first), "the driver never reported the fault"
+        if fault != "page-crashed":
+            assert _reports_stopped(first), "the driver never reported the fault"
         assert _alive(node), "the fault took the Node driver as well"
-        if fault == "page-closed":
-            assert _alive(root), "closing the page ended Chromium"
+        if fault != "chromium-killed":
+            assert _alive(root), "the fault ended Chromium"
         else:
             assert not _alive(root), "Chromium survived the kill"
 
