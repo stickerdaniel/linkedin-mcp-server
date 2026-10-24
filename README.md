@@ -453,7 +453,7 @@ docker run -it --rm `
   --login --login-viewer
 ```
 
-Open the full URL the command prints (it carries the access token) and sign in. The viewer closes itself afterwards; let the command exit on its own so the session is stored completely. It gives up after 30 minutes.
+Open the full URL the command prints (it carries the access token) and sign in. Ctrl+V (Cmd+V on a Mac) types what you copied into the login page, so a password manager works; only ASCII characters arrive. The viewer closes itself afterwards; let the command exit on its own so the session is stored completely. It gives up after 30 minutes.
 
 Keep the same host directory mounted at `/home/pwuser/.linkedin-mcp` on every later `docker run`, otherwise the server cannot find the session.
 
