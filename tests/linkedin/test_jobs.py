@@ -2024,6 +2024,93 @@ class TestSearchJobs:
         mock_ids.assert_not_awaited()
         assert mock_extract.await_count == 1
 
+    _NOTICE = (
+        "We found more results related to your search that may not be exact "
+        "matches, but could still be a great fit."
+    )
+
+    async def _search_redesigned(self, mock_page, organic):
+        """One redesigned page holding the notice, with `organic` above it.
+
+        `organic` is what the DOM read answers, or an exception it raises.
+        """
+        reader = _reader(mock_page)
+        page = extracted(
+            f"99+ results\nParis (80 km)\nTransformation Success Engineer\n"
+            f"Promoted\n{self._NOTICE}\nData Engineer - F/H"
+        )
+        count_kwargs = (
+            {"side_effect": organic}
+            if isinstance(organic, Exception)
+            else {"return_value": organic}
+        )
+        with (
+            patch.object(
+                reader._pages,
+                "_extract_search_page",
+                side_effect=self._navigating(mock_page, [page] * 2),
+            ) as mock_extract,
+            patch.object(
+                reader._pages,
+                "_count_organic_before_notice",
+                new_callable=AsyncMock,
+                **count_kwargs,
+            ) as mock_count,
+            patch.object(
+                reader._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["4458422026", "4458003726"],
+            ) as mock_ids,
+            patch.object(
+                reader._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.linkedin.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await reader.search_jobs("qzxvwk plorbnaut", max_pages=1)
+        mock_count.assert_awaited_with(self._NOTICE, "Promoted")
+        return result, mock_extract, mock_ids
+
+    async def test_nothing_but_ads_above_the_notice_is_no_match(self, mock_page):
+        """The redesigned search's answer to a query matching nothing.
+
+        It has no no-match page: the promoted cards, the notice, then a page
+        of unrelated postings under "99+ results". Read as a result page, they
+        came back as `job_ids` with nothing to say they were not matches.
+        """
+        result, mock_extract, mock_ids = await self._search_redesigned(mock_page, 0)
+
+        assert result["job_ids"] == []
+        assert result["sections"] == {}
+        error = result["section_errors"]["search_results"]
+        assert error["error_type"] == "no_matching_jobs"
+        assert "qzxvwk plorbnaut" in error["error_message"]
+        mock_ids.assert_not_awaited()
+        assert mock_extract.await_count == 1
+
+    async def test_matches_above_the_notice_keep_the_page(self, mock_page):
+        """The notice also ends a short list of real matches."""
+        result, _, mock_ids = await self._search_redesigned(mock_page, 24)
+
+        assert result["job_ids"] == ["4458422026", "4458003726"]
+        assert "section_errors" not in result
+        mock_ids.assert_awaited()
+
+    async def test_a_failed_read_above_the_notice_keeps_the_page(self, mock_page):
+        """Zero would discard real matches, so a failed read is not zero."""
+        result, _, _ = await self._search_redesigned(
+            mock_page, TypeError("Organic results read returned str")
+        )
+
+        assert result["job_ids"] == ["4458422026", "4458003726"]
+        assert "section_errors" not in result
+
     async def test_recommendations_after_real_results_end_the_list(self, mock_page):
         """Past a page of matches, the substitute page is just the end.
 

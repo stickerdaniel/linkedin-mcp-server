@@ -370,6 +370,11 @@ class JobSearchTextTable:
     # A sponsored card's own line. The detail pane says "Promoted by hirer",
     # which a whole-line match leaves alone.
     promoted_label: str
+    # The line the redesigned search puts between its matches and the
+    # related postings it pads the list with. It has no no-match page: a
+    # search matching nothing opens with this line under the promoted cards,
+    # and the cards after it are then all the page holds.
+    inexact_notices: tuple[str, ...]
 
     def shows_no_match(self, text: str) -> bool:
         """Whether a search page's text opens with a no-match heading.
@@ -379,6 +384,16 @@ class JobSearchTextTable:
         """
         first = next((line.strip() for line in text.splitlines() if line.strip()), "")
         return first in self.no_match_headings
+
+    def inexact_notice(self, text: str) -> str | None:
+        """The notice line ending a page's matches, if the text holds one.
+
+        A whole line, since a posting's own text could quote it in part.
+        """
+        for line in text.splitlines():
+            if line.strip() in self.inexact_notices:
+                return line.strip()
+        return None
 
     def result_count(self, text: str) -> tuple[int, bool] | None:
         """The advertised number of results, and whether it is exact.
@@ -405,6 +420,10 @@ _JOB_SEARCH_TEXT: dict[str, JobSearchTextTable] = {
             r"(?P<count>[0-9]{1,3}(?:,[0-9]{3})*)(?P<plus>\+)? results?"
         ),
         promoted_label="Promoted",
+        inexact_notices=(
+            "We found more results related to your search that may not be "
+            "exact matches, but could still be a great fit.",
+        ),
     ),
 }
 

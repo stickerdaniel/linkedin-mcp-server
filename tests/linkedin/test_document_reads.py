@@ -148,6 +148,11 @@ CASES: list[tuple[str, Read, Any]] = [
         lambda p: _jobs(p)._extract_promoted_job_ids("Promoted"),
         ["123"],
     ),
+    (
+        "results above the notice",
+        lambda p: _jobs(p)._count_organic_before_notice("Notice", "Promoted"),
+        0,
+    ),
     ("search page count", lambda p: _jobs(p)._get_total_search_pages(), "1 of 9"),
     ("saved page count", lambda p: _jobs(p)._get_total_list_pages(), 9),
     ("sidebar profiles", _sidebar, {"sections": {}, "showAllUrls": {}}),
