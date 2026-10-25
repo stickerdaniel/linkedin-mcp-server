@@ -153,9 +153,9 @@ def register_job_tools(
         LinkedIn is moving accounts to a redesigned job search, which keeps
         only the keywords, date_posted and paging. It drops the filters
         marked "Classic search only" and reports them in section_errors as
-        filters_dropped. After a filters_dropped, search again with the place
-        and work type in the keywords ("remote python developer in Lyon") and
-        keep doing so; words such as "senior" or "internship" there narrow the
+        filters_dropped. When it drops the location or work type, search again
+        with them in the keywords ("remote python developer in Lyon") and keep
+        doing so; words such as "senior" or "internship" there narrow the
         results too. Quotes do not make a phrase exact on that search.
 
         Args:
