@@ -79,15 +79,27 @@ _VIEWER = """<!DOCTYPE html>
     },
   };
   document.addEventListener("keydown", event => keyboard._sendKeyEvent(0, event.code, true));
-  UI.connected = true;
-  UI.rfb = {
+  const newRfb = () => Object.assign(new EventTarget(), {
     viewOnly: false,
     _keyboard: keyboard,
     // A press and release, as the add-on sends each character.
     sendKey(keysym, code, down) {
-      if (down === undefined) state.typed += String.fromCodePoint(keysym);
+      if (down === undefined) {
+        state.typed += keysym === 0xff0d ? "\\n" : keysym === 0xff09 ? "\\t" : String.fromCodePoint(keysym);
+      }
     },
-  };
+  });
+  UI.connected = true;
+  UI.rfb = newRfb();
+  document.addEventListener("viewer-test-connection", event => {
+    if (event.detail === "disconnect") {
+      UI.connected = false;
+      UI.rfb.dispatchEvent(new Event("disconnect"));
+    } else {
+      if (event.detail === "replace") UI.rfb = newRfb();
+      UI.connected = true;
+    }
+  });
 </script>
 <script type="module" src="paste.js"></script>
 </head><body></body></html>
@@ -261,6 +273,58 @@ async def test_a_paste_with_no_ctrl_v_before_it_is_typed(viewer):
 
     assert await _state(viewer, "typed") == "user@example.comcorrect horse"
     assert await _state(viewer, "reads") == "0"
+
+
+async def test_pastes_received_while_typing_are_queued_in_order(viewer):
+    """Browser-menu pastes arrive even while key events are blocked."""
+    await viewer.clock.install()
+    first = "a" * 100
+    await viewer.evaluate(_CTRL_V)
+    await viewer.evaluate(_PASTE, first)
+    assert await _state(viewer, "typed") == "a"
+
+    await viewer.evaluate(_PASTE, "second\r\nline\n")
+    await viewer.evaluate(_PASTE, "third")
+    await viewer.clock.run_for(5000)
+
+    assert await _state(viewer, "typed") == first + "second\nlinethird"
+    assert await _state(viewer, "reads") == "0"
+
+
+@pytest.mark.parametrize("connection", ["disconnect", "replace"])
+@pytest.mark.parametrize("paste_immediately", [False, True])
+async def test_a_connection_change_drops_pending_pastes(
+    viewer, connection, paste_immediately
+):
+    """Neither active nor queued text may reach the next connection."""
+    await viewer.clock.install()
+    await viewer.evaluate(_PASTE, "a" * 100)
+    await viewer.evaluate(_PASTE, "queued text")
+    await viewer.clock.run_for(40)
+    already_typed = await _state(viewer, "typed")
+
+    await viewer.evaluate(
+        """connection => {
+          document.dispatchEvent(new CustomEvent("viewer-test-connection", {detail: connection}));
+          if (connection === "disconnect") {
+            // Reconnect before the pending 20 ms sleep ends, even with the
+            // same RFB: checking only the current connected flag misses it.
+            document.dispatchEvent(new CustomEvent("viewer-test-connection", {detail: "reconnect"}));
+          }
+        }""",
+        connection,
+    )
+    if paste_immediately:
+        await viewer.evaluate(_PASTE, "fresh text")
+    await viewer.clock.run_for(5000)
+
+    assert await _state(viewer, "typed") == already_typed + (
+        "fresh text" if paste_immediately else ""
+    )
+    if not paste_immediately:
+        await viewer.evaluate(_PASTE, "fresh text")
+        await viewer.clock.run_for(1000)
+        assert await _state(viewer, "typed") == already_typed + "fresh text"
 
 
 async def test_control_goes_up_before_the_first_character(viewer):
