@@ -221,3 +221,21 @@ class TestBoundaryPermalinksAgainstRealDom:
 
         assert result["posts"][0]["ambiguous"] is True
         assert result["posts"][0]["url"] is None
+
+    async def test_a_same_path_anchor_off_linkedin_is_not_a_permalink(self, dom_page):
+        # An external site's /posts/ path is not a LinkedIn permalink;
+        # only the host decides that, never the path shape.
+        result = await snapshot(
+            dom_page,
+            """
+            <article>
+              <p>A card quoting an outside blog</p>
+              <a href="https://blog.example/posts/ada_engines-ugcPost-1-abc">
+                Read more
+              </a>
+            </article>
+            """,
+        )
+
+        assert result["posts"][0]["url"] is None
+        assert result["posts"][0]["ambiguous"] is False

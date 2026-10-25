@@ -249,6 +249,51 @@ class TestFeedPostBoundaries:
         assert ref["url"] == "/feed/update/urn:li:activity:7000000000000000000/"
         assert "text" not in ref
 
+    def test_boundaries_survive_a_cap_filling_anchor_slice(self):
+        # A rendered post must not lose its paired entry because earlier
+        # anchor-derived references already filled the 50-entry cap.
+        raw_anchors = [
+            {
+                "href": "https://www.linkedin.com/feed/update/"
+                f"urn:li:activity:{7000000000000000000 + i}/"
+            }
+            for i in range(50)
+        ]
+        posts = [
+            {
+                "text": "The paired post",
+                "urn": "urn:li:activity:1",
+                "url": None,
+                "ambiguous": False,
+            }
+        ]
+        refs = build_feed_references(raw_anchors, [], post_boundaries=posts)
+        assert len(refs) == 50
+        assert refs[0]["value"] == "urn:li:activity:1"
+
+    def test_a_wordier_same_url_anchor_loses_to_the_boundary(self):
+        # A permalink anchor's label ("3 comments") can outscore a short
+        # excerpt on text length; the boundary's pairing must still win
+        # or the URN and the post's own words are lost.
+        raw_anchors = [
+            {
+                "href": "https://www.linkedin.com/feed/update/urn:li:activity:1234567890/",
+                "text": "42 comments and a very long anchor label",
+            }
+        ]
+        posts = [
+            {
+                "text": "Short",
+                "urn": "urn:li:activity:1234567890",
+                "url": None,
+                "ambiguous": False,
+            }
+        ]
+        refs = build_feed_references(raw_anchors, [], post_boundaries=posts)
+        assert len(refs) == 1
+        assert refs[0]["text"] == "Short"
+        assert refs[0]["value"] == "urn:li:activity:1234567890"
+
 
 class TestIsPermalinkPayloadResponse:
     def test_voyager_normalized_json_counts(self):

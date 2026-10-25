@@ -53,6 +53,11 @@ FEED_POST_BOUNDARIES_JS = r"""() => {
                     .map(anchor => {
                         try {
                             const u = new URL(anchor.href, location.href);
+                            // The path alone does not make a permalink: an
+                            // outside host's /posts/ link is still external.
+                            if (!/(^|\.)linkedin\.com$/.test(u.hostname)) {
+                                return null;
+                            }
                             return /^\/feed\/update\//.test(u.pathname) ||
                                 /^\/posts\//.test(u.pathname)
                                 ? u.pathname

@@ -153,15 +153,11 @@ def build_feed_references(
     ``FEED_POST_BOUNDARIES_JS`` in feed.py): each entry names one rendered
     post by its own URN or permalink anchor, so the reference can carry
     the post's text as an excerpt and its URN as ``value``. Boundary
-    entries sit before the anchor-derived slice, and ``dedupe_references``
-    keeps the richer of two same-URL entries — so a paired post replaces
-    its bare anchor, never the other way around (#817).
+    entries sit before the anchor-derived slice, and an anchor whose URL
+    a boundary already claimed is skipped outright — a paired post never
+    competes with its bare anchor on label richness or cap space (#817).
     """
-    refs = [
-        ref
-        for ref in build_references(raw_references, "feed")
-        if ref["kind"] == "feed_post"
-    ]
+    paired: list[Reference] = []
     for post in post_boundaries or []:
         urn = post.get("urn")
         url = f"/feed/update/{urn}/" if urn else post.get("url")
@@ -173,7 +169,13 @@ def build_feed_references(
             ref["text"] = text[:_POST_EXCERPT_LIMIT]
         if urn:
             ref["value"] = urn
-        refs.append(ref)
+        paired.append(ref)
+    paired_urls = {ref["url"] for ref in paired}
+    refs = paired + [
+        ref
+        for ref in build_references(raw_references, "feed")
+        if ref["kind"] == "feed_post" and ref["url"] not in paired_urls
+    ]
     existing = {r["url"] for r in refs}
     for sdui_url in captured_urls:
         # AGENTS.md mandates relative paths for LinkedIn references.
