@@ -151,24 +151,24 @@ def register_job_tools(
         Returns job_ids that can be passed to get_job_details for full info.
 
         LinkedIn is moving accounts to a redesigned job search, which keeps
-        only the keywords, date_posted and paging. There, location, job_type,
-        experience_level, work_type, easy_apply and sort_by are dropped and
-        reported in section_errors as filters_dropped. Put the place and work
-        type in the keywords instead ("remote python developer in Lyon");
-        words such as "senior" or "internship" there narrow the results too.
-        Quotes do not make a phrase exact on that search.
+        only the keywords, date_posted and paging. It drops the filters
+        marked "Classic search only" and reports them in section_errors as
+        filters_dropped. After a filters_dropped, search again with the place
+        and work type in the keywords ("remote python developer in Lyon") and
+        keep doing so; words such as "senior" or "internship" there narrow the
+        results too. Quotes do not make a phrase exact on that search.
 
         Args:
             keywords: Search keywords (e.g., "software engineer", "data scientist")
             ctx: FastMCP context for progress reporting
-            location: Optional location filter (e.g., "San Francisco", "Remote")
+            location: Optional location filter (e.g., "San Francisco", "Remote"). Classic search only.
             max_pages: Maximum number of result pages to load (1-10, default 3)
             date_posted: Filter by posting date (past_hour, past_24_hours, past_week, past_month)
-            job_type: Filter by job type, comma-separated (full_time, part_time, contract, temporary, volunteer, internship, other)
-            experience_level: Filter by experience level, comma-separated (internship, entry, associate, mid_senior, director, executive)
-            work_type: Filter by work type, comma-separated (on_site, remote, hybrid)
-            easy_apply: Only show Easy Apply jobs (default false)
-            sort_by: Sort results (date, relevance)
+            job_type: Filter by job type, comma-separated (full_time, part_time, contract, temporary, volunteer, internship, other). Classic search only.
+            experience_level: Filter by experience level, comma-separated (internship, entry, associate, mid_senior, director, executive). Classic search only.
+            work_type: Filter by work type, comma-separated (on_site, remote, hybrid). Classic search only.
+            easy_apply: Only show Easy Apply jobs (default false). Classic search only.
+            sort_by: Sort results (date, relevance). Classic search only.
 
         Returns:
             Dict with url, sections (name -> raw text), job_ids (list of
