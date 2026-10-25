@@ -32,6 +32,63 @@ from linkedin_mcp_server.linkedin.text import (
 
 logger = logging.getLogger(__name__)
 
+# collectPostBoundaries: pair each rendered feed post with its own permalink.
+# The scroll-progress signal and the text read stay as they are; this second
+# walk answers the question the flat structures cannot — which post a
+# captured URL belongs to (#817). Identity comes from inside one boundary:
+# the post URN on the container or, failing that, its single permalink
+# anchor. A boundary that cannot name exactly one post reports ambiguous
+# and is emitted without a URL rather than paired by position.
+FEED_POST_BOUNDARIES_JS = r"""() => {
+    const collectPostBoundaries = main => {
+        const roots = Array.from(
+            main.querySelectorAll('article, [data-id^="urn:li:activity:"]')
+        );
+        const outermost = roots.filter(
+            root => !roots.some(other => other !== root && other.contains(root))
+        );
+        return outermost.map(root => {
+            const urls = [...new Set(
+                Array.from(root.querySelectorAll('a[href]'))
+                    .map(anchor => {
+                        try {
+                            const u = new URL(anchor.href, location.href);
+                            return /^\/feed\/update\//.test(u.pathname) ||
+                                /^\/posts\//.test(u.pathname)
+                                ? u.pathname
+                                : null;
+                        } catch {
+                            return null;
+                        }
+                    })
+                    .filter(Boolean)
+            )];
+            const ids = [...new Set([
+                ...[root, ...root.querySelectorAll('[data-urn],[data-id]')]
+                    .flatMap(element => [
+                        element.getAttribute('data-urn'),
+                        element.getAttribute('data-id'),
+                    ])
+                    .filter(value =>
+                        /^urn:li:(activity|share|ugcPost):\d+$/.test(value || '')
+                    ),
+                ...urls.flatMap(
+                    url => url.match(/urn:li:activity:\d+/g) || []
+                ),
+            ])];
+            const ambiguous = urls.length > 1 || ids.length > 1;
+            return {
+                text: (root.innerText || '').trim(),
+                urn: ids.length === 1 ? ids[0] : null,
+                url: urls.length === 1 && !ambiguous ? urls[0] : null,
+                ambiguous,
+            };
+        });
+    };
+    const main = document.querySelector('main');
+    return { posts: main ? collectPostBoundaries(main) : [] };
+}"""
+
 
 class FeedReader:
     """Read the home feed and the post permalinks its SDUI payloads carry."""
@@ -293,7 +350,20 @@ class FeedReader:
             )
             return ExtractedSection(text=RATE_LIMITED_SECTION_TEXT, references=[])
         cleaned = filter_linkedin_noise_lines(truncated)
+        try:
+            post_boundaries = await self._session.run_on_linkedin(
+                FEED_POST_BOUNDARIES_JS
+            )
+        except Exception:
+            # The pairing read is additive: its failure must not cost a
+            # feed that already extracted cleanly.
+            logger.debug("Feed post boundary read failed", exc_info=True)
+            post_boundaries = None
         return ExtractedSection(
             text=cleaned,
-            references=build_feed_references(raw_result["references"], captured_urls),
+            references=build_feed_references(
+                raw_result["references"],
+                captured_urls,
+                post_boundaries=(post_boundaries or {}).get("posts"),
+            ),
         )

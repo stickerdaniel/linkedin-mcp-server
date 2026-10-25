@@ -119,9 +119,16 @@ def is_feed_payload_response(url: str) -> bool:
     return url.split("?", 1)[0] in _FEED_DOCUMENT_URLS
 
 
+# How much of a post's own text a reference carries: enough to recognise the
+# post inside ``sections["feed"]``, which remains the full text (#817).
+_POST_EXCERPT_LIMIT = 240
+
+
 def build_feed_references(
     raw_references: list[Any],
     captured_urls: list[str],
+    *,
+    post_boundaries: list[dict[str, Any]] | None = None,
 ) -> list[Reference]:
     """Compose feed references from DOM anchors + SDUI captures.
 
@@ -141,12 +148,32 @@ def build_feed_references(
     matches strings, not URNs. Both are valid LinkedIn permalinks, so
     consumers should treat ``feed_post`` as polymorphic on URL form;
     URN-based equivalence is left to the consumer.
+
+    ``post_boundaries`` is the per-post read of the same page (see
+    ``FEED_POST_BOUNDARIES_JS`` in feed.py): each entry names one rendered
+    post by its own URN or permalink anchor, so the reference can carry
+    the post's text as an excerpt and its URN as ``value``. Boundary
+    entries sit before the anchor-derived slice, and ``dedupe_references``
+    keeps the richer of two same-URL entries — so a paired post replaces
+    its bare anchor, never the other way around (#817).
     """
     refs = [
         ref
         for ref in build_references(raw_references, "feed")
         if ref["kind"] == "feed_post"
     ]
+    for post in post_boundaries or []:
+        urn = post.get("urn")
+        url = f"/feed/update/{urn}/" if urn else post.get("url")
+        if not url:
+            continue
+        ref: Reference = {"kind": "feed_post", "url": url, "context": "feed"}
+        text = post.get("text") or ""
+        if text:
+            ref["text"] = text[:_POST_EXCERPT_LIMIT]
+        if urn:
+            ref["value"] = urn
+        refs.append(ref)
     existing = {r["url"] for r in refs}
     for sdui_url in captured_urls:
         # AGENTS.md mandates relative paths for LinkedIn references.
