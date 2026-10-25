@@ -292,6 +292,13 @@
     },
     {
       "call": "extract_feed",
+      "kind": "evaluate",
+      "operation": "feed_post_boundaries",
+      "program_digest": "9946214edfea",
+      "section": "feed"
+    },
+    {
+      "call": "extract_feed",
       "callback_id": "callback-1",
       "event": "response",
       "kind": "listener.remove",
