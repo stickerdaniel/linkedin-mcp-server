@@ -155,6 +155,9 @@ AI agent? Get a quick confirmation from the user before enabling automatic updat
 - `--browser-idle-timeout SECONDS` - Close an idle browser and release the profile after this long without a tool call (default: 600; 0 = keep it open)
 - `--browser-max-calls N` - Close the browser between calls once it has served this many tool calls, so the next call starts a fresh one (default: 0 = no limit). For memory-limited containers, where a long run of calls keeps the idle timeout from ever closing it; each restart loads the feed once more.
 
+See the [bounded browser-lifetime measurement](docs/browser-lifetime-measurement.md)
+for the measured memory/latency tradeoff and its limits.
+
 **Browser:**
 
 - `--no-headless` - Show the browser window (useful for debugging)
