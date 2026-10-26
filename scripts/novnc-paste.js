@@ -126,8 +126,7 @@ document.addEventListener("paste", event => {
   event.preventDefault();
   // The paste event of the latest Ctrl+V settles that attempt. One with no Ctrl+V before it, such as the browser's
   // own Paste menu, is typed as it is.
-  // A cancelled connection still owns its late paste event after the duplicate-suppression window expires.
-  const current = attempt && (attempt.replaced || attempt.rfb !== UI.rfb || Date.now() - attempt.at < LATE_PASTE_MS) ? attempt : null;
+  const current = attempt && Date.now() - attempt.at < LATE_PASTE_MS ? attempt : null;
   if (current) {
     clearTimeout(current.timer);
     current.rfb.removeEventListener("disconnect", current.cancel);

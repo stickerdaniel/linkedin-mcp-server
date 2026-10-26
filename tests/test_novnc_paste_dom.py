@@ -358,8 +358,7 @@ async def test_a_connection_change_cancels_a_clipboard_attempt(
     await viewer.clock.run_for(1000)
     assert await _state(viewer, "typed") == ""
 
-    # A permission prompt can outlast the ordinary late-paste suppression window.
-    await viewer.clock.run_for(6000)
+    # The old shortcut's paste event can arrive after the connection changed too.
     await viewer.evaluate(_PASTE, "stale paste event")
     await viewer.clock.run_for(1000)
     assert await _state(viewer, "typed") == ""
@@ -368,6 +367,36 @@ async def test_a_connection_change_cancels_a_clipboard_attempt(
     await viewer.evaluate(_PASTE, "fresh text")
     await viewer.clock.run_for(1000)
     assert await _state(viewer, "typed") == "fresh text"
+
+
+@pytest.mark.parametrize("connection", ["disconnect", "replace"])
+async def test_a_fresh_menu_paste_survives_after_a_cancelled_attempt_expires(
+    viewer, connection
+):
+    """Late read results stay cancelled without swallowing a later menu paste."""
+    await viewer.clock.install()
+    await _set_clipboard(viewer, "stale clipboard", held=True)
+    await viewer.evaluate(_CTRL_V)
+    await viewer.clock.run_for(400)
+    assert await _state(viewer, "reads") == "1"
+
+    await viewer.evaluate(
+        """connection => {
+          document.dispatchEvent(new CustomEvent("viewer-test-connection", {detail: connection}));
+          if (connection === "disconnect") {
+            document.dispatchEvent(new CustomEvent("viewer-test-connection", {detail: "reconnect"}));
+          }
+        }""",
+        connection,
+    )
+    await viewer.clock.run_for(6000)
+    await viewer.evaluate(_PASTE, "fresh menu paste")
+    await viewer.clock.run_for(1000)
+    assert await _state(viewer, "typed") == "fresh menu paste"
+
+    await _set_clipboard(viewer, "irrelevant")
+    await viewer.clock.run_for(1000)
+    assert await _state(viewer, "typed") == "fresh menu paste"
 
 
 async def test_control_goes_up_before_the_first_character(viewer):
