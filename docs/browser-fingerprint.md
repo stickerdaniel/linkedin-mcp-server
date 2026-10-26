@@ -135,9 +135,8 @@ fills the display. Measured 2026-10-23 on amd64, Chrome for Testing
 `true` / `visible`, `navigator.webdriver` `false`. The outer window still does
 not exceed the screen. arm64 was not measured again.
 
-Unmeasured: the four detectors above against the kiosk launch, and against the
-image's other launches, which all run under the managed policy in
-`scripts/chromium-policy.json`.
+The four-detector comparison of kiosk and managed-policy launches is recorded
+in [Docker policy and kiosk comparison — 2026-10-25](#docker-policy-and-kiosk-comparison--2026-10-25).
 
 The client scales the fixed framebuffer locally. x11vnc remote resize remains
 disabled, so connecting cannot change Chromium's reported screen. The package
