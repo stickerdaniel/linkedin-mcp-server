@@ -329,6 +329,47 @@ async def test_a_connection_change_drops_pending_pastes(
         assert await _state(viewer, "typed") == already_typed + "fresh text"
 
 
+@pytest.mark.parametrize("connection", ["disconnect", "replace"])
+@pytest.mark.parametrize("read_started", [False, True])
+async def test_a_connection_change_cancels_a_clipboard_attempt(
+    viewer, connection, read_started
+):
+    """A pending shortcut must not read or deliver text to another connection."""
+    await viewer.clock.install()
+    await _set_clipboard(viewer, "stale clipboard", held=True)
+    await viewer.evaluate(_CTRL_V)
+    if read_started:
+        await viewer.clock.run_for(400)
+        assert await _state(viewer, "reads") == "1"
+
+    await viewer.evaluate(
+        """connection => {
+          document.dispatchEvent(new CustomEvent("viewer-test-connection", {detail: connection}));
+          if (connection === "disconnect") {
+            document.dispatchEvent(new CustomEvent("viewer-test-connection", {detail: "reconnect"}));
+          }
+        }""",
+        connection,
+    )
+    await viewer.clock.run_for(1000)
+    assert await _state(viewer, "reads") == ("1" if read_started else "0")
+
+    await _set_clipboard(viewer, "fresh text")
+    await viewer.clock.run_for(1000)
+    assert await _state(viewer, "typed") == ""
+
+    # A permission prompt can outlast the ordinary late-paste suppression window.
+    await viewer.clock.run_for(6000)
+    await viewer.evaluate(_PASTE, "stale paste event")
+    await viewer.clock.run_for(1000)
+    assert await _state(viewer, "typed") == ""
+
+    await viewer.evaluate(_CTRL_V)
+    await viewer.evaluate(_PASTE, "fresh text")
+    await viewer.clock.run_for(1000)
+    assert await _state(viewer, "typed") == "fresh text"
+
+
 async def test_control_goes_up_before_the_first_character(viewer):
     """Control reached noVNC on its own, so the remote side holds it down.
 

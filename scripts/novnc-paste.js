@@ -99,18 +99,23 @@ document.addEventListener("keydown", event => {
   event.stopPropagation();
   // Each Ctrl+V is an attempt of its own, so what an earlier one did never holds this one back. An earlier one whose
   // fallback is still waiting or still reading gives way to it.
-  if (attempt) {
-    clearTimeout(attempt.timer);
-    attempt.replaced = true;
-  }
-  const current = { at: Date.now(), timer: null, typed: false, replaced: false };
+  if (attempt) attempt.cancel();
+  const current = { at: Date.now(), timer: null, typed: false, replaced: false, rfb: UI.rfb };
+  current.cancel = () => {
+    clearTimeout(current.timer);
+    current.replaced = true;
+    current.rfb.removeEventListener("disconnect", current.cancel);
+  };
   attempt = current;
+  current.rfb.addEventListener("disconnect", current.cancel);
   current.timer = setTimeout(() => {
+    if (current.replaced || !connected() || current.rfb !== UI.rfb) return;
     if (!navigator.clipboard || !navigator.clipboard.readText) return;
     navigator.clipboard.readText().then(text => {
-      // Its paste event came first after all, a later Ctrl+V replaced it while it read, or there is no text.
-      if (current.typed || current.replaced || !text) return;
+      // Its paste event came first, the attempt's connection ended, a later shortcut replaced it, or it is empty.
+      if (current.typed || current.replaced || current.rfb !== UI.rfb || !text) return;
       current.typed = true;
+      current.rfb.removeEventListener("disconnect", current.cancel);
       type(text);
     }, () => {});  // refused: nothing typed, so this Ctrl+V's paste event may still type its text
   }, FALLBACK_MS);
@@ -121,11 +126,13 @@ document.addEventListener("paste", event => {
   event.preventDefault();
   // The paste event of the latest Ctrl+V settles that attempt. One with no Ctrl+V before it, such as the browser's
   // own Paste menu, is typed as it is.
-  const current = attempt && Date.now() - attempt.at < LATE_PASTE_MS ? attempt : null;
+  // A cancelled connection still owns its late paste event after the duplicate-suppression window expires.
+  const current = attempt && (attempt.replaced || attempt.rfb !== UI.rfb || Date.now() - attempt.at < LATE_PASTE_MS) ? attempt : null;
   if (current) {
     clearTimeout(current.timer);
+    current.rfb.removeEventListener("disconnect", current.cancel);
     attempt = null;
-    if (current.typed) return;  // a late paste event after the fallback already typed this Ctrl+V's text
+    if (current.typed || current.replaced || current.rfb !== UI.rfb) return;
     current.typed = true;
   }
   type(event.clipboardData ? event.clipboardData.getData("text/plain") : "");
