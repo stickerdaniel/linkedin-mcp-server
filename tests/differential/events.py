@@ -1,0 +1,549 @@
+"""The differential harness's event log and its case counts.
+
+One ``events.jsonl`` per pytest run, one record per line, every record carrying
+``{t, run, experiment, row, platform, actor, kind}`` and whatever the kind adds.
+Records come from three writers that share no memory: the harness itself, the
+watcher process, and the synthetic origin's request log, which the harness
+copies in after a row. ``t`` is wall-clock seconds for that reason, since the
+watcher runs in another process and a monotonic clock is not comparable across
+processes.
+
+``counts.json`` says how many cases ran, skipped and failed per experiment, row,
+platform and column. A gate that reads "no difference" from a row that never ran
+is the failure it exists to expose, so a skipped case is counted, not dropped.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import platform as _platform
+import shutil
+import sys
+import threading
+import time
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+EVENTS_FILE = "events.jsonl"
+COUNTS_FILE = "counts.json"
+
+#: Where CI collects a run's evidence. Read by the conftest at import, because
+#: the suite's autouse fixture deletes every ``LINKEDIN*`` variable per test.
+OUT_ENV = "LINKEDIN_MCP_DIFFERENTIAL_OUT"
+
+BASE_FIELDS = ("t", "run", "experiment", "row", "platform", "actor", "kind")
+
+#: The plan's actors, plus ``driver`` (Patchright's Node process), ``harness``
+#: (this process), and ``other`` for a process the watcher cannot attribute.
+ACTORS = frozenset(
+    {
+        "host_stub",
+        "frontend",
+        "owner",
+        "guardian",
+        "browser",
+        "installer",
+        "watcher",
+        "canary",
+        "origin",
+        "proxy",
+        "cli",
+        "driver",
+        "harness",
+        "other",
+    }
+)
+
+KINDS = frozenset(
+    {
+        # From the watcher.
+        "process.start",
+        "process.update",
+        "process.exit",
+        "browser.roots",
+        "watcher.ready",
+        "watcher.summary",
+        # From the synthetic origin and its proxy.
+        "browser.request",
+        "proxy.decision",
+        # From the harness.
+        "profile.snapshot",
+        "user.output",
+        "owner.found",
+        "owner.successor",
+        "owner.exit",
+        "tool.result",
+        "row.identity",
+        "row.outcome",
+        # O2: the signal oracle, the canaries and what the harness killed.
+        "signal.call",
+        "signal.resolved",
+        "signal.violation",
+        "signal.oracle",
+        "process.death_unattributed",
+        "canary.start",
+        "actor.killed",
+        # H-R11: the declared shim and its hash, the close's window and the
+        # installer it ran into, how each installer ended, where the planted
+        # failure was reached, and the native continuation it all adds up to.
+        "shim.planted",
+        "job_query.window",
+        "installer.fate",
+        "shim.reached",
+        "job_query.continuation",
+        # H-R7: the activation, the close and the recovery barrier, each lease
+        # checkpoint, what the harness ended after measuring, the phase of the
+        # trace after the real drain returned, the fatal-kill calibration and
+        # the native continuation.
+        "r7.activation",
+        "r7.window",
+        "r7.lease",
+        "r7.ended",
+        "r7.phase",
+        "r7.calibration",
+        "r7.continuation",
+        # H-R3: each checkpoint around the host's quit, as it was read.
+        "host.checkpoint",
+        # Calls that lose their caller: a request held at the origin and how
+        # it was let go, a loss the harness caused, a row's phase boundary,
+        # and each attempt the frontend made (``KIND_FIELDS``).
+        "gate.entered",
+        "gate.released",
+        "loss",
+        "phase",
+        "attempt",
+        # A staged sign-in: the authorization the row recorded, the origin's
+        # rejection and release, and the lineage read beside R17.
+        "authorization",
+        "login.rejected",
+        "login.released",
+        "r17.lineage",
+    }
+)
+
+#: How a held request was let go: answered, its deadline expired, or the peer
+#: that sent it was gone.
+GATE_TERMINALS = frozenset({"served", "deadline", "peer-gone"})
+#: What the harness ended: a host's stdin at EOF, its pipes closed abruptly, or
+#: one actor killed.
+LOSSES = frozenset(
+    {
+        "eof",
+        "pipe",
+        "host-killed",
+        "frontend-killed",
+        "server-killed",
+        "owner-killed",
+    }
+)
+#: Which authorization a row recorded (``session.LOGIN``, ``IMPORT`` and
+#: ``ORIGIN_REJECTED``; a logout is recorded on its row's own record).
+AUTHORIZATIONS = frozenset({"login", "import", "origin-rejected"})
+#: What ``session.replacement_lineage`` reads.
+LINEAGES = frozenset({"none", "replaced", "lost", "unauthorized", "uncertain"})
+#: Which attempt the frontend made. Each is reported by the frontend's own
+#: output, never inferred from browser navigations.
+ATTEMPTS = frozenset({"preflight", "dispatch", "election", "replay"})
+
+
+def _text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _digests(value: Any) -> bool:
+    """A list of SHA-256 digests, never a value they were taken of."""
+    return isinstance(value, list) and all(
+        isinstance(item, str)
+        and len(item) == 64
+        and set(item) <= set("0123456789abcdef")
+        for item in value
+    )
+
+
+def _one_of(choices: frozenset[str]) -> Callable[[Any], bool]:
+    return lambda value: value in choices
+
+
+#: The fields a kind requires beyond ``BASE_FIELDS``, each with its check.
+#: Times are on the harness's monotonic clock, in nanoseconds, which every
+#: writer of these kinds shares. ``classification`` is required and may be
+#: null: an attempt that was not classified says so.
+KIND_FIELDS: dict[str, dict[str, Callable[[Any], bool]]] = {
+    "gate.entered": {"path": _text, "ordinal": _count, "entered_monotonic_ns": _count},
+    "gate.released": {
+        "path": _text,
+        "ordinal": _count,
+        "entered_monotonic_ns": _count,
+        "released_monotonic_ns": _count,
+        "terminal": _one_of(GATE_TERMINALS),
+    },
+    "loss": {
+        "loss": _one_of(LOSSES),
+        "target": _one_of(ACTORS),
+        "monotonic_ns": _count,
+    },
+    "phase": {"name": _text, "monotonic_ns": _count},
+    "attempt": {
+        "attempt": _one_of(ATTEMPTS),
+        "classification": lambda value: value is None or _text(value),
+    },
+    "authorization": {
+        "authorization": _one_of(AUTHORIZATIONS),
+        "monotonic_ns": _count,
+    },
+    "login.rejected": {"digests": _digests, "monotonic_ns": _count},
+    "login.released": {"released_ns": _count, "released_by": _text},
+    "r17.lineage": {"reading": _one_of(LINEAGES)},
+}
+
+EXPERIMENTS = frozenset({"K0", "K1", "K2", "K3"})
+
+#: ``unit`` for a model or unit control, ``integrated`` for a native row on a
+#: real browser, ``manual`` for a step only a person can run. The plan counts
+#: them apart so a unit pass never stands in for a missing native one.
+COLUMNS = frozenset({"unit", "integrated", "manual"})
+
+#: What kind of evidence each column is, as a packet's node records label it.
+EVIDENCE = {"unit": "source-model", "integrated": "native", "manual": "manual"}
+
+STATUSES = ("executed", "skipped", "failed")
+
+
+def current_platform() -> str:
+    return f"{sys.platform}-{_platform.machine().lower() or 'unknown'}"
+
+
+def validate(record: Mapping[str, Any]) -> None:
+    """Refuse a record the schema does not describe."""
+    missing = [name for name in BASE_FIELDS if name not in record]
+    if missing:
+        raise ValueError(f"event lacks {missing}: {dict(record)}")
+    if not isinstance(record["t"], (int, float)) or isinstance(record["t"], bool):
+        raise ValueError(f"event time is not a number: {record['t']!r}")
+    if record["experiment"] not in EXPERIMENTS:
+        raise ValueError(f"unknown experiment {record['experiment']!r}")
+    if record["actor"] not in ACTORS:
+        raise ValueError(f"unknown actor {record['actor']!r}")
+    if record["kind"] not in KINDS:
+        raise ValueError(f"unknown event kind {record['kind']!r}")
+    for name in ("run", "row", "platform"):
+        if not isinstance(record[name], str) or not record[name]:
+            raise ValueError(f"event field {name} is empty: {record[name]!r}")
+    for name, valid in KIND_FIELDS.get(record["kind"], {}).items():
+        if name not in record:
+            raise ValueError(f"{record['kind']} event lacks {name}: {dict(record)}")
+        if not valid(record[name]):
+            raise ValueError(
+                f"{record['kind']} event field {name} is invalid: {record[name]!r}"
+            )
+
+
+class EventLog:
+    """Appends validated records to one ``events.jsonl``."""
+
+    def __init__(self, directory: Path, run: str, platform: str | None = None):
+        self.directory = directory
+        self.path = directory / EVENTS_FILE
+        self.run = run
+        self.platform = platform or current_platform()
+        self._lock = threading.Lock()
+        directory.mkdir(parents=True, exist_ok=True)
+
+    def emit(
+        self,
+        *,
+        experiment: str,
+        row: str,
+        actor: str,
+        kind: str,
+        t: float | None = None,
+        **fields: Any,
+    ) -> dict[str, Any]:
+        record = {
+            "t": time.time() if t is None else t,
+            "run": self.run,
+            "experiment": experiment,
+            "row": row,
+            "platform": self.platform,
+            "actor": actor,
+            "kind": kind,
+            **fields,
+        }
+        self.append(record)
+        return record
+
+    def append(self, record: Mapping[str, Any]) -> None:
+        validate(record)
+        line = json.dumps(record, sort_keys=True, default=str)
+        with self._lock, self.path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+
+    def extend(self, records: Iterable[Mapping[str, Any]]) -> int:
+        count = 0
+        for record in records:
+            self.append(record)
+            count += 1
+        return count
+
+    def records(self) -> list[dict[str, Any]]:
+        if not self.path.exists():
+            return []
+        with self.path.open(encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Every complete record in *path*. A torn last line is a writer that was
+    stopped mid-write, and is dropped rather than failing the reader."""
+    if not path.exists():
+        return []
+    records = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return records
+
+
+@dataclass
+class Counts:
+    """Executed, skipped and failed cases per experiment, row, platform, column.
+
+    A case recorded with its *node* id is also kept whole under ``nodes``, with
+    its evidence label and, for a skip, its reason: a count says how many cells
+    ran, the nodes say which tests they were and why one did not.
+    """
+
+    _cells: Counter[tuple[str, str, str, str, str]] = field(default_factory=Counter)
+    _nodes: list[dict[str, Any]] = field(default_factory=list)
+
+    def record(
+        self,
+        *,
+        experiment: str,
+        row: str,
+        column: str,
+        status: str,
+        platform: str | None = None,
+        node: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        if experiment not in EXPERIMENTS:
+            raise ValueError(f"unknown experiment {experiment!r}")
+        if column not in COLUMNS:
+            raise ValueError(f"unknown column {column!r}")
+        if status not in STATUSES:
+            raise ValueError(f"unknown status {status!r}")
+        platform = platform or current_platform()
+        self._cells[(experiment, row, platform, column, status)] += 1
+        if node is not None:
+            self._nodes.append(
+                {
+                    "node": node,
+                    "experiment": experiment,
+                    "row": row,
+                    "platform": platform,
+                    "column": column,
+                    "evidence": EVIDENCE[column],
+                    "status": status,
+                    "reason": reason,
+                }
+            )
+
+    def __bool__(self) -> bool:
+        return bool(self._cells)
+
+    def as_rows(self) -> list[dict[str, Any]]:
+        grouped: dict[tuple[str, str, str, str], dict[str, int]] = {}
+        for (experiment, row, platform, column, status), n in self._cells.items():
+            cell = grouped.setdefault(
+                (experiment, row, platform, column),
+                {status_name: 0 for status_name in STATUSES},
+            )
+            cell[status] += n
+        return [
+            {
+                "experiment": experiment,
+                "row": row,
+                "platform": platform,
+                "column": column,
+                **cell,
+            }
+            for (experiment, row, platform, column), cell in sorted(grouped.items())
+        ]
+
+    def write(self, directory: Path) -> Path:
+        path = directory / COUNTS_FILE
+        nodes = sorted(self._nodes, key=lambda n: (n["node"], n["experiment"]))
+        path.write_text(
+            json.dumps(
+                {"cases": self.as_rows(), "nodes": nodes}, indent=2, sort_keys=True
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return path
+
+
+#: Every line an actor wrote, whole, one file per actor beside the row's other
+#: evidence. The event log carries the same lines one record each, which is
+#: the form a gate reads and the wrong one for following a single process; for
+#: the owner it carries only the last lines of its log, and
+#: ``OWNER_LOG_FILE`` is the whole of it. On Windows CI they hold Patchright's
+#: driver log too, which is where a browser's exit code is written
+#: (``DEBUG=pw:browser``).
+OUTPUT_FILES = {"frontend": "frontend.stderr", "cli": "cli.output"}
+OWNER_LOG_FILE = "owner.log"
+
+#: Per file. A driver logging every line its browser prints is a stream
+#: nothing else here bounds, and the runner's disk is shared with the rows.
+#: The head is what is kept. The browser's own output is the bulk; the
+#: driver's launch, exit, close and kill lines are recorded in the event log
+#: too (``harness.driver_lifecycle``), which is where an exit that arrives
+#: after the cap still is.
+OUTPUT_CAP_BYTES = 4 * 1024 * 1024
+
+
+def _truncated(cap: int, total: int | None = None) -> str:
+    size = f" of {total}" if total is not None else ""
+    return (
+        f"[truncated by the differential harness: the first {cap} bytes{size} "
+        f"are kept, the rest is not]\n"
+    )
+
+
+class CappedOutput:
+    """Lines appended to one file until *cap* bytes, then one marker.
+
+    Written as they arrive, so a row that never reaches its teardown still
+    leaves what its actors said. Evidence and never a verdict: a write that
+    fails is dropped, and the row goes on as it would have without it.
+    """
+
+    def __init__(self, path: Path, cap: int | None = None):
+        self.path = path
+        self.cap = OUTPUT_CAP_BYTES if cap is None else cap
+        self._written = 0
+        self._full = False
+        self._lock = threading.Lock()
+
+    def line(self, text: str) -> None:
+        data = (text + "\n").encode("utf-8", errors="replace")
+        with self._lock:
+            if self._full:
+                return
+            if self._written + len(data) > self.cap:
+                self._full = True
+                data = _truncated(self.cap).encode()
+            else:
+                self._written += len(data)
+            with contextlib.suppress(OSError):
+                with self.path.open("ab") as handle:
+                    handle.write(data)
+
+
+def keep_capped(source: Path, destination: Path, cap: int | None = None) -> bool:
+    """Copy *source* to *destination*, at most *cap* bytes.
+
+    A log that fits is copied whole. A longer one keeps the first half of the
+    budget and the last half, with a marker between them, because the line
+    that matters can be at either end: a browser that dies on launch writes
+    its exit first, and one that dies late writes it last. False when there
+    was nothing to read; like ``CappedOutput``, a failure is evidence lost
+    and nothing else."""
+    cap = OUTPUT_CAP_BYTES if cap is None else cap
+    head_cap = cap // 2
+    try:
+        with source.open("rb") as handle:
+            # The whole log when it fits. Reading only the first half would
+            # drop the rest of a log between half and the whole budget, and
+            # drop it silently, with no marker.
+            head = handle.read(cap)
+            total = os.fstat(handle.fileno()).st_size
+            tail = b""
+            if total > cap:
+                head = head[:head_cap]
+                handle.seek(max(head_cap, total - (cap - head_cap)))
+                tail = handle.read()
+    except OSError:
+        return False
+    with contextlib.suppress(OSError):
+        with destination.open("wb") as handle:
+            handle.write(head)
+            if tail:
+                marker = (
+                    f"[truncated by the differential harness: the first {head_cap} bytes "
+                    f"of {total} are kept, and its last {len(tail)}, the middle "
+                    f"is not]\n"
+                )
+                handle.write(b"\n" + marker.encode())
+                handle.write(tail)
+    return True
+
+
+#: What an evidence packet may contain, by file name. Everything else in the
+#: run directory stays on the runner: the rows keep their profiles, cookie
+#: files and certificates elsewhere, and this list is what keeps a later
+#: addition there from being uploaded by accident.
+PUBLISHED_FILES = frozenset(
+    {
+        EVENTS_FILE,
+        COUNTS_FILE,
+        "identity.json",
+        "failures.json",
+        "watcher.jsonl",
+        "watcher.stderr",
+        # What the actors wrote, whole and capped (``OUTPUT_FILES``).
+        *OUTPUT_FILES.values(),
+        OWNER_LOG_FILE,
+        # The signal oracle's own output: syscalls and targets, no environment.
+        "strace.txt",
+        "strace.stderr",
+        # H-R7: what the row recorded, and the fault's own records. A launch
+        # marker appears in them only as its digest.
+        "r7.json",
+        "activation.json",
+        "claim.json",
+        "outcome.json",
+        # Why a first navigation stalled and how a browser or the session went
+        # (``first_navigation``): phases, lifetimes, counts and names, never a
+        # cookie value, header or URL query.
+        "first-navigation.json",
+        "browser-lifetimes.json",
+        "cookie-lineage.json",
+        # K2's source-model witnesses at the pin, judged per node
+        # (``frozen_witnesses``).
+        "witnesses.json",
+    }
+)
+
+
+def publish(directory: Path, out: str | None, run: str) -> Path | None:
+    """Copy a run's evidence to *out*, for CI to collect. None when unset.
+
+    Only files named in ``PUBLISHED_FILES``, wherever they sit in the run
+    directory, and nothing else.
+    """
+    if not out:
+        return None
+    target = Path(out) / run
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file() or path.name not in PUBLISHED_FILES:
+            continue
+        destination = target / path.relative_to(directory)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, destination)
+    target.mkdir(parents=True, exist_ok=True)
+    return target

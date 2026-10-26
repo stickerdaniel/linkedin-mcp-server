@@ -1,0 +1,2305 @@
+"""The post-quit session starts only when every actor of the row is settled.
+
+Driven through the real row entry, ``measure_host_quit_row``, with everything
+that would launch, signal or touch an owner replaced: staging, the watcher
+process, the host session, owner discovery, cleanup and the post-quit session
+itself. What runs for real is the profile census over a modelled process
+table, the gate, and the row's own continuation. Only the census and the
+watcher's summary differ between cases, and the question is whether the
+post-quit session was started.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import dataclasses
+import json
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import AsyncMock
+
+import psutil
+import pytest
+
+import linkedin_mcp_server
+from differential import harness
+from differential.baseline import baseline_file
+from differential import events
+from differential.events import OUTPUT_FILES, OWNER_LOG_FILE, EventLog, publish
+from differential.harness import DaemonCleanup, PostQuit, measure_host_quit_row
+from differential import job_query
+from differential.job_query import SHIM_SHA256, ShimVenv, StallHost
+from differential.job_query_model import BASELINE, CANDIDATE, calibrate
+from differential.session import LAST_VERSION_FILE, write_synthetic_cookie_file
+from differential.signals import (
+    COMPLETE,
+    UNAVAILABLE,
+    OracleOutcome,
+    parse_strace,
+)
+from differential.test_failed_job_query import _Native
+from differential.test_row_judgement import _healthy
+from linkedin_mcp_server import process_tree
+from linkedin_mcp_server.session_state import portable_cookie_path, write_source_state
+
+ME = "harness-user"
+_PROCESS_TREE = "linkedin_mcp_server/process_tree.py"
+
+
+class _Watcher:
+    summary: dict = {}
+    records: list = []
+    #: Whether the row has started observing, and with it its actors.
+    started = False
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        _Watcher.started = True
+
+    def observed(self):
+        return list(self.records)
+
+    def stop(self):
+        return self.summary
+
+
+class _Actor:
+    """A modelled owner or server: the handle the row took when it tied it.
+
+    Killed, it stays a zombie, as a killed owner does until its parent reaps
+    it; otherwise it has already left.
+    """
+
+    def __init__(self, pid: int):
+        self.pid = pid
+        self.kills = 0
+
+    def kill(self):
+        self.kills += 1
+
+    def status(self):
+        if self.kills:
+            return psutil.STATUS_ZOMBIE
+        raise psutil.NoSuchProcess(self.pid)
+
+    def num_threads(self):
+        # SIGKILL ended every thread: the dead leader is all that is left.
+        return 1
+
+    def wait(self, timeout=None):
+        return None
+
+
+class _Oracle:
+    """No strace: the unit rows never attach anything to a modelled pid.
+
+    ``stop`` returns ``outcome``, unavailable unless a test sets another.
+    """
+
+    available = False
+    unavailable = "modelled"
+    scope = None
+    outcome = OracleOutcome(status=UNAVAILABLE, reasons=["modelled"])
+
+    def __init__(self, directory, *, required=False):
+        self.required = required
+
+    def start(self, pids):
+        raise AssertionError("the oracle is not available")
+
+    def stop(self, *, confirmed_dead=()):
+        return dataclasses.replace(self.outcome, required=self.required)
+
+
+class _Row:
+    """The row entry, and what the modelled row handed to its owner cleanup.
+
+    ``hooks`` maps a tool name to what the modelled actors do while that call
+    runs in a row's scripted phase: an owner's log line, a shim record.
+    ``operations`` is every scripted tool call, in order, with whatever else a
+    test instruments (``_job_query_row``) interleaved.
+    """
+
+    def __init__(
+        self, run, owner, cleaned: list, log: EventLog, hooks: dict, operations: list
+    ):
+        self._run = run
+        self.owner = owner
+        self.cleaned = cleaned
+        self.log = log
+        self.hooks = hooks
+        self.operations = operations
+
+    async def __call__(self, **row):
+        return await self._run(**row)
+
+
+def _process(pid: int, *, cmdline, exe=None, user=ME, status="running"):
+    return SimpleNamespace(
+        pid=pid, info={"cmdline": cmdline, "exe": exe, "status": status}, user=user
+    )
+
+
+@pytest.fixture
+def row(tmp_path, monkeypatch, profile):
+    """Run the row with the modelled census and watcher summary given."""
+    directory, staged = profile
+    healthy = _healthy(profile, daemon=True)
+    account = harness.ActorAccount(directory)
+    preservation = AsyncMock(return_value=PostQuit(valid=True))
+    origin = SimpleNamespace(requests=[], accept_session=lambda _value: None)
+    proxy = SimpleNamespace(url="http://127.0.0.1:9", decisions=[])
+    owner = harness.OwnerIdentity(
+        42, 1.0, "synthetic", str(account.auth_root), _Actor(42)
+    )
+    cleaned: list = []
+    hooks: dict = {}
+    operations: list = []
+
+    async def host(*args, **kwargs):
+        origin.requests.extend(healthy.row_requests)
+        started = kwargs.get("started")
+        if started is not None:
+            started(4242)
+        await kwargs["after_call"]()
+        script = kwargs.get("script")
+        if script is not None:
+            # A row's scripted phase: every call answers at once.
+            async def call(name, arguments):
+                operations.append(("call", name))
+                began = time.time()
+                began_monotonic_ns = time.monotonic_ns()
+                if name == harness.READ_TOOL:
+                    # The origin sees the read's feed request while it runs.
+                    origin.requests.extend(
+                        dataclasses.replace(request, t=time.time())
+                        for request in harness.feed_requests(healthy.row_requests)
+                    )
+                hook = hooks.get(name)
+                if hook is not None:
+                    hook()
+                return {
+                    "tool": name,
+                    "began": began,
+                    "ended": time.time(),
+                    "began_monotonic_ns": began_monotonic_ns,
+                    "ended_monotonic_ns": time.monotonic_ns(),
+                    "is_error": False,
+                    "read_the_post": name == harness.READ_TOOL,
+                }
+
+            await script(call)
+        return healthy.host
+
+    def identify(*args, **kwargs):
+        # The descriptor names pid 42 until something replaces it; once 42 is
+        # killed, it is no owner any longer.
+        if owner.process.kills:
+            return None, "pid 42 is not running"
+        return owner, None
+
+    monkeypatch.setattr(harness, "claim_account", lambda _: account)
+    monkeypatch.setattr(harness, "row_identity", lambda: {})
+    monkeypatch.setattr(harness, "evidence_refusal", lambda *a, **k: None)
+    monkeypatch.setattr(
+        harness, "stage_signed_in_session", AsyncMock(return_value=staged)
+    )
+    monkeypatch.setattr(
+        harness, "resolved_browser_executable", AsyncMock(return_value="/b/chrome")
+    )
+    monkeypatch.setattr(harness, "actor_environment", lambda *a, **k: {})
+    monkeypatch.setattr(harness, "Watcher", _Watcher)
+    monkeypatch.setattr(harness, "run_host_session", host)
+    monkeypatch.setattr(harness, "identify_owner", identify)
+    monkeypatch.setattr(harness, "SignalOracle", _Oracle)
+    monkeypatch.setattr(_Oracle, "outcome", _Oracle.outcome)
+    # A published descriptor, which is what the row looks for before reading.
+    published = tmp_path / "descriptor.json"
+    published.write_text("{}")
+    monkeypatch.setattr(
+        harness.daemon_descriptor, "descriptor_path", lambda _root: published
+    )
+    monkeypatch.setattr(
+        harness.daemon_descriptor,
+        "read",
+        lambda _: SimpleNamespace(
+            pid=42, instance_id="synthetic", protocol_version=2, log_path=""
+        ),
+    )
+
+    def retire(_account, identified):
+        cleaned.append(identified)
+        return DaemonCleanup("dir", True, False, True, True)
+
+    monkeypatch.setattr(harness, "retire_daemon_state", retire)
+    monkeypatch.setattr(harness, "observe_preservation", preservation)
+    monkeypatch.setattr(harness, "harness_user", lambda: ME)
+    monkeypatch.setattr(harness, "process_user", lambda process: process.user)
+    # Nothing changes a modelled process table while the row waits on it, so
+    # the first census is the answer every later sample would give: take it
+    # instead of sampling until the native deadline. A row whose census never
+    # settles would otherwise spend that whole minute on it.
+    wait_for_no_browser = harness.wait_for_no_browser
+    monkeypatch.setattr(
+        harness,
+        "wait_for_no_browser",
+        lambda account, _seconds, **census: wait_for_no_browser(account, 0.0, **census),
+    )
+
+    # A frozen runtime's identity, staging and browser, asked of no interpreter.
+    monkeypatch.setattr(harness, "frozen_identity", lambda runtime: {})
+    monkeypatch.setattr(harness, "frozen_refusal", lambda *a: None)
+    monkeypatch.setattr(harness, "stage_frozen_session", lambda *a, **k: None)
+    monkeypatch.setattr(harness, "bundled_executable", lambda runtime: "/b/chrome")
+
+    async def run(*, processes, summary, observed=(), **row):
+        # The modelled processes are the row's: the staging wait before the
+        # watcher starts finds the profile empty.
+        monkeypatch.setattr(_Watcher, "started", False)
+        monkeypatch.setattr(
+            harness,
+            "process_table",
+            lambda *a, **k: list(processes) if _Watcher.started else [],
+        )
+        _Watcher.summary = {**(healthy.watcher or {}), **summary}
+        _Watcher.records = list(observed)
+        row.setdefault("daemon", True)
+        row.setdefault("experiment", "K3")
+        result = await measure_host_quit_row(
+            profile=directory,
+            # Modelled: the row reads only their request and decision logs.
+            egress=cast(Any, (origin, proxy)),
+            log=EventLog(tmp_path / "evidence", run="gate"),
+            work_dir=tmp_path / "row",
+            **row,
+        )
+        return result, preservation.await_count
+
+    return _Row(
+        run,
+        owner,
+        cleaned,
+        EventLog(tmp_path / "evidence", run="gate"),
+        hooks,
+        operations,
+    )
+
+
+@pytest.fixture
+def profile(tmp_path):
+    directory = tmp_path / "auth" / "profile"
+    directory.mkdir(parents=True)
+    (directory / LAST_VERSION_FILE).write_text("153.0.8010.12")
+    staged = write_synthetic_cookie_file(portable_cookie_path(directory))
+    write_source_state(directory)
+    return directory, staged
+
+
+_OPEN_POSSIBLE_BROWSER = {
+    "pid": 777,
+    "possible_browser": True,
+    "resolution": "open",
+    "failures": ["cmdline: AccessDenied"],
+}
+_FINISHED_PS = {
+    "pid": 778,
+    "exe": "/bin/ps",
+    "possible_browser": False,
+    "resolution": "exited",
+    "failures": ["cmdline: AccessDenied"],
+}
+
+
+#: The checkout the modelled rows run, as ``row_identity`` names it.
+_HEAD = "c" * 40
+
+
+def _job_query_row(
+    monkeypatch, tmp_path, native=None, *, module=None, operations=None
+) -> ShimVenv:
+    """The row's own script, cache, stall host and fate tracking, with one
+    installer, 700, found as it starts; *native* answers for its handle.
+
+    The actors import *module*'s process_tree, this checkout's by default,
+    and the checkout is at ``_HEAD``. The row-private cache is made under
+    *tmp_path*. Each real ``PrivateCache.restore``, ``dismantle`` and
+    ``restore_installed`` call, each install-record write (``private`` through
+    the cache, ``real`` from the teardown) and each stall-host stop is
+    appended to *operations*, in order.
+    """
+    operations = [] if operations is None else operations
+    store = tmp_path / "store"
+    sources = [store / "chromium-1", store / "ffmpeg-2"]
+    for source in sources:
+        source.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(harness, "install_locations", lambda *a: sources)
+    monkeypatch.setattr(
+        harness,
+        "private_install",
+        lambda python, locations, env, stall: job_query.private_install(
+            python,
+            locations,
+            env,
+            stall,
+            parent=Path(tempfile.mkdtemp(prefix="private-", dir=tmp_path)),
+        ),
+    )
+    # No browser here to read as installed; test_failed_job_query covers that.
+    monkeypatch.setattr(
+        job_query,
+        "record_install",
+        lambda *a: operations.append(("record_install", "private")),
+    )
+    monkeypatch.setattr(
+        harness,
+        "record_install",
+        lambda *a: operations.append(("record_install", "real")),
+    )
+    for name in ("restore", "dismantle", "restore_installed"):
+        original = getattr(job_query.PrivateCache, name)
+
+        def recorded(self, *args, _name=name, _original=original, **kwargs):
+            operations.append(("cache", _name))
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(job_query.PrivateCache, name, recorded)
+    stop = job_query.StallHost.stop
+
+    def stopped(self):
+        operations.append(("stall", "stop"))
+        return stop(self)
+
+    monkeypatch.setattr(job_query.StallHost, "stop", stopped)
+    monkeypatch.setattr(harness, "row_identity", lambda: {"head": _HEAD})
+    monkeypatch.setattr(harness, "_FAMILY_SETTLE_SECONDS", 0.3)
+
+    def installers(observed, *, watch, **kwargs):
+        watch(700, 9.0)
+        return [(700, 9.0)]
+
+    monkeypatch.setattr(harness, "wait_for_installers", installers)
+    if native is not None:
+        monkeypatch.setattr(harness, "Fates", lambda: job_query.Fates(native))
+    return ShimVenv(
+        directory=tmp_path / "shim",
+        python=sys.executable,
+        source_python=sys.executable,
+        site_packages=str(tmp_path),
+        shim_sha256=SHIM_SHA256,
+        pth_sha256="",
+        source_code={},
+        code={"module": str(module or Path(linkedin_mcp_server.__file__))},
+    )
+
+
+def _baseline_module(tmp_path: Path) -> Path:
+    """Where a baseline runtime's actors would import the pinned process_tree."""
+    package = tmp_path / "baseline-code" / "linkedin_mcp_server"
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "process_tree.py").write_text(baseline_file(_PROCESS_TREE))
+    (package / "__init__.py").write_text("")
+    return package / "__init__.py"
+
+
+#: A watcher that observed the whole row: nothing it could not see.
+_SETTLED = {
+    "read_failures": [],
+    "relevant_read_failures": [],
+    "stopped_by": "stop file",
+    "observation_start": 0.0,
+    "observation_end": time.time() + 3600,
+    "max_gap_seconds": 0.1,
+}
+
+
+def _owner_log(monkeypatch, tmp_path) -> Path:
+    """The daemon log the descriptor names, shared by every owner of the root."""
+    log = tmp_path / "daemon.log"
+    if not log.exists():
+        log.write_text("")
+    monkeypatch.setattr(
+        harness.daemon_descriptor,
+        "read",
+        lambda _: SimpleNamespace(
+            pid=42, instance_id="synthetic", protocol_version=2, log_path=str(log)
+        ),
+    )
+    return log
+
+
+def _log_line(log: Path, message: str) -> None:
+    """A line in the shared daemon log: diagnostic, and no writer is named."""
+    with log.open("a") as stream:
+        stream.write(json.dumps({"level": "WARNING", "message": message}) + "\n")
+
+
+#: What the two observed events log, as the daemon log would show them.
+_CONSUMED_LINE = (
+    "Browser processes from this launch are still running after close, so the "
+    "shutdown stays unconfirmed."
+)
+_STAND_DOWN_LINE = f"Standing down: {harness.HELD_PROFILE_REASON}"
+
+
+def _event(shim: ShimVenv, event: str, **fields: Any) -> None:
+    """The shim's record of one observed logger event: by default reached by
+    the owner that closes (42, created 1.0), now."""
+    record = {
+        "kind": "log",
+        "event": event,
+        "t": time.time(),
+        "monotonic_ns": time.monotonic_ns(),
+        "pid": 42,
+        "pid_created": 1.0,
+        "reason": harness.HELD_PROFILE_REASON if event == harness.STAND_DOWN else None,
+        **fields,
+    }
+    with shim.reached_file.open("a") as stream:
+        stream.write(json.dumps(record) + "\n")
+
+
+def _witness(shim: ShimVenv, **fields: Any) -> None:
+    """The shim's record of one planted failure: by default by the owner that
+    closes (42, created 1.0), about installer 700 (created 9.0), now."""
+    record = {
+        "kind": "query",
+        "t": time.time(),
+        "monotonic_ns": time.monotonic_ns(),
+        "pid": 42,
+        "pid_created": 1.0,
+        "member": 700,
+        "created": 9.0,
+        "job": 55,
+        **fields,
+    }
+    with shim.reached_file.open("a") as stream:
+        stream.write(json.dumps(record) + "\n")
+
+
+class _Marker:
+    """The close marker: created at 2, and a clock that held."""
+
+    def mark(self):
+        pass
+
+    def held(self):
+        return True
+
+    def after(self, pid, start):
+        return start > 2.0
+
+
+def _chain(*, gate: bool = True) -> list[dict]:
+    """The frontend the harness started, the owner's gate and the owner (42)."""
+    records = [_started(4242, os.getpid(), 0.2, "frontend")]
+    if gate:
+        records.append(dict(_started(3572, 4242, 0.5, "owner"), start_identity=0.5))
+    records.append(_started(42, 4242, 1.0, "owner"))
+    return records
+
+
+async def _k1(row, monkeypatch, tmp_path, *, module=None, witness=False, native=None):
+    """K1 through the real entry: Direct, the installer running at the close,
+    no adopted Job, so nothing plants a failure unless *witness*."""
+    shim = _job_query_row(
+        monkeypatch,
+        tmp_path,
+        native or _Native(),
+        module=module,
+        operations=row.operations,
+    )
+    row.hooks.clear()
+    if witness:
+        row.hooks["close_session"] = lambda: _witness(shim)
+    result, _ = await row(
+        processes=[],
+        summary=_SETTLED,
+        daemon=False,
+        job_query_shim=shim,
+        experiment="K1",
+    )
+    return result
+
+
+async def _k2(row, monkeypatch, tmp_path, *, module=None, witness=True, summary=None):
+    """K2 through the real entry: the owner that closes (42) reaches the
+    planted failure about installer 700 inside its close, confirms its close
+    and stays; the family settles, then the recovery."""
+    shim = _job_query_row(
+        monkeypatch, tmp_path, _Native(), module=module, operations=row.operations
+    )
+    _owner_log(monkeypatch, tmp_path)
+    row.hooks.clear()
+    if witness:
+        row.hooks["close_session"] = lambda: _witness(shim)
+    result, _ = await row(
+        processes=[],
+        summary=summary or _SETTLED,
+        observed=_chain(),
+        job_query_shim=shim,
+        experiment="K2",
+    )
+    return result
+
+
+_NO_CONSUMPTION = "not seen to reach core.close's consumption"
+_NO_STAND_DOWN = "not seen to reach its held-profile stand-down"
+
+#: One piece of K3's continuation, taken away or moved, and the problem the
+#: common gate then names.
+_K3_FAULTS = {
+    "no-witness": "no planted failure witnesses the entry",
+    "another-actor": "no planted failure witnesses the entry",
+    "reused-pid": "no planted failure witnesses the entry",
+    "the-successors": "no planted failure witnesses the entry",
+    "before-the-close": "no planted failure witnesses the entry",
+    "about-the-gate": "no planted failure witnesses the entry",
+    "no-consumption": _NO_CONSUMPTION,
+    # E1EY-02: another owner generation reaching it, inside the close, while
+    # the daemon log shows the same line.
+    "a-foreign-generations-consumption": _NO_CONSUMPTION,
+    "consumption-before-the-close": _NO_CONSUMPTION,
+    # The lines in the shared daemon log, and no lifetime-bound event at all.
+    "daemon-log-lines-only": _NO_CONSUMPTION,
+    "no-stand-down": _NO_STAND_DOWN,
+    "a-foreign-stand-down": _NO_STAND_DOWN,
+    "a-setup-deadline-stand-down": _NO_STAND_DOWN,
+    # E1EY-03: the shim proves 799 existed; nothing shows it ended.
+    "an-unaccounted-queried-member": "pid 799",
+    "unsettled-family": "no post-settlement recovery",
+    "restoration-race": "restoration: the auth root's",
+    "unreadable-directory": "restoration: the auth root's profile/blocked could not be compared",
+    "protected-change": "by the recovery boundary: the login generation",
+    "impossible-successor": "no successor is shown to have served",
+    "host-killed": "the harness had to kill the server",
+    "no-first-post": "the first call did not read the synthetic post",
+    "watcher-gap": "watcher: ",
+    "cleanup-swept": "cleanup had to kill browsers",
+}
+
+
+async def _k3(
+    row,
+    monkeypatch,
+    tmp_path,
+    *,
+    fault=None,
+    stood=None,
+    native=None,
+    extra=(),
+    experiment="K3",
+):
+    """K3 through the real entry, whole unless *fault* names one piece; K0 is
+    the same row under its own label.
+
+    The owner that closes (42) reaches the planted failure about installer 700
+    inside its close and reaches core.close's consumption of the drain's
+    False, then its held-profile stand-down, and is seen to exit; the family
+    settles; after the harness's restoration a successor (43), begun after
+    the close, serves the probe. The daemon log gets the matching lines too,
+    as the real one would: diagnostic, and never read as a witness.
+    """
+    if native is None:
+        native = (
+            _Native(wait=PermissionError())
+            if fault == "unsettled-family"
+            else _Native()
+        )
+    shim = _job_query_row(monkeypatch, tmp_path, native, operations=row.operations)
+    log = _owner_log(monkeypatch, tmp_path)
+    monkeypatch.setattr(harness, "WallClockMarker", _Marker)
+    monkeypatch.setattr(harness, "_SUCCESSOR_SECONDS", 0.3)
+    # Seen before the probe returned: the run starts after these were taken.
+    seen = time.time() - 1
+    created = 1.5 if fault == "impossible-successor" else seen - 0.5
+    successor = harness.OwnerIdentity(
+        43, created, "successor", row.owner.auth_root, _Actor(43)
+    )
+    foreign = {"pid": 43, "pid_created": created}
+
+    def gone(process, seconds, **kwargs):
+        if stood is not None:
+            stood.append(time.time())
+        _log_line(log, _STAND_DOWN_LINE)
+        if fault == "replaced-daemon-log":
+            # Another file at the same path: nothing it holds is read.
+            log.unlink()
+            log.write_text("a replacement log\n")
+        if fault in ("no-stand-down", "daemon-log-lines-only"):
+            return True
+        if fault == "a-foreign-stand-down":
+            _event(shim, harness.STAND_DOWN, **foreign)
+        elif fault == "a-setup-deadline-stand-down":
+            _event(
+                shim,
+                harness.STAND_DOWN,
+                reason="managed browser setup exceeded its background deadline",
+            )
+        else:
+            _event(shim, harness.STAND_DOWN)
+        return True
+
+    monkeypatch.setattr(harness, "wait_until_dead", gone)
+    looked = {"n": 0}
+
+    def identify(*args, **kwargs):
+        looked["n"] += 1
+        return (successor if looked["n"] > 1 else row.owner), None
+
+    monkeypatch.setattr(harness, "identify_owner", identify)
+    witness: dict[str, Any] = {
+        "another-actor": {"pid": 99},
+        "reused-pid": {"pid_created": 0.5},
+        "the-successors": foreign,
+        "before-the-close": {"monotonic_ns": time.monotonic_ns() - 3_600_000_000_000},
+        "about-the-gate": {"member": 3572, "created": 0.5},
+    }.get(fault or "", {})
+
+    def close():
+        if fault != "no-witness":
+            _witness(shim, **witness)
+        if fault == "an-unaccounted-queried-member":
+            _witness(shim, member=799, created=9.5)
+        _log_line(log, _CONSUMED_LINE)
+        if fault == "a-foreign-generations-consumption":
+            _event(shim, harness.CONSUMED_FALSE, **foreign)
+            # The foreign owner's stand-down would then be its own, too.
+        elif fault == "consumption-before-the-close":
+            _event(
+                shim,
+                harness.CONSUMED_FALSE,
+                monotonic_ns=time.monotonic_ns() - 3_600_000_000_000,
+            )
+        elif fault not in ("no-consumption", "daemon-log-lines-only"):
+            _event(shim, harness.CONSUMED_FALSE)
+        if fault == "replaced-daemon-log":
+            log.write_text("")
+        if fault == "protected-change":
+            # A fresh login generation: a relogin nobody asked for.
+            write_source_state(Path(row.owner.auth_root) / "profile")
+
+    row.hooks.clear()
+    row.hooks["close_session"] = close
+    if fault in ("restoration-race", "unreadable-directory"):
+        late = Path(row.owner.auth_root) / "profile" / "late.txt"
+        if fault == "unreadable-directory":
+            blocked = late.parent / "blocked"
+            blocked.mkdir()
+            late = blocked / "Preferences"
+            late.write_text("before")
+            scandir = os.scandir
+
+            def refused(path):
+                if Path(path) == blocked:
+                    raise PermissionError(13, "test subtree is unreadable", str(path))
+                return scandir(path)
+
+            monkeypatch.setattr(os, "scandir", refused)
+
+        def racing(*args):
+            # Something besides the harness writes whenever it records.
+            late.write_text(str(time.monotonic_ns()))
+
+        monkeypatch.setattr(job_query, "record_install", racing)
+    if fault in ("host-killed", "no-first-post"):
+        original = harness.run_host_session
+        changes: dict[str, Any] = (
+            {"killed_by_harness": True}
+            if fault == "host-killed"
+            else {"tool": {"is_error": True, "read_the_post": False, "text": ""}}
+        )
+
+        async def host(*args, **kwargs):
+            return dataclasses.replace(await original(*args, **kwargs), **changes)
+
+        monkeypatch.setattr(harness, "run_host_session", host)
+    if fault == "cleanup-swept":
+        monkeypatch.setattr(harness, "sweep_browsers", lambda account: [4711])
+    summary = dict(_SETTLED)
+    if fault == "watcher-gap":
+        summary["max_gap_seconds"] = 5.0
+    records = [
+        *_chain(),
+        dict(_started(43, 4242, seen - 0.5, "owner"), start_identity=created),
+        _started(50, 43, seen, "driver"),
+        _started(51, 50, seen + 0.1, "browser"),
+        *extra,
+    ]
+    result, _ = await row(
+        processes=[],
+        summary=summary,
+        observed=records,
+        job_query_shim=shim,
+        experiment=experiment,
+    )
+    return result
+
+
+def _gate(result, experiment: str) -> list[str]:
+    return harness.continuation_problems(
+        result.continuation, experiment=experiment, revision=_HEAD, run="gate"
+    )
+
+
+async def test_the_failed_job_query_row_writes_through_the_real_event_log(
+    row, monkeypatch, tmp_path
+):
+    # The real EventLog: an event kind the schema does not know fails here.
+    result = await _k3(row, monkeypatch, tmp_path)
+    assert result.host is not None and result.host.error is None
+    records = row.log.records()
+    kinds = {record["kind"] for record in records}
+    assert {
+        "shim.planted",
+        "job_query.window",
+        "installer.fate",
+        "shim.reached",
+        "job_query.continuation",
+    } <= kinds
+    (planted,) = [r for r in records if r["kind"] == "shim.planted"]
+    assert planted["shim_sha256"] == SHIM_SHA256
+    (continuation,) = [r for r in records if r["kind"] == "job_query.continuation"]
+    assert continuation["termination_cause"] == "unobserved"
+    assert continuation["evidence"] == "native"
+    # The row-private cache is gone and the linked directories are not.
+    assert not Path(planted["private_cache"]).exists()
+    assert all(source.is_dir() for source in (tmp_path / "store").iterdir()), (
+        "a linked directory was removed"
+    )
+
+
+async def test_a_whole_k3_continuation_passes_the_common_gate(
+    row, monkeypatch, tmp_path
+):
+    result = await _k3(row, monkeypatch, tmp_path)
+    continuation = result.continuation
+    assert continuation is not None
+    assert _gate(result, "K3") == []
+    assert continuation.termination_cause == harness.UNOBSERVED_CAUSE
+    assert [(w["pid"], w["member"]) for w in continuation.witnesses] == [(42, 700)]
+    assert continuation.recovery == harness.POST_SETTLEMENT
+    # A packet that claims to have seen the caller, or to be more than native
+    # evidence, claims what nothing here observed.
+    for claim in (
+        {"termination_cause": "the routine drain"},
+        {"evidence": harness.SOURCE_MODEL},
+    ):
+        overclaimed = dataclasses.replace(continuation, **claim)
+        assert any(
+            "nothing native observed the caller" in problem
+            for problem in harness.continuation_problems(
+                overclaimed, experiment="K3", revision=_HEAD
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("fault", "why"), list(_K3_FAULTS.items()), ids=list(_K3_FAULTS)
+)
+async def test_each_missing_piece_of_k3_fails_the_common_gate(
+    row, monkeypatch, tmp_path, fault, why
+):
+    result = await _k3(row, monkeypatch, tmp_path, fault=fault)
+    problems = _gate(result, "K3")
+    assert any(why in problem for problem in problems), problems
+
+
+async def test_k3_probes_only_after_its_owner_left_and_the_family_settled(
+    row, monkeypatch, tmp_path
+):
+    # K3 on Windows: the probe reached the owner 33 ms after its unconfirmed
+    # close, was told the owner was restarting, and no successor was asked
+    # for (run 36384952466). Now the owner's exit, then the family's
+    # settlement, then the harness's restoration, then the probe.
+    stood: list[float] = []
+    await _k3(row, monkeypatch, tmp_path, stood=stood)
+    windows = [r for r in row.log.records() if r["kind"] == "job_query.window"]
+    phases = [w["phase"] for w in windows]
+    assert phases.index("close") < phases.index("family settled")
+    assert phases.index("family settled") < phases.index("cache restored")
+    assert phases.index("cache restored") < phases.index("probe")
+    close = next(w for w in windows if w["phase"] == "close")
+    settled = next(w for w in windows if w["phase"] == "family settled")
+    assert close["ended"] <= stood[0] <= settled["t"]
+
+
+async def test_the_shared_daemon_log_is_read_for_nothing(row, monkeypatch, tmp_path):
+    # Positive control for E1EY-02: truncated during the close and replaced
+    # at the same path before the owner's exit, the daemon log changes
+    # nothing the continuation says; the lifetime-bound events carry it.
+    result = await _k3(row, monkeypatch, tmp_path, fault="replaced-daemon-log")
+    assert _gate(result, "K3") == []
+    assert result.continuation is not None
+    assert result.continuation.consumed_false and result.continuation.stood_down
+
+
+#: What restores or rewrites the row-private download or an install record.
+_CACHE_WRITES = {
+    ("cache", "restore"),
+    ("cache", "dismantle"),
+    ("cache", "restore_installed"),
+    ("record_install", "private"),
+    ("record_install", "real"),
+}
+
+
+def _after_close(operations: list) -> list:
+    return operations[operations.index(("call", "close_session")) + 1 :]
+
+
+async def test_a_row_that_fails_before_its_verdict_touches_no_cache(
+    row, monkeypatch, tmp_path
+):
+    # The host session itself raises: no settlement verdict was ever taken,
+    # which is not a settled family.
+    shim = _job_query_row(monkeypatch, tmp_path, _Native(), operations=row.operations)
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("the host session broke")
+
+    monkeypatch.setattr(harness, "run_host_session", broken)
+    with pytest.raises(RuntimeError, match="the host session broke"):
+        await row(processes=[], summary=_SETTLED, job_query_shim=shim)
+    setup = row.operations.index(("record_install", "private"))
+    teardown = row.operations[setup + 1 :]
+    assert not _CACHE_WRITES & set(teardown), teardown
+    assert teardown == [("stall", "stop")]
+    (cache,) = _private_caches(tmp_path)
+    assert cache.is_dir()
+
+
+async def test_a_settled_row_restores_for_reuse_and_only_then_stops_its_stall_host(
+    row, monkeypatch, tmp_path
+):
+    await _k3(row, monkeypatch, tmp_path)
+    after = _after_close(row.operations)
+    # Restored for the probe, then the probe; the teardown's restoration for
+    # reuse, then the stall host.
+    assert after.index(("cache", "restore_installed")) < after.index(
+        ("call", harness.READ_TOOL)
+    )
+    teardown = after[after.index(("call", harness.READ_TOOL)) + 1 :]
+    assert teardown.index(("cache", "dismantle")) < teardown.index(("stall", "stop"))
+    assert teardown.index(("record_install", "real")) < teardown.index(
+        ("stall", "stop")
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "settles"),
+    [
+        # The shim proves 799 existed, and nothing records it: it blocks.
+        ("unrecorded", False),
+        # Recorded with an unknown parent: it blocks until it is seen to leave.
+        ("unresolved-running", False),
+        ("seen-to-exit", True),
+        # Recorded below the frontend the harness started: no installer's.
+        ("grounded", True),
+    ],
+)
+async def test_a_positively_queried_member_is_reconciled_before_restoration(
+    row, monkeypatch, tmp_path, case, settles
+):
+    # E1EY-03: before the harness restores or probes, not only at the end.
+    unresolved = _started(799, 9999, 9.5, "other")
+    extra = {
+        "unrecorded": (),
+        "unresolved-running": (unresolved,),
+        "seen-to-exit": (
+            unresolved,
+            {"kind": "process.exit", "pid": 799, "start_identity": 9.5, "t": 9.9},
+        ),
+        "grounded": (_started(799, 4242, 9.5, "other"),),
+    }[case]
+    result = await _k3(
+        row, monkeypatch, tmp_path, fault="an-unaccounted-queried-member", extra=extra
+    )
+    after = _after_close(row.operations)
+    problems = _gate(result, "K3")
+    if settles:
+        assert ("cache", "restore_installed") in after
+        assert ("call", harness.READ_TOOL) in after
+        assert problems == []
+    else:
+        # No restoration, no probe, and no teardown write to the cache or to
+        # an install record: 799 was never shown ended.
+        assert not _CACHE_WRITES & set(after), after
+        assert ("call", harness.READ_TOOL) not in after
+        assert ("stall", "stop") in after
+        assert any("before recovery:" in p and "pid 799" in p for p in problems)
+        assert any("before cleanup:" in p and "pid 799" in p for p in problems)
+
+
+class _Pending(_Native):
+    """An installer handle whose wait returns only once the harness stops its
+    stall host: an exit that the harness itself caused."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = threading.Event()
+
+    def wait(self, handle):
+        self.release.wait(30)
+
+
+def _private_caches(tmp_path: Path) -> list[Path]:
+    return sorted(tmp_path.glob("private-*/browsers"))
+
+
+@pytest.mark.parametrize(
+    "case", ["failed-wait", "pending-wait", "unresolved-descendant", "direct"]
+)
+async def test_an_unresolved_family_is_left_as_it_was(row, monkeypatch, tmp_path, case):
+    # E1EY-04: the teardown restores for reuse only a settled family; a
+    # failed row's cleanup stops the harness's own stall host and keeps the
+    # download, the install records and the unresolved verdict.
+    monkeypatch.setattr(harness, "_BROWSER_GONE_SECONDS", 0.3)
+    if case == "pending-wait":
+        native = _Pending()
+        stop = job_query.StallHost.stop
+
+        def releasing(self):
+            stop(self)
+            native.release.set()
+
+        monkeypatch.setattr(job_query.StallHost, "stop", releasing)
+        result = await _k3(row, monkeypatch, tmp_path, native=native)
+    elif case == "failed-wait":
+        result = await _k3(row, monkeypatch, tmp_path, fault="unsettled-family")
+    elif case == "unresolved-descendant":
+        family = (
+            _started(700, 4242, 9.0, "installer"),
+            _started(701, 700, 9.2, "other"),
+        )
+        result = await _k3(row, monkeypatch, tmp_path, extra=family)
+    else:
+        result = await _k1(
+            row, monkeypatch, tmp_path, native=_Native(wait=PermissionError())
+        )
+    after = _after_close(row.operations)
+    assert not _CACHE_WRITES & set(after), after
+    assert after[-1] == ("stall", "stop")
+    # The download's place is still there, as the row left it.
+    (cache,) = _private_caches(tmp_path)
+    assert cache.is_dir()
+    (cleanup,) = [
+        r
+        for r in row.log.records()
+        if r["kind"] == "job_query.window" and r["phase"] == "failed-row cleanup"
+    ]
+    assert cleanup["private_cache"] == str(cache) and cleanup["unresolved"]
+    assert result.continuation is not None
+    validity = result.continuation.validity
+    assert any(p.startswith("before cleanup: ") for p in validity), validity
+    assert any("cannot establish product settlement before" in p for p in validity)
+    assert any("its cause remains unobserved" in p for p in validity)
+    assert _gate(result, "K1" if case == "direct" else "K3")
+    if case == "pending-wait":
+        # The installer did end, once the harness stopped the stall host; that
+        # settles nothing the row's verdict had already left unresolved.
+        assert native.release.is_set()
+
+
+async def test_a_whole_k2_continuation_passes_without_any_consumer(
+    row, monkeypatch, tmp_path
+):
+    # The baseline confirms its close and keeps serving: no consumption, no
+    # stand-down, no successor, and none is asked of it.
+    result = await _k2(row, monkeypatch, tmp_path)
+    assert _gate(result, "K2") == []
+    missing = await _k2(row, monkeypatch, tmp_path, witness=False)
+    assert any("no planted failure" in p for p in _gate(missing, "K2"))
+
+
+async def test_k1_needs_no_fault_and_refuses_one(row, monkeypatch, tmp_path):
+    result = await _k1(row, monkeypatch, tmp_path)
+    assert _gate(result, "K1") == []
+    assert result.continuation is not None
+    assert result.continuation.recovery == harness.NO_RECOVERY
+    reached = await _k1(row, monkeypatch, tmp_path, witness=True)
+    assert any("no adopted Job" in p for p in _gate(reached, "K1"))
+
+
+async def test_a_cell_is_judged_against_its_own_experiment_revision_and_run(
+    row, monkeypatch, tmp_path
+):
+    result = await _k2(row, monkeypatch, tmp_path)
+    assert "the continuation is K2's, not K3's" in harness.continuation_problems(
+        result.continuation, experiment="K3", revision=_HEAD
+    )
+    other = harness.continuation_problems(
+        result.continuation, experiment="K2", revision="d" * 40
+    )
+    assert any(f"not {'d' * 40}" in p for p in other)
+    elsewhere = harness.continuation_problems(
+        result.continuation, experiment="K2", revision=_HEAD, run="another"
+    )
+    assert any("from run gate, not another" in p for p in elsewhere)
+    assert harness.continuation_problems(None, experiment="K2", revision=_HEAD) == [
+        "K2 left no native continuation"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("native", "starts"),
+    [
+        pytest.param(_Native(), 1, id="an-observed-exit"),
+        pytest.param(_Native(wait=PermissionError()), 0, id="a-failed-wait"),
+        pytest.param(_Native(exited=None), 0, id="no-kernel-exit"),
+        pytest.param(_Native(created=5.0), 0, id="another-lifetime"),
+    ],
+)
+async def test_the_post_quit_session_waits_for_every_installer_fate(
+    row, monkeypatch, tmp_path, native, starts
+):
+    # An installer whose end was not observed may still be running on the
+    # profile's setup: no session starts after the row until it is.
+    shim = _job_query_row(monkeypatch, tmp_path, native)
+    result, calls = await row(
+        processes=[],
+        summary=_SETTLED,
+        daemon=False,
+        job_query_shim=shim,
+        experiment="K1",
+    )
+    assert calls == starts, result.failures
+    problems = _gate(result, "K1")
+    if not starts:
+        assert result.post_quit is not None and result.post_quit.valid is None
+        assert any("H-R11 evidence incomplete" in f for f in result.failures)
+        assert any("installer inventory" in p for p in problems)
+    else:
+        assert problems == []
+
+
+@pytest.mark.parametrize("case", ["reused-parent", "delayed-installer"])
+@pytest.mark.parametrize("helper_exited", [False, True])
+async def test_uncertain_installer_lineage_blocks_preservation_until_exit(
+    row, monkeypatch, tmp_path, case, helper_exited
+):
+    shim = _job_query_row(monkeypatch, tmp_path, _Native())
+    helper = dict(_started(702, 700, 9.08, "other"), start_identity=9.02)
+    if case == "reused-parent":
+        observed = [
+            _started(700, os.getpid(), 9.0, "installer"),
+            {"kind": "process.exit", "pid": 700, "start_identity": 9.0, "t": 9.03},
+            dict(_started(700, os.getpid(), 9.08, "other"), start_identity=9.06),
+            helper,
+        ]
+    else:
+        observed = [
+            {**helper, "ppid": -1, "t": 9.1, "in_row": False},
+            dict(_started(700, os.getpid(), 9.2, "installer"), start_identity=9.0),
+            {**helper, "kind": "process.update", "t": 9.2},
+            {"kind": "process.exit", "pid": 700, "start_identity": 9.0, "t": 9.3},
+        ]
+    if helper_exited:
+        observed.append(
+            {"kind": "process.exit", "pid": 702, "start_identity": 9.02, "t": 9.4}
+        )
+    lineage = harness.Lineage(observed)
+    life = lineage.lifetime(702, 9.02)
+    assert life is None or lineage.of(life) != harness.FROM_HARNESS
+    result, calls = await row(
+        processes=[],
+        summary=_SETTLED,
+        observed=observed,
+        daemon=False,
+        job_query_shim=shim,
+        experiment="K1",
+    )
+    problems = _gate(result, "K1")
+    if helper_exited:
+        assert calls == 1 and problems == [], result.failures
+    else:
+        assert calls == 0
+        assert any("702 (unresolved)" in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    ("recorded", "starts"),
+    [
+        # The watcher recorded it after the first look: the late look watches it.
+        pytest.param(True, 1, id="started-late-and-recorded"),
+        pytest.param("owner-gate", 1, id="a-known-row-process"),
+        # Nothing recorded it: its fate is unknown, and it could be setup's.
+        pytest.param(False, 0, id="never-recorded"),
+    ],
+)
+async def test_every_queried_lifetime_must_be_accounted_for(
+    row, monkeypatch, tmp_path, recorded, starts
+):
+    shim = _job_query_row(monkeypatch, tmp_path, _Native())
+    # Some actor's drain asked about 702: positive evidence that it existed.
+    row.hooks.clear()
+    row.hooks["close_session"] = lambda: _witness(shim, pid=1, member=702)
+    # Recorded as a late installer the late look watches, or as the owner's
+    # own gate (run 36410976409), a row process that is no installer.
+    role = "installer" if recorded != "owner-gate" else "owner"
+    late = dict(_started(702, 4242, 2.0, role), start_identity=9.0)
+    # The frontend, started by the harness: the gate's chain is complete.
+    frontend = _started(4242, os.getpid(), 1.0, "frontend")
+    result, calls = await row(
+        processes=[],
+        summary=_SETTLED,
+        observed=[frontend, late] if recorded else [],
+        job_query_shim=shim,
+        experiment="K2",
+    )
+    assert calls == starts, result.failures
+    assert result.continuation is not None
+    unaccounted = [p for p in result.continuation.validity if "pid 702" in p]
+    assert bool(unaccounted) is (not starts), result.continuation.validity
+
+
+@pytest.mark.parametrize(
+    "fault", ["cleanup", "watcher"], ids=["daemon-dir-survived", "watcher-gap"]
+)
+async def test_k2_never_accepts_a_cleanup_or_watcher_failure(
+    row, monkeypatch, tmp_path, fault
+):
+    # E1EP-04, through the row: the baseline's own behaviour is K2's to keep,
+    # a cleanup that did not finish or a watcher that could not see is not.
+    summary = dict(_SETTLED)
+    if fault == "cleanup":
+
+        def retire(_account, identified):
+            return DaemonCleanup(
+                "dir",
+                True,
+                False,
+                True,
+                False,
+                ("the row's daemon directory survived removal",),
+            )
+
+        monkeypatch.setattr(harness, "retire_daemon_state", retire)
+    else:
+        summary["max_gap_seconds"] = 5.0
+    result = await _k2(row, monkeypatch, tmp_path, summary=summary)
+    problems = _gate(result, "K2")
+    expected = "cleanup: the row's daemon" if fault == "cleanup" else "watcher: "
+    assert any(p.startswith(expected) for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        ({}, None),
+        ({"killed_by_harness": True}, "the harness had to kill the server"),
+        ({"exited_on_quit": False}, "the server did not exit within"),
+        ({"exit_code": 1}, "the server exited abnormally"),
+        ({"stdin_closed": False}, "closing the server's stdin failed"),
+        ({"alive_before_quit": False}, "the server was already gone"),
+    ],
+    ids=["clean", "killed", "timeout", "nonzero", "stdin", "already-dead"],
+)
+async def test_k2_requires_a_successful_host_quit(
+    row, monkeypatch, tmp_path, changes, expected
+):
+    original = harness.run_host_session
+
+    async def host(*args, **kwargs):
+        return dataclasses.replace(await original(*args, **kwargs), **changes)
+
+    monkeypatch.setattr(harness, "run_host_session", host)
+    result = await _k2(row, monkeypatch, tmp_path)
+    assert result.host is not None and result.host.error is None
+    problems = _gate(result, "K2")
+    host_problems = harness.host_failures(result.host)
+    if expected is None:
+        assert host_problems == [] and problems == []
+    else:
+        assert any(expected in problem for problem in host_problems)
+        assert all(problem in problems for problem in host_problems)
+
+
+async def test_failed_private_setup_closes_the_listener_and_removes_its_links(
+    row, monkeypatch, tmp_path
+):
+    store = tmp_path / "store"
+    sources = [store / "chromium-1", store / "ffmpeg-2"]
+    for source in sources:
+        source.mkdir(parents=True)
+        (source / "INSTALLATION_COMPLETE").write_text("")
+    monkeypatch.setattr(harness, "install_locations", lambda *a: sources)
+    monkeypatch.setattr(
+        harness,
+        "private_install",
+        lambda python, locations, env, stall: job_query.private_install(
+            python, locations, env, stall, parent=tmp_path
+        ),
+    )
+
+    def refuse_record(*args):
+        raise RuntimeError("private install is not ready")
+
+    monkeypatch.setattr(job_query, "record_install", refuse_record)
+    started: list[str] = []
+
+    class TrackedStall(StallHost):
+        def start(self):
+            super().start()
+            started.append(self.url)
+            return self
+
+    monkeypatch.setattr(harness, "StallHost", TrackedStall)
+    shim = ShimVenv(
+        directory=tmp_path / "shim",
+        python=sys.executable,
+        source_python=sys.executable,
+        site_packages=str(tmp_path),
+        shim_sha256=SHIM_SHA256,
+        pth_sha256="",
+        source_code={},
+        code={},
+    )
+    with pytest.raises(RuntimeError, match="private install is not ready"):
+        await row(
+            processes=[],
+            summary={"read_failures": [], "relevant_read_failures": []},
+            job_query_shim=shim,
+        )
+    assert not (tmp_path / "browsers").exists()
+    assert all((source / "INSTALLATION_COMPLETE").exists() for source in sources)
+    assert len(started) == 1
+    port = int(started[0].rsplit(":", 1)[1])
+    with pytest.raises(OSError):
+        socket.create_connection(("127.0.0.1", port), timeout=0.2)
+
+
+# --- The composition: the source model and every native cell of this run ---------
+
+
+@pytest.fixture
+def cells(row, monkeypatch, tmp_path):
+    """K1, K2, K3 and K0 as four real rows of one run, K1 and K2 importing the
+    pinned baseline's process_tree and K3 and K0 this checkout's."""
+    import asyncio
+
+    baseline = _baseline_module(tmp_path)
+
+    async def run():
+        k1 = await _k1(row, monkeypatch, tmp_path, module=baseline)
+        k2 = await _k2(row, monkeypatch, tmp_path, module=baseline)
+        k3 = await _k3(row, monkeypatch, tmp_path)
+        k0 = await _k3(row, monkeypatch, tmp_path, experiment="K0")
+        return k1.continuation, k2.continuation, k3.continuation, k0.continuation
+
+    return asyncio.run(run())
+
+
+@pytest.fixture(scope="module")
+def model():
+    return calibrate(
+        {
+            BASELINE: baseline_file(_PROCESS_TREE),
+            CANDIDATE: Path(process_tree.__file__).read_text(encoding="utf-8"),
+        }
+    )
+
+
+_REVISIONS = {"K1": _HEAD, "K2": _HEAD, "K3": _HEAD, "K0": _HEAD}
+
+
+def _ledger(*continuations, run="gate") -> harness.R11Ledger:
+    ledger = harness.R11Ledger(run)
+    for continuation in continuations:
+        ledger.record(continuation)
+    return ledger
+
+
+def test_the_composition_holds_for_a_calibrated_whole_run(cells, model):
+    assert harness.r11_composition(model, _ledger(*cells), revisions=_REVISIONS) == []
+
+
+async def test_unreadable_restoration_cannot_pass_a_calibrated_composition(
+    cells, model, row, monkeypatch, tmp_path
+):
+    k1, k2, _, k0 = cells
+    result = await _k3(row, monkeypatch, tmp_path, fault="unreadable-directory")
+    problems = harness.r11_composition(
+        model, _ledger(k1, k2, result.continuation, k0), revisions=_REVISIONS
+    )
+    assert any("profile/blocked could not be compared" in p for p in problems)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "a-foreign-generations-consumption",
+        "daemon-log-lines-only",
+        "no-consumption",
+        "a-foreign-stand-down",
+        "an-unaccounted-queried-member",
+        "unsettled-family",
+    ],
+)
+async def test_a_k3_cell_missing_its_own_continuation_cannot_be_composed(
+    cells, model, row, monkeypatch, tmp_path, fault
+):
+    # From the producer, through the row and the cell's gate, to the
+    # composition with a fresh calibration and valid K1, K2 and K0 cells.
+    k1, k2, _, k0 = cells
+    result = await _k3(row, monkeypatch, tmp_path, fault=fault)
+    problems = harness.r11_composition(
+        model, _ledger(k1, k2, result.continuation, k0), revisions=_REVISIONS
+    )
+    assert any(
+        problem.startswith("K3: ") and _K3_FAULTS[fault] in problem
+        for problem in problems
+    ), problems
+
+
+def test_the_composition_needs_a_calibration_from_this_invocation(cells, model):
+    problems = harness.r11_composition(None, _ledger(*cells), revisions=_REVISIONS)
+    assert problems == ["no source-model calibration ran in this invocation"]
+    failing = dataclasses.replace(model, problems=("unknown, candidate: ended 700",))
+    problems = harness.r11_composition(failing, _ledger(*cells), revisions=_REVISIONS)
+    assert problems == ["source model: unknown, candidate: ended 700"]
+
+
+@pytest.mark.parametrize("missing", ["K1", "K2", "K3", "K0"])
+def test_the_composition_needs_every_native_cell(cells, model, missing):
+    # K1 and K3 selected without K2 compose nothing, nor does any other
+    # selection short of all four.
+    present = [c for c in cells if c.experiment != missing]
+    problems = harness.r11_composition(model, _ledger(*present), revisions=_REVISIONS)
+    assert f"{missing}: {missing} left no native continuation" in problems
+
+
+def test_a_valid_looking_cell_from_another_revision_or_run_fails(cells, model):
+    k1, k2, k3, k0 = cells
+    moved = dataclasses.replace(k3, revision="d" * 40)
+    problems = harness.r11_composition(
+        model, _ledger(k1, k2, moved, k0), revisions=_REVISIONS
+    )
+    assert any(p.startswith("K3: the actors ran dddd") for p in problems), problems
+    problems = harness.r11_composition(
+        model, _ledger(*cells, run="another"), revisions=_REVISIONS
+    )
+    assert sum("from run gate, not another" in p for p in problems) == 4
+
+
+def test_a_cell_that_ran_other_code_than_the_model_fails(cells, model):
+    k1, k2, k3, k0 = cells
+    swapped = dataclasses.replace(k3, process_tree_sha256=k1.process_tree_sha256)
+    problems = harness.r11_composition(
+        model, _ledger(k1, k2, swapped, k0), revisions=_REVISIONS
+    )
+    assert any(p.startswith("K3: the actors imported process_tree") for p in problems)
+    # K0 repeats the candidate, so the baseline's process_tree is not its own.
+    swapped = dataclasses.replace(k0, process_tree_sha256=k1.process_tree_sha256)
+    problems = harness.r11_composition(
+        model, _ledger(k1, k2, k3, swapped), revisions=_REVISIONS
+    )
+    assert any(p.startswith("K0: the actors imported process_tree") for p in problems)
+
+
+def test_an_invocation_takes_each_cell_once(cells, model):
+    ledger = _ledger(*cells)
+    assert harness.r11_composition(model, ledger, revisions=_REVISIONS) == []
+    # Emptied by the composition: nothing is left over for a later one.
+    again = harness.r11_composition(model, ledger, revisions=_REVISIONS)
+    assert {p for p in again if "left no native continuation" in p} == {
+        f"{k}: {k} left no native continuation" for k in ("K1", "K2", "K3", "K0")
+    }
+    doubled = harness.r11_composition(
+        model, _ledger(*cells, cells[2]), revisions=_REVISIONS
+    )
+    assert "a second K3 continuation in one invocation" in doubled
+
+
+def test_k3_worse_than_k1_fails_the_composition(cells, model):
+    k1, k2, k3, k0 = cells
+    assert k3.vector is not None
+    worse = dataclasses.replace(
+        k3, vector=dataclasses.replace(k3.vector, o4_session="lost")
+    )
+    problems = harness.r11_composition(
+        model, _ledger(k1, k2, worse, k0), revisions=_REVISIONS
+    )
+    assert any(p.startswith("K3 differs from K1 frozen: o4_session") for p in problems)
+
+
+def test_a_repeat_that_reads_unlike_k3_fails_the_composition(cells, model):
+    # Valid through K3's own gate, and still not the same reading.
+    k1, k2, k3, k0 = cells
+    assert k0.vector is not None
+    unlike = dataclasses.replace(
+        k0, vector=dataclasses.replace(k0.vector, fell_back=True)
+    )
+    assert (
+        harness.continuation_problems(
+            unlike, experiment="K0", revision=_HEAD, run="gate"
+        )
+        == []
+    )
+    problems = harness.r11_composition(
+        model, _ledger(k1, k2, k3, unlike), revisions=_REVISIONS
+    )
+    assert problems == ["K0 differs from K3: fell_back: False then True"]
+    blind = dataclasses.replace(k0, vector=None)
+    problems = harness.r11_composition(
+        model, _ledger(k1, k2, k3, blind), revisions=_REVISIONS
+    )
+    assert problems == ["K3 or K0 left no vector to compare"]
+    # K0 is held to all of K3's gate, not only to K2's entry.
+    standing = dataclasses.replace(k0, stood_down=False)
+    assert any(
+        "held-profile stand-down" in p
+        for p in harness.continuation_problems(
+            standing, experiment="K0", revision=_HEAD, run="gate"
+        )
+    )
+
+
+async def test_a_settled_complete_census_starts_the_post_quit_session_once(row):
+    result, calls = await row(
+        processes=[
+            _process(10, cmdline=["python", "server"]),
+            _process(11, cmdline=None, user="root"),
+        ],
+        summary={"read_failures": [_FINISHED_PS], "relevant_read_failures": []},
+    )
+    assert calls == 1
+    assert result.post_quit is not None and result.post_quit.valid is True
+
+
+@pytest.mark.parametrize(
+    ("processes", "summary", "reported"),
+    [
+        pytest.param(
+            [_process(777, cmdline=None)],
+            {"relevant_read_failures": [_OPEN_POSSIBLE_BROWSER]},
+            "incomplete",
+            id="denied-arguments-and-open-episode",
+        ),
+        pytest.param(
+            [_process(777, cmdline=None)],
+            {"relevant_read_failures": []},
+            "incomplete",
+            id="denied-arguments",
+        ),
+        pytest.param(
+            [_process(777, cmdline=None, exe="/b/chrome")],
+            {"relevant_read_failures": []},
+            "incomplete",
+            id="denied-arguments-browser-exe",
+        ),
+        pytest.param(
+            [],
+            {"relevant_read_failures": [_OPEN_POSSIBLE_BROWSER]},
+            "unresolved possible browsers",
+            id="open-episode",
+        ),
+    ],
+)
+async def test_an_unsettled_census_starts_nothing(row, processes, summary, reported):
+    result, calls = await row(processes=processes, summary=summary)
+    assert calls == 0
+    assert result.post_quit is not None and result.post_quit.valid is None
+    assert any(reported in failure for failure in result.post_quit.failures)
+    assert any("post-quit not run" in failure for failure in result.failures)
+
+
+def _retained(profile: str) -> dict:
+    """The watcher's note of a known root whose later argument read failed."""
+    return {
+        "pid": 777,
+        "start_identity": 6.0,
+        "exe": "/b/chrome",
+        "first": 1.0,
+        "last": 2.0,
+        "failures": ["cmdline: AccessDenied"],
+        "possible_browser": False,
+        "resolution": "a known browser root's earlier reading retained",
+        "retained_profile": profile,
+    }
+
+
+def _retained_summary(key: str, retained_profile: str) -> dict:
+    return {
+        "read_failures": [_retained(retained_profile)],
+        "relevant_read_failures": [],
+        "observation_start": 0.0,
+        "observation_end": time.time() + 60.0,
+        "max_roots": {key: 1},
+    }
+
+
+async def test_a_retained_row_root_does_not_settle_a_census_that_cannot_read_it(
+    row, profile
+):
+    # The watcher's retained reading is history; the launch waits on what the
+    # census reads now, and it cannot read the browser's arguments.
+    key = harness.ActorAccount(profile[0]).browser_key
+    result, calls = await row(
+        processes=[_process(777, cmdline=None, exe="/b/chrome")],
+        summary=_retained_summary(key, key),
+    )
+    assert calls == 0
+    assert result.post_quit is not None and result.post_quit.valid is None
+    assert any("incomplete" in failure for failure in result.post_quit.failures)
+
+
+async def test_an_empty_profile_permits_the_session_and_keeps_o1_open(
+    row, profile, tmp_path
+):
+    # A root retained on another profile: nothing is on the row's profile now,
+    # so the session may start, but the row's O1 stays unestablished.
+    key = harness.ActorAccount(profile[0]).browser_key
+    result, calls = await row(
+        processes=[], summary=_retained_summary(key, str(tmp_path / "elsewhere"))
+    )
+    assert calls == 1
+    assert result.post_quit is not None and result.post_quit.valid is True
+    assert result.vector is not None and not result.vector.o1_single_browser
+    assert any("possible browser" in failure for failure in result.failures)
+
+
+def test_the_census_keeps_a_denied_reading_apart_from_an_empty_one(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(harness, "process_user", lambda process: process.user)
+    account = harness.ActorAccount(tmp_path / "auth" / "profile")
+    ours = [
+        str(tmp_path / "browsers" / "chrome"),
+        f"--user-data-dir={account.profile}",
+    ]
+    census = harness.profile_census(
+        account,
+        browser_dir=tmp_path / "browsers",
+        process_iter=lambda *a, **k: [
+            _process(1, cmdline=ours),
+            _process(2, cmdline=None),
+            _process(3, cmdline=None, user="root"),
+            _process(4, cmdline=None, exe="/bin/ps"),
+            _process(5, cmdline=["python"]),
+        ],
+        user=ME,
+    )
+    assert census.pids == [1]
+    assert census.unresolved == [2]
+    assert not census.complete
+
+
+def test_other_users_and_known_non_browsers_leave_the_census_complete(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(harness, "process_user", lambda process: process.user)
+    account = harness.ActorAccount(tmp_path / "auth" / "profile")
+    census = harness.profile_census(
+        account,
+        browser_dir=tmp_path / "browsers",
+        process_iter=lambda *a, **k: [
+            _process(3, cmdline=None, user="root"),
+            _process(4, cmdline=None, exe="/bin/ps"),
+        ],
+        user=ME,
+    )
+    assert census.complete and census.pids == []
+
+
+@pytest.mark.parametrize(
+    ("user", "unresolved"),
+    [
+        pytest.param("root", [7], id="another-user-but-own-user-unknown"),
+        pytest.param(ME, [7], id="same-user"),
+    ],
+)
+def test_an_unknown_harness_user_excludes_nobody_by_user(
+    tmp_path, monkeypatch, user, unresolved
+):
+    monkeypatch.setattr(harness, "process_user", lambda process: process.user)
+    monkeypatch.setattr(harness, "harness_user", lambda: None)
+    account = harness.ActorAccount(tmp_path / "auth" / "profile")
+    census = harness.profile_census(
+        account,
+        browser_exe="/b/chrome",
+        process_iter=lambda *a, **k: [
+            _process(7, cmdline=None, exe="/b/chrome", user=user)
+        ],
+    )
+    assert census.unresolved == unresolved
+
+
+def test_a_known_other_user_is_excluded_from_the_census(tmp_path, monkeypatch):
+    monkeypatch.setattr(harness, "process_user", lambda process: process.user)
+    account = harness.ActorAccount(tmp_path / "auth" / "profile")
+    census = harness.profile_census(
+        account,
+        browser_exe="/b/chrome",
+        process_iter=lambda *a, **k: [
+            _process(7, cmdline=None, exe="/b/chrome", user="root")
+        ],
+        user=ME,
+    )
+    assert census.complete
+
+
+@pytest.mark.parametrize(
+    ("linux", "threads", "complete"),
+    [
+        pytest.param(True, 1, True, id="linux-leader-alone"),
+        pytest.param(True, 2, False, id="linux-leader-with-live-threads"),
+        pytest.param(True, None, False, id="linux-threads-unreadable"),
+        pytest.param(False, 2, True, id="macos-or-windows"),
+        pytest.param(False, None, True, id="macos-or-windows-threads-unreadable"),
+    ],
+)
+def test_a_zombie_leaves_the_census_only_once_the_whole_process_exited(
+    tmp_path, monkeypatch, linux, threads, complete
+):
+    monkeypatch.setattr(harness, "process_user", lambda process: process.user)
+    account = harness.ActorAccount(tmp_path / "auth" / "profile")
+    census = harness.profile_census(
+        account,
+        process_iter=lambda *a, **k: [_process(6, cmdline=[], status="zombie")],
+        user=ME,
+        linux=linux,
+        threads_of=lambda _: threads,
+        # The zombie is still listed, so only the count can settle it.
+        open_process=_looked_up(None),
+    )
+    assert census.complete is complete
+    assert census.unresolved == ([] if complete else [6])
+
+
+def _looked_up(error: BaseException | None):
+    """``open_process`` that finds a process at any pid, or raises *error*."""
+
+    def open_process(pid: int) -> Any:
+        if error is not None:
+            raise error
+        return SimpleNamespace(pid=pid)
+
+    return open_process
+
+
+@pytest.mark.parametrize(
+    ("threads", "error", "lookup"),
+    [
+        pytest.param(None, psutil.NoSuchProcess(6), None, id="reaped-since-the-table"),
+        pytest.param(2, psutil.NoSuchProcess(6), None, id="ended-after-a-count"),
+        pytest.param(2, None, "present", id="leader-with-live-threads"),
+        # Possibly a later process at a reused pid; never told apart by start.
+        pytest.param(None, None, "present", id="count-denied-process-still-there"),
+        pytest.param(
+            None, psutil.ZombieProcess(6), "present", id="count-denied-still-a-zombie"
+        ),
+        pytest.param(
+            None,
+            psutil.AccessDenied(6),
+            "unknown: AccessDenied",
+            id="count-and-liveness-unreadable",
+        ),
+    ],
+)
+def test_a_linux_zombie_is_excluded_only_once_its_pid_is_gone(
+    tmp_path, monkeypatch, threads, error, lookup
+):
+    # The table listed a zombie; whatever the count says short of the dead
+    # leader alone, its pid is looked up again.
+    monkeypatch.setattr(harness, "process_user", lambda process: process.user)
+    account = harness.ActorAccount(tmp_path / "auth" / "profile")
+    census = harness.profile_census(
+        account,
+        process_iter=lambda *a, **k: [_process(6, cmdline=None, status="zombie")],
+        user=ME,
+        linux=True,
+        threads_of=lambda _: threads,
+        open_process=_looked_up(error),
+    )
+    if lookup is None:
+        assert census.complete and census.provenance == []
+    else:
+        assert census.unresolved == [6]
+        assert census.provenance == [
+            {
+                "pid": 6,
+                "phase": "zombie",
+                "status": psutil.STATUS_ZOMBIE,
+                "threads": threads,
+                "lookup": lookup,
+            }
+        ]
+
+
+def _status(pid: int, want: str, seconds: float = 10.0) -> bool:
+    """Wait, without reaping, until *pid* reports *want*."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            if psutil.Process(pid).status() == want:
+                return True
+        except psutil.NoSuchProcess:
+            return False
+        time.sleep(0.02)
+    return False
+
+
+# The leader ends with pthread_exit while a worker thread keeps the process,
+# and the lock it took, alive. Python cannot end its main thread on its own
+# (the interpreter waits for the others), so libc does it.
+_ZOMBIE_LEADER = """
+import ctypes, fcntl, os, sys, threading
+lock = open(sys.argv[1], "w")
+fcntl.flock(lock, fcntl.LOCK_EX)
+try:
+    pthread_exit = ctypes.CDLL(None).pthread_exit
+except AttributeError:
+    print("no pthread_exit", flush=True)
+    sys.exit(0)
+pthread_exit.argtypes = [ctypes.c_void_p]
+started = threading.Event()
+def worker():
+    started.set()
+    sys.stdin.buffer.read(1)
+    os._exit(0)
+threading.Thread(target=worker).start()
+started.wait()
+print("ready", flush=True)
+pthread_exit(None)
+"""
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="a zombie leader with live threads is Linux's; elsewhere a zombie "
+    "has exited as a whole",
+)
+def test_a_real_zombie_leader_with_a_live_thread_stays_unresolved(tmp_path):
+    import fcntl
+
+    account = harness.ActorAccount(tmp_path / "auth" / "profile")
+    lockfile = tmp_path / "lock"
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            _ZOMBIE_LEADER,
+            str(lockfile),
+            f"--user-data-dir={account.profile}",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    )
+    try:
+        assert child.stdout is not None
+        line = child.stdout.readline().decode().strip()
+        if line == "no pthread_exit":
+            pytest.skip("libc exports no pthread_exit to ctypes here")
+        assert line == "ready"
+        assert _status(child.pid, psutil.STATUS_ZOMBIE), "the leader never exited"
+        with lockfile.open("w") as other:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        census = harness.profile_census(account)
+        assert child.pid in census.unresolved
+        assert not census.complete
+    finally:
+        # Bounded however the body ended: release the worker, then force it.
+        with contextlib.suppress(OSError, ValueError):
+            assert child.stdin is not None
+            child.stdin.write(b"x")
+            child.stdin.close()
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=10)
+        if child.stdout is not None:
+            child.stdout.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="psutil reports no zombie on Windows")
+def test_a_real_fully_exited_unreaped_child_leaves_the_census(tmp_path):
+    account = harness.ActorAccount(tmp_path / "auth" / "profile")
+    child = subprocess.Popen(
+        [sys.executable, "-c", "pass", f"--user-data-dir={account.profile}"]
+    )
+    try:
+        assert _status(child.pid, psutil.STATUS_ZOMBIE), "it never became a zombie"
+        census = harness.profile_census(account)
+        assert child.pid not in census.unresolved
+        assert child.pid not in census.pids
+    finally:
+        child.wait(timeout=10)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="psutil reports no zombie on Windows")
+def test_a_zombie_reaped_after_the_table_was_read_leaves_the_census(
+    tmp_path, monkeypatch
+):
+    # A possible cause of run 38600969897's unresolved pid: the table lists a
+    # browser's zombie, its parent reaps it, and the thread count, read only
+    # then, finds nothing at all. Judged as Linux judges a zombie, so the
+    # count is what is asked first.
+    account = harness.ActorAccount(tmp_path / "auth" / "profile")
+    child = subprocess.Popen(
+        [sys.executable, "-c", "pass", f"--user-data-dir={account.profile}"]
+    )
+    try:
+        assert _status(child.pid, psutil.STATUS_ZOMBIE), "it never became a zombie"
+        monkeypatch.setattr(
+            psutil, "process_iter", lambda: iter([psutil.Process(child.pid)])
+        )
+
+        def listed_then_reaped(attrs):
+            listed = list(harness.process_table(attrs))
+            assert [p.info["status"] for p in listed] == [psutil.STATUS_ZOMBIE]
+            child.wait(timeout=10)
+            return listed
+
+        counted: list[int | None] = []
+
+        def threads_of(process):
+            counted.append(harness.thread_count(process))
+            return counted[-1]
+
+        census = harness.profile_census(
+            account, process_iter=listed_then_reaped, linux=True, threads_of=threads_of
+        )
+        assert counted == [None], "the count was read before the reap"
+        assert census.complete and census.pids == []
+    finally:
+        child.wait(timeout=10)
+
+
+# --- H-R6: the kill path, through the row entry ----------------------------------
+
+
+def _guardian(principal: int, group: int) -> dict:
+    return {
+        "kind": "process.start",
+        "actor": "guardian",
+        "in_row": True,
+        "pid": principal + 1,
+        "ppid": principal,
+        "cmdline": ["python", "-I", "-S", "-u", "/x/process_guardian.py", "5", "6"]
+        + [str(group)],
+    }
+
+
+def _killed_events(row) -> list[dict]:
+    return [r for r in row.log.records() if r["kind"] == "actor.killed"]
+
+
+async def test_the_daemon_rows_kill_reaches_the_owner_and_is_reported(row):
+    result, _ = await row(
+        processes=[],
+        summary={},
+        observed=[_guardian(42, 42)],
+        kill_actor=True,
+        row="H-R6",
+    )
+    assert row.owner.process.kills == 1
+    # A killed owner lingers as a zombie until its parent reaps it: dead.
+    assert result.killed is not None
+    assert result.killed["exit"] == "killed"
+    if os.name != "nt":
+        assert result.killed["guardian_owner_group"] == 42
+    (event,) = _killed_events(row)
+    assert (event["actor"], event["role"], event["pid"]) == ("harness", "owner", 42)
+
+
+async def test_an_owner_nobody_replaced_is_still_handed_to_cleanup(row):
+    # The frontend published no new owner after the kill: cleanup gets the
+    # killed owner's handle, so it can settle that owner rather than meeting
+    # its descriptor as one the row never identified.
+    result, _ = await row(
+        processes=[],
+        summary={},
+        observed=[_guardian(42, 0)],
+        kill_actor=True,
+        row="H-R6",
+    )
+    assert row.cleaned == [row.owner]
+    assert result.owner is not None
+    assert result.owner["replaced_after_kill"] is False
+    assert result.owner["exit"]["how"] == "exited"
+
+
+async def test_the_killed_zombie_found_again_is_no_successor(row, monkeypatch):
+    # The stale descriptor still names the killed owner, unreaped, with its
+    # own create time: identifying that lifetime again replaces nothing.
+    monkeypatch.setattr(harness, "identify_owner", lambda *a, **k: (row.owner, None))
+    result, _ = await row(
+        processes=[],
+        summary={},
+        observed=[_guardian(42, 0)],
+        kill_actor=True,
+        row="H-R6",
+    )
+    assert result.owner is not None
+    assert result.owner["replaced_after_kill"] is False
+
+
+async def test_the_direct_rows_kill_reaches_the_associated_server(row, monkeypatch):
+    server = _Actor(4242)
+    monkeypatch.setattr(
+        harness,
+        "associate_server",
+        lambda pid, observed: (server, 1.0) if pid == 4242 else (None, None),
+    )
+    result, _ = await row(
+        processes=[],
+        summary={},
+        observed=[_guardian(4242, 0)],
+        kill_actor=True,
+        daemon=False,
+        experiment="K1",
+        row="H-R6",
+    )
+    assert server.kills == 1 and row.owner.process.kills == 0
+    assert result.killed is not None and result.killed["exit"] == "killed"
+    (event,) = _killed_events(row)
+    assert (event["role"], event["pid"]) == ("frontend", 4242)
+
+
+# --- O2 through the row entry ---------------------------------------------------
+
+
+def _timeline(*records: dict, ends=(1.0, 2.0, 5.0, 6.0, 6.5, 7.0)) -> list[dict]:
+    """Watcher records with the ready line and a summary that logs its samples."""
+    return [
+        {"kind": "watcher.ready", "t": 0.5, "baseline_pgids": [1]},
+        *records,
+        {
+            "kind": "watcher.summary",
+            "t": ends[-1],
+            "sample_log": [[end - 0.01, end, 100000] for end in ends],
+            "read_failures": [],
+        },
+    ]
+
+
+def _started(pid, ppid, t, actor, *, in_row=True):
+    return {
+        "kind": "process.start",
+        "t": t,
+        "pid": pid,
+        "ppid": ppid,
+        "pgid": pid,
+        "start_identity": t,
+        "in_row": in_row,
+        "actor": actor,
+    }
+
+
+async def test_a_signal_is_reported_as_a_signal_and_never_as_a_death(row, monkeypatch):
+    # The traced owner sent a SIGTERM outside its launched set. That fails
+    # O2, as a delivered signal: nothing observed a death.
+    monkeypatch.setattr(
+        _Oracle,
+        "outcome",
+        OracleOutcome(
+            status=COMPLETE,
+            traced=[42],
+            attached_at=5.0,
+            calls=parse_strace("42  6.0 kill(95, SIGTERM) = 0\n"),
+        ),
+    )
+    result, _ = await row(
+        processes=[],
+        summary={},
+        observed=_timeline(
+            _started(42, 1, 1.0, "owner"), _started(95, 7, 2.0, "other", in_row=False)
+        ),
+    )
+    assert result.vector is not None and result.vector.o2 == "violated"
+    kinds = [r["kind"] for r in row.log.records()]
+    assert "process.death_unattributed" not in kinds
+    (violation,) = [r for r in row.log.records() if r["kind"] == "signal.violation"]
+    assert "delivered SIGTERM" in violation["violation"]
+    assert any(f.startswith("O2 violation") for f in result.failures)
+
+
+class _Helpers:
+    """Canaries that record their own teardown."""
+
+    stopped = 0
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        return []
+
+    def outside_the_harness(self):
+        return []
+
+    def deaths(self):
+        return []
+
+    def stop(self):
+        _Helpers.stopped += 1
+
+
+async def test_a_helper_that_fails_to_stop_skips_no_other_teardown(row, monkeypatch):
+    class Stuck(_Watcher):
+        def stop(self):
+            raise RuntimeError("the watcher would not stop")
+
+    monkeypatch.setattr(harness, "Watcher", Stuck)
+    monkeypatch.setattr(harness, "Canaries", _Helpers)
+    monkeypatch.setattr(_Helpers, "stopped", 0)
+    result, _ = await row(processes=[], summary={})
+    assert _Helpers.stopped == 1
+    assert any("the watcher could not be stopped" in f for f in result.failures)
+    assert row.cleaned, "the owner's cleanup still ran"
+
+
+async def test_a_watcher_that_never_started_still_has_its_helpers_ended(
+    row, monkeypatch
+):
+    class Failing(_Watcher):
+        def start(self):
+            raise RuntimeError("no baseline")
+
+    monkeypatch.setattr(harness, "Watcher", Failing)
+    monkeypatch.setattr(harness, "Canaries", _Helpers)
+    monkeypatch.setattr(_Helpers, "stopped", 0)
+    with pytest.raises(RuntimeError, match="no baseline"):
+        await row(processes=[], summary={})
+    assert _Helpers.stopped == 1
+
+
+def _hold_the_after_row_read(monkeypatch) -> tuple[asyncio.Event, threading.Event]:
+    """Keep the row's after-row lineage read in its thread until released, so
+    a cancellation lands while the row awaits it."""
+    loop = asyncio.get_running_loop()
+    entered, release = asyncio.Event(), threading.Event()
+
+    def read(path: Path, *, point: str, **kwargs: Any) -> None:
+        if point == "after-row":
+            loop.call_soon_threadsafe(entered.set)
+            release.wait(10)
+
+    monkeypatch.setattr(harness, "record_cookie_lineage", read)
+    return entered, release
+
+
+async def _cancelled_at_the_after_row_read(row, monkeypatch) -> asyncio.Task:
+    entered, release = _hold_the_after_row_read(monkeypatch)
+    task = asyncio.create_task(row(processes=[], summary={}))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        task.cancel()
+    finally:
+        release.set()
+    return task
+
+
+async def test_a_cancelled_after_row_read_cancels_the_row_after_its_teardown(
+    row, monkeypatch
+):
+    monkeypatch.setattr(harness, "Canaries", _Helpers)
+    monkeypatch.setattr(_Helpers, "stopped", 0)
+    task = await _cancelled_at_the_after_row_read(row, monkeypatch)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert _Helpers.stopped == 1
+    assert row.cleaned, "the owner's cleanup still ran"
+
+
+async def test_a_failed_row_keeps_its_error_over_a_cancelled_after_row_read(
+    row, monkeypatch
+):
+    class Failing(_Watcher):
+        def start(self):
+            raise RuntimeError("no baseline")
+
+    monkeypatch.setattr(harness, "Watcher", Failing)
+    task = await _cancelled_at_the_after_row_read(row, monkeypatch)
+    with pytest.raises(RuntimeError, match="no baseline"):
+        await task
+
+
+# --- What the actors wrote, kept whole ----------------------------------------
+
+
+async def _published_output(row, monkeypatch, tmp_path, host_lines, owner_lines):
+    """Run a daemon row whose server writes *host_lines* to stderr and whose
+    owner left *owner_lines* in its log, and publish its evidence."""
+    log = _owner_log(monkeypatch, tmp_path)
+    # Bytes, not text: the cap counts bytes, and a text write would turn
+    # "\n" into "\r\n" on Windows, so the copy would no longer start where
+    # the test says it does.
+    log.write_bytes("".join(f"{line}\n" for line in owner_lines).encode())
+    original = harness.run_host_session
+
+    async def host(*args, **kwargs):
+        for line in host_lines:
+            kwargs["on_stderr"](line)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(harness, "run_host_session", host)
+    await row(processes=[], summary={})
+    target = publish(tmp_path / "row", str(tmp_path / "out"), "run")
+    assert target is not None
+    return target
+
+
+async def test_the_evidence_keeps_every_line_the_actors_wrote(
+    row, monkeypatch, tmp_path
+):
+    # The event log carries the owner's last 200 lines only, and the daemon
+    # directory that holds the rest is removed by the cleanup. A browser that
+    # vanished early is in the lines before those.
+    host_lines = [f"[pid=7] <process did exit: exitCode={n}>" for n in range(300)]
+    owner_lines = [f"owner line {n}" for n in range(500)]
+    target = await _published_output(
+        row, monkeypatch, tmp_path, host_lines, owner_lines
+    )
+    frontend = target / OUTPUT_FILES["frontend"]
+    assert frontend.read_text().splitlines() == host_lines
+    assert (target / OWNER_LOG_FILE).read_text().splitlines() == owner_lines
+
+
+async def test_an_actor_past_the_cap_is_cut_and_says_so(row, monkeypatch, tmp_path):
+    monkeypatch.setattr(events, "OUTPUT_CAP_BYTES", 1000)
+    host_lines = [f"host line {n:04d}" for n in range(300)]
+    owner_lines = [f"owner line {n:04d}" for n in range(300)]
+    target = await _published_output(
+        row, monkeypatch, tmp_path, host_lines, owner_lines
+    )
+    marker = "[truncated by the differential harness: the first 1000 bytes"
+
+    kept = (target / OUTPUT_FILES["frontend"]).read_text().splitlines()
+    # Whole lines while they fit, 15 bytes each, then the marker and nothing.
+    assert kept[:-1] == host_lines[: 1000 // 15]
+    assert kept[-1].startswith(marker)
+
+    whole = "".join(f"{line}\n" for line in owner_lines).encode()
+    copied = (target / OWNER_LOG_FILE).read_bytes()
+    # The budget is split in two: the first half, the marker, the last half.
+    half = 500
+    assert copied.startswith(whole[:half])
+    assert copied.endswith(whole[-half:])
+    assert f"the first {half} bytes of {len(whole)}".encode() in copied
+
+
+def test_the_owner_log_is_copied_as_bytes(tmp_path, monkeypatch):
+    # The cap is a byte count, and a Windows log ends its lines with "\r\n".
+    # A copy that reads the log as text would drop the carriage returns and
+    # cut at a different place.
+    monkeypatch.setattr(events, "OUTPUT_CAP_BYTES", 1000)
+    source = tmp_path / "daemon.log"
+    raw = "".join(f"owner line {n:04d}\r\n" for n in range(300)).encode("ascii")
+    source.write_bytes(raw)
+    destination = tmp_path / "owner.log"
+    assert events.keep_capped(source, destination)
+    copied = destination.read_bytes()
+    half = 500
+    assert copied.startswith(raw[:half])
+    assert copied.endswith(raw[-half:])
+    assert f"the first {half} bytes".encode() in copied
+    # Head and tail share the budget. Keeping both in full would be twice the cap.
+    assert len(copied) <= 1000 + 200
+
+
+def test_a_log_that_fits_is_copied_whole(tmp_path, monkeypatch):
+    # Between half and the whole budget. Copying only the first half would
+    # drop the rest and say nothing about it.
+    monkeypatch.setattr(events, "OUTPUT_CAP_BYTES", 1000)
+    source = tmp_path / "daemon.log"
+    raw = b"x" * 800
+    source.write_bytes(raw)
+    destination = tmp_path / "owner.log"
+    assert events.keep_capped(source, destination)
+    assert destination.read_bytes() == raw
+
+
+def test_an_exit_at_the_end_of_a_long_log_is_kept(tmp_path, monkeypatch):
+    # The exit is the last line, and the cap keeps only the head. A copy that
+    # drops the tail loses the one line it exists to keep.
+    monkeypatch.setattr(events, "OUTPUT_CAP_BYTES", 1000)
+    source = tmp_path / "daemon.log"
+    body = "".join(f"owner line {n:04d}\n" for n in range(300)).encode("ascii")
+    exit_line = b"<process did exit: exitCode=3221225477, signal=null>\n"
+    source.write_bytes(body + exit_line)
+    destination = tmp_path / "owner.log"
+    assert events.keep_capped(source, destination)
+    assert destination.read_bytes().endswith(exit_line)
+
+
+async def test_browser_chatter_that_quotes_a_marker_stays_capped(
+    row, monkeypatch, tmp_path
+):
+    # The browser's own stderr is ``[pid=N][err]`` and can quote the driver's
+    # words. That is chatter, one line per print. The driver's own ``<kill>``
+    # is the record.
+    monkeypatch.setattr(events, "OUTPUT_CAP_BYTES", 1000)
+    chatter = "2026-10-05T00:00:00.000Z pw:browser [pid=7][err] <kill>"
+    killed = "2026-10-05T00:00:01.000Z pw:browser [pid=7] <kill>"
+
+    async def direct(**kwargs):
+        return await row(daemon=False, experiment="K1", **kwargs)
+
+    await _published_output(
+        direct, monkeypatch, tmp_path, [chatter] * 100 + [killed], []
+    )
+    recorded = (tmp_path / "evidence" / "events.jsonl").read_text()
+    assert chatter not in recorded
+    assert killed in recorded
+
+
+async def test_driver_diagnostics_fill_the_capped_file_and_not_the_event_log(
+    row, monkeypatch, tmp_path
+):
+    # One line per thing the browser prints. The capped file keeps the head;
+    # the event log keeps the server's own lines and not the driver's.
+    monkeypatch.setattr(events, "OUTPUT_CAP_BYTES", 1000)
+    server = "the server said this"
+    driver = [
+        f"2026-10-05T00:00:00.000Z pw:browser [pid=1][err] diagnostic {n:04d}"
+        for n in range(2000)
+    ]
+    target = await _published_output(row, monkeypatch, tmp_path, [server, *driver], [])
+    kept = (target / OUTPUT_FILES["frontend"]).read_text()
+    assert kept.startswith(server)
+    assert "pw:browser" in kept
+    assert "[truncated by the differential harness: the first 1000 bytes" in kept
+    assert len(kept.encode()) < 1200
+    recorded = (tmp_path / "evidence" / "events.jsonl").read_text()
+    assert server in recorded
+    assert "pw:browser" not in recorded
+
+
+async def test_an_exit_after_a_diagnostic_storm_stays_in_the_event_log(
+    row, monkeypatch, tmp_path
+):
+    # The capped file keeps its head, so the exit that follows the storm is
+    # not in it. It is the line the evidence exists to keep.
+    monkeypatch.setattr(events, "OUTPUT_CAP_BYTES", 1000)
+    diagnostic = "2026-10-05T00:00:00.000Z pw:browser [pid=7][err] synthetic diagnostic"
+    exit_line = (
+        "2026-10-05T00:00:01.000Z pw:browser [pid=7] "
+        "<process did exit: exitCode=3221225477, signal=null>"
+    )
+
+    async def direct(**kwargs):
+        return await row(daemon=False, experiment="K1", **kwargs)
+
+    target = await _published_output(
+        direct, monkeypatch, tmp_path, [diagnostic] * 100 + [exit_line], []
+    )
+    copied = (target / OUTPUT_FILES["frontend"]).read_text()
+    recorded = (tmp_path / "evidence" / "events.jsonl").read_text()
+    assert "[truncated by the differential harness: the first 1000 bytes" in copied
+    assert exit_line not in copied
+    assert exit_line in recorded
+    assert diagnostic not in recorded

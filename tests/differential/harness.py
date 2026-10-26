@@ -1,0 +1,10636 @@
+"""The harness core: account boundary, watcher, host stub, and row H-R1.
+
+**Account boundary.** Spawned actors use the account's *real* daemon state
+root, as the gate in ``docs/decisions/2026-09-26-daemon-default-on-contract.md``
+specifies, and the frozen baseline has no other root to use. The rest of the
+suite gives its processes a temporary account home instead
+(``isolate_daemon_state`` in ``tests/conftest.py``), which the rows opt out of.
+What keeps them off the user's state is the key: the daemon directory is a hash
+of the auth root, and every row's auth root is a fresh temporary directory, so
+cleanup has one exact target (``daemon_dir``).
+
+The one auth root no row may ever use is the user's, ``~/.linkedin-mcp``.
+``claim_account`` refuses it, and anything that contains it or sits inside it,
+before a file is read, a browser launched or a process spawned. It judges the
+path as written first, then the filesystem's own identity of every directory
+involved, which is what catches a case alias on a case-insensitive volume or a
+link. An account whose home cannot be determined is refused, not assumed
+harmless. ``HOME`` is deliberately not redirected for the actors: on Linux the
+bundled browser reads the trusted test CA from ``~/.pki/nssdb``, so a different
+home would be a different trust store.
+
+**Owner cleanup acts only on the owner this row identified.** Its pid, create
+time, instance and auth root are recorded when the row finds it, and the
+``psutil.Process`` taken then is the only handle cleanup ever signals. A
+descriptor naming anything else, or an identity that no longer holds, is
+refused and the row's daemon directory is kept as evidence.
+
+**Host stub.** A real MCP client over stdio, spawning the server from this
+virtual environment the way a host does. It is not ``fastmcp``'s own stdio
+transport: that one starts the server in a new session and, when the client
+leaves, closes stdin and then escalates to signals after two seconds (measured
+again under FastMCP 4, whose default also keeps the server running past the
+client unless ``keep_alive`` is off). A host
+quit is stdin EOF and a wait, and a server closing a browser takes longer than
+two seconds, so that transport would turn every host quit into a kill. This one
+starts the server in the harness's own process group, where the child of a host
+that does not detach it lands, and on quit closes stdin and waits. Not leading
+a group matters: a Direct server that leads one hands its guardian that group
+to signal (``process_tree.start_browser_guardian``), a different topology.
+
+**Row H-R1** (normal start, one host, local storage, bundled browser): stage a
+signed-in session, start the watcher, initialize, call one read tool, quit the
+host, and wait for the server, the owner and the profile's browser to be gone.
+In daemon mode the owner leaves through its own idle exit. Then, outside the
+row's interval, one short Direct session on the same profile shows whether the
+origin still accepts the staged session. Before and after, the R17 snapshot.
+
+K1 here is a **same-revision Direct reference**: the server of this checkout
+with the daemon off. The plan's **frozen K1** and **K2** run the pinned baseline
+instead (``baseline.Runtime``), with its own interpreter, staging and browser,
+and are labelled with its short SHA; the two K1 columns are kept apart.
+
+**Row H-R12** (custom browser): the daemon enabled and ``CHROME_PATH`` set to
+the runtime's own bundled Chromium, so the browser is the same binary and only
+the setting differs. The candidate must show no coordination effect (no owner,
+no forwarding, no daemon state) and the O1/O4 of the frozen Direct run with the
+same setting; the baseline, in K2, must be caught coordinating
+(``k2_r12_verdict``).
+
+**Row H-R3** (host quit with an idle browser): H-R1's actions, read at three
+checkpoints around the quit (``observe_checkpoint``): from the row's script
+before it, from the host stub's post-exit hook, and once the actors have left
+by themselves, before any cleanup. ``host_comparison`` judges the record.
+
+**Row H-R2** (a second host while the first is open): host A reads, then its
+script runs a second host, B, with the same command, environment and profile;
+B reads and quits, and A reads again and quits. The checkpoints add one after
+A1 and one from B's own post-exit hook.
+
+**Row lifecycles** (``ROWS``): every row is declared before it may run, with
+its first call, how its host is expected to end, what its preservation may
+do, its idle timeout and, for a row that keeps a raw record, the verdict that
+judges it (``ROW_VERDICTS``), appended after ``judge_row``. An undeclared row,
+or a declaration that does not hold together, is refused before anything is
+staged or spawned. A row declared since then runs its own script on a
+``RowContext``; the scripts of H-R2, H-R3, H-R7 and H-R11 stay where they
+are. **Row H-CAL** (``call_loss``) is the first such row: an unfaulted person
+read through a held, then released, section page. **Rows H-R4 and H-R5**
+lose that read once its held page entered, each by a termination of its own
+(``RowLifecycle.termination``), through ``LossSeams``; a host killed whole
+is a process of its own (``StubHost``). **Row H-R13** and the **turnover
+lanes** (``retirement_race``) race the read against the owner's retirement,
+idle or asked for, through ``RaceSeams``; a row whose call a successor may
+serve settles that successor in the identified owner's place. **Rows H-R8 and
+H-R9** (``owner_loss``) lose the owner before a call and after the dispatch of
+a mutating one, through ``OwnerLossSeams``: killed or stopped through the
+handle the row tied it by, or its old address answered by a declared
+responder; a stopped owner is resumed on every path. **Row H-R6-contended**
+(``crash_overlap``, Windows) kills the same way under a contender armed on the
+profile's lock and asks for a successor's browser at once. **Rows H-R10a, H-R10b
+and H-R15** (``profile_commands``) run the profile commands themselves, the
+row's own command line with ``--logout``, ``--login``,
+``--import-from-browser`` or ``--status``, on a pseudo-terminal or on pipes,
+through ``CommandSeams``: a command not shown exited with its output ended
+once the row is done with it is retained, and one the script leaves running
+is ended by the teardown and recorded as a harness failure. **Rows H-R16
+and H-R10a-login** (``auth_repair``) stage a sign-in at the synthetic origin
+through ``AuthSeams``: the harness records each authorization with the
+session read right after it, the teardown closes the sign-in so nothing
+issues a session after the row, and R17's replacement lineage
+(``session.replacement_lineage``) is judged beside the original generation's
+outcome, never in its place. **The H-R12 remainder and H-R14**
+(``eligibility_rows``) declare what they run with
+(``RowLifecycle.environment``, ``runtime_environment``, ``arguments``,
+``transport``): a configuration declared ineligible is held to Direct in
+every column, an HTTP row's host is ``HttpHost``, and a rival row's script
+starts its second host through ``CoordinationSeams.rival``. Every recorded
+row keeps its server lifetimes (``frontend_lifetimes``), which tie a browser
+to the host whose server launched it.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import hashlib
+import json
+import math
+import os
+import re
+import shutil
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import threading
+import time
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
+from dataclasses import asdict, dataclass, field, replace
+from pathlib import Path
+from typing import Any, Protocol
+from urllib.parse import urlparse
+from urllib.request import url2pathname
+
+import anyio
+import mcp.types as mcp_types
+import psutil
+from anyio.streams.text import TextReceiveStream
+from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
+from fastmcp.client.transports.base import (
+    ClientTransport,
+    SessionKwargs,
+    TransportOptions,
+)
+from mcp import ClientSession
+from mcp.shared.message import SessionMessage
+from typing_extensions import Unpack
+
+from differential import (
+    auth_repair,
+    call_loss,
+    crash_overlap,
+    eligibility_rows,
+    host_comparison,
+    lease_probe,
+    owner_loss,
+    profile_commands,
+    r7_fault,
+    retirement_race,
+)
+from differential.baseline import (
+    BaselineRefused,
+    Runtime,
+    bundled_executable,
+    checkout_refusal,
+    frozen_identity,
+    interpreter_failures,
+    stage_frozen_session,
+)
+from differential.daemon_state import (
+    BASELINE_LAYOUT,
+    CANDIDATE_LAYOUT,
+    DaemonStateLayout,
+)
+from differential.events import (
+    OUTPUT_FILES,
+    OWNER_LOG_FILE,
+    CappedOutput,
+    EventLog,
+    keep_capped,
+    read_jsonl,
+)
+from differential.fault_overlay import events as fault_events
+from differential.fault_overlay import (
+    publish_activation,
+    scenario_problems,
+    selection_problems,
+)
+from differential.first_navigation import (
+    COOKIE_LINEAGE_FILE,
+    observing,
+    record_cookie_lineage,
+    record_origin,
+)
+from differential.host_comparison import ROW_H_R2, ROW_H_R3
+from differential.job_query import (
+    SHIM_SHA256,
+    Fates,
+    PrivateCache,
+    ShimVenv,
+    StallHost,
+    install_locations,
+    logged,
+    private_install,
+    reached,
+    record_install,
+)
+from differential.job_query_model import (
+    BASELINE,
+    CANDIDATE,
+    SOURCE_MODEL,
+    RoutineModel,
+    source_sha256,
+)
+from differential.session import (
+    CALLER,
+    CLEARED_BY_USER,
+    EXPECTABLE,
+    IMPORT,
+    LINEAGE_LOST,
+    LINEAGE_NONE,
+    LINEAGE_REPLACED,
+    LINEAGE_UNAUTHORIZED,
+    LOGIN,
+    LOGOUT,
+    LOST_AFTER_AUTHORIZATION,
+    LOST_ANNOUNCED,
+    LOST_SILENT,
+    ORIGIN_REJECTED,
+    PRESERVATION,
+    PROBE,
+    REPLACED_AFTER_AUTHORIZATION,
+    REPLACING,
+    RETAINED,
+    ROW,
+    UNCERTAIN,
+    Authorization,
+    ProfileSnapshot,
+    ReplacementLineage,
+    r17_outcome,
+    replacement_lineage,
+    shown,
+    snapshot,
+    stage_signed_in_session,
+    write_synthetic_cookie_file,
+)
+from differential.signals import COMPLETE as ORACLE_COMPLETE
+from differential.signals import HELD as O2_HELD
+from differential.signals import INCOMPLETE as O2_INCOMPLETE
+from differential.signals import UNAVAILABLE as ORACLE_UNAVAILABLE
+from differential.signals import UNKNOWN as O2_UNKNOWN
+from differential.signals import UNOBSERVED as O2_UNOBSERVED
+from differential.signals import VIOLATED as O2_VIOLATED
+from differential.signals import (
+    ORACLE_REQUIRED,
+    Canaries,
+    Lifetime,
+    O2Result,
+    OracleOutcome,
+    ProcessHistory,
+    SignalOracle,
+    classes_direct_would_not_send,
+    derive_o2,
+)
+from differential.synthetic_origin import (
+    GATE_DEADLINE_SECONDS,
+    PERSON_MARKERS,
+    POST_MARKER,
+    RELEASED_BY_TEARDOWN,
+    EgressProxy,
+    Gate,
+    SyntheticOrigin,
+)
+from differential.unconfirmed_close import (
+    AFTER_CONFIRMED_CLOSE,
+    AFTER_CONSUMPTION,
+    BEFORE_CLOSE,
+    BEFORE_PRESERVATION,
+    BEFORE_QUIT,
+    BEFORE_RECOVERY,
+    LOCK_FILE,
+    ROW_H_R7,
+    Deferral,
+    PhaseReading,
+    R7Continuation,
+    R7Setup,
+    Retained,
+    SharedReduction,
+    UnsettledWorker,
+    checkpoint_problems,
+    clock_sample,
+    discharge,
+    early_browsers,
+    file_sha256,
+    gate,
+    lock_association,
+    lock_identity,
+    open_lifetime,
+    published_return,
+    r7_environment,
+    read_phase,
+    realtime_interval,
+    retain,
+    retained,
+    run_owned,
+    settlement_problems,
+    shared_reduction,
+    wait_for_marker,
+)
+from differential.unconfirmed_close import NO_RECOVERY as R7_NO_RECOVERY
+
+# The calibration child's check, reused for the creation marker: it ends a
+# child only through its own ``Popen`` and answers settled once reaped.
+from differential.unconfirmed_close import _ended as _popen_ended
+from differential.unconfirmed_close import POST_SETTLEMENT as R7_POST_SETTLEMENT
+from differential.watcher import (
+    LAUNCHER_ENV,
+    OWNER_MODULES,
+    SERVER_MODULE,
+    USER_DATA_DIR_FLAG,
+    another_user,
+    canonical_user_data_dir,
+    harness_user,
+    invoked_module,
+    possible_browser,
+    process_user,
+    read_arguments,
+    user_data_dir,
+)
+from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
+from linkedin_mcp_server.config.loaders import EnvironmentKeys
+from linkedin_mcp_server.daemon.auth_repair import MARKER_KEY as AUTH_MARKER_KEY
+from linkedin_mcp_server.daemon.liveness import REFUSAL_KEY
+from linkedin_mcp_server.session_state import portable_cookie_path
+
+REAL_AUTH_ROOT_NAME = ".linkedin-mcp"
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PACKAGE = "mcp-server-linkedin"
+
+#: The browser cache this run was started with. Read at import, because the
+#: suite's ``reset_bootstrap_for_testing`` deletes the variable per test.
+_INHERITED_BROWSERS_PATH = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+
+WATCHER_SCRIPT = Path(__file__).with_name("watcher.py")
+
+ROW_H_R1 = "H-R1"
+#: R12, a custom browser: ``CHROME_PATH`` set to the runtime's own bundled
+#: Chromium, so the browser is the same binary and only the setting differs.
+ROW_H_R12 = "H-R12"
+DIRECT_REFERENCE = "same-revision Direct reference"
+#: The read tool H-R1 calls. ``get_feed`` because the product already has to
+#: load ``/feed/`` to sign in, so the synthetic origin serves one page for both
+#: and the extractor reads innerText under ``<main>`` without any selector tied
+#: to LinkedIn's layout. See ``synthetic_origin._FEED_PAGE``.
+READ_TOOL = "get_feed"
+READ_TOOL_ARGUMENTS = {"num_posts": 1}
+#: H-R6 and H-R11, whose native cells name these rows.
+ROW_H_R6 = "H-R6"
+ROW_H_R11 = "H-R11"
+
+
+@dataclass(frozen=True)
+class InitialCall:
+    """A row's first call through its host, and what its result must show.
+
+    *sections* empty: the synthetic post, which only the feed read can return.
+    Otherwise every named section, each carrying its own page's marker
+    (``synthetic_origin.PERSON_MARKERS``).
+    """
+
+    tool: str
+    arguments: Mapping[str, Any]
+    sections: tuple[str, ...] = ()
+
+    def succeeded(self, summary: Mapping[str, Any] | None) -> bool:
+        if summary is None or summary["is_error"]:
+            return False
+        if not self.sections:
+            return bool(summary["read_the_post"])
+        return set(self.sections) <= set(summary.get("marked_sections") or ())
+
+    @property
+    def unmet(self) -> str:
+        """The failure a result that did not show it reads as."""
+        if not self.sections:
+            return f"{self.tool} did not return the synthetic post"
+        return (
+            f"{self.tool} did not return the synthetic sections {list(self.sections)}"
+        )
+
+
+#: Every row's first call so far: one ``get_feed`` read of the synthetic post.
+FEED_READ = InitialCall(READ_TOOL, READ_TOOL_ARGUMENTS)
+
+#: How a row's host is expected to end. ``normal``: stdin EOF and a wait
+#: (``HostQuitTransport.host_quit``), judged by ``host_failures``. The rest
+#: lose the server mid-call (``call_loss.LOSS_TERMINATIONS``): stdin closed,
+#: both pipes closed, the host process killed, or the server or frontend
+#: killed. Such a host is never quit; its row's script observes what settles
+#: by itself from its own body, after the lost call ended and before the
+#: client leaves, so before the corrective ``_stop``, and its own verdict
+#: judges how the server ended (``judge_row``). The transport's
+#: ``before_stop`` hook is no place for that: FastMCP's client stops waiting
+#: for a session still unwinding after about ten seconds and returns while
+#: the hook runs on.
+NORMAL_EOF = "normal"
+TERMINATIONS = frozenset({NORMAL_EOF, *call_loss.LOSS_TERMINATIONS})
+
+#: How a row's host reaches its server. ``stdio``: the harness's host stub,
+#: whose quit is stdin EOF. ``streamable-http``: the server on a loopback
+#: port of its own, reached by FastMCP's HTTP client (``HttpHost``); it
+#: reads no EOF, and its quit is the operator's interrupt.
+STDIO = eligibility_rows.STDIO
+STREAMABLE_HTTP = eligibility_rows.STREAMABLE_HTTP
+TRANSPORTS = frozenset({STDIO, STREAMABLE_HTTP})
+
+#: What the session after the row may do. ``ordinary``: the post-quit Direct
+#: session (``observe_preservation``), which can repair what it finds, since
+#: its read may sign in again. ``must-remain-cleared`` and ``must-not-repair``:
+#: a row whose cleared or failed session is the finding, which no session
+#: that can repair may touch before it is judged.
+ORDINARY = "ordinary"
+MUST_REMAIN_CLEARED = "must-remain-cleared"
+MUST_NOT_REPAIR = "must-not-repair"
+PRESERVATIONS = frozenset({ORDINARY, MUST_REMAIN_CLEARED, MUST_NOT_REPAIR})
+
+#: The owner leaves through its own idle exit once the host has quit, so the
+#: daemon row ends through the product's path rather than a signal. Set for
+#: both modes, so the two configurations differ only in DAEMON_ENABLED. Not
+#: shorter: the owner's quiet period starts when it publishes, so a value
+#: below the frontend's time from election to first call would retire the
+#: owner before the row's one call reached it.
+IDLE_TIMEOUT_SECONDS = 20.0
+
+#: The comparison rows' own idle timeout (H-R3 and H-R2), a declared scenario
+#: setting chosen before any of them ran. Their freshness window runs from the
+#: send of the row's timed read, and that read can include the browser's
+#: launch; the owner is normally elected before it, during initialization.
+#: Kept above the Direct minimum hold (20s), so a second host is handed the
+#: profile by that hold and not raced by an idle close. The same in K1, K3 and
+#: K0, and recorded in the row's packet. Every other row keeps
+#: ``IDLE_TIMEOUT_SECONDS``.
+COMPARISON_IDLE_TIMEOUT_SECONDS = 60.0
+
+#: The largest wall-clock gap between two watcher samples a row accepts. The
+#: maximum accepted gap is an observation-quality budget, not proof that every
+#: browser lifetime is sampled. Record the actual gaps; an overlap wholly
+#: between samples remains outside this oracle's resolution. Twenty times the
+#: target interval, so a busy runner passes and a stalled watcher does not.
+MAX_WATCHER_GAP_SECONDS = 1.0
+
+_HOST_EXIT_SECONDS = 90.0
+_OWNER_EXIT_SLACK_SECONDS = 90.0
+_BROWSER_GONE_SECONDS = 60.0
+_OWNER_KILL_WAIT_SECONDS = 15.0
+_INIT_SECONDS = 180.0
+_CALL_SECONDS = 240.0
+_STDERR_EOF_SECONDS = 10.0
+
+_FORWARDING_LINE = "Forwarding to the shared browser owner"
+_IDLE_EXIT_LINE = "Nothing has needed the browser in"
+#: ``__PYVENV_LAUNCHER__`` included: a framework build takes its venv from it,
+#: so the harness's own value would hand a baseline actor the candidate's venv.
+_FOREIGN_CODE = frozenset(
+    {"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "VIRTUAL_ENV", LAUNCHER_ENV}
+)
+
+
+class ContainmentError(RuntimeError):
+    """The configured auth root is the user's own, or would reach it."""
+
+
+class EvidenceRefused(RuntimeError):
+    """The runtime is not the checkout this row claims to measure."""
+
+
+def default_browsers_path() -> Path:
+    """Where ``patchright install`` put the browser, as the driver computes it."""
+    if _INHERITED_BROWSERS_PATH:
+        return Path(_INHERITED_BROWSERS_PATH)
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(base) / "ms-playwright"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "ms-playwright"
+    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / (
+        "ms-playwright"
+    )
+
+
+# --- Account boundary --------------------------------------------------------
+
+
+def account_homes() -> tuple[Path, ...]:
+    """Both homes that can name the user's auth root, or a refusal.
+
+    The environment's (``Path.home()``) and the operating system account's,
+    which the daemon keys on and which ignores ``HOME``. Not knowing the second
+    is not evidence that nothing is there to protect.
+    """
+    try:
+        account = daemon_descriptor._account_home()
+    except Exception as exc:
+        raise ContainmentError(
+            f"the account's home directory could not be determined "
+            f"({type(exc).__name__}), so the auth root it protects cannot be "
+            f"excluded; refusing"
+        ) from exc
+    return (Path.home(), Path(account))
+
+
+def _within(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:
+        # Different drives on Windows: neither contains the other.
+        return False
+
+
+def _identity(path: str) -> tuple[int, int] | None:
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def _chain(path: str) -> list[tuple[int, int]]:
+    """The identities of *path* and of every ancestor of it that exists.
+
+    Along the path as written and along its resolved form, since a link's
+    written ancestors are not the ancestors of the directory it reaches.
+    """
+    identities = []
+    for spelling in dict.fromkeys((path, os.path.realpath(path))):
+        current = spelling
+        while True:
+            identity = _identity(current)
+            if identity is not None and identity not in identities:
+                identities.append(identity)
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+    return identities
+
+
+@dataclass(frozen=True)
+class ActorAccount:
+    """A profile the harness may hand to actors. Built only by ``claim_account``."""
+
+    profile: Path
+    #: Where the row's runtime keeps its daemon state: the candidate's own,
+    #: unless the row runs the frozen baseline (``run_row``).
+    layout: DaemonStateLayout = CANDIDATE_LAYOUT
+
+    @property
+    def auth_root(self) -> Path:
+        return self.profile.parent
+
+    @property
+    def browser_key(self) -> str:
+        """The profile as the watcher spells it."""
+        return canonical_user_data_dir(str(self.profile))
+
+
+def _refuse_overlap(profile: Path, auth_root: str, reals: list[str]) -> None:
+    """Refuse *auth_root* if it is, holds or sits inside any of *reals*.
+
+    As a string first, so a root named inside the real one is refused without a
+    filesystem call beneath it; then by the filesystem's identity (device and
+    inode) of the auth root and each of its ancestors, written and resolved,
+    against the real root and each of its ancestors. Identity is what the
+    filesystem itself says is the same directory, so a case alias on a
+    case-insensitive volume and a link are both caught, and two names a
+    case-sensitive volume keeps apart stay apart. The auth root has to exist:
+    an identity that cannot be read cannot be judged.
+    """
+    written = os.path.normcase(auth_root)
+    for real in reals:
+        protected = os.path.normcase(real)
+        if _within(written, protected) or _within(protected, written):
+            raise ContainmentError(
+                f"refusing profile {profile}: its auth root {auth_root} "
+                f"overlaps the account's own {real}"
+            )
+    candidate = _identity(auth_root)
+    if candidate is None:
+        raise ContainmentError(
+            f"refusing profile {profile}: its auth root {auth_root} does not "
+            f"exist, so its identity cannot be judged"
+        )
+    candidate_chain = _chain(auth_root)
+    for real in reals:
+        real_identity = _identity(real)
+        if real_identity is not None and real_identity in candidate_chain:
+            raise ContainmentError(
+                f"refusing profile {profile}: its auth root {auth_root} is the "
+                f"account's own {real} or inside it, under another name"
+            )
+        if candidate in _chain(real):
+            raise ContainmentError(
+                f"refusing profile {profile}: its auth root {auth_root} contains "
+                f"the account's own {real}"
+            )
+
+
+def claim_account(profile: Path) -> ActorAccount:
+    """Refuse the user's own auth root, before anything touches the profile.
+
+    Refused in both directions: an auth root at or inside ``~/.linkedin-mcp``,
+    and one at or above it, such as the home directory itself.
+
+    Two auth roots are judged, completely: the parent of the profile as
+    written, and the parent of the profile once the whole path is resolved.
+    The second is the one every product path acts on, since they resolve the
+    configured profile before taking its parent, and it differs from the first
+    exactly when the profile itself is a link. The account returned carries the
+    resolved profile, which is the path that was checked.
+    """
+    reals = [
+        os.path.join(os.path.abspath(home), REAL_AUTH_ROOT_NAME)
+        for home in account_homes()
+    ]
+    raw = os.path.abspath(os.path.expanduser(profile))
+    # As written first, and before any filesystem call on the profile itself.
+    _refuse_overlap(profile, os.path.dirname(raw), reals)
+    resolved = os.path.realpath(raw)
+    _refuse_overlap(profile, os.path.dirname(resolved), reals)
+    return ActorAccount(Path(resolved))
+
+
+def actor_environment(
+    account: ActorAccount,
+    proxy_url: str,
+    *,
+    daemon: bool,
+    browsers: Path,
+    chrome_path: str | None = None,
+    idle_timeout: float = IDLE_TIMEOUT_SECONDS,
+) -> dict[str, str]:
+    """The server's environment: this one, minus every setting, plus the row's.
+
+    *idle_timeout* is the row's (``COMPARISON_IDLE_TIMEOUT_SECONDS`` for the
+    comparison rows), the same for both modes.
+    """
+    settings = {
+        value
+        for name, value in vars(EnvironmentKeys).items()
+        if not name.startswith("_") and isinstance(value, str)
+    }
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in settings
+        and not key.startswith("LINKEDIN")
+        # What could put another checkout's code on the actors' path: a
+        # frozen row's interpreter must import its own package and nothing else.
+        and key not in _FOREIGN_CODE
+    }
+    env.update(
+        {
+            EnvironmentKeys.USER_DATA_DIR: str(account.profile),
+            EnvironmentKeys.PROXY_SERVER: proxy_url,
+            EnvironmentKeys.DAEMON_ENABLED: "true" if daemon else "false",
+            EnvironmentKeys.HEADLESS: "true",
+            EnvironmentKeys.LOG_LEVEL: "INFO",
+            EnvironmentKeys.BROWSER_IDLE_TIMEOUT: str(idle_timeout),
+            "LINKEDIN_MCP_CHECK_FOR_UPDATES": "off",
+            "PLAYWRIGHT_BROWSERS_PATH": str(browsers),
+        }
+    )
+    if chrome_path is not None:
+        env[EnvironmentKeys.CHROME_PATH] = chrome_path
+    return env
+
+
+@contextlib.contextmanager
+def process_environment(settings: Mapping[str, str]) -> Iterator[None]:
+    """*settings* over this process's own environment for the block, then
+    exactly what was there before, an absent name absent again.
+
+    For the candidate's in-process staging, which decides the runtime it
+    stages for from the environment (``session_state.get_runtime_id``) as
+    the actors decide theirs.
+    """
+    before = {name: os.environ.get(name) for name in settings}
+    os.environ.update(settings)
+    try:
+        yield
+    finally:
+        for name, value in before.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def server_command() -> list[str]:
+    return [sys.executable, "-m", "linkedin_mcp_server"]
+
+
+def candidate_runtime() -> Runtime:
+    """This checkout, run from the harness's own interpreter."""
+    browsers = Path(
+        os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or default_browsers_path()
+    )
+    return Runtime(sys.executable, REPO_ROOT, browsers)
+
+
+# --- Runtime identity ----------------------------------------------------------
+
+
+def _git(repo: Path, *args: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def row_identity(repo: Path = REPO_ROOT) -> dict[str, Any]:
+    """What the actors will import and run, recorded before they start.
+
+    Every actor is started from ``sys.executable``; the owner by production
+    code, which reuses it. So the interpreter, the installed package's
+    ``direct_url.json``, and the checkout it points at are the code under test.
+    """
+    import sysconfig
+    from importlib.metadata import distributions
+
+    # The install in this interpreter's own site-packages, which is what an
+    # actor started from ``sys.executable`` imports. Not whatever the lookup
+    # meets first on this process's path: a build left in the checkout, say,
+    # an ``*.egg-info`` with no ``direct_url.json``.
+    site = sysconfig.get_paths()["purelib"]
+    installed = list(distributions(name=PACKAGE, path=[site]))
+    direct_url = None
+    if len(installed) == 1:
+        try:
+            raw = installed[0].read_text("direct_url.json")
+            direct_url = json.loads(raw) if raw else None
+        except ValueError:
+            direct_url = None
+    head = _git(repo, "rev-parse", "HEAD")
+    # ``--no-optional-locks``: reading the state must not write the index.
+    porcelain = _git(repo, "--no-optional-locks", "status", "--porcelain")
+    lock = repo / "uv.lock"
+    return {
+        "reference": DIRECT_REFERENCE,
+        "sys_executable": sys.executable,
+        "site_packages": site,
+        "installed_distributions": len(installed),
+        "direct_url": direct_url,
+        "checkout": str(repo),
+        "head": head.strip() if head else None,
+        "porcelain_empty": porcelain == "" if porcelain is not None else None,
+        "dirty_paths": (porcelain or "").splitlines()[:50],
+        "uv_lock_sha256": (
+            hashlib.sha256(lock.read_bytes()).hexdigest() if lock.is_file() else None
+        ),
+    }
+
+
+def evidence_refusal(identity: dict[str, Any], *, ci: bool) -> str | None:
+    """Why this runtime cannot stand for the checkout, or None."""
+    direct_url = identity.get("direct_url") or {}
+    url = direct_url.get("url") if isinstance(direct_url, dict) else None
+    editable = isinstance(direct_url, dict) and (direct_url.get("dir_info") or {}).get(
+        "editable"
+    )
+    installed_from: str | None = None
+    if isinstance(url, str) and url.startswith("file:"):
+        installed_from = url2pathname(urlparse(url).path)
+    checkout = identity.get("checkout")
+    if not editable or installed_from is None or checkout is None:
+        return (
+            f"{PACKAGE} is not an editable install of a local checkout "
+            f"({direct_url!r}); the row would run code this record cannot name"
+        )
+    try:
+        same = os.path.samefile(installed_from, checkout)
+    except OSError:
+        same = False
+    if not same:
+        return (
+            f"{PACKAGE} is installed from {installed_from}, not from the checkout "
+            f"{checkout} whose revision this row records"
+        )
+    if identity.get("head") is None:
+        return "git could not name the checkout's HEAD"
+    if ci and identity.get("porcelain_empty") is not True:
+        return (
+            f"the checkout is not clean, so HEAD does not describe the code the "
+            f"actors import: {identity.get('dirty_paths')}"
+        )
+    return None
+
+
+def frozen_refusal(identity: dict[str, Any], runtime: Runtime) -> str | None:
+    """Why a frozen runtime is not its pin, installed from its own checkout."""
+    assert runtime.pinned is not None
+    return checkout_refusal(identity, runtime.pinned) or evidence_refusal(
+        identity, ci=True
+    )
+
+
+# --- Watcher -----------------------------------------------------------------
+
+
+class Watcher:
+    """The watcher process, and the events it wrote once it has stopped."""
+
+    def __init__(
+        self,
+        directory: Path,
+        log: EventLog,
+        *,
+        experiment: str,
+        row: str,
+        browser_exe: str | None = None,
+        browser_dir: Path | None = None,
+    ) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        self.browser_exe = browser_exe
+        self.browser_dir = browser_dir
+        self.out = directory / "watcher.jsonl"
+        self.stop_file = directory / "watcher.stop"
+        self.stderr = directory / "watcher.stderr"
+        self._log = log
+        self._experiment = experiment
+        self._row = row
+        self._process: subprocess.Popen[Any] | None = None
+
+    def start(self, *, ready_seconds: float = 15.0) -> None:
+        command = [
+            sys.executable,
+            str(WATCHER_SCRIPT),
+            "--out",
+            str(self.out),
+            "--stop",
+            str(self.stop_file),
+            "--run",
+            self._log.run,
+            "--experiment",
+            self._experiment,
+            "--row",
+            self._row,
+            "--platform",
+            self._log.platform,
+            "--root-pid",
+            str(os.getpid()),
+        ]
+        if self.browser_exe:
+            command += ["--browser-exe", self.browser_exe]
+        if self.browser_dir is not None:
+            command += ["--browser-dir", str(self.browser_dir)]
+        detach: dict[str, Any] = (
+            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+            if sys.platform == "win32"
+            else {"start_new_session": True}
+        )
+        with self.stderr.open("wb") as err:
+            process: subprocess.Popen[Any] = subprocess.Popen(
+                command, stdin=subprocess.DEVNULL, stdout=err, stderr=err, **detach
+            )
+        self._process = process
+        # The first sample is the baseline: a process already running then is
+        # never reported as started. Waiting for it means every actor the row
+        # starts afterwards is reported as one.
+        deadline = time.monotonic() + ready_seconds
+        while time.monotonic() < deadline:
+            if any(r.get("kind") == "watcher.ready" for r in read_jsonl(self.out)):
+                return
+            if process.poll() is not None:
+                break
+            time.sleep(0.05)
+        # Detached from the row, so nothing else would end it before its own
+        # deadline: a watcher that never took its baseline is stopped here.
+        if process.poll() is None:
+            process.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=10)
+        raise RuntimeError(
+            f"the watcher did not take its baseline sample: "
+            f"{self.stderr.read_text(errors='replace')[-2000:]}"
+        )
+
+    def observed(self) -> list[dict[str, Any]]:
+        """What the watcher has written so far, read while it still runs."""
+        return read_jsonl(self.out)
+
+    def stop(self) -> dict[str, Any] | None:
+        """Stop sampling, copy its events into the log, return its summary."""
+        if self._process is None:
+            return None
+        self.stop_file.touch()
+        try:
+            self._process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            self._process.kill()
+            self._process.wait(timeout=15)
+        records = read_jsonl(self.out)
+        self._log.extend(records)
+        summaries = [r for r in records if r.get("kind") == "watcher.summary"]
+        return summaries[-1] if summaries else None
+
+
+#: How a gap diagnostic names each part the watcher timed: the steps outside
+#: sampling (``watcher.BETWEEN_STEPS``) and the phases of the sample that
+#: closed the gap (``watcher.SAMPLE_PHASES``), with read kinds named apart.
+_GAP_STEP_NAMES = {
+    "tracker": "turning the previous sample into events",
+    "enqueue": "handing events to the writer thread",
+    # The loop's own writing, zero since the writer thread does it; named for
+    # a summary written before that.
+    "write": "serializing and writing events",
+    "flush": "flushing the event file",
+    "sleep": "the sleep asked for",
+    "wakeup_delay": "waking late from sleep",
+    "stop_check": "checking for a stop request",
+}
+#: The file-system calls the watcher makes off the sampling path
+#: (``watcher.FILE_IO_CALLS``), which overlap a gap without being part of it.
+_GAP_FILE_IO_NAMES = {
+    "write": "the event writer's writes",
+    "flush": "its flushes",
+    "stop_check": "the stop-file checks",
+}
+_GAP_PHASE_NAMES = {
+    "last_pid": "reading the kernel's last pid",
+    "enumeration": "enumerating pids",
+    "canonicalization": "canonicalizing paths",
+    "bookkeeping": "classification and bookkeeping",
+}
+
+
+def _seconds(value: object) -> float:
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _largest_gap_cause(largest: dict[str, Any], priority: object) -> str:
+    """Name the largest part of the gap the watcher broke down, and the
+    slowest process read of the sample that closed it."""
+    outside = largest.get("outside_sampling") or {}
+    inside = largest.get("in_sample") or {}
+    sample = largest.get("sample") or {}
+    steps = outside.get("steps") or {}
+    details = {
+        "wakeup_delay": (
+            f", after asking for {_seconds(outside.get('sleep_requested')):.4f}s"
+        ),
+        "enqueue": ", which waits only while the writer's queue is full",
+    }
+    # (seconds, name, what else the record says about it)
+    parts: list[tuple[float, str, str]] = [
+        (
+            _seconds(steps.get(step)),
+            f"{name} outside sampling",
+            details.get(step, ""),
+        )
+        for step, name in _GAP_STEP_NAMES.items()
+    ]
+    parts.append(
+        (_seconds(outside.get("unaccounted")), "untimed time outside sampling", "")
+    )
+    phases = sample.get("phases") or {}
+    parts += [
+        (_seconds(phases.get(phase)), f"{name} in the sample", "")
+        for phase, name in _GAP_PHASE_NAMES.items()
+    ]
+    # Reads compete as one phase, whatever kinds they were split across; the
+    # kind that took most of them explains it.
+    kinds = [
+        (_seconds(stats.get("seconds")), kind, stats)
+        for kind, stats in (sample.get("read_kinds") or {}).items()
+        if isinstance(stats, dict)
+    ]
+    reads_detail = ""
+    if kinds:
+        kind_seconds, kind, stats = max(kinds, key=lambda entry: entry[0])
+        reads_detail = (
+            f", most of it {kind} reads: {kind_seconds:.4f}s over "
+            f"{stats.get('count')} reads, the longest "
+            f"{_seconds(stats.get('max_seconds')):.4f}s of pid {stats.get('max_pid')}"
+        )
+    parts.append(
+        (_seconds(phases.get("reads")), "process reads in the sample", reads_detail)
+    )
+    parts.append(
+        (_seconds(inside.get("unaccounted")), "untimed time in the sample", "")
+    )
+    seconds, name, detail = max(parts, key=lambda part: part[0])
+    slowest = sample.get("slowest")
+    operation = (
+        f"{slowest.get('kind')} of pid {slowest.get('pid')} ({slowest.get('exe')}) "
+        f"at {_seconds(slowest.get('seconds')):.4f}s"
+        if isinstance(slowest, dict)
+        else "none"
+    )
+    return (
+        f"{_seconds(outside.get('seconds')):.4f}s of it passed between two "
+        f"samples, outside sampling, and {_seconds(inside.get('seconds')):.4f}s "
+        f"in the sample that closed it (watcher priority {priority!r}); its "
+        f"largest part was {name} at {seconds:.4f}s{detail}; the watcher used "
+        f"{_seconds(outside.get('cpu_seconds')):.4f}s of CPU outside sampling "
+        f"and {_seconds(sample.get('cpu_seconds')):.4f}s in the sample; the "
+        f"slowest process read in that sample was {operation}"
+        f"{_file_io_clause(largest.get('file_io'))}"
+    )
+
+
+def _file_io_clause(file_io: object) -> str:
+    """What the watcher's off-path file-system calls that ended in the gap
+    took, each its whole duration, so a slow file system shows even though
+    sampling did not wait on it. A call that began before the gap counts in
+    full, so this can exceed the gap's own share."""
+    if not isinstance(file_io, dict):
+        return ""
+    parts = []
+    for call, name in _GAP_FILE_IO_NAMES.items():
+        calls = file_io.get(call)
+        if not isinstance(calls, dict):
+            continue
+        part = (
+            f"{name} took {_seconds(calls.get('seconds')):.4f}s over "
+            f"{calls.get('count')} calls"
+        )
+        running = _seconds(calls.get("in_progress_seconds"))
+        if running:
+            part += f" and one was still running after {running:.4f}s"
+        parts.append(part)
+    if not parts:
+        return ""
+    return (
+        "; off the sampling path, calls that ended in that gap (whole "
+        "durations): " + ", ".join(parts)
+    )
+
+
+def _gap_cause(summary: dict[str, Any]) -> str:
+    """Where the largest gap went, so the failure names its cause.
+
+    From the watcher's breakdown of that gap (``largest_gap``) when the
+    summary has one. A summary written before it had one is split by its
+    ``sample_log`` into the time outside sampling and the sample that closed
+    the gap; its slow samples are the run's slowest, which need not include
+    that one, and are named as such.
+    """
+    largest = summary.get("largest_gap")
+    if isinstance(largest, dict):
+        return _largest_gap_cause(largest, summary.get("priority"))
+    widest: tuple[float, float] | None = None
+    log = summary.get("sample_log") or []
+    for previous, current in zip(log, log[1:]):
+        ended, began, now = previous[1], current[0], current[1]
+        if not all(isinstance(t, (int, float)) for t in (ended, began, now)):
+            continue
+        if widest is None or now - ended > widest[0]:
+            widest = (now - ended, began - ended)
+    if widest is not None and widest[1] > widest[0] - widest[1]:
+        return (
+            f"{widest[1]:.4f}s of it passed between two samples, outside "
+            f"sampling, and {widest[0] - widest[1]:.4f}s in the sample that "
+            f"closed it (watcher priority {summary.get('priority')!r}); this "
+            f"summary has no breakdown of either"
+        )
+    slow = sorted(
+        summary.get("slow_samples") or [],
+        key=lambda entry: entry.get("seconds") or 0,
+        reverse=True,
+    )
+    largest_timed = [
+        {"sample_seconds": entry.get("seconds"), **(entry.get("slowest") or {})}
+        for entry in slow[:3]
+    ]
+    return (
+        f"this summary has no breakdown of the sample that closed it; the "
+        f"slowest process read of each of the run's slowest samples was "
+        f"{largest_timed or 'not recorded'}"
+    )
+
+
+def watcher_failures(
+    summary: dict[str, Any] | None,
+    *,
+    actors_began: float,
+    actors_ended: float,
+    max_gap: float = MAX_WATCHER_GAP_SECONDS,
+    browser_key: str | None = None,
+) -> list[str]:
+    """Why this observation cannot carry O1 for the profile *browser_key*, or
+    nothing when it can. Without one, no retained reading is credited."""
+    if not summary:
+        return ["the watcher wrote no summary"]
+    failures = []
+    if summary.get("stopped_by") != "stop file":
+        failures.append(
+            f"the watcher stopped by {summary.get('stopped_by')!r}, not at the "
+            f"harness's request"
+        )
+    start, end = summary.get("observation_start"), summary.get("observation_end")
+    if not isinstance(start, (int, float)) or start > actors_began:
+        failures.append("the watcher's observation began after the actors started")
+    if not isinstance(end, (int, float)) or end < actors_ended:
+        failures.append("the watcher's observation ended before the actors were gone")
+    gap = summary.get("max_gap_seconds")
+    if not isinstance(gap, (int, float)) or gap > max_gap:
+        failures.append(
+            f"the watcher's largest gap between samples was {gap}s, over the "
+            f"{max_gap}s this row accepts; {_gap_cause(summary)}"
+        )
+    # Only an actor that could have been a browser root: one whose executable
+    # could not be read, or is the row's browser. Every failed read stays in
+    # the summary's ``read_failures`` either way. A known root whose later
+    # argument read failed kept its earlier reading, and that reading keeps
+    # it counted only on the profile it named: for any other, a same-image
+    # exec with hidden arguments could have moved it onto the one judged.
+    unread = [
+        *(summary.get("relevant_read_failures") or []),
+        *(
+            entry
+            for entry in summary.get("read_failures") or []
+            if "retained_profile" in entry and entry["retained_profile"] != browser_key
+        ),
+    ]
+    if unread:
+        failures.append(
+            f"the watcher could not identify {len(unread)} row actors as "
+            f"anything but a possible browser: {unread[:5]}"
+        )
+    return failures
+
+
+#: The driver's own line, as written when its stderr is not a terminal:
+#: ``toISOString()``, a space, the ``pw:browser`` channel, a space. Measured
+#: on both locked drivers. A server record is JSON and starts with ``{``, so
+#: the channel token has to be here and not merely somewhere in the line: a
+#: Chrome path can contain the words ``pw:browser``.
+_DRIVER_LINE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z pw:browser(?:\s|$)"
+)
+
+
+#: What the driver did with the browser, a few lines per launch. The text
+#: file keeps its head, so an exit that follows a storm of browser output is
+#: past the cap; these are what that exit has to leave in the event log.
+def driver_diagnostic(line: str) -> bool:
+    """Whether *line* is the driver's browser log rather than the server's.
+
+    The ``<launching>`` line names the browser cache. A cache directory called
+    ``login`` matches the loss notice (``session._LOSS``), so a lost session
+    the server never mentioned would read as one it announced.
+    """
+    return _DRIVER_LINE.match(line) is not None
+
+
+#: What the driver did with the browser, as it logs it: ``<launching>`` and
+#: ``[pid=N] <process did exit: ...>``, ``<gracefully close start>``,
+#: ``<kill>`` and ``<will force kill>``. The browser's own output is
+#: ``[pid=N][err]`` or ``[pid=N][out]`` and can quote the same words; that is
+#: chatter, one line per thing the browser prints, and it stays in the capped
+#: file. Measured in the locked drivers.
+_DRIVER_LIFECYCLE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z pw:browser "
+    r"(?:<launching> |\[pid=\d+\] <(?:"
+    r"process did exit|gracefully close start|will force kill|kill))"
+)
+
+
+def driver_lifecycle(line: str) -> bool:
+    """A driver line that says it launched, closed, killed or saw the exit."""
+    return _DRIVER_LIFECYCLE.match(line) is not None
+
+
+def note_server_output(session: Any, line: str) -> None:
+    """Remember *line* as what the server showed, unless the driver wrote it.
+
+    Both lists are what a row classifies (``user_lines`` for who was told,
+    ``stderr`` for the server's own reports). The line still goes to the
+    evidence file through the caller's own callback.
+    """
+    if driver_diagnostic(line):
+        return
+    session.stderr.append(line)
+    session.user_lines.append(line)
+
+
+# --- Host stub ---------------------------------------------------------------
+
+
+class HostQuitTransport(ClientTransport):
+    """Stdio to a real server, where quitting is stdin EOF and a wait."""
+
+    def __init__(
+        self,
+        command: Sequence[str],
+        *,
+        env: dict[str, str],
+        cwd: Path,
+        on_stderr: Callable[[str], None],
+        exit_seconds: float = _HOST_EXIT_SECONDS,
+        after_exit: Callable[[], Awaitable[None]] | None = None,
+        on_process: Callable[[Any], None] | None = None,
+        before_stop: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        self.command = list(command)
+        self.env = env
+        self.cwd = cwd
+        self.on_stderr = on_stderr
+        self.exit_seconds = exit_seconds
+        self.after_exit = after_exit
+        self.on_process = on_process
+        #: Runs once the client has left, however it left, shielded from its
+        #: cancellation and before the corrective ``_stop``. It bounds itself,
+        #: and briefly: FastMCP's client stops waiting for a session still
+        #: unwinding after about ten seconds, so a long observation belongs in
+        #: the row's script (``TERMINATIONS``). Its failure is
+        #: ``before_stop_error``.
+        self.before_stop = before_stop
+        self.before_stop_error: str | None = None
+        self.process: anyio.abc.Process | None = None
+        self.pid: int | None = None
+        self.quit_done = False
+        self.alive_before_quit: bool | None = None
+        self.stdin_closed: bool | None = None
+        self.stdin_close_error: str | None = None
+        self.exited_on_quit: bool | None = None
+        self.quit_seconds: float | None = None
+        #: When stdin EOF was requested and when the wait saw the exit, on the
+        #: harness's monotonic clock; the second only for an exit it saw.
+        self.eof_monotonic_ns: int | None = None
+        self.exit_seen_monotonic_ns: int | None = None
+        self.after_exit_error: str | None = None
+        self.killed_by_harness = False
+        #: When the corrective ``_stop`` killed a server still running.
+        self.stopped_monotonic_ns: int | None = None
+        self.stderr_closed: bool | None = None
+        #: A loss a row made instead of a quit (``lose``, ``mark_lost``): its
+        #: termination, when it was made, and how making it failed. Once set,
+        #: the session never quits this host; the corrective ``_stop`` still
+        #: runs when the client leaves.
+        self.lost: str | None = None
+        self.lost_monotonic_ns: int | None = None
+        self.loss_error: str | None = None
+        self._stderr_eof = anyio.Event()
+
+    async def _pump_stderr(self, process: anyio.abc.Process) -> None:
+        assert process.stderr is not None
+        buffer = ""
+        try:
+            async for chunk in TextReceiveStream(process.stderr, errors="replace"):
+                lines = (buffer + chunk).split("\n")
+                buffer = lines.pop()
+                for line in lines:
+                    self.on_stderr(line.rstrip("\r"))
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+            pass
+        finally:
+            if buffer:
+                self.on_stderr(buffer.rstrip("\r"))
+            self._stderr_eof.set()
+
+    async def host_quit(self) -> None:
+        """What a host does on quit: close the server's stdin, then wait.
+
+        *after_exit*, when given, runs once the wait has seen the server exit,
+        before the bounded wait for its stderr to close: the first moment the
+        exit is known, not the moment this returns. It runs only here, never
+        on the forced cleanup in ``_stop``, and a failure of it is recorded
+        (``after_exit_error``) without skipping anything after it.
+        """
+        process = self.process
+        assert process is not None and process.stdin is not None
+        self.alive_before_quit = process.returncode is None
+        began = time.monotonic()
+        self.eof_monotonic_ns = time.monotonic_ns()
+        try:
+            await process.stdin.aclose()
+            self.stdin_closed = True
+        except Exception as exc:  # noqa: BLE001 - recorded, and judged by the row
+            self.stdin_closed = False
+            self.stdin_close_error = f"{type(exc).__name__}: {exc}"
+        with anyio.move_on_after(self.exit_seconds):
+            await process.wait()
+        self.quit_seconds = round(time.monotonic() - began, 3)
+        self.exited_on_quit = process.returncode is not None
+        if self.exited_on_quit:
+            self.exit_seen_monotonic_ns = time.monotonic_ns()
+        self.quit_done = True
+        if self.exited_on_quit and self.after_exit is not None:
+            try:
+                await self.after_exit()
+            except Exception as exc:  # noqa: BLE001 - recorded; the quit goes on
+                self.after_exit_error = f"{type(exc).__name__}: {exc}"
+        # A grandchild that inherited stderr keeps it open past the exit, so
+        # this wait is bounded and its result is evidence, not a requirement.
+        with anyio.move_on_after(_STDERR_EOF_SECONDS):
+            await self._stderr_eof.wait()
+        self.stderr_closed = self._stderr_eof.is_set()
+
+    def mark_lost(self, termination: str) -> None:
+        """Record that the row lost this host's server by *termination*, so
+        the session does not quit it; whoever caused the loss made it."""
+        self.lost = termination
+        self.lost_monotonic_ns = time.monotonic_ns()
+
+    async def lose(self, termination: str) -> None:
+        """Lose the server mid-call as a host can, with no MCP shutdown and no
+        wait for its exit.
+
+        ``call_loss.EOF_LOSS`` closes its stdin, so it reads EOF.
+        ``call_loss.PIPE_LOSS`` closes the read end of its stdout as well, so
+        its next write finds the pipe broken: what the kernel does to both
+        pipes when a host goes away, named pipe loss here and never host
+        death, which ``StubHost`` makes. A failure is ``loss_error``.
+
+        Stdout goes first. Both closes reach their descriptors from the loop's
+        callback queue, which runs in order, so the server cannot read EOF
+        while its stdout still takes a write. Closed after stdin, the server
+        had until this coroutine was next scheduled to answer the EOF with a
+        write that went through.
+        """
+        process = self.process
+        assert process is not None and process.stdin is not None
+        self.mark_lost(termination)
+        errors = []
+        if termination == call_loss.PIPE_LOSS:
+            problem = close_read_end(process, 1)
+            if problem is not None:
+                errors.append(problem)
+        try:
+            await process.stdin.aclose()
+        except Exception as exc:  # noqa: BLE001 - recorded, and judged by the row
+            errors.append(f"closing stdin: {type(exc).__name__}: {exc}")
+        self.loss_error = "; ".join(errors) or None
+
+    async def server_exit(self, seconds: float) -> dict[str, Any]:
+        """Whether the server exits by itself within *seconds*: waited for on
+        the host's own handle, never caused."""
+        process = self.process
+        assert process is not None
+        with anyio.move_on_after(seconds):
+            await process.wait()
+        code = process.returncode
+        return {
+            "how": "exited" if code is not None else "still running",
+            "code": code,
+            "seen_ns": time.monotonic_ns(),
+        }
+
+    async def _stop(self, process: anyio.abc.Process) -> None:
+        """Cleanup only: a server still running when the stub leaves."""
+        if process.returncode is not None:
+            return
+        self.killed_by_harness = True
+        self.stopped_monotonic_ns = time.monotonic_ns()
+        with contextlib.suppress(ProcessLookupError, OSError):
+            process.kill()
+        with anyio.move_on_after(15):
+            await process.wait()
+
+    @contextlib.asynccontextmanager
+    async def connect_session(
+        self,
+        *,
+        transport_options: TransportOptions | None = None,
+        **session_kwargs: Unpack[SessionKwargs],
+    ) -> AsyncIterator[ClientSession]:
+        options = transport_options or TransportOptions()
+        process = await anyio.open_process(
+            self.command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=self.env,
+            cwd=str(self.cwd),
+        )
+        self.process = process
+        self.pid = process.pid
+        if self.on_process is not None:
+            # Before anything else can fail: whoever needs the process shown
+            # gone later holds this object, never its number.
+            self.on_process(process)
+        read_send, read_receive = anyio.create_memory_object_stream[
+            SessionMessage | Exception
+        ](0)
+        write_send, write_receive = anyio.create_memory_object_stream[SessionMessage](0)
+
+        async def pump_stdout() -> None:
+            assert process.stdout is not None
+            buffer = ""
+            async with read_send:
+                with contextlib.suppress(
+                    anyio.ClosedResourceError, anyio.BrokenResourceError
+                ):
+                    async for chunk in TextReceiveStream(process.stdout):
+                        lines = (buffer + chunk).split("\n")
+                        buffer = lines.pop()
+                        for line in lines:
+                            if not line.strip():
+                                continue
+                            # Parsed and written as the SDK's own stdio
+                            # client does (mcp/client/stdio.py).
+                            try:
+                                message = (
+                                    mcp_types.jsonrpc_message_adapter.validate_json(
+                                        line, by_name=False
+                                    )
+                                )
+                            except Exception as exc:
+                                await read_send.send(exc)
+                                continue
+                            await read_send.send(SessionMessage(message))
+
+        async def pump_stdin() -> None:
+            assert process.stdin is not None
+            async with write_receive:
+                with contextlib.suppress(
+                    anyio.ClosedResourceError, anyio.BrokenResourceError
+                ):
+                    async for outgoing in write_receive:
+                        data = outgoing.message.model_dump_json(
+                            by_alias=True, exclude_unset=True
+                        )
+                        await process.stdin.send((data + "\n").encode())
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(pump_stdout)
+            tasks.start_soon(pump_stdin)
+            tasks.start_soon(self._pump_stderr, process)
+            try:
+                async with options.session_class(
+                    read_receive, write_send, **session_kwargs
+                ) as session:
+                    yield session
+            finally:
+                with anyio.CancelScope(shield=True):
+                    if self.before_stop is not None:
+                        try:
+                            await self.before_stop()
+                        except Exception as exc:  # noqa: BLE001 - recorded; the stop still runs
+                            self.before_stop_error = f"{type(exc).__name__}: {exc}"
+                    await self._stop(process)
+                tasks.cancel_scope.cancel()
+
+
+def close_read_end(process: Any, fd: int) -> str | None:
+    """Close the harness's end of *process*'s output pipe *fd* for real.
+
+    ``aclose`` on an anyio process stream only fails the reader and leaves the
+    pipe open, so a server writing to it would never find it broken. The
+    asyncio subprocess transport underneath owns the pipe, and closing its
+    pipe transport closes the descriptor, at the loop's next turn, on POSIX
+    and on Windows alike. A pipe that cannot be reached is the answer.
+    """
+    inner = getattr(process, "_process", None)
+    transport = getattr(inner, "_transport", None)
+    pipe = transport.get_pipe_transport(fd) if transport is not None else None
+    if pipe is None:
+        return f"the read end of pipe {fd} could not be reached"
+    pipe.close()
+    return None
+
+
+def tool_summary(result: mcp_types.CallToolResult) -> dict[str, Any]:
+    """What the host saw from the call, without copying the whole result."""
+    texts = [
+        block.text
+        for block in result.content
+        if isinstance(block, mcp_types.TextContent)
+    ]
+    structured = result.structured_content
+    if not isinstance(structured, dict):
+        structured = {}
+    if isinstance(structured.get("result"), dict):
+        structured = structured["result"]
+    sections = structured.get("sections")
+    feed = sections.get("feed") if isinstance(sections, dict) else None
+    status, retry_safe = structured.get("status"), structured.get("retry_safe")
+    return {
+        "is_error": bool(result.is_error),
+        "sections": sorted(sections) if isinstance(sections, dict) else [],
+        "section_errors": sorted(structured.get("section_errors") or {}),
+        "read_the_post": isinstance(feed, str) and POST_MARKER in feed,
+        # Each person section whose text carries its own page's marker.
+        "marked_sections": sorted(
+            name
+            for name, marker in PERSON_MARKERS.items()
+            if isinstance(sections, dict)
+            and isinstance(sections.get(name), str)
+            and marker in sections[name]
+        ),
+        # A transport's answer for a call whose effect is unknown.
+        "status": status if isinstance(status, str) else None,
+        "retry_safe": retry_safe if isinstance(retry_safe, bool) else None,
+        "meta": meta_summary(result.meta),
+        "text": "\n".join(texts)[:2000],
+    }
+
+
+def meta_summary(meta: Any) -> dict[str, Any]:
+    """The result's ``_meta`` by key, and the daemon's own markers by kind.
+
+    Names and labels only. The owner's refusal names its kind, and the auth
+    marker its reason and whether a replay was safe; a generation, an
+    instance or anything a session is made of stays out.
+    """
+    meta = meta if isinstance(meta, dict) else {}
+    refusal, auth = meta.get(REFUSAL_KEY), meta.get(AUTH_MARKER_KEY)
+    return {
+        "keys": sorted(str(key) for key in meta),
+        "refusal": refusal.get("daemon") if isinstance(refusal, dict) else None,
+        "auth": (
+            {name: auth.get(name) for name in ("reason", "replayable", "browser_open")}
+            if isinstance(auth, dict)
+            else None
+        ),
+    }
+
+
+#: How a call through the host's client ended: a result came back (an error
+#: result included), the client raised, or the call was cancelled.
+RETURNED = "returned"
+RAISED = "raised"
+CANCELLED = "cancelled"
+
+
+async def timed_call(
+    client: Client,
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """One tool call through the host's client, and its summary.
+
+    ``began`` is read before the request is sent and ``ended`` once the result
+    is back, each on the wall clock and on the harness's monotonic clock, so
+    the interval contains the whole call. The row's default read and every
+    scripted one go through here, so all of them carry the same times.
+
+    The record is appended to *records* before the request is sent and
+    completed however the call ends: on a raise or a cancellation it is
+    given its ``outcome`` and the exception's class, and then the exception
+    is raised again. A client's exception says nothing about whether the
+    request reached the server, so the record never claims that either way.
+    """
+    record: dict[str, Any] = {
+        "tool": name,
+        "began": time.time(),
+        "began_monotonic_ns": time.monotonic_ns(),
+    }
+    if records is not None:
+        records.append(record)
+    try:
+        called = await client.call_tool_mcp(name, arguments, timeout=_CALL_SECONDS)
+    except BaseException as exc:
+        cancelled = isinstance(
+            exc, (asyncio.CancelledError, anyio.get_cancelled_exc_class())
+        )
+        record.update(
+            ended=time.time(),
+            ended_monotonic_ns=time.monotonic_ns(),
+            outcome=CANCELLED if cancelled else RAISED,
+            exception=type(exc).__name__,
+            error=str(exc)[:500],
+        )
+        raise
+    record.update(
+        ended=time.time(),
+        ended_monotonic_ns=time.monotonic_ns(),
+        outcome=RETURNED,
+        **tool_summary(called),
+    )
+    return record
+
+
+@dataclass
+class HostSession:
+    stderr: list[str] = field(default_factory=list)
+    #: Everything the user saw, in order: stderr lines and the tool's text.
+    user_lines: list[str] = field(default_factory=list)
+    pid: int | None = None
+    tool: dict[str, Any] | None = None
+    alive_before_quit: bool | None = None
+    stdin_closed: bool | None = None
+    stdin_close_error: str | None = None
+    exited_on_quit: bool | None = None
+    exit_code: int | None = None
+    quit_seconds: float | None = None
+    #: When EOF was requested and the exit seen, on the monotonic clock.
+    eof_monotonic_ns: int | None = None
+    exit_seen_monotonic_ns: int | None = None
+    stderr_closed: bool | None = None
+    killed_by_harness: bool = False
+    #: A failure before the quit completed: initialize, the call, the hook.
+    error: str | None = None
+    #: How the post-exit observation failed; the quit went on regardless.
+    after_exit_error: str | None = None
+    #: A failure while the client unwound after a completed quit. Evidence only.
+    teardown_error: str | None = None
+    #: H-R6: the call made after the owner was killed, and how it failed.
+    second_tool: dict[str, Any] | None = None
+    second_error: str | None = None
+    #: What a row's scripted phase called, in order, and how it failed.
+    scripted: list[dict[str, Any]] = field(default_factory=list)
+    script_error: str | None = None
+    #: Every timed call's record in the order sent, each completed however it
+    #: ended (``timed_call``): a raised or cancelled one keeps its own.
+    calls: list[dict[str, Any]] = field(default_factory=list)
+    #: How the transport's ``before_stop`` hook failed, if it did.
+    before_stop_error: str | None = None
+    #: A loss the row made instead of a quit (``HostQuitTransport.lose``):
+    #: its termination, when it was made and how making it failed; and when
+    #: the corrective stop killed a server still running.
+    lost: str | None = None
+    lost_monotonic_ns: int | None = None
+    loss_error: str | None = None
+    stopped_monotonic_ns: int | None = None
+    #: How the host reached its server (``TRANSPORTS``). A streamable-HTTP
+    #: server reads no EOF: its quit is the interrupt ``HttpHost`` sends, and
+    #: whether that was delivered, how it failed and when it was sent stand
+    #: where a stdio host's stdin close and EOF do.
+    transport: str = STDIO
+    interrupted: bool | None = None
+    interrupt_error: str | None = None
+    interrupt_monotonic_ns: int | None = None
+
+
+#: A row's scripted phase: it is handed a function that calls one tool through
+#: the host's own client and returns the call's summary.
+ToolCall = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
+#: What the host's client is told of a call's progress: the value, the total
+#: and the message (FastMCP's ``ProgressHandler``).
+ProgressReport = Callable[[float, float | None, str | None], Awaitable[None]]
+
+
+def progress_recorder(into: list[dict[str, Any]]) -> ProgressReport:
+    """A progress handler for a host's client that keeps each message with
+    when the host heard it, on the harness's monotonic clock. Passive: the
+    client sends a progress token with every call whether or not one is
+    given (its default handler only logs), so the wire is the same."""
+
+    async def heard(progress: float, total: float | None, message: str | None) -> None:
+        into.append({"message": message, "seen_ns": time.monotonic_ns()})
+
+    return heard
+
+
+async def run_host_session(
+    command: Sequence[str],
+    *,
+    env: dict[str, str],
+    cwd: Path,
+    on_stderr: Callable[[str], None],
+    after_call: Callable[[], Awaitable[None]] | None = None,
+    tool: str = READ_TOOL,
+    arguments: dict[str, Any] | None = None,
+    started: Callable[[int], None] | None = None,
+    second_call: bool = False,
+    script: Callable[[ToolCall], Awaitable[None]] | None = None,
+    after_exit: Callable[[], Awaitable[None]] | None = None,
+    on_process: Callable[[Any], None] | None = None,
+    row_script: TransportScript | None = None,
+    before_stop: Callable[[], Awaitable[None]] | None = None,
+    on_progress: ProgressReport | None = None,
+) -> HostSession:
+    """Initialize, call the read tool once, then quit the way a host does.
+
+    *started* is told the server's pid as soon as it runs. With *second_call*
+    the tool is called once more after *after_call*, which is how H-R6 sees the
+    frontend recover from a killed owner; its failure is recorded apart and
+    does not stop the host from quitting. *script*, when given, runs last
+    before the quit with a function that calls tools through this client
+    (H-R11); what it called is in ``scripted``, and its failure, recorded as
+    ``script_error``, does not stop the quit either. *after_exit* runs once
+    the server is seen to exit on EOF (``HostQuitTransport.host_quit``), and
+    its failure is ``after_exit_error``. *on_process* is handed the server's
+    process object the moment it is spawned. *row_script* is a declared row's
+    scripted phase, run where *script* would be, with the live transport as
+    well; the two are one or the other. *before_stop* is the transport's
+    hook of that name. *on_progress* is the client's progress handler
+    (``progress_recorder``); without it the client keeps its default.
+    """
+    if script is not None and row_script is not None:
+        raise ValueError("a host session runs one scripted phase, not two")
+    session = HostSession()
+
+    def remember(line: str) -> None:
+        note_server_output(session, line)
+        on_stderr(line)
+
+    transport = HostQuitTransport(
+        command,
+        env=env,
+        cwd=cwd,
+        on_stderr=remember,
+        after_exit=after_exit,
+        on_process=on_process,
+        before_stop=before_stop,
+    )
+    # The initialize handshake, as a host sends it. FastMCP 4's default probes
+    # server/discover first and settles on the 2026-07-28 era with a FastMCP 4
+    # server, a different path from the one every row so far measured.
+    client = Client(
+        transport,
+        init_timeout=_INIT_SECONDS,
+        mode="legacy",
+        progress_handler=on_progress,
+    )
+    try:
+        async with client:
+            if started is not None and transport.pid is not None:
+                started(transport.pid)
+            session.tool = await timed_call(
+                client,
+                tool,
+                READ_TOOL_ARGUMENTS if arguments is None else arguments,
+                records=session.calls,
+            )
+            session.user_lines += session.tool["text"].splitlines()
+            if after_call is not None:
+                await after_call()
+            if second_call:
+                try:
+                    again = await client.call_tool_mcp(
+                        tool,
+                        READ_TOOL_ARGUMENTS if arguments is None else arguments,
+                        timeout=_CALL_SECONDS,
+                    )
+                    session.second_tool = tool_summary(again)
+                    session.user_lines += session.second_tool["text"].splitlines()
+                except Exception as exc:  # noqa: BLE001 - the recovery's evidence
+                    session.second_error = f"{type(exc).__name__}: {exc}"
+            if script is not None or row_script is not None:
+
+                async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+                    summary = await timed_call(
+                        client, name, arguments, records=session.calls
+                    )
+                    session.scripted.append(summary)
+                    session.user_lines += summary["text"].splitlines()
+                    return summary
+
+                try:
+                    if row_script is not None:
+                        await row_script(call, transport)
+                    elif script is not None:
+                        await script(call)
+                except Exception as exc:  # noqa: BLE001 - the script's own evidence
+                    session.script_error = f"{type(exc).__name__}: {exc}"
+            # A host the row lost is not quit: its server already had its end.
+            # Nor one the row's script quit itself.
+            if transport.lost is None and not transport.quit_done:
+                await transport.host_quit()
+    except Exception as exc:  # noqa: BLE001 - reported as the row's evidence
+        detail = f"{type(exc).__name__}: {exc}"
+        if transport.quit_done or transport.lost is not None:
+            session.teardown_error = detail
+        else:
+            session.error = detail
+    session.lost = transport.lost
+    session.lost_monotonic_ns = transport.lost_monotonic_ns
+    session.loss_error = transport.loss_error
+    session.stopped_monotonic_ns = transport.stopped_monotonic_ns
+    session.pid = transport.pid
+    session.alive_before_quit = transport.alive_before_quit
+    session.stdin_closed = transport.stdin_closed
+    session.stdin_close_error = transport.stdin_close_error
+    session.exited_on_quit = transport.exited_on_quit
+    session.quit_seconds = transport.quit_seconds
+    session.eof_monotonic_ns = transport.eof_monotonic_ns
+    session.exit_seen_monotonic_ns = transport.exit_seen_monotonic_ns
+    session.after_exit_error = transport.after_exit_error
+    session.stderr_closed = transport.stderr_closed
+    session.killed_by_harness = transport.killed_by_harness
+    session.before_stop_error = transport.before_stop_error
+    if transport.process is not None:
+        session.exit_code = transport.process.returncode
+    return session
+
+
+async def run_second_host(
+    command: Sequence[str],
+    *,
+    env: dict[str, str],
+    cwd: Path,
+    progress: list[dict[str, Any]],
+    on_stderr: Callable[[str], None],
+    on_process: Callable[[Any], None],
+) -> tuple[HostSession, dict[str, Any]]:
+    """A second host's one read and quit (``AuthSeams.second_host``), and
+    what its record keeps. *progress* fills as the host's client hears the
+    read's progress, so the row can act on it while the read runs; the
+    record keeps what was heard by the end."""
+    second = await run_host_session(
+        command,
+        env=env,
+        cwd=cwd,
+        on_stderr=on_stderr,
+        on_process=on_process,
+        on_progress=progress_recorder(progress),
+    )
+    return second, {
+        "host": host_summary(second),
+        "call": call_record(second.tool) if second.tool is not None else None,
+        "forwarded": any(_FORWARDING_LINE in line for line in second.stderr),
+        "quit_problems": host_failures(second),
+        "lines": auth_repair._flags(second.stderr),
+        "progress": list(progress),
+    }
+
+
+# --- A host in a process of its own --------------------------------------------
+
+STUB_HOST_SCRIPT = Path(__file__).with_name("stub_host.py")
+#: How long a killed or quitting stub host may take to be reaped. It is the
+#: harness's own child, holding nothing but pipes.
+_STUB_EXIT_SECONDS = 15.0
+
+
+class StubHostGone(RuntimeError):
+    """The stub host's control channel closed with an answer outstanding."""
+
+
+class StubCallFailed(RuntimeError):
+    """The stub host's client raised on a call; the message names its class."""
+
+
+class StubHost:
+    """A host as a process of its own: the one a row can kill whole.
+
+    ``stub_host.py`` runs the harness's own host stub (``HostQuitTransport``
+    under the same client) and so owns the server's three pipes; the harness
+    drives it over the stub's stdin and stdout, one JSON object a line, and
+    reads the server's stderr relayed on the stub's. Killing it (``lose``) is
+    what a host's death does to its server: every pipe the host held breaks
+    at once, and nothing else is sent. The observer stays outside, in this
+    process. The stub is the harness's child, in its process group, and the
+    server the stub's, in the same group, as the child of a host that does
+    not detach it lands.
+
+    Its command line names no server module, so the watcher counts it as a
+    row process and never as a frontend; the server's command and directory
+    go over the control channel, and its environment is the stub's own.
+    *server_handle* is the server as the row tied it to the watcher's record
+    (``associate_server``): the only handle its exit is observed through,
+    and the only one the corrective stop may end it by.
+    """
+
+    def __init__(
+        self,
+        command: Sequence[str],
+        *,
+        env: dict[str, str],
+        cwd: Path,
+        on_stderr: Callable[[str], None],
+    ) -> None:
+        self.command = list(command)
+        self.env = env
+        self.cwd = cwd
+        self.on_stderr = on_stderr
+        self.process: anyio.abc.Process | None = None
+        #: The server's pid, as the stub reported it.
+        self.pid: int | None = None
+        self.server_handle: Any = None
+        self.lost: str | None = None
+        self.lost_monotonic_ns: int | None = None
+        self.loss_error: str | None = None
+        self.killed_by_harness = False
+        self.stopped_monotonic_ns: int | None = None
+        self.quit_done = False
+        #: How the stub's own quit of the server ended, as it reported it.
+        self.quit: dict[str, Any] = {}
+        self._ids = 0
+        self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
+        self._ready: asyncio.Future[dict[str, Any]] | None = None
+        self._quit: asyncio.Future[dict[str, Any]] | None = None
+
+    async def _send(self, order: Mapping[str, Any]) -> None:
+        process = self.process
+        assert process is not None and process.stdin is not None
+        try:
+            await process.stdin.send((json.dumps(dict(order)) + "\n").encode())
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError, OSError) as exc:
+            raise StubHostGone(f"the stub host took no order: {exc!r}") from exc
+
+    def _answer(self, event: Mapping[str, Any]) -> None:
+        kind = event.get("event")
+        if kind in ("ready", "failed") and self._ready is not None:
+            if not self._ready.done():
+                if kind == "ready":
+                    self._ready.set_result(dict(event))
+                else:
+                    self._ready.set_exception(
+                        StubCallFailed(f"the stub host failed: {event.get('error')}")
+                    )
+        elif kind in ("returned", "raised"):
+            ident = event.get("id")
+            waiting = self._pending.pop(ident, None) if isinstance(ident, int) else None
+            if waiting is not None and not waiting.done():
+                waiting.set_result(dict(event))
+        elif kind == "quit" and self._quit is not None and not self._quit.done():
+            self._quit.set_result(dict(event))
+
+    async def _pump_events(self, process: anyio.abc.Process) -> None:
+        assert process.stdout is not None
+        buffer = ""
+        try:
+            async for chunk in TextReceiveStream(process.stdout, errors="replace"):
+                lines = (buffer + chunk).split("\n")
+                buffer = lines.pop()
+                for line in lines:
+                    if line.strip():
+                        try:
+                            self._answer(json.loads(line))
+                        except ValueError:
+                            self.on_stderr(f"stub host: unreadable report {line!r}")
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+            pass
+        finally:
+            gone = StubHostGone("the stub host's control channel closed")
+            for waiting in (self._ready, self._quit, *self._pending.values()):
+                if waiting is not None and not waiting.done():
+                    waiting.set_exception(gone)
+            self._pending.clear()
+
+    async def _pump_stderr(self, process: anyio.abc.Process) -> None:
+        assert process.stderr is not None
+        buffer = ""
+        with contextlib.suppress(anyio.ClosedResourceError, anyio.BrokenResourceError):
+            async for chunk in TextReceiveStream(process.stderr, errors="replace"):
+                lines = (buffer + chunk).split("\n")
+                buffer = lines.pop()
+                for line in lines:
+                    self.on_stderr(line.rstrip("\r"))
+        if buffer:
+            self.on_stderr(buffer.rstrip("\r"))
+
+    @contextlib.asynccontextmanager
+    async def running(self) -> AsyncIterator[StubHost]:
+        """The stub started, its server started and initialized, until left;
+        then the corrective stop, whatever ended it."""
+        process = await anyio.open_process(
+            [sys.executable, str(STUB_HOST_SCRIPT)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=self.env,
+            cwd=str(self.cwd),
+        )
+        self.process = process
+        loop = asyncio.get_running_loop()
+        self._ready = loop.create_future()
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(self._pump_events, process)
+            tasks.start_soon(self._pump_stderr, process)
+            try:
+                await self._send(
+                    {"op": "start", "command": self.command, "cwd": str(self.cwd)}
+                )
+                with anyio.fail_after(_INIT_SECONDS + 30.0):
+                    ready = await self._ready
+                pid = ready.get("server_pid")
+                self.pid = pid if isinstance(pid, int) else None
+                yield self
+            finally:
+                with anyio.CancelScope(shield=True):
+                    await self._stop(process)
+                tasks.cancel_scope.cancel()
+
+    async def call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        records: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """One tool call through the stub's client, recorded as ``timed_call``
+        records one: appended before the order is sent, completed however it
+        ends, and raised again on a failure or a cancellation."""
+        record: dict[str, Any] = {
+            "tool": name,
+            "began": time.time(),
+            "began_monotonic_ns": time.monotonic_ns(),
+        }
+        if records is not None:
+            records.append(record)
+        self._ids += 1
+        ident = self._ids
+        answer: asyncio.Future[dict[str, Any]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._pending[ident] = answer
+        try:
+            await self._send(
+                {"op": "call", "id": ident, "tool": name, "arguments": arguments}
+            )
+            with anyio.fail_after(_CALL_SECONDS):
+                event = await answer
+            if event.get("event") != "returned":
+                raise StubCallFailed(f"{event.get('exception')}: {event.get('error')}")
+        except BaseException as exc:
+            self._pending.pop(ident, None)
+            cancelled = isinstance(
+                exc, (asyncio.CancelledError, anyio.get_cancelled_exc_class())
+            )
+            record.update(
+                ended=time.time(),
+                ended_monotonic_ns=time.monotonic_ns(),
+                outcome=CANCELLED if cancelled else RAISED,
+                exception=type(exc).__name__,
+                error=str(exc)[:500],
+            )
+            raise
+        record.update(
+            ended=time.time(),
+            ended_monotonic_ns=time.monotonic_ns(),
+            outcome=RETURNED,
+            **dict(event.get("summary") or {}),
+        )
+        return record
+
+    def mark_lost(self, termination: str) -> None:
+        """As ``HostQuitTransport.mark_lost``."""
+        self.lost = termination
+        self.lost_monotonic_ns = time.monotonic_ns()
+
+    async def lose(self, termination: str) -> None:
+        """Kill the stub host whole: SIGKILL on POSIX, TerminateProcess on
+        Windows, through its own process object. The server is told nothing."""
+        process = self.process
+        assert process is not None
+        self.mark_lost(termination)
+        try:
+            process.kill()
+        except (ProcessLookupError, OSError) as exc:
+            self.loss_error = f"the stub host could not be killed: {exc!r}"
+            return
+        with anyio.move_on_after(_STUB_EXIT_SECONDS):
+            await process.wait()
+        if process.returncode is None:
+            self.loss_error = (
+                f"the stub host was still running {_STUB_EXIT_SECONDS}s after "
+                f"it was killed"
+            )
+
+    async def server_exit(self, seconds: float) -> dict[str, Any]:
+        """Whether the server, no child of this process, is seen gone within
+        *seconds* through the handle the row tied it by; waited for, never
+        caused."""
+        try:
+            how = await run_owned(
+                "the stub host's server's exit",
+                exit_state,
+                self.server_handle,
+                seconds,
+                seconds=seconds + 30.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - an unanswered wait settles nothing
+            how = f"unknown: {type(exc).__name__}: {exc}"
+        return {"how": how, "code": None, "seen_ns": time.monotonic_ns()}
+
+    async def quit_host(self) -> None:
+        """Have the stub quit its server as a host does, and leave itself."""
+        process = self.process
+        assert process is not None
+        self._quit = asyncio.get_running_loop().create_future()
+        await self._send({"op": "quit"})
+        with anyio.move_on_after(_HOST_EXIT_SECONDS + 30.0):
+            self.quit = dict((await self._quit).get("host") or {})
+        self.quit_done = True
+        with anyio.move_on_after(_STUB_EXIT_SECONDS):
+            await process.wait()
+
+    async def _stop(self, process: anyio.abc.Process) -> None:
+        """Cleanup only: the stub, then its server, if either still runs.
+
+        The server is ended only through the handle the row tied it by; one
+        never tied is left to the row's own residual checks.
+        """
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                process.kill()
+            with anyio.move_on_after(_STUB_EXIT_SECONDS):
+                await process.wait()
+        handle = self.server_handle
+        if handle is not None and is_alive(handle) is not False:
+            self.killed_by_harness = True
+            self.stopped_monotonic_ns = time.monotonic_ns()
+            with contextlib.suppress(psutil.Error):
+                handle.kill()
+            await asyncio.to_thread(exit_state, handle, _STUB_EXIT_SECONDS)
+
+
+# --- A host on streamable HTTP ---------------------------------------------------
+
+#: The endpoint path both runtimes default to, named explicitly all the same.
+HTTP_PATH = "/mcp"
+_HTTP_POLL_SECONDS = 0.1
+
+
+def free_loopback_port() -> int:
+    """A loopback port nothing listens on now, for one HTTP server to bind.
+
+    Let go before the server binds it, so another process could take it in
+    between; the server then fails to start, which the row records as its
+    host failing, never as a finding.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def http_arguments(port: int) -> list[str]:
+    """What binds a server to *port* on loopback as a streamable-HTTP server,
+    in the options both runtimes accept."""
+    return [
+        "--transport",
+        STREAMABLE_HTTP,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--path",
+        HTTP_PATH,
+    ]
+
+
+class HttpHostRefused(RuntimeError):
+    """A streamable-HTTP host cannot run here, or its server never listened."""
+
+
+class HttpHost:
+    """A streamable-HTTP server and the one client a row talks to it with.
+
+    The server is the harness's child in its process group, as a stdio
+    server is, started with the row's command and the arguments that bind it
+    to a loopback port of its own (``http_arguments``). Its stdin is the null
+    device, since nothing reads it, and both its output streams are read line
+    by line, as an operator's console shows them. The client is FastMCP's own
+    over that port, connected once the port accepts.
+
+    Such a server has no host whose EOF ends it. ``host_quit`` is called once
+    the client has left, and sends the interrupt an operator's Ctrl-C does
+    (SIGINT, through the server's own process object), then waits for the
+    exit as a stdio host waits after EOF. Windows delivers that interrupt to
+    a child only through a console process group of its own, a topology no
+    other row runs, so an HTTP row is POSIX only and ``run_http_host_session``
+    refuses on Windows. A server still running when the host leaves is
+    killed by the corrective stop, recorded as ``killed_by_harness``.
+    """
+
+    def __init__(
+        self,
+        command: Sequence[str],
+        *,
+        env: dict[str, str],
+        cwd: Path,
+        on_stderr: Callable[[str], None],
+        on_process: Callable[[Any], None] | None = None,
+        after_exit: Callable[[], Awaitable[None]] | None = None,
+        port: int | None = None,
+    ) -> None:
+        self.port = port if port is not None else free_loopback_port()
+        self.command = [*command, *http_arguments(self.port)]
+        self.env = env
+        self.cwd = cwd
+        self.on_stderr = on_stderr
+        self.on_process = on_process
+        self.after_exit = after_exit
+        self.process: anyio.abc.Process | None = None
+        self.pid: int | None = None
+        self.quit_done = False
+        self.alive_before_quit: bool | None = None
+        self.interrupted: bool | None = None
+        self.interrupt_error: str | None = None
+        self.interrupt_monotonic_ns: int | None = None
+        self.exited_on_quit: bool | None = None
+        self.quit_seconds: float | None = None
+        self.exit_seen_monotonic_ns: int | None = None
+        self.after_exit_error: str | None = None
+        self.killed_by_harness = False
+        self.stopped_monotonic_ns: int | None = None
+        self.output_closed: bool | None = None
+        #: An HTTP host is never lost: a row on it declares no loss.
+        self.lost: str | None = None
+        self.lost_monotonic_ns: int | None = None
+        self.loss_error: str | None = None
+        self._open_streams = 0
+        self._output_eof = anyio.Event()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}{HTTP_PATH}"
+
+    async def _pump(self, stream: Any) -> None:
+        buffer = ""
+        try:
+            async for chunk in TextReceiveStream(stream, errors="replace"):
+                lines = (buffer + chunk).split("\n")
+                buffer = lines.pop()
+                for line in lines:
+                    self.on_stderr(line.rstrip("\r"))
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+            pass
+        finally:
+            if buffer:
+                self.on_stderr(buffer.rstrip("\r"))
+            self._open_streams -= 1
+            if self._open_streams == 0:
+                self._output_eof.set()
+
+    async def _listening(self, process: anyio.abc.Process) -> None:
+        """Until the server's port accepts, within ``_INIT_SECONDS``; refused
+        once the server has exited or the bound passed."""
+        deadline = time.monotonic() + _INIT_SECONDS
+        while True:
+            if process.returncode is not None:
+                raise HttpHostRefused(
+                    f"the HTTP server exited with status {process.returncode} "
+                    f"before it listened"
+                )
+            try:
+                stream = await anyio.connect_tcp("127.0.0.1", self.port)
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise HttpHostRefused(
+                        f"the HTTP server did not listen within {_INIT_SECONDS}s"
+                    ) from None
+                await anyio.sleep(_HTTP_POLL_SECONDS)
+                continue
+            await stream.aclose()
+            return
+
+    async def host_quit(self) -> None:
+        """What an operator does to stop the server: interrupt it, then wait.
+
+        As ``HostQuitTransport.host_quit``, with the interrupt in place of
+        stdin EOF: *after_exit* runs once the exit is seen, then a bounded
+        wait for its output to end.
+        """
+        process = self.process
+        assert process is not None
+        self.alive_before_quit = process.returncode is None
+        began = time.monotonic()
+        self.interrupt_monotonic_ns = time.monotonic_ns()
+        try:
+            process.send_signal(signal.SIGINT)
+            self.interrupted = True
+        except (ProcessLookupError, OSError) as exc:
+            self.interrupted = False
+            self.interrupt_error = f"{type(exc).__name__}: {exc}"
+        with anyio.move_on_after(_HOST_EXIT_SECONDS):
+            await process.wait()
+        self.quit_seconds = round(time.monotonic() - began, 3)
+        self.exited_on_quit = process.returncode is not None
+        if self.exited_on_quit:
+            self.exit_seen_monotonic_ns = time.monotonic_ns()
+        self.quit_done = True
+        if self.exited_on_quit and self.after_exit is not None:
+            try:
+                await self.after_exit()
+            except Exception as exc:  # noqa: BLE001 - recorded; the quit goes on
+                self.after_exit_error = f"{type(exc).__name__}: {exc}"
+        with anyio.move_on_after(_STDERR_EOF_SECONDS):
+            await self._output_eof.wait()
+        self.output_closed = self._output_eof.is_set()
+
+    async def _stop(self, process: anyio.abc.Process) -> None:
+        """Cleanup only: a server still running when the host leaves."""
+        if process.returncode is not None:
+            return
+        self.killed_by_harness = True
+        self.stopped_monotonic_ns = time.monotonic_ns()
+        with contextlib.suppress(ProcessLookupError, OSError):
+            process.kill()
+        with anyio.move_on_after(15):
+            await process.wait()
+
+    @contextlib.asynccontextmanager
+    async def running(self) -> AsyncIterator[HttpHost]:
+        """The server started and listening, until left; then the corrective
+        stop, whatever ended it."""
+        process = await anyio.open_process(
+            self.command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=self.env,
+            cwd=str(self.cwd),
+        )
+        self.process = process
+        self.pid = process.pid
+        if self.on_process is not None:
+            try:
+                self.on_process(process)
+            except BaseException:
+                # Not yet inside the stop below: a server whose registration
+                # failed is stopped here, never left running.
+                with anyio.CancelScope(shield=True):
+                    await self._stop(process)
+                raise
+        # Raised once the output is read and the server stopped, as itself
+        # rather than inside the task group's exception group.
+        refused: HttpHostRefused | None = None
+        async with anyio.create_task_group() as tasks:
+            self._open_streams = 2
+            tasks.start_soon(self._pump, process.stdout)
+            tasks.start_soon(self._pump, process.stderr)
+            try:
+                try:
+                    await self._listening(process)
+                except HttpHostRefused as exc:
+                    refused = exc
+                else:
+                    yield self
+            finally:
+                with anyio.CancelScope(shield=True):
+                    await self._stop(process)
+                    if refused is not None:
+                        # What the server said before it went is its reason.
+                        with anyio.move_on_after(_STDERR_EOF_SECONDS):
+                            await self._output_eof.wait()
+                tasks.cancel_scope.cancel()
+        if refused is not None:
+            raise refused
+
+
+async def run_http_host_session(
+    command: Sequence[str],
+    *,
+    env: dict[str, str],
+    cwd: Path,
+    on_stderr: Callable[[str], None],
+    after_call: Callable[[], Awaitable[None]] | None = None,
+    tool: str = READ_TOOL,
+    arguments: dict[str, Any] | None = None,
+    started: Callable[[int], None] | None = None,
+    row_script: TransportScript | None = None,
+    on_process: Callable[[Any], None] | None = None,
+    after_exit: Callable[[], Awaitable[None]] | None = None,
+    **unsupported: Any,
+) -> HostSession:
+    """``run_host_session`` over streamable HTTP (``HttpHost``): the server
+    listening, the client initialized, one call, the row's script, the
+    client gone, and then the interrupt that is this host's quit.
+
+    Only what a declared row passes is run; a scripted phase of an older row
+    or a second call is refused rather than dropped, and so is Windows.
+    """
+    if sys.platform == "win32":
+        raise HttpHostRefused(eligibility_rows.HTTP_NOT_ON_WINDOWS)
+    refused = sorted(name for name, value in unsupported.items() if value)
+    if refused:
+        raise ValueError(f"the HTTP host runs no {refused}")
+    session = HostSession(transport=STREAMABLE_HTTP)
+
+    def remember(line: str) -> None:
+        note_server_output(session, line)
+        on_stderr(line)
+
+    host = HttpHost(
+        command,
+        env=env,
+        cwd=cwd,
+        on_stderr=remember,
+        on_process=on_process,
+        after_exit=after_exit,
+    )
+    try:
+        async with host.running():
+            # The initialize handshake as the stdio host sends it
+            # (``run_host_session``), over the server's own port.
+            client = Client(
+                StreamableHttpTransport(host.url),
+                init_timeout=_INIT_SECONDS,
+                mode="legacy",
+            )
+            async with client:
+                if started is not None and host.pid is not None:
+                    started(host.pid)
+                session.tool = await timed_call(
+                    client,
+                    tool,
+                    READ_TOOL_ARGUMENTS if arguments is None else arguments,
+                    records=session.calls,
+                )
+                session.user_lines += session.tool["text"].splitlines()
+                if after_call is not None:
+                    await after_call()
+                if row_script is not None:
+
+                    async def call(
+                        name: str, arguments: dict[str, Any]
+                    ) -> dict[str, Any]:
+                        summary = await timed_call(
+                            client, name, arguments, records=session.calls
+                        )
+                        session.scripted.append(summary)
+                        session.user_lines += summary["text"].splitlines()
+                        return summary
+
+                    try:
+                        await row_script(call, host)
+                    except Exception as exc:  # noqa: BLE001 - the script's own evidence
+                        session.script_error = f"{type(exc).__name__}: {exc}"
+            # The client has left first: an open session would hold the
+            # server's graceful shutdown on its connection.
+            if not host.quit_done:
+                await host.host_quit()
+    except Exception as exc:  # noqa: BLE001 - reported as the row's evidence
+        detail = f"{type(exc).__name__}: {exc}"
+        if host.quit_done:
+            session.teardown_error = detail
+        else:
+            session.error = detail
+    session.pid = host.pid
+    session.alive_before_quit = host.alive_before_quit
+    session.interrupted = host.interrupted
+    session.interrupt_error = host.interrupt_error
+    session.interrupt_monotonic_ns = host.interrupt_monotonic_ns
+    session.exited_on_quit = host.exited_on_quit
+    session.quit_seconds = host.quit_seconds
+    session.exit_seen_monotonic_ns = host.exit_seen_monotonic_ns
+    session.after_exit_error = host.after_exit_error
+    session.stderr_closed = host.output_closed
+    session.killed_by_harness = host.killed_by_harness
+    session.stopped_monotonic_ns = host.stopped_monotonic_ns
+    if host.process is not None:
+        session.exit_code = host.process.returncode
+    return session
+
+
+#: The live host a declared row's script is handed: the transport of the
+#: harness's own host stub, a stub host in a process of its own, or an HTTP
+#: host.
+LiveHost = HostQuitTransport | StubHost | HttpHost
+#: A declared row's scripted phase (``RowLifecycle.script``): the host's
+#: timed call, and the live host it talks through.
+TransportScript = Callable[[ToolCall, LiveHost], Awaitable[None]]
+
+
+async def run_stub_host_session(
+    command: Sequence[str],
+    *,
+    env: dict[str, str],
+    cwd: Path,
+    on_stderr: Callable[[str], None],
+    after_call: Callable[[], Awaitable[None]] | None = None,
+    tool: str = READ_TOOL,
+    arguments: dict[str, Any] | None = None,
+    started: Callable[[int], None] | None = None,
+    row_script: TransportScript | None = None,
+    **unsupported: Any,
+) -> HostSession:
+    """``run_host_session`` through a ``StubHost``: initialize, read, run the
+    row's script, and quit the way a host does unless the script lost it.
+
+    Only what a declared row passes is run; a scripted phase of an older row,
+    a second call or a post-exit hook is refused rather than dropped.
+    """
+    refused = sorted(name for name, value in unsupported.items() if value)
+    if refused:
+        raise ValueError(f"the stub host runs no {refused}")
+    session = HostSession()
+
+    def remember(line: str) -> None:
+        note_server_output(session, line)
+        on_stderr(line)
+
+    host = StubHost(command, env=env, cwd=cwd, on_stderr=remember)
+    try:
+        async with host.running():
+            if started is not None and host.pid is not None:
+                started(host.pid)
+            session.tool = await host.call(
+                tool,
+                READ_TOOL_ARGUMENTS if arguments is None else arguments,
+                records=session.calls,
+            )
+            session.user_lines += session.tool["text"].splitlines()
+            if after_call is not None:
+                await after_call()
+            if row_script is not None:
+
+                async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+                    summary = await host.call(name, arguments, records=session.calls)
+                    session.scripted.append(summary)
+                    session.user_lines += summary["text"].splitlines()
+                    return summary
+
+                try:
+                    await row_script(call, host)
+                except Exception as exc:  # noqa: BLE001 - the script's own evidence
+                    session.script_error = f"{type(exc).__name__}: {exc}"
+            if host.lost is None:
+                await host.quit_host()
+    except Exception as exc:  # noqa: BLE001 - reported as the row's evidence
+        detail = f"{type(exc).__name__}: {exc}"
+        if host.quit_done or host.lost is not None:
+            session.teardown_error = detail
+        else:
+            session.error = detail
+    session.pid = host.pid
+    session.lost = host.lost
+    session.lost_monotonic_ns = host.lost_monotonic_ns
+    session.loss_error = host.loss_error
+    session.killed_by_harness = host.killed_by_harness
+    session.stopped_monotonic_ns = host.stopped_monotonic_ns
+    quit_ = host.quit
+    session.alive_before_quit = quit_.get("alive_before_quit")
+    session.stdin_closed = quit_.get("stdin_closed")
+    session.exited_on_quit = quit_.get("exited_on_quit")
+    session.exit_code = quit_.get("exit_code")
+    session.quit_seconds = quit_.get("quit_seconds")
+    return session
+
+
+def host_failures(session: HostSession) -> list[str]:
+    """Why this was not a normal host quit, or nothing when it was.
+
+    A normal quit is a live server whose stdin was closed and which then exited
+    by itself with status 0; on streamable HTTP, one that was interrupted
+    (``HttpHost.host_quit``) and then exited by itself with status 0. A crash
+    or a kill may be a row of its own; it is never evidence of this one.
+    """
+    if session.error is not None:
+        return [f"the host session failed: {session.error}"]
+    failures = []
+    if session.alive_before_quit is not True:
+        failures.append("the server was already gone before the host quit")
+    if session.transport == STREAMABLE_HTTP:
+        quit_by = "its interrupt"
+        if session.interrupted is not True:
+            failures.append(
+                f"interrupting the HTTP server failed: {session.interrupt_error}"
+            )
+    else:
+        quit_by = "stdin EOF"
+        if session.stdin_closed is not True:
+            failures.append(
+                f"closing the server's stdin failed: {session.stdin_close_error}"
+            )
+    if session.killed_by_harness:
+        failures.append("the harness had to kill the server")
+    if session.exited_on_quit is not True:
+        failures.append(
+            f"the server did not exit within {_HOST_EXIT_SECONDS}s of {quit_by}"
+        )
+    elif session.exit_code != 0:
+        failures.append(
+            f"the server exited abnormally, with status {session.exit_code}, "
+            f"after {quit_by}"
+        )
+    return failures
+
+
+def host_summary(session: HostSession) -> dict[str, Any]:
+    """How a host session ended, as the comparison rows record it."""
+    return {
+        "error": session.error,
+        "alive_before_quit": session.alive_before_quit,
+        "stdin_closed": session.stdin_closed,
+        "stdin_close_error": session.stdin_close_error,
+        "exited_on_quit": session.exited_on_quit,
+        "exit_code": session.exit_code,
+        "killed_by_harness": session.killed_by_harness,
+        "stderr_closed": session.stderr_closed,
+        "eof_ns": session.eof_monotonic_ns,
+        "exit_seen_ns": session.exit_seen_monotonic_ns,
+        "lost": session.lost,
+        "lost_ns": session.lost_monotonic_ns,
+        "loss_error": session.loss_error,
+        "stop_ns": session.stopped_monotonic_ns,
+        "transport": session.transport,
+        "interrupted": session.interrupted,
+        "interrupt_error": session.interrupt_error,
+        "interrupt_ns": session.interrupt_monotonic_ns,
+    }
+
+
+def call_summary(
+    summary: Mapping[str, Any] | None,
+    *,
+    host: str | None = None,
+    call: str | None = None,
+) -> dict[str, Any] | None:
+    """A call's times and outcome, without its text; labelled for H-R2."""
+    if summary is None:
+        return None
+    found = {
+        name: summary.get(name)
+        for name in (
+            "began",
+            "ended",
+            "began_monotonic_ns",
+            "ended_monotonic_ns",
+            "is_error",
+            "read_the_post",
+        )
+    }
+    if call is not None:
+        found.update(host=host, call=call)
+    return found
+
+
+def call_record(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """A call's whole terminal record (``timed_call``) but its text."""
+    return {name: value for name, value in summary.items() if name != "text"}
+
+
+def launch_digest(command: Sequence[str], env: Mapping[str, str]) -> dict[str, Any]:
+    """What a host was started with: its command, and a digest of its whole
+    environment, whose values stay on the runner."""
+    text = json.dumps(sorted(env.items()))
+    return {
+        "command": list(command),
+        "env_sha256": hashlib.sha256(text.encode()).hexdigest(),
+    }
+
+
+# --- Process helpers -----------------------------------------------------------
+
+
+@dataclass
+class ProfileCensus:
+    """The processes running a browser on the row's profile, and what is unknown.
+
+    ``complete`` only when every process could be judged: its command line
+    read, or it established as unrelated the way the watcher establishes it
+    (another user, or a readable executable that cannot be the browser), or,
+    for a zombie, the whole process shown to have exited (``zombie_unresolved``).
+    An empty ``processes`` from an incomplete census is not an empty profile.
+    """
+
+    processes: list[Any] = field(default_factory=list)
+    #: Processes whose arguments could not be read and that were not excluded.
+    unresolved: list[int] = field(default_factory=list)
+    #: Why each of ``unresolved`` was kept, in the same order, each with its
+    #: ``pid`` and the ``phase`` that could not judge it. Evidence only.
+    provenance: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def pids(self) -> list[int]:
+        return [process.pid for process in self.processes]
+
+    @property
+    def complete(self) -> bool:
+        return not self.unresolved
+
+    def unresolve(self, pid: int, **why: Any) -> None:
+        """Keep *pid* unresolved, with what the census read of it."""
+        self.unresolved.append(pid)
+        self.provenance.append({"pid": pid, **why})
+
+
+#: ``pid_state``: nothing is at the pid any more.
+PID_GONE = "gone"
+#: ``pid_state``: a process, a zombie included, is at the pid.
+PID_PRESENT = "present"
+
+
+def pid_state(pid: int, *, open_process: Callable[[int], Any] = psutil.Process) -> str:
+    """Whether anything is at *pid*, looked up now.
+
+    ``PID_GONE`` only when the lookup finds nothing, ``PID_PRESENT`` for any
+    process there, and otherwise ``unknown: ...`` with what failed. A zombie
+    is present even though psutil raises it as a ``NoSuchProcess``. A later
+    process at a reused pid is present too: telling it apart would take a
+    start time, and the public one moves with the wall clock.
+    """
+    try:
+        open_process(pid)
+    except psutil.ZombieProcess:
+        return PID_PRESENT
+    except psutil.NoSuchProcess:
+        return PID_GONE
+    except (psutil.Error, OSError) as exc:
+        return f"unknown: {type(exc).__name__}"
+    return PID_PRESENT
+
+
+def thread_count(process: Any) -> int | None:
+    """How many threads a process has, or None if that cannot be read."""
+    try:
+        return process.num_threads()
+    except (psutil.Error, OSError):
+        pass
+    try:
+        return len(os.listdir(f"/proc/{process.pid}/task"))
+    except OSError:
+        return None
+
+
+def exited_zombie(
+    process: Any,
+    *,
+    linux: bool | None = None,
+    threads_of: Callable[[Any], int | None] = thread_count,
+) -> bool:
+    """Whether a process reported as a zombie has exited as a whole.
+
+    On Linux the status is the thread-group leader's. A leader that ended with
+    ``pthread_exit`` is a zombie while the process's other threads run on and
+    keep every descriptor and lock it holds, so only a thread count of one,
+    the dead leader alone, shows the process gone; an unreadable count shows
+    nothing. On macOS a process becomes a zombie only once its last thread has
+    exited, and psutil never reports the status on Windows, so there the
+    status is enough.
+    """
+    if not (sys.platform.startswith("linux") if linux is None else linux):
+        return True
+    return threads_of(process) == 1
+
+
+def zombie_unresolved(
+    process: Any,
+    *,
+    linux: bool | None = None,
+    threads_of: Callable[[Any], int | None] = thread_count,
+    open_process: Callable[[int], Any] = psutil.Process,
+) -> dict[str, Any] | None:
+    """Why a zombie the census listed cannot be excluded; None once its whole
+    process is shown to have exited.
+
+    First ``exited_zombie``. A count that shows nothing on Linux can also mean
+    the zombie was reaped after the table was read, which takes its
+    ``/proc/<pid>/task`` with it, so the pid is looked up again: excluded only
+    once nothing is there, never because a read failed.
+    """
+    counted: list[int | None] = []
+
+    def count(target: Any) -> int | None:
+        counted.append(threads_of(target))
+        return counted[-1]
+
+    if exited_zombie(process, linux=linux, threads_of=count):
+        return None
+    lookup = pid_state(process.pid, open_process=open_process)
+    if lookup == PID_GONE:
+        return None
+    return {
+        "phase": "zombie",
+        "status": psutil.STATUS_ZOMBIE,
+        "threads": counted[-1] if counted else None,
+        "lookup": lookup,
+    }
+
+
+def process_table(attrs: Sequence[str]) -> Iterator[Any]:
+    """``psutil.process_iter(attrs)``, every read judged as psutil judges it.
+
+    A refused read is ``None`` in ``info`` and a process gone is skipped,
+    with one difference: a command line, environment or executable that
+    psutil 7.2.2 on macOS fails to read with a ``SystemError`` is refused too
+    (``read_arguments``). psutil's own iteration ends at that error, and
+    the census with it, before any process is judged.
+    """
+    for process in psutil.process_iter():
+        info: dict[str, Any] = {}
+        try:
+            with process.oneshot():
+                for name in attrs:
+                    try:
+                        if name in ("cmdline", "environ", "exe"):
+                            info[name] = read_arguments(process, name)
+                        else:
+                            info[name] = getattr(process, name)()
+                    except (psutil.AccessDenied, psutil.ZombieProcess):
+                        info[name] = None
+        except psutil.NoSuchProcess:
+            continue
+        process.info = info
+        yield process
+
+
+def profile_census(
+    account: ActorAccount,
+    *,
+    browser_exe: str | None = None,
+    browser_dir: str | Path | None = None,
+    process_iter: Callable[..., Iterable[Any]] | None = None,
+    user: object | None = None,
+    linux: bool | None = None,
+    threads_of: Callable[[Any], int | None] = thread_count,
+    open_process: Callable[[int], Any] = psutil.Process,
+) -> ProfileCensus:
+    """Every process, root or child, running a browser on this row's profile.
+
+    ``process_iter`` reports a refused read as ``None`` in ``info``, which is
+    kept apart from a process that has no such argument.
+    """
+    owner = harness_user() if user is None else user
+    directory = str(browser_dir) if browser_dir is not None else None
+    census = ProfileCensus()
+    try:
+        processes = list((process_iter or process_table)(["cmdline", "exe", "status"]))
+    except psutil.Error as exc:
+        census.unresolve(-1, phase="table", error=type(exc).__name__)
+        return census
+    for process in processes:
+        info = getattr(process, "info", {}) or {}
+        cmdline = info.get("cmdline")
+        if info.get("status") == psutil.STATUS_ZOMBIE:
+            # Exited and not yet reaped, then nothing is running there; but
+            # a zombie leader can still have threads that hold the profile.
+            if another_user(process_user(process), owner):
+                continue
+            why = zombie_unresolved(
+                process,
+                linux=linux,
+                threads_of=threads_of,
+                open_process=open_process,
+            )
+            if why is not None:
+                census.unresolve(process.pid, **why)
+            continue
+        if cmdline is None:
+            if another_user(process_user(process), owner):
+                continue
+            exe = info.get("exe")
+            if exe and not possible_browser(exe, browser_exe, directory):
+                continue
+            census.unresolve(
+                process.pid, phase="arguments", status=info.get("status"), exe=exe
+            )
+            continue
+        for argument in cmdline:
+            if not argument.startswith(USER_DATA_DIR_FLAG):
+                continue
+            value = argument[len(USER_DATA_DIR_FLAG) :]
+            if canonical_user_data_dir(value) == account.browser_key:
+                census.processes.append(process)
+            break
+    return census
+
+
+def _profile_processes(account: ActorAccount) -> list[Any]:
+    return profile_census(account).processes
+
+
+def wait_for_no_browser(
+    account: ActorAccount,
+    seconds: float,
+    *,
+    browser_dir: str | Path,
+    browser_exe: str | None = None,
+) -> list[int]:
+    """Wait for the profile's browser to be shown gone; the pids that keep it
+    from that if the wait ends first.
+
+    Shown gone only by a complete census: a process that could be the
+    browser and whose arguments cannot be read keeps the profile occupied
+    as surely as one running on it, so its pid (or -1 for a process table
+    that could not be read) is among those returned. The browser's directory
+    is what settles every other unreadable process of this user: without it
+    each could be the browser, and on macOS the setuid ``login`` of every
+    terminal session is one.
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        census = profile_census(
+            account, browser_exe=browser_exe, browser_dir=browser_dir
+        )
+        remaining = [*census.pids, *census.unresolved]
+        if not remaining or time.monotonic() >= deadline:
+            return remaining
+        time.sleep(0.2)
+
+
+def sweep_browsers(account: ActorAccount) -> list[int]:
+    """Cleanup only: kill whatever still runs on this row's temporary profile.
+
+    Found by the row's own temporary profile in the command line, and killed
+    through the handle that lookup returned, which psutil checks against a
+    recycled pid before it signals.
+    """
+    killed = []
+    for process in _profile_processes(account):
+        with contextlib.suppress(psutil.Error):
+            process.kill()
+            killed.append(process.pid)
+    return killed
+
+
+# --- Owner identity and cleanup ----------------------------------------------
+
+
+@dataclass(frozen=True)
+class OwnerIdentity:
+    """The owner as this row found it, and the one handle that may signal it."""
+
+    pid: int
+    create_time: float
+    instance_id: str
+    auth_root: str
+    process: Any = field(compare=False, repr=False)
+
+
+@dataclass(frozen=True)
+class PublishedOwner:
+    """What the descriptor on disk names at cleanup."""
+
+    pid: int
+    instance_id: str
+
+
+#: Gone, confirmed: not running before cleanup, or stopped by it and waited for.
+GONE = "gone"
+STOPPED = "stopped"
+#: Anything cleanup could not confirm. Never read as gone.
+UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class OwnerDisposition:
+    #: ``gone``, ``stopped`` or ``unknown``.
+    state: str
+    #: Cleanup sent the owner a signal.
+    signalled: bool
+    failures: tuple[str, ...] = ()
+
+    @property
+    def gone(self) -> bool:
+        return self.state in (GONE, STOPPED)
+
+
+#: How far apart two readings of one create time may be. Both come from psutil
+#: on the same machine; the tolerance only absorbs float formatting.
+_START_TOLERANCE_SECONDS = 0.01
+
+
+def row_owner_starts(observed: Iterable[dict[str, Any]]) -> list[tuple[int, float]]:
+    """The owners the watcher saw start as this row's actors.
+
+    A ``process.start`` or ``process.update`` it wrote with actor ``owner`` and
+    ``in_row`` set: a process that appeared after its baseline, whose ancestry
+    at first sight led to this row's harness (the frontend spawns the owner),
+    and whose command line was the owner's.
+    """
+    return [
+        (record["pid"], record["start_identity"])
+        for record in observed
+        if record.get("kind") in ("process.start", "process.update")
+        and record.get("actor") == "owner"
+        and record.get("in_row") is True
+        and isinstance(record.get("pid"), int)
+        and isinstance(record.get("start_identity"), (int, float))
+    ]
+
+
+def identify_owner(
+    published: Any,
+    account: ActorAccount,
+    observed: Iterable[dict[str, Any]],
+    *,
+    open_process: Callable[[int], Any] = psutil.Process,
+) -> tuple[OwnerIdentity | None, str | None]:
+    """Bind the descriptor's owner to this row, or say why it cannot be.
+
+    The descriptor says which pid and profile; it cannot say that the process
+    now at that pid is the one this row started. The watcher can: it saw the
+    row's own frontend start an owner, with a pid and a create time. Only a
+    process whose pid and create time match that observation is this row's
+    owner, which is what refuses a stale descriptor whose pid another owner
+    has since taken.
+    """
+    try:
+        if canonical_user_data_dir(published.profile_path) != account.browser_key:
+            return None, "the descriptor serves another profile"
+    except (AttributeError, TypeError):
+        return None, "the descriptor names no profile"
+    try:
+        process = open_process(published.pid)
+        created = process.create_time()
+    except psutil.Error as exc:
+        return None, f"pid {published.pid} could not be read ({type(exc).__name__})"
+    starts = row_owner_starts(observed)
+    if not any(
+        pid == published.pid and abs(start - created) <= _START_TOLERANCE_SECONDS
+        for pid, start in starts
+    ):
+        return None, (
+            f"pid {published.pid}, created {created}, is not an owner the watcher "
+            f"saw this row start (saw {starts})"
+        )
+    return (
+        OwnerIdentity(
+            pid=published.pid,
+            create_time=created,
+            instance_id=published.instance_id,
+            auth_root=str(account.auth_root),
+            process=process,
+        ),
+        None,
+    )
+
+
+#: How long, after the probe, the row waits for the descriptor to name the
+#: successor and for the watcher to have seen the browser it launched.
+_SUCCESSOR_SECONDS = 10.0
+
+
+def kernel_start_ticks(
+    pid: int, start: float, *, open_process: Callable[[int], Any] = psutil.Process
+) -> int | None:
+    """When the lifetime (*pid*, *start*) began, in the kernel's clock ticks.
+
+    ``/proc/<pid>/stat``'s start time counts ticks since boot, so two of them
+    compare whatever the wall clock did meanwhile, which a create time read
+    against ``time.time()`` does not. None off Linux, for a process gone, or
+    when the pid was not that lifetime both before and after the read.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+
+    def same() -> bool:
+        try:
+            created = open_process(pid).create_time()
+        except psutil.Error:
+            return False
+        return abs(created - start) <= _START_TOLERANCE_SECONDS
+
+    if not same():
+        return None
+    ticks = _stat_start_ticks(pid)
+    return ticks if ticks is not None and same() else None
+
+
+def _stat_start_ticks(pid: int) -> int | None:
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    # The command name is in parentheses and may hold anything; the fields
+    # after its last ')' start with the state, field 3, so start time (22)
+    # is the 20th of them.
+    fields = text[text.rfind(")") + 2 :].split()
+    try:
+        return int(fields[19])
+    except (IndexError, ValueError):
+        return None
+
+
+def creation_marker(
+    *,
+    popen: Callable[..., Any] | None = None,
+    open_process: Callable[[int], Any] | None = None,
+) -> tuple[int | None, float | None]:
+    """A process started now, as H-R7 marks its close and its barrier.
+
+    Its start in kernel ticks, where they can be read (Linux): a lifetime
+    whose start is later in ticks began after the marker, which no reading
+    of the wall clock can say across a clock step. And its creation time as
+    psutil reads every lifetime's (``start_identity``), so a lifetime the
+    watcher recorded can be ordered against the marker after it is gone.
+    None for either that cannot be read.
+
+    The marker is retained (``retain``) from the moment it exists, ended only
+    through its own ``Popen``, and released only once that shows it gone.
+    Each cleanup step runs whatever the one before it did. One not shown
+    gone stays retained, refusing every later measurement, and the call
+    raises: the first failure of the reading, or else the cleanup's last,
+    with every other cleanup failure as a note.
+    """
+    try:
+        marker = (popen or subprocess.Popen)(
+            [sys.executable, "-I", "-c", "import sys; sys.stdin.read()"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None, None
+    held = retain(f"the creation marker {marker.pid}", _popen_ended(marker))
+    primary: BaseException | None = None
+    ticks: int | None = None
+    created: float | None = None
+    try:
+        if sys.platform.startswith("linux"):
+            ticks = _stat_start_ticks(marker.pid)
+        try:
+            created = (open_process or psutil.Process)(marker.pid).create_time()
+        except psutil.Error:
+            created = None
+    except BaseException as exc:  # noqa: BLE001 - raised again once cleanup ran
+        primary = exc
+    errors: list[BaseException] = []
+    try:
+        if marker.stdin is not None:
+            marker.stdin.close()
+    except BaseException as exc:  # noqa: BLE001 - kept, the next step still runs
+        errors.append(exc)
+    try:
+        marker.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            marker.kill()
+        except BaseException as exc:  # noqa: BLE001 - kept, the next step still runs
+            errors.append(exc)
+        try:
+            marker.wait(timeout=10)
+        except BaseException as exc:  # noqa: BLE001 - kept; the marker stays held
+            errors.append(exc)
+    except BaseException as exc:  # noqa: BLE001 - kept; the marker stays held
+        errors.append(exc)
+    try:
+        settled = marker.poll() is not None
+    except BaseException as exc:  # noqa: BLE001 - an unanswered poll settles nothing
+        errors.append(exc)
+        settled = False
+    if settled:
+        discharge(held)
+    elif primary is None:
+        primary = errors[-1] if errors else UnsettledWorker(held.label)
+    if primary is not None:
+        for error in errors:
+            if error is not primary:
+                primary.add_note(f"cleaning up the creation marker: {error!r}")
+        if not settled:
+            primary.add_note(f"{held.label} is not shown gone; it stays retained")
+        raise primary
+    return ticks, created
+
+
+def created_after(pid: int, start: float, marker: int | None) -> bool | None:
+    """Whether (*pid*, *start*) began after a marker's ticks; None if unknown.
+
+    The same tick is unknown: either could have come first.
+    """
+    if marker is None:
+        return None
+    ticks = kernel_start_ticks(pid, start)
+    if ticks is None or ticks == marker:
+        return None
+    return ticks > marker
+
+
+def successor_problems(
+    observed: Iterable[Mapping[str, Any]],
+    closing: OwnerIdentity | None,
+    successor: OwnerIdentity | None,
+    *,
+    probe: tuple[float, float] | None,
+    probe_requests: int,
+    after_close: Callable[[int, float], bool | None],
+    browser_after: Callable[[int, float], bool | None] | None = None,
+) -> list[str]:
+    """Why *successor* is not shown to have replaced *closing* and served the
+    probe; empty when it is.
+
+    A served probe says that some owner answered, not which. The successor
+    counts only as a lifetime of its own: another pid and create time and
+    another instance than the owner that closed, not yet gone, and begun
+    after the close (*after_close*, from kernel start times: when the watcher
+    first saw a process says only when it looked).
+
+    And it served *this* probe. The origin saw the feed request while the
+    probe ran (*probe* is its call's start and return, *probe_requests* the
+    feed requests between them), so a row browser alive then made it. Every
+    row browser the watcher could have seen in that interval must descend
+    from the successor, one of them begun after the close (or, with
+    *browser_after*, after the boundary that asks: H-R7's recovery barrier)
+    and seen before the probe returned. One from the owner that closed, or
+    one whose ancestry is unknown, leaves the served request unattributed; a
+    browser launched only after the response is no evidence for it.
+    """
+    browser_after = browser_after or after_close
+    if closing is None:
+        return ["the owner that closed was never identified"]
+    if successor is None:
+        return ["the descriptor names no owner this row started"]
+    if (successor.pid, successor.create_time) == (closing.pid, closing.create_time):
+        return [f"the descriptor still names the owner that closed, pid {closing.pid}"]
+    problems = []
+    if successor.instance_id == closing.instance_id:
+        problems.append(f"the successor reuses instance {closing.instance_id!r}")
+    history = ProcessHistory(observed, outside=[os.getpid()])
+
+    def lifetime(owner: OwnerIdentity) -> Lifetime | None:
+        for life in history.lifetimes:
+            if (
+                life.pid == owner.pid
+                and abs(life.start - owner.create_time) <= _START_TOLERANCE_SECONDS
+                and life.was("owner")
+            ):
+                return life
+        return None
+
+    old, new = lifetime(closing), lifetime(successor)
+    if new is None:
+        return [*problems, f"the watcher never saw pid {successor.pid} start"]
+    if old is None:
+        return [*problems, f"the watcher has no lifetime for pid {closing.pid}"]
+    if new.exit_t is not None:
+        problems.append(f"pid {successor.pid} had exited before the host quit")
+    began_after = after_close(successor.pid, successor.create_time)
+    if began_after is False:
+        problems.append(f"pid {successor.pid} began before the close")
+    elif began_after is None:
+        problems.append(
+            f"pid {successor.pid}'s start could not be ordered against the close"
+        )
+    if probe is None:
+        return [*problems, "the probe's interval was not recorded"]
+    began, ended = probe
+    if probe_requests < 1:
+        problems.append("the origin saw no feed request while the probe ran")
+    now = time.time()
+    served = False
+    for life in history.lifetimes:
+        if not (life.in_row and life.was("browser")):
+            continue
+        # Any row browser the watcher could have seen while the probe ran.
+        if life.first_t > ended + MAX_WATCHER_GAP_SECONDS:
+            continue
+        if life.exit_t is not None and life.exit_t < began:
+            continue
+        if history.descends(life, old, now) is True:
+            problems.append(
+                f"browser {life.pid} of pid {closing.pid}, the owner that closed, "
+                f"ran while the probe was served"
+            )
+        elif history.descends(life, new, now) is not True:
+            problems.append(
+                f"browser {life.pid} ran while the probe was served, and nothing "
+                f"ties it to pid {successor.pid}"
+            )
+        elif life.first_t <= ended and browser_after(life.pid, life.start) is True:
+            served = True
+    if not served:
+        problems.append(
+            f"no browser of pid {successor.pid}, begun after the "
+            f"{'close' if browser_after is after_close else 'recovery barrier'}, "
+            f"was seen before the probe returned"
+        )
+    return problems
+
+
+def settle_owner(
+    owner: OwnerIdentity | None,
+    published: PublishedOwner | None,
+    read_error: str | None,
+    *,
+    auth_root: str,
+    wait_seconds: float = _OWNER_KILL_WAIT_SECONDS,
+    linux: bool | None = None,
+) -> OwnerDisposition:
+    """Decide whether the row's owner is gone, signalling only that owner.
+
+    Three answers: gone (confirmed), stopped (confirmed same-row live, killed
+    and waited for), or unknown. Every psutil failure along the way is unknown,
+    never gone. Nothing is ever looked up by pid here: the only process that may
+    receive a signal is ``owner.process``, the handle taken when the row
+    identified it, and the descriptor must still name that pid and instance.
+    A zombie is gone only once the whole process has exited (``is_dead``).
+    """
+
+    def unknown(reason: str, *, signalled: bool = False) -> OwnerDisposition:
+        return OwnerDisposition(UNKNOWN, signalled, (reason,))
+
+    if read_error is not None:
+        return unknown(f"the row's descriptor could not be read: {read_error}")
+    if owner is None:
+        if published is None:
+            return OwnerDisposition(GONE, False)
+        return unknown(
+            f"the descriptor names pid {published.pid}, instance "
+            f"{published.instance_id}, which this row never identified; "
+            f"not signalled"
+        )
+    if owner.auth_root != auth_root:
+        return unknown(
+            f"the identified owner belongs to {owner.auth_root}; not signalled"
+        )
+    if published is not None and (
+        published.pid != owner.pid or published.instance_id != owner.instance_id
+    ):
+        return unknown(
+            f"the descriptor names pid {published.pid}, instance "
+            f"{published.instance_id}; the row identified pid {owner.pid}, "
+            f"instance {owner.instance_id}; not signalled"
+        )
+    try:
+        running = owner.process.is_running()
+    except psutil.Error as exc:
+        return unknown(f"the owner's liveness could not be read ({type(exc).__name__})")
+    try:
+        # H-R6 kills the owner, and its parent may not have reaped it yet.
+        if not running or is_dead(owner.process, linux=linux):
+            return OwnerDisposition(GONE, False)
+    except psutil.Error as exc:
+        return unknown(f"the owner's liveness could not be read ({type(exc).__name__})")
+    try:
+        owner.process.kill()
+    except psutil.NoSuchProcess:
+        return OwnerDisposition(GONE, False)
+    except psutil.Error as exc:
+        return unknown(f"the owner could not be stopped ({type(exc).__name__})")
+    try:
+        dead = wait_until_dead(owner.process, wait_seconds, linux=linux)
+    except psutil.Error as exc:
+        return unknown(
+            f"the owner's exit could not be confirmed ({type(exc).__name__})",
+            signalled=True,
+        )
+    if not dead:
+        return unknown(
+            f"the owner was still running {wait_seconds}s after it was killed",
+            signalled=True,
+        )
+    return OwnerDisposition(STOPPED, True)
+
+
+@dataclass(frozen=True)
+class DaemonCleanup:
+    directory: str
+    existed: bool
+    signalled: bool
+    owner_gone: bool
+    cleaned: bool
+    failures: tuple[str, ...] = ()
+
+
+def retire_daemon_state(
+    account: ActorAccount,
+    owner: OwnerIdentity | None,
+    *,
+    linux: bool | None = None,
+    wait_seconds: float = _OWNER_KILL_WAIT_SECONDS,
+) -> DaemonCleanup:
+    """Settle the row's owner, then remove the row's daemon directory.
+
+    Removed only once the owner is provably gone or was never published.
+    Otherwise the directory stays, as the evidence of what was left running.
+    """
+    directory = account.layout.directory(account.auth_root)
+    existed = directory.exists()
+    published: PublishedOwner | None = None
+    read_error: str | None = None
+    if existed:
+        try:
+            descriptor = account.layout.read(account.auth_root)
+        except Exception as exc:  # noqa: BLE001 - the cleanup reports it
+            read_error = f"{type(exc).__name__}: {exc}"
+        else:
+            if descriptor is not None:
+                published = PublishedOwner(descriptor.pid, descriptor.instance_id)
+    disposition = settle_owner(
+        owner,
+        published,
+        read_error,
+        auth_root=str(account.auth_root),
+        linux=linux,
+        wait_seconds=wait_seconds,
+    )
+    failures = list(disposition.failures)
+    if disposition.gone and existed:
+        shutil.rmtree(directory, ignore_errors=True)
+        if directory.exists():
+            failures.append(f"the row's daemon directory survived removal: {directory}")
+    elif existed:
+        failures.append(f"the row's daemon directory is kept: {directory}")
+    return DaemonCleanup(
+        directory=str(directory),
+        existed=existed,
+        signalled=disposition.signalled,
+        owner_gone=disposition.gone,
+        cleaned=not directory.exists(),
+        failures=tuple(failures),
+    )
+
+
+# --- The outcome of a row ------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RowVector:
+    """What K0 compares across repeats. O1 to O4 are what K3 compares to K1.
+
+    No pid, instance or time: those differ between two healthy runs.
+    """
+
+    mode: str
+    #: O1: at no sample more than one browser root on the row's profile, from
+    #: a watcher whose observation is healthy.
+    o1_single_browser: bool
+    #: The watcher's positive control: it saw the browser at all.
+    browser_seen: bool
+    watcher_healthy: bool
+    #: O4: the R17 outcome.
+    o4_session: str
+    origin_saw_feed: bool
+    #: A ``/feed/`` request in the row carried the staged session, by the
+    #: origin's own judgement.
+    feed_carried_session: bool
+    tool_succeeded: bool
+    #: Daemon mode: a descriptor named the owner. Direct: any sign of one.
+    owner_published: bool
+    #: Daemon mode was asked for and the frontend drove its own browser.
+    fell_back: bool
+    host_exit_clean: bool
+    #: Cleanup signalled and killed nothing and removed the row's state.
+    cleanup_clean: bool
+    #: The watcher saw a row actor start the owner module, published or not.
+    owner_launched: bool = False
+    #: The watcher saw a row actor start the owner's release gate, which is an
+    #: attempt to start one whether or not the gate ever released it.
+    owner_start_attempted: bool = False
+    #: O2 for every actor of the row: ``violated`` on evidence (a traced
+    #: violation, a dead canary), otherwise ``unobserved``. Never ``held``:
+    #: nothing observes the senders outside the traced scope.
+    o2: str = O2_UNOBSERVED
+    #: O2 for the traced scope only (``signals.derive_o2``): the killed actor
+    #: and its guardian from the attach on. ``held``, ``violated``,
+    #: ``unknown``, ``incomplete``, or ``unobserved`` where no oracle ran.
+    o2_traced: str = O2_UNOBSERVED
+    #: The oracle was required here (native Linux CI, a row that kills).
+    o2_required: bool = False
+    #: The oracle's collection, apart from what it showed: ``complete``,
+    #: ``incomplete`` or ``unavailable``. What every required-oracle check reads.
+    oracle_collection: str = ORACLE_UNAVAILABLE
+    #: Every class of signal the oracle resolved, ``role:target kind``.
+    signal_classes: tuple[str, ...] = ()
+    #: H-R6: the group the killed actor's guardian was told to kill, from its
+    #: argv; None where no guardian was seen (Windows has none).
+    guardian_owner_group: int | None = None
+    #: H-R6, daemon mode: the frontend's second call after the owner was
+    #: killed read the post again.
+    recovered: bool | None = None
+    #: O3: the protected changes between the row's two readings, by kind
+    #: (``protected_kinds``), that no action the user authorized covers.
+    o3_protected: tuple[str, ...] = ()
+    #: The protected changes the row's authorized action does cover.
+    o3_authorized: tuple[str, ...] = ()
+    #: R17 beyond the original generation (``session.replacement_lineage``):
+    #: ``none`` on every row that stages no sign-in.
+    o4_lineage: str = LINEAGE_NONE
+
+
+_ASSOCIATE_SECONDS = 5.0
+
+
+def is_dead(
+    process: Any,
+    *,
+    linux: bool | None = None,
+    threads_of: Callable[[Any], int | None] = thread_count,
+) -> bool:
+    """Whether *process* has ended as a whole, an unreaped one included.
+
+    An owner is not the harness's child, so once killed it stays a zombie
+    until its own parent reaps it, and ``psutil`` reads a zombie as running.
+    A zombie counts as dead only under ``exited_zombie``'s contract: on Linux
+    the status is the leader thread's, and other threads may run on. A read
+    that fails for any other reason than the process being gone raises: that
+    is not knowing, never dead.
+    """
+    try:
+        zombie = process.status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+    return zombie and exited_zombie(process, linux=linux, threads_of=threads_of)
+
+
+def wait_until_dead(process: Any, seconds: float, *, linux: bool | None = None) -> bool:
+    """Whether *process* is dead within *seconds*; ``psutil.Error`` is unknown.
+
+    On Windows, where nothing lingers as a zombie, the handle is waited on.
+    """
+    if os.name == "nt":
+        try:
+            process.wait(timeout=seconds)
+        except psutil.TimeoutExpired:
+            return False
+        except psutil.NoSuchProcess:
+            pass
+        return True
+    deadline = time.monotonic() + seconds
+    while not is_dead(process, linux=linux):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def associate_server(
+    pid: int,
+    observed: Callable[[], Iterable[dict[str, Any]]],
+    *,
+    open_process: Callable[[int], Any] = psutil.Process,
+    seconds: float = _ASSOCIATE_SECONDS,
+) -> tuple[Any, float | None]:
+    """The handle to the row's Direct server, once the watcher vouches for it.
+
+    The process at *pid* is the server only if its create time is the one the
+    watcher recorded for the row's frontend at that pid; the handle taken for
+    that check is the only one the harness will ever kill it through.
+    """
+    try:
+        process = open_process(pid)
+        created = process.create_time()
+    except psutil.Error:
+        return None, None
+    deadline = time.monotonic() + seconds
+    while True:
+        for entry in observed():
+            if (
+                entry.get("kind") in ("process.start", "process.update")
+                and entry.get("actor") == "frontend"
+                and entry.get("in_row") is True
+                and entry.get("pid") == pid
+                and isinstance(entry.get("start_identity"), (int, float))
+                and abs(entry["start_identity"] - created) <= _START_TOLERANCE_SECONDS
+            ):
+                return process, created
+        if time.monotonic() >= deadline:
+            return None, None
+        time.sleep(0.05)
+
+
+def wait_for_guardian(
+    observed: Callable[[], Iterable[dict[str, Any]]],
+    principal_pid: int,
+    *,
+    seconds: float = _ASSOCIATE_SECONDS,
+) -> tuple[int, int] | None:
+    """The guardian *principal_pid* started, once the watcher has reported it.
+
+    POSIX only: ``start_browser_guardian`` starts none on Windows.
+    """
+    if os.name == "nt":
+        return None
+    deadline = time.monotonic() + seconds
+    while True:
+        found = guardian_launch(observed(), principal_pid)
+        if found is not None or time.monotonic() >= deadline:
+            return found
+        time.sleep(0.05)
+
+
+def guardian_launch(
+    observed: Iterable[dict[str, Any]], principal_pid: int
+) -> tuple[int, int] | None:
+    """The guardian *principal_pid* started, and its owner-group argument.
+
+    Read from the watcher's records of a row actor started by that process:
+    ``<python> -I -S -u .../process_guardian.py <control> <ready> <group>``, as
+    ``process_tree.start_browser_guardian`` builds it. None if none was seen.
+    """
+    found = None
+    for entry in observed:
+        if entry.get("kind") not in ("process.start", "process.update"):
+            continue
+        if entry.get("in_row") is not True or entry.get("ppid") != principal_pid:
+            continue
+        cmdline = entry.get("cmdline")
+        if not isinstance(cmdline, list):
+            continue
+        for index, argument in enumerate(cmdline):
+            if Path(str(argument)).name != "process_guardian.py":
+                continue
+            try:
+                found = (int(entry["pid"]), int(cmdline[index + 3]))
+            except (IndexError, KeyError, TypeError, ValueError):
+                continue
+    return found
+
+
+def owner_launches(observed: Iterable[dict[str, Any]]) -> list[int]:
+    """The owner processes the watcher saw this row start.
+
+    A ``process.start`` or ``process.update`` of a row actor (``in_row``: its
+    ancestry at first sight led to the harness) whose command line runs the
+    owner module with ``-m``. Whether it ever published is not asked: an owner
+    that started and gave up is still a coordination effect.
+    """
+    return sorted(
+        {
+            record["pid"]
+            for record in observed
+            if record.get("kind") in ("process.start", "process.update")
+            and record.get("in_row") is True
+            and isinstance(record.get("cmdline"), list)
+            and invoked_module(record["cmdline"]) in OWNER_MODULES
+        }
+    )
+
+
+#: What ``process_tree.windows_gate_command`` puts before the gate script, and
+#: the separator ``process_gate._arguments`` requires after the nonce.
+_GATE_FLAGS = ["-I", "-S", "-u"]
+_GATE_NONCE_LENGTH = 64
+_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+def gate_script(checkout: Path) -> Path:
+    """The release gate a runtime's own ``windows_gate_command`` names."""
+    return checkout / "linkedin_mcp_server" / "process_gate.py"
+
+
+def _same_file(path: str, expected: Path) -> bool:
+    spelled = os.path.normcase(os.path.realpath(path))
+    return spelled == os.path.normcase(os.path.realpath(expected))
+
+
+def owner_gate(cmdline: Sequence[str], gates: Sequence[Path]) -> bool:
+    """Whether a command line is the product's owner release gate.
+
+    Exactly what ``process_tree.windows_gate_command`` builds around the
+    owner: ``<python> -I -S -u <runtime>/linkedin_mcp_server/process_gate.py
+    <nonce> -- <python> ... -m linkedin_mcp_server.daemon.owner ...``, with
+    the gate one of *gates* after resolution, the nonce the 64 hex digits
+    ``process_gate`` accepts, and the target running either build's owner
+    module (``OWNER_MODULES``) by the interpreter's own option grammar. The
+    gate holds the owner until the frontend releases it, so it shows an owner
+    start was attempted, not that owner code ran.
+    """
+    command = list(cmdline)
+    if len(command) < 8 or command[1:4] != _GATE_FLAGS:
+        return False
+    if not any(_same_file(command[4], gate) for gate in gates):
+        return False
+    nonce = command[5]
+    if len(nonce) != _GATE_NONCE_LENGTH or not set(nonce) <= _HEX:
+        return False
+    if command[6] != "--":
+        return False
+    return invoked_module(command[7:]) in OWNER_MODULES
+
+
+def owner_gates(observed: Iterable[dict[str, Any]], gates: Sequence[Path]) -> list[int]:
+    """The owner release gates the watcher saw this row start.
+
+    Row actors only, as for ``owner_launches``, and never asked for their
+    environment.
+    """
+    return sorted(
+        {
+            record["pid"]
+            for record in observed
+            if record.get("kind") in ("process.start", "process.update")
+            and record.get("in_row") is True
+            and isinstance(record.get("cmdline"), list)
+            and owner_gate(record["cmdline"], gates)
+        }
+    )
+
+
+def browser_lineage(observed: Iterable[dict[str, Any]]) -> list[list[Any]]:
+    """Every browser root the watcher saw this row's actors start, with the
+    process that launched it: ``[pid, start, gone, owner pid, owner start]``.
+
+    A root is a browser process whose parent is not itself a browser (the
+    watcher's own tree rule, ``watcher.browser_roots``); its parent is the
+    driver, and the driver's parent the process that drove it, which in a
+    daemon row is an owner. A parent is the latest lifetime of that pid
+    started no later than its child, with no tolerance: a child is never born
+    before its parent, on any clock the watcher reads. *gone* is when the
+    watcher saw the root exit, or None; the launcher's fields are None where
+    the watcher never saw that ancestor. A launch that read a page had a
+    browser of its own, so this names which launch could have read what,
+    whatever its process timing.
+    """
+    _, browsers, gone, parent_of = _lifetimes(observed)
+    roots = []
+    for key in sorted(browsers, key=lambda key: key[1]):
+        parent = parent_of(key)
+        if parent is not None and parent in browsers:
+            continue
+        launcher = parent_of(parent) if parent is not None else None
+        roots.append(
+            [
+                key[0],
+                key[1],
+                gone.get(key),
+                launcher[0] if launcher is not None else None,
+                launcher[1] if launcher is not None else None,
+            ]
+        )
+    return roots
+
+
+#: Arguments only a Chromium process carries: a child's process type, and
+#: the profile every browser launch names.
+_CHROMIUM_MARKERS = ("--type=", "--user-data-dir")
+
+
+def browser_processes(
+    observed: Iterable[dict[str, Any]], browser_key: str
+) -> list[list[Any]]:
+    """Every browser process the watcher saw this row's actors start, members
+    as well as roots, with its tree's root: ``[pid, start, gone, root pid,
+    root start]``. What a crash row holds an old browser's members to
+    (``crash_overlap``), where ``browser_lineage`` names the roots alone.
+
+    The watcher samples, so this is what its samples saw: a process whose
+    whole lifetime fell between two samples is in no record and not here.
+
+    A process a browser started is a browser too, whatever its command line;
+    *gone* and the parent rule are ``browser_lineage``'s. A browser outside
+    every tree roots one of its own only on proof: a record of it reads a
+    root's command line, ``--user-data-dir`` without ``--type=``, on the
+    profile *browser_key*, or, its arguments withheld, names that profile as
+    the watcher read it. Anything else that reaches no tree, its parent never
+    sampled or no browser, is listed with no root, ``[pid, start, gone, None,
+    None]``, when it could be a browser's helper whose ancestry was lost: it
+    runs a root's image, or its image was never read and its command line
+    carries a Chromium marker or was withheld. So a renderer is never taken
+    for a root, and never for a successor's.
+    """
+    observed = list(observed)
+    first, browsers, gone, parent_of = _lifetimes(observed)
+    # The image each lifetime last ran: the one it became, where it execs.
+    image: dict[tuple[int, float], str] = {}
+    # Lifetimes whose command line may be a Chromium process's.
+    marked: set[tuple[int, float]] = set()
+    # Lifetimes read as a browser root on the profile.
+    proven: set[tuple[int, float]] = set()
+    for record in observed:
+        pid, start, exe = (
+            record.get(name) for name in ("pid", "start_identity", "exe")
+        )
+        if type(pid) is not int or not isinstance(start, (int, float)):
+            continue
+        key = (pid, float(start))
+        if exe:
+            image[key] = str(exe)
+        arguments = record.get("cmdline") or ()
+        if (
+            record.get("cmdline_withheld")
+            or record.get("profile")
+            or any(str(a).startswith(_CHROMIUM_MARKERS) for a in arguments)
+        ):
+            marked.add(key)
+        profile = (
+            record.get("profile")
+            if record.get("cmdline_withheld")
+            else user_data_dir([str(a) for a in arguments])
+        )
+        if profile == browser_key:
+            proven.add(key)
+    root_of: dict[tuple[int, float], tuple[int | None, float | None]] = {}
+    for key in sorted(first, key=lambda key: key[1]):
+        parent = parent_of(key)
+        if parent is not None and parent in root_of:
+            root_of[key] = root_of[parent]
+        elif key in browsers and key in proven:
+            root_of[key] = key
+    roots = {
+        image[key] for key, root in root_of.items() if root == key and key in image
+    }
+    for key in first.keys() - root_of.keys():
+        if image.get(key) in roots or (key not in image and key in marked):
+            root_of[key] = (None, None)
+    return [
+        [key[0], key[1], gone.get(key), *root]
+        for key, root in sorted(root_of.items(), key=lambda item: item[0][1])
+    ]
+
+
+def _lifetimes(
+    observed: Iterable[dict[str, Any]],
+) -> tuple[
+    dict[tuple[int, float], dict[str, Any]],
+    set[tuple[int, float]],
+    dict[tuple[int, float], float],
+    Callable[[tuple[int, float]], tuple[int, float] | None],
+]:
+    """The watcher's records by lifetime: each one's first record, the
+    browsers, when each was seen gone, and each one's parent.
+
+    A lifetime is a browser if any record of it says so: a child sampled
+    between fork and exec is first seen with its parent's command line and
+    only later as the browser it became. Its parent is the one its first
+    record names, before any reparenting.
+    """
+    first: dict[tuple[int, float], dict[str, Any]] = {}
+    browsers: set[tuple[int, float]] = set()
+    gone: dict[tuple[int, float], float] = {}
+    for record in observed:
+        pid, start = record.get("pid"), record.get("start_identity")
+        if type(pid) is not int or not isinstance(start, (int, float)):
+            continue
+        key = (pid, float(start))
+        if record.get("kind") not in (
+            "process.start",
+            "process.update",
+            "process.exit",
+        ):
+            continue
+        first.setdefault(key, record)
+        if record.get("actor") == "browser":
+            browsers.add(key)
+        if record.get("kind") == "process.exit" and isinstance(
+            record.get("t"), (int, float)
+        ):
+            gone.setdefault(key, float(record["t"]))
+    by_pid: dict[int, list[float]] = {}
+    for pid, start in first:
+        by_pid.setdefault(pid, []).append(start)
+
+    def parent_of(child: tuple[int, float]) -> tuple[int, float] | None:
+        ppid = first[child].get("ppid")
+        if type(ppid) is not int:
+            return None
+        starts = [start for start in by_pid.get(ppid, ()) if start <= child[1]]
+        return (ppid, max(starts)) if starts else None
+
+    return first, browsers, gone, parent_of
+
+
+def launch_lifetimes(
+    observed: Iterable[dict[str, Any]],
+    gates: Sequence[Path],
+    samples: Sequence[Sequence[Any]] | None = None,
+) -> tuple[list[list[Any]], list[list[Any]]]:
+    """The owner processes and release gates this row's actors started.
+
+    Each as ``[pid, start, ppid, command digest, exit sample, first sample,
+    last read]``, once per lifetime, from the watcher's records: what
+    ``host_comparison``'s ``same_invocation`` needs to count a Windows venv
+    launcher and the interpreter it starts with the same command as one
+    launch, and nothing else. The digest is of the whole command line, gate
+    nonce and target included; the exit sample is when the watcher saw that
+    lifetime gone, or None, and the first sample when it first saw it. A
+    sample's events all carry its end, while its processes were read one by
+    one from its start (*samples*, the watcher's ``sample_log``), so the last
+    read is the start of the last sample that still found the lifetime: the
+    latest moment it is known alive. None without the log.
+    """
+
+    def kind(cmdline: Sequence[str]) -> str | None:
+        if invoked_module(cmdline) in OWNER_MODULES:
+            return "owner"
+        if owner_gate(cmdline, gates):
+            return "gate"
+        return None
+
+    found = _row_lifetimes(observed, kind, samples)
+    return found.get("owner", []), found.get("gate", [])
+
+
+def frontend_lifetimes(
+    observed: Iterable[dict[str, Any]],
+    samples: Sequence[Sequence[Any]] | None = None,
+) -> list[list[Any]]:
+    """Every server or frontend this row's actors ran (``-m
+    linkedin_mcp_server``), once per lifetime, in ``launch_lifetimes``'
+    shape: what ties a browser's launcher (``browser_lineage``) to the host
+    that started it, a Windows venv launcher and the interpreter it started
+    for it included (``host_comparison.same_invocation``)."""
+
+    def kind(cmdline: Sequence[str]) -> str | None:
+        return "frontend" if invoked_module(cmdline) == SERVER_MODULE else None
+
+    return _row_lifetimes(observed, kind, samples).get("frontend", [])
+
+
+def _row_lifetimes(
+    observed: Iterable[dict[str, Any]],
+    kind: Callable[[Sequence[str]], str | None],
+    samples: Sequence[Sequence[Any]] | None,
+) -> dict[str, list[list[Any]]]:
+    """The row actors' lifetimes each command line *kind* names, by that
+    name, as ``launch_lifetimes`` describes them; a name no record of the row
+    carries has no key."""
+    begins = sorted(
+        (float(entry[1]), float(entry[0]))
+        for entry in samples or []
+        if len(entry) >= 2
+        and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in entry[:2]
+        )
+    )
+
+    def last_read(exit_sample: float | None) -> float | None:
+        found = [
+            began
+            for ended, began in begins
+            if exit_sample is None or ended < exit_sample
+        ]
+        return found[-1] if found else None
+
+    records = list(observed)
+    exits: dict[tuple[int, float], float] = {}
+    for record in records:
+        pid, start, t = record.get("pid"), record.get("start_identity"), record.get("t")
+        if (
+            record.get("kind") == "process.exit"
+            and isinstance(pid, int)
+            and isinstance(start, (int, float))
+            and isinstance(t, (int, float))
+        ):
+            exits[(pid, float(start))] = float(t)
+    lifetimes: dict[str, list[list[Any]]] = {}
+    for record in records:
+        pid, start = record.get("pid"), record.get("start_identity")
+        if not (
+            record.get("kind") in ("process.start", "process.update")
+            and record.get("in_row") is True
+            and isinstance(record.get("cmdline"), list)
+            and isinstance(pid, int)
+            and isinstance(start, (int, float))
+        ):
+            continue
+        name = kind(record["cmdline"])
+        if name is None:
+            continue
+        kept = lifetimes.setdefault(name, [])
+        # Exact, as the watcher itself tells lifetimes apart: a pid reused
+        # within any tolerance would otherwise merge two lifetimes, or lend
+        # one the other's exit.
+        if not any((seen[0], float(seen[1])) == (pid, float(start)) for seen in kept):
+            digest = hashlib.sha256(json.dumps(record["cmdline"]).encode()).hexdigest()
+            ended = exits.get((pid, float(start)))
+            kept.append(
+                [
+                    pid,
+                    start,
+                    record.get("ppid"),
+                    digest,
+                    ended,
+                    record.get("t"),
+                    last_read(ended),
+                ]
+            )
+    return lifetimes
+
+
+#: The lineage each lineage expectation holds a row to.
+_LINEAGE_EXPECTED = {
+    REPLACED_AFTER_AUTHORIZATION: LINEAGE_REPLACED,
+    LOST_AFTER_AUTHORIZATION: LINEAGE_LOST,
+}
+
+
+#: ``row_expectations``' O1: two browser roots on the profile in one sample.
+SECOND_BROWSER = "O1: a second browser ran on the profile, or O1 is unknown"
+
+
+def row_expectations(
+    vector: RowVector,
+    *,
+    expect_owner: bool | None = None,
+    expect_session: str = RETAINED,
+    initial: InitialCall = FEED_READ,
+) -> list[str]:
+    """What a row requires; each unmet one is a failure.
+
+    *expect_owner* says whether the row should reach a shared owner, which is
+    the configured mode unless the row says otherwise: H-R12 enables the
+    daemon with a custom browser and requires the Direct behaviour.
+    *expect_session* is the R17 outcome the row declares, one of
+    ``EXPECTABLE``; any other declaration fails rather than waiving anything.
+    *initial* is the row's declared first call, whose unmet result is named
+    as that call's own failure.
+    """
+    if expect_owner is None:
+        expect_owner = vector.mode == "daemon"
+    failures = []
+    if not vector.watcher_healthy:
+        failures.append("the watcher's observation cannot carry O1")
+    if not vector.browser_seen:
+        failures.append("the watcher never saw a browser on the row's profile")
+    if not vector.o1_single_browser:
+        failures.append(SECOND_BROWSER)
+    if not vector.origin_saw_feed:
+        failures.append("the synthetic origin logged no /feed/ request in the row")
+    if not vector.feed_carried_session:
+        failures.append("no /feed/ request in the row carried the staged session")
+    if not vector.tool_succeeded:
+        failures.append(initial.unmet)
+    if expect_session not in EXPECTABLE:
+        failures.append(f"O4: a row cannot expect the session {expect_session!r}")
+    elif expect_session in _LINEAGE_EXPECTED:
+        # The original generation ends lost either way; what makes it the
+        # row's expectation is the lineage beside it, never the string.
+        lineage = _LINEAGE_EXPECTED[expect_session]
+        if (
+            vector.o4_session not in (LOST_ANNOUNCED, LOST_SILENT)
+            or vector.o4_lineage != lineage
+        ):
+            failures.append(
+                f"O4: the session was {vector.o4_session} with lineage "
+                f"{vector.o4_lineage}, not {expect_session}"
+            )
+    elif vector.o4_session != expect_session:
+        failures.append(
+            f"O4: the session was {vector.o4_session}, not {expect_session}"
+        )
+    if vector.o4_lineage == LINEAGE_UNAUTHORIZED:
+        failures.append(
+            "O4: the session was lost or replaced without an authorization "
+            "recorded before it"
+        )
+    if not vector.host_exit_clean:
+        failures.append("the host quit was not a normal one")
+    if not vector.cleanup_clean:
+        failures.append("cleanup had to intervene or could not finish")
+    if vector.o2 == O2_VIOLATED:
+        failures.append("O2: a signal was aimed at a wrong target, or a canary died")
+    # ``unknown`` is the oracle's stated limit (``signals``): a recipient a
+    # SIGKILL reached is gone by the next sample. It is recorded, not failed.
+    if vector.o2_traced == O2_VIOLATED:
+        failures.append("O2: a traced signal reached a process outside its set")
+    if vector.o2_required and vector.oracle_collection != ORACLE_COMPLETE:
+        failures.append(
+            f"O2: the required signal oracle's evidence is "
+            f"{vector.oracle_collection}, not complete"
+        )
+    if expect_owner:
+        if not vector.owner_published:
+            failures.append("daemon mode published no owner")
+        if vector.fell_back:
+            failures.append("daemon mode fell back to a Direct server")
+    else:
+        if vector.owner_published:
+            failures.append("a row that must stay Direct reached a shared owner")
+        if vector.owner_launched:
+            failures.append(
+                "a row that must stay Direct started a shared owner process "
+                "(the watcher saw it; publication is not required)"
+            )
+        if vector.owner_start_attempted:
+            failures.append(
+                "a row that must stay Direct started the shared owner's release "
+                "gate (an attempted owner start, released or not)"
+            )
+    return failures
+
+
+def coordination_reading(vector: RowVector) -> str:
+    """H-R12's reading: ``!`` when a shared owner took part, ``=`` when none did.
+
+    An owner published (a descriptor named one, or in a Direct-configured row
+    any sign of one), an owner process or owner release gate the row started,
+    or the frontend forwarding to one. With the daemon enabled, ``fell_back``
+    false means the frontend forwarded.
+    """
+    forwarded = vector.mode == "daemon" and not vector.fell_back
+    coordinated = (
+        vector.owner_published
+        or vector.owner_launched
+        or vector.owner_start_attempted
+        or forwarded
+    )
+    return "!" if coordinated else "="
+
+
+def k2_r12_verdict(result: RowResult) -> list[str]:
+    """K2 on H-R12: the baseline must be caught coordinating despite the setting.
+
+    The baseline elects and uses an owner with a custom browser configured
+    (W-CHROME-PATH). A K2 row reading ``=`` there is the harness failing to see
+    a known ``!``, so it stops the stage; the rest of K2's outcome is evidence
+    of the baseline, not a requirement of it. The reading has to rest on a row
+    that ran: a host that never got to call the tool reads nothing, and a
+    baseline row that ran candidate code measured the wrong thing.
+    """
+    problems = list(result.runtime_failures)
+    host = result.host
+    if result.vector is None or host is None:
+        return [*problems, "K2 produced no vector to read"]
+    if host.error is not None:
+        problems.append(f"K2 could not be read: the host session failed: {host.error}")
+    elif coordination_reading(result.vector) != "!":
+        problems.append(
+            "K2 read '=' on H-R12, where the baseline's '!' is known (it elects "
+            "a shared owner despite CHROME_PATH): a harness defect"
+        )
+    if result.cleanup is not None and result.cleanup.failures:
+        problems.append(
+            f"cleanup could not settle the baseline's owner: "
+            f"{list(result.cleanup.failures)}"
+        )
+    return problems
+
+
+#: The class of the pre-Path-A guardian's ``killpg(owner_group)``.
+GUARDIAN_OWNER_GROUP_KILL = "guardian:principal-group"
+
+
+def r6_reading(result: RowResult) -> str | None:
+    """H-R6's O2 reading for the owner's guardian: ``!``, ``=``, or None.
+
+    ``!`` when the killed owner's guardian was given a nonzero group to kill
+    (its argv, read by the watcher on every POSIX platform) or was seen by the
+    oracle killing its principal's group (Linux). The argv is what the reading
+    rests on: it is fixed before the kill, needs no tracing, and is the change
+    Path A makes; the oracle, where it runs, must agree with it. None where no
+    guardian exists (Windows) or none was seen.
+    """
+    vector = result.vector
+    if vector is None or vector.guardian_owner_group is None:
+        return None
+    if vector.guardian_owner_group != 0:
+        return "!"
+    if GUARDIAN_OWNER_GROUP_KILL in vector.signal_classes:
+        return "!"
+    return "="
+
+
+def r6_verdict(
+    result: RowResult,
+    *,
+    experiment: str,
+    windows: bool,
+    linux: bool | None = None,
+) -> list[str]:
+    """What H-R6 requires of an experiment beyond the row's own expectations.
+
+    K2 (baseline daemon) must read ``!``: before Path A its owner's guardian
+    kills the owner's group, which no Direct guardian does. Reading ``=`` there
+    is the harness missing a known difference. On Linux the oracle is part of
+    that witness: K2 needs a complete required trace that shows the class
+    ``guardian:principal-group``, while the rest of K2's outcome stays the
+    baseline's to record. On macOS the guardian's argv is the witness. K3
+    (candidate daemon) and K0, its repeat, must read ``=`` and have recovered
+    on the second call. K1 (Direct killed) reads ``=`` as the non-leader
+    server a host starts. On Windows there is no guardian, so the reading is
+    not applicable; the kill and the candidate's recovery still are.
+    """
+    if linux is None:
+        linux = sys.platform.startswith("linux")
+    problems = list(result.runtime_failures)
+    killed = result.killed or {}
+    vector = result.vector
+    if killed.get("exit") != "killed":
+        problems.append(f"the harness did not kill the actor: {killed}")
+    # Every experiment's kill follows a first call that read the synthetic
+    # post; one that failed before reading is not the row this measures.
+    if vector is None or not vector.tool_succeeded:
+        problems.append("the first call did not read the synthetic post")
+    if experiment in ("K3", "K0") and (vector is None or vector.recovered is not True):
+        problems.append("the frontend did not recover on the call after the kill")
+    if windows:
+        return problems
+    reading = r6_reading(result)
+    if reading is None:
+        return [*problems, "the killed actor's guardian was never seen"]
+    assert vector is not None
+    group_kill_seen = GUARDIAN_OWNER_GROUP_KILL in vector.signal_classes
+    traced = vector.o2_required and vector.oracle_collection == ORACLE_COMPLETE
+    if linux and not traced:
+        problems.append(
+            f"the required signal oracle did not deliver a complete trace "
+            f"(required={vector.o2_required}, collection "
+            f"{vector.oracle_collection!r})"
+        )
+    if experiment == "K2":
+        if reading != "!":
+            problems.append(
+                "K2 read '=' on H-R6, where the baseline's '!' is known (its "
+                "owner's guardian gets the owner's group): a harness defect"
+            )
+        elif linux and traced and not group_kill_seen:
+            problems.append(
+                "K2's guardian had a group to kill, but the signal oracle saw no "
+                "kill of the owner's group: a harness defect"
+            )
+        return problems
+    if reading != "=":
+        problems.append(
+            f"{experiment} read '!' on H-R6: the killed actor's guardian was told "
+            f"to kill group {vector.guardian_owner_group}, or the oracle saw it do so"
+        )
+    return problems
+
+
+_INSTALLER_SECONDS = 60.0
+#: How long an owner that stood down after an unconfirmed close may take to go.
+_OWNER_STAND_DOWN_SECONDS = 30.0
+#: How long the installer family may take to settle once the close is over.
+_FAMILY_SETTLE_SECONDS = 30.0
+#: The two logger events the shim observes (``job_query``): ``core.close``
+#: consuming the drain's False, logged only when the drain did not prove the
+#: launch gone and never for an exception on the way (e1ex, P2), and the
+#: owner's stand-down.
+CONSUMED_FALSE = "consumed-false"
+STAND_DOWN = "stand-down"
+#: The stand-down of an OWNER whose close left the profile held
+#: (``server_role.a_held_profile_means_this_owner_must_go``). An owner also
+#: stands down for a setup deadline, which is not this continuation.
+HELD_PROFILE_REASON = "the browser did not shut down cleanly, so the profile is held"
+
+
+def owner_events(
+    events: Iterable[Mapping[str, Any]],
+    *,
+    owner: tuple[int, float] | None,
+    event: str,
+    after_ns: int | None,
+    before_ns: int | None = None,
+    reason: str | None = None,
+) -> list[dict[str, Any]]:
+    """The observed logger events of kind *event* the owner that closed reached.
+
+    That very lifetime (its pid and its own creation time, read once at its
+    startup), at a monotonic reading no earlier than *after_ns* and, when
+    given, no later than *before_ns*, and with *reason* when given. The
+    daemon log is one file per auth root that every owner generation appends
+    to, so a line in it names no writer; another generation's event, the
+    successor's, or an earlier process's at a reused pid witnesses nothing
+    for this owner (review e1ey, E1EY-02).
+    """
+    if owner is None or type(after_ns) is not int:
+        return []
+    pid, created = owner
+    found = []
+    for record in events:
+        made, t = record.get("pid_created"), record.get("monotonic_ns")
+        if record.get("event") != event or record.get("pid") != pid:
+            continue
+        if not isinstance(made, (int, float)):
+            continue
+        if abs(float(made) - created) > _START_TOLERANCE_SECONDS:
+            continue
+        if type(t) is not int or t < after_ns:
+            continue
+        if before_ns is not None and t > before_ns:
+            continue
+        if reason is not None and record.get("reason") != reason:
+            continue
+        found.append(dict(record))
+    return found
+
+
+def is_installer(record: Mapping[str, Any]) -> bool:
+    """A process of the product's installer: supervisor, its gate, the
+    ``patchright install`` worker and the Node processes it starts."""
+    joined = " ".join(str(part) for part in record.get("cmdline") or [])
+    return (
+        record.get("actor") == "installer"
+        or ("patchright" in joined and " install " in f" {joined} ")
+        or "oopBrowserDownload" in joined
+    )
+
+
+def installer_starts(observed: Iterable[Mapping[str, Any]]) -> list[tuple[int, float]]:
+    """Every installer lifetime (pid, create time) the watcher recorded in the row."""
+    starts: list[tuple[int, float]] = []
+    for entry in observed:
+        if entry.get("kind") not in ("process.start", "process.update"):
+            continue
+        if entry.get("in_row") is not True or not is_installer(entry):
+            continue
+        start = entry.get("start_identity")
+        if not isinstance(start, (int, float)):
+            continue
+        key = (int(entry["pid"]), float(start))
+        if key not in starts:
+            starts.append(key)
+    return starts
+
+
+def wait_for_installers(
+    observed: Callable[[], Iterable[Mapping[str, Any]]],
+    *,
+    watch: Callable[[int, float], None],
+    open_process: Callable[[int], Any] = psutil.Process,
+    seconds: float = _INSTALLER_SECONDS,
+) -> list[tuple[int, float]]:
+    """The row's installer processes, each handed to *watch* as it is found.
+
+    Only when the process at the pid is still the lifetime the watcher
+    recorded (its create time), and at once, so the handle *watch* takes names
+    that lifetime and keeps its exit readable however it ends. After the
+    first is seen, a second look a moment later picks up the worker and the
+    download the supervisor starts.
+    """
+    deadline = time.monotonic() + seconds
+    found: list[tuple[int, float]] = []
+    settle_until: float | None = None
+    while True:
+        for key in installer_starts(observed()):
+            if key in found:
+                continue
+            try:
+                process = open_process(key[0])
+                if abs(process.create_time() - key[1]) > _START_TOLERANCE_SECONDS:
+                    continue
+            except psutil.Error:
+                continue
+            found.append(key)
+            watch(*key)
+            if settle_until is None:
+                settle_until = time.monotonic() + 3.0
+        now = time.monotonic()
+        if (settle_until is not None and now >= settle_until) or now >= deadline:
+            return found
+        time.sleep(0.1)
+
+
+#: Where a row lifetime's recorded ancestry leads (``Lineage.of``).
+INSTALLER = "installer"
+BELOW_INSTALLER = "below an installer"
+FROM_HARNESS = "from the harness"
+UNRESOLVED = "unresolved"
+
+
+class Lineage:
+    """Where each row lifetime's recorded ancestry leads, parent by parent.
+
+    ``installer`` for an installer by its own record (``is_installer``);
+    ``below an installer`` when a recorded ancestor is one, whatever the
+    lifetime's own command; ``from the harness`` only when every link up to a
+    process the harness itself started (*outside*, the harness's own pid) is
+    a recorded row lifetime and none of them is an installer; ``unresolved``
+    otherwise: a parent the watcher never recorded, a link outside the row,
+    or a loop. Measured on Windows (run 36410976409, K2): the owner's release
+    gate, its Python child and that child's console host trace, through the
+    frontend and its launcher, to the harness pid that also started the
+    row's canaries.
+    """
+
+    def __init__(
+        self, observed: Iterable[Mapping[str, Any]], *, outside: Iterable[int] = ()
+    ) -> None:
+        records = list(observed)
+        self.outside = frozenset(outside) or frozenset({os.getpid()})
+        self.history = ProcessHistory(records, outside=self.outside)
+        self.installers = installer_starts(records)
+        self._memo: dict[tuple[int, float], str] = {}
+
+    def _is_installer(self, life: Lifetime) -> bool:
+        return any(
+            life.pid == pid and abs(life.start - start) <= _START_TOLERANCE_SECONDS
+            for pid, start in self.installers
+        )
+
+    def of(self, life: Lifetime) -> str:
+        if life.identity in self._memo:
+            return self._memo[life.identity]
+        answer = UNRESOLVED
+        current: Lifetime | None = life
+        seen: set[tuple[int, float]] = set()
+        while current is not None and current.identity not in seen:
+            seen.add(current.identity)
+            if self._is_installer(current):
+                answer = INSTALLER if current is life else BELOW_INSTALLER
+                break
+            if not current.in_row:
+                break
+            if current.ppid in self.outside:
+                answer = FROM_HARNESS
+                break
+            parent = self.history.at(current.ppid, current.first_t)
+            if parent is None or parent.start > current.start:
+                break
+            current = parent
+        self._memo[life.identity] = answer
+        return answer
+
+    def lifetime(self, pid: Any, created: Any) -> Lifetime | None:
+        """The one row lifetime recorded at *pid* with creation time *created*."""
+        if not isinstance(pid, int) or not isinstance(created, (int, float)):
+            return None
+        lives = [
+            life
+            for life in self.history.lifetimes
+            if life.pid == pid
+            and life.in_row
+            and abs(life.start - float(created)) <= _START_TOLERANCE_SECONDS
+        ]
+        return lives[0] if len(lives) == 1 else None
+
+
+def installer_family(
+    observed: Iterable[Mapping[str, Any]], fates: Fates, *, outside: Iterable[int] = ()
+) -> Callable[[Any, Any], bool]:
+    """Whether a lifetime is one of the installer family the row tracked.
+
+    A lifetime the row watched as an installer, or one the watcher recorded
+    in the row whose own record or recorded ancestry is an installer
+    (``Lineage``). An unresolved ancestry is not the family: it may be, which
+    keeps it in the inventory, but it witnesses nothing.
+    """
+    lineage = Lineage(observed, outside=outside)
+
+    def member(pid: Any, created: Any) -> bool:
+        if any(fate.is_lifetime(pid, created) for fate in fates.fates.values()):
+            return True
+        life = lineage.lifetime(pid, created)
+        return life is not None and lineage.of(life) in (INSTALLER, BELOW_INSTALLER)
+
+    return member
+
+
+def unaccounted_members(
+    records: Iterable[Mapping[str, Any]],
+    observed: Iterable[Mapping[str, Any]],
+    fates: Fates,
+    *,
+    outside: Iterable[int] = (),
+) -> list[str]:
+    """Every lifetime the shim saw asked about that the row cannot account for.
+
+    A record names a member of some actor's adopted Job, which is positive
+    evidence that the lifetime existed. It is accounted for when the row
+    watched it or the watcher recorded it in the row: then either the
+    inventory has to see it end (an installer, below one, or of unresolved
+    ancestry) or its ancestry leads to the harness with no installer on the
+    way. Measured on Windows (run 36410976409, K2): the drain also asked
+    about the owner's release gate, its Python child and that child's console
+    host. A lifetime nobody recorded could be an installer still running.
+    """
+    lineage = Lineage(observed, outside=outside)
+    problems = []
+    seen: set[tuple[Any, Any]] = set()
+    for record in records:
+        key = (record.get("member"), record.get("created"))
+        if key in seen:
+            continue
+        seen.add(key)
+        pid, created = key
+        if any(fate.is_lifetime(pid, created) for fate in fates.fates.values()):
+            continue
+        if lineage.lifetime(pid, created) is not None:
+            continue
+        problems.append(
+            f"the drain asked about pid {pid} created {created}, a lifetime the "
+            f"watcher never recorded in the row, so its end is unknown"
+        )
+    return problems
+
+
+def family_problems(
+    observed: Iterable[Mapping[str, Any]],
+    fates: Fates,
+    records: Iterable[Mapping[str, Any]],
+) -> list[str]:
+    """Why the installer family is not shown ended, from everything known now.
+
+    The watcher's history and the row's own handles (``installer_inventory``),
+    and every lifetime the shim has positively seen asked about
+    (``unaccounted_members``): a lifetime that evidence proves existed and
+    nothing shows ended may still be setup's, however it escaped the
+    watcher. The same rules at every boundary: before the harness restores
+    or probes, and before its teardown touches the cache.
+    """
+    observed = list(observed)
+    return [
+        *installer_inventory(observed, fates),
+        *unaccounted_members(records, observed, fates),
+    ]
+
+
+def settle_family(
+    observed: Callable[[], Iterable[Mapping[str, Any]]],
+    fates: Fates,
+    records: Callable[[], Iterable[Mapping[str, Any]]],
+    seconds: float = _FAMILY_SETTLE_SECONDS,
+) -> list[str]:
+    """Wait for the installer family to be shown ended; what is not, if not.
+
+    The labelled boundary before the harness restores the row-private cache
+    and makes the recovery probe: restoring a dependency under a download
+    still running would race it, and a probe made then would be a different
+    measurement. The same reconciliation as the barrier after the row
+    (``family_problems``), with the shim's records read afresh each time.
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        problems = family_problems(observed(), fates, records())
+        if not problems or time.monotonic() >= deadline:
+            return problems
+        time.sleep(0.2)
+
+
+def installer_inventory(
+    observed: Iterable[Mapping[str, Any]],
+    fates: Fates,
+    *,
+    outside: Iterable[int] = (),
+) -> list[str]:
+    """Every lifetime setup could have left running that is not shown ended.
+
+    That is every installer, every row lifetime recorded below one whatever
+    its own command (a console host, a helper), every lifetime the row
+    watched, and every row lifetime whose ancestry is unresolved: its first
+    observation cannot prove that it predates setup. Ended is
+    an exit observed through the row's own handle, or the watcher seeing
+    that lifetime leave the process table; a handle that could not be opened
+    or read, or a lifetime nobody saw leave, is neither.
+    """
+    records = list(observed)
+    lineage = Lineage(records, outside=outside)
+    gone = [
+        (record.get("pid"), record.get("start_identity"))
+        for record in records
+        if record.get("kind") == "process.exit"
+    ]
+    inventory: dict[tuple[int, float], str] = {}
+    for life in lineage.history.lifetimes:
+        if not life.in_row:
+            continue
+        kind = lineage.of(life)
+        if kind in (INSTALLER, BELOW_INSTALLER, UNRESOLVED):
+            inventory[(life.pid, life.start)] = kind
+    for key in fates.fates:
+        if not any(
+            key[0] == pid and abs(key[1] - start) <= _START_TOLERANCE_SECONDS
+            for pid, start in inventory
+        ):
+            inventory[key] = "watched"
+    problems = []
+    for (pid, start), kind in inventory.items():
+        fate = next(
+            (
+                fate
+                for fate in fates.fates.values()
+                if fate.pid == pid
+                and abs(fate.start - start) <= _START_TOLERANCE_SECONDS
+            ),
+            None,
+        )
+        if fate is not None and fate.settled:
+            continue
+        if any(
+            gone_pid == pid
+            and isinstance(gone_start, (int, float))
+            and abs(gone_start - start) <= _START_TOLERANCE_SECONDS
+            for gone_pid, gone_start in gone
+        ):
+            continue
+        why = f": {fate.problem}" if fate is not None and fate.problem else ""
+        problems.append(
+            f"pid {pid} ({kind}), created {start}, was neither seen to exit nor "
+            f"settled through its handle{why}"
+        )
+    return problems
+
+
+#: How far the wall clock may move apart from the monotonic one, and how far
+#: apart two creation times must be to be ordered at all.
+_CLOCK_SECONDS = 0.25
+
+
+class WallClockMarker:
+    """The creation time of a process started as the close begins.
+
+    Windows keeps a process's creation time on the wall clock only, so it
+    orders two processes only while that clock ran with the monotonic one:
+    this records both as the row began and checks them when asked. Creation
+    times within ``_CLOCK_SECONDS`` of the marker are not ordered at all.
+    """
+
+    def __init__(self) -> None:
+        self.began = (time.time(), time.monotonic())
+        self.created: float | None = None
+
+    def mark(self) -> None:
+        try:
+            marker = subprocess.Popen(
+                [sys.executable, "-I", "-c", "import sys; sys.stdin.read()"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            return
+        try:
+            with contextlib.suppress(psutil.Error):
+                self.created = psutil.Process(marker.pid).create_time()
+        finally:
+            with contextlib.suppress(OSError, ValueError):
+                assert marker.stdin is not None
+                marker.stdin.close()
+            try:
+                marker.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                marker.kill()
+                marker.wait(timeout=10)
+
+    def held(self) -> bool:
+        """Whether the wall clock has kept pace with the monotonic one so far."""
+        wall, mono = self.began
+        return abs((time.time() - wall) - (time.monotonic() - mono)) <= _CLOCK_SECONDS
+
+    def after(self, pid: int, start: float) -> bool | None:
+        """Whether *start* is after the marker; None when that is not known."""
+        if self.created is None or not self.held():
+            return None
+        if start > self.created + _CLOCK_SECONDS:
+            return True
+        if start < self.created - _CLOCK_SECONDS:
+            return False
+        return None
+
+
+def successor_verdict(
+    *,
+    probe: Mapping[str, Any] | None,
+    left: bool | None,
+    problems: Iterable[str] | None,
+) -> list[str]:
+    """Why H-R11's recovery is not a successor that served, before host quit.
+
+    All three are needed: the probe read the synthetic post, the owner that
+    closed was confirmed gone before it, and the owner the descriptor then
+    named is a new lifetime and instance that served it (``successor_problems``
+    and a creation time after the close began). A gate, an owner-labelled
+    start or a later Direct session stands in for none of them.
+    """
+    found = []
+    if probe is None:
+        found.append("no probe was made after the close")
+    elif probe.get("is_error") or not probe.get("read_the_post"):
+        found.append(
+            f"the probe after the close did not read the synthetic post "
+            f"(is_error={probe.get('is_error')!r})"
+        )
+    if left is not True:
+        found.append(
+            f"the owner that closed was not confirmed gone before the probe "
+            f"(left={left!r})"
+        )
+    if problems is None:
+        # Nobody looked for a new owner, so nothing shows there was one.
+        return [*found, "the successor was never looked for"]
+    return [*found, *problems]
+
+
+#: The one file the harness's own restoration writes in the auth root: the
+#: install record ``record_install`` puts back for the restored cache.
+_RESTORATION_WRITES = frozenset({"browser-install.json"})
+
+
+def auth_files(root: Path) -> dict[str, str]:
+    """Snapshot files and directories without traversing links or reparse points.
+
+    File content is hashed; directories are recorded even when empty. Failed
+    enumeration, metadata or content reads stay ``unreadable``, never absence.
+    """
+    files: dict[str, str] = {}
+
+    def relative(path: Path) -> str:
+        try:
+            return path.relative_to(root).as_posix()
+        except ValueError:
+            return "."
+
+    def kind(path: Path) -> str:
+        try:
+            metadata = path.lstat()
+        except OSError:
+            return "unreadable"
+        if stat.S_ISLNK(metadata.st_mode) or (
+            getattr(metadata, "st_file_attributes", 0)
+            & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            return "link"
+        if stat.S_ISDIR(metadata.st_mode):
+            return "directory"
+        return "file" if stat.S_ISREG(metadata.st_mode) else "unreadable"
+
+    def failed(error: OSError) -> None:
+        path = Path(error.filename) if error.filename else root
+        files[relative(path)] = "unreadable"
+
+    files["."] = kind(root)
+    if files["."] != "directory":
+        return files
+    for directory, names, entries in os.walk(root, onerror=failed, followlinks=False):
+        base = Path(directory)
+        for name in [*names, *entries]:
+            path = base / name
+            entry_kind = kind(path)
+            key = relative(path)
+            if entry_kind != "file":
+                files[key] = entry_kind
+                if name in names and entry_kind != "directory":
+                    names.remove(name)
+            else:
+                try:
+                    # An empty file has nothing to read, and its read may be
+                    # refused: on Windows a live trace writer's exclusive
+                    # byte-range lock on its empty `.alive` marker denies
+                    # every other handle's read.
+                    empty = path.lstat().st_size == 0
+                    content = b"" if empty else path.read_bytes()
+                    files[key] = hashlib.sha256(content).hexdigest()
+                except OSError:
+                    files[key] = "unreadable"
+    return files
+
+
+def restoration_changes(
+    before: Mapping[str, str], after: Mapping[str, str]
+) -> list[str]:
+    """What changed in the auth root across the harness's restoration, beyond
+    the install record it writes itself.
+
+    The restoration relinks a row-private cache outside the auth root and
+    writes that record. Anything else that changed meanwhile was changed by
+    something else, and a final snapshot would count it as the product's.
+    """
+    problems = []
+    for name in sorted(before.keys() | after.keys()):
+        if name in _RESTORATION_WRITES:
+            continue
+        if {before.get(name), after.get(name)} & {"unreadable", "link"}:
+            problems.append(
+                f"the auth root's {name} could not be compared across restoration"
+            )
+        elif before.get(name) != after.get(name):
+            problems.append(
+                f"the auth root's {name} changed while the harness restored the cache"
+            )
+    return problems
+
+
+#: O3's kinds of protected change. Kinds, never values: a generation or a
+#: quarantine name differs between two healthy runs, and the vector holds
+#: nothing that does.
+GENERATION_CHANGED = "generation-changed"
+GENERATION_REMOVED = "generation-removed"
+SESSION_UNUSABLE = "session-unusable"
+QUARANTINED = "quarantined"
+PROFILE_REMOVED = "profile-removed"
+NO_LONGER_READABLE = "no-longer-readable"
+#: The after-reading was never taken, so O3 could not be read.
+O3_UNOBSERVED = "unobserved"
+
+#: The protected changes each authorized action is allowed to make: exactly
+#: what ``clear_auth_state`` removes. A logout that left another generation
+#: behind, or quarantined anything, did something the user did not ask for.
+_AUTHORIZED_CHANGES = {
+    LOGOUT: frozenset({GENERATION_REMOVED, SESSION_UNUSABLE, PROFILE_REMOVED}),
+    # A sign-in retires the session it replaces into quarantine
+    # (``rotate_shielded``, the stale path's force-move), profile and
+    # generation with it, and writes a generation of its own, or none when it
+    # fails; nothing else. Allowed only where the lineage shows the
+    # authorization first (``judge_row``).
+    **{
+        kind: frozenset(
+            {
+                GENERATION_CHANGED,
+                GENERATION_REMOVED,
+                SESSION_UNUSABLE,
+                QUARANTINED,
+                PROFILE_REMOVED,
+            }
+        )
+        for kind in REPLACING
+    },
+}
+
+
+def _protected(before: ProfileSnapshot, at: ProfileSnapshot) -> list[tuple[str, str]]:
+    found = []
+    if at.generation != before.generation:
+        found.append(
+            (
+                GENERATION_REMOVED if at.generation is None else GENERATION_CHANGED,
+                f"the login generation changed from {before.generation!r} to "
+                f"{at.generation!r}",
+            )
+        )
+    if before.li_at_usable and not at.li_at_usable:
+        found.append(
+            (SESSION_UNUSABLE, "the staged session's li_at is no longer usable")
+        )
+    quarantined = sorted(set(at.quarantine) - set(before.quarantine))
+    if quarantined:
+        found.append((QUARANTINED, f"quarantined: {quarantined}"))
+    if before.profile_present and not at.profile_present:
+        found.append((PROFILE_REMOVED, "the browser profile is gone"))
+    unreadable = sorted(set(at.unreadable) - set(before.unreadable))
+    if unreadable:
+        found.append((NO_LONGER_READABLE, f"no longer readable: {unreadable}"))
+    return found
+
+
+def protected_changes(before: ProfileSnapshot, at: ProfileSnapshot) -> list[str]:
+    """What the product changed of the protected session by the recovery boundary.
+
+    Read at that checkpoint, before the harness restores anything, so no
+    restoration can repair it; a checkpoint, not a watch over the interval.
+    Allowed: the cookie file's bytes and names, which the close's export and
+    a session refresh rewrite, and the browser's own profile files. Not
+    allowed: another login generation, a staged session no longer usable, a
+    new quarantine, a missing profile, an artefact that no longer reads.
+    """
+    return [message for _, message in _protected(before, at)]
+
+
+def protected_kinds(
+    before: ProfileSnapshot, after: ProfileSnapshot | None, authorized: str | None
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """O3 for one row: its protected changes, by kind, split by authorization.
+
+    The first are the changes no action the user confirmed covers, the second
+    those *authorized* does. The same changes ``protected_changes`` names,
+    read between the row's before and after readings. A row without an
+    after-reading has an O3 nobody could read, which no action covers.
+    """
+    if after is None:
+        return (O3_UNOBSERVED,), ()
+    allowed = (
+        _AUTHORIZED_CHANGES.get(authorized, frozenset()) if authorized else frozenset()
+    )
+    kinds = sorted({kind for kind, _ in _protected(before, after)})
+    return (
+        tuple(kind for kind in kinds if kind not in allowed),
+        tuple(kind for kind in kinds if kind in allowed),
+    )
+
+
+def fault_witnesses(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    owner: tuple[int, float] | None,
+    family: Callable[[Any, Any], bool],
+    interval_ns: tuple[int, int] | None,
+) -> list[dict[str, Any]]:
+    """The planted failures that witness the intended entry, and only those.
+
+    A witness was written by the owner that closed, that very lifetime (its
+    pid and its own creation time, so neither an earlier process at a reused
+    pid nor the successor), about a lifetime of the installer family
+    (*family*), asking a Job that owner held (its handle), at a time inside
+    the close call (*interval_ns*, host and shim monotonic nanoseconds on this
+    machine). Wall time is diagnostic only and cannot move a pre-close query
+    inside the interval. Each record certifies one invocation, not later calls.
+    """
+    if owner is None or interval_ns is None:
+        return []
+    pid, created = owner
+    began, ended = interval_ns
+    if type(began) is not int or type(ended) is not int or began > ended:
+        return []
+    found = []
+    for record in records:
+        made, t = record.get("pid_created"), record.get("monotonic_ns")
+        if record.get("pid") != pid or not isinstance(made, (int, float)):
+            continue
+        if not isinstance(record.get("job"), int):
+            continue
+        if abs(float(made) - created) > _START_TOLERANCE_SECONDS:
+            continue
+        if type(t) is not int or not began <= t <= ended:
+            continue
+        if family(record.get("member"), record.get("created")):
+            found.append(dict(record))
+    return found
+
+
+def imported_process_tree(shim: ShimVenv) -> str | None:
+    """The process_tree the shim venv's actors import, by content."""
+    module = shim.code.get("module")
+    if not module:
+        return None
+    try:
+        text = (Path(module).parent / "process_tree.py").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return source_sha256(text)
+
+
+def job_query_problems(
+    shim: ShimVenv | None,
+    *,
+    fates: Fates,
+    window: Mapping[str, Any],
+    script_error: str | None,
+    observed: Iterable[Mapping[str, Any]] = (),
+    records: Iterable[Mapping[str, Any]] = (),
+    host: Sequence[str] = (),
+    watcher: Sequence[str] = (),
+    cleanup: Sequence[str] = (),
+    before_cleanup: Sequence[str] | None = (),
+) -> list[str]:
+    """What stops H-R11 from observing the row, in any experiment.
+
+    Not the behaviour under test, so K2 is held to all of it too: the row's
+    own script; every installer lifetime not shown ended
+    (``installer_inventory``), at the recovery boundary, before the teardown
+    touched anything (*before_cleanup*, None when that was never
+    established) and after the row; every lifetime the shim saw asked about
+    that the row cannot account for (``unaccounted_members``); a harness
+    restoration that changed more than its own record; the whole of
+    ``host_failures``; what the watcher could not observe (*watcher*,
+    ``watcher_failures``); what cleanup could not do (*cleanup*,
+    ``DaemonCleanup.failures``); and a wall clock that moved.
+
+    What was unresolved before the teardown stays unresolved. An exit observed
+    after the harness stops its stall host cannot establish product settlement
+    before that intervention; its cause remains unobserved.
+    """
+    if shim is None:
+        return []
+    observed = list(observed)
+    problems = list(host)
+    if script_error is not None:
+        problems.append(f"the H-R11 script failed: {script_error}")
+    if before_cleanup is None:
+        problems.append(
+            "the installer family was never shown ended before the teardown began"
+        )
+    else:
+        problems += [f"before cleanup: {p}" for p in before_cleanup]
+    problems += [
+        f"installer inventory: {p}" for p in installer_inventory(observed, fates)
+    ]
+    problems += [
+        f"installer evidence: {p}"
+        for p in unaccounted_members(records, observed, fates)
+    ]
+    problems += [
+        f"before recovery: {p}" for p in window.get("family_before_recovery") or ()
+    ]
+    problems += [f"restoration: {p}" for p in window.get("restoration_changes") or ()]
+    problems += [f"watcher: {problem}" for problem in watcher]
+    problems += [f"cleanup: {problem}" for problem in cleanup]
+    if not fates.fates:
+        problems.append(
+            "no installer ran when the row closed, so the Job query had no "
+            "member to be asked about"
+        )
+    if window.get("clock_held") is False:
+        problems.append(
+            "the wall clock moved apart from the monotonic one by the end of the "
+            "close, so no record's time can be placed inside it"
+        )
+    if window.get("script_ended") is not True:
+        problems.append("the H-R11 script did not run to its end")
+    return problems
+
+
+#: No native evidence here says which caller ended an installer lifetime:
+#: exit code 1 comes from the routine drain and from a Job's rundown alike.
+UNOBSERVED_CAUSE = "unobserved"
+NATIVE = "native"
+#: The recovery probe was made only once the installer family had settled.
+POST_SETTLEMENT = "post-settlement"
+#: Direct keeps its installer in its own setup until host quit, so no
+#: settlement can come before a probe, and none is made.
+NO_RECOVERY = "none: Direct keeps its installer until host quit"
+
+
+@dataclass(frozen=True)
+class NativeContinuation:
+    """What one native H-R11 experiment established, as native evidence only.
+
+    Claim map. That the experiment reached the planted situation: the owner
+    that closed, the installer family it held, and positive fault witnesses
+    (``fault_witnesses``), each certifying one invocation. What followed:
+    that same owner lifetime reaching core.close's consumption of the drain's
+    False inside the close, then its own held-profile stand-down, and its
+    observed exit (K3, ``owner_events``); the family settled at a labelled
+    boundary, then a post-settlement recovery whose successor served the probe
+    (K3); the protected session at that boundary; and every validity problem.
+    The shared daemon log is diagnostic only: its lines name no writer.
+
+    ``termination_cause`` is ``unobserved`` in every cell, and no field says
+    whether any caller selected ``TerminateProcess``: that is the source
+    model's (``job_query_model``), a different kind of evidence. Nothing
+    here is merged with it into a native reading of the drain.
+    """
+
+    experiment: str
+    run: str
+    mode: str
+    #: The revision the actors ran (the pin, or the checkout's HEAD), and the
+    #: process_tree they import, by content (``source_sha256``).
+    revision: str | None
+    process_tree_sha256: str | None
+    shim_sha256: str
+    vector: RowVector | None
+    first_read: bool
+    #: The owner that closed, (pid, creation time); None in Direct.
+    owner: tuple[int, float] | None
+    #: The close call, as the host sent it and read its answer.
+    close: tuple[float, float] | None
+    #: Installer lifetimes the row watched.
+    installers: int
+    #: Every planted failure recorded in the row, and those that witness the
+    #: intended entry.
+    reached: int
+    witnesses: tuple[Mapping[str, Any], ...]
+    #: Daemon rows: the owner that closed reached core.close's consumption of
+    #: the drain's False inside its close and its held-profile stand-down
+    #: after it began (observed logger events of that lifetime), and was seen
+    #: to exit. None in Direct.
+    consumed_false: bool | None
+    stood_down: bool | None
+    owner_left: bool | None
+    #: Observed logger events recorded in the row, whoever reached them.
+    events: int
+    recovery: str
+    protected_at_boundary: tuple[str, ...]
+    successor_verified: bool | None
+    successor_problems: tuple[str, ...]
+    #: What kept this experiment from being observed, whatever it is.
+    validity: tuple[str, ...]
+    termination_cause: str = UNOBSERVED_CAUSE
+    evidence: str = NATIVE
+    close_monotonic_ns: tuple[int, int] | None = None
+
+
+def native_continuation(
+    *,
+    experiment: str,
+    run: str,
+    daemon: bool,
+    identity: Mapping[str, Any],
+    shim: ShimVenv,
+    vector: RowVector | None,
+    host: HostSession,
+    window: Mapping[str, Any],
+    fates: Fates,
+    observed: Sequence[Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+    events: Sequence[Mapping[str, Any]],
+    successor: Mapping[str, Any],
+    validity: Sequence[str],
+) -> NativeContinuation:
+    """The row's continuation, from what it recorded; judged elsewhere."""
+    owner_pid, owner_created = window.get("owner_pid"), window.get("owner_created")
+    owner = (
+        (int(owner_pid), float(owner_created))
+        if daemon
+        and isinstance(owner_pid, int)
+        and isinstance(owner_created, (int, float))
+        else None
+    )
+    began, ended = window.get("began"), window.get("ended")
+    close = (
+        (float(began), float(ended))
+        if isinstance(began, (int, float)) and isinstance(ended, (int, float))
+        else None
+    )
+    mono_began, mono_ended = (
+        window.get("began_monotonic_ns"),
+        window.get("ended_monotonic_ns"),
+    )
+    close_monotonic_ns = (
+        (mono_began, mono_ended)
+        if type(mono_began) is int and type(mono_ended) is int
+        else None
+    )
+    witnesses = fault_witnesses(
+        records,
+        owner=owner,
+        family=installer_family(observed, fates),
+        interval_ns=close_monotonic_ns,
+    )
+    began_ns, ended_ns = close_monotonic_ns or (None, None)
+    consumed = owner_events(
+        events,
+        owner=owner,
+        event=CONSUMED_FALSE,
+        after_ns=began_ns,
+        before_ns=ended_ns,
+    )
+    stood = owner_events(
+        events,
+        owner=owner,
+        event=STAND_DOWN,
+        after_ns=began_ns,
+        reason=HELD_PROFILE_REASON,
+    )
+    tool = host.tool or {}
+    return NativeContinuation(
+        experiment=experiment,
+        run=run,
+        mode="daemon" if daemon else "direct",
+        revision=identity.get("head"),
+        process_tree_sha256=imported_process_tree(shim),
+        shim_sha256=shim.shim_sha256,
+        vector=vector,
+        first_read=bool(tool)
+        and not tool.get("is_error")
+        and bool(tool.get("read_the_post")),
+        owner=owner,
+        close=close,
+        close_monotonic_ns=close_monotonic_ns,
+        installers=len(fates.fates),
+        reached=len(records),
+        witnesses=tuple(witnesses),
+        consumed_false=bool(consumed) if daemon else None,
+        stood_down=bool(stood) if daemon else None,
+        owner_left=window.get("owner_left_before_probe") if daemon else None,
+        events=len(events),
+        recovery=str(window.get("recovery") or "not reached"),
+        protected_at_boundary=tuple(window.get("protected_at_boundary") or ()),
+        successor_verified=successor.get("verified") if daemon else None,
+        successor_problems=tuple(successor.get("problems") or ()),
+        validity=tuple(validity),
+    )
+
+
+def continuation_problems(
+    continuation: NativeContinuation | None,
+    *,
+    experiment: str,
+    revision: str | None,
+    run: str | None = None,
+) -> list[str]:
+    """The common validity gate of an H-R11 cell, and what its experiment adds.
+
+    Every cell: the expected experiment, mode, revision and shim, a named
+    process_tree, a first read of the synthetic post, labels that claim no
+    more than native evidence, and not one validity problem (host, watcher,
+    cleanup, census, installer family, script, runtime, restoration, clock).
+    K1 is the reference: Direct has no adopted Job, so no planted failure is
+    required, and one reached there is the wrong topology. K2 and K3: the
+    owner that closed and a positive fault witness inside its close. K3, and
+    K0 as its repeat, also: core.close's negative consumption, the
+    stand-down, the owner's exit, a post-settlement recovery with nothing
+    protected changed by its boundary, and a successor that served it. No
+    cell says which caller ended an installer.
+    """
+    if continuation is None:
+        return [f"{experiment} left no native continuation"]
+    c = continuation
+    problems = list(c.validity)
+    if c.experiment != experiment:
+        problems.append(f"the continuation is {c.experiment}'s, not {experiment}'s")
+    if run is not None and c.run != run:
+        problems.append(f"the continuation is from run {c.run}, not {run}")
+    if revision is None or c.revision != revision:
+        problems.append(f"the actors ran {c.revision}, not {revision}")
+    if c.shim_sha256 != SHIM_SHA256:
+        problems.append(f"the shim was {c.shim_sha256}, not the declared {SHIM_SHA256}")
+    if c.process_tree_sha256 is None:
+        problems.append("the process_tree the actors import could not be read")
+    if c.evidence != NATIVE or c.termination_cause != UNOBSERVED_CAUSE:
+        problems.append(
+            f"the continuation claims {c.evidence!r} evidence and a termination "
+            f"cause {c.termination_cause!r}; nothing native observed the caller"
+        )
+    expected_mode = "direct" if experiment == "K1" else "daemon"
+    if c.mode != expected_mode:
+        problems.append(f"{experiment} ran in {c.mode} mode, not {expected_mode}")
+    if not c.first_read:
+        problems.append("the first call did not read the synthetic post")
+    if experiment == "K1":
+        if c.reached:
+            problems.append(
+                f"the Direct reference reached the Job-membership query "
+                f"{c.reached} time(s), but it has no adopted Job to reach it "
+                f"through"
+            )
+        return problems
+    if c.owner is None:
+        problems.append("the owner that closed was never identified")
+    if c.close is None:
+        problems.append("the close's interval was not recorded")
+    if not c.witnesses:
+        problems.append(
+            f"no planted failure witnesses the entry: {c.reached} recorded, none "
+            f"by the owner that closed, about the installer family, inside its "
+            f"close"
+        )
+    if experiment == "K2":
+        return problems
+    if c.consumed_false is not True:
+        problems.append(
+            f"the owner that closed was not seen to reach core.close's consumption "
+            f"of the drain's False inside its close ({c.events} logger event(s) "
+            f"recorded in the row)"
+        )
+    if c.stood_down is not True:
+        problems.append(
+            f"the owner that closed was not seen to reach its held-profile "
+            f"stand-down ({c.events} logger event(s) recorded in the row)"
+        )
+    if c.owner_left is not True:
+        problems.append(
+            f"the owner that closed was not seen to exit (owner_left={c.owner_left!r})"
+        )
+    if c.recovery != POST_SETTLEMENT:
+        problems.append(f"no post-settlement recovery: {c.recovery}")
+    problems += [f"by the recovery boundary: {p}" for p in c.protected_at_boundary]
+    if c.successor_verified is not True:
+        problems.append(
+            "no successor is shown to have served the recovery"
+            + (f": {'; '.join(c.successor_problems)}" if c.successor_problems else "")
+        )
+    return problems
+
+
+class R11Ledger:
+    """The native continuations of one invocation of the row module.
+
+    Made by that module for itself and emptied by the composition, so a cell
+    of another invocation or an earlier repetition never stands in. A second
+    continuation for one experiment is refused, not chosen between.
+    """
+
+    def __init__(self, run: str) -> None:
+        self.run = run
+        self._cells: dict[str, NativeContinuation] = {}
+        self._problems: list[str] = []
+
+    def record(self, continuation: NativeContinuation | None) -> None:
+        if continuation is None:
+            return
+        if continuation.experiment in self._cells:
+            self._problems.append(
+                f"a second {continuation.experiment} continuation in one invocation"
+            )
+            return
+        self._cells[continuation.experiment] = continuation
+
+    def take(self) -> tuple[dict[str, NativeContinuation], list[str]]:
+        cells, problems = self._cells, self._problems
+        self._cells, self._problems = {}, []
+        return cells, problems
+
+
+def r11_composition(
+    model: RoutineModel | None,
+    ledger: R11Ledger,
+    *,
+    revisions: Mapping[str, str | None],
+) -> list[str]:
+    """What stops H-R11's claim from being composed in this invocation.
+
+    A composition of separate results, never a sum of them: the source
+    model's conditional branch, calibrated in this process against the exact
+    sources the native runtimes imported (the baseline's prohibited
+    selection, the candidate's abstention and every positive control); each
+    native continuation of this run through the common gate; K3 no worse
+    than K1 on O1, O2 and O4; and K0, K3 repeated, reading as K3 did
+    (``compare_repeat``). A missing calibration or cell fails it: K1 and K3
+    selected alone compose nothing. Whole-system O2 stays what the vectors
+    say, unobserved where nothing traced it.
+    """
+    cells, problems = ledger.take()
+    if model is None:
+        problems.append("no source-model calibration ran in this invocation")
+    else:
+        if model.evidence != SOURCE_MODEL:
+            problems.append(f"the calibration is {model.evidence!r}, not source-model")
+        problems += [f"source model: {problem}" for problem in model.problems]
+    for experiment in ("K1", "K2", "K3", "K0"):
+        cell = cells.get(experiment)
+        problems += [
+            f"{experiment}: {problem}"
+            for problem in continuation_problems(
+                cell,
+                experiment=experiment,
+                revision=revisions.get(experiment),
+                run=ledger.run,
+            )
+        ]
+        if cell is None or model is None:
+            continue
+        modelled = model.sha256.get(
+            CANDIDATE if experiment in ("K3", "K0") else BASELINE
+        )
+        if cell.process_tree_sha256 != modelled:
+            problems.append(
+                f"{experiment}: the actors imported process_tree "
+                f"{cell.process_tree_sha256}, the source model ran {modelled}"
+            )
+    reference, candidate = cells.get("K1"), cells.get("K3")
+    if reference is not None and candidate is not None:
+        if reference.vector is None or candidate.vector is None:
+            problems.append("K1 or K3 left no vector to compare")
+        else:
+            problems += [
+                f"K3 differs from K1 frozen: {difference}"
+                for difference in compare_to_direct(reference.vector, candidate.vector)
+            ]
+    repeat = cells.get("K0")
+    if candidate is not None and repeat is not None:
+        if candidate.vector is None or repeat.vector is None:
+            problems.append("K3 or K0 left no vector to compare")
+        else:
+            problems += [
+                f"K0 differs from K3: {difference}"
+                for difference in compare_repeat(candidate.vector, repeat.vector)
+            ]
+    return problems
+
+
+# --- Row H-R7: the processes around an unconfirmed close ------------------------
+
+#: How long the original owner and its guardian may take to go after an
+#: unconfirmed close: the owner's own stand-down bound, and slack.
+_R7_EXIT_SECONDS = 60.0
+
+
+def exit_state(process: Any, seconds: float) -> str:
+    """Whether *process* is seen gone within *seconds*: ``exited``, ``still
+    running`` or ``unknown``. It waits and sends nothing."""
+    if process is None:
+        return "unknown: no handle to it was taken"
+    try:
+        return "exited" if wait_until_dead(process, seconds) else "still running"
+    except psutil.Error as exc:
+        return f"unknown ({type(exc).__name__})"
+
+
+def lifetime_exit_state(
+    observed: Iterable[Mapping[str, Any]],
+    pid: int,
+    seconds: float,
+    *,
+    open_process: Callable[[int], Any] = psutil.Process,
+) -> str:
+    """``exit_state`` of the row lifetime the watcher recorded at *pid*.
+
+    A pid that names no process, or another lifetime than every one recorded
+    there, shows that lifetime gone: a pid is not reused while its process,
+    or its zombie, still exists.
+    """
+    starts = [
+        float(entry["start_identity"])
+        for entry in observed
+        if entry.get("kind") in ("process.start", "process.update")
+        and entry.get("pid") == pid
+        and entry.get("in_row") is True
+        and isinstance(entry.get("start_identity"), (int, float))
+    ]
+    if not starts:
+        return "unknown: the watcher never recorded it in the row"
+    return _lifetime_exit(pid, starts, seconds, open_process=open_process)
+
+
+def _lifetime_exit(
+    pid: int,
+    starts: Sequence[float],
+    seconds: float,
+    *,
+    open_process: Callable[[int], Any] = psutil.Process,
+) -> str:
+    """``exit_state`` of the lifetime at *pid* that began at one of *starts*.
+
+    A pid that names no process, or another lifetime than every one of
+    them, shows that lifetime gone: a pid is not reused while its process,
+    or its zombie, still exists.
+    """
+    try:
+        process = open_process(pid)
+        created = process.create_time()
+    except psutil.NoSuchProcess:
+        return "exited"
+    except psutil.Error as exc:
+        return f"unknown ({type(exc).__name__})"
+    if not any(abs(created - start) <= _START_TOLERANCE_SECONDS for start in starts):
+        return "exited"
+    return exit_state(process, seconds)
+
+
+class UnresolvedPublication:
+    """An owner published on the row's own auth root that the row could not
+    tie to a lifetime it identified: *pid* is the one the descriptor named,
+    None when the descriptor could not be read.
+
+    Nothing here is signalled: the row never showed that process to be its
+    own. ``check`` answers settled only on lifetime evidence that whatever
+    published *pid* is gone: no process holds that pid, or the lifetime
+    first read there, by pid and create time, has since ended
+    (``_lifetime_exit``, one look and no wait, since nothing was sent). The
+    first read is taken at once and again by each check until one succeeds;
+    whatever published *pid* was either that lifetime or already gone. The
+    descriptor settles nothing, missing or replaced: it says nothing of the
+    process it named. Nor does a pid whose process cannot be read, and an
+    unreadable descriptor names no pid to read, so that one is never settled.
+    """
+
+    def __init__(
+        self, pid: int | None, *, open_process: Callable[[int], Any] = psutil.Process
+    ) -> None:
+        self.pid = pid
+        self._open = open_process
+        self.created: float | None = None
+        self.gone = False
+        if pid is not None:
+            self._first_read()
+
+    def _first_read(self) -> None:
+        assert self.pid is not None
+        try:
+            self.created = self._open(self.pid).create_time()
+        except psutil.NoSuchProcess:
+            self.gone = True
+        except psutil.Error:
+            pass
+
+    def check(self, grace: float) -> bool:
+        if self.pid is None:
+            return False
+        if not self.gone and self.created is None:
+            self._first_read()
+        if not self.gone and self.created is not None:
+            state = _lifetime_exit(
+                self.pid, [self.created], 0.0, open_process=self._open
+            )
+            self.gone = state == "exited"
+        return self.gone
+
+
+def r7_continuation(
+    setup: R7Setup,
+    *,
+    window: Mapping[str, Any],
+    experiment: str,
+    run: str,
+    daemon: bool,
+    identity: Mapping[str, Any],
+    fault_dir: Path | None,
+    activation: Mapping[str, Any] | None,
+    runtime: Runtime,
+    env: Mapping[str, str],
+    host: HostSession,
+    vector: RowVector | None,
+    phase: PhaseReading | None,
+    validity: Sequence[str],
+    observed: Iterable[Mapping[str, Any]] = (),
+    shared: SharedReduction = SharedReduction(),
+) -> R7Continuation:
+    """The row's H-R7 continuation, from what it recorded; judged elsewhere.
+
+    The selected call is judged here, once every actor has exited, from the
+    fault's own records: a duplicate or an invalid entry written late counts.
+    The process_tree is the one the actors import, by content, and the fault
+    text the one in the overlay now, not the one declared. So is early use
+    of the profile: against the whole of *observed*, the watcher's completed
+    history, wherever the row reached its recovery barrier, so a browser the
+    watcher reported after the barrier's own look still counts.
+    """
+    overlay = setup.overlay
+    if overlay is not None:
+        tree = (overlay.reports.get("overlay isolated") or {}).get("process_tree")
+        try:
+            fault: str | None = hashlib.sha256(
+                overlay.fault_file.read_bytes()
+            ).hexdigest()
+        except OSError:
+            fault = None
+    else:
+        tree = str(runtime.checkout / "linkedin_mcp_server" / "process_tree.py")
+        fault = None
+    consumed: int | None = None
+    if fault_dir is not None:
+        consumed = sum(
+            1
+            for event in fault_events(fault_dir)
+            if event.get("event") == r7_fault.CONSUMED
+        )
+    selection: list[str] = []
+    if setup.activate:
+        if activation is None or fault_dir is None:
+            selection = ["no activation was published"]
+        else:
+            selection = selection_problems(
+                fault_dir,
+                activation=activation,
+                sent_ns=(window.get("close") or {}).get("began_monotonic_ns"),
+            )
+    tool = host.tool or {}
+    principal, guardian, lock = (
+        window.get("principal"),
+        window.get("guardian"),
+        window.get("lock"),
+    )
+    early: list[str] = []
+    if "barrier_created" in window and principal:
+        early = early_browsers(
+            observed,
+            (int(principal[0]), float(principal[1])),
+            since=window.get("close_created"),
+            until=window.get("barrier_created"),
+        )
+    return R7Continuation(
+        experiment=experiment,
+        repetition=setup.repetition,
+        run=run,
+        mode="daemon" if daemon else "direct",
+        control=setup.control,
+        revision=identity.get("head"),
+        process_tree_sha256=file_sha256(tree),
+        fault_sha256=fault,
+        scenario=tuple(scenario_problems(env)),
+        vector=vector,
+        first_read=bool(tool)
+        and not tool.get("is_error")
+        and bool(tool.get("read_the_post")),
+        principal=(int(principal[0]), float(principal[1])) if principal else None,
+        role=window.get("role"),
+        guardian=(int(guardian[0]), float(guardian[1])) if guardian else None,
+        guardian_group=window.get("guardian_group"),
+        owner_group=window.get("owner_group"),
+        marker_digest=window.get("marker_digest"),
+        lock=(int(lock[0]), int(lock[1])) if lock else None,
+        checkpoints=tuple(window.get("checkpoints") or ()),
+        traced_before_activation=window.get("traced_before_close"),
+        activated=activation is not None,
+        selection=tuple(selection),
+        consumed=consumed,
+        owner_exit=window.get("owner_exit"),
+        guardian_exit=window.get("guardian_exit"),
+        pre_probe=tuple(window.get("pre_probe") or ()),
+        recovery=str(window.get("recovery") or "not reached"),
+        successor_verified=window.get("successor_verified"),
+        successor_problems=tuple(window.get("successor_problems") or ()),
+        ended_by_harness=tuple(window.get("ended_by_harness") or ()),
+        phase=phase,
+        validity=tuple(validity),
+        shared=shared,
+        early_use=tuple(early),
+    )
+
+
+def r7_settled_problems(window: Mapping[str, Any], *, daemon: bool) -> list[str]:
+    """Why H-R7's actors are not all shown gone after the row.
+
+    Direct: the server and its guardian, after the host's quit. Daemon:
+    every owner the harness ended, and its guardian. A process that could
+    not be ended or seen gone is not settled, however the row went.
+    """
+    problems = []
+    if not daemon:
+        for name, key in (
+            ("server", "server_exit"),
+            ("guardian", "guardian_after_quit"),
+        ):
+            if window.get(key) != "exited":
+                problems.append(
+                    f"the Direct {name} was {window.get(key)!r} after the quit"
+                )
+        return problems
+    for record in window.get("ended_by_harness") or []:
+        if record.get("result") not in ("gone", "stopped"):
+            problems.append(
+                f"the {record.get('who')} {record.get('pid')} was {record.get('result')!r}"
+            )
+        if record.get("guardian_exit") not in ("exited", "none was seen"):
+            problems.append(
+                f"the {record.get('who')}'s guardian {record.get('guardian')} was "
+                f"{record.get('guardian_exit')!r}"
+            )
+    return problems
+
+
+def is_alive(process: Any) -> bool | None:
+    """Whether *process* still runs, a zombie that has not wholly exited
+    included; None when that cannot be read."""
+    if process is None:
+        return None
+    try:
+        return not is_dead(process)
+    except psutil.Error:
+        return None
+
+
+def end_owner(identity: OwnerIdentity) -> str:
+    """Cleanup after measurement only: end the owner this row identified.
+
+    Through the handle taken when the row identified it, which psutil checks
+    against a reused pid before it signals; never by a pid looked up again.
+    ``gone`` when it had already exited, ``stopped`` when it was killed and
+    seen gone, anything else unknown.
+    """
+    try:
+        if not identity.process.is_running() or is_dead(identity.process):
+            return "gone"
+        identity.process.kill()
+    except psutil.NoSuchProcess:
+        return "gone"
+    except psutil.Error as exc:
+        return f"unknown ({type(exc).__name__})"
+    try:
+        dead = wait_until_dead(identity.process, _OWNER_KILL_WAIT_SECONDS)
+    except psutil.Error as exc:
+        return f"unknown ({type(exc).__name__})"
+    return "stopped" if dead else "still running"
+
+
+# --- Row H-R3: checkpoints around the host's quit ------------------------------
+
+#: How long one checkpoint may run on its owned thread. A census, one contender
+#: and one holder read take well under a second; a checkpoint that needs this
+#: is long past its window, and one that outlives it stops the row measuring.
+_CHECKPOINT_SECONDS = 60.0
+#: How many ancestors a root's lineage is read through before it gives up.
+_LINEAGE_DEPTH = 16
+
+
+def census_entry(process: Any) -> dict[str, Any]:
+    """One census process as ``host_comparison.census_roots`` reads it.
+
+    Its parent and start, read now, and the profile it is a browser root on
+    by the watcher's own reading of its arguments (``user_data_dir``), kept
+    as this machine spells it. A field that could not be read is None, which
+    leaves the root count unknown rather than smaller.
+    """
+    cmdline = list((getattr(process, "info", {}) or {}).get("cmdline") or [])
+    entry: dict[str, Any] = {
+        "pid": process.pid,
+        "ppid": None,
+        "start": None,
+        "profile": user_data_dir(cmdline),
+        "cmdline": cmdline,
+    }
+    with contextlib.suppress(psutil.Error):
+        entry["ppid"] = process.ppid()
+    with contextlib.suppress(psutil.Error):
+        entry["start"] = process.create_time()
+    return entry
+
+
+def lineage(
+    pid: int,
+    start: float,
+    *,
+    stop: tuple[int, float] | None,
+    open_process: Callable[[int], Any] = psutil.Process,
+) -> dict[str, Any]:
+    """The ancestors of the lifetime (*pid*, *start*), nearest first.
+
+    Each as ``[pid, start]``, read through ``parent``, which refuses a parent
+    younger than its child, and only up to *stop*: above the actor nothing is
+    needed, and a system process there may refuse the read. ``complete`` when
+    the walk reached *stop* or the top; a lifetime no longer at *pid*, or a
+    read that failed first, leaves it incomplete, never shown unrelated.
+    """
+    ancestors: list[list[float]] = []
+    try:
+        process = open_process(pid)
+        if abs(process.create_time() - start) > _START_TOLERANCE_SECONDS:
+            return {"ancestors": ancestors, "complete": False}
+        for _ in range(_LINEAGE_DEPTH):
+            parent = process.parent()
+            if parent is None:
+                return {"ancestors": ancestors, "complete": True}
+            life = [parent.pid, parent.create_time()]
+            ancestors.append(life)
+            if stop is not None and host_comparison.same_lifetime(life, stop):
+                return {"ancestors": ancestors, "complete": True}
+            process = parent
+    except psutil.Error:
+        pass
+    return {"ancestors": ancestors, "complete": False}
+
+
+def holder_association(
+    identity: tuple[int, int] | None,
+    holder: tuple[int, float],
+    *,
+    open_process: Callable[[int], Any] = psutil.Process,
+) -> dict[str, Any]:
+    """``lock_association`` for the lifetime *holder*, on the lock *identity*.
+
+    The pid is read as that lifetime on both sides of the association, so a
+    pid another process has taken meanwhile is not credited as the holder.
+    """
+
+    def same() -> bool:
+        try:
+            created = open_process(holder[0]).create_time()
+        except psutil.Error:
+            return False
+        return abs(created - holder[1]) <= _START_TOLERANCE_SECONDS
+
+    before = same()
+    found = lock_association(identity, holder[0])
+    return {
+        **found,
+        "holder": list(holder),
+        "identity": list(identity) if identity is not None else None,
+        "same_before": before,
+        "same_after": same(),
+    }
+
+
+def read_lock(lock_path: Path) -> dict[str, Any]:
+    """The lock file's identity now and a fresh contender's answer, as a
+    checkpoint records them (``observe_checkpoint``)."""
+    now = lock_identity(lock_path)
+    found: dict[str, Any] = {"now": list(now) if now is not None else None}
+    if host_comparison.capabilities(sys.platform)[0]:
+        found["answer"] = lease_probe.run_probe(str(lock_path))
+    return found
+
+
+def observe_checkpoint(
+    label: str,
+    account: ActorAccount,
+    *,
+    actor: tuple[Any, int, float] | None,
+    lock_path: Path,
+    lock: tuple[int, int] | None,
+    browser_exe: str | None = None,
+    browser_dir: str | Path | None = None,
+    platform: str = sys.platform,
+    process_iter: Callable[..., Iterable[Any]] | None = None,
+    open_process: Callable[[int], Any] = psutil.Process,
+) -> dict[str, Any]:
+    """One H-R3 checkpoint: the raw facts ``host_comparison`` classifies.
+
+    Read in turn, and not at one instant: the actor's liveness, the whole
+    profile census with each process's parent and start, each root's lineage
+    up to the actor, the lock file's identity, the contender's answer where
+    the platform has one, the holder where Linux can name it, and the actor's
+    liveness again. The two liveness reads bracket the rest, so a transition
+    during the checkpoint reads as one, never as either state. *actor* is the
+    handle the row identified it by, with its pid and start; *lock* the lock
+    file the row identified before the quit, or None to take it now. Its
+    interval is on both clocks, the monotonic one being the one the verdict
+    measures freshness on.
+    """
+    point: dict[str, Any] = {
+        "label": label,
+        "began": time.time(),
+        "began_ns": time.monotonic_ns(),
+    }
+    handle = actor[0] if actor is not None else None
+    life = (actor[1], actor[2]) if actor is not None else None
+    point["lifetime"] = list(life) if life is not None else None
+    alive_before = is_alive(handle)
+    census = profile_census(
+        account,
+        browser_exe=browser_exe,
+        browser_dir=browser_dir,
+        process_iter=process_iter,
+    )
+    point["census"] = {
+        "entries": [census_entry(process) for process in census.processes],
+        "unresolved": list(census.unresolved),
+        "unresolved_provenance": list(census.provenance),
+    }
+    roots = host_comparison.census_roots(point["census"], account.browser_key) or []
+    point["lineages"] = [
+        {
+            "pid": pid,
+            "start": start,
+            **lineage(pid, start, stop=life, open_process=open_process),
+        }
+        for pid, start in roots
+    ]
+    now = lock_identity(lock_path)
+    identity = lock if lock is not None else now
+    contender, association = host_comparison.capabilities(platform)
+    found: dict[str, Any] = {"now": list(now) if now is not None else None}
+    if contender:
+        found["answer"] = lease_probe.run_probe(str(lock_path))
+    if association and life is not None:
+        found["association"] = holder_association(
+            identity, life, open_process=open_process
+        )
+    point["lock"] = found
+    point["actor_alive"] = [alive_before, is_alive(handle)]
+    point["ended"] = time.time()
+    point["ended_ns"] = time.monotonic_ns()
+    return point
+
+
+def observe_owner(
+    label: str,
+    account: ActorAccount,
+    observed: Callable[[], Iterable[dict[str, Any]]],
+) -> dict[str, Any]:
+    """H-R2: which owner the row's descriptor names now, tied to a lifetime
+    the watcher saw this row start (``identify_owner``), and its instance."""
+    seen: dict[str, Any] = {"label": label, "lifetime": None, "instance_id": None}
+    try:
+        published = account.layout.read(account.auth_root)
+    except Exception as exc:  # noqa: BLE001 - the reading's own evidence
+        seen["problem"] = f"the descriptor could not be read: {exc!r}"
+        return seen
+    if published is None:
+        seen["problem"] = "no owner is published"
+        return seen
+    seen["instance_id"] = published.instance_id
+    found, problem = identify_owner(published, account, observed())
+    seen["problem"] = problem
+    if found is not None:
+        seen["lifetime"] = [found.pid, found.create_time]
+    return seen
+
+
+def observe_roots(
+    label: str,
+    account: ActorAccount,
+    *,
+    browser_exe: str | None = None,
+    browser_dir: str | Path | None = None,
+    process_iter: Callable[..., Iterable[Any]] | None = None,
+) -> dict[str, Any]:
+    """The browser roots on the row's profile now, each ``[pid, start]``, by
+    the watcher's own predicate (``host_comparison.census_roots``); None
+    when the census could not say. Stamped on both clocks as it began, and
+    on the monotonic clock as its census was done (``done_ns``): a reading
+    lies between the two, never at the first alone."""
+    point: dict[str, Any] = {
+        "label": label,
+        "seen": time.time(),
+        "seen_ns": time.monotonic_ns(),
+    }
+    census = profile_census(
+        account,
+        browser_exe=browser_exe,
+        browser_dir=browser_dir,
+        process_iter=process_iter,
+    )
+    found = {
+        "entries": [census_entry(process) for process in census.processes],
+        "unresolved": list(census.unresolved),
+    }
+    point["done_ns"] = time.monotonic_ns()
+    roots = host_comparison.census_roots(found, account.browser_key)
+    point["roots"] = [list(root) for root in roots] if roots is not None else None
+    point["unresolved"] = list(census.unresolved)
+    point["unresolved_provenance"] = list(census.provenance)
+    return point
+
+
+def descriptor_written(account: ActorAccount) -> dict[str, Any]:
+    """When the row's descriptor was last written, by the wall clock.
+
+    Only looked at, as ``find_the_owner`` looks: the file's own time, which
+    an owner sets as it prepares its publication, so no later than the
+    publication itself.
+    """
+    path = account.layout.descriptor_path(account.auth_root)
+    try:
+        return {"written": path.stat().st_mtime}
+    except FileNotFoundError:
+        return {"written": None}
+    except OSError as exc:
+        return {"written": None, "error": f"{type(exc).__name__}: {exc}"}
+
+
+#: The bound on the stand-down request, as the product's own sender keeps one.
+_STAND_DOWN_REQUEST_SECONDS = 10.0
+
+
+def ask_to_stand_down(
+    account: ActorAccount, identified: OwnerIdentity | None
+) -> dict[str, Any]:
+    """Ask the identified owner to stand down, as a newer build does.
+
+    The product's own request (``daemon.election._ask_to_stand_down``): a POST
+    to ``daemon.owner.STAND_DOWN_PATH`` with the row runtime's turnover body
+    (``DaemonStateLayout.stand_down_body``), with the bearer token read from the
+    row's own auth root, through the owner's loopback client. Sent only when
+    the descriptor still names the owner the row identified, so the request
+    cannot reach another. The token goes into no record; the answer's status
+    and its ``standing_down`` flag do.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    from linkedin_mcp_server.daemon import owner as daemon_owner
+
+    found: dict[str, Any] = {
+        "addressed": False,
+        "sent_ns": None,
+        "answered_ns": None,
+        "status": None,
+        "standing_down": None,
+        "error": None,
+    }
+    try:
+        published = account.layout.read(account.auth_root)
+        if (
+            identified is None
+            or published is None
+            or published.pid != identified.pid
+            or published.instance_id != identified.instance_id
+        ):
+            found["error"] = "the descriptor does not name the owner the row identified"
+            return found
+        published.check_endpoint_is_local()
+        parts = urlsplit(published.url)
+        url = urlunsplit(
+            (parts.scheme, parts.netloc, daemon_owner.STAND_DOWN_PATH, "", "")
+        )
+        found["addressed"] = True
+        with daemon_owner.direct_http_client(
+            timeout=_STAND_DOWN_REQUEST_SECONDS
+        ) as client:
+            headers = {
+                "Authorization": "Bearer "
+                + account.layout.read_token(account.auth_root, published)
+            }
+            body = account.layout.stand_down_body(published.instance_id)
+            found["sent_ns"] = time.monotonic_ns()
+            response = (
+                client.post(url, headers=headers)
+                if body is None
+                else client.post(url, headers=headers, json=body)
+            )
+            found["answered_ns"] = time.monotonic_ns()
+    except Exception as exc:  # noqa: BLE001 - the request's own evidence
+        found["error"] = type(exc).__name__
+        return found
+    found["status"] = response.status_code
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        found["standing_down"] = body.get("standing_down")
+    return found
+
+
+def bind_responder(
+    account: ActorAccount, identified: OwnerIdentity | None, status: int
+) -> tuple[owner_loss.DeclaredResponder | None, dict[str, Any]]:
+    """Bind a declared responder on the address the identified owner published.
+
+    Only while the descriptor still names that owner, which the row has just
+    killed, so the address is the one its frontend is attached to and nobody
+    else's. A bind that fails is the record's ``error``: the port could not be
+    taken again, and the row's evidence is invalid.
+    """
+    from urllib.parse import urlsplit
+
+    found: dict[str, Any] = {
+        "bound": False,
+        "status": status,
+        "address": None,
+        "bound_ns": None,
+        "error": None,
+    }
+    try:
+        published = account.layout.read(account.auth_root)
+        if (
+            identified is None
+            or published is None
+            or published.pid != identified.pid
+            or published.instance_id != identified.instance_id
+        ):
+            found["error"] = "the descriptor does not name the owner the row identified"
+            return None, found
+        published.check_endpoint_is_local()
+        parts = urlsplit(published.url)
+        host, port = parts.hostname, parts.port
+        if host is None or port is None:
+            found["error"] = "the published address names no host and port"
+            return None, found
+        responder = owner_loss.DeclaredResponder(host, port, status)
+    except Exception as exc:  # noqa: BLE001 - the bind's own evidence
+        found["error"] = f"{type(exc).__name__}: {exc}"
+        return None, found
+    responder.start()
+    found.update(bound=True, address=[host, port], bound_ns=time.monotonic_ns())
+    return responder, found
+
+
+#: Traced O2 states that differ by timing alone (``compare_to_direct``).
+_SAMPLED_ALIKE = frozenset({O2_HELD, O2_UNKNOWN})
+
+
+def compare_repeat(first: RowVector, second: RowVector) -> list[str]:
+    """K0: every field of two runs of the same experiment must agree, except a
+    traced O2 of ``held`` against ``unknown``, which says only whether a
+    recipient outlived the next sample."""
+    one, two = asdict(first), asdict(second)
+    return [
+        f"{name}: {one[name]!r} then {two[name]!r}"
+        for name in one
+        if one[name] != two[name]
+        and not (name == "o2_traced" and {one[name], two[name]} <= _SAMPLED_ALIKE)
+    ]
+
+
+def compare_to_direct(direct: RowVector, daemon: RowVector) -> list[str]:
+    """K3 against a Direct reference: O1, O2, O3 and O4 must be ``=``.
+
+    O2 is ``=`` when the row's states are the same, the daemon row sent no
+    class of signal that neither Direct's construction nor the reference's
+    run sends, and neither traced O2 is violated or incomplete where the other
+    is not. ``held`` against ``unknown`` is no difference: which of the two a
+    row reads depends on whether a recipient outlived the next sample, not on
+    what was sent. Two unobserved states compare equal as labels, which says
+    nothing of what either row's unobserved actors sent.
+
+    O3 is ``=`` unless the daemon row made a protected change that the
+    reference did not and that no action the user authorized covers. Equal O4
+    outcomes are not equal O3: two sessions can both be lost while only one
+    mode quarantined it. A change only Direct made is Direct mutating more.
+    """
+    differences = []
+    for name in ("o1_single_browser", "o2", "o4_session", "o4_lineage"):
+        if getattr(direct, name) != getattr(daemon, name):
+            differences.append(
+                f"{name}: Direct {getattr(direct, name)!r}, daemon "
+                f"{getattr(daemon, name)!r}"
+            )
+    if (direct.o2_traced == O2_VIOLATED) != (daemon.o2_traced == O2_VIOLATED):
+        differences.append(
+            f"o2_traced: Direct {direct.o2_traced!r}, daemon {daemon.o2_traced!r}"
+        )
+    if direct.oracle_collection != daemon.oracle_collection:
+        differences.append(
+            f"oracle_collection: Direct {direct.oracle_collection!r}, daemon "
+            f"{daemon.oracle_collection!r}"
+        )
+    extra = classes_direct_would_not_send(daemon.signal_classes, direct.signal_classes)
+    if extra:
+        differences.append(f"o2: signals Direct would not send: {extra}")
+    mutated = sorted(set(daemon.o3_protected) - set(direct.o3_protected))
+    if mutated:
+        differences.append(
+            f"o3: protected changes Direct did not make and nobody "
+            f"authorized: {mutated}"
+        )
+    return differences
+
+
+def feed_requests(requests: Sequence[Any]) -> list[Any]:
+    return [
+        request
+        for request in requests
+        if request.path.split("?", 1)[0] == "/feed/"
+        and (request.host or "").split(":", 1)[0] == "www.linkedin.com"
+    ]
+
+
+@dataclass
+class PostQuit:
+    """One short Direct session after the row, on the same profile."""
+
+    #: The origin accepted the staged session; None if it could not be asked.
+    valid: bool | None
+    failures: list[str] = field(default_factory=list)
+    user_lines: list[str] = field(default_factory=list)
+    feed_requests: int = 0
+    #: The row's preservation policy, when that policy is why no session ran
+    #: (``preservation_policy_refusals``): declared, so not a failure, and
+    #: never an observation either.
+    withheld: str | None = None
+    #: *valid* is the synthetic origin's own judgement of the ``li_at`` on
+    #: disk, read without any browser: the observation a withheld session
+    #: leaves on a row that stages a sign-in, which nothing can repair.
+    origin_judged: bool = False
+
+
+@dataclass
+class Observations:
+    """Everything a row observed, for ``judge_row`` to decide on."""
+
+    daemon: bool
+    browser_key: str
+    host: HostSession
+    owner: dict[str, Any]
+    cleanup: DaemonCleanup
+    swept: list[int]
+    residual: list[int]
+    watcher: dict[str, Any] | None
+    actors_began: float
+    actors_ended: float
+    row_requests: list[Any]
+    before: ProfileSnapshot
+    after: ProfileSnapshot | None
+    post_quit: PostQuit | None
+    #: Whether the row should reach a shared owner; the mode's when None.
+    expect_owner: bool | None = None
+    #: Daemon state was present for the row's auth root at cleanup.
+    daemon_state_existed: bool = False
+    #: Owner processes the watcher saw a row actor start (``owner_launches``).
+    owner_launches: list[int] = field(default_factory=list)
+    #: Owner release gates the watcher saw a row actor start (``owner_gates``).
+    owner_gates: list[int] = field(default_factory=list)
+    #: O2 as ``signals.derive_o2`` found it; None reads as unobserved.
+    o2: O2Result | None = None
+    #: H-R6: what the harness killed, and the guardian it had.
+    killed: dict[str, Any] | None = None
+    #: The idle timeout the row's actors ran with.
+    idle_timeout: float = IDLE_TIMEOUT_SECONDS
+    #: The R17 outcome the row declares it expects, one of ``EXPECTABLE``.
+    expect_session: str = RETAINED
+    #: The user action the row recorded the user confirming (``LOGOUT``), or
+    #: None. A record of the confirmation only; what it did is read from
+    #: ``after``.
+    authorized: str | None = None
+    #: The row's declared first call, which ``tool_succeeded`` judges.
+    initial: InitialCall = FEED_READ
+    #: How the row's host was declared to end (``TERMINATIONS``).
+    termination: str = NORMAL_EOF
+    #: R17 beyond the original generation, on a row that stages a sign-in
+    #: (``session.replacement_lineage``); None reads as ``none``.
+    lineage: ReplacementLineage | None = None
+
+
+@dataclass
+class RowResult:
+    experiment: str
+    mode: str
+    #: The column this result stands in, when not the mode's default.
+    reference: str | None = None
+    vector: RowVector | None = None
+    before: ProfileSnapshot | None = None
+    after: ProfileSnapshot | None = None
+    host: HostSession | None = None
+    owner: dict[str, Any] | None = None
+    watcher: dict[str, Any] | None = None
+    cleanup: DaemonCleanup | None = None
+    post_quit: PostQuit | None = None
+    failures: list[str] = field(default_factory=list)
+    #: A frozen row whose actors could not be shown to run the baseline.
+    runtime_failures: list[str] = field(default_factory=list)
+    #: H-R11: what the native experiment established, and every problem that
+    #: kept it from being observed (``continuation_problems`` judges it).
+    continuation: NativeContinuation | None = None
+    #: H-R7: the same for an unconfirmed close (``unconfirmed_close.r7_problems``).
+    unconfirmed: R7Continuation | None = None
+    #: H-R6: what the harness killed, its guardian and the oracle's state.
+    killed: dict[str, Any] | None = None
+    o2: O2Result | None = None
+    #: H-R3: the checkpoint record and its verdict (``host_comparison``).
+    comparison: dict[str, Any] | None = None
+    #: A declared row's raw record and its verdict (``ROW_VERDICTS``), for a
+    #: row whose script runs on a ``RowContext``.
+    record: dict[str, Any] | None = None
+
+    @property
+    def label(self) -> str:
+        default = DIRECT_REFERENCE if self.mode == "direct" else self.mode
+        return f"{self.experiment} ({self.reference or default})"
+
+    def report(self) -> str:
+        lines = [f"{self.label} failures:"]
+        lines += [f"  - {failure}" for failure in self.failures]
+        lines.append(f"vector: {self.vector}")
+        if self.host is not None:
+            lines.append(f"tool: {self.host.tool}")
+            lines.append(f"host error: {self.host.error}")
+            lines.append("stderr tail:")
+            lines += [f"  {line}" for line in self.host.stderr[-40:]]
+        if self.owner is not None:
+            lines.append(f"owner: {self.owner.get('pid')} {self.owner.get('exit')}")
+            lines += [f"  {line}" for line in self.owner.get("log_tail", [])[-40:]]
+        lines.append(f"watcher: {self.watcher}")
+        lines.append(f"cleanup: {self.cleanup}")
+        return "\n".join(lines)
+
+
+def judge_row(observed: Observations) -> tuple[RowVector, list[str]]:
+    """The row's vector and every failure, from its observations alone."""
+    host = observed.host
+    failures: list[str] = []
+    killed = observed.killed or {}
+    normal = observed.termination == NORMAL_EOF
+
+    if not normal:
+        # The row lost its host on purpose, so there is no quit to judge, and
+        # how its server ended is the row's own verdict's. Only a failure
+        # before the loss, or a loss that never came, counts here.
+        host_problems = (
+            [f"the host session failed before its loss: {host.error}"]
+            if host.error
+            else []
+        )
+        if host.lost != observed.termination:
+            host_problems.append(
+                f"the host's declared loss, {observed.termination}, was not "
+                f"what happened: {host.lost!r}"
+            )
+    elif killed.get("actor") == "frontend" and killed.get("exit") == "killed":
+        # H-R6 in Direct: the server is the host's own process and the harness
+        # killed it after its call, so it cannot quit. Only a failure before
+        # that kill counts against the host.
+        host_problems = [f"the host session failed: {host.error}"] if host.error else []
+    else:
+        host_problems = host_failures(host)
+    failures += host_problems
+
+    o2 = observed.o2
+    if o2 is not None:
+        failures += [f"O2 violation: {line}" for line in o2.violations]
+        failures += [f"O2 violation: {line}" for line in o2.canary_deaths]
+        if o2.required:
+            failures += [f"O2 incomplete: {line}" for line in o2.incomplete]
+
+    watcher_problems = watcher_failures(
+        observed.watcher,
+        actors_began=observed.actors_began,
+        actors_ended=observed.actors_ended,
+        browser_key=observed.browser_key,
+    )
+    failures += watcher_problems
+    summary = observed.watcher or {}
+    most_roots = (summary.get("max_roots") or {}).get(observed.browser_key, 0)
+
+    forwarded = any(_FORWARDING_LINE in line for line in host.stderr)
+    owner = observed.owner
+    expect_owner = (
+        observed.daemon if observed.expect_owner is None else observed.expect_owner
+    )
+    if not expect_owner and observed.daemon and observed.daemon_state_existed:
+        # Enabled but ineligible: no coordination effect at all, state included.
+        # The harness only ever tests for this directory and never creates it
+        # on such a row, so an actor of the row did.
+        failures.append(
+            f"a row that must stay Direct left daemon state for its auth root: "
+            f"{observed.cleanup.directory}"
+        )
+    if observed.daemon and expect_owner:
+        owner_published = bool(owner.get("pid"))
+        if owner.get("identify_error"):
+            failures.append(
+                f"the owner could not be identified: {owner['identify_error']}"
+            )
+        if owner.get("pid") and (owner.get("exit") or {}).get("how") != "exited":
+            failures.append(
+                f"the owner did not exit within {_OWNER_EXIT_SLACK_SECONDS}s of "
+                f"its {observed.idle_timeout}s idle timeout"
+            )
+    else:
+        owner_published = (
+            bool(owner.get("descriptor_present")) or bool(owner.get("pid")) or forwarded
+        )
+
+    cleanup = observed.cleanup
+    failures += list(cleanup.failures)
+    if observed.swept:
+        failures.append(f"cleanup had to kill browsers: {observed.swept}")
+    if observed.residual:
+        failures.append(
+            f"a browser on the profile outlived the row by "
+            f"{_BROWSER_GONE_SECONDS}s: {observed.residual}"
+        )
+    cleanup_clean = (
+        cleanup.cleaned
+        and not cleanup.signalled
+        and not cleanup.failures
+        and not observed.swept
+        and not observed.residual
+    )
+
+    post_quit = observed.post_quit
+    if post_quit is None:
+        failures.append("the post-quit observation did not run")
+    else:
+        failures += post_quit.failures
+
+    row_feed = feed_requests(observed.row_requests)
+    # Each line keeps its phase and recipient: the preservation probe's output
+    # is recorded with the rest, and never as the row's caller being told.
+    user_output = shown(ROW, CALLER, host.user_lines)
+    if post_quit is not None:
+        user_output += shown(PRESERVATION, PROBE, post_quit.user_lines)
+    if observed.after is None:
+        o4 = UNCERTAIN
+    else:
+        o4 = r17_outcome(
+            observed.before,
+            observed.after,
+            user_output,
+            post_quit=post_quit.valid if post_quit is not None else None,
+            user_cleared=observed.authorized == LOGOUT,
+        )
+    lineage = observed.lineage
+    if lineage is not None:
+        failures += [f"O4 lineage: {problem}" for problem in lineage.problems]
+    # A replacing authorization covers what a sign-in changes only where the
+    # lineage shows it came first; otherwise it covers nothing.
+    authorized = observed.authorized
+    if authorized in REPLACING and (
+        lineage is None or lineage.reading not in (LINEAGE_REPLACED, LINEAGE_LOST)
+    ):
+        authorized = None
+    o3_protected, o3_authorized = protected_kinds(
+        observed.before, observed.after, authorized
+    )
+
+    vector = RowVector(
+        mode="daemon" if observed.daemon else "direct",
+        o1_single_browser=not watcher_problems and most_roots <= 1,
+        browser_seen=most_roots >= 1,
+        watcher_healthy=not watcher_problems,
+        o4_session=o4,
+        origin_saw_feed=bool(row_feed),
+        feed_carried_session=any(r.session_valid is True for r in row_feed),
+        tool_succeeded=observed.initial.succeeded(host.tool),
+        owner_published=owner_published,
+        fell_back=observed.daemon and not forwarded,
+        owner_launched=bool(observed.owner_launches),
+        owner_start_attempted=bool(observed.owner_gates),
+        host_exit_clean=not host_problems,
+        cleanup_clean=cleanup_clean,
+        o2=o2.row if o2 is not None else O2_UNOBSERVED,
+        o2_traced=o2.state if o2 is not None else O2_UNOBSERVED,
+        o2_required=o2.required if o2 is not None else False,
+        oracle_collection=o2.collection if o2 is not None else ORACLE_UNAVAILABLE,
+        signal_classes=o2.classes if o2 is not None else (),
+        guardian_owner_group=killed.get("guardian_owner_group"),
+        # H-R6's second call; a row that kills on its own trigger makes none.
+        recovered=_recovered(host) if killed and observed.daemon and normal else None,
+        o3_protected=o3_protected,
+        o3_authorized=o3_authorized,
+        o4_lineage=lineage.reading if lineage is not None else LINEAGE_NONE,
+    )
+    expected = row_expectations(
+        vector,
+        expect_owner=expect_owner,
+        expect_session=observed.expect_session,
+        initial=observed.initial,
+    )
+    return vector, expected + failures
+
+
+def _recovered(host: HostSession) -> bool:
+    """The call after the owner was killed read the post again."""
+    second = host.second_tool
+    return bool(second and not second["is_error"] and second["read_the_post"])
+
+
+def repeat_verdict(reference: RowVector | None, result: RowResult) -> list[str]:
+    """K0: the repeat is valid on its own, and reads as the reference did."""
+    problems = []
+    if reference is None:
+        problems.append("no valid K3 result in this run to repeat")
+    if result.failures:
+        problems.append(f"the repeat failed its own expectations: {result.failures}")
+    if result.vector is None:
+        problems.append("the repeat produced no vector")
+    elif reference is not None:
+        problems += compare_repeat(reference, result.vector)
+    return problems
+
+
+# --- Row lifecycles --------------------------------------------------------------
+
+
+class RowVerdict(Protocol):
+    """A row's own verdict over its raw record: every problem, or nothing."""
+
+    def __call__(self, record: Mapping[str, Any], *, daemon: bool) -> list[str]: ...
+
+
+#: How often a declared row's script looks at an event another thread sets.
+_EVENT_POLL_SECONDS = 0.01
+#: How long the teardown waits for a released hold to record its end; a hold
+#: polls for its release every ``synthetic_origin._PEER_POLL_SECONDS``.
+_GATE_END_SECONDS = 5.0
+
+
+async def wait_for(event: threading.Event, seconds: float) -> bool:
+    """Whether *event* is set within *seconds*, polled on the loop.
+
+    Polled rather than waited on in a thread, so nothing is left running past
+    the bound for the row to own.
+    """
+    deadline = time.monotonic() + seconds
+    while not event.is_set():
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(_EVENT_POLL_SECONDS)
+    return True
+
+
+@dataclass(frozen=True)
+class LossSeams:
+    """What a row that loses its host mid-call may do (``RowContext.loss``).
+
+    One action and passive readings. ``lose`` is the only thing here that
+    ends anything, and only the host's own side: its pipes, the stub host's
+    process, or the server or frontend the host started, through the handle
+    the row tied it by (the H-R6 kill path, with its guardian found and the
+    signal oracle attached in ``prepare``). Never the owner. Every reading
+    waits and sends nothing, runs on a thread the row owns where it blocks,
+    and stamps itself on the monotonic clock (``seen_ns``), so a verdict can
+    tell a reading taken before the harness's corrective cleanup from one
+    after it. Each answers a record; none raises.
+    """
+
+    #: Get ready for *termination* before the read: associate the victim,
+    #: find its guardian and attach the oracle, or tie the stub's server.
+    prepare: Callable[[str], Awaitable[dict[str, Any]]]
+    #: Make the loss now; its record carries the kind, target and time.
+    lose: Callable[[str], Awaitable[dict[str, Any]]]
+    #: Whether the host's server or frontend exits within the seconds given.
+    server_exit: Callable[[float], Awaitable[dict[str, Any]]]
+    #: Direct: the profile's browser waited for, the census, the guardian's
+    #: exit when one was prepared, and the lease where the platform answers.
+    settlement: Callable[[], Awaitable[dict[str, Any]]]
+    #: A fresh host with the row's own command and environment: one read of
+    #: the feed and a normal quit.
+    fresh_read: Callable[[], Awaitable[dict[str, Any]]]
+    #: Which owner the descriptor names now, and whether the identified one
+    #: is alive.
+    owner_reading: Callable[[str], Awaitable[dict[str, Any]]]
+    #: The identified owner's log, as written so far.
+    owner_log: Callable[[], list[str]]
+
+
+@dataclass
+class RowContext:
+    """What a declared row's script may use (``RowLifecycle.script``).
+
+    Narrow on purpose: the host's timed call, its live transport, the origin
+    and its proxy, the account, checkpoint readings, the event log and the
+    owned-worker helpers. The owner stays the row's: ``owner`` reads the one
+    the row identified, and nothing here replaces, signals or ends it. Nothing
+    here cleans up either; the row's teardown releases every gate armed
+    through ``hold``, whatever the script did or did not do.
+
+    A held request is released by the script, on its own schedule, and never
+    only after ``transport.host_quit``: that waits for the server's exit,
+    which a request still held can keep from happening until its deadline.
+
+    A row that loses its host mid-call (``RowLifecycle.termination``) also
+    gets ``loss``: the one way it may end the host's server, and the passive
+    readings it takes afterwards. A row that races the owner's retirement
+    (``RowLifecycle.race``) gets ``race``: its readings, and on a turnover
+    lane the stand-down. A row that loses the owner
+    (``RowLifecycle.owner_loss``) gets ``owner_loss``: the kill, the stop and
+    the declared responder, and its readings. A row that runs profile
+    commands (``RowLifecycle.commands``) gets ``commands``, a row that
+    stages a sign-in (``RowLifecycle.auth``) gets ``auth``, and a row that
+    reads how the frontend decided (``RowLifecycle.coordination``) gets
+    ``coordination``.
+
+    A row may quit its host itself (``transport.host_quit``) and go on
+    observing; the session then quits it no second time.
+    """
+
+    row: str
+    daemon: bool
+    #: The host's timed call (``timed_call``). It raises on a failure or a
+    #: cancellation, after completing its record in ``HostSession.calls``.
+    call: ToolCall
+    #: The live host the row talks through: closing its stdin is how a row
+    #: quits its host before the session would.
+    transport: LiveHost
+    origin: SyntheticOrigin
+    proxy: EgressProxy
+    account: ActorAccount
+    #: The row's raw record, judged by its ``ROW_VERDICTS`` entry. What the
+    #: script observes goes here and nowhere else.
+    record: dict[str, Any]
+    #: The owner the row identified, as it stands when asked; None before.
+    owner: Callable[[], OwnerIdentity | None]
+    browser_exe: str | None
+    browser_dir: Path
+    _emit: Callable[..., None]
+    _gates: list[Gate]
+    #: Only on a row that loses its host (``LossSeams``).
+    loss: LossSeams | None = None
+    #: Only on a row that races the owner's retirement (``RaceSeams``).
+    race: RaceSeams | None = None
+    #: Only on a row that loses the owner (``OwnerLossSeams``).
+    owner_loss: OwnerLossSeams | None = None
+    #: Only on a row that runs profile commands (``CommandSeams``).
+    commands: CommandSeams | None = None
+    #: Only on a row that stages a sign-in (``AuthSeams``).
+    auth: AuthSeams | None = None
+    #: Only on a row that reads how the frontend decided
+    #: (``CoordinationSeams``).
+    coordination: CoordinationSeams | None = None
+
+    def emit(self, actor: str, kind: str, **fields: Any) -> None:
+        self._emit(actor, kind, **fields)
+
+    def hold(
+        self, path: str, *, ordinal: int = 1, seconds: float = GATE_DEADLINE_SECONDS
+    ) -> Gate:
+        """Arm a gate on the origin (``SyntheticOrigin.hold``); its events go
+        to the row's log as the origin's."""
+
+        def report(kind: str, **fields: Any) -> None:
+            self._emit("origin", kind, **fields)
+
+        gate = self.origin.hold(path, ordinal=ordinal, seconds=seconds, on_event=report)
+        self._gates.append(gate)
+        return gate
+
+    async def entered(self, gate: Gate, seconds: float) -> bool:
+        """Whether *gate*'s request entered it within *seconds*."""
+        return await wait_for(gate.entered, seconds)
+
+    async def ended(self, gate: Gate, seconds: float) -> bool:
+        """Whether *gate*'s hold recorded its terminal within *seconds*."""
+        return await wait_for(gate.ended, seconds)
+
+    async def checkpoint(
+        self, label: str, *, actor: tuple[Any, int, float] | None = None
+    ) -> dict[str, Any]:
+        """One checkpoint on a thread the row owns (``observe_checkpoint``),
+        appended to the record as it was read.
+
+        A failure is recorded on the checkpoint and not raised; a worker that
+        outlives its bound stays owned and refuses every later measurement.
+        """
+        point: dict[str, Any] = {"label": label}
+        try:
+            point = await run_owned(
+                f"checkpoint: {label}",
+                observe_checkpoint,
+                label,
+                self.account,
+                actor=actor,
+                lock_path=self.account.auth_root / LOCK_FILE,
+                lock=None,
+                browser_exe=self.browser_exe,
+                browser_dir=self.browser_dir,
+                seconds=_CHECKPOINT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 - the checkpoint's own evidence
+            point["error"] = f"{type(exc).__name__}: {exc}"
+        self.record.setdefault("checkpoints", []).append(point)
+        self.emit("harness", "host.checkpoint", **point)
+        return point
+
+    async def run_owned(
+        self,
+        label: str,
+        func: Callable[..., Any],
+        *args: Any,
+        seconds: float,
+        **kw: Any,
+    ) -> Any:
+        """Blocking work on a thread the row owns (``unconfirmed_close``)."""
+        return await run_owned(label, func, *args, seconds=seconds, **kw)
+
+    @staticmethod
+    def retain(label: str, check: Callable[[float], bool]) -> Retained:
+        """Hold *label* until *check* answers settled; every later
+        measurement is refused meanwhile (``unconfirmed_close.retain``)."""
+        return retain(label, check)
+
+
+@dataclass(frozen=True)
+class RaceSeams:
+    """What a row racing the owner's retirement may read (``RowContext.race``).
+
+    Readings, and one action on a row declared to take it
+    (``RowLifecycle.stands_down``): ``stand_down``, the turnover request of
+    the row's runtime to the owner the row identified, with the
+    token read from the row's own auth root and kept out of every record.
+    Nothing here signals or ends anything. Every reading waits and sends
+    nothing, and the ones taken at a moment stamp it (``seen_ns``); none
+    raises.
+    """
+
+    #: Which owner the descriptor names now, and whether the identified one
+    #: is alive (``LossSeams.owner_reading``).
+    owner_reading: Callable[[str], Awaitable[dict[str, Any]]]
+    #: The row's own daemon log, as written so far; every owner's.
+    owner_log: Callable[[], list[str]]
+    #: Whether the identified owner is seen gone within the seconds given.
+    owner_exit: Callable[[float], Awaitable[dict[str, Any]]]
+    #: The host's server's or frontend's stderr so far, every line in order.
+    host_output: Callable[[], list[str]]
+    #: The browser roots on the row's profile now (``observe_roots``).
+    roots: Callable[[str], Awaitable[dict[str, Any]]]
+    #: The profile's browser waited for (``wait_for_no_browser``).
+    browser_gone: Callable[[float], Awaitable[dict[str, Any]]]
+    #: When the row's descriptor was written, by the wall clock, or None.
+    published: Callable[[], dict[str, Any]]
+    #: Ask the identified owner to stand down (``ask_to_stand_down``).
+    stand_down: Callable[[], Awaitable[dict[str, Any]]] | None = None
+
+
+@dataclass(frozen=True)
+class OwnerLossSeams:
+    """What a row that loses the owner may do (``RowContext.owner_loss``).
+
+    Three actions, each on the one actor the row tied: ``kill`` ends the owner
+    in daemon mode, or the server the host started in Direct, through the
+    H-R6 path with its guardian found and the signal oracle attached in
+    ``prepare``; ``stop`` and ``resume`` stop and continue the identified
+    owner (POSIX daemon only, None elsewhere), synchronous so that nothing
+    can come between a script leaving and its resume, and the row resumes
+    whatever a script left stopped; ``respond`` binds a declared responder on
+    the killed owner's published address. Every reading waits and sends
+    nothing, stamps itself on the monotonic clock (``seen_ns``) where it is
+    taken at a moment, and none raises.
+    """
+
+    #: Tie what the kill will end, before the call: associate it, find its
+    #: guardian and attach the oracle. A row that kills nothing in one column
+    #: calls it there too, so both columns' O2 rest on the same tracing.
+    prepare: Callable[[], Awaitable[dict[str, Any]]]
+    #: Kill the prepared actor now and wait for its death.
+    kill: Callable[[], Awaitable[dict[str, Any]]]
+    #: Bind an ``owner_loss.DeclaredResponder`` on the dead owner's address
+    #: (``bind_responder``), the status given.
+    respond: Callable[[int], Awaitable[dict[str, Any]]]
+    #: What the responder recorded so far, and its stop.
+    responder_requests: Callable[[], list[dict[str, Any]]]
+    stop_responding: Callable[[], dict[str, Any]]
+    #: Direct: what the profile shows by itself (``LossSeams.settlement``).
+    settlement: Callable[[], Awaitable[dict[str, Any]]]
+    #: A fresh host's read (``LossSeams.fresh_read``).
+    fresh_read: Callable[[], Awaitable[dict[str, Any]]]
+    #: Which owner the descriptor names now, and whether the identified one
+    #: is alive (``LossSeams.owner_reading``).
+    owner_reading: Callable[[str], Awaitable[dict[str, Any]]]
+    #: The host's server's or frontend's stderr so far, every line in order.
+    host_output: Callable[[], list[str]]
+    #: Stop and continue the identified owner; None where there is none to
+    #: stop or no portable way to (Windows).
+    stop: Callable[[], dict[str, Any]] | None = None
+    resume: Callable[[], dict[str, Any]] | None = None
+
+
+@dataclass(frozen=True)
+class CommandSeams:
+    """What a row that runs profile commands may do (``RowContext.commands``).
+
+    One action: ``start``, the row's own command line with the arguments
+    given, in the row's own environment, as a child on a pseudo-terminal or
+    on pipes (``profile_commands.TerminalCommand``). The row measures beside
+    a running command (a checkpoint while it waits at a prompt), so it is
+    not retained while it runs; one ``finish`` cannot show exited with its
+    output ended is retained from then on, which refuses every later
+    measurement until it is. One the script leaves running is ended by the
+    row's teardown, which records it as a harness failure and never as a
+    settlement. Every reading waits and sends nothing, stamps itself on the
+    monotonic clock (``seen_ns``), and none raises.
+    """
+
+    #: Start the row's command line with *args*: ``terminal`` on a
+    #: pseudo-terminal, else on pipes; ``overrides`` over the row's
+    #: environment, recorded by name only.
+    start: Callable[..., Awaitable[profile_commands.TerminalCommand]]
+    #: Wait up to the seconds given for a started command to exit and its
+    #: output to end; its record, however it went.
+    finish: Callable[
+        [profile_commands.TerminalCommand, float], Awaitable[dict[str, Any]]
+    ]
+    #: What the profile shows by itself (``LossSeams.settlement``).
+    settlement: Callable[[], Awaitable[dict[str, Any]]]
+    #: Which owner the descriptor names now, and whether the identified one
+    #: is alive (``LossSeams.owner_reading``).
+    owner_reading: Callable[[str], Awaitable[dict[str, Any]]]
+    #: The row's own daemon log, as written so far; every owner's.
+    owner_log: Callable[[], list[str]]
+    #: Whether the identified owner is seen gone within the seconds given.
+    owner_exit: Callable[[float], Awaitable[dict[str, Any]]]
+    #: The browser roots on the row's profile now (``observe_roots``).
+    roots: Callable[[str], Awaitable[dict[str, Any]]]
+    #: A directory of the row's own, for what its commands need on disk.
+    scratch: Path
+
+
+@dataclass(frozen=True)
+class AuthSeams:
+    """What a row that stages a sign-in may do (``RowContext.auth``).
+
+    Three actions on the synthetic origin's sign-in, each recorded by the
+    harness and not by the script: ``reject``, the harness's own rejection of
+    the staged session, which is the row's authorization
+    (``ORIGIN_REJECTED``); ``authorize``, a user action the row confirms
+    (``LOGIN``, ``IMPORT``) recorded before the command it starts; and
+    ``release``, which lets the login's next ask issue a fresh session. Each
+    authorization is read back with the session right after it, which is
+    what shows it came before anything invalidated the original. The
+    teardown closes the sign-in, so nothing still asking after the row can
+    complete. Every reading waits and sends nothing, and none raises.
+    """
+
+    #: Reject every session the origin accepted; the record, with the
+    #: session read right after.
+    reject: Callable[[], dict[str, Any]]
+    #: Record the user's confirmed action of the kind given now, with the
+    #: session read right after.
+    authorize: Callable[[str], dict[str, Any]]
+    #: Let the next completion asks issue fresh sessions.
+    release: Callable[[], dict[str, Any]]
+    #: The sign-in's record so far (``SyntheticOrigin.login_record``).
+    login: Callable[[], dict[str, Any]]
+    #: The session's artefacts now, read from disk alone, labelled.
+    snapshot: Callable[[str], dict[str, Any]]
+    #: The profile's browser waited for (``RaceSeams.browser_gone``).
+    browser_gone: Callable[[float], Awaitable[dict[str, Any]]]
+    #: A second host with the row's own command and environment, one read of
+    #: the feed and a normal quit, its lines its own (``LossSeams.fresh_read``).
+    second_host: Callable[[], Awaitable[dict[str, Any]]]
+    #: The progress the latest second host's client heard for its read so
+    #: far, while it runs (``progress_recorder``).
+    second_progress: Callable[[], list[dict[str, Any]]]
+    #: Which owner the descriptor names now (``LossSeams.owner_reading``).
+    owner_reading: Callable[[str], Awaitable[dict[str, Any]]]
+    #: The row's own daemon log, as written so far; every owner's.
+    owner_log: Callable[[], list[str]]
+    #: The host's server's or frontend's stderr so far, every line in order.
+    host_output: Callable[[], list[str]]
+
+
+@dataclass(frozen=True)
+class CoordinationSeams:
+    """What a row reading how the frontend decided may do
+    (``RowContext.coordination``).
+
+    Readings, and on a row declared to take it (``RowLifecycle.rival``) one
+    action: ``rival``, a second host with the row's command and environment
+    and the settings given over it, one call of the tool given and a normal
+    quit, its server retained until shown gone; the settings are recorded
+    with their values, which are declared bounds and never a secret. Every
+    reading waits and sends nothing, and none raises.
+    """
+
+    #: The host's server's or frontend's output so far, every line in order.
+    host_output: Callable[[], list[str]]
+    #: Which owner the descriptor names now, and whether the identified one
+    #: is alive (``LossSeams.owner_reading``).
+    owner_reading: Callable[[str], Awaitable[dict[str, Any]]]
+    #: The row's own daemon log, as written so far; every owner's.
+    owner_log: Callable[[], list[str]]
+    #: What the profile shows by itself (``LossSeams.settlement``).
+    settlement: Callable[[], Awaitable[dict[str, Any]]]
+    #: Start the rival host with the settings given over the row's.
+    rival: Callable[..., Awaitable[dict[str, Any]]] | None = None
+
+
+@dataclass(frozen=True)
+class RowLifecycle:
+    """How one row runs, declared before it may (``ROWS``)."""
+
+    initial: InitialCall = FEED_READ
+    #: One of ``TERMINATIONS``.
+    termination: str = NORMAL_EOF
+    #: One of ``PRESERVATIONS``.
+    preservation: str = ORDINARY
+    #: Fed to staging, the actors, the owner's exit wait, the judgement and
+    #: the record alike, the same in every column of the row.
+    idle_timeout: float = IDLE_TIMEOUT_SECONDS
+    #: The row keeps a raw record, judged by its ``ROW_VERDICTS`` entry.
+    recorded: bool = False
+    #: Whether a killed actor, a job-query shim or an unconfirmed close may
+    #: combine with the row, as each does with the row that runs it.
+    scenarios: bool = True
+    #: The row's own scripted phase, after its first call. None for every row
+    #: whose script predates ``RowContext``.
+    script: Callable[[RowContext], Awaitable[None]] | None = None
+    #: What the record says of K2, for a row without a K2 column.
+    k2: Mapping[str, Any] | None = None
+    #: The script races the owner's retirement and gets ``RaceSeams``.
+    race: bool = False
+    #: The script may ask the identified owner to stand down
+    #: (``RaceSeams.stand_down``).
+    stands_down: bool = False
+    #: The row may end on an owner that replaced the identified one, which the
+    #: row then waits for and settles in its place.
+    successor: bool = False
+    #: The script loses the owner and gets ``OwnerLossSeams``.
+    owner_loss: bool = False
+    #: The script's ``prepare`` attaches the signal oracle, which the row is
+    #: then held to on Linux, as H-R6 is.
+    traced: bool = False
+    #: The script runs profile commands and gets ``CommandSeams``.
+    commands: bool = False
+    #: The R17 outcome the row declares it expects, one of ``EXPECTABLE``:
+    #: what ``judge_row`` holds the session to. The authorization a clear
+    #: needs is never declared here; the script records it as confirmed.
+    expect_session: str = RETAINED
+    #: The script stages a sign-in and gets ``AuthSeams``; the origin's
+    #: sign-in is armed for the row and closed by its teardown.
+    auth: bool = False
+    #: Settings over the actors' environment, the same in every column and
+    #: recorded whole: the cell's declared bounds. Never a secret.
+    environment: Mapping[str, str] | None = None
+    #: Settings that decide which runtime the row runs as
+    #: (``LINKEDIN_MCP_CONTAINER``): over the actors' environment like
+    #: ``environment``, and over the staging of its session and the
+    #: preservation session as well, so all three are one runtime. Recorded
+    #: whole; never a secret.
+    runtime_environment: Mapping[str, str] | None = None
+    #: The row's own arguments after the server's command, the same in every
+    #: column and for every host the row starts (``--no-daemon``); never the
+    #: preservation session's, which is the ordinary Direct host. Recorded.
+    arguments: tuple[str, ...] = ()
+    #: How the row's host reaches its server (``TRANSPORTS``).
+    transport: str = STDIO
+    #: Whether the row's configuration may share a browser at all. One
+    #: declared ineligible is held to Direct in every column: no column may
+    #: expect an owner, and none may publish, start or forward to one, or
+    #: leave daemon state (``row_expectations``).
+    eligible: bool = True
+    #: The script reads how the frontend decided and gets
+    #: ``CoordinationSeams``.
+    coordination: bool = False
+    #: The script starts a differently configured second host
+    #: (``CoordinationSeams.rival``).
+    rival: bool = False
+
+
+ROW_H_CAL = call_loss.ROW_H_CAL
+
+#: Every row ``measure_host_quit_row`` runs. H-R2 and H-R3 idle out after
+#: ``COMPARISON_IDLE_TIMEOUT_SECONDS``, H-CAL after the value the call-loss
+#: rows it calibrates use, and every other row after ``IDLE_TIMEOUT_SECONDS``.
+ROWS: dict[str, RowLifecycle] = {
+    ROW_H_R1: RowLifecycle(),
+    ROW_H_R2: RowLifecycle(
+        idle_timeout=COMPARISON_IDLE_TIMEOUT_SECONDS, recorded=True, scenarios=False
+    ),
+    ROW_H_R3: RowLifecycle(
+        idle_timeout=COMPARISON_IDLE_TIMEOUT_SECONDS, recorded=True, scenarios=False
+    ),
+    ROW_H_R6: RowLifecycle(),
+    ROW_H_R7: RowLifecycle(),
+    ROW_H_R11: RowLifecycle(),
+    ROW_H_R12: RowLifecycle(),
+    ROW_H_CAL: RowLifecycle(
+        idle_timeout=call_loss.CALIBRATION_IDLE_TIMEOUT_SECONDS,
+        recorded=True,
+        scenarios=False,
+        script=call_loss.calibration_script,
+        k2=call_loss.K2_NOT_APPLICABLE,
+    ),
+    # H-R4 and H-R5: the calibrated read, lost once its held page entered,
+    # each by its own termination, in the calibration's configuration.
+    **{
+        row: RowLifecycle(
+            termination=case.termination,
+            idle_timeout=call_loss.LOSS_IDLE_TIMEOUT_SECONDS,
+            recorded=True,
+            scenarios=False,
+            script=call_loss.loss_script,
+            k2=call_loss.LOSS_K2_NOT_APPLICABLE,
+        )
+        for row, case in call_loss.LOSS_CASES.items()
+    },
+    # H-R13: a read racing the owner's idle exit, with an idle timeout of its
+    # own; when retirement wins, the call is served by a successor.
+    **{
+        row: RowLifecycle(
+            idle_timeout=retirement_race.IDLE_RACE_TIMEOUT_SECONDS,
+            recorded=True,
+            scenarios=False,
+            script=retirement_race.idle_script,
+            k2=retirement_race.K2_NOT_APPLICABLE,
+            race=True,
+            successor=row == retirement_race.ROW_RETIREMENT,
+        )
+        for row in retirement_race.IDLE_ROWS
+    },
+    # The owner turned over under a held read, in the calibration's
+    # configuration; daemon only.
+    **{
+        row: RowLifecycle(
+            idle_timeout=retirement_race.TURNOVER_IDLE_TIMEOUT_SECONDS,
+            recorded=True,
+            scenarios=False,
+            script=retirement_race.turnover_script,
+            k2=retirement_race.K2_NOT_APPLICABLE,
+            race=True,
+            stands_down=True,
+            successor=case.successor,
+        )
+        for row, case in retirement_race.TURNOVER_CASES.items()
+    },
+    # H-R8: the owner out of service between calls, in the calibration's
+    # configuration; a lane that kills is traced in both columns.
+    **{
+        row: RowLifecycle(
+            idle_timeout=owner_loss.OWNER_LOSS_IDLE_TIMEOUT_SECONDS,
+            recorded=True,
+            scenarios=False,
+            script=owner_loss.unreachable_script,
+            k2=owner_loss.K2_NOT_APPLICABLE,
+            successor=True,
+            owner_loss=True,
+            traced=case.kills,
+        )
+        for row, case in owner_loss.H_R8_CASES.items()
+    },
+    # H-R9: the owner, or Direct's server, killed once a message's first
+    # navigation entered the gate.
+    owner_loss.ROW_H_R9: RowLifecycle(
+        idle_timeout=owner_loss.OWNER_LOSS_IDLE_TIMEOUT_SECONDS,
+        recorded=True,
+        scenarios=False,
+        script=owner_loss.message_script,
+        k2=owner_loss.K2_NOT_APPLICABLE,
+        successor=True,
+        owner_loss=True,
+        traced=True,
+    ),
+    # H-R6-contended: the owner, or Direct's server, killed under a contender
+    # armed on the profile's lock, and a successor asked for at once (#808).
+    crash_overlap.ROW: RowLifecycle(
+        idle_timeout=crash_overlap.IDLE_TIMEOUT_SECONDS,
+        recorded=True,
+        scenarios=False,
+        script=crash_overlap.script,
+        k2=crash_overlap.K2_NOT_APPLICABLE,
+        successor=True,
+        owner_loss=True,
+        traced=True,
+    ),
+    # H-R10a, H-R10b and H-R15: profile commands beside a live owner or
+    # Direct server, in the calibration's configuration. A confirmed logout
+    # is expected to leave the session cleared, and nothing that could sign
+    # in again may run after it.
+    **{
+        row: RowLifecycle(
+            idle_timeout=profile_commands.COMMAND_IDLE_TIMEOUT_SECONDS,
+            recorded=True,
+            scenarios=False,
+            script=case.script,
+            k2=profile_commands.K2_NOT_APPLICABLE,
+            commands=True,
+            expect_session=case.expect_session,
+            preservation=(
+                MUST_REMAIN_CLEARED
+                if case.expect_session == CLEARED_BY_USER
+                else ORDINARY
+            ),
+        )
+        for row, case in profile_commands.CASES.items()
+    },
+    # H-R16 and H-R10a-login: a sign-in staged at the origin, in the
+    # calibration's configuration with the cell's declared bounds. Nothing
+    # that could sign in again runs after it.
+    **{
+        row: RowLifecycle(
+            idle_timeout=auth_repair.AUTH_IDLE_TIMEOUT_SECONDS,
+            recorded=True,
+            scenarios=False,
+            script=case.script,
+            k2=auth_repair.K2_NOT_APPLICABLE,
+            commands=case.commands,
+            expect_session=case.expect_session,
+            preservation=MUST_NOT_REPAIR,
+            auth=True,
+            environment=auth_repair.ENVIRONMENT,
+        )
+        for row, case in auth_repair.CASES.items()
+    },
+    # H-R12 remainder: a configuration the daemon must refuse, the same in
+    # every column, held to Direct; its one read, then what the frontend said.
+    **{
+        row: RowLifecycle(
+            idle_timeout=eligibility_rows.INELIGIBLE_IDLE_TIMEOUT_SECONDS,
+            recorded=True,
+            scenarios=False,
+            script=eligibility_rows.ineligible_script,
+            k2=eligibility_rows.K2_NOT_APPLICABLE,
+            environment=case.environment,
+            runtime_environment=case.runtime_environment,
+            arguments=case.arguments,
+            transport=case.transport,
+            eligible=False,
+            coordination=True,
+        )
+        for row, case in eligibility_rows.CASES.items()
+    },
+    # H-R14: a second host with an equal build and another configuration while
+    # the first is open, with an idle timeout of its own.
+    eligibility_rows.ROW_RIVAL: RowLifecycle(
+        idle_timeout=eligibility_rows.RIVAL_IDLE_TIMEOUT_SECONDS,
+        recorded=True,
+        scenarios=False,
+        script=eligibility_rows.rival_script,
+        k2=eligibility_rows.K2_NOT_APPLICABLE,
+        environment=eligibility_rows.RIVAL_ENVIRONMENT,
+        coordination=True,
+        rival=True,
+    ),
+}
+
+#: The verdict over each recorded row's raw record, appended after
+#: ``judge_row``. A recorded row without one is refused before it runs.
+ROW_VERDICTS: dict[str, RowVerdict] = {
+    ROW_H_R2: host_comparison.problems_for,
+    ROW_H_R3: host_comparison.problems_for,
+    ROW_H_CAL: call_loss.calibration_problems,
+    **{row: call_loss.loss_problems for row in call_loss.LOSS_CASES},
+    **{row: retirement_race.idle_problems for row in retirement_race.IDLE_ROWS},
+    **{
+        row: retirement_race.turnover_problems for row in retirement_race.TURNOVER_CASES
+    },
+    **{row: owner_loss.h_r8_problems for row in owner_loss.H_R8_CASES},
+    owner_loss.ROW_H_R9: owner_loss.h_r9_problems,
+    crash_overlap.ROW: crash_overlap.problems_for,
+    **{row: profile_commands.problems_for for row in profile_commands.CASES},
+    **{row: auth_repair.problems_for for row in auth_repair.CASES},
+    **{row: eligibility_rows.problems_for for row in eligibility_rows.CASES},
+    eligibility_rows.ROW_RIVAL: eligibility_rows.problems_for,
+}
+
+
+def _positive_seconds(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def lifecycle_problems(row: str, lifecycle: RowLifecycle) -> list[str]:
+    """Why *lifecycle* does not hold together as *row*'s declaration."""
+    problems = []
+    if lifecycle.termination not in TERMINATIONS:
+        problems.append(f"no termination {lifecycle.termination!r}")
+    if lifecycle.preservation not in PRESERVATIONS:
+        problems.append(f"no preservation policy {lifecycle.preservation!r}")
+    if not _positive_seconds(lifecycle.idle_timeout):
+        problems.append(f"an idle timeout of {lifecycle.idle_timeout!r}")
+    if not lifecycle.initial.tool:
+        problems.append("a first call with no tool")
+    if lifecycle.recorded and row not in ROW_VERDICTS:
+        problems.append("a record with no verdict to judge it")
+    if not lifecycle.recorded and row in ROW_VERDICTS:
+        problems.append("a verdict with no record to judge")
+    if lifecycle.script is not None and not lifecycle.recorded:
+        problems.append("a script whose observations have no record")
+    if lifecycle.termination in call_loss.LOSS_TERMINATIONS:
+        # Only the row's own script makes and observes its loss, and a kill,
+        # a shim or a fault on top of it would be another scenario.
+        if lifecycle.script is None:
+            problems.append("a loss with no script to make it")
+        if lifecycle.scenarios:
+            problems.append("a loss that combines with other scenarios")
+    if lifecycle.race or lifecycle.stands_down:
+        # The race and the stand-down are the script's to make and observe.
+        if lifecycle.script is None:
+            problems.append("a race with no script to run it")
+        if lifecycle.scenarios:
+            problems.append("a race that combines with other scenarios")
+    if lifecycle.stands_down and not lifecycle.race:
+        problems.append("a stand-down with no race seams to send it")
+    if lifecycle.owner_loss:
+        # The owner is lost and observed by the script alone.
+        if lifecycle.script is None:
+            problems.append("an owner loss with no script to make it")
+        if lifecycle.scenarios:
+            problems.append("an owner loss that combines with other scenarios")
+    if lifecycle.traced and not lifecycle.owner_loss:
+        problems.append("a trace with no owner-loss seams to attach it")
+    if lifecycle.commands:
+        # The commands are the script's to run and observe.
+        if lifecycle.script is None:
+            problems.append("profile commands with no script to run them")
+        if lifecycle.scenarios:
+            problems.append("profile commands that combine with other scenarios")
+    if lifecycle.auth:
+        # The sign-in is the script's to stage and observe.
+        if lifecycle.script is None:
+            problems.append("a sign-in with no script to stage it")
+        if lifecycle.scenarios:
+            problems.append("a sign-in that combines with other scenarios")
+    if lifecycle.transport not in TRANSPORTS:
+        problems.append(f"no transport {lifecycle.transport!r}")
+    elif lifecycle.transport != STDIO:
+        # An HTTP host has no pipes to lose and no stub to kill, and a kill,
+        # a shim or a fault would be another scenario.
+        if lifecycle.termination != NORMAL_EOF:
+            problems.append("a loss on a host with no pipes to lose")
+        if lifecycle.scenarios:
+            problems.append("an HTTP host that combines with other scenarios")
+    if "--transport" in lifecycle.arguments:
+        problems.append("a transport given as an argument rather than declared")
+    if lifecycle.coordination and lifecycle.script is None:
+        problems.append("a coordination reading with no script to take it")
+    if lifecycle.rival:
+        if not lifecycle.coordination:
+            problems.append("a rival host with no coordination seams to start it")
+        if not lifecycle.eligible:
+            problems.append("a rival host beside a configuration with no owner")
+        if lifecycle.scenarios:
+            problems.append("a rival host that combines with other scenarios")
+    if lifecycle.expect_session not in EXPECTABLE:
+        problems.append(f"an expected session of {lifecycle.expect_session!r}")
+    elif (
+        lifecycle.expect_session == CLEARED_BY_USER
+        and lifecycle.preservation != MUST_REMAIN_CLEARED
+    ):
+        problems.append(
+            "a cleared session left to a preservation session that can repair it"
+        )
+    elif lifecycle.expect_session in _LINEAGE_EXPECTED:
+        if not lifecycle.auth:
+            problems.append("a lineage expectation with no sign-in to read it from")
+        if lifecycle.preservation != MUST_NOT_REPAIR:
+            problems.append(
+                "a replaced or failed-login session left to a preservation "
+                "session that can repair it"
+            )
+    return problems
+
+
+def declared_row(
+    row: str, *, scenario: bool, idle_timeout: float | None
+) -> tuple[RowLifecycle, float]:
+    """*row*'s declaration and the idle timeout it runs with, or a refusal.
+
+    Raised before anything is staged or spawned: an undeclared row, a
+    declaration that does not hold together, a scenario the row does not
+    combine with, or an idle timeout that is not a positive number of seconds.
+    *idle_timeout* None is the row's declared one.
+    """
+    lifecycle = ROWS.get(row)
+    if lifecycle is None:
+        raise ValueError(f"{row!r} is no declared row; declared: {sorted(ROWS)}")
+    problems = lifecycle_problems(row, lifecycle)
+    if problems:
+        raise ValueError(f"{row} is declared with {'; '.join(problems)}")
+    if scenario and not lifecycle.scenarios:
+        # The comparison rows are plain host quits, and a kill, a shim or a
+        # fault would be another scenario.
+        raise ValueError(
+            f"{row} combines with no killed actor, job-query shim or unconfirmed close"
+        )
+    idle = lifecycle.idle_timeout if idle_timeout is None else idle_timeout
+    if not _positive_seconds(idle):
+        raise ValueError(f"{row} cannot run with an idle timeout of {idle!r}")
+    return lifecycle, float(idle)
+
+
+def preservation_policy_refusals(policy: str) -> list[str]:
+    """Why the ordinary post-quit session may not run under *policy*.
+
+    That session is a Direct host whose read signs in again when it finds the
+    session gone, so it can repair exactly what a clearing or failed-login
+    row is judged on. Such a row's session is withheld, by its own
+    declaration and so not as a failure (``PostQuit.withheld``): R17 reads a
+    clear or a loss from the artefacts alone, and a session still in place
+    with no observation of it reads as uncertain, which no row expects.
+    """
+    if policy == ORDINARY:
+        return []
+    if policy in (MUST_REMAIN_CLEARED, MUST_NOT_REPAIR):
+        return [
+            f"the row's preservation policy is {policy}, and the ordinary "
+            f"post-quit session can repair the session it would observe"
+        ]
+    return [f"the row declares no known preservation policy: {policy!r}"]
+
+
+# --- Running the row -----------------------------------------------------------
+
+
+def preservation_refusals(
+    cleanup: DaemonCleanup,
+    *,
+    owner_exit: str | None,
+    residual: Sequence[int],
+    swept: Sequence[int],
+    remaining: Sequence[int],
+    census_unresolved: Sequence[int] = (),
+    open_possible_browsers: Sequence[dict[str, Any]] = (),
+) -> list[str]:
+    """Why the post-quit session must not start, or nothing when it may.
+
+    It may start only when every actor of the row is settled: the owner, if
+    there was one, observed to exit and confirmed gone by cleanup; the profile's
+    browser census empty and resolved; and cleanup finished without anything
+    kept or killed. Launching another server to find out that authority was
+    uncertain is exactly what this refuses.
+
+    Settled also means nothing unknown could still be on the profile: a census
+    whose arguments could not all be read is not an empty one, and a process
+    the watcher still holds as an unresolved possible browser is not gone. A
+    finished episode judged by its executable, such as ``/bin/ps``, is neither.
+    """
+    reasons = []
+    if owner_exit not in (None, "exited"):
+        reasons.append(f"the owner's exit was {owner_exit!r}")
+    if not cleanup.owner_gone:
+        reasons.append("cleanup could not confirm the owner gone")
+    if not cleanup.cleaned or cleanup.failures:
+        reasons.append(f"cleanup did not finish: {list(cleanup.failures)}")
+    if residual:
+        reasons.append(f"browsers outlived the row: {list(residual)}")
+    if swept:
+        reasons.append(f"cleanup had to kill browsers: {list(swept)}")
+    if remaining:
+        reasons.append(f"browsers still run on the profile: {list(remaining)}")
+    if census_unresolved:
+        reasons.append(
+            f"the profile census is incomplete; unreadable: {list(census_unresolved)}"
+        )
+    if open_possible_browsers:
+        reasons.append(
+            f"the watcher still holds unresolved possible browsers: "
+            f"{[e.get('pid') for e in open_possible_browsers]}"
+        )
+    return reasons
+
+
+async def resolved_browser_executable(profile: Path) -> str | None:
+    """The executable the product would launch for this row, or None.
+
+    Asked of the product's own launch path with its configured options, so it
+    names the same binary the actors will run. None if it cannot say; the
+    watcher then still treats anything under the browsers directory as a
+    possible browser.
+    """
+    from patchright.async_api import async_playwright
+
+    from linkedin_mcp_server.browser_launch import build_launch_options
+    from linkedin_mcp_server.config import get_config
+    from linkedin_mcp_server.core.browser import BrowserManager
+
+    try:
+        options, viewport = build_launch_options(get_config().browser)
+        probe = BrowserManager(
+            user_data_dir=profile, headless=True, viewport=viewport, **options
+        )
+        playwright = await async_playwright().start()
+        try:
+            probe._playwright = playwright
+            return probe._executable_about_to_run()
+        finally:
+            probe._playwright = None
+            await playwright.stop()
+    except Exception:  # noqa: BLE001 - the directory rule still covers it
+        return None
+
+
+async def observe_preservation(
+    account: ActorAccount,
+    origin: SyntheticOrigin,
+    proxy: EgressProxy,
+    *,
+    command: Sequence[str],
+    browsers: Path,
+    work_dir: Path,
+    on_stderr: Callable[[str], None],
+    chrome_path: str | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> PostQuit:
+    """Start one Direct host on the profile and ask the origin about its session.
+
+    After the row's interval, with its actors gone, through the same proxy and
+    fence. Nothing is re-staged first: that would repair the loss this exists
+    to see. Its own browser has to be gone before the row is judged.
+    *environment* is the row's runtime (``RowLifecycle.runtime_environment``),
+    so the session is read as the runtime that staged and used it.
+    """
+    mark = len(origin.requests)
+    session = await run_host_session(
+        command,
+        env={
+            **actor_environment(
+                account,
+                proxy.url,
+                daemon=False,
+                browsers=browsers,
+                chrome_path=chrome_path,
+            ),
+            **(environment or {}),
+        },
+        cwd=work_dir,
+        on_stderr=on_stderr,
+    )
+    failures = [f"post-quit: {problem}" for problem in host_failures(session)]
+    residual = await asyncio.to_thread(
+        wait_for_no_browser,
+        account,
+        _BROWSER_GONE_SECONDS,
+        browser_dir=browsers,
+        browser_exe=chrome_path,
+    )
+    if residual:
+        failures.append(f"post-quit: its browser outlived it: {residual}")
+        swept = sweep_browsers(account)
+        if swept:
+            failures.append(f"post-quit: cleanup had to kill browsers: {swept}")
+    feeds = feed_requests(origin.requests[mark:])
+    if any(request.session_valid is True for request in feeds):
+        valid: bool | None = True
+    elif session.error is not None:
+        valid = None
+    else:
+        valid = False
+    return PostQuit(
+        valid=valid,
+        failures=failures,
+        user_lines=list(session.user_lines),
+        feed_requests=len(feeds),
+    )
+
+
+async def measure_host_quit_row(
+    *,
+    profile: Path,
+    experiment: str,
+    daemon: bool,
+    egress: tuple[SyntheticOrigin, EgressProxy],
+    log: EventLog,
+    work_dir: Path,
+    command: Sequence[str] | None = None,
+    runtime: Runtime | None = None,
+    row: str = ROW_H_R1,
+    custom_browser: bool = False,
+    expect_owner: bool | None = None,
+    reference: str | None = None,
+    kill_actor: bool = False,
+    job_query_shim: ShimVenv | None = None,
+    unconfirmed_close: R7Setup | None = None,
+    idle_timeout: float | None = None,
+) -> RowResult:
+    """Run a host-quit row once and return its outcome vector and evidence.
+
+    *runtime* is the code the actors run: this checkout by default, or the
+    frozen baseline, whose actors, staging and browser are all its own.
+    *custom_browser* sets ``CHROME_PATH`` to that runtime's bundled Chromium.
+    *kill_actor* makes it H-R6: after the call the harness kills the owner
+    (daemon) or the server (Direct), through the handle it took when it tied
+    that process to the watcher's record of it, with the signal oracle
+    attached to it and its guardian first; in daemon mode the host then calls
+    again, which is where the frontend recovers.
+    *job_query_shim* makes it H-R11 (``job_query``): the actors start from that
+    venv, whose declared shim fails the routine drain's Job-membership query;
+    the browser cache is a row-private one of links; after the read the row
+    holds a dependency back so the next call starts an installer that waits on
+    a host that never answers, then calls ``close_session`` with it running.
+    In daemon mode, once the installer family has settled, the row restores
+    the cache and calls once more, where a successor would serve. What the
+    row established is ``RowResult.continuation`` (``NativeContinuation``).
+    *unconfirmed_close* makes it H-R7 (``unconfirmed_close``): the actors start
+    from the setup's fault overlay with the idle close off; after the read the
+    row identifies the original actor, its guardian, the launch marker and the
+    profile lock, attaches the trace, activates the fault and sends
+    ``close_session``, then takes the lease checkpoints and, in daemon mode,
+    recovers once the original owner and guardian are gone and the lock is
+    free. Whatever still serves is ended after measurement, since nothing
+    idles out, and that settling and the teardown after it run whole even
+    when the row is cancelled, the cancellation raised only once they are
+    done. What it established is ``RowResult.unconfirmed``.
+    *row* ``H-R3`` (``host_comparison``) keeps H-R1's actions and takes three
+    checkpoints: from the script before the quit, from the host stub's
+    post-exit hook, and after the actors left by themselves and the profile's
+    browser was waited for passively, before any cleanup. Its record is
+    ``RowResult.comparison``, judged after ``judge_row``; none of the three
+    scenarios above combines with it. *row* ``H-R2`` does the same around a
+    second host: after the first read the script runs host B with the same
+    command and environment, reads once more and quits, with checkpoints after
+    A1 and from B's own post-exit hook. Both use
+    ``COMPARISON_IDLE_TIMEOUT_SECONDS``.
+
+    Every *row* is declared in ``ROWS``; an undeclared one, a declaration
+    that does not hold together, or a scenario the row does not combine with
+    is refused before anything is staged or spawned (``declared_row``). A
+    declared row's first call is its ``RowLifecycle.initial``, its
+    preservation obeys its policy, and a row with a ``script`` runs it on a
+    ``RowContext`` and keeps the raw record its ``ROW_VERDICTS`` entry judges
+    (``RowResult.record``), whose held requests the teardown releases.
+    *idle_timeout* is the row's declared one unless given, and is the one
+    value staging, the actors, the owner's exit wait, the judgement and the
+    record read.
+
+    No row starts while anything an earlier row left is unsettled
+    (``unconfirmed_close.settlement_problems``).
+    """
+    # Before anything else, whatever the row: nothing is claimed, staged or
+    # spawned for a row that cannot run as declared.
+    lifecycle, idle_timeout = declared_row(
+        row,
+        scenario=(
+            kill_actor or job_query_shim is not None or unconfirmed_close is not None
+        ),
+        idle_timeout=idle_timeout,
+    )
+    if not lifecycle.eligible:
+        # Refused before anything is staged: a column that expected an owner
+        # here would be judged against the wrong behaviour.
+        if expect_owner:
+            raise ValueError(
+                f"{row} declares a configuration that may not share a browser, "
+                f"so no column of it may expect an owner"
+            )
+        expect_owner = False
+    comparing = row in (ROW_H_R3, ROW_H_R2)
+    second_host = row == ROW_H_R2
+    r7 = unconfirmed_close
+    # Before anything else, whichever row this is: an earlier row's worker or
+    # helper still running could still be asking about a profile, and a
+    # tracer, owner or guardian it retained could still act in this one.
+    left = settlement_problems()
+    if left:
+        raise UnsettledWorker(f"an earlier row left these unsettled: {left}")
+    # First, before anything reads, launches or spawns.
+    account = claim_account(profile)
+
+    origin, proxy = egress
+    mode = "daemon" if daemon else "direct"
+    if expect_owner is None:
+        expect_owner = daemon
+    result = RowResult(experiment=experiment, mode=mode, reference=reference)
+    runtime = runtime or candidate_runtime()
+    if runtime.frozen:
+        # The baseline's owners keep their state in its own namespace, and every
+        # lookup of the row's daemon state goes through this account.
+        account = replace(account, layout=BASELINE_LAYOUT)
+    shim = job_query_shim
+    overlay = r7.overlay if r7 is not None else None
+    if shim is not None:
+        default_command = [shim.python, "-m", "linkedin_mcp_server"]
+    elif overlay is not None:
+        default_command = [overlay.python, "-m", "linkedin_mcp_server"]
+    else:
+        default_command = runtime.command()
+    command = list(command or default_command)
+    #: Every host the row starts runs its own arguments; the preservation
+    #: session, the ordinary Direct host, runs ``command`` alone.
+    row_command = [*command, *lifecycle.arguments]
+    #: The settings that decide the runtime, for staging, the actors and the
+    #: preservation session alike.
+    runtime_settings = dict(lifecycle.runtime_environment or {})
+
+    #: Every line a host's server or a profile command wrote, whole, by actor
+    #: (``events.OUTPUT_FILES``). A line from anything but the row's own host
+    #: is prefixed with the host, phase or command the record names.
+    outputs = {
+        actor: CappedOutput(work_dir / name) for actor, name in OUTPUT_FILES.items()
+    }
+
+    def emit(actor: str, kind: str, **fields: Any) -> None:
+        # The browser's own output is one line per thing it prints, and the
+        # event log keeps every record, so that chatter goes to the capped
+        # file only. A launch, exit, close or kill is a few lines, and it is
+        # the line a storm pushes past the cap. A server line is recorded as
+        # before.
+        line = fields.get("line")
+        diagnostic = (
+            kind == "user.output" and isinstance(line, str) and driver_diagnostic(line)
+        )
+        if not diagnostic or driver_lifecycle(line):
+            log.emit(experiment=experiment, row=row, actor=actor, kind=kind, **fields)
+        output = outputs.get(actor)
+        if kind == "user.output" and output is not None and isinstance(line, str):
+            label = fields.get("host") or fields.get("phase") or fields.get("command")
+            output.line(f"[{label}] {line}" if label else line)
+
+    if runtime.frozen:
+        identity = frozen_identity(runtime)
+        refusal = frozen_refusal(identity, runtime)
+        if refusal is not None:
+            raise BaselineRefused(refusal)
+    else:
+        identity = row_identity()
+        refusal = evidence_refusal(identity, ci=bool(os.environ.get("CI")))
+        if refusal is not None:
+            raise EvidenceRefused(refusal)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / "identity.json").write_text(json.dumps(identity, indent=2) + "\n")
+    emit("harness", "row.identity", mode=mode, **identity)
+
+    browsers = runtime.browsers
+    # From before the staging, whichever runtime stages: a first navigation
+    # that stalls there, a staging browser that goes, or a session that does
+    # not reach the row is visible only to observers that were already there
+    # (``first_navigation``). The frozen baseline drives its browser from its
+    # own interpreter, which records its navigation itself; the lifetimes are
+    # this process's descendants either way. No verdict reads any of it.
+    staging_marks = len(origin.requests), len(proxy.decisions)
+    navigation_file = None
+    try:
+        with observing(
+            work_dir,
+            profile=account.profile,
+            label="frozen-staging" if runtime.frozen else "candidate-staging",
+            in_process=not runtime.frozen,
+        ) as navigation_file:
+            if runtime.frozen:
+                # Written here, validated and committed by the baseline's own
+                # code and browser, so the profile never meets a newer
+                # Chromium first.
+                staged = write_synthetic_cookie_file(
+                    portable_cookie_path(account.profile)
+                )
+                origin.accept_session(staged.li_at)
+                await asyncio.to_thread(
+                    stage_frozen_session,
+                    runtime,
+                    account.profile,
+                    {
+                        **actor_environment(
+                            account,
+                            proxy.url,
+                            daemon=False,
+                            browsers=browsers,
+                            idle_timeout=idle_timeout,
+                        ),
+                        **runtime_settings,
+                    },
+                    diagnostics=navigation_file,
+                )
+            else:
+                with process_environment(runtime_settings):
+                    staged = await stage_signed_in_session(
+                        account.profile,
+                        accept=lambda session: origin.accept_session(session.li_at),
+                    )
+    finally:
+        if navigation_file is not None:
+            # Off the event loop: landing the file waits on the disc, and that
+            # wait must not freeze the row's other tasks. A failure to start
+            # the worker must not replace the staging error this finally runs
+            # after.
+            try:
+                await asyncio.to_thread(
+                    record_origin,
+                    navigation_file,
+                    origin.requests[staging_marks[0] :],
+                    proxy.decisions[staging_marks[1] :],
+                )
+            except Exception:
+                # The staging error, if there is one, is what the row reports.
+                pass
+    # The staging browser has confirmed its close, but a root still on the
+    # profile when the watcher takes its baseline would count against O1, and
+    # one the census cannot read could be that root. The executable is named
+    # only below; staging runs the runtime's browser, which lives in its
+    # browsers directory.
+    lingering = await asyncio.to_thread(
+        wait_for_no_browser, account, _BROWSER_GONE_SECONDS, browser_dir=browsers
+    )
+    # What the staging left for the row's browser to reopen.
+    try:
+        await asyncio.to_thread(
+            record_cookie_lineage,
+            work_dir / COOKIE_LINEAGE_FILE,
+            point="after-staging",
+            profile=account.profile,
+            cookie_file=portable_cookie_path(account.profile),
+            expected_digest=staged.li_at_digest,
+        )
+    except Exception:
+        pass
+    if lingering:
+        raise RuntimeError(f"the staging browser is not shown gone: {lingering}")
+    before = snapshot(account.profile, expected_digest=staged.li_at_digest)
+    result.before = before
+    emit("harness", "profile.snapshot", phase="before", **before.as_event_fields())
+
+    request_mark, decision_mark = len(origin.requests), len(proxy.decisions)
+    if runtime.frozen:
+        browser_exe: str | None = await asyncio.to_thread(bundled_executable, runtime)
+    else:
+        browser_exe = await resolved_browser_executable(account.profile)
+    chrome_path: str | None = None
+    if custom_browser:
+        if not browser_exe:
+            raise RuntimeError(
+                "the runtime's bundled browser could not be named, so CHROME_PATH "
+                "cannot point at the same binary"
+            )
+        chrome_path = browser_exe
+    env = actor_environment(
+        account,
+        proxy.url,
+        daemon=daemon,
+        browsers=browsers,
+        chrome_path=chrome_path,
+        idle_timeout=idle_timeout,
+    )
+    # The cell's declared bounds, the same in every column, over the row's.
+    env.update(lifecycle.environment or {})
+    env.update(runtime_settings)
+    if lifecycle.auth:
+        # From before the row's first request: the wall and its completion
+        # are served, and nothing is issued until the script releases it.
+        origin.arm_login()
+    #: H-R7: the fault's row directory, fresh for this execution, which only an
+    #: overlay's actors are told about.
+    fault_dir: Path | None = None
+    if r7 is not None:
+        if overlay is not None:
+            fault_dir = work_dir / "fault"
+            # Not exist_ok: a directory another execution wrote would lend it
+            # a claim or an activation.
+            fault_dir.mkdir()
+        env = r7_environment(env, fault_dir=fault_dir)
+    cache: PrivateCache | None = None
+    stall: StallHost | None = None
+    fates = Fates()
+    job_window: dict[str, Any] = {}
+    #: H-R11 daemon: the owner the descriptor named after the probe, and why it
+    #: is not shown to be a successor that served it (``successor_verdict``).
+    successor: dict[str, Any] = {}
+    #: H-R11 daemon: orders the successor's creation after the close.
+    close_clock = WallClockMarker()
+    #: H-R11: why the installer family is not shown ended, taken after host
+    #: quit and before the teardown; None until that verdict has been taken.
+    family_at_teardown: list[str] | None = None
+    if shim is not None:
+        # Every planted failure of an earlier row in the same venv is not ours.
+        shim.reached_file.unlink(missing_ok=True)
+        locations = await asyncio.to_thread(install_locations, runtime.python, browsers)
+        stall = StallHost().start()
+        try:
+            cache = await asyncio.to_thread(
+                private_install, runtime.python, locations, env, stall
+            )
+            emit(
+                "harness",
+                "shim.planted",
+                **shim.as_event_fields(),
+                private_cache=str(cache.directory),
+                linked=[str(location) for location in locations],
+                stall_host=stall.url,
+            )
+        except BaseException:
+            try:
+                if cache is not None:
+                    cache.dismantle()
+            finally:
+                stall.stop()
+            raise
+    emit(
+        "harness",
+        "row.identity",
+        browser_exe=browser_exe,
+        browsers=str(browsers),
+        chrome_path=chrome_path,
+        interpreter=runtime.python,
+    )
+    watcher = Watcher(
+        work_dir,
+        log,
+        experiment=experiment,
+        row=row,
+        browser_exe=browser_exe,
+        browser_dir=browsers,
+    )
+    # Constructed here, started inside the row's try: whatever fails from the
+    # watcher's start on, its ``finally`` ends every helper already started.
+    canaries = Canaries()
+    canary_problems: list[str] = []
+    # A row that kills an actor on its own trigger is held to the oracle as
+    # H-R6 is.
+    oracle = SignalOracle(
+        work_dir,
+        required=(
+            kill_actor
+            or r7 is not None
+            or lifecycle.termination == call_loss.ACTOR_KILLED
+            or lifecycle.traced
+        )
+        and ORACLE_REQUIRED,
+    )
+    actors_began = time.time()
+
+    owner: dict[str, Any] = {}
+    identified: OwnerIdentity | None = None
+    killed: dict[str, Any] = {}
+    server: dict[str, int] = {}
+    #: H-R7: what the row recorded, all of it fit for the packet, and the
+    #: handles it took, which are not: each is used to wait on its process, and
+    #: an owner's to end it after measurement.
+    r7_window: dict[str, Any] = {
+        "checkpoints": [],
+        "clocks": [],
+        "ended_by_harness": [],
+        "script_problems": [],
+    }
+    if overlay is not None:
+        # The overlay's own identity, kept apart from the runtime's (the
+        # revision in ``identity.json``): what the actors started from.
+        r7_window["overlay"] = {
+            "python": overlay.python,
+            "source_python": overlay.source_python,
+            "source_purelib": overlay.source_purelib,
+            "fault_sha256": overlay.fault_sha256,
+            "pth_sha256": overlay.pth_sha256,
+        }
+    r7_handles: dict[str, Any] = {}
+    activation: dict[str, Any] | None = None
+    #: The owner cleanup settles: whoever the descriptor names at the end.
+    cleanup_owner: OwnerIdentity | None = None
+    #: H-R7: the cancellations its teardown held back (``Deferral``), raised
+    #: once that teardown is done, and whether ``r7_after_quit`` has begun: a
+    #: row cancelled before it still settles its owners in the teardown.
+    r7_defer = Deferral()
+    r7_settling_began = False
+    #: H-R7: the hold registered for each owner published on the row's root
+    #: that it could not identify, by the pid named and the lifetime first
+    #: read there.
+    r7_publications: dict[tuple[int | None, float | None], Retained] = {}
+    #: H-R3 and H-R2: the raw record ``host_comparison`` judges, all of it fit
+    #: for the packet; None on every other row.
+    comparison: dict[str, Any] | None = (
+        {
+            "row": row,
+            "mode": mode,
+            "platform": sys.platform,
+            "browser_key": account.browser_key,
+            "idle_timeout_seconds": idle_timeout,
+            "k2": dict(host_comparison.K2_NOT_APPLICABLE),
+            "actor": None,
+            "lock": None,
+            "checkpoints": [],
+            "observation_problems": [],
+            **(
+                {
+                    "launch": {"A": launch_digest(command, env)},
+                    "a_open": {},
+                    "owners": [],
+                }
+                if second_host
+                else {}
+            ),
+        }
+        if comparing
+        else None
+    )
+    #: A declared row's raw record (``RowLifecycle.script``), all of it fit for
+    #: the packet; None on every row whose script predates ``RowContext``.
+    row_record: dict[str, Any] | None = (
+        {
+            "row": row,
+            "mode": mode,
+            "platform": sys.platform,
+            "browser_key": account.browser_key,
+            "idle_timeout_seconds": idle_timeout,
+            "lifecycle": {
+                "initial": lifecycle.initial.tool,
+                "termination": lifecycle.termination,
+                "preservation": lifecycle.preservation,
+            },
+            "k2": dict(lifecycle.k2) if lifecycle.k2 is not None else None,
+            # What the actors got for each declared setting, read back from
+            # their environment rather than from the declaration.
+            "environment": (
+                {name: env.get(name) for name in lifecycle.environment}
+                if lifecycle.environment is not None
+                else None
+            ),
+            "runtime_environment": (
+                {name: env.get(name) for name in runtime_settings}
+                if lifecycle.runtime_environment is not None
+                else None
+            ),
+            "arguments": row_command[len(command) :],
+            "transport": lifecycle.transport,
+            "observation_problems": [],
+        }
+        if lifecycle.script is not None
+        else None
+    )
+    #: Every gate the row's script armed; the teardown releases each one.
+    armed_gates: list[Gate] = []
+    #: The row's host's server or frontend stderr, every line as it came.
+    host_lines: list[str] = []
+    #: H-R3: the actor the checkpoints read, as its handle, pid and start.
+    r3_actor: list[tuple[Any, int, float]] = []
+    #: H-R2: host B's read, when host B was seen to start, and the hold on
+    #: its server's process object.
+    b_read: dict[str, Any] = {}
+    b_started: dict[str, int] = {}
+    b_held: list[Retained] = []
+
+    #: The process the row is about to kill, once ``prepare_kill`` tied it.
+    victim: list[Any] = []
+
+    async def kill_the_actor() -> None:
+        """Associate the victim, find its guardian, attach the oracle, kill."""
+        await prepare_kill()
+        await fire_kill()
+
+    async def prepare_kill(*, server_only: bool = False) -> None:
+        """Associate the victim, find its guardian and attach the oracle.
+
+        The owner in daemon mode, else the server the host started; with
+        *server_only*, that server in either mode (the frontend in daemon
+        mode), never the owner.
+        """
+        if daemon and not server_only:
+            if identified is None:
+                killed["exit"] = "not killed: the owner was never identified"
+                return
+            role, pid = "owner", identified.pid
+            process, start = identified.process, identified.create_time
+        else:
+            role, pid = "frontend", server.get("pid", -1)
+            process, start = await asyncio.to_thread(
+                associate_server, pid, watcher.observed
+            )
+            if process is None:
+                killed["exit"] = f"not killed: server {pid} was never associated"
+                return
+        guardian = await asyncio.to_thread(wait_for_guardian, watcher.observed, pid)
+        killed.update(
+            actor=role,
+            pid=pid,
+            start_identity=start,
+            guardian=guardian[0] if guardian else None,
+            guardian_owner_group=guardian[1] if guardian else None,
+        )
+        if oracle.available:
+            pids = [pid] + ([guardian[0]] if guardian else [])
+            reason = await asyncio.to_thread(oracle.start, pids)
+        else:
+            reason = oracle.unavailable
+        killed["oracle"] = {
+            "attached": oracle.available and reason is None,
+            "reason": reason,
+            "ptrace_scope": oracle.scope,
+            "required": oracle.required,
+        }
+        victim.append(process)
+
+    async def fire_kill() -> None:
+        """Kill the victim ``prepare_kill`` tied, and wait for it to be dead;
+        nothing at all when it tied none."""
+        if not victim:
+            return
+        process = victim[0]
+        try:
+            # SIGKILL on POSIX, TerminateProcess on Windows: psutil's kill().
+            process.kill()
+        except psutil.NoSuchProcess:
+            killed["exit"] = "gone before the kill"
+        except psutil.Error as exc:
+            killed["exit"] = f"not killed ({type(exc).__name__})"
+        else:
+            try:
+                dead = await asyncio.to_thread(
+                    wait_until_dead, process, _OWNER_KILL_WAIT_SECONDS
+                )
+            except psutil.Error as exc:
+                killed["exit"] = f"killed, death unconfirmed ({type(exc).__name__})"
+            else:
+                killed["exit"] = "killed" if dead else "still running after the kill"
+        # ``actor`` is the event's own field: the killed role goes as ``role``.
+        emit(
+            "harness",
+            "actor.killed",
+            role=killed.get("actor"),
+            **{name: value for name, value in killed.items() if name != "actor"},
+        )
+
+    async def find_the_owner() -> None:
+        nonlocal identified
+        # A Direct server publishes nothing; a descriptor here would be one.
+        # Only looked at, never read into being: ``daemon.descriptor.read``
+        # prepares the daemon directory before it reads, so calling it on a
+        # row that must leave no daemon state would create that state itself.
+        owner["descriptor_present"] = account.layout.descriptor_path(
+            account.auth_root
+        ).exists()
+        if not daemon or not owner["descriptor_present"]:
+            return
+        try:
+            published = account.layout.read(account.auth_root)
+        except Exception as exc:  # noqa: BLE001 - the row reports it, the host still quits
+            owner["read_error"] = f"{type(exc).__name__}: {exc}"
+            return
+        if published is None:
+            return
+        owner.update(
+            pid=published.pid,
+            instance_id=published.instance_id,
+            protocol=published.protocol_version,
+            log_path=published.log_path,
+        )
+        identified, problem = identify_owner(published, account, watcher.observed())
+        if identified is None:
+            owner["identify_error"] = problem
+        else:
+            owner["start_identity"] = identified.create_time
+        emit("harness", "owner.found", **owner)
+
+    async def job_query_script(call: ToolCall) -> None:
+        """Start an installer and close with it running; in daemon mode, once
+        the installer family has settled, recover and call once more."""
+        assert cache is not None and shim is not None
+        # The owner whose drain the shim should be reached in: the one serving now.
+        job_window["owner_pid"] = identified.pid if identified is not None else None
+        job_window["owner_created"] = (
+            identified.create_time if identified is not None else None
+        )
+        log_path = owner.get("log_path")
+        job_window["owner_log"] = log_path
+        held = cache.hold_back()
+        # The row's own install record, so setup looks again on the next call.
+        (account.auth_root / "browser-install.json").unlink(missing_ok=True)
+        emit("harness", "job_query.window", phase="held back", held=str(held))
+        await call(READ_TOOL, READ_TOOL_ARGUMENTS)
+        members = await asyncio.to_thread(
+            wait_for_installers, watcher.observed, watch=fates.watch
+        )
+        emit(
+            "harness",
+            "job_query.window",
+            phase="installer",
+            installers=[list(member) for member in members],
+        )
+        # Whatever was created after this marker was created after the close
+        # began, while the wall clock kept pace (``WallClockMarker``).
+        await asyncio.to_thread(close_clock.mark)
+        closed = await call("close_session", {})
+        job_window.update(
+            began=closed["began"],
+            ended=closed["ended"],
+            began_monotonic_ns=closed.get("began_monotonic_ns"),
+            ended_monotonic_ns=closed.get("ended_monotonic_ns"),
+        )
+        job_window["clock_held"] = close_clock.held()
+        # Whether the owner that closed reached core.close's consumption of the
+        # drain's False inside the close: the shim records it synchronously in
+        # that owner before the call answers. Only a lifetime-bound event
+        # counts; the daemon log is shared by every owner generation.
+        consumed = daemon and bool(
+            owner_events(
+                logged(shim.reached_file),
+                owner=(
+                    (identified.pid, identified.create_time)
+                    if identified is not None
+                    else None
+                ),
+                event=CONSUMED_FALSE,
+                after_ns=closed.get("began_monotonic_ns"),
+                before_ns=closed.get("ended_monotonic_ns"),
+            )
+        )
+        job_window["consumed_false"] = consumed
+        emit("harness", "job_query.window", phase="close", **job_window)
+        watch_late_installers()
+        if not daemon:
+            # Direct's own setup holds the installer until host quit, so its
+            # family settles only then (``fates.settle`` below) and no probe
+            # could come after that settlement.
+            job_window["recovery"] = NO_RECOVERY
+            job_window["script_ended"] = True
+            return
+        # An owner whose close stayed unconfirmed stands down, and a call that
+        # reaches it meanwhile is told to call again for its replacement
+        # (measured on Windows, run 36384952466: the probe came 33 ms after the
+        # verdict, the owner answered "restarting", the host quit, and no
+        # successor was ever asked for). So the probe waits for that owner to
+        # be gone, observed through the handle the row identified it by.
+        leaving = identified is not None and consumed is True
+        job_window["owner_left_before_probe"] = (
+            await asyncio.to_thread(
+                wait_until_dead, identified.process, _OWNER_STAND_DOWN_SECONDS
+            )
+            if leaving and identified is not None
+            else None
+        )
+        # The labelled boundary: the installer family settled first, then the
+        # harness's restoration, then the probe, so the probe is a
+        # post-settlement recovery and the restoration races no download.
+        # Settled means every lifetime known so far, the shim's positively
+        # queried ones included, not only what the watcher recorded.
+        watch_late_installers()
+        unsettled = await asyncio.to_thread(
+            settle_family,
+            watcher.observed,
+            fates,
+            lambda: reached(shim.reached_file),
+            _FAMILY_SETTLE_SECONDS,
+        )
+        job_window["family_before_recovery"] = unsettled
+        emit("harness", "job_query.window", phase="family settled", unsettled=unsettled)
+        if unsettled:
+            job_window["recovery"] = "not made: the installer family had not settled"
+            job_window["script_ended"] = True
+            return
+        # What the product left at the boundary, read before the harness
+        # restores anything, and the auth root on both sides of that
+        # restoration, so neither can stand for the other.
+        at_boundary = snapshot(account.profile, expected_digest=staged.li_at_digest)
+        job_window["protected_at_boundary"] = protected_changes(before, at_boundary)
+        unrestored = await asyncio.to_thread(auth_files, account.auth_root)
+        # Both the held-back link and its install record must be ready before
+        # the next owner can serve a browser-backed read.
+        await asyncio.to_thread(cache.restore_installed, runtime.python, env)
+        restored = await asyncio.to_thread(auth_files, account.auth_root)
+        job_window["restoration_changes"] = restoration_changes(unrestored, restored)
+        job_window["recovery"] = POST_SETTLEMENT
+        emit(
+            "harness",
+            "job_query.window",
+            phase="cache restored",
+            at_boundary=at_boundary.as_event_fields(),
+            protected_at_boundary=job_window["protected_at_boundary"],
+            restoration_changes=job_window["restoration_changes"],
+        )
+        probe = await call(READ_TOOL, READ_TOOL_ARGUMENTS)
+        job_window["probe_ended"] = probe["ended"]
+        job_window["probe"] = {
+            name: probe.get(name)
+            for name in ("began", "ended", "is_error", "read_the_post")
+        }
+        emit(
+            "harness",
+            "job_query.window",
+            phase="probe",
+            owner_left_before_probe=job_window["owner_left_before_probe"],
+            probe_ended=probe["ended"],
+            probe_error=probe.get("is_error"),
+            probe_read_the_post=probe.get("read_the_post"),
+        )
+        watch_late_installers()
+        await verify_the_successor(job_window["probe"])
+        job_window["script_ended"] = True
+
+    def watch_late_installers() -> None:
+        """Watch installer lifetimes the first look missed; one that cannot be
+        watched stays an unknown fate for the inventory to account for."""
+        for pid, start in installer_starts(watcher.observed()):
+            fates.watch(pid, start)
+
+    def find_the_successor(
+        closing: OwnerIdentity | None, probe: Mapping[str, Any]
+    ) -> None:
+        """Which owner the descriptor names now, and whether it replaced *closing*
+        and served *probe*."""
+        found: OwnerIdentity | None = None
+        successor.pop("identify_error", None)
+        try:
+            published = account.layout.read(account.auth_root)
+        except Exception as exc:  # noqa: BLE001 - the row reports it
+            successor["identify_error"] = f"{type(exc).__name__}: {exc}"
+            published = None
+        if published is not None:
+            found, problem = identify_owner(published, account, watcher.observed())
+            if problem is not None:
+                successor["identify_error"] = problem
+            successor.update(pid=published.pid, instance_id=published.instance_id)
+        began, ended = probe.get("began"), probe.get("ended")
+        interval = (began, ended) if began is not None and ended is not None else None
+        successor["problems"] = successor_problems(
+            watcher.observed(),
+            closing,
+            found,
+            probe=interval,
+            probe_requests=sum(
+                1
+                for request in feed_requests(origin.requests[request_mark:])
+                if interval is not None
+                and interval[0] <= (request.t or 0.0) <= interval[1]
+            ),
+            after_close=close_clock.after,
+        )
+
+    async def verify_the_successor(probe: Mapping[str, Any]) -> None:
+        """Before the host quits: a new owner, and only it, served the probe."""
+        left = job_window.get("owner_left_before_probe")
+        close_began = job_window.get("began")
+        served = not probe.get("is_error") and bool(probe.get("read_the_post"))
+        if served and left is True and close_began is not None:
+            deadline = time.monotonic() + _SUCCESSOR_SECONDS
+            while True:
+                await asyncio.to_thread(find_the_successor, identified, probe)
+                if not successor["problems"] or time.monotonic() >= deadline:
+                    break
+                await asyncio.sleep(0.2)
+        successor["problems"] = successor_verdict(
+            probe=probe, left=left, problems=successor.get("problems")
+        )
+        successor["verified"] = not successor["problems"]
+        job_window["successor_verified"] = successor["verified"]
+        emit(
+            "harness",
+            "owner.successor",
+            **{name: value for name, value in successor.items()},
+        )
+
+    lock_path = account.auth_root / LOCK_FILE
+
+    async def lease_checkpoint(
+        label: str,
+        *,
+        holder: int | None = None,
+        alive: Mapping[str, bool] | None = None,
+    ) -> dict[str, Any]:
+        """Ask the non-announcing contender about the lock, once settled.
+
+        On the lock file the row identified, by device and inode now and in
+        the contender's own open; for a held one, whether the original actor
+        holds it; and whether each named process is alive. A contender that
+        fails is recorded and raised: the row advances no further.
+        """
+        point: dict[str, Any] = {"label": label, "t": time.time()}
+        expected = tuple(r7_window["lock"]) if r7_window.get("lock") else None
+        try:
+            gate(label)
+            now = lock_identity(lock_path)
+            answer = await run_owned(
+                f"lease probe: {label}",
+                lease_probe.run_probe,
+                str(lock_path),
+                seconds=60.0,
+            )
+            point.update(state=answer.get("state"), reason=answer.get("reason"))
+            point["same_lock"] = (
+                expected is not None
+                and now == expected
+                and (answer.get("device"), answer.get("inode")) == expected
+            )
+            if holder is not None:
+                point["association"] = await run_owned(
+                    f"lock holder: {label}",
+                    lock_association,
+                    expected,
+                    holder,
+                    seconds=30.0,
+                )
+            if alive:
+                point["expect_alive"] = dict(alive)
+                point["alive"] = {
+                    name: is_alive(r7_handles.get(name)) for name in alive
+                }
+        except Exception as exc:
+            point["error"] = f"{type(exc).__name__}: {exc}"
+            r7_window["checkpoints"].append(point)
+            emit("harness", "r7.lease", **point)
+            raise
+        r7_window["checkpoints"].append(point)
+        emit("harness", "r7.lease", **point)
+        return point
+
+    async def take_checkpoint(label: str) -> None:
+        """One H-R3 checkpoint on a thread the row owns, kept as it was read.
+
+        A failure is recorded on the checkpoint and not raised: the host still
+        quits and the row still settles, and the verdict fails the row. A
+        worker that outlives its bound stays owned, so the gate refuses every
+        later checkpoint and the preservation as well.
+        """
+        assert comparison is not None
+        point: dict[str, Any] = {"label": label}
+        try:
+            point = await run_owned(
+                f"checkpoint: {label}",
+                observe_checkpoint,
+                label,
+                account,
+                actor=r3_actor[0] if r3_actor else None,
+                lock_path=lock_path,
+                lock=tuple(comparison["lock"]) if comparison["lock"] else None,
+                browser_exe=browser_exe,
+                browser_dir=browsers,
+                seconds=_CHECKPOINT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 - the checkpoint's own evidence
+            point["error"] = f"{type(exc).__name__}: {exc}"
+        # Appended, never replaced: a first post-exit reading that settlement
+        # later contradicts stays what it was.
+        comparison["checkpoints"].append(point)
+        if label in (host_comparison.BEFORE_QUIT, host_comparison.AFTER_A1):
+            comparison["lock"] = (point.get("lock") or {}).get("now")
+        emit("harness", "host.checkpoint", **point)
+
+    async def identify_actor() -> None:
+        """The actor the checkpoints read: the owner the row found, or the
+        Direct server as the watcher recorded it."""
+        assert comparison is not None
+        if daemon:
+            if identified is None:
+                comparison["observation_problems"].append(
+                    "the owner was never identified"
+                )
+            else:
+                r3_actor.append(
+                    (identified.process, identified.pid, identified.create_time)
+                )
+        else:
+            process, created = await run_owned(
+                "associate the server",
+                associate_server,
+                server.get("pid", -1),
+                watcher.observed,
+                seconds=30.0,
+            )
+            if process is None or created is None:
+                comparison["observation_problems"].append(
+                    "the Direct server was never associated"
+                )
+            else:
+                r3_actor.append((process, process.pid, created))
+        if r3_actor:
+            comparison["actor"] = [r3_actor[0][1], r3_actor[0][2]]
+
+    async def r3_script(call: ToolCall) -> None:
+        """Identify the actor the checkpoints read, then read before the quit.
+
+        It calls no tool: a call here would restart the owner's idle clock,
+        which the row's one read is the last thing allowed to do.
+        """
+        await identify_actor()
+        await take_checkpoint(host_comparison.BEFORE_QUIT)
+
+    async def first_post_exit() -> None:
+        await take_checkpoint(host_comparison.FIRST_POST_EXIT)
+
+    async def after_b_quit() -> None:
+        await take_checkpoint(host_comparison.AFTER_B_QUIT)
+
+    async def read_owner(label: str) -> None:
+        """H-R2: which owner the descriptor names now, on an owned thread."""
+        assert comparison is not None
+        try:
+            seen = await run_owned(
+                f"owner: {label}",
+                observe_owner,
+                label,
+                account,
+                watcher.observed,
+                seconds=30.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - the reading's own evidence
+            seen = {
+                "label": label,
+                "lifetime": None,
+                "instance_id": None,
+                "problem": f"{type(exc).__name__}: {exc}",
+            }
+        comparison["owners"].append(seen)
+
+    def blocked_before(action: str, problems: Sequence[str] = ()) -> bool:
+        """H-R2: whether *action* may not be taken: *problems* found before
+        it, or anything the row started still not shown settled. Recorded,
+        and the reason the preservation session is refused as well."""
+        assert comparison is not None
+        left = [*problems, *settlement_problems()]
+        if left:
+            comparison["observation_problems"].append(f"{action} was not taken: {left}")
+            comparison.setdefault("blocked", []).extend(left)
+        return bool(left)
+
+    def hold_host_b(process: Any) -> None:
+        """Retain host B's server through its own process object from the
+        moment it is spawned, until that object has a return code: a later
+        step, and a later row, is refused meanwhile, cancellation included."""
+        b_held.append(
+            retain(
+                f"host B's server {process.pid}",
+                lambda grace, process=process: process.returncode is not None,
+            )
+        )
+
+    async def free_before_a2() -> list[str]:
+        """Direct H-R2: a fresh non-announcing contender on the lock the row
+        identified, at the boundary before A2; unobserved on Windows."""
+        assert comparison is not None
+        found: dict[str, Any] = {}
+        try:
+            found = await run_owned(
+                "the lock before A2", read_lock, lock_path, seconds=60.0
+            )
+        except Exception as exc:  # noqa: BLE001 - the reading's own evidence
+            found = {"error": f"{type(exc).__name__}: {exc}"}
+        comparison["lock_before_a2"] = found
+        return host_comparison.free_problems(
+            found, comparison.get("lock"), sys.platform, label="before A2"
+        )
+
+    async def r2_script(call: ToolCall) -> None:
+        """Host A's part of H-R2: after its read, host B on the same profile,
+        then A's second read. A stays open throughout; B quits by itself.
+
+        Only A2 is called through A, and B starts from A's own command and
+        environment; only its working directory is its own.
+        """
+        assert comparison is not None
+        await identify_actor()
+        # Host A's own process, to show it open across B: the Direct server
+        # itself, and in daemon mode the frontend the watcher recorded.
+        a_handle = r3_actor[0][0] if r3_actor and not daemon else None
+        if daemon:
+            a_handle, _ = await run_owned(
+                "associate host A",
+                associate_server,
+                server.get("pid", -1),
+                watcher.observed,
+                seconds=30.0,
+            )
+            if a_handle is None:
+                comparison["observation_problems"].append(
+                    "host A's frontend was never associated"
+                )
+        await take_checkpoint(host_comparison.AFTER_A1)
+        if daemon:
+            await read_owner("after A1")
+        if blocked_before("host B"):
+            return
+        b_dir = work_dir / "host-b"
+        b_dir.mkdir(exist_ok=True)
+        comparison["launch"]["B"] = launch_digest(command, env)
+        comparison["a_open"]["at_b_start"] = is_alive(a_handle)
+        launched_ns = time.monotonic_ns()
+        b = await run_host_session(
+            command,
+            env=env,
+            cwd=b_dir,
+            on_stderr=lambda line: emit(
+                "frontend", "user.output", stream="stderr", host="B", line=line
+            ),
+            started=lambda pid: b_started.update(pid=pid, ns=time.monotonic_ns()),
+            after_exit=after_b_quit,
+            on_process=hold_host_b,
+        )
+        # Settled only once its own process object has a return code; the
+        # transport's bounded cleanup can return without one.
+        if b_held and b_held[0].check(0.0):
+            discharge(b_held[0])
+        comparison["a_open"]["after_b_exit"] = is_alive(a_handle)
+        comparison["host_b"] = {
+            **host_summary(b),
+            "pid": b.pid,
+            "launched_ns": launched_ns,
+            "started_ns": b_started.get("ns"),
+            "after_exit_error": b.after_exit_error,
+            "forwarded": any(_FORWARDING_LINE in line for line in b.stderr),
+        }
+        if b.tool is not None:
+            b_read.update(b.tool)
+            emit(
+                "host_stub",
+                "tool.result",
+                **{"tool": READ_TOOL, **b.tool, "host": "B", "call": "B"},
+            )
+        emit("host_stub", "process.exit", host="B", **comparison["host_b"])
+        if not daemon:
+            # Direct: B's server closed its browser at its quit. A bounded
+            # passive wait, and a census that has to be complete, before A2
+            # asks for the profile; nothing is ended here.
+            try:
+                await run_owned(
+                    "host B's browser",
+                    wait_for_no_browser,
+                    account,
+                    _BROWSER_GONE_SECONDS,
+                    seconds=_BROWSER_GONE_SECONDS + 30.0,
+                    browser_dir=browsers,
+                    browser_exe=browser_exe,
+                )
+                census = await run_owned(
+                    "the census after host B",
+                    profile_census,
+                    account,
+                    browser_exe=browser_exe,
+                    browser_dir=browsers,
+                    seconds=60.0,
+                )
+                comparison["b_settlement"] = {
+                    "remaining": census.pids,
+                    "unresolved": list(census.unresolved),
+                    "unresolved_provenance": list(census.provenance),
+                    "ended_ns": time.monotonic_ns(),
+                }
+            except Exception as exc:  # noqa: BLE001 - the settlement's own evidence
+                comparison["b_settlement"] = {"error": f"{type(exc).__name__}: {exc}"}
+        else:
+            await read_owner("after B")
+        # Before A2: B quit normally and its process is gone, and in Direct
+        # mode its browser is shown gone by a complete census and, where the
+        # platform can say, the lock is free. Otherwise A only quits.
+        before_a2 = host_comparison.host_problems(
+            comparison["host_b"], prefix="host B: "
+        )
+        if b.after_exit_error:
+            before_a2.append(f"host B's post-exit hook failed: {b.after_exit_error}")
+        if not b_held:
+            before_a2.append("host B's server process was never held")
+        elif retained(b_held[0]):
+            before_a2.append(
+                "host B's server is not shown gone after its quit; it stays retained"
+            )
+        if not daemon:
+            settled = comparison.get("b_settlement") or {}
+            if (
+                settled.get("error")
+                or settled.get("remaining") != []
+                or settled.get("unresolved") != []
+            ):
+                before_a2.append(f"host B's browser is not shown gone: {settled}")
+            before_a2 += await free_before_a2()
+        if blocked_before("A2", before_a2):
+            return
+        await call(READ_TOOL, READ_TOOL_ARGUMENTS)
+        if daemon:
+            await read_owner("after A2")
+
+    def hold_publication(pid: int | None, why: str) -> None:
+        """Keep an owner published on the row's root that the row could not
+        identify (``UnresolvedPublication``) until it is shown gone: no
+        later measurement starts meanwhile, and nothing is sent to it.
+
+        Held before anything reports it, and passed over only while an
+        earlier hold of the same lifetime is still held: a report that fails
+        is named on the hold and among the row's problems, and releases
+        nothing."""
+        held = UnresolvedPublication(pid)
+        key = (pid, held.created)
+        earlier = r7_publications.get(key)
+        if earlier is not None and retained(earlier):
+            return
+        hold = r7_publications[key] = retain(
+            f"the owner published on the row's root as pid {pid}, which the row "
+            f"could not identify ({why})"
+            if pid is not None
+            else f"the owner published on the row's root, whose descriptor could "
+            f"not be read ({why})",
+            held.check,
+        )
+        record = {"pid": pid, "created": held.created, "gone": held.gone, "why": why}
+        r7_window.setdefault("unresolved_publications", []).append(record)
+        try:
+            emit("harness", "r7.window", phase="unresolved publication", **record)
+        except Exception as exc:  # noqa: BLE001 - named below; the hold stands
+            hold.label += f"; reporting it failed: {exc!r}"
+            r7_window["script_problems"].append(
+                f"the unresolved publication of pid {pid} could not be reported: "
+                f"{exc!r}"
+            )
+
+    def find_the_successor_r7(
+        probe: Mapping[str, Any],
+    ) -> tuple[OwnerIdentity | None, list[str]]:
+        """The owner the descriptor names now, and why it is not shown to be
+        a new lifetime that replaced the original and served *probe*: the
+        owner begun after the close, since an early election is allowed, and
+        the browser that served begun after the recovery barrier, since early
+        use of the profile is not. One the row cannot identify, or cannot
+        read, is held (``hold_publication``)."""
+        found: OwnerIdentity | None = None
+        problems: list[str] = []
+        try:
+            published = account.layout.read(account.auth_root)
+        except Exception as exc:  # noqa: BLE001 - the row reports it
+            hold_publication(None, f"{type(exc).__name__}: {exc}")
+            return None, [f"the descriptor could not be read: {exc!r}"]
+        if published is not None:
+            found, problem = identify_owner(published, account, watcher.observed())
+            if problem is not None:
+                problems.append(problem)
+            if found is None:
+                hold_publication(published.pid, problem or "not identified")
+        began, ended = probe.get("began"), probe.get("ended")
+        interval = (began, ended) if began is not None and ended is not None else None
+        ticks = r7_window.get("close_ticks")
+        barrier = r7_window.get("barrier_ticks")
+        problems += successor_problems(
+            watcher.observed(),
+            identified,
+            found,
+            probe=interval,
+            probe_requests=sum(
+                1
+                for request in feed_requests(origin.requests[request_mark:])
+                if interval is not None
+                and interval[0] <= (request.t or 0.0) <= interval[1]
+            ),
+            after_close=lambda pid, start: created_after(pid, start, ticks),
+            browser_after=lambda pid, start: created_after(pid, start, barrier),
+        )
+        return found, problems
+
+    async def r7_script(call: ToolCall) -> None:
+        """Identify, trace, activate, close; then the checkpoints and, for an
+        injected owner, the post-settlement recovery."""
+        nonlocal activation
+        assert r7 is not None
+        w = r7_window
+        role = "owner" if daemon else "direct"
+        w["role"] = role
+        if daemon:
+            if identified is None:
+                w["script_problems"].append("the owner was never identified")
+                return
+            principal = (identified.pid, identified.create_time)
+            r7_handles["original actor"] = identified.process
+        else:
+            process, created = await run_owned(
+                "associate the server",
+                associate_server,
+                server.get("pid", -1),
+                watcher.observed,
+                seconds=30.0,
+            )
+            if process is None or created is None:
+                w["script_problems"].append("the Direct server was never associated")
+                return
+            principal = (process.pid, created)
+            r7_handles["original actor"] = process
+        w["principal"] = list(principal)
+        w["start_ticks"] = kernel_start_ticks(*principal)
+        try:
+            w["owner_group"] = os.getpgid(principal[0])
+        except OSError:
+            w["owner_group"] = None
+        guardian = await run_owned(
+            "find the guardian",
+            wait_for_guardian,
+            watcher.observed,
+            principal[0],
+            seconds=30.0,
+        )
+        if guardian is not None:
+            w["guardian_group"] = guardian[1]
+            opened = open_lifetime(watcher.observed(), guardian[0])
+            if opened is not None:
+                r7_handles["guardian"] = opened[0]
+                w["guardian"] = [guardian[0], opened[1]]
+        # The value stays in this frame; only the digest goes anywhere.
+        marker = await run_owned(
+            "read the launch marker",
+            wait_for_marker,
+            watcher.observed,
+            principal,
+            seconds=30.0,
+        )
+        w["marker_digest"] = marker.digest if marker is not None else None
+        w["browser"] = list(marker.browser) if marker is not None else None
+        lock = lock_identity(lock_path)
+        w["lock"] = list(lock) if lock is not None else None
+        await lease_checkpoint(
+            BEFORE_CLOSE,
+            holder=principal[0],
+            alive={"original actor": True, "guardian": True},
+        )
+        # The trace, before anything is activated, on the original actor and
+        # its guardian; both clocks sampled on either side of it.
+        w["clocks"].append(clock_sample("before the trace"))
+        traced = [principal[0]] + ([guardian[0]] if guardian is not None else [])
+        if oracle.available:
+            reason = await run_owned(
+                "attach the trace", oracle.start, traced, seconds=60.0
+            )
+        else:
+            reason = oracle.unavailable
+        w["trace"] = {
+            "attached": oracle.available and reason is None,
+            "reason": reason,
+            "pids": traced,
+            "required": oracle.required,
+        }
+        w["traced_before_close"] = bool(w["trace"]["attached"])
+        emit(
+            "harness",
+            "signal.oracle",
+            phase="unconfirmed-close",
+            attached=w["trace"]["attached"],
+            reason=reason,
+            ptrace_scope=oracle.scope,
+            required=oracle.required,
+            pids=traced,
+        )
+        if r7.activate:
+            refused = []
+            if fault_dir is None:
+                refused.append("the row has no fault directory")
+            if marker is None:
+                refused.append("the launch marker was not read and matched")
+            if w["start_ticks"] is None:
+                refused.append("the original actor's kernel start is unknown")
+            if oracle.required and not w["trace"]["attached"]:
+                refused.append(f"the trace did not attach: {reason}")
+            if refused:
+                w["activation_refused"] = refused
+            else:
+                assert fault_dir is not None and marker is not None
+                activation = publish_activation(
+                    fault_dir,
+                    row=row,
+                    experiment=experiment,
+                    repetition=r7.repetition,
+                    run=log.run,
+                    pid=principal[0],
+                    start_ticks=w["start_ticks"],
+                    role=role,
+                    marker=marker.value,
+                    source={
+                        "python": command[0],
+                        "revision": identity.get("head") or identity.get("pinned"),
+                    },
+                )
+                # The event's own row, experiment and run are the row's.
+                emit(
+                    "harness",
+                    "r7.activation",
+                    **{
+                        name: value
+                        for name, value in activation.items()
+                        if name not in ("row", "experiment", "run")
+                    },
+                )
+        # Whatever starts after this marker started after the close began.
+        w["close_ticks"], w["close_created"] = await run_owned(
+            "mark the close", creation_marker, seconds=30.0
+        )
+        w["close_began"] = time.time()
+        closed = await call("close_session", {})
+        w["close"] = {
+            name: closed.get(name)
+            for name in (
+                "began",
+                "ended",
+                "began_monotonic_ns",
+                "ended_monotonic_ns",
+                "is_error",
+            )
+        }
+        if closed.get("is_error") is not False:
+            w["script_problems"].append(
+                "close_session did not return a successful tool result"
+            )
+        w["clocks"].append(clock_sample("after the close"))
+        emit("harness", "r7.window", phase="closed", **w["close"])
+        if not daemon:
+            # Direct keeps the profile until the host quits.
+            await lease_checkpoint(
+                AFTER_CONSUMPTION,
+                holder=principal[0],
+                alive={"original actor": True, "guardian": True},
+            )
+            w["recovery"] = R7_NO_RECOVERY
+            await lease_checkpoint(
+                BEFORE_QUIT,
+                holder=principal[0],
+                alive={"original actor": True, "guardian": True},
+            )
+            w["script_ended"] = True
+            return
+        if r7.control is not None:
+            # A confirmed close releases the lease and the guardian, and the
+            # owner keeps serving.
+            await lease_checkpoint(
+                AFTER_CONFIRMED_CLOSE,
+                alive={"original actor": True, "guardian": False},
+            )
+            w["recovery"] = "none: a control's owner keeps serving"
+            w["script_ended"] = True
+            return
+        # The owner gives way after an unconfirmed close. Nothing asks for the
+        # profile until it and its guardian are seen gone and the lock is free
+        # (E1EZ-02); an election may already have happened, a browser may not.
+        w["owner_exit"] = await run_owned(
+            "the original owner's exit",
+            exit_state,
+            r7_handles.get("original actor"),
+            _R7_EXIT_SECONDS,
+            seconds=_R7_EXIT_SECONDS + 30.0,
+        )
+        w["guardian_exit"] = await run_owned(
+            "the original guardian's exit",
+            exit_state,
+            r7_handles.get("guardian"),
+            _R7_EXIT_SECONDS,
+            seconds=_R7_EXIT_SECONDS + 30.0,
+        )
+        point = await lease_checkpoint(BEFORE_RECOVERY)
+        # The recovery barrier, kept: early use is judged against it again,
+        # from the watcher's completed history, before the row is accepted.
+        w["barrier_ticks"], w["barrier_created"] = await run_owned(
+            "mark the barrier", creation_marker, seconds=30.0
+        )
+        pre = []
+        if w["owner_exit"] != "exited":
+            pre.append(f"the original owner was {w['owner_exit']!r}")
+        if w["guardian_exit"] != "exited":
+            pre.append(f"the original guardian was {w['guardian_exit']!r}")
+        pre += checkpoint_problems(point, expect=lease_probe.FREE)
+        pre += early_browsers(
+            watcher.observed(),
+            principal,
+            since=w["close_created"],
+            until=w["barrier_created"],
+        )
+        w["pre_probe"] = pre
+        emit("harness", "r7.window", phase="barrier", pre_probe=pre)
+        if pre:
+            w["recovery"] = f"not made: {pre}"
+            w["script_ended"] = True
+            return
+        gate("the recovery")
+        probe = await call(READ_TOOL, READ_TOOL_ARGUMENTS)
+        w["probe"] = {
+            name: probe.get(name)
+            for name in ("began", "ended", "is_error", "read_the_post")
+        }
+        w["recovery"] = R7_POST_SETTLEMENT
+        # Before the host quits: a new owner, and only it, served the probe.
+        served = not probe.get("is_error") and bool(probe.get("read_the_post"))
+        found_problems: list[str] | None = None
+        if served:
+            deadline = time.monotonic() + _SUCCESSOR_SECONDS
+            while True:
+                found, found_problems = await run_owned(
+                    "find the successor", find_the_successor_r7, probe, seconds=30.0
+                )
+                if found is not None:
+                    r7_handles["successor"] = found
+                if not found_problems or time.monotonic() >= deadline:
+                    break
+                await asyncio.sleep(0.2)
+        verdict = successor_verdict(
+            probe=probe,
+            left=w["owner_exit"] == "exited",
+            problems=found_problems,
+        )
+        w["successor_problems"] = verdict
+        w["successor_verified"] = not verdict
+        emit("harness", "owner.successor", problems=verdict, verified=not verdict)
+        gate("the host's quit")
+        w["script_ended"] = True
+
+    async def r7_step(label: str, func: Callable[..., Any], *args: Any, **kw: Any):
+        """One step of H-R7's settling: owned, bounded, never gated, and with
+        every cancellation held for the whole teardown (``r7_defer``). A step
+        that fails is recorded and answers None; the next one still runs."""
+        seconds = kw.pop("seconds")
+        try:
+            return await run_owned(
+                label, func, *args, seconds=seconds, gated=False, defer=r7_defer, **kw
+            )
+        except Exception as exc:  # noqa: BLE001 - recorded, the next step runs
+            r7_window["script_problems"].append(
+                f"settling: {label} failed: {type(exc).__name__}: {exc}"
+            )
+            return None
+
+    async def r7_after_quit() -> None:
+        """Settle what the scenario leaves running, after every measurement.
+
+        Direct: the host's quit is the scenario's own end, so the server's
+        and its guardian's exits are observed, not caused. Daemon: nothing
+        idles out, so each owner still serving is ended through the handle
+        the row identified it by, labelled as the harness's, and its guardian
+        seen gone; none of that is read as the product settling.
+
+        Run once, after the host's quit or, when the row was cancelled or
+        failed before it, from the teardown; either way the serving owner is
+        the one the row found serving, else the one the descriptor names now
+        as ``identify_owner`` ties it to this row, so a successor elected
+        after the last look is not left running. Each step runs whatever the
+        one before it did (``r7_step``). Anything not shown gone is retained
+        (``retain``): no later measurement starts until it is.
+        """
+        nonlocal cleanup_owner, r7_settling_began
+        r7_settling_began = True
+        w = r7_window
+        if not daemon:
+            server_handle = r7_handles.get("original actor")
+            guardian_handle = r7_handles.get("guardian")
+            w["server_exit"] = await r7_step(
+                "the server's exit", exit_state, server_handle, 30.0, seconds=60.0
+            )
+            w["guardian_after_quit"] = await r7_step(
+                "the guardian's exit",
+                exit_state,
+                guardian_handle,
+                _R7_EXIT_SECONDS,
+                seconds=_R7_EXIT_SECONDS + 30.0,
+            )
+            for label, handle, state in (
+                ("the Direct server", server_handle, w["server_exit"]),
+                ("the Direct guardian", guardian_handle, w["guardian_after_quit"]),
+            ):
+                if handle is not None and state != "exited":
+                    retain(
+                        f"{label} {handle.pid}",
+                        lambda grace, handle=handle: (
+                            exit_state(handle, grace) == "exited"
+                        ),
+                    )
+            return
+        serving = r7_handles.get("successor")
+        # Only looked at, never read into being (``find_the_owner``).
+        if (
+            serving is None
+            and account.layout.descriptor_path(account.auth_root).exists()
+        ):
+            found = await r7_step(
+                "find the serving owner", find_the_successor_r7, {}, seconds=30.0
+            )
+            serving = found[0] if found else None
+        cleanup_owner = serving or identified
+        seen: set[tuple[int, float]] = set()
+        for who, running in (
+            ("serving owner", serving),
+            ("original owner", identified),
+        ):
+            if running is None or (running.pid, running.create_time) in seen:
+                continue
+            seen.add((running.pid, running.create_time))
+            ended = (
+                await r7_step(f"end the {who}", end_owner, running, seconds=60.0)
+                or "unknown: the end was not answered"
+            )
+            if ended not in ("gone", "stopped"):
+                retain(
+                    f"the {who} {running.pid}",
+                    lambda grace, running=running: (
+                        end_owner(running) in ("gone", "stopped")
+                    ),
+                )
+            observed = watcher.observed()
+            guardian = guardian_launch(observed, running.pid)
+            guardian_exit = "none was seen"
+            if guardian is not None:
+                guardian_exit = (
+                    await r7_step(
+                        f"the {who}'s guardian's exit",
+                        lifetime_exit_state,
+                        observed,
+                        guardian[0],
+                        _R7_EXIT_SECONDS,
+                        seconds=_R7_EXIT_SECONDS + 30.0,
+                    )
+                    or "unknown: the wait was not answered"
+                )
+                if guardian_exit != "exited":
+                    retain(
+                        f"the {who}'s guardian {guardian[0]}",
+                        lambda grace, pid=guardian[0], records=observed: (
+                            lifetime_exit_state(records, pid, grace) == "exited"
+                        ),
+                    )
+            record = {
+                "who": who,
+                "pid": running.pid,
+                "start_identity": running.create_time,
+                "result": ended,
+                "guardian": guardian[0] if guardian else None,
+                "guardian_exit": guardian_exit,
+            }
+            w["ended_by_harness"].append(record)
+            emit("harness", "r7.ended", **record)
+        if identified is not None:
+            original = next(
+                (
+                    record
+                    for record in w["ended_by_harness"]
+                    if (record["pid"], record["start_identity"])
+                    == (identified.pid, identified.create_time)
+                ),
+                None,
+            )
+            by_itself = w.get("owner_exit") == "exited"
+            gone = by_itself or (
+                original is not None and original["result"] in ("gone", "stopped")
+            )
+            # Gone either way is what cleanup and the preservation gate ask;
+            # whether it went by itself is the continuation's, not this record's.
+            owner["exit"] = {
+                "how": "exited" if gone else (original or {}).get("result"),
+                "by": "itself" if by_itself else "the harness, after measurement",
+            }
+
+    #: A losing row's live host, as the session handed it to the script.
+    live: list[LiveHost] = []
+    #: How many fresh hosts a losing row's script started.
+    fresh_hosts: list[HostSession] = []
+
+    async def prepare_loss(termination: str) -> dict[str, Any]:
+        """``LossSeams.prepare``: tie what the loss will end before the read."""
+        if termination == call_loss.ACTOR_KILLED:
+            await prepare_kill(server_only=True)
+            return {
+                name: killed.get(name)
+                for name in ("actor", "pid", "start_identity", "guardian", "oracle")
+            } | ({} if victim else {"error": killed.get("exit")})
+        if termination == call_loss.HOST_KILLED:
+            host = live[0]
+            try:
+                process, created = await run_owned(
+                    "associate the stub host's server",
+                    associate_server,
+                    server.get("pid", -1),
+                    watcher.observed,
+                    seconds=30.0,
+                )
+            except Exception as exc:  # noqa: BLE001 - the preparation's own evidence
+                return {"error": f"{type(exc).__name__}: {exc}"}
+            if process is None or created is None:
+                return {"error": f"server {server.get('pid')} was never associated"}
+            if isinstance(host, StubHost):
+                host.server_handle = process
+            return {"server": [process.pid, created]}
+        return {}
+
+    async def make_loss(termination: str) -> dict[str, Any]:
+        """``LossSeams.lose``: the loss, on the host's side only, now."""
+        host = live[0]
+        # A row on HTTP declares no loss (``lifecycle_problems``).
+        assert not isinstance(host, HttpHost), "an HTTP host is never lost"
+        if termination == call_loss.ACTOR_KILLED:
+            host.mark_lost(termination)
+            await fire_kill()
+            error = None if killed.get("exit") == "killed" else killed.get("exit")
+        else:
+            await host.lose(termination)
+            error = host.loss_error
+        name, target = call_loss.loss_event(termination, daemon=daemon)
+        found = {
+            "kind": termination,
+            "loss": name,
+            "target": target,
+            "monotonic_ns": host.lost_monotonic_ns,
+            "error": error,
+        }
+        if termination == call_loss.ACTOR_KILLED:
+            found["killed"] = {k: v for k, v in killed.items() if k != "oracle"}
+        if isinstance(found["monotonic_ns"], int):
+            emit(
+                "harness",
+                "loss",
+                loss=name,
+                target=target,
+                monotonic_ns=found["monotonic_ns"],
+                termination=termination,
+                error=error,
+            )
+        return found
+
+    async def loss_server_exit(seconds: float) -> dict[str, Any]:
+        """``LossSeams.server_exit``: the host's own handle or the tied one."""
+        host = live[0]
+        assert not isinstance(host, HttpHost), "an HTTP host is never lost"
+        return await host.server_exit(seconds)
+
+    async def loss_settlement() -> dict[str, Any]:
+        """``LossSeams.settlement``: what the profile shows by itself."""
+        found: dict[str, Any] = {}
+        try:
+            guardian = killed.get("guardian")
+            if isinstance(guardian, int):
+                # H-R5 in Direct: the killed server's guardian drains the
+                # browser and leaves, which is the settlement being read.
+                found["guardian_exit"] = await run_owned(
+                    "the killed server's guardian",
+                    lifetime_exit_state,
+                    watcher.observed(),
+                    guardian,
+                    _BROWSER_GONE_SECONDS,
+                    seconds=_BROWSER_GONE_SECONDS + 30.0,
+                )
+            found["waited"] = await run_owned(
+                "the browser after the loss",
+                wait_for_no_browser,
+                account,
+                _BROWSER_GONE_SECONDS,
+                seconds=_BROWSER_GONE_SECONDS + 30.0,
+                browser_dir=browsers,
+                browser_exe=browser_exe,
+            )
+            census = await run_owned(
+                "the census after the loss",
+                profile_census,
+                account,
+                browser_exe=browser_exe,
+                browser_dir=browsers,
+                seconds=60.0,
+            )
+            found["remaining"] = census.pids
+            found["unresolved"] = list(census.unresolved)
+            found["unresolved_provenance"] = list(census.provenance)
+            lock = await run_owned(
+                "the lock after the loss", read_lock, lock_path, seconds=60.0
+            )
+            answer = lock.get("answer")
+            found["lease"] = (
+                answer.get("state")
+                if isinstance(answer, Mapping)
+                else call_loss.LEASE_UNOBSERVED
+            )
+        except Exception as exc:  # noqa: BLE001 - the reading's own evidence
+            found["error"] = f"{type(exc).__name__}: {exc}"
+        found["seen_ns"] = time.monotonic_ns()
+        return found
+
+    async def loss_fresh_read() -> dict[str, Any]:
+        """``LossSeams.fresh_read``: the row's command and environment again,
+        in a directory of its own, retained until its server is gone."""
+        left = settlement_problems()
+        if left:
+            return {"made": False, "why": f"unsettled: {left}"}
+        directory = work_dir / f"fresh-{len(fresh_hosts) + 1}"
+        directory.mkdir(exist_ok=True)
+        held: list[Retained] = []
+
+        def hold(process: Any) -> None:
+            held.append(
+                retain(
+                    f"the fresh host's server {process.pid}",
+                    lambda grace, process=process: process.returncode is not None,
+                )
+            )
+
+        launched_ns = time.monotonic_ns()
+        fresh = await run_host_session(
+            row_command,
+            env=env,
+            cwd=directory,
+            on_stderr=lambda line: emit(
+                "frontend", "user.output", stream="stderr", host="fresh", line=line
+            ),
+            on_process=hold,
+        )
+        fresh_hosts.append(fresh)
+        if held and held[0].check(0.0):
+            discharge(held[0])
+        if fresh.tool is not None:
+            emit("host_stub", "tool.result", **{**fresh.tool, "host": "fresh"})
+        return {
+            "made": True,
+            "launched_ns": launched_ns,
+            "host": host_summary(fresh),
+            "call": call_record(fresh.tool) if fresh.tool is not None else None,
+            "forwarded": any(_FORWARDING_LINE in line for line in fresh.stderr),
+            "quit_problems": host_failures(fresh),
+            "retained": bool(held) and retained(held[0]),
+        }
+
+    async def loss_owner_reading(label: str) -> dict[str, Any]:
+        """``LossSeams.owner_reading``: the descriptor's owner, on a thread
+        the row owns, and the identified one's liveness."""
+        try:
+            seen = await run_owned(
+                f"owner: {label}",
+                observe_owner,
+                label,
+                account,
+                watcher.observed,
+                seconds=30.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - the reading's own evidence
+            seen = {
+                "label": label,
+                "lifetime": None,
+                "instance_id": None,
+                "problem": f"{type(exc).__name__}: {exc}",
+            }
+        seen["alive"] = is_alive(identified.process) if identified else None
+        seen["seen_ns"] = time.monotonic_ns()
+        return seen
+
+    def loss_owner_log() -> list[str]:
+        """``LossSeams.owner_log``: the row's own daemon log, read now."""
+        path = Path(owner.get("log_path") or "")
+        if not path.is_file():
+            return []
+        return path.read_text(errors="replace").splitlines()
+
+    async def race_owner_exit(seconds: float) -> dict[str, Any]:
+        """``RaceSeams.owner_exit``: the identified owner's own handle,
+        polled on the loop, so it can run beside the row's calls."""
+        process = identified.process if identified is not None else None
+        how = "no owner"
+        if process is not None:
+            deadline = time.monotonic() + seconds
+            while True:
+                alive = is_alive(process)
+                if alive is False:
+                    how = "exited"
+                    break
+                if time.monotonic() >= deadline:
+                    how = "still running" if alive else "unknown"
+                    break
+                await asyncio.sleep(0.05)
+        return {"how": how, "seen_ns": time.monotonic_ns(), "seen": time.time()}
+
+    async def race_roots(label: str) -> dict[str, Any]:
+        """``RaceSeams.roots``: on a thread the row owns."""
+        try:
+            return await run_owned(
+                f"roots: {label}",
+                observe_roots,
+                label,
+                account,
+                browser_exe=browser_exe,
+                browser_dir=browsers,
+                seconds=_CHECKPOINT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 - the reading's own evidence
+            return {
+                "label": label,
+                "roots": None,
+                "seen": time.time(),
+                "seen_ns": time.monotonic_ns(),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    async def race_browser_gone(seconds: float) -> dict[str, Any]:
+        """``RaceSeams.browser_gone``: waited for, on a thread the row owns."""
+        found: dict[str, Any] = {}
+        try:
+            found["remaining"] = await run_owned(
+                "the browser after its close",
+                wait_for_no_browser,
+                account,
+                seconds,
+                seconds=seconds + 30.0,
+                browser_dir=browsers,
+                browser_exe=browser_exe,
+            )
+        except Exception as exc:  # noqa: BLE001 - the reading's own evidence
+            found["error"] = f"{type(exc).__name__}: {exc}"
+        found["seen_ns"] = time.monotonic_ns()
+        return found
+
+    async def race_stand_down() -> dict[str, Any]:
+        """``RaceSeams.stand_down``: the request, on a thread the row owns."""
+        try:
+            found = await run_owned(
+                "ask the owner to stand down",
+                ask_to_stand_down,
+                account,
+                identified,
+                seconds=_STAND_DOWN_REQUEST_SECONDS + 20.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - the request's own evidence
+            found = {"addressed": False, "error": type(exc).__name__}
+        return found
+
+    def race_seams() -> RaceSeams:
+        """``RowContext.race``: the stand-down only on a row declared to send it."""
+        return RaceSeams(
+            owner_reading=loss_owner_reading,
+            owner_log=loss_owner_log,
+            owner_exit=race_owner_exit,
+            host_output=lambda: list(host_lines),
+            roots=race_roots,
+            browser_gone=race_browser_gone,
+            published=lambda: descriptor_written(account),
+            stand_down=race_stand_down if lifecycle.stands_down else None,
+        )
+
+    #: An owner-losing row's stopped owner, until it is resumed; whatever the
+    #: script leaves stopped, the row resumes (``restore_stopped``).
+    stopped_owner: list[Any] = []
+    #: Every declared responder the row bound; the teardown stops each.
+    responders: list[owner_loss.DeclaredResponder] = []
+
+    async def owner_loss_prepare() -> dict[str, Any]:
+        """``OwnerLossSeams.prepare``: the owner in daemon mode, the server the
+        host started in Direct (``prepare_kill``)."""
+        await prepare_kill()
+        return {
+            name: killed.get(name)
+            for name in ("actor", "pid", "start_identity", "guardian", "oracle")
+        } | ({} if victim else {"error": killed.get("exit")})
+
+    async def owner_loss_kill() -> dict[str, Any]:
+        """``OwnerLossSeams.kill``: the prepared actor, now; its record carries
+        the kind, the target, how it ended and when the kill was made."""
+        fired = time.monotonic_ns()
+        if victim:
+            await fire_kill()
+        how = killed.get("exit") or "not killed: nothing was prepared"
+        kind, target = (
+            ("owner-killed", "owner") if daemon else ("server-killed", "frontend")
+        )
+        if how == "killed":
+            emit("harness", "loss", loss=kind, target=target, monotonic_ns=fired)
+        return {
+            "kind": kind,
+            "target": target,
+            "exit": how,
+            "monotonic_ns": fired,
+            "seen_ns": time.monotonic_ns(),
+            "seen": time.time(),
+        }
+
+    def owner_stop() -> dict[str, Any]:
+        """``OwnerLossSeams.stop``: SIGSTOP to the identified owner, through the
+        handle the row identified it by, which psutil checks against a reused
+        pid before it signals."""
+        found: dict[str, Any] = {"stopped_ns": None, "pid": None, "error": None}
+        if identified is None:
+            found["error"] = "no owner was identified"
+            return found
+        try:
+            identified.process.suspend()
+        except psutil.Error as exc:
+            found["error"] = type(exc).__name__
+            return found
+        found.update(stopped_ns=time.monotonic_ns(), pid=identified.pid)
+        stopped_owner.append(identified.process)
+        return found
+
+    def owner_resume(by: str = "row") -> dict[str, Any]:
+        """``OwnerLossSeams.resume``: SIGCONT to whatever the row stopped."""
+        found: dict[str, Any] = {
+            "resumed_ns": None,
+            "resumed_by": by,
+            "resume_error": None,
+        }
+        if not stopped_owner:
+            found["resume_error"] = "nothing was stopped"
+            return found
+        process = stopped_owner.pop()
+        try:
+            process.resume()
+        except psutil.NoSuchProcess:
+            found["resume_error"] = "gone before it was resumed"
+        except psutil.Error as exc:
+            found["resume_error"] = type(exc).__name__
+        else:
+            found["resumed_ns"] = time.monotonic_ns()
+        return found
+
+    def restore_stopped(where: str) -> None:
+        """Resume an owner the script left stopped: a harness failure, and
+        recorded as one."""
+        if not stopped_owner:
+            return
+        found = owner_resume("teardown")
+        teardown.append(
+            f"the row left the identified owner stopped; the harness resumed it "
+            f"{where}: {found}"
+        )
+        if row_record is not None:
+            row_record["left_stopped"] = True
+
+    async def owner_loss_respond(status: int) -> dict[str, Any]:
+        """``OwnerLossSeams.respond``: bound on a thread the row owns."""
+        try:
+            responder, found = await run_owned(
+                "bind the declared responder",
+                bind_responder,
+                account,
+                identified,
+                status,
+                seconds=30.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - the bind's own evidence
+            return {"bound": False, "status": status, "error": type(exc).__name__}
+        if responder is not None:
+            responders.append(responder)
+        return found
+
+    def stop_responding() -> dict[str, Any]:
+        for responder in responders:
+            responder.stop()
+        return {"closed_ns": time.monotonic_ns()}
+
+    def owner_loss_seams() -> OwnerLossSeams:
+        """``RowContext.owner_loss``: a stop only for an owner on POSIX."""
+        stoppable = daemon and os.name != "nt"
+        return OwnerLossSeams(
+            prepare=owner_loss_prepare,
+            kill=owner_loss_kill,
+            respond=owner_loss_respond,
+            responder_requests=lambda: responders[-1].requests() if responders else [],
+            stop_responding=stop_responding,
+            settlement=loss_settlement,
+            fresh_read=loss_fresh_read,
+            owner_reading=loss_owner_reading,
+            host_output=lambda: list(host_lines),
+            stop=owner_stop if stoppable else None,
+            resume=owner_resume if stoppable else None,
+        )
+
+    #: Every profile command the row started; the hold on each that could not
+    #: be shown settled when the row was done with it, which refuses every
+    #: later measurement until it is; and the ones whose output was logged.
+    #: A command is not held while it runs: the row measures beside it, a
+    #: checkpoint while it waits at a prompt among them.
+    commands_started: list[profile_commands.TerminalCommand] = []
+    command_holds: dict[int, Retained] = {}
+    commands_logged: set[int] = set()
+
+    async def command_start(
+        args: Sequence[str],
+        *,
+        terminal: bool,
+        label: str,
+        overrides: Mapping[str, str] | None = None,
+    ) -> profile_commands.TerminalCommand:
+        """``CommandSeams.start``: the row's command line and environment,
+        with *overrides* over it."""
+        directory = work_dir / "commands" / f"{len(commands_started) + 1}-{label}"
+        directory.mkdir(parents=True, exist_ok=True)
+        started = profile_commands.TerminalCommand(
+            [*command, *args],
+            args=args,
+            env={**env, **profile_commands.COMMAND_ENV, **(overrides or {})},
+            overridden=sorted(overrides or {}),
+            cwd=directory,
+            terminal=terminal,
+            label=label,
+        )
+        commands_started.append(started)
+        started.start()
+        emit(
+            "harness",
+            "phase",
+            name=f"command started: {label}",
+            monotonic_ns=started.started_ns or time.monotonic_ns(),
+        )
+        return started
+
+    def command_done(started: profile_commands.TerminalCommand) -> None:
+        """The row is done with *started*: log what it printed, once, and
+        hold it until it is shown settled if it is not now."""
+        if id(started) not in commands_logged:
+            commands_logged.add(id(started))
+            for _, line in started.lines():
+                emit(
+                    "cli",
+                    "user.output",
+                    stream="terminal" if started.terminal else "pipe",
+                    command=started.label,
+                    line=line,
+                )
+        if not started.settled(0.0) and id(started) not in command_holds:
+            command_holds[id(started)] = retain(
+                f"the profile command {started.label}", started.settled
+            )
+
+    async def command_finish(
+        started: profile_commands.TerminalCommand, seconds: float
+    ) -> dict[str, Any]:
+        """``CommandSeams.finish``: its exit and the end of its output.
+        Waiting on the row's own command is no measurement, so it is not
+        gated on what else the row could not settle."""
+        await started.wait(seconds)
+        if started.returncode is not None:
+            await run_owned(
+                f"the output of {started.label}",
+                started.settled,
+                profile_commands.OUTPUT_END_SECONDS,
+                seconds=profile_commands.OUTPUT_END_SECONDS + 5.0,
+                gated=False,
+            )
+        command_done(started)
+        return started.record()
+
+    def end_commands(where: str) -> None:
+        """End every command the script left running: a harness failure, and
+        recorded as one, never a settlement."""
+        for started in commands_started:
+            if started.started_ns is not None and not started.settled(0.0):
+                # Running, or exited with a descendant it started still alive.
+                started.end()
+                teardown.append(
+                    f"the row left the profile command {started.label} running; "
+                    f"the harness ended it {where}"
+                )
+                if row_record is not None:
+                    row_record.setdefault("left_running", []).append(started.label)
+            command_done(started)
+
+    def command_seams() -> CommandSeams:
+        scratch = work_dir / "scratch"
+        scratch.mkdir(parents=True, exist_ok=True)
+        return CommandSeams(
+            start=command_start,
+            finish=command_finish,
+            settlement=loss_settlement,
+            owner_reading=loss_owner_reading,
+            owner_log=loss_owner_log,
+            owner_exit=race_owner_exit,
+            roots=race_roots,
+            scratch=scratch,
+        )
+
+    #: The one authorization a row that stages a sign-in recorded, with the
+    #: session read right after it; what the lineage reads it from.
+    authorizations: list[Authorization] = []
+    #: The second hosts the row ran; each server held until it is gone.
+    second_hosts: list[HostSession] = []
+    #: Each second host's progress as its client hears it, the latest last.
+    second_progress: list[list[dict[str, Any]]] = []
+
+    def auth_snapshot(label: str) -> dict[str, Any]:
+        """``AuthSeams.snapshot``: the artefacts alone, stamped when read."""
+        seen = snapshot(account.profile, expected_digest=staged.li_at_digest)
+        return {
+            "label": label,
+            **seen.as_event_fields(),
+            "seen_ns": time.monotonic_ns(),
+        }
+
+    def authorize_now(kind: str, at_ns: int) -> dict[str, Any]:
+        """Record *kind* at *at_ns* and read the session after it; a second
+        authorization in one row is the row's problem and records nothing."""
+        assert row_record is not None
+        if authorizations:
+            row_record["observation_problems"].append(
+                f"the row recorded a second authorization: {kind!r}"
+            )
+            return {"kind": kind, "at_ns": at_ns, "recorded": False}
+        seen = snapshot(account.profile, expected_digest=staged.li_at_digest)
+        authorizations.append(Authorization(kind, at_ns, seen))
+        found = {
+            "kind": kind,
+            "at_ns": at_ns,
+            "snapshot": {**seen.as_event_fields(), "seen_ns": time.monotonic_ns()},
+        }
+        row_record["authorized"] = kind
+        row_record["authorization"] = found
+        emit("harness", "authorization", authorization=kind, monotonic_ns=at_ns)
+        return found
+
+    def auth_reject() -> dict[str, Any]:
+        """``AuthSeams.reject``: the origin's rejection is the authorization,
+        at the time the origin took the sessions back."""
+        found = origin.reject_sessions()
+        emit("origin", "login.rejected", **found)
+        recorded = authorize_now(ORIGIN_REJECTED, found["monotonic_ns"])
+        return {**found, "snapshot": recorded.get("snapshot")}
+
+    def auth_authorize(kind: str) -> dict[str, Any]:
+        """``AuthSeams.authorize``: a confirmed user action, now."""
+        if kind not in (LOGIN, IMPORT):
+            assert row_record is not None
+            row_record["observation_problems"].append(
+                f"the row tried to authorize {kind!r}, which no user confirms"
+            )
+            return {"kind": kind, "recorded": False}
+        return authorize_now(kind, time.monotonic_ns())
+
+    def auth_release() -> dict[str, Any]:
+        """``AuthSeams.release``: the row's, in the row's phase."""
+        found = origin.release_login()
+        emit("origin", "login.released", **found)
+        return found
+
+    async def extra_host(
+        name: str,
+        directory: Path,
+        host_env: dict[str, str],
+        *,
+        tag: str,
+        tool: str = READ_TOOL,
+        arguments: dict[str, Any] | None = None,
+    ) -> tuple[HostSession, list[Retained], int, float]:
+        """A host of the row's own command in *directory* with *host_env*:
+        one call of *tool* and a normal quit, its server, *name*, retained
+        until its own process object has a return code; its lines are its
+        own, tagged *tag*, and never the row's caller's. The session, its
+        hold, and when it was launched by the monotonic and wall clocks."""
+        directory.mkdir(exist_ok=True)
+        held: list[Retained] = []
+
+        def hold(process: Any) -> None:
+            held.append(
+                retain(
+                    f"{name} {process.pid}",
+                    lambda grace, process=process: process.returncode is not None,
+                )
+            )
+
+        def heard(line: str) -> None:
+            emit("frontend", "user.output", stream="stderr", host=tag, line=line)
+
+        launched_ns, launched = time.monotonic_ns(), time.time()
+        session = await run_host_session(
+            row_command,
+            env=host_env,
+            cwd=directory,
+            on_stderr=heard,
+            on_process=hold,
+            tool=tool,
+            arguments=arguments,
+        )
+        if held and held[0].check(0.0):
+            discharge(held[0])
+        if session.tool is not None:
+            emit("host_stub", "tool.result", **{**session.tool, "host": tag})
+        return session, held, launched_ns, launched
+
+    async def auth_second_host() -> dict[str, Any]:
+        """``AuthSeams.second_host``: the row's command and environment
+        again, in a directory of its own, retained until its server is gone;
+        its lines are its own and never the row's caller's."""
+        left = settlement_problems()
+        if left:
+            return {"made": False, "why": f"unsettled: {left}"}
+        directory = work_dir / f"second-{len(second_hosts) + 1}"
+        directory.mkdir(exist_ok=True)
+        held: list[Retained] = []
+        progress: list[dict[str, Any]] = []
+        second_progress.append(progress)
+
+        def hold(process: Any) -> None:
+            held.append(
+                retain(
+                    f"the second host's server {process.pid}",
+                    lambda grace, process=process: process.returncode is not None,
+                )
+            )
+
+        def heard(line: str) -> None:
+            emit("frontend", "user.output", stream="stderr", host="second", line=line)
+
+        launched_ns = time.monotonic_ns()
+        second, found = await run_second_host(
+            row_command,
+            env=env,
+            cwd=directory,
+            progress=progress,
+            on_stderr=heard,
+            on_process=hold,
+        )
+        second_hosts.append(second)
+        if held and held[0].check(0.0):
+            discharge(held[0])
+        if second.tool is not None:
+            emit("host_stub", "tool.result", **{**second.tool, "host": "second"})
+        return {
+            "made": True,
+            "launched_ns": launched_ns,
+            **found,
+            "retained": bool(held) and retained(held[0]),
+        }
+
+    #: The differently configured hosts a rival row started.
+    rival_hosts: list[HostSession] = []
+
+    async def coordination_rival(
+        overrides: Mapping[str, str],
+        *,
+        tool: str = READ_TOOL,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """``CoordinationSeams.rival``: the row's command with *overrides*
+        over its environment, in a directory of its own (``extra_host``)."""
+        left = settlement_problems()
+        if left:
+            return {"made": False, "why": f"unsettled: {left}"}
+        rival_env = {**env, **overrides}
+        rival, held, launched_ns, launched = await extra_host(
+            "the rival host's server",
+            work_dir / f"rival-{len(rival_hosts) + 1}",
+            rival_env,
+            tag="B",
+            tool=tool,
+            arguments=arguments,
+        )
+        rival_hosts.append(rival)
+        return {
+            "made": True,
+            "launched_ns": launched_ns,
+            "launched": launched,
+            "pid": rival.pid,
+            "environment": {name: rival_env.get(name) for name in overrides},
+            "host": host_summary(rival),
+            "call": call_record(rival.tool) if rival.tool is not None else None,
+            "forwarded": any(_FORWARDING_LINE in line for line in rival.stderr),
+            "lines": eligibility_rows.decision_lines(rival.stderr),
+            "quit_problems": host_failures(rival),
+            "retained": bool(held) and retained(held[0]),
+        }
+
+    def coordination_seams() -> CoordinationSeams:
+        return CoordinationSeams(
+            host_output=lambda: list(host_lines),
+            owner_reading=loss_owner_reading,
+            owner_log=loss_owner_log,
+            settlement=loss_settlement,
+            rival=coordination_rival if lifecycle.rival else None,
+        )
+
+    def auth_seams() -> AuthSeams:
+        return AuthSeams(
+            reject=auth_reject,
+            authorize=auth_authorize,
+            release=auth_release,
+            login=origin.login_record,
+            snapshot=auth_snapshot,
+            browser_gone=race_browser_gone,
+            second_host=auth_second_host,
+            second_progress=lambda: (
+                list(second_progress[-1]) if second_progress else []
+            ),
+            owner_reading=loss_owner_reading,
+            owner_log=loss_owner_log,
+            host_output=lambda: list(host_lines),
+        )
+
+    async def declared_script(call: ToolCall, transport: LiveHost) -> None:
+        """The row's own script, on the context it is allowed."""
+        assert lifecycle.script is not None and row_record is not None
+        live.append(transport)
+        race = race_seams() if lifecycle.race else None
+        seams = (
+            LossSeams(
+                prepare=prepare_loss,
+                lose=make_loss,
+                server_exit=loss_server_exit,
+                settlement=loss_settlement,
+                fresh_read=loss_fresh_read,
+                owner_reading=loss_owner_reading,
+                owner_log=loss_owner_log,
+            )
+            if lifecycle.termination != NORMAL_EOF
+            else None
+        )
+        await lifecycle.script(
+            RowContext(
+                row=row,
+                daemon=daemon,
+                call=call,
+                transport=transport,
+                origin=origin,
+                proxy=proxy,
+                account=account,
+                record=row_record,
+                owner=lambda: identified,
+                browser_exe=browser_exe,
+                browser_dir=browsers,
+                _emit=emit,
+                _gates=armed_gates,
+                loss=seams,
+                race=race,
+                owner_loss=owner_loss_seams() if lifecycle.owner_loss else None,
+                commands=command_seams() if lifecycle.commands else None,
+                auth=auth_seams() if lifecycle.auth else None,
+                coordination=(coordination_seams() if lifecycle.coordination else None),
+            )
+        )
+
+    async def after_call() -> None:
+        await find_the_owner()
+        if kill_actor:
+            await kill_the_actor()
+
+    after: ProfileSnapshot | None = None
+    actors_ended: float | None = None
+    residual: list[int] = []
+    teardown: list[str] = []
+    r7_phase: PhaseReading | None = None
+    r7_shared = SharedReduction()
+    #: What ended the row's try, if anything: the teardown raises a
+    #: cancellation it held only when that is not already one.
+    row_failure: BaseException | None = None
+    #: A cancellation that reached the after-row lineage read of a row that
+    #: had not failed, raised once the teardown is done.
+    read_cancelled: BaseException | None = None
+    try:
+        watcher.start()
+        # After the watcher's baseline, so it reports the canaries' starts and
+        # a signal aimed at one resolves to it.
+        for canary in canaries.start():
+            emit("canary", "canary.start", **canary.as_event_fields())
+        canary_problems = canaries.outside_the_harness()
+        emit(
+            "harness",
+            "signal.oracle",
+            phase="setup",
+            available=oracle.available,
+            reason=oracle.unavailable,
+            ptrace_scope=oracle.scope,
+            required=oracle.required,
+        )
+        actors_began = time.time()
+        # A row that kills its host whole needs a host in a process of its
+        # own; every other one is the harness's in-process host stub.
+        host_session = (
+            run_stub_host_session
+            if lifecycle.termination == call_loss.HOST_KILLED
+            else run_http_host_session
+            if lifecycle.transport == STREAMABLE_HTTP
+            else run_host_session
+        )
+
+        def host_stderr(line: str) -> None:
+            host_lines.append(line)
+            emit(
+                "frontend",
+                "user.output",
+                stream="stderr",
+                line=line,
+                **({"host": "A"} if second_host else {}),
+            )
+
+        host = await host_session(
+            row_command,
+            env=env,
+            cwd=work_dir,
+            on_stderr=host_stderr,
+            after_call=after_call,
+            started=lambda pid: server.update(pid=pid),
+            tool=lifecycle.initial.tool,
+            arguments=dict(lifecycle.initial.arguments),
+            second_call=kill_actor and daemon,
+            script=(
+                job_query_script
+                if shim is not None
+                else r7_script
+                if r7 is not None
+                else r2_script
+                if second_host
+                else r3_script
+                if comparing
+                else None
+            ),
+            after_exit=first_post_exit if comparing else None,
+            **({"row_script": declared_script} if lifecycle.script is not None else {}),
+        )
+        # Before the owner's exit is waited for: a stopped owner never leaves,
+        # and a profile command still running could keep one from it.
+        restore_stopped("after the host quit")
+        end_commands("after the host quit")
+        result.host = host
+        if row_record is not None:
+            # Every call the host made, each as it ended, without its text.
+            row_record["calls"] = [call_record(summary) for summary in host.calls]
+            row_record["script_error"] = host.script_error
+            row_record["host"] = host_summary(host)
+        if comparison is not None:
+            if second_host:
+                # Every read, labelled with its host, in the order made: a
+                # read that never happened is missing, not borrowed.
+                reads = [
+                    call_summary(host.tool, host="A", call="A1"),
+                    call_summary(b_read or None, host="B", call="B"),
+                    call_summary(
+                        host.scripted[0] if host.scripted else None,
+                        host="A",
+                        call="A2",
+                    ),
+                ]
+                comparison["calls"] = [read for read in reads if read is not None]
+            else:
+                comparison["call"] = call_summary(host.tool)
+            comparison["script_error"] = host.script_error
+            comparison["after_exit_error"] = host.after_exit_error
+            comparison["host"] = host_summary(host)
+        if r7 is not None:
+            try:
+                await r7_after_quit()
+            except Exception as exc:  # noqa: BLE001 - the row's evidence; the teardown goes on
+                r7_window["script_problems"].append(
+                    f"settling after the quit failed: {type(exc).__name__}: {exc}"
+                )
+            # Every owner settled, the cancellation held meanwhile ends the
+            # row; the teardown below still runs whole.
+            held = r7_defer.take()
+            if held is not None:
+                raise held
+        if (kill_actor or shim is not None or lifecycle.successor) and daemon:
+            # The owner the frontend recovered to is the one that now has to
+            # leave through its idle exit and be cleaned up. If nothing else
+            # was published since, the killed (or retired) owner's own handle
+            # stays, so cleanup settles it as gone rather than meeting its
+            # descriptor as one it never identified. A different owner that
+            # could not be identified keeps its own record: that is the row's
+            # finding.
+            killed_owner, killed_record = identified, dict(owner)
+            owner.clear()
+            identified = None
+            await find_the_owner()
+            # A stale descriptor can still name the killed owner while it is
+            # an unreaped zombie, and identifying it again is not a successor.
+            again = (
+                identified is not None
+                and killed_owner is not None
+                and (identified.pid, identified.create_time)
+                == (killed_owner.pid, killed_owner.create_time)
+            )
+            replaced = (identified is not None and not again) or owner.get(
+                "pid"
+            ) not in (None, killed_record.get("pid"))
+            if not replaced:
+                identified = killed_owner
+                owner.clear()
+                owner.update(killed_record)
+            owner[
+                "replaced_after_kill" if kill_actor or shim is not None else "replaced"
+            ] = replaced
+            if shim is not None:
+                owner["successor"] = dict(successor)
+        if host.tool is not None:
+            emit("host_stub", "tool.result", **{"tool": READ_TOOL, **host.tool})
+        emit(
+            "host_stub",
+            "process.exit",
+            pid=host.pid,
+            alive_before_quit=host.alive_before_quit,
+            stdin_closed=host.stdin_closed,
+            exit_code=host.exit_code,
+            killed_by_harness=host.killed_by_harness,
+            quit_seconds=host.quit_seconds,
+        )
+
+        if identified is not None and r7 is not None:
+            # H-R7 settled its owners in ``r7_after_quit``: none idles out.
+            log_path = Path(owner.get("log_path") or "")
+            if log_path.is_file():
+                lines = log_path.read_text(errors="replace").splitlines()
+                owner["log_tail"] = lines[-200:]
+                for line in owner["log_tail"]:
+                    emit("owner", "user.output", stream="owner-log", line=line)
+            emit("harness", "owner.exit", **(owner.get("exit") or {}))
+        elif identified is not None:
+            began = time.monotonic()
+            exit_record: dict[str, Any] = {}
+            owner["exit"] = exit_record
+            try:
+                exited = await asyncio.to_thread(
+                    wait_until_dead,
+                    identified.process,
+                    idle_timeout + _OWNER_EXIT_SLACK_SECONDS,
+                )
+            except psutil.Error as exc:
+                exit_record["how"] = f"unknown ({type(exc).__name__})"
+            else:
+                exit_record["how"] = "exited" if exited else "still running"
+                if exited:
+                    exit_record["seconds_after_quit"] = round(
+                        time.monotonic() - began, 3
+                    )
+            if comparison is not None:
+                # Waited for, never caused: the owner's own exit, which
+                # ``settled`` has to follow.
+                comparison["owner_exit"] = {
+                    "how": exit_record["how"],
+                    "seen_ns": time.monotonic_ns(),
+                    "seconds_after_quit": exit_record.get("seconds_after_quit"),
+                }
+            log_path = Path(owner.get("log_path") or "")
+            if log_path.is_file():
+                lines = log_path.read_text(errors="replace").splitlines()
+                owner["log_tail"] = lines[-200:]
+                for line in owner["log_tail"]:
+                    emit("owner", "user.output", stream="owner-log", line=line)
+            # Evidence of which path it took, not a requirement: the line is an
+            # INFO record, and whether the owner's log keeps INFO is a setting.
+            exit_record["idle_line_seen"] = any(
+                _IDLE_EXIT_LINE in line for line in owner.get("log_tail", [])
+            )
+            emit("harness", "owner.exit", **exit_record)
+
+        if shim is not None:
+            # Ended with their Jobs when the server or owner went (Direct's
+            # only boundary). The wait is bounded and settles nothing by
+            # itself: what counts is the verdict taken here, before the
+            # teardown touches the cache or stops the stall host, and nothing
+            # after it can improve that verdict.
+            watch_late_installers()
+            await asyncio.to_thread(fates.settle, _BROWSER_GONE_SECONDS)
+            family_at_teardown = await asyncio.to_thread(
+                family_problems,
+                watcher.observed(),
+                fates,
+                reached(shim.reached_file),
+            )
+        residual = await asyncio.to_thread(
+            wait_for_no_browser,
+            account,
+            _BROWSER_GONE_SECONDS,
+            browser_dir=browsers,
+            browser_exe=browser_exe,
+        )
+        if comparison is not None:
+            # After the actors left by themselves and the passive wait above,
+            # and before anything below can intervene. That wait's empty list
+            # is its own; the census this takes is what the comparison
+            # records as the profile empty.
+            await take_checkpoint(host_comparison.SETTLED)
+        actors_ended = time.time()
+        after = snapshot(account.profile, expected_digest=staged.li_at_digest)
+        result.after = after
+        emit("harness", "profile.snapshot", phase="after", **after.as_event_fields())
+    except BaseException as exc:
+        row_failure = exc
+        raise
+    finally:
+        # Before the teardown releases anything. A row that failed after
+        # reopening the profile still needs the cookie counts; the success
+        # path used to be the only one that took them.
+        try:
+            await asyncio.to_thread(
+                record_cookie_lineage,
+                work_dir / COOKIE_LINEAGE_FILE,
+                point="after-row",
+                profile=account.profile,
+                cookie_file=portable_cookie_path(account.profile),
+                expected_digest=staged.li_at_digest,
+            )
+        except Exception:
+            # A diagnostic miss; the teardown goes on.
+            pass
+        except BaseException as exc:
+            # A cancellation of this read must not skip the releases below or
+            # replace the row's own error, nor be lost: a row that had not
+            # failed raises it once its teardown is done.
+            if row_failure is None:
+                read_cancelled = exc
+        if comparison is not None:
+            # From here on the harness acts: a checkpoint after this marker
+            # could be reading its cleanup rather than the product.
+            comparison["cleanup_began_ns"] = time.monotonic_ns()
+        # Whatever the script left held is let go before anything is ended, so
+        # no browser waits out a deadline on the harness's account. A release
+        # here is the teardown's, and the gate's record says so.
+        for armed in armed_gates:
+            armed.release(by=RELEASED_BY_TEARDOWN)
+        if lifecycle.auth:
+            # Never released here: closed, so a login still asking after the
+            # row cannot sign in on the harness's account.
+            origin.close_login()
+        # An owner left stopped is resumed, and a responder stopped, on every
+        # path, whatever the row did or did not do.
+        restore_stopped("in the teardown")
+        end_commands("in the teardown")
+        for responder in responders:
+            try:
+                responder.stop()
+            except Exception as exc:  # noqa: BLE001 - reported, the teardown goes on
+                teardown.append(f"a declared responder could not be stopped: {exc!r}")
+        if row_record is not None:
+            row_record["cleanup_began_ns"] = time.monotonic_ns()
+            for armed in armed_gates:
+                if armed.entered.is_set():
+                    await wait_for(armed.ended, _GATE_END_SECONDS)
+            row_record["gates"] = [armed.as_record() for armed in armed_gates]
+        if actors_ended is None:
+            actors_ended = time.time()
+        if r7 is not None and not r7_settling_began:
+            # Cancelled or failed before the host's quit was settled: the
+            # same settling, in this teardown, with its cancellations held.
+            try:
+                await r7_after_quit()
+            except Exception as exc:  # noqa: BLE001 - reported, the teardown goes on
+                teardown.append(f"the H-R7 actors could not be settled: {exc!r}")
+        # A failed row's cleanup differs from restoration for reuse: while the
+        # family is not shown ended, a download may still be running, and it
+        # is evidence, not litter.
+        unresolved_family = cache is not None and family_at_teardown != []
+        if cache is not None and not unresolved_family:
+            # Restoration for reuse: the row-private cache goes, and the real
+            # cache is recorded again for the post-quit session.
+            try:
+                cache.dismantle()
+            except Exception as exc:  # noqa: BLE001 - reported, the teardown goes on
+                teardown.append(f"the private browser cache stayed: {exc!r}")
+            try:
+                await asyncio.to_thread(
+                    record_install,
+                    runtime.python,
+                    {**env, "PLAYWRIGHT_BROWSERS_PATH": str(browsers)},
+                )
+            except Exception as exc:  # noqa: BLE001 - reported, the teardown goes on
+                teardown.append(f"the real cache's install was not recorded: {exc!r}")
+        elif cache is not None:
+            # The private cache, its held-back place and the install records
+            # stay exactly as the row left them, and so does what is known of
+            # each installer, read before the harness intervenes below.
+            emit(
+                "harness",
+                "job_query.window",
+                phase="failed-row cleanup",
+                unresolved=family_at_teardown,
+                private_cache=str(cache.directory),
+                held=str(cache.held) if cache.held is not None else None,
+                fates=[fate.as_event_fields() for fate in fates.fates.values()],
+            )
+            teardown.append(
+                f"the installer family was not shown ended, so the private cache "
+                f"{cache.directory} (held back: {cache.held}) and the install "
+                f"records were left as they were"
+            )
+        if stall is not None:
+            stall_url = stall.url
+            stall.stop()
+            if unresolved_family:
+                # Do not credit later exits as pre-intervention settlement.
+                teardown.append(
+                    f"the harness stopped its stall host {stall_url} with the "
+                    f"installer family unresolved; a later exit cannot establish "
+                    f"product settlement before this intervention; its cause "
+                    f"remains unobserved"
+                )
+        # Each helper is ended whatever the one before it did; a failure is
+        # the row's to report.
+        confirmed = [killed["pid"]] if killed.get("exit") == "killed" else []
+        try:
+            # Once its tracees have exited, strace has seen every signal they
+            # sent. H-R7 owns the wait and holds a cancellation for the whole
+            # teardown, so the watcher and the canaries below still stop.
+            if r7 is not None:
+                outcome = await run_owned(
+                    "stop the trace",
+                    oracle.stop,
+                    confirmed_dead=confirmed,
+                    seconds=180.0,
+                    gated=False,
+                    defer=r7_defer,
+                )
+            else:
+                outcome = await asyncio.to_thread(oracle.stop, confirmed_dead=confirmed)
+        except Exception as exc:  # noqa: BLE001 - reported, the teardown goes on
+            teardown.append(f"the signal oracle could not be stopped: {exc!r}")
+            outcome = OracleOutcome(
+                status=O2_INCOMPLETE,
+                required=oracle.required,
+                reasons=[f"the oracle could not be stopped: {exc!r}"],
+            )
+        if r7 is not None:
+            # ``stop`` returning is not the tracer gone: its last wait is
+            # bounded. Asked of the tracer's own process, and kept if not.
+            try:
+                traced_out = oracle.settled()
+            except Exception as exc:  # noqa: BLE001 - an unanswered question settles nothing
+                teardown.append(f"the trace's end could not be asked about: {exc!r}")
+                traced_out = False
+            if not traced_out:
+                retain("the row's trace", lambda grace: oracle.end())
+                teardown.append("the trace is not shown ended; it stays retained")
+        try:
+            # The row's interval ends here: the watcher stops before anything
+            # else starts on the profile.
+            result.watcher = watcher.stop()
+        except Exception as exc:  # noqa: BLE001 - reported, the teardown goes on
+            teardown.append(f"the watcher could not be stopped: {exc!r}")
+        canary_deaths: list[dict[str, Any]] = []
+        try:
+            canary_deaths = canaries.deaths()
+        finally:
+            canaries.stop()
+        observed_events = watcher.observed()
+        o2 = derive_o2(
+            outcome,
+            ProcessHistory(observed_events, outside=[os.getpid()]),
+            canary_deaths=canary_deaths,
+        )
+        emit("harness", "signal.oracle", phase="stop", **outcome.as_event_fields())
+        for call in outcome.calls:
+            emit("harness", "signal.call", **call.as_event_fields())
+        for resolved in o2.resolved:
+            emit("harness", "signal.resolved", **resolved)
+        for death in canary_deaths:
+            emit("canary", "process.death_unattributed", **death)
+        for violation in o2.violations:
+            emit("harness", "signal.violation", violation=violation)
+        if r7 is not None:
+            # The whole transcript first, then the phase: after the real drain
+            # returned, on strace's clock, from the fault's monotonic return.
+            r7_window["clocks"].append(clock_sample("after the trace"))
+            try:
+                text = oracle.out.read_text(errors="replace")
+            except OSError:
+                text = ""
+            returned = published_return(fault_dir) if activation is not None else None
+            boundary = (
+                realtime_interval(returned, r7_window["clocks"])
+                if returned is not None
+                else "no real drain return was published"
+            )
+            principal_pid = (r7_window.get("principal") or [None])[0]
+            r7_phase = read_phase(
+                outcome,
+                text,
+                owner=principal_pid,
+                guardian=(r7_window.get("guardian") or [None])[0],
+                owner_group=r7_window.get("owner_group"),
+                boundary=boundary,
+                history=ProcessHistory(observed_events, outside=[os.getpid()]),
+                marker=r7_window.get("marker_digest"),
+            )
+            r7_shared = shared_reduction(o2.resolved, len(o2.unknowns), r7_phase)
+            emit(
+                "harness",
+                "r7.phase",
+                collection=r7_phase.collection,
+                reasons=list(r7_phase.reasons),
+                boundary=list(r7_phase.boundary) if r7_phase.boundary else None,
+                clock=r7_phase.clock,
+                calls=len(r7_phase.calls),
+                tracees=r7_phase.tracees,
+            )
+        launched = owner_launches(observed_events)
+        # The row's own runtime's gate, and the candidate's: a baseline row
+        # reaching the candidate's gate is an owner start attempt all the same.
+        gated = owner_gates(
+            observed_events,
+            [gate_script(runtime.checkout), gate_script(REPO_ROOT)],
+        )
+        if runtime.frozen:
+            result.runtime_failures = interpreter_failures(
+                observed_events,
+                # The declared shim venv or fault overlay is where the actors
+                # start from; that it imports the runtime's code was checked
+                # when it was made.
+                replace(runtime, python=shim.python)
+                if shim
+                else replace(runtime, python=overlay.python)
+                if overlay
+                else runtime,
+                candidate_prefix=sys.prefix,
+                owner_expected=bool(owner.get("pid")),
+            )
+        row_requests = list(origin.requests[request_mark:])
+        row_decisions = list(proxy.decisions[decision_mark:])
+        # The owner's whole log, every owner of the row's in turn, taken last
+        # before the cleanup below removes the daemon directory it sits in.
+        # The event log has only its tail, and the browser's exit, crashed or
+        # killed, is near the start of a row. Nothing in the verdict reads it.
+        with contextlib.suppress(Exception):
+            keep_capped(
+                Path(
+                    owner.get("log_path") or account.layout.log_path(account.auth_root)
+                ),
+                work_dir / OWNER_LOG_FILE,
+            )
+        result.cleanup = retire_daemon_state(
+            account, cleanup_owner if cleanup_owner is not None else identified
+        )
+        if r7 is not None and daemon:
+            # Whatever the root still publishes is an owner this row
+            # identified, and settled or retained, or it is held: cleanup
+            # left it running unsignalled.
+            known = {
+                (owner_identity.pid, owner_identity.instance_id)
+                for owner_identity in (
+                    identified,
+                    cleanup_owner,
+                    r7_handles.get("successor"),
+                )
+                if owner_identity is not None
+            }
+            try:
+                if account.layout.descriptor_path(account.auth_root).exists():
+                    left_published = account.layout.read(account.auth_root)
+                    if (
+                        left_published is not None
+                        and (left_published.pid, left_published.instance_id)
+                        not in known
+                    ):
+                        hold_publication(
+                            left_published.pid,
+                            "still published after cleanup, and not an owner this "
+                            "row identified",
+                        )
+            except Exception as exc:  # noqa: BLE001 - unread is unknown, and held
+                hold_publication(None, f"after cleanup: {type(exc).__name__}: {exc}")
+        swept = sweep_browsers(account)
+        for request in row_requests:
+            emit(
+                "origin",
+                "browser.request",
+                t=request.t or None,
+                host=request.host,
+                server_name=request.server_name,
+                path=request.path,
+                cookie_names=list(request.cookie_names),
+                session_valid=request.session_valid,
+                monotonic_ns=request.monotonic_ns,
+                session_digests=list(request.session_digests),
+                redirected=request.redirected,
+            )
+        for decision in row_decisions:
+            emit(
+                "proxy",
+                "proxy.decision",
+                method=decision.method,
+                target=decision.target,
+                host=decision.host,
+                port=decision.port,
+                forwarded=decision.forwarded,
+            )
+        if r7 is not None:
+            # The teardown is done: a cancellation it held is raised now, and
+            # nothing is preserved or measured after it. A cancellation that
+            # ended the try is already on its way; a later one is not lost
+            # behind another failure.
+            held = r7_defer.take()
+            if held is not None and not isinstance(row_failure, asyncio.CancelledError):
+                if row_failure is not None:
+                    held.add_note(
+                        f"held while the row's teardown ran after {row_failure!r}"
+                    )
+                if read_cancelled is not None:
+                    held.add_note(
+                        f"the after-row lineage read was also cancelled: "
+                        f"{read_cancelled!r}"
+                    )
+                raise held
+        if read_cancelled is not None:
+            # Last, so H-R7's held cancellation is raised first and keeps a
+            # note of this one; either way the row does not go on to a verdict.
+            raise read_cancelled
+
+    host = result.host
+    assert host is not None
+    census = profile_census(account, browser_exe=browser_exe, browser_dir=browsers)
+    refusals = preservation_refusals(
+        result.cleanup,
+        owner_exit=(owner.get("exit") or {}).get("how") if daemon else None,
+        residual=residual,
+        swept=swept,
+        remaining=census.pids,
+        census_unresolved=census.unresolved,
+        open_possible_browsers=[
+            episode
+            for episode in (result.watcher or {}).get("relevant_read_failures") or []
+            if episode.get("resolution") == "open"
+        ],
+    )
+    if expect_owner and identified is None:
+        refusals.append("the row's owner was never identified")
+    # Every actor that could plant a failure has exited by now; a record
+    # still missing is simply not a witness.
+    records = reached(shim.reached_file) if shim is not None else []
+    observation = job_query_problems(
+        shim,
+        fates=fates,
+        window=job_window,
+        script_error=host.script_error,
+        observed=observed_events,
+        records=records,
+        host=host_failures(host),
+        watcher=watcher_failures(
+            result.watcher,
+            actors_began=actors_began,
+            actors_ended=actors_ended,
+            browser_key=account.browser_key,
+        ),
+        cleanup=list(result.cleanup.failures) if result.cleanup else [],
+        before_cleanup=family_at_teardown,
+    )
+    # The census, cleanup and owner checks, before H-R11 adds its own: the
+    # continuation's validity carries these, and them once.
+    settled_refusals = list(refusals)
+    if comparison is not None:
+        # A checkpoint worker or contender helper not shown finished could
+        # still be asking about the profile: nothing is launched on it.
+        refusals += [f"{row}: {p}" for p in settlement_problems()]
+        # A step the row refused to take leaves it unsettled: nothing is
+        # launched on the profile after it either.
+        refusals += [f"{row}: {p}" for p in comparison.get("blocked") or []]
+    if shim is not None:
+        # An installer whose end was not observed may still be running on the
+        # profile's setup, so no session starts after the row until every one
+        # of them is an observed exit, and every lifetime the drain asked
+        # about is one of them.
+        refusals += [f"H-R11 evidence incomplete: {p}" for p in observation]
+    if r7 is not None:
+        # Before preservation: the original actors, and whatever the harness
+        # ended, positively gone, the lock free, nothing of the row's own
+        # still running or unsettled. Any of that missing launches nothing.
+        r7_refusals = r7_settled_problems(r7_window, daemon=daemon)
+        try:
+            point = await lease_checkpoint(BEFORE_PRESERVATION)
+            r7_refusals += checkpoint_problems(point, expect=lease_probe.FREE)
+        except Exception as exc:  # noqa: BLE001 - a refusal, and the row's evidence
+            r7_refusals.append(f"the lock could not be asked about: {exc}")
+        r7_refusals += settlement_problems()
+        r7_window["before_preservation"] = r7_refusals
+        refusals += [f"H-R7: {p}" for p in r7_refusals]
+    if row_record is not None:
+        # A worker the script started and did not see finish could still be
+        # asking about the profile: nothing is launched on it.
+        refusals += [f"{row}: {p}" for p in settlement_problems()]
+    # A row whose finding is a cleared or failed session launches nothing
+    # that could repair it (``preservation_policy_refusals``): by its own
+    # declaration, so not a failure, once nothing else refused it.
+    withheld = preservation_policy_refusals(lifecycle.preservation)
+    post_quit: PostQuit | None
+    if refusals:
+        # Nothing is launched. The session's fate after the row is unknown, and
+        # the reasons are the row's failures.
+        post_quit = PostQuit(
+            valid=None, failures=[f"post-quit not run: {r}" for r in refusals]
+        )
+    elif withheld and lifecycle.auth:
+        # Nothing that could sign in again runs; the origin itself says
+        # whether the session on disk is one it accepts.
+        digests = after.li_at_digests if after is not None else ()
+        post_quit = PostQuit(
+            valid=(
+                any(origin.accepts_digest(value) for value in digests)
+                if digests
+                else None
+            ),
+            withheld=lifecycle.preservation,
+            origin_judged=True,
+        )
+    elif withheld:
+        post_quit = PostQuit(valid=None, withheld=lifecycle.preservation)
+    else:
+        post_quit = await observe_preservation(
+            account,
+            origin,
+            proxy,
+            command=command,
+            browsers=browsers,
+            chrome_path=chrome_path,
+            work_dir=work_dir,
+            on_stderr=lambda line: emit(
+                "frontend", "user.output", stream="stderr", phase="post-quit", line=line
+            ),
+            environment=runtime_settings,
+        )
+    emit(
+        "harness",
+        "tool.result",
+        phase="post-quit",
+        session_valid=post_quit.valid,
+        feed_requests=post_quit.feed_requests,
+        failures=post_quit.failures,
+        withheld=post_quit.withheld,
+        origin_judged=post_quit.origin_judged,
+    )
+    result.post_quit = post_quit
+    result.owner = owner or None
+    # Only a confirmation the script recorded, and only one this harness
+    # knows: anything else authorizes nothing and is the row's problem.
+    authorized: str | None = None
+    if (lifecycle.commands or lifecycle.auth) and row_record is not None:
+        claimed = row_record.get("authorized")
+        if claimed == LOGOUT and lifecycle.commands:
+            authorized = LOGOUT
+        elif (
+            claimed in REPLACING
+            and lifecycle.auth
+            and [a.kind for a in authorizations] == [claimed]
+        ):
+            # Only one the harness itself recorded, with its reading.
+            authorized = claimed
+        elif claimed is not None:
+            row_record["observation_problems"].append(
+                f"the row recorded an authorization the harness does not know: "
+                f"{claimed!r}"
+            )
+    #: Each row request as the packet keeps it, with the session digests the
+    #: lineage reads which session was in use from.
+    request_records = [
+        {
+            "host": request.host,
+            "path": request.path,
+            "session_valid": request.session_valid,
+            "t": request.t,
+            "monotonic_ns": request.monotonic_ns,
+            "session_digests": list(request.session_digests),
+            "redirected": request.redirected,
+        }
+        for request in row_requests
+    ]
+    lineage: ReplacementLineage | None = None
+    if lifecycle.auth:
+        login_record = origin.login_record()
+        lineage = replacement_lineage(
+            before,
+            after,
+            authorizations[0] if authorized in REPLACING else None,
+            login_record["issued"],
+            request_records,
+        )
+        emit("harness", "r17.lineage", **lineage.as_record())
+        if row_record is not None:
+            row_record["login"] = login_record
+            row_record["lineage"] = lineage.as_record()
+
+    result.vector, result.failures = judge_row(
+        Observations(
+            daemon=daemon,
+            browser_key=account.browser_key,
+            host=host,
+            owner=owner,
+            cleanup=result.cleanup,
+            swept=swept,
+            residual=residual,
+            watcher=result.watcher,
+            actors_began=actors_began,
+            actors_ended=actors_ended,
+            row_requests=row_requests,
+            before=before,
+            after=after,
+            post_quit=post_quit,
+            expect_owner=expect_owner,
+            daemon_state_existed=result.cleanup.existed,
+            owner_launches=launched,
+            owner_gates=gated,
+            o2=o2,
+            killed=killed or None,
+            idle_timeout=idle_timeout,
+            initial=lifecycle.initial,
+            termination=lifecycle.termination,
+            expect_session=lifecycle.expect_session,
+            authorized=authorized,
+            lineage=lineage,
+        )
+    )
+    if row_record is not None:
+        # From the row's completed history: what the origin served, in order,
+        # with its arrival on the monotonic clock the call records share.
+        row_record["requests"] = request_records
+        # Every name the row's proxy forwarded and refused, from its log: the
+        # whole of what left the row through it.
+        row_record["egress"] = {
+            "forwarded": sorted({d.host for d in row_decisions if d.forwarded}),
+            "refused": sorted({d.host for d in row_decisions if not d.forwarded}),
+        }
+        # The owners and release gates the row started, once per lifetime,
+        # read after the watcher stopped so each carries its last read: what a
+        # loss row's verdict counts launches from (``owner_launches``), which
+        # ties a Windows venv launcher to the interpreter it started. The
+        # watcher labels a gate that runs the owner as an owner too.
+        owners, gates = launch_lifetimes(
+            observed_events,
+            [gate_script(runtime.checkout), gate_script(REPO_ROOT)],
+            (result.watcher or {}).get("sample_log"),
+        )
+        row_record["owner_processes"] = owners
+        row_record["gate_processes"] = gates
+        row_record["browser_roots"] = browser_lineage(observed_events)
+        row_record["browser_processes"] = browser_processes(
+            observed_events, account.browser_key
+        )
+        # Every server and frontend, each lifetime once: what a browser's
+        # launcher is tied to the host that started it by.
+        row_record["frontend_processes"] = frontend_lifetimes(
+            observed_events, (result.watcher or {}).get("sample_log")
+        )
+        # Whether the row's auth root got daemon state or a descriptor, as
+        # cleanup and the owner lookup found them; neither is ever created
+        # by the harness on a row that must stay Direct.
+        row_record["daemon_state_existed"] = result.cleanup.existed
+        row_record["descriptor_present"] = owner.get("descriptor_present")
+    if comparison is not None:
+        # Selected by the row, so its record is required: a missing window, a
+        # failed hook or script fails here however healthy the vector is.
+        if second_host:
+            # From the row's completed history: its feed requests, with their
+            # arrival on the monotonic clock, the owners and release gates it
+            # started, and, as evidence only, its distinct roots and how host
+            # A's server gave the browser up.
+            comparison["requests"] = [
+                {
+                    "host": request.host,
+                    "path": request.path,
+                    "session_valid": request.session_valid,
+                    "t": request.t,
+                    "monotonic_ns": request.monotonic_ns,
+                }
+                for request in feed_requests(row_requests)
+            ]
+            owners, gates = launch_lifetimes(
+                observed_events,
+                [gate_script(runtime.checkout), gate_script(REPO_ROOT)],
+                (result.watcher or {}).get("sample_log"),
+            )
+            comparison["owner_processes"] = owners
+            comparison["gate_processes"] = gates
+            comparison["owner_gates"] = list(gated)
+            comparison["evidence"] = {
+                "distinct_roots": host_comparison.distinct_roots(
+                    observed_events, account.browser_key
+                ),
+                "handoff": host_comparison.handoff_reading(host.stderr),
+            }
+        result.comparison = comparison
+    if lifecycle.recorded:
+        # Selected by the row, so its record is required: a missing window, a
+        # failed hook or script fails here however healthy the vector is. The
+        # verdict is the row's registered one (``ROW_VERDICTS``), never none.
+        judged = comparison if comparison is not None else row_record
+        problems = (
+            ROW_VERDICTS[row](judged, daemon=daemon)
+            if judged is not None
+            else ["the row kept no record for its verdict to judge"]
+        )
+        if judged is not None:
+            judged["problems"] = problems
+        result.record = row_record
+        result.failures += [f"{row}: {problem}" for problem in problems]
+    if shim is not None:
+        for fate in fates.fates.values():
+            emit("harness", "installer.fate", **fate.as_event_fields())
+        if fates.alive():
+            observation.append(
+                f"installers outlived the row: {[f.pid for f in fates.alive()]}"
+            )
+        result.failures += observation
+        # A known-bad control keeps its behaviour, never a failure to observe,
+        # to settle or to clean up after it: every experiment is held to these.
+        result.continuation = native_continuation(
+            experiment=experiment,
+            run=log.run,
+            daemon=daemon,
+            identity=identity,
+            shim=shim,
+            vector=result.vector,
+            host=host,
+            window=job_window,
+            fates=fates,
+            observed=observed_events,
+            records=records,
+            events=logged(shim.reached_file),
+            successor=successor,
+            validity=[
+                *observation,
+                *settled_refusals,
+                *result.runtime_failures,
+                *(f"canary placement: {problem}" for problem in canary_problems),
+                *(f"teardown: {problem}" for problem in teardown),
+            ],
+        )
+        emit(
+            "harness",
+            "shim.reached",
+            lines=records,
+            events=logged(shim.reached_file),
+            witnesses=list(result.continuation.witnesses),
+            shim_sha256=shim.shim_sha256,
+        )
+        emit(
+            "harness",
+            "job_query.continuation",
+            # The event's own experiment and run are the row's; the vector is
+            # in row.outcome and the witnesses in shim.reached.
+            **{
+                name: value
+                for name, value in asdict(result.continuation).items()
+                if name not in ("experiment", "run", "vector", "witnesses")
+            },
+        )
+    if r7 is not None:
+        result.unconfirmed = r7_continuation(
+            r7,
+            window=r7_window,
+            experiment=experiment,
+            run=log.run,
+            daemon=daemon,
+            identity=identity,
+            fault_dir=fault_dir,
+            activation=activation,
+            runtime=runtime,
+            env=env,
+            host=host,
+            vector=result.vector,
+            phase=r7_phase,
+            observed=observed_events,
+            shared=r7_shared,
+            validity=[
+                *host_failures(host),
+                *(
+                    [f"the H-R7 script failed: {host.script_error}"]
+                    if host.script_error
+                    else []
+                ),
+                *r7_window["script_problems"],
+                *(
+                    []
+                    if r7_window.get("script_ended") is True
+                    else ["the H-R7 script did not run to its end"]
+                ),
+                *(
+                    f"activation refused: {p}"
+                    for p in r7_window.get("activation_refused") or []
+                ),
+                *(
+                    f"watcher: {problem}"
+                    for problem in watcher_failures(
+                        result.watcher,
+                        actors_began=actors_began,
+                        actors_ended=actors_ended,
+                        browser_key=account.browser_key,
+                    )
+                ),
+                *(f"cleanup: {p}" for p in result.cleanup.failures),
+                *settled_refusals,
+                *(
+                    f"before preservation: {p}"
+                    for p in r7_window["before_preservation"]
+                ),
+                *result.runtime_failures,
+                *(f"canary placement: {problem}" for problem in canary_problems),
+                *(f"teardown: {problem}" for problem in teardown),
+            ],
+        )
+        (work_dir / "r7.json").write_text(
+            json.dumps(
+                {**r7_window, "clocks": [asdict(s) for s in r7_window["clocks"]]},
+                indent=2,
+                default=str,
+            )
+            + "\n"
+        )
+        emit(
+            "harness",
+            "r7.continuation",
+            **{
+                name: value
+                for name, value in asdict(result.unconfirmed).items()
+                if name not in ("experiment", "run", "vector", "phase")
+            },
+        )
+    result.killed = killed or None
+    result.o2 = o2
+    result.failures += result.runtime_failures
+    result.failures += [f"canary placement: {problem}" for problem in canary_problems]
+    result.failures += [f"teardown: {problem}" for problem in teardown]
+    (work_dir / "failures.json").write_text(
+        json.dumps(
+            {
+                "label": result.label,
+                "row": row,
+                "vector": asdict(result.vector),
+                "failures": result.failures,
+                "coordination": coordination_reading(result.vector),
+                "killed": result.killed,
+                "o2": asdict(o2),
+                "continuation": (
+                    asdict(result.continuation)
+                    if result.continuation is not None
+                    else None
+                ),
+                "unconfirmed": (
+                    asdict(result.unconfirmed)
+                    if result.unconfirmed is not None
+                    else None
+                ),
+                "comparison": result.comparison,
+                **({"record": result.record} if result.record is not None else {}),
+            },
+            indent=2,
+            default=str,
+        )
+        + "\n"
+    )
+    emit(
+        "harness",
+        "row.outcome",
+        mode=mode,
+        reference=reference or (DIRECT_REFERENCE if not daemon else None),
+        coordination=coordination_reading(result.vector),
+        vector=asdict(result.vector),
+        failures=result.failures,
+        cleanup=asdict(result.cleanup),
+        killed=result.killed,
+        o2_state=o2.row,
+        o2_traced=o2.state,
+    )
+    return result

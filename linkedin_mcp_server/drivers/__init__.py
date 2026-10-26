@@ -1,7 +1,7 @@
 """
-Browser management package for LinkedIn scraping.
+Browser management package for reading LinkedIn.
 
-This package provides Patchright browser management using linkedin_scraper v3's
+This package provides Patchright browser management using the core
 BrowserManager with persistent context. It implements a singleton pattern for
 browser instances to ensure profile persistence across multiple tool calls
 while handling authentication and proper resource cleanup.

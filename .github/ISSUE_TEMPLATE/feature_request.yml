@@ -3,24 +3,82 @@ description: Suggest an improvement or new capability
 title: "[FEATURE] "
 labels: ["enhancement"]
 body:
-  - type: textarea
-    id: feature-description
+  - type: markdown
     attributes:
-      label: Feature Description
-      description: What you want to happen.
+      value: |
+        Search open and closed issues first. Add your evidence to a matching issue. Otherwise, fill this packet. Keep excerpts short and review attachments before posting.
+  - type: textarea
+    id: packet-summary
+    attributes:
+      label: "Packet Summary"
+      description: "Give five short lines: proposed tool or capability; UI language and region; the gap and who needs it; related issue numbers; your verdict after checking existing tools."
+      placeholder: |
+        Proposed tool or capability:
+        UI language and region:
+        Gap and who needs it:
+        Related issues:
+        Verdict:
     validations:
       required: true
   - type: textarea
-    id: use-case
+    id: related-issues
     attributes:
-      label: Use Case
-      description: Why this is useful.
+      label: "Related Issues"
+      description: "List the existing tools or documented alternatives you checked. Give your open and closed issue searches, link the closest results, and explain the match or difference in one sentence. If no result matches, include the searches that found none."
+      placeholder: |
+        Checked tools:
+        Open and closed searches:
+        Candidate issues:
+        Match or difference:
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: "Runtime"
+      description: "Give the server version or commit, installation method, MCP client, OS, and browser mode. Use the installed version, not 'latest'. Name uvx, Docker, uv run, or the actual launcher you use. Mark facts you could not establish."
+      placeholder: |
+        Server version or commit:
+        Installation method:
+        MCP client:
+        OS:
+        Browser mode (headless or visible):
+    validations:
+      required: true
+  - type: textarea
+    id: linkedin-variant
+    attributes:
+      label: "LinkedIn Variant"
+      description: "Give LinkedIn's UI language, country or region, and product: Free, Premium, Sales Nav, or Recruiter. Describe the target relationship with URL patterns such as /in/<person>/edit/intro/ or /messaging/compose/, or state that it is your own profile. Use URL and attribute evidence to identify actions. If setup failed before LinkedIn loaded, say so."
+      placeholder: |
+        UI language:
+        Country or region:
+        Product:
+        Target relationship:
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: |
+        Share a redacted copy. Replace names, message text, credentials, machine names, and local profile paths. Keep argument keys, URL route patterns, and error names. Put full redacted traces in a gist and link it here.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: "Evidence"
+      description: "Show the gap using the current tools and your account's page. Include actual calls and arguments, returned url and section names, errors or their absence, and a short redacted excerpt. Identify proposed tool names and calls as unimplemented or not run. A page URL and screenshot can establish a capability gap without inventing a tool result."
+    validations:
+      required: true
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: "Reproduction"
+      description: "Give one line that shows the current gap on your machine or account. A page navigation is enough when no tool exists. Label any proposed future call as not run."
     validations:
       required: true
   - type: textarea
     id: suggested-approach
     attributes:
-      label: Suggested Approach
-      description: How you'd implement it. Leave blank if unsure.
+      label: "Suggested Change"
+      description: "Describe the change you propose. Keep untested implementation ideas separate from the evidence."
     validations:
       required: false

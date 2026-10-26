@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "btca-local": {
+      "source": "davis7dotsh/better-context",
+      "sourceType": "github",
+      "skillPath": "skills/btca-local/SKILL.md",
+      "computedHash": "1888cc18192c3e0356fd8a4333b5e8ea60524f920a8dbc9c203c39d7e8de7e56"
+    }
+  }
+}

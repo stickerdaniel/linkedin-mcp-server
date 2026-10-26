@@ -3,25 +3,53 @@ description: Report incorrect, missing, or confusing documentation
 title: "[DOCS] "
 labels: ["documentation"]
 body:
-  - type: input
-    id: location
+  - type: markdown
     attributes:
-      label: Location
-      description: File path, section name, or URL.
-      placeholder: "e.g. README.md, Docker setup section"
+      value: |
+        Search open and closed issues first. Add your evidence to a matching issue. Otherwise, fill this packet. Keep excerpts short and review attachments before posting.
+  - type: textarea
+    id: packet-summary
+    attributes:
+      label: "Packet Summary"
+      description: "Give five short lines: documentation area; locale or not applicable; what is wrong; related issue numbers; your verdict after checking the documented behavior."
+      placeholder: |
+        Documentation area:
+        Locale:
+        What is wrong:
+        Related issues:
+        Verdict:
     validations:
       required: true
   - type: textarea
-    id: problem
+    id: related-issues
     attributes:
-      label: Problem
-      description: What's wrong or confusing.
+      label: "Related Issues"
+      description: "List the existing tools or documented alternatives you checked. Give your open and closed issue searches, link the closest results, and explain the match or difference in one sentence. If no result matches, include the searches that found none."
+      placeholder: |
+        Checked tools:
+        Open and closed searches:
+        Candidate issues:
+        Match or difference:
     validations:
       required: true
   - type: textarea
-    id: suggested-fix
+    id: evidence
     attributes:
-      label: Suggested Fix
-      description: What it should say instead. Leave blank if unsure.
+      label: "Evidence"
+      description: "Link the documentation path or URL and quote the short passage at issue. Give the observed behavior or the source that supports the correction. Add runtime details only when they matter to the documentation claim."
+    validations:
+      required: true
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: "Reproduction"
+      description: "Give one command, navigation path, or reading step that exposes the problem. State when the finding comes from source review rather than a run."
+    validations:
+      required: true
+  - type: textarea
+    id: suggested-approach
+    attributes:
+      label: "Suggested Change"
+      description: "Describe the change you propose. Keep untested implementation ideas separate from the evidence."
     validations:
       required: false

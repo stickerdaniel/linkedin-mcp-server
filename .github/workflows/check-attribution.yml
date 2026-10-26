@@ -1,44 +1,28 @@
 name: Check Attribution
 
 on:
-  pull_request:
-    branches: [main]
+  # Stacked pull requests need the same checks before reaching main.
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   check-bot-coauthors:
-    if: ${{ !endsWith(github.actor, '[bot]') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Check agent attribution and hidden Unicode
+        uses: stickerdaniel/post-no-bills@207fb1f8bd0b30d17bc0b43f19c811f8fd87c9a5 # v4.0.0
         with:
-          fetch-depth: 0
-
-      - name: Check for bot Co-Authored-By lines
+          model-attribution: host
+        # Bind live evidence to this run, not a later branch-tip lookup.
         env:
-          BASE_REF: ${{ github.base_ref }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          COMMITS=$(git log --format='%H' "origin/${BASE_REF}..${HEAD_SHA}" 2>/dev/null || true)
-
-          if [ -z "$COMMITS" ]; then
-            echo "No commits to check"
-            exit 0
-          fi
-
-          FOUND=0
-          for sha in $COMMITS; do
-            MSG=$(git log --format='%B' -1 "$sha")
-            if echo "$MSG" | grep -qi 'co-authored-by.*\(noreply@anthropic\.com\|Copilot@users\.noreply\.github\.com\|greptile-apps\[bot\]\)'; then
-              echo "::error::Commit $sha contains a bot Co-Authored-By line. Remove it with: git rebase -i and edit the commit message."
-              echo "$MSG" | grep -i 'co-authored-by.*\(noreply@anthropic\|copilot\|greptile\)'
-              FOUND=1
-            fi
-          done
-
-          if [ "$FOUND" -eq 1 ]; then
-            echo ""
-            echo "To fix: run 'git rebase -i origin/main', change 'pick' to 'reword' for flagged commits, then remove the Co-Authored-By lines."
-            exit 1
-          fi
-
-          echo "All commits clean."
+          GUARDRAILS_WORKFLOW_REF: ${{ github.workflow_ref }}
+          GUARDRAILS_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          GUARDRAILS_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GUARDRAILS_BASE_SHA: ${{ github.event.pull_request.base.sha }}

@@ -6,19 +6,30 @@ on:
     branches: [main]
     paths: ['pyproject.toml']  # Only trigger when pyproject.toml changes
 
+# Every job then declares what it needs on top of this. Nothing here may run
+# third-party code and hold a credential it does not need: a job with
+# id-token: write can mint an OIDC token for PyPI, so anything executing a
+# build backend, an npm package or a Dockerfile stays in a job without it.
+permissions:
+  contents: read
+
 jobs:
   check-version-bump:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       should-release: ${{ steps.check.outputs.should-release }}
       new-version: ${{ steps.check.outputs.new-version }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 2  # Need to compare with previous commit
+          persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -45,41 +56,364 @@ jobs:
             echo "should-release=false" >> $GITHUB_OUTPUT
           fi
 
-  release:
+      # Composed here, before build and publish-pypi, so a CHANGELOG without a
+      # section for this version stops the release while nothing exists yet
+      # that would have to be withdrawn. The previous version is read on its
+      # own and an unreadable parent manifest fails the step. The author of
+      # every pull request the section links is looked up for the credit
+      # line, and a failed lookup fails the step too. An author other than the
+      # owner or a bot whose merged pull requests all sit in this section is
+      # searched for and named as a first contribution.
+      - name: Compose release notes
+        if: steps.check.outputs.should-release == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.new-version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PREVIOUS=$(git show HEAD~1:pyproject.toml | python3 -c \
+            'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["project"]["version"])')
+          echo "Previous version: $PREVIOUS"
+          git ls-remote --exit-code --tags origin "refs/tags/v$PREVIOUS"
+          PULLS=$(python3 scripts/compose_release_notes.py --list-pull-requests \
+            --changelog docs/CHANGELOG.md \
+            --version "$VERSION" \
+            --repository "$GITHUB_REPOSITORY")
+          : > "$RUNNER_TEMP/pr-authors.txt"
+          for N in $PULLS; do
+            LOGIN=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$N" --jq .user.login)
+            printf '%s %s\n' "$N" "$LOGIN" >> "$RUNNER_TEMP/pr-authors.txt"
+          done
+          python3 -c 'import json, sys; print(json.dumps(dict(line.split() for line in sys.stdin)))' \
+            < "$RUNNER_TEMP/pr-authors.txt" > "$RUNNER_TEMP/pr-authors.json"
+          OWNER=${GITHUB_REPOSITORY%%/*}
+          cut -d' ' -f2 "$RUNNER_TEMP/pr-authors.txt" | sort -u > "$RUNNER_TEMP/authors.txt"
+          : > "$RUNNER_TEMP/first-contributors.txt"
+          # Read on fd 3, so nothing inside the loop can consume the list.
+          while read -r LOGIN <&3; do
+            case "$LOGIN" in *'[bot]') continue ;; esac
+            if printf '%s\n' "$LOGIN" | grep -qixF "$OWNER"; then continue; fi
+            # Search allows 30 requests a minute; stay under it however many
+            # authors a release credits.
+            sleep 2
+            MERGED=$(gh api -X GET search/issues \
+              -f q="repo:$GITHUB_REPOSITORY is:pr is:merged author:$LOGIN" \
+              -f per_page=100 \
+              --jq '[.incomplete_results, .total_count, .items[].number] | map(tostring) | join(" ")')
+            # Only a complete search that finds this release's pull request and
+            # nothing older names a first contribution; a search that timed out
+            # or found nothing leaves the author unmarked.
+            FIRST=$(python3 -c 'import sys; incomplete, total, *merged = sys.argv[1].split(); print(incomplete == "false" and bool(merged) and int(total) <= 100 and set(merged) <= set(sys.argv[2].split()))' \
+              "$MERGED" "$PULLS")
+            if [ "$FIRST" = True ]; then
+              echo "$LOGIN" >> "$RUNNER_TEMP/first-contributors.txt"
+            fi
+          done 3< "$RUNNER_TEMP/authors.txt"
+          python3 -c 'import json, sys; print(json.dumps(sys.stdin.read().split()))' \
+            < "$RUNNER_TEMP/first-contributors.txt" > "$RUNNER_TEMP/first-contributors.json"
+          python3 scripts/compose_release_notes.py \
+            --changelog docs/CHANGELOG.md \
+            --template .github/RELEASE_NOTES_TEMPLATE.md \
+            --fragments-dir changelog.d \
+            --version "$VERSION" \
+            --previous-version "$PREVIOUS" \
+            --repository "$GITHUB_REPOSITORY" \
+            --pr-authors "$RUNNER_TEMP/pr-authors.json" \
+            --first-contributors "$RUNNER_TEMP/first-contributors.json" \
+            --pyproject pyproject.toml \
+            --output RELEASE_NOTES.md
+
+      - name: Upload release notes
+        if: steps.check.outputs.should-release == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: RELEASE_NOTES.md
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  # Builds the distributions without any publishing or administration
+  # credentials: the build backend is third-party code and must not run where
+  # it could reach the OIDC identity. Its output travels to the publishing job
+  # as an artifact.
+  build:
     needs: check-version-bump
     if: needs.check-version-bump.outputs.should-release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+
+      # requirements/build-constraints.txt pins the build backend to a hashed version, so a
+      # tampered setuptools release cannot slip into the distributions. The
+      # requirement in pyproject.toml stays a lower bound, because an exact pin
+      # there would be baked into every published sdist.
+      - name: Build package distributions
+        run: |
+          uv build --no-sources --build-constraint requirements/build-constraints.txt --require-hashes
+          echo "Built package distributions:"
+          ls -lh dist/
+
+      - name: Optimize uv cache for CI
+        run: uv cache prune --ci
+
+      # The upload is not the last thing the job does: a post step such as the
+      # uv cache save can still fail it. Artifacts are immutable, so overwrite
+      # keeps a retry from tripping over the one the failed attempt wrote.
+      - name: Upload distributions
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  # PyPI is the cutover-critical artifact: publish first so a failure in any
+  # later job (Docker build, MCPB pack) cannot leave the README pointing at a
+  # package version that does not exist yet.
+  #
+  # This job holds the OIDC identity of the project, so it runs no repository
+  # code: no checkout, no build, only the artifact download and the upload.
+  publish-pypi:
+    needs: [check-version-bump, build]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/mcp-server-linkedin/${{ needs.check-version-bump.outputs.new-version }}/
+    permissions:
+      id-token: write  # Required for PyPI Trusted Publishing
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          print-hash: true
+          verbose: true
+          skip-existing: true
+
+  # Writes the released version into the repository and tags it. Runs nothing
+  # but checkout and the tools the runner ships with, so the admin token never
+  # shares a job with a package manager.
+  prepare-release:
+    needs: [check-version-bump, publish-pypi]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.check-version-bump.outputs.new-version }}
     permissions:
       contents: write
-      packages: write
-      id-token: write  # Required for PyPI Trusted Publishing
-
+    outputs:
+      release-sha: ${{ steps.release-sha.outputs.release-sha }}
     steps:
+      # The only checkout that keeps its credentials: this job pushes the
+      # version commit and the tag. fetch-depth: 0 brings the existing tags in
+      # for the duplicate check below.
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 # zizmor: ignore[artipacked]
         with:
           fetch-depth: 0
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          enable-cache: true
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
       - name: Update manifest.json and docker-compose.yml version
         run: |
           set -e
           sed -i 's/"version": ".*"/"version": "'$VERSION'"/' manifest.json
-          sed -i 's/stickerdaniel\/linkedin-mcp-server:[^ ]*/stickerdaniel\/linkedin-mcp-server:'$VERSION'/' docker-compose.yml
+          # Stop at a quote as well as a space. `[^ ]*` swallowed the closing
+          # quote of a quoted image reference, which YAML then rejects and this
+          # step never notices, because sed reports success either way.
+          sed -i 's|stickerdaniel/linkedin-mcp-server:[^ "'"'"']*|stickerdaniel/linkedin-mcp-server:'$VERSION'|' docker-compose.yml
           echo "✅ Updated manifest.json and docker-compose.yml to version $VERSION"
+
+      # server.json carries the version in three places, one of them inside an
+      # image reference. sed would leave any it failed to match untouched and
+      # exit 0, which ships a registry entry pointing at a release that is not
+      # the one just built. This edits the parsed document and fails loudly
+      # instead. `tests/test_server_json.py` pins the output format, so the
+      # rewrite is a pure version change and never a reformat.
+      - name: Update server.json version
+        run: |
+          set -e
+          python3 - "$VERSION" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          path = Path(".github/mcp/server.json")
+          doc = json.loads(path.read_text(encoding="utf-8"))
+
+          doc["version"] = version
+          for package in doc["packages"]:
+              if package["registryType"] == "pypi":
+                  package["version"] = version
+              elif package["registryType"] == "oci":
+                  repository, _, _tag = package["identifier"].rpartition(":")
+                  package["identifier"] = f"{repository}:{version}"
+              else:
+                  raise SystemExit(
+                      f"unhandled registryType {package['registryType']!r}: "
+                      "teach this step how to version it"
+                  )
+
+          path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+          PY
+          echo "✅ Updated server.json to version $VERSION"
+
+      - name: Update plugin versions
+        run: |
+          set -e
+          python3 - "$VERSION" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          # Only the manifests carry the release. The shared .mcp.json runs
+          # mcp-server-linkedin@latest, so it has no version to rewrite.
+          version = sys.argv[1]
+          manifest_paths = (
+              Path("plugins/linkedin-mcp-server/.codex-plugin/plugin.json"),
+              Path("plugins/linkedin-mcp-server/.claude-plugin/plugin.json"),
+              Path("plugins/linkedin-mcp-server/.cursor-plugin/plugin.json"),
+          )
+
+          for manifest_path in manifest_paths:
+              plugin = json.loads(manifest_path.read_text(encoding="utf-8"))
+              plugin["version"] = version
+              manifest_path.write_text(
+                  json.dumps(plugin, indent=2, ensure_ascii=False) + "\n",
+                  encoding="utf-8",
+              )
+          PY
+          echo "✅ Updated the Codex, Claude Code, and Cursor plugins to version $VERSION"
+
+      # The rewrites above are text edits that report success whatever they
+      # matched, so this asks every file that carries the version what it now
+      # says. Rendering the compose file is also what proves it still parses;
+      # a JSON load does the same for the other two, which is why there is one
+      # gate here and not two. `--no-interpolate` because this asks whether the
+      # repository's file is well formed, not whether the runner happens to
+      # hold the operator's environment.
+      - name: Verify the versioned files agree
+        run: |
+          set -e
+          docker compose -f docker-compose.yml config --no-interpolate \
+            --format json > /tmp/compose.json
+          python3 - "$VERSION" <<'PY'
+          import json
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          version = sys.argv[1]
+          server = json.loads(Path(".github/mcp/server.json").read_text(encoding="utf-8"))
+          manifest = json.loads(Path("manifest.json").read_text(encoding="utf-8"))
+          plugin = json.loads(
+              Path(
+                  "plugins/linkedin-mcp-server/.codex-plugin/plugin.json"
+              ).read_text(encoding="utf-8")
+          )
+          claude_plugin = json.loads(
+              Path(
+                  "plugins/linkedin-mcp-server/.claude-plugin/plugin.json"
+              ).read_text(encoding="utf-8")
+          )
+          cursor_plugin = json.loads(
+              Path(
+                  "plugins/linkedin-mcp-server/.cursor-plugin/plugin.json"
+              ).read_text(encoding="utf-8")
+          )
+          project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          name = project["project"]["name"]
+          image = next(
+              p["identifier"] for p in server["packages"]
+              if p["registryType"] == "oci"
+          )
+          repository = image.rpartition(":")[0].removeprefix("docker.io/")
+
+          def tag(reference: str) -> str:
+              return reference.rpartition(":")[2]
+
+          # The resolved services rather than the file's text. A commented-out
+          # image reference is matched by any regex over the source and blessed
+          # a compose file whose live service named something else entirely.
+          # `docker.io/` is the same repository written out, and compose accepts
+          # both spellings.
+          compose = json.loads(Path("/tmp/compose.json").read_text(encoding="utf-8"))
+          images = [
+              service["image"]
+              for service in compose.get("services", {}).values()
+              if service.get("image", "").removeprefix("docker.io/").startswith(
+                  repository
+              )
+          ]
+
+          # uv.lock carries the project's own version a second time, and `uv
+          # lock --check` fails on a release built past a stale one.
+          lock = tomllib.loads(Path("uv.lock").read_text(encoding="utf-8"))
+
+          found = {
+              "pyproject.toml": [project["project"]["version"]],
+              "uv.lock": [
+                  package["version"]
+                  for package in lock.get("package", [])
+                  if package.get("name") == name
+              ],
+              "manifest.json": [manifest["version"]],
+              "server.json": [server["version"]],
+              "server.json (pypi)": [
+                  p["version"] for p in server["packages"]
+                  if p["registryType"] == "pypi"
+              ],
+              "server.json (oci)": [
+                  tag(p["identifier"]) for p in server["packages"]
+                  if p["registryType"] == "oci"
+              ],
+              "docker-compose.yml": [tag(image) for image in images],
+              "Codex plugin": [plugin["version"]],
+              "Claude Code plugin": [claude_plugin["version"]],
+              "Cursor plugin": [cursor_plugin["version"]],
+          }
+          for site, values in found.items():
+              if not values:
+                  raise SystemExit(f"{site}: no version found; the rewrite missed it")
+              for value in values:
+                  if value != version:
+                      raise SystemExit(f"{site}: {value!r}, expected {version!r}")
+          PY
+          echo "✅ Every versioned file reads $VERSION"
+
+      # Capture before deleting: an unreadable policy must leave protection in place.
+      - name: Read branch protection
+        id: protection
+        env:
+          GH_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          STRICT=$(gh api "repos/$GITHUB_REPOSITORY/branches/main/protection" \
+            --jq '.required_status_checks.strict | if type == "boolean" then . else error("strict must be a JSON boolean") end')
+          case "$STRICT" in
+            true|false) ;;
+            *) echo "::error::No boolean strict setting; leaving protection in place."; exit 1 ;;
+          esac
+          printf 'strict=%s\n' "$STRICT" >> "$GITHUB_OUTPUT"
+          printf 'Captured required_status_checks.strict=%s\n' "$STRICT"
 
       - name: Remove branch protection (temporary)
         run: |
-          gh api repos/${{ github.repository }}/branches/main/protection \
+          gh api "repos/$GITHUB_REPOSITORY/branches/main/protection" \
             --method DELETE
         env:
           GH_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
@@ -89,26 +423,31 @@ jobs:
           set -e
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add manifest.json docker-compose.yml
+          git add manifest.json docker-compose.yml .github/mcp/server.json \
+            plugins/linkedin-mcp-server/.codex-plugin/plugin.json \
+            plugins/linkedin-mcp-server/.claude-plugin/plugin.json \
+            plugins/linkedin-mcp-server/.cursor-plugin/plugin.json
           if git diff --staged --quiet; then
             echo "ℹ️ No changes to commit"
           else
-            git commit -m "chore: update manifest.json and docker-compose.yml to v$VERSION [skip ci]"
+            git commit -m "chore(release): Sync versioned files to v$VERSION [skip ci]"
             git push origin main
             echo "✅ Committed version updates"
           fi
 
+      # The separate successful capture survives a failed DELETE or version sync.
       - name: Restore branch protection
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
+          STRICT: ${{ steps.protection.outputs.strict }}
           PAYLOAD: >-
             {
               "required_status_checks": {
-                "strict": true,
                 "checks": [
                   {"context": "lint-and-check", "app_id": 15368},
-                  {"context": "test", "app_id": 15368}
+                  {"context": "test", "app_id": 15368},
+                  {"context": "PR Title", "app_id": 15368}
                 ]
               },
               "enforce_admins": true,
@@ -120,7 +459,25 @@ jobs:
               "restrictions": null
             }
         run: |
-          echo "$PAYLOAD" | gh api repos/${{ github.repository }}/branches/main/protection \
+          set -euo pipefail
+          if [[ -z "$STRICT" ]]; then
+            echo "No captured strict setting; leaving protection unchanged."
+            exit 0
+          fi
+          case "$STRICT" in
+            true|false) ;;
+            *) echo "::error::Captured strict setting is not boolean; refusing to restore."; exit 1 ;;
+          esac
+          RESTORE_PAYLOAD=$(python3 - <<'PY'
+          import json
+          import os
+
+          payload = json.loads(os.environ["PAYLOAD"])
+          payload["required_status_checks"]["strict"] = os.environ["STRICT"] == "true"
+          print(json.dumps(payload))
+          PY
+          )
+          printf '%s\n' "$RESTORE_PAYLOAD" | gh api "repos/$GITHUB_REPOSITORY/branches/main/protection" \
             --method PUT \
             --input -
 
@@ -138,17 +495,38 @@ jobs:
             echo "✅ Created and pushed tag v$VERSION"
           fi
 
+      # The Docker image and the MCP bundle are built from the commit that
+      # carries the updated manifest.json and docker-compose.yml, so the jobs
+      # below check out this SHA instead of the one that triggered the run.
+      - name: Publish the released commit
+        id: release-sha
+        run: echo "release-sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  docker:
+    needs: [check-version-bump, prepare-release]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check-version-bump.outputs.new-version }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout released commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.prepare-release.outputs.release-sha }}
+          persist-credentials: false
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build and push Docker images
-        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           push: true
@@ -167,49 +545,78 @@ jobs:
           repository: stickerdaniel/linkedin-mcp-server
           readme-filepath: docs/docker-hub.md
 
-      - name: Optimize uv cache for CI
-        run: uv cache prune --ci
+  build-mcpb:
+    needs: [check-version-bump, prepare-release]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check-version-bump.outputs.new-version }}
+      MCPB_VERSION: 2.1.2
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout released commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.prepare-release.outputs.release-sha }}
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
       - name: Validate and build MCP bundle
         run: |
-          bunx @anthropic-ai/mcpb validate manifest.json
-          bunx @anthropic-ai/mcpb pack .
+          bunx "@anthropic-ai/mcpb@$MCPB_VERSION" validate manifest.json
+          bunx "@anthropic-ai/mcpb@$MCPB_VERSION" pack .
           mv linkedin-mcp-server.mcpb linkedin-mcp-server-v$VERSION.mcpb
 
-      - name: Generate release notes
-        run: |
-          envsubst < RELEASE_NOTES_TEMPLATE.md > RELEASE_NOTES.md
-          echo "✅ Generated release notes from template"
+      # Overwrites for the same reason as the distributions upload: the bun
+      # cache save runs after this and can fail the job around it.
+      - name: Upload release assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: github-release-assets
+          path: linkedin-mcp-server-v${{ env.VERSION }}.mcpb
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  # Waits for Docker so the release never announces an image that failed to
+  # push. Runs no repository code, only the artifact download and the release.
+  create-github-release:
+    needs: [check-version-bump, docker, build-mcpb]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check-version-bump.outputs.new-version }}
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: github-release-assets
+
+      - name: Download release notes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
 
       - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           tag_name: v${{ env.VERSION }}
           files: |
             *.mcpb
-          generate_release_notes: true
+          generate_release_notes: false
           draft: false
           prerelease: false
-          name: "LinkedIn MCP Server v${{ env.VERSION }}"
+          name: "v${{ env.VERSION }}"
           body_path: RELEASE_NOTES.md
-
-      - name: Build package distributions
-        run: |
-          uv build
-          echo "Built package distributions:"
-          ls -lh dist/
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
-        with:
-          print-hash: true
-          verbose: true
 
       - name: Summary
         run: |
           echo "Successfully released v$VERSION!"
           echo "Docker: stickerdaniel/linkedin-mcp-server:$VERSION"
-          echo "PyPI: https://pypi.org/project/linkedin-scraper-mcp/$VERSION/"
+          echo "PyPI: https://pypi.org/project/mcp-server-linkedin/$VERSION/"
           echo "GitHub: https://github.com/${{ github.repository }}/releases/tag/v$VERSION"

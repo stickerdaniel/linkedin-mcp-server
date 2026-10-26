@@ -1,4 +1,25 @@
-import pytest
+import hashlib
+import os
+import sys
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+# FastMCP 4 bridges camelCase reads on MCP SDK models (`result.isError`) with
+# deprecation shims that this switch turns off. The suite runs with them off,
+# so a read the SDK v2 rename left behind fails here instead of passing on a
+# shim. Set before anything imports fastmcp, which reads its settings once at
+# import, and inherited by every process a test starts. CI sets it before
+# Python starts as well; `test_fastmcp_compatibility.py` checks it took effect.
+os.environ["FASTMCP_MCP_CAMELCASE_COMPAT"] = "false"
+
+import pytest  # noqa: E402
+
+# The differential accounting is a plugin rather than a directory conftest so
+# that it is loaded wherever those cases run, the xdist controller included,
+# and counts cases no fixture ever set up.
+pytest_plugins = ("linkedin.support.navigation", "differential.accounting")
 
 
 @pytest.fixture(autouse=True)
@@ -6,20 +27,132 @@ def reset_singletons():
     """Reset global state for test isolation."""
     from linkedin_mcp_server.bootstrap import reset_bootstrap_for_testing
     from linkedin_mcp_server.config import reset_config
+    from linkedin_mcp_server.daemon.descriptor import (
+        reset_daemon_descriptor_for_testing,
+    )
+    from linkedin_mcp_server.daemon.liveness import reset_liveness_for_testing
+    from linkedin_mcp_server.debug_trace import reset_trace_state_for_testing
+    from linkedin_mcp_server.logging_config import teardown_trace_logging
     from linkedin_mcp_server.drivers.browser import reset_browser_for_testing
+    from linkedin_mcp_server.profile_lease import reset_leases_for_testing
+    from linkedin_mcp_server.server_role import reset_process_role_for_testing
 
     reset_bootstrap_for_testing()
+    reset_daemon_descriptor_for_testing()
+    # The owner's call tracker is process state like the rest. Left standing, a
+    # call one test watched is still in flight for the next, which reads as an
+    # owner that is never idle, and the moment of one test's last expiry scan
+    # becomes the baseline for the next, where a gap of seconds reads as an
+    # owner that was not running.
+    reset_liveness_for_testing()
     reset_browser_for_testing()
+    reset_leases_for_testing()
     reset_config()
+    # Every test that builds a server records a role, and the auth gates read it
+    # from process state. Left standing, one OWNER would refuse logins in every
+    # test after it, in a suite where most never mention a role.
+    reset_process_role_for_testing()
+    # The trace directory is derived from the profile root and cached, so a
+    # test pointing USER_DATA_DIR at its tmp_path otherwise leaves every later
+    # test on this worker writing into a directory pytest has removed. The log
+    # handler holds the same path independently of that cache and has to be
+    # unbound with it, or records keep landing in the previous test's
+    # directory while a fresh one is resolved. `keep_traces` because removing
+    # a directory is a test's own business, not this fixture's.
+    teardown_trace_logging(keep_traces=True)
+    reset_trace_state_for_testing()
     yield
     reset_bootstrap_for_testing()
+    reset_daemon_descriptor_for_testing()
     reset_browser_for_testing()
+    # After the browser, so a lease the browser still held is released by its
+    # own bookkeeping first rather than yanked out from under it.
+    reset_leases_for_testing()
     reset_config()
+    reset_process_role_for_testing()
+    reset_liveness_for_testing()
+    teardown_trace_logging(keep_traces=True)
+    reset_trace_state_for_testing()
+
+
+#: The browser cache the run was started with, read before any test can write
+#: the variable.
+_INHERITED_BROWSERS_PATH = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
 
 
 @pytest.fixture(autouse=True)
-def isolate_profile_dir(tmp_path, monkeypatch):
-    """Redirect profile directory to tmp_path via config and DEFAULT_PROFILE_DIR."""
+def installed_browser_for_dom_tests(request, reset_singletons, monkeypatch):
+    """Give ``browser_dom`` tests the browser cache the run was started with.
+
+    ``reset_bootstrap_for_testing`` deletes ``PLAYWRIGHT_BROWSERS_PATH`` so that
+    no bootstrap test measures, reports on or installs into a real cache. That
+    also hid a browser installed outside patchright's default cache, such as the
+    server's own under ``~/.linkedin-mcp/patchright-browsers``, and every DOM
+    test skipped. These tests only launch Chromium against synthetic markup, so
+    they get the caller's cache back and nothing else does.
+    """
+    if _INHERITED_BROWSERS_PATH and request.node.get_closest_marker("browser_dom"):
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", _INHERITED_BROWSERS_PATH)
+
+
+@pytest.fixture(autouse=True)
+def ignore_the_developers_environment(monkeypatch):
+    """Run against an empty environment rather than whatever the shell holds.
+
+    The configuration loader calls ``load_dotenv()`` at import, so a local
+    ``.env`` is part of the environment too. A developer running a real proxy
+    then fails a test that sets only ``PROXY_SERVER``, because the loader sees
+    that server *and* the ambient credentials and refuses the pair. That failure
+    says nothing about the code, reproduces on no other machine, and is
+    invisible in CI, which is the worst combination a test can have.
+
+    Two sources rather than a list kept here, because a hand-written list is the
+    same bug one setting along: it has to be remembered whenever a setting is
+    added, and forgetting it produces a test that passes or fails only on the
+    machine that happens to define it.
+
+    * every key the loader reads, from the loader's own table;
+    * every variable this project names after itself. Those are read directly
+      through ``os.environ`` all over the package — debug switches, the trace
+      mode, the container hint, the update check — and none of them go through
+      the table above. Measured: with ``LINKEDIN_DEBUG_BRIDGE_COOKIE_SET`` set,
+      a cookie-import test fails, and a run with every one of them set failed 22
+      tests.
+
+    What is deliberately left alone is everything this project did not name:
+    ``CI``, which pytest and the workflow both mean something by,
+    ``PYTEST_CURRENT_TEST``, which pytest owns, ``PLAYWRIGHT_BROWSERS_PATH``,
+    which points at an installed browser, and the platform's own
+    ``LOCALAPPDATA``, ``APPDATA`` and ``XDG_CONFIG_HOME``. Clearing those would
+    not be isolation, it would be pretending to run somewhere else.
+    """
+    import os
+
+    from linkedin_mcp_server.config.loaders import EnvironmentKeys
+
+    from_the_table = [
+        value
+        for name, value in vars(EnvironmentKeys).items()
+        if not name.startswith("_") and isinstance(value, str)
+    ]
+    ours = [key for key in os.environ if key.startswith("LINKEDIN")]
+    for key in (*from_the_table, *ours):
+        monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def isolate_profile_dir(ignore_the_developers_environment, tmp_path, monkeypatch):
+    """Redirect profile directory to tmp_path via config and DEFAULT_PROFILE_DIR.
+
+    Takes the clearing fixture as an argument rather than trusting the order two
+    autouse fixtures happen to run in. Pytest orders by scope, dependency and
+    autouse, and explicitly not by where or in what order a fixture was defined;
+    the order these two run in today comes from ``dir()`` being alphabetical,
+    which is a coincidence a rename would end. Reversed, the clearing would
+    delete the ``USER_DATA_DIR`` this sets, and tests would fall back to the
+    real profile at ``~/.linkedin-mcp/profile`` — including anything that spawns
+    a subprocess, which the in-process patches below do not reach.
+    """
     fake_profile = tmp_path / "profile"
     monkeypatch.setenv("USER_DATA_DIR", str(fake_profile))
 
@@ -70,7 +203,257 @@ def isolate_profile_dir(tmp_path, monkeypatch):
         except AttributeError:
             pass
 
+    # Claim it, the same way `main()` does on the first run against a fresh
+    # custom root. Without this every test that rotates, restores, resets or
+    # clears would be refused: tmp_path is not the canonical default, and the
+    # guard exists precisely to refuse roots nobody claimed. Tests that prove
+    # the refusal use a *different* directory, which stays unclaimed.
+    from linkedin_mcp_server.profile_claim import ensure_profile_claim
+
+    ensure_profile_claim(fake_profile)
+
     return fake_profile
+
+
+def _is_differential_row(request: pytest.FixtureRequest) -> bool:
+    """Whether this is a release-gate row of the differential harness.
+
+    Those keep the account's real daemon state root on purpose: the decision
+    record of 2026-09-26 makes it part of what the gate measures, and the frozen
+    baseline those rows run predates the variable below.
+    """
+    return request.node.get_closest_marker("differential_row") is not None
+
+
+@pytest.fixture(scope="session")
+def real_daemon_state_root() -> Path | None:
+    """The daemon state root of the account running the suite, if it has one."""
+    from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.delenv(daemon_descriptor.TEST_ACCOUNT_HOME_ENV, raising=False)
+        try:
+            return daemon_descriptor.daemon_state_root()
+        except daemon_descriptor.DescriptorError:
+            return None
+
+
+#: Captured at import. The directory walk runs in a fixture teardown, where the
+#: test's own patches are still in force, and one that replaces ``os.walk`` or
+#: ``os.scandir`` would otherwise blind it, or hang it.
+_lstat = os.lstat
+_listdir = os.listdir
+_scandir = os.scandir
+
+
+@dataclass(frozen=True)
+class _DaemonStateCheck:
+    """What the teardown report needs to judge one test's daemon state."""
+
+    root: Path
+    started_ns: int
+    #: The state directory names of every directory the test left in ``tmp_path``.
+    keys: frozenset[str]
+    #: Those of ``keys`` that were already under ``root`` before the test. Only
+    #: these, never the whole listing: pytest keeps every item until the session
+    #: ends, and a developer's root can hold thousands of entries.
+    stale: frozenset[str]
+
+
+_DAEMON_STATE_CHECK = pytest.StashKey[_DaemonStateCheck]()
+
+
+def _entries(root: Path) -> frozenset[str]:
+    try:
+        return frozenset(_listdir(root))
+    except FileNotFoundError:
+        return frozenset()
+
+
+def _state_keys(top: Path) -> frozenset[str]:
+    """The daemon state directory name of *top* and of every directory below it.
+
+    Derived as ``daemon.descriptor._auth_root_identity`` keys an auth root, by
+    device and inode. Restated rather than called, because that function
+    creates what is missing and goes through ``Path`` methods a test may have
+    replaced; ``tests/test_daemon_state_guard.py`` fails if the two disagree.
+    """
+    keys: set[str] = set()
+    pending = [os.fspath(top)]
+    while pending:
+        path = pending.pop()
+        try:
+            info = _lstat(path)
+            with _scandir(path) as entries:
+                pending.extend(
+                    entry.path
+                    for entry in entries
+                    if entry.is_dir(follow_symlinks=False)
+                )
+        except OSError:
+            continue
+        identity = f"inode\0{info.st_dev}\0{info.st_ino}".encode("ascii")
+        keys.add(hashlib.sha256(identity).hexdigest())
+    return frozenset(keys)
+
+
+#: How long a teardown waits, in total, for the daemon workers a test started.
+_DAEMON_WORKER_GRACE_SECONDS = 2.0
+
+
+def _let_daemon_workers_finish(running: frozenset[threading.Thread]) -> None:
+    """Wait for daemon worker threads the test started, while its home is set.
+
+    The election bounds its filesystem reads by abandoning them, so a read can
+    still be running when ``obtain_owner`` returns. One that resolves daemon
+    storage after the monkeypatch teardown restored the environment does so
+    under the real account home, and after ``_daemon_state_on_the_real_root``
+    has already looked. Bounded, because a test may block a worker for good.
+    """
+    deadline = time.monotonic() + _DAEMON_WORKER_GRACE_SECONDS
+    for thread in threading.enumerate():
+        if thread in running or not thread.name.startswith("daemon-"):
+            continue
+        thread.join(max(deadline - time.monotonic(), 0.0))
+
+
+@pytest.fixture(autouse=True)
+def isolate_daemon_state(
+    ignore_the_developers_environment,
+    real_daemon_state_root,
+    request,
+    tmp_path,
+    tmp_path_factory,
+    monkeypatch,
+):
+    """Give every process a test starts a temporary account home for daemon state.
+
+    ``daemon.descriptor._account_home`` ignores ``HOME`` by design, and an owner
+    is started by production code, so no in-process patch reaches it. The
+    variable does: frontends inherit it from the test, and the owner from its
+    frontend. Takes the clearing fixture as an argument for the reason
+    ``isolate_profile_dir`` gives, since the clearing deletes this variable too.
+
+    Outside ``tmp_path``, so tests that list their own directory see only what
+    they made, and created by ``harden_directory`` rather than ``mkdir``: on
+    Windows the daemon refuses a home whose access list is still inherited.
+
+    Also records what ``_daemon_state_on_the_real_root`` checks. The keys are
+    read in this teardown because it runs before ``tmp_path``'s own, which
+    deletes a passing test's directory under ``tmp_path_retention_policy=failed``.
+    """
+    if _is_differential_row(request):
+        yield
+        return
+    from linkedin_mcp_server.daemon.descriptor import TEST_ACCOUNT_HOME_ENV
+    from linkedin_mcp_server.private_state import harden_directory
+
+    home = tmp_path_factory.mktemp("account") / "home"
+    harden_directory(home)
+    monkeypatch.setenv(TEST_ACCOUNT_HOME_ENV, str(home))
+    running = frozenset(threading.enumerate())
+    if real_daemon_state_root is None:
+        yield
+        _let_daemon_workers_finish(running)
+        return
+    before = _entries(real_daemon_state_root)
+    started_ns = time.time_ns()
+    yield
+    _let_daemon_workers_finish(running)
+    keys = _state_keys(tmp_path)
+    request.node.stash[_DAEMON_STATE_CHECK] = _DaemonStateCheck(
+        real_daemon_state_root, started_ns, keys, keys & before
+    )
+
+
+def _daemon_state_on_the_real_root(item: pytest.Item) -> str | None:
+    """Say where a process this test started wrote daemon state under the real root.
+
+    Looked up the way the state is keyed: every directory the test left in
+    ``tmp_path`` may be an auth root, and its key is checked under the real
+    root. A key that was not there before the test was written by it. One that
+    was is left over from an earlier run whose directory had the same inode,
+    which deleted temporary directories hand on, and counts only if something
+    in it changed after the test started.
+
+    Asked from outside every process, so a child that lost the variable is
+    caught the same way as code that stopped reading it. An auth root the test
+    deleted before its teardown has no key left to look up.
+    """
+    check = item.stash.get(_DAEMON_STATE_CHECK, None)
+    if check is None:
+        return None
+    written: list[str] = []
+    for key in sorted(check.keys):
+        state = check.root / key
+        try:
+            stamps = [_lstat(state)]
+            with _scandir(state) as entries:
+                stamps.extend(_lstat(entry.path) for entry in entries)
+        except OSError:
+            continue
+        if key not in check.stale or any(
+            max(s.st_mtime_ns, s.st_ctime_ns) >= check.started_ns for s in stamps
+        ):
+            written.append(str(state))
+    if not written:
+        return None
+    return (
+        f"{item.nodeid} started a process that wrote daemon state under the "
+        f"real {check.root}: {', '.join(written)}. Start children with the "
+        f"inherited environment, which carries the temporary account home "
+        f"`isolate_daemon_state` sets."
+    )
+
+
+#: The real state root, read before any test can move ``HOME``.
+_REAL_STATE_ROOT = os.path.realpath(os.path.expanduser("~/.linkedin-mcp"))
+
+
+@pytest.fixture(autouse=True)
+def no_owner_on_the_real_profile(monkeypatch):
+    """Fail a test that would start an owner process on the real state root.
+
+    The owner is a separate process, so none of the in-process patches in
+    ``isolate_profile_dir`` reach it: it takes its profile from the CONFIG
+    frame on its standard input. An ``AppConfig()`` built in a
+    test names ``~/.linkedin-mcp/profile``, and an election that got as far as
+    spawning ran a real owner against it, which opened its trace directory
+    there and left a ``run-*/server.log`` behind on every full run, while
+    racing any server already holding that profile.
+
+    Checked at ``_spawn``, the last point before a child exists, and against
+    both the auth root and the configured profile, because the child reads its
+    state from one and its browser from the other. Reported at teardown as well
+    as raised: the election runs in a worker thread whose caller turns any
+    failure into "no owner", so a raise alone could pass unseen.
+    """
+    from linkedin_mcp_server.daemon import spawn as daemon_spawn
+
+    spawn = daemon_spawn._spawn
+    refused: list[str] = []
+
+    def guarded(auth_root, config, *args, **kwargs):
+        for what, path in (
+            ("auth root", auth_root),
+            ("profile", config.browser.user_data_dir),
+        ):
+            resolved = os.path.realpath(os.path.expanduser(str(path)))
+            # Not `os.path.commonpath`, which raises on Windows when the two
+            # sit on different drives, as with `--basetemp=D:\\pytest`.
+            if Path(resolved).is_relative_to(_REAL_STATE_ROOT):
+                refused.append(f"{what} at {resolved}")
+                raise RuntimeError(f"refused to start an owner with {refused[-1]}")
+        return spawn(auth_root, config, *args, **kwargs)
+
+    monkeypatch.setattr(daemon_spawn, "_spawn", guarded)
+    yield
+    if refused:
+        pytest.fail(
+            f"A test tried to start an owner with its {refused[0]}, under the "
+            f"real {_REAL_STATE_ROOT}. Stub `daemon.election.obtain_owner`, or "
+            "elect with a configuration whose user_data_dir is under tmp_path."
+        )
 
 
 @pytest.fixture
@@ -93,3 +476,55 @@ def mock_context():
     ctx = MagicMock()
     ctx.report_progress = AsyncMock()
     return ctx
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Fail a test that leaves a stream unusable or daemon state on the real root.
+
+    The daemon state check is ``_daemon_state_on_the_real_root``, over what
+    ``isolate_daemon_state`` recorded in its teardown. It reports here, after
+    every fixture has torn down, so state a process wrote while a fixture was
+    stopping it still counts.
+
+    A test that closes one of them breaks every test that runs after it in the
+    same process, and the traceback lands on the innocent one. The failure
+    reads as unrelated: ``uvicorn`` asks ``sys.stdout.isatty()`` while building
+    its log config, so a closed stream surfaces as ``Unable to configure
+    formatter 'default'`` in a daemon test.
+
+    Under pytest's own capturing every test gets a fresh ``sys.stdout``, which
+    repairs the damage before anything can trip over it. CI runs with ``-s``,
+    where nothing repairs it, so this class of defect passes locally and fails
+    there. The usual cause is ``capsys`` in the signature of a test that also
+    monkeypatches ``sys.stdout``: ``capsys`` installs the object that
+    ``monkeypatch`` then records as the one to restore, tears down first, and
+    closes it, so the undo reinstalls a closed stream.
+
+    Checked on the teardown report rather than in a fixture, because a fixture
+    cannot see what the teardown of another fixture did after it, and reported
+    against the test that caused it rather than raised from a hook, which would
+    abort the whole session as an internal error.
+    """
+    report = yield
+    if call.when != "teardown" or report.get_result().failed:
+        return
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name)
+        try:
+            stream.write("")
+            stream.flush()
+        except Exception as exc:  # noqa: BLE001 - any failure is the same defect
+            result = report.get_result()
+            result.outcome = "failed"
+            result.longrepr = (
+                f"{item.nodeid} left sys.{name} unusable "
+                f"({type(exc).__name__}: {exc}). Every later test in this "
+                f"process would print into it. A `capsys` argument on a test "
+                f"that also monkeypatches sys.{name} is the usual cause."
+            )
+            return
+    if written := _daemon_state_on_the_real_root(item):
+        result = report.get_result()
+        result.outcome = "failed"
+        result.longrepr = written

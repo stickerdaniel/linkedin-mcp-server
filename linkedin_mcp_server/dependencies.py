@@ -1,30 +1,46 @@
 """Helpers used by MCP tools after bootstrap gating."""
 
+import functools
+import inspect
 import logging
+from collections.abc import Awaitable, Callable
 from typing import NoReturn
 
 from fastmcp import Context
 
 from linkedin_mcp_server.bootstrap import (
     RuntimePolicy,
+    current_login_generation,
     ensure_tool_ready_or_raise,
     get_runtime_policy,
+    go_auth_quiescent,
     invalidate_auth_and_trigger_relogin,
     invalidate_browser_setup,
 )
+from linkedin_mcp_server.core import BrowserManager
 from linkedin_mcp_server.core.exceptions import AuthenticationError, NetworkError
 from linkedin_mcp_server.drivers.browser import (
     close_browser,
+    close_unusable_browser,
     ensure_authenticated,
     get_or_create_browser,
 )
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.exceptions import (
+    AuthStaleOnOwnerError,
     BrowserBinaryMissingError,
+    BrowserShutdownUnconfirmedError,
+    BrowserUnavailableError,
     DockerHostLoginRequiredError,
     LinuxBrowserDependencyError,
 )
-from linkedin_mcp_server.scraping import LinkedInExtractor
+from linkedin_mcp_server.profile_lease import get_profile_lease
+from linkedin_mcp_server.linkedin import LinkedInExtractor
+from linkedin_mcp_server.server_role import (
+    ServerRole,
+    a_held_profile_means_this_owner_must_go,
+    process_role,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,25 +69,178 @@ def _is_browser_binary_missing_error(error: Exception) -> bool:
 async def handle_auth_error(
     error: AuthenticationError,
     ctx: Context | None,
+    *,
+    nothing_ran_yet: bool = False,
 ) -> NoReturn:
     """Close the stale browser and trigger interactive re-login.
 
     In Docker mode a GUI browser cannot be opened, so we raise
     ``DockerHostLoginRequiredError`` for a consistent user message.
+
+    *nothing_ran_yet* says whether the tool had done any work before the failure,
+    which decides whether a client may safely run the call again after signing in.
+    Only :func:`get_ready_extractor` can answer yes: boundary validation may run
+    first, but no tool work has started when it fails. :func:`tool_errors`, which
+    catches the failure everywhere else in a tool, leaves it at the default,
+    because by then the page read may be part done, and some tools send messages
+    and connection requests. A new caller is non-replayable until someone says
+    otherwise, which is the safe direction for a default to point.
     """
     if get_runtime_policy() == RuntimePolicy.DOCKER:
         raise DockerHostLoginRequiredError(
-            "No valid LinkedIn session is available in Docker. "
-            "Run --login on the host machine to create a session, "
-            "then retry this tool."
+            "No valid LinkedIn session is available in Docker. Create one with "
+            "the explicit --login --login-viewer Docker command, or run --login "
+            "on the host, then retry this tool."
         ) from error
+
+    # Read before the close rather than after it, deliberately, though the
+    # ordering is defensive rather than load-bearing today. On the forwarded tool
+    # path `SequentialToolExecutionMiddleware` holds a lease reference of its own
+    # from before the tool body until after this function returns
+    # (`sequential_tool_middleware.py:116-130`), and `close_browser` releases only
+    # the browser's reference, so no other process can write a generation in
+    # between. What the order costs is nothing, and what it buys is not depending
+    # on that: any future caller reaching here without the middleware, or any
+    # change that releases the lease sooner, would otherwise latch onto a
+    # generation written by the login it is about to ask for.
+    # Read for every role, not only the owner. A DIRECT server rotates through
+    # `invalidate_auth_and_trigger_relogin` exactly as a frontend does, so
+    # without this it reaches the rotation with nothing to compare against and
+    # the guard downstream reads the dead session as a peer's repair.
+    broken_generation = current_login_generation()
 
     logger.warning("Stale session detected; closing browser and triggering re-login")
     try:
         await close_browser()
     except Exception as close_exc:
         logger.warning("Failed to close stale browser (ignored): %s", close_exc)
-    await invalidate_auth_and_trigger_relogin(ctx)  # always raises
+    finally:
+        # In a `finally`, and that is the whole point of it. `close_browser`
+        # defers cancellation until teardown finishes and then re-raises
+        # `CancelledError` (`drivers/browser.py:747-757`), which is a
+        # `BaseException` and passes straight through the `except Exception`
+        # above. A tool timeout landing during the close therefore skipped
+        # everything below, and a wedged owner stayed wedged.
+        #
+        # Measured: `wait_for(handle_auth_error(...), 0.02)` against a close that
+        # defers its cancel left `stand_down_reason()` at None with the lease
+        # still held.
+        #
+        # Only the request is made here. The exception below still has to be
+        # raised on the normal path, and a cancelled call has nobody left to
+        # raise it to, so what has to survive the cancellation is exactly this.
+        a_held_profile_means_this_owner_must_go()
+
+    if get_profile_lease().browser_open:
+        # The teardown could not be confirmed, so Chromium may still be on the
+        # profile, and the lease is deliberately kept until this process exits
+        # (`drivers/browser.py:786-798`). Nothing that follows can work: a shared
+        # owner would send a client after a lease it can never take, and a
+        # single-process server would start a login whose own rotation is refused
+        # for the same reason, after telling the user a window had opened.
+        #
+        # Checked for every role, ahead of the split. It was owner-only once, on
+        # the reasoning that only a marker could mislead a client. Measured
+        # otherwise: the single-process server reported "a login browser window
+        # has been opened", opened none, and left a state only a restart clears.
+        raise BrowserShutdownUnconfirmedError() from error
+
+    if process_role() is ServerRole.OWNER:
+        # The browser is down and the lease is free, so the client can take over.
+        # Recorded before raising so the next forwarded call is answered from the
+        # latch rather than by opening Chromium again.
+        go_auth_quiescent(broken_generation)
+        raise AuthStaleOnOwnerError(
+            "The shared LinkedIn browser's session stopped working, and it "
+            "cannot sign in by itself. Retry this tool: the client will open a "
+            "login window.",
+            nothing_ran_yet=nothing_ran_yet,
+            # The same observation the latch was armed with, so the two can never
+            # name different sessions.
+            generation=broken_generation,
+        ) from error
+
+    await invalidate_auth_and_trigger_relogin(
+        ctx, stale_generation=broken_generation
+    )  # always raises
+
+
+def tool_errors[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
+    """Shape a tool's failures for the client, and start a login on a dead session.
+
+    Applied under ``@mcp.tool``, and the failures are reported under
+    ``fn.__name__``. ``functools.wraps`` is what keeps the published schema the
+    body's own: FastMCP reads the signature, docstring and annotations through
+    ``__wrapped__``.
+    """
+    signature = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return await fn(*args, **kwargs)
+        except AuthenticationError as e:
+            # Bound rather than read from kwargs: FastMCP passes every argument
+            # by keyword, but a direct caller may pass ctx by position.
+            ctx = signature.bind_partial(*args, **kwargs).arguments.get("ctx")
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, wrapper.__name__)
+        except Exception as e:
+            raise_tool_error(e, wrapper.__name__)
+
+    return wrapper
+
+
+def _browser_is_unusable(browser: BrowserManager) -> bool:
+    """Whether the cached browser is known to be dead, from local state alone.
+
+    Two signals, both already delivered by the driver: the active page closed, or
+    the browser it belongs to disconnected (Chromium exited while the Node driver
+    lived on). Neither costs a round trip. They miss a driver that died itself
+    and a renderer crash that leaves the page open; those still fail inside the
+    tool, as before. An event that has not arrived yet is caught by a later call.
+
+    Only positive evidence counts. A missing browser handle or a property that
+    raises says nothing about whether Chromium is gone, and closing a browser
+    on a guess would end a working one.
+    """
+    try:
+        # The page first: a closed page is enough, and the context read below
+        # can raise once the manager has started tearing down.
+        if browser.page.is_closed():
+            return True
+        handle = browser.context.browser
+        return handle is not None and not handle.is_connected()
+    except Exception:
+        logger.debug("Could not read the browser's state", exc_info=True)
+        return False
+
+
+async def _shut_down_unusable_browser(browser: BrowserManager) -> BrowserManager:
+    """Close a dead browser and raise how that ended.
+
+    Returns only when another close retired *browser* first, so this call closed
+    nothing, with whatever the getter hands out now. That is one reacquisition,
+    not a loop, and its own errors (a busy profile, a login) take the normal
+    path.
+    """
+    logger.warning("The browser stopped unexpectedly; shutting it down")
+    failure: Exception | None = None
+    try:
+        outcome = await close_unusable_browser(browser)
+    except Exception as exc:
+        # Settlement has already run unconfirmed and kept the lease.
+        logger.warning("Shutting down the stopped browser failed: %s", exc)
+        failure, outcome = exc, False
+    # Outside the try, so a confirmed close can never be caught there as a
+    # failed one and reported as unconfirmed.
+    if outcome is None:
+        return await get_or_create_browser()
+    if outcome:
+        raise BrowserUnavailableError()
+    raise BrowserShutdownUnconfirmedError() from failure
 
 
 async def get_ready_extractor(
@@ -83,10 +252,18 @@ async def get_ready_extractor(
     try:
         await ensure_tool_ready_or_raise(tool_name, ctx)
         browser = await get_or_create_browser()
+        # Before the auth check, which reads only a flag the dead browser still
+        # has set, and before any tool work, so the failure is an ordinary one
+        # and starts no login. A browser this call shut down is not replaced
+        # inside it; the error asks the caller to run the tool again.
+        if _browser_is_unusable(browser):
+            browser = await _shut_down_unusable_browser(browser)
         await ensure_authenticated()
         return LinkedInExtractor(browser.page)
     except AuthenticationError as e:
-        await handle_auth_error(e, ctx)  # always raises
+        # Boundary validation may run first, but no tool work has started here,
+        # so the client may safely run the call again once it has signed in.
+        await handle_auth_error(e, ctx, nothing_ran_yet=True)  # always raises
     except Exception as e:
         if isinstance(e, NetworkError) and _is_browser_binary_missing_error(e):
             invalidate_browser_setup()

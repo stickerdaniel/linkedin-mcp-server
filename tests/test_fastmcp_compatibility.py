@@ -1,0 +1,83 @@
+"""Keep published FastMCP metadata compatible with the code that uses it."""
+
+from __future__ import annotations
+
+import tomllib
+from pathlib import Path
+
+import pytest
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_LOWER_BOUND_OPERATORS = frozenset({">=", ">", "==", "===", "~="})
+
+
+def _minimum(requirement: Requirement) -> Version:
+    floors = []
+    for specifier in requirement.specifier:
+        if specifier.operator not in _LOWER_BOUND_OPERATORS:
+            continue
+        try:
+            floors.append(Version(specifier.version))
+        except InvalidVersion:
+            continue
+    assert floors, f"{requirement.name} has no interpretable lower bound: {requirement}"
+    return max(floors)
+
+
+@pytest.mark.parametrize("operator", [">=", ">", "~="])
+def test_minimum_understands_lower_bound_operators(operator: str) -> None:
+    assert _minimum(Requirement(f"example{operator}2.14.2")) == Version("2.14.2")
+
+
+def test_minimum_rejects_an_uninterpretable_lower_bound() -> None:
+    with pytest.raises(AssertionError, match="no interpretable lower bound"):
+        _minimum(Requirement("example==2.14.*"))
+
+
+def test_security_floors_are_published() -> None:
+    pyproject = tomllib.loads(
+        (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    runtime = {
+        str(canonicalize_name(requirement.name)): requirement
+        for requirement in map(Requirement, pyproject["project"]["dependencies"])
+    }
+    development = {
+        str(canonicalize_name(requirement.name)): requirement
+        for requirement in map(Requirement, pyproject["dependency-groups"]["dev"])
+    }
+
+    expected_runtime = {
+        "cryptography": Version("50.0.1"),
+        "fastmcp": Version("4.0.10"),
+        "httpx2": Version("2.13.1"),
+        "mcp": Version("2.2.0"),
+        "opentelemetry-api": Version("1.45.1"),
+        "pydantic-settings": Version("2.14.2"),
+        "starlette": Version("1.3.1"),
+    }
+    for name, floor in expected_runtime.items():
+        assert _minimum(runtime[name]) >= floor
+    assert _minimum(development["aiohttp"]) >= Version("3.14.4")
+    assert _minimum(development["virtualenv"]) >= Version("21.14.9")
+
+
+def test_the_suite_runs_without_the_camelcase_bridge() -> None:
+    """The SDK v2 names are the only ones that resolve during the run.
+
+    ``tests/conftest.py`` and CI switch FastMCP's camelCase shims off before
+    fastmcp is imported. A switch set too late leaves the shims on, and every
+    ``result.isError`` left behind by the rename would pass on a deprecation
+    warning; the read below is what would go on working.
+    """
+    import fastmcp
+    import mcp.types as mt
+
+    assert fastmcp.settings.mcp_camelcase_compat is False
+    result = mt.CallToolResult(content=[], is_error=True)
+    with pytest.raises(AttributeError, match="isError"):
+        getattr(result, "isError")
+    assert result.is_error is True

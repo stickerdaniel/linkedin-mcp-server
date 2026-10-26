@@ -1,8 +1,15 @@
 """Tests for dependencies.py — bootstrap gating and auto-relogin."""
 
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import asyncio
+import threading
+
 import pytest
+from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
 from linkedin_mcp_server.core.exceptions import (
@@ -13,7 +20,18 @@ from linkedin_mcp_server.core.exceptions import (
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.exceptions import (
     AuthenticationStartedError,
+    AuthStaleOnOwnerError,
+    BrowserBusyError,
+    BrowserShutdownUnconfirmedError,
+    BrowserUnavailableError,
     DockerHostLoginRequiredError,
+)
+
+# Bound at import, before the autouse isolation replaces it with a fixed path.
+# The tests that retarget the profile root need the real resolution, which reads
+# USER_DATA_DIR through a symlink, and restore it deliberately.
+from linkedin_mcp_server.session_state import (
+    get_source_profile_dir as _resolve_the_configured_profile,
 )
 
 
@@ -30,6 +48,10 @@ class TestHandleAuthError:
                 new_callable=AsyncMock,
             ) as mock_close,
             patch(
+                "linkedin_mcp_server.dependencies.current_login_generation",
+                return_value="the-dead-one",
+            ),
+            patch(
                 "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
                 new_callable=AsyncMock,
                 side_effect=AuthenticationStartedError("login opened"),
@@ -41,7 +63,15 @@ class TestHandleAuthError:
                 )
 
             mock_close.assert_awaited_once()
-            mock_relogin.assert_awaited_once_with(None)
+            # The generation it observed travels with it, so the rotation
+            # downstream can tell the dead session from a peer's repair.
+            mock_relogin.assert_awaited_once()
+            assert mock_relogin.await_args is not None
+            assert mock_relogin.await_args.args == (None,)
+            # The value, not merely the keyword. Asserting only that the argument
+            # exists left a mutation passing a hardcoded None green, which is the
+            # regression this whole path was fixed for.
+            assert mock_relogin.await_args.kwargs["stale_generation"] == "the-dead-one"
 
     async def test_docker_raises_host_error(self):
         """On Docker runtime, raise DockerHostLoginRequiredError."""
@@ -49,13 +79,55 @@ class TestHandleAuthError:
             "linkedin_mcp_server.dependencies.get_runtime_policy",
             return_value="docker",
         ):
-            with pytest.raises(DockerHostLoginRequiredError, match="host machine"):
+            with pytest.raises(
+                DockerHostLoginRequiredError, match="--login --login-viewer"
+            ):
                 await handle_auth_error(
                     AuthenticationError("Session expired"), ctx=None
                 )
 
 
+def _a_live_browser() -> MagicMock:
+    """A browser double the dead-browser check reads as live.
+
+    A bare mock answers ``is_closed()`` with something truthy, which reads as a
+    closed page and sends the call down the shutdown path instead.
+    """
+    browser = MagicMock()
+    browser.page.is_closed.return_value = False
+    browser.context.browser.is_connected.return_value = True
+    return browser
+
+
 class TestGetReadyExtractor:
+    async def test_ready_resumes_to_read_path(self):
+        """When gating returns (login resolved in-budget), control falls through
+        to get_or_create_browser + ensure_authenticated and returns an extractor.
+        """
+        browser = _a_live_browser()
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.get_or_create_browser",
+                new_callable=AsyncMock,
+                return_value=browser,
+            ) as mock_get_browser,
+            patch(
+                "linkedin_mcp_server.dependencies.ensure_authenticated",
+                new_callable=AsyncMock,
+            ) as mock_ensure_auth,
+        ):
+            from linkedin_mcp_server.linkedin import LinkedInExtractor
+
+            extractor = await get_ready_extractor(ctx=None, tool_name="test_tool")
+
+            assert isinstance(extractor, LinkedInExtractor)
+            mock_get_browser.assert_awaited_once()
+            mock_ensure_auth.assert_awaited_once()
+
     async def test_auth_error_triggers_relogin(self):
         """AuthenticationError from ensure_authenticated triggers relogin."""
         with (
@@ -66,6 +138,7 @@ class TestGetReadyExtractor:
             patch(
                 "linkedin_mcp_server.dependencies.get_or_create_browser",
                 new_callable=AsyncMock,
+                return_value=_a_live_browser(),
             ),
             patch(
                 "linkedin_mcp_server.dependencies.ensure_authenticated",
@@ -156,7 +229,7 @@ class TestGetReadyExtractor:
 
             mock_invalidate.assert_not_called()
 
-    async def test_mid_scrape_auth_error_triggers_relogin(self):
+    async def test_mid_read_auth_error_triggers_relogin(self):
         """AuthenticationError caught in tool wrapper invokes handle_auth_error."""
         from linkedin_mcp_server.tools.person import register_person_tools
 
@@ -174,25 +247,1759 @@ class TestGetReadyExtractor:
         register_person_tools(mock_mcp)
 
         mock_extractor = AsyncMock()
-        mock_extractor.scrape_person = AsyncMock(
+        mock_extractor.read_person = AsyncMock(
             side_effect=AuthenticationError("Auth barrier detected")
         )
 
         mock_ctx = MagicMock()
         mock_ctx.report_progress = AsyncMock()
 
-        with patch(
-            "linkedin_mcp_server.tools.person.handle_auth_error",
-            new_callable=AsyncMock,
-            side_effect=AuthenticationStartedError("login opened"),
-        ) as mock_handle:
+        with (
+            patch(
+                "linkedin_mcp_server.tools.person.get_ready_extractor",
+                AsyncMock(return_value=mock_extractor),
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.handle_auth_error",
+                new_callable=AsyncMock,
+                side_effect=AuthenticationStartedError("login opened"),
+            ) as mock_handle,
+        ):
             with pytest.raises(ToolError, match="login opened"):
                 await tools["get_person_profile"](
                     linkedin_username="testuser",
                     ctx=mock_ctx,
-                    extractor=mock_extractor,
                 )
 
             mock_handle.assert_awaited_once()
             # First arg should be the AuthenticationError
             assert isinstance(mock_handle.call_args[0][0], AuthenticationError)
+
+    async def test_registered_feed_tool_routes_exact_auth_error_to_recovery(self):
+        """The registered MCP boundary awaits the real recovery policy."""
+        from linkedin_mcp_server.tools import feed as feed_tools
+
+        challenged = AuthenticationError("feed session challenged")
+        extractor = MagicMock()
+        extractor.extract_feed = AsyncMock(side_effect=challenged)
+        mcp = FastMCP("feed-auth-recovery")
+        feed_tools.register_feed_tools(mcp)
+
+        with (
+            patch.object(
+                feed_tools,
+                "get_ready_extractor",
+                new_callable=AsyncMock,
+                return_value=extractor,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.handle_auth_error",
+                new=AsyncMock(wraps=handle_auth_error),
+            ) as routed,
+            patch(
+                "linkedin_mcp_server.dependencies.get_runtime_policy",
+                return_value="managed",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.current_login_generation",
+                return_value="challenged-generation",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.close_browser",
+                new_callable=AsyncMock,
+            ) as close,
+            patch(
+                "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+                new_callable=AsyncMock,
+                side_effect=AuthenticationStartedError("login opened"),
+            ) as relogin,
+        ):
+            async with Client(mcp) as client:
+                with pytest.raises(ToolError, match="login opened"):
+                    await client.call_tool("get_feed", {"num_posts": 1})
+
+        extractor.extract_feed.assert_awaited_once_with(num_posts=1)
+        routed.assert_awaited_once()
+        routed_call = routed.await_args
+        assert routed_call is not None
+        assert routed_call.args[0] is challenged
+        close.assert_awaited_once()
+        relogin.assert_awaited_once()
+
+
+class TestAnOwnerGoesQuiescentInsteadOfLoggingIn:
+    """The owner closes the browser, records what it found, and reports."""
+
+    async def test_the_broken_generation_is_read_before_the_browser_closes(self):
+        """The ordering is the whole point, so it is asserted rather than assumed.
+
+        A confirmed close releases the profile lease, which is exactly what lets
+        another process log in. If the generation were read afterwards, a login
+        that landed in that gap would be recorded as the broken one, and the owner
+        would then hold its latch against the very session it asked for.
+        """
+        from linkedin_mcp_server.server_role import ServerRole, set_process_role
+
+        set_process_role(ServerRole.OWNER)
+        order: list[str] = []
+
+        async def closing() -> None:
+            order.append("close")
+
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.get_runtime_policy",
+                return_value="managed",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.current_login_generation",
+                side_effect=lambda: (order.append("read"), "gen-1")[1],
+            ),
+            patch("linkedin_mcp_server.dependencies.close_browser", closing),
+            patch(
+                "linkedin_mcp_server.dependencies.go_auth_quiescent",
+                side_effect=lambda gen: order.append(f"latch:{gen}"),
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+                new_callable=AsyncMock,
+                side_effect=AuthStaleOnOwnerError("owner cannot sign in"),
+            ),
+        ):
+            with pytest.raises(AuthStaleOnOwnerError):
+                await handle_auth_error(AuthenticationError("expired"), ctx=None)
+
+        assert order == ["read", "close", "latch:gen-1"]
+
+    async def test_a_direct_server_reads_the_generation_but_does_not_latch(self):
+        """DIRECT reads it too, and that is a correction rather than a widening.
+
+        An earlier version asserted that DIRECT read nothing, on the reasoning
+        that the generation was owner state. It is not: a DIRECT server rotates
+        through the same function a frontend does, so without the generation it
+        reaches the rotation with nothing to compare against. Measured with the
+        old behaviour and a momentary profile holder: the login reported that a
+        window had opened, opened none, kept the dead session, and left readiness
+        saying the session was fine.
+
+        The latch stays owner-only. That is process state a single-process server
+        has no use for, and setting it would make it refuse its own logins.
+        """
+        latched = MagicMock()
+        read = MagicMock(return_value="gen-1")
+
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.get_runtime_policy",
+                return_value="managed",
+            ),
+            patch("linkedin_mcp_server.dependencies.current_login_generation", read),
+            patch("linkedin_mcp_server.dependencies.close_browser", AsyncMock()),
+            patch("linkedin_mcp_server.dependencies.go_auth_quiescent", latched),
+            patch(
+                "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+                new_callable=AsyncMock,
+                side_effect=AuthenticationStartedError("login opened"),
+            ),
+        ):
+            with pytest.raises(AuthenticationStartedError):
+                await handle_auth_error(AuthenticationError("expired"), ctx=None)
+
+        read.assert_called_once()
+        latched.assert_not_called()
+
+    async def test_an_unconfirmed_close_is_reported_instead_of_latching(self):
+        """A teardown that could not be confirmed must not invite a login.
+
+        ``close_browser`` keeps the profile lease when Chromium's shutdown times
+        out, deliberately, because it may still be running
+        (``drivers/browser.py:786-798``). Telling a client to sign in then sends it
+        after a lease it can never take, and latching would answer every later call
+        from a state only an owner restart clears.
+
+        Reproduced before this guard existed: the owner said "retry, the client
+        will open a login window" while holding the lease with ``browser_open``
+        still set.
+        """
+        from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+        from linkedin_mcp_server.server_role import ServerRole, set_process_role
+
+        set_process_role(ServerRole.OWNER)
+        latched = MagicMock()
+        lease = MagicMock()
+        lease.browser_open = True  # what an unconfirmed close leaves behind
+
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.get_runtime_policy",
+                return_value="managed",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.current_login_generation",
+                return_value="gen-1",
+            ),
+            patch("linkedin_mcp_server.dependencies.close_browser", AsyncMock()),
+            patch(
+                "linkedin_mcp_server.dependencies.get_profile_lease",
+                return_value=lease,
+            ),
+            # Also at the source: the stand-down helper lives in `server_role`
+            # and reads the lease through `profile_lease`, not through the
+            # module under test.
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                return_value=lease,
+            ),
+            patch("linkedin_mcp_server.dependencies.go_auth_quiescent", latched),
+        ):
+            with pytest.raises(BrowserShutdownUnconfirmedError, match="Restart"):
+                await handle_auth_error(AuthenticationError("expired"), ctx=None)
+
+        # Not latched: a latch here is the wedge, because nothing can clear it.
+        latched.assert_not_called()
+
+    async def test_an_unconfirmed_close_stops_a_single_server_too(self):
+        """Not only the shared owner: nothing that follows can work for either.
+
+        An unconfirmed teardown keeps the profile lease until the process exits,
+        so a single-process server that carried on would start a login whose own
+        rotation is refused for exactly that reason, after having told the user a
+        window had opened. Measured with the check owner-only: the server reported
+        "a login browser window has been opened", opened none, kept the dead
+        session, and left a state only a restart clears.
+        """
+        from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+
+        relogin = AsyncMock()
+        lease = MagicMock()
+        lease.browser_open = True
+
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.get_runtime_policy",
+                return_value="managed",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.current_login_generation",
+                return_value="gen-1",
+            ),
+            patch("linkedin_mcp_server.dependencies.close_browser", AsyncMock()),
+            patch(
+                "linkedin_mcp_server.dependencies.get_profile_lease",
+                return_value=lease,
+            ),
+            # Also at the source: the stand-down helper lives in `server_role`
+            # and reads the lease through `profile_lease`, not through the
+            # module under test.
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                return_value=lease,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+                relogin,
+            ),
+        ):
+            # A DIRECT server: the role is never set, so it is the default.
+            with pytest.raises(BrowserShutdownUnconfirmedError, match="Restart"):
+                await handle_auth_error(AuthenticationError("expired"), ctx=None)
+
+        relogin.assert_not_awaited()
+
+    async def test_a_wedged_owner_asks_to_be_replaced(self):
+        """Reporting the wedge is not enough for an owner: it has to go.
+
+        The two roles need different answers to the same condition. "Restart the
+        server" is actionable for a single-process server, whose client owns it.
+        A detached owner outlives the client that started it, so restarting the
+        client elects nothing: the next frontend attaches to this same owner and
+        meets the same held profile. Only exiting frees the lock.
+
+        Asserted against the request rather than against a real exit, because the
+        exit itself belongs to the serve loop; ``test_daemon_owner`` covers that
+        the loop acts on this.
+        """
+        from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        lease = MagicMock()
+        lease.browser_open = True
+
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.get_runtime_policy",
+                return_value="managed",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.current_login_generation",
+                return_value="gen-1",
+            ),
+            patch("linkedin_mcp_server.dependencies.close_browser", AsyncMock()),
+            patch(
+                "linkedin_mcp_server.dependencies.get_profile_lease",
+                return_value=lease,
+            ),
+            # Also at the source: the stand-down helper lives in `server_role`
+            # and reads the lease through `profile_lease`, not through the
+            # module under test.
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                return_value=lease,
+            ),
+        ):
+            with pytest.raises(BrowserShutdownUnconfirmedError):
+                await handle_auth_error(AuthenticationError("expired"), ctx=None)
+
+        assert stand_down_reason() is not None, "the wedged owner keeps serving"
+
+    async def test_a_timeout_during_the_close_still_frees_the_owner(self):
+        """The wedge must be noticed even when the call it runs in is cut short.
+
+        ``close_browser`` defers cancellation until teardown finishes and then
+        re-raises ``CancelledError`` (``drivers/browser.py``), which is a
+        ``BaseException`` and passes through ``except Exception`` untouched. A
+        tool timeout landing during the close therefore skipped the whole
+        stand-down decision, and the owner stayed wedged exactly as before the
+        fix -- recoverable only by killing it.
+
+        Measured with the decision outside the ``finally``: the call ended in
+        ``TimeoutError`` with ``stand_down_reason()`` still None and the lease
+        still held.
+        """
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        lease = MagicMock()
+        lease.browser_open = True
+
+        async def close_that_defers_its_cancel():
+            """What the production close does, in miniature."""
+            try:
+                await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                pass  # teardown runs to the end regardless
+            raise asyncio.CancelledError
+
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.get_runtime_policy",
+                return_value="managed",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.current_login_generation",
+                return_value="gen-1",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.close_browser",
+                close_that_defers_its_cancel,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.get_profile_lease",
+                return_value=lease,
+            ),
+            # Also at the source: the stand-down helper lives in `server_role`
+            # and reads the lease through `profile_lease`, not through the
+            # module under test.
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                return_value=lease,
+            ),
+        ):
+            with pytest.raises((TimeoutError, asyncio.CancelledError)):
+                await asyncio.wait_for(
+                    handle_auth_error(AuthenticationError("expired"), ctx=None),
+                    timeout=0.02,
+                )
+
+        assert stand_down_reason() is not None, (
+            "a timeout during the close left the owner wedged"
+        )
+
+    async def test_a_single_server_is_not_asked_to_stand_down(self):
+        """The same condition, and deliberately not the same answer.
+
+        A DIRECT server has no successor to elect. Asking it to stand down would
+        end the only server the client has, over something a restart fixes.
+        """
+        from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+        from linkedin_mcp_server.server_role import stand_down_reason
+
+        lease = MagicMock()
+        lease.browser_open = True
+
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.get_runtime_policy",
+                return_value="managed",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.current_login_generation",
+                return_value="gen-1",
+            ),
+            patch("linkedin_mcp_server.dependencies.close_browser", AsyncMock()),
+            patch(
+                "linkedin_mcp_server.dependencies.get_profile_lease",
+                return_value=lease,
+            ),
+            # Also at the source: the stand-down helper lives in `server_role`
+            # and reads the lease through `profile_lease`, not through the
+            # module under test.
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                return_value=lease,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+                AsyncMock(),
+            ),
+        ):
+            with pytest.raises(BrowserShutdownUnconfirmedError):
+                await handle_auth_error(AuthenticationError("expired"), ctx=None)
+
+        assert stand_down_reason() is None
+
+
+class TestAWedgeFromAnywhereFreesTheOwner:
+    """The request belongs to the error, not to one of its raise sites.
+
+    Found live rather than by review. A real detached owner failed to close
+    Chromium inside 10 seconds during `_authenticate_existing_profile`, deep in
+    the driver, which never reaches `handle_auth_error`. The owner kept the
+    profile and three consecutive fresh clients each attached to it and got the
+    same refusal, recoverable only by killing it.
+    """
+
+    def teardown_method(self):
+        from linkedin_mcp_server.server_role import reset_process_role_for_testing
+
+        reset_process_role_for_testing()
+
+    def test_raising_it_asks_an_owner_to_give_way(self):
+        from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        # Constructed with the profile already held, which is the state the
+        # request is about. This asserts the constructor's own contribution; the
+        # startup path that produces that state in the real order is asserted
+        # through `_create_browser` below, because a mocked flag there hid a live
+        # wedge for a whole review round.
+        lease = MagicMock()
+        lease.browser_open = True
+        with patch(
+            "linkedin_mcp_server.profile_lease.get_profile_lease", return_value=lease
+        ):
+            BrowserShutdownUnconfirmedError("the startup teardown timed out")
+
+        assert stand_down_reason() is not None, (
+            "an owner wedged outside handle_auth_error keeps the profile forever"
+        )
+
+    async def test_the_startup_path_frees_the_owner_in_the_real_order(self):
+        """The live wedge, driven through the function that produces it.
+
+        `_create_browser_locked` raises while `browser_open` is still false, so
+        the helper inside the exception's constructor reads "nothing is held" and
+        returns. Only the catch afterwards marks the browser open and takes the
+        extra reference -- holding the profile with nobody having asked for a
+        replacement.
+
+        Measured in production order: `browser_open=True`, `stand_down=None`.
+        The previous test for this handed the constructor a lease that already
+        said True, which is exactly the state production has not reached yet, and
+        that mock is what hid it.
+        """
+        from linkedin_mcp_server.drivers import browser as drv
+        from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        class Lease:
+            """Real enough: the marker starts false, as production's does."""
+
+            def __init__(self):
+                self.browser_open = False
+                self.refs = 1
+
+            def try_acquire(self):
+                self.refs += 1
+                return True
+
+            def guardian_fd(self):
+                return 7
+
+            def mark_browser_open(self):
+                self.browser_open = True
+
+            def release(self):
+                self.refs -= 1
+
+        set_process_role(ServerRole.OWNER)
+        lease = Lease()
+
+        async def teardown_that_could_not_be_confirmed():
+            raise BrowserShutdownUnconfirmedError("the startup teardown timed out")
+
+        with (
+            patch.object(drv, "_browser", None),
+            patch.object(drv, "get_profile_lease", return_value=lease),
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                return_value=lease,
+            ),
+            patch.object(drv, "start_browser_guardian"),
+            patch.object(
+                drv, "_create_browser_locked", teardown_that_could_not_be_confirmed
+            ),
+        ):
+            with pytest.raises(BrowserShutdownUnconfirmedError):
+                await drv._create_browser()
+
+        assert lease.browser_open is True, "the profile was not actually held"
+        assert stand_down_reason() is not None, (
+            "the owner holds the profile and nobody asked for a replacement"
+        )
+
+    def test_a_single_server_is_left_alone(self):
+        """Its client owns it, so "restart the server" is something to act on."""
+        from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+        from linkedin_mcp_server.server_role import stand_down_reason
+
+        lease = MagicMock()
+        lease.browser_open = True
+        with patch(
+            "linkedin_mcp_server.profile_lease.get_profile_lease", return_value=lease
+        ):
+            BrowserShutdownUnconfirmedError("the startup teardown timed out")
+
+        assert stand_down_reason() is None
+
+    async def test_a_quiet_close_that_keeps_the_profile_also_frees_the_owner(self):
+        """The path that reports nothing at all, which is why it was missed twice.
+
+        A handoff, the idle timeout and ``close_session`` all reach
+        ``_close_browser_locked``, which returns *normally* when the teardown
+        cannot be confirmed: it logs, keeps the lease, and raises nothing. So
+        neither the exception constructor nor ``handle_auth_error`` runs, and the
+        owner sits on the profile while every later launch is refused with
+        ``BrowserBusyError``.
+
+        Reproduced before this: close returned, the lease was kept, and
+        ``stand_down_reason()`` was still None.
+        """
+        from linkedin_mcp_server.drivers import browser as drv
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        lease = MagicMock()
+        lease.browser_open = True
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=False)  # unconfirmed teardown
+
+        with (
+            patch.object(drv, "_browser", fake_browser),
+            patch.object(drv, "_browser_lease", lease),
+            patch.object(drv, "get_profile_lease", return_value=lease),
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                return_value=lease,
+            ),
+        ):
+            await drv._close_browser_locked()
+
+        # The lease is kept deliberately; what must not also happen is silence.
+        lease.release.assert_not_called()
+        assert stand_down_reason() is not None, (
+            "an owner stranded by a routine close keeps the profile forever"
+        )
+
+    def test_a_free_profile_leaves_the_owner_serving(self):
+        """The guard is what keeps this from firing on every ordinary close.
+
+        Asserted against the helper directly rather than through a confirmed
+        close: that branch never reaches the helper at all, so a test driving it
+        stays green with the guard deleted. Measured -- the first version of this
+        did exactly that.
+
+        Without the guard every call here would end the owner, healthy or not,
+        and the daemon would churn a process per stale session.
+        """
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            a_held_profile_means_this_owner_must_go,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        lease = MagicMock()
+        lease.browser_open = False  # a confirmed teardown clears it
+
+        with patch(
+            "linkedin_mcp_server.profile_lease.get_profile_lease", return_value=lease
+        ):
+            a_held_profile_means_this_owner_must_go()
+
+        assert stand_down_reason() is None, "a healthy owner was told to exit"
+
+    async def test_a_confirmed_close_does_not_reach_the_request(self):
+        """And the ordinary close path stays silent end to end."""
+        from linkedin_mcp_server.drivers import browser as drv
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        lease = MagicMock()
+        lease.browser_open = False  # a confirmed teardown clears it
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=True)
+
+        with (
+            patch.object(drv, "_browser", fake_browser),
+            patch.object(drv, "_browser_lease", lease),
+            patch.object(drv, "get_profile_lease", return_value=lease),
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                return_value=lease,
+            ),
+        ):
+            await drv._close_browser_locked()
+
+        assert stand_down_reason() is None, "a healthy owner was told to exit"
+
+    def test_a_lease_it_cannot_read_counts_as_held(self):
+        """Not being able to tell is not the same as being told it is free.
+
+        The two outcomes are not symmetric: an unnecessary stand-down costs one
+        election, a stranded owner costs every later call. Measured with the read
+        raising ``PermissionError``: the owner kept serving.
+        """
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            a_held_profile_means_this_owner_must_go,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+
+        def unreadable():
+            raise PermissionError("the profile path cannot be resolved")
+
+        with patch(
+            "linkedin_mcp_server.profile_lease.get_profile_lease",
+            side_effect=unreadable,
+        ):
+            a_held_profile_means_this_owner_must_go()
+
+        assert stand_down_reason() is not None
+
+    async def test_a_close_settles_the_profile_without_any_lookup(self):
+        """The close no longer asks where its lease is, so it cannot be told wrong.
+
+        This replaces a pair of tests that injected ``get_profile_lease`` raising
+        ``PermissionError`` inside the close and asserted the workaround fired.
+        Kept as a scenario and inverted as an assertion: with the lookup raising
+        for the whole call, an unconfirmed teardown still keeps the lease and
+        still asks for a replacement. If a lookup ever returns to this path the
+        ``PermissionError`` surfaces and this fails.
+
+        Worth saying why the old pair had to go rather than be adjusted. Left as
+        they were they would have passed *vacuously* — green while the injected
+        failure had nothing to land on — which is the one outcome worse than a
+        red test. And the failure they injected is hard to provoke for real:
+        measured against the actual function, a removed auth root, a parent
+        directory at mode 000 and a symlink loop all return normally, because
+        ``Path.resolve()`` is non-strict and the registry is a dict. What they
+        were really pinning is structural, and that is what is asserted here:
+        whatever goes wrong between clearing ``_browser`` and settling the lease,
+        the profile must not be left held in silence.
+        """
+        from linkedin_mcp_server.drivers import browser as drv
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        lease = MagicMock()
+        lease.browser_open = True
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=False)  # unconfirmed
+
+        def unreadable():
+            raise PermissionError("the profile path cannot be resolved")
+
+        with (
+            patch.object(drv, "_browser", fake_browser),
+            patch.object(drv, "_browser_lease", lease),
+            patch.object(drv, "get_profile_lease", side_effect=unreadable),
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                side_effect=unreadable,
+            ),
+        ):
+            # No PermissionError: nothing on this path resolves a path any more.
+            await drv._close_browser_locked()
+
+        lease.release.assert_not_called()
+        assert stand_down_reason() is not None, (
+            "an owner stranded by an unconfirmed close keeps the profile"
+        )
+
+    async def test_a_confirmed_close_releases_without_any_lookup_either(self):
+        """The same for the ordinary ending, which used to strand a lease too.
+
+        A proven-closed Chromium does not by itself free the profile: both
+        ``mark_browser_closed()`` and ``release()`` need the lease object, and
+        when that had to be looked up a failing lookup left it held with its
+        marker set. Measured then with a real acquired lease: Chromium gone, and
+        this owner's own next launch refused with ``BrowserBusyError`` while
+        nobody had asked for a replacement.
+        """
+        from linkedin_mcp_server.drivers import browser as drv
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        lease = MagicMock()
+        lease.browser_open = False  # a confirmed teardown clears it
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=True)  # confirmed
+
+        def unreadable():
+            raise PermissionError("the profile path cannot be resolved")
+
+        with (
+            patch.object(drv, "_browser", fake_browser),
+            patch.object(drv, "_browser_lease", lease),
+            patch.object(drv, "get_profile_lease", side_effect=unreadable),
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                side_effect=unreadable,
+            ),
+        ):
+            await drv._close_browser_locked()
+
+        lease.mark_browser_closed.assert_called_once()
+        lease.release.assert_called_once()
+        assert stand_down_reason() is None, "a healthy owner was told to exit"
+
+
+def test_browser_activation_applies_the_default_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from linkedin_mcp_server.drivers import browser as drv
+
+    browser = MagicMock()
+    config = MagicMock()
+    config.browser.default_timeout = 30_000
+    monkeypatch.setattr(drv, "get_config", lambda: config)
+
+    drv._apply_browser_settings(browser)
+
+    browser.page.set_default_timeout.assert_called_once_with(30_000)
+
+
+def test_confirmed_shutdown_retains_other_detached_process_groups():
+    from linkedin_mcp_server import process_tree
+    from linkedin_mcp_server.drivers import browser as drv
+
+    original = dict(process_tree._registered_posix_groups)
+    registration = process_tree._PosixGroupRegistration("leader", {124: "member"})
+    process_tree._registered_posix_groups[123] = registration
+    drv._browser_lease = None
+    try:
+        drv._settle_the_profile(confirmed=True)
+        assert process_tree._registered_posix_groups[123] is registration
+    finally:
+        process_tree._registered_posix_groups.clear()
+        process_tree._registered_posix_groups.update(original)
+
+
+def test_unconfirmed_shutdown_without_local_lease_requires_hard_exit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from linkedin_mcp_server.drivers import browser as drv
+    from linkedin_mcp_server import server_role
+
+    lease = MagicMock()
+    lease.browser_open = True
+    monkeypatch.setattr(
+        "linkedin_mcp_server.profile_lease.get_profile_lease", lambda: lease
+    )
+    drv._browser_lease = None
+    server_role.set_process_role(server_role.ServerRole.OWNER)
+    try:
+        drv._settle_the_profile(confirmed=False)
+        assert server_role.hard_exit_required()
+    finally:
+        server_role.reset_process_role_for_testing()
+
+
+class TestTheBrowserKeepsItsOwnLease:
+    """Ownership as an object it holds, rather than a fact it remembers.
+
+    Six review rounds each found one more way for an owner to end up sitting on
+    the profile with nobody asked to replace it, and every one of them lived in
+    the same gap: the close had cleared ``_browser``, still had work to do, and
+    had to go and find its lease again before it could do any of it.
+    """
+
+    def teardown_method(self):
+        from linkedin_mcp_server.server_role import reset_process_role_for_testing
+
+        reset_process_role_for_testing()
+
+    async def test_it_keeps_the_object_the_registry_handed_out(self, tmp_path):
+        """By identity, because a fresh equivalent instance is the failure mode.
+
+        ``profile_lease`` clears inherited leases after a fork by walking its
+        registry, so a ``ProfileLease`` constructed outside it is invisible to
+        that handler: a forked child would keep its parent's kernel lock alive
+        with nothing in its own state to explain why. The two objects would
+        behave identically everywhere else, which is exactly why this asserts
+        identity rather than behaviour.
+        """
+        from linkedin_mcp_server.drivers import browser as drv
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+
+        lease = get_profile_lease(tmp_path / "profile")
+
+        async def built() -> object:
+            return MagicMock()
+
+        with (
+            patch.object(drv, "_browser", None),
+            patch.object(drv, "_browser_lease", None),
+            patch.object(drv, "get_profile_lease", return_value=lease),
+            patch.object(drv, "_create_browser_locked", built),
+        ):
+            await drv._create_browser()
+            retained = drv._browser_lease
+
+        try:
+            assert retained is lease, "the browser kept a lease of its own making"
+        finally:
+            lease.release()
+
+    def test_the_test_reset_drops_the_lease_without_releasing_it(self, tmp_path):
+        """``conftest`` resets this module first, on purpose.
+
+        A lease the browser still holds is settled by its own bookkeeping before
+        ``reset_leases_for_testing`` runs. Releasing a reference here as well
+        would drop one this module never took, and the next test would meet a
+        lease reporting itself free while the kernel lock is still open.
+        """
+        from linkedin_mcp_server.drivers import browser as drv
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+
+        lease = get_profile_lease(tmp_path / "profile")
+        assert lease.try_acquire()
+
+        with patch.object(drv, "_browser_lease", lease):
+            drv.reset_browser_for_testing()
+
+        try:
+            assert lease.held, "the reset released a reference it never took"
+        finally:
+            lease.release()
+
+    async def test_it_settles_the_lease_it_took_after_a_rotation(self, tmp_path):
+        """The profile can move under a live browser, and the lease does not.
+
+        ``rotate_source_profile`` takes the lease itself, and afterwards the
+        registry's entry for the new auth root is a *different* object. A close
+        that re-derived its lease from the current path would then mark and
+        release the wrong one, leaving the browser's own profile held. Holding
+        the object is what makes that unrepresentable.
+        """
+        from linkedin_mcp_server.drivers import browser as drv
+
+        took = MagicMock()
+        took.browser_open = True
+        somewhere_else = MagicMock()
+        somewhere_else.browser_open = True
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=True)
+
+        with (
+            patch.object(drv, "_browser", fake_browser),
+            patch.object(drv, "_browser_lease", took),
+            # What the path resolves to now, which is not what was acquired.
+            patch.object(drv, "get_profile_lease", return_value=somewhere_else),
+        ):
+            await drv._close_browser_locked()
+
+        took.release.assert_called_once()
+        somewhere_else.release.assert_not_called()
+        somewhere_else.mark_browser_closed.assert_not_called()
+
+    def test_the_stand_down_helper_uses_the_lease_it_is_given(self):
+        """And never reaches for the registry when it was handed one.
+
+        The lookup is the thing being removed from these paths, so a helper that
+        quietly consulted it anyway would leave the reconstruction alive in the
+        one decision the six rounds converged on.
+
+        Asserted against the *call*, not by making the lookup raise. That was the
+        first version of this test and it passed against a helper that ignored
+        its argument entirely: the helper catches broadly on purpose, so an
+        injected failure is swallowed and read as "cannot tell, assume held",
+        which is the same verdict the correct code reaches. The mutation was
+        invisible until the assertion moved here.
+        """
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            a_held_profile_means_this_owner_must_go,
+            hard_exit_required,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        held = MagicMock()
+        held.browser_open = True
+
+        with patch("linkedin_mcp_server.profile_lease.get_profile_lease") as looked_up:
+            a_held_profile_means_this_owner_must_go(held)
+
+        looked_up.assert_not_called()
+        assert stand_down_reason() is not None
+        assert hard_exit_required()
+
+    async def test_a_startup_that_could_not_tear_down_keeps_its_extra_reference(
+        self, tmp_path
+    ):
+        """The one path that retains a lease with no browser behind it.
+
+        ``_create_browser_locked`` can raise after Chromium is up, and then the
+        teardown may not be confirmable: something may still be on the profile
+        with nothing left to close it. So the lease is kept *and* an extra
+        reference taken, so the caller's own release cannot drop the last one and
+        let a second launch start on top of a live Chromium. The kernel frees it
+        when the process exits, which is the whole recovery.
+        """
+        from linkedin_mcp_server.drivers import browser as drv
+        from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        class Lease:
+            """Real enough, and the marker starts false as production's does."""
+
+            def __init__(self):
+                self.browser_open = False
+                self.refs = 0
+
+            def try_acquire(self):
+                self.refs += 1
+                return True
+
+            def guardian_fd(self):
+                return 7
+
+            def mark_browser_open(self):
+                self.browser_open = True
+
+            def release(self):
+                self.refs -= 1
+
+        set_process_role(ServerRole.OWNER)
+        lease = Lease()
+
+        async def teardown_that_could_not_be_confirmed():
+            raise BrowserShutdownUnconfirmedError("the startup teardown timed out")
+
+        with (
+            patch.object(drv, "_browser", None),
+            patch.object(drv, "_browser_lease", None),
+            patch.object(drv, "get_profile_lease", return_value=lease),
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                return_value=lease,
+            ),
+            patch.object(drv, "start_browser_guardian"),
+            patch.object(
+                drv, "_create_browser_locked", teardown_that_could_not_be_confirmed
+            ),
+        ):
+            with pytest.raises(BrowserShutdownUnconfirmedError):
+                await drv._create_browser()
+            retained = drv._browser_lease
+
+        assert retained is lease, "nothing records who holds the profile"
+        assert lease.refs >= 2, "the extra reference was not taken"
+        assert lease.browser_open is True
+        assert stand_down_reason() is not None, (
+            "the owner holds the profile and nobody asked for a replacement"
+        )
+
+
+# --- A browser that stopped ------------------------------------------------------
+
+
+def _answer(value: object) -> Any:
+    """Return *value*, or raise it when it is an exception."""
+    if isinstance(value, BaseException):
+        raise value
+    return value
+
+
+class _Browser:
+    """A cached browser whose liveness and close verdict the test decides.
+
+    Only what the dependency gate, the driver's close and the auth check read.
+    ``page_closed``, ``connected`` and ``verdict`` may be exceptions, raised when
+    read; ``connected=None`` is a context without a browser handle.
+    """
+
+    def __init__(self) -> None:
+        self.page_closed: object = False
+        self.connected: object = True
+        self.context_error: Exception | None = None
+        self.verdict: object = True
+        self.closes = 0
+        self.during_close: Any = None
+        self.is_authenticated = True
+        self.page = SimpleNamespace(is_closed=lambda: _answer(self.page_closed))
+
+    @property
+    def context(self) -> SimpleNamespace:
+        if self.context_error is not None:
+            raise self.context_error
+        if self.connected is None:
+            return SimpleNamespace(browser=None)
+        return SimpleNamespace(
+            browser=SimpleNamespace(is_connected=lambda: _answer(self.connected))
+        )
+
+    async def close(self) -> bool:
+        self.closes += 1
+        await asyncio.sleep(0)
+        if self.during_close is not None:
+            self.during_close()
+        return bool(_answer(self.verdict))
+
+
+@pytest.fixture
+def driver(monkeypatch):
+    """The real driver singleton, creation fence and close, with launch doubled.
+
+    Browsers are created through ``get_or_create_browser`` and
+    ``_create_browser``, so the cached one holds the lease the driver took for
+    it, as in production. A browser placed in ``_browser`` without that lease
+    is not a state the gate can meet, and would say nothing about its verdict.
+    Each launch publishes the next of ``upcoming``, or a live ``_Browser``.
+    """
+    from linkedin_mcp_server import dependencies
+    from linkedin_mcp_server.drivers import browser as drv
+
+    # Fresh, because an earlier test's loop may have bound the module's own.
+    monkeypatch.setattr(drv, "_browser_lifecycle_lock", asyncio.Lock())
+    monkeypatch.setattr(drv, "_browser_create_lock", asyncio.Lock())
+    monkeypatch.setattr(drv, "start_browser_guardian", lambda fd: None)
+    monkeypatch.setattr(drv, "release_browser_guardian", lambda: None)
+    monkeypatch.setattr(dependencies, "ensure_tool_ready_or_raise", AsyncMock())
+    extractor = MagicMock(name="LinkedInExtractor")
+    monkeypatch.setattr(dependencies, "LinkedInExtractor", extractor)
+    launched: list[Any] = []
+    upcoming: list[Any] = []
+
+    async def launch() -> Any:
+        manager: Any = upcoming.pop(0) if upcoming else _Browser()
+        drv._browser = manager
+        launched.append(manager)
+        return manager
+
+    monkeypatch.setattr(drv, "_create_browser_locked", launch)
+    return SimpleNamespace(
+        drv=drv, launched=launched, upcoming=upcoming, extractor=extractor
+    )
+
+
+async def _cached_with_a_call_reference(driver) -> tuple[Any, Any]:
+    """Launch the singleton, then take the reference a tool call's middleware holds."""
+    from linkedin_mcp_server.profile_lease import get_profile_lease
+
+    manager = await driver.drv.get_or_create_browser()
+    lease = get_profile_lease()
+    assert driver.drv._browser_lease is lease and lease.browser_open
+    assert lease.try_acquire()
+    return manager, lease
+
+
+async def _until(condition, timeout: float = 5.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        assert loop.time() < deadline, "the teardown step was never reached"
+        await asyncio.sleep(0.005)
+
+
+def _on_the_tool_path() -> Any:
+    """The real sequential middleware, and a tool body that only acquires."""
+    from linkedin_mcp_server.sequential_tool_middleware import (
+        SequentialToolExecutionMiddleware,
+    )
+
+    middleware = SequentialToolExecutionMiddleware()
+    request: Any = SimpleNamespace(
+        message=SimpleNamespace(name="get_feed"), fastmcp_context=None
+    )
+
+    async def body(context: Any) -> Any:
+        return await get_ready_extractor(None, tool_name="get_feed")
+
+    async def call() -> Any:
+        return await middleware.on_call_tool(request, body)
+
+    return call
+
+
+@pytest.fixture
+def two_roots(tmp_path, monkeypatch):
+    """A profile root reached through a symlink the test can point elsewhere.
+
+    Undoes only the autouse path patch, and only for the source profile:
+    USER_DATA_DIR still names a directory inside *tmp_path*.
+    """
+    from linkedin_mcp_server import session_state
+    from linkedin_mcp_server.config import set_config
+    from linkedin_mcp_server.config.schema import AppConfig, BrowserConfig
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    for root in (a, b):
+        (root / "profile").mkdir(parents=True)
+    alias = tmp_path / "selected"
+    alias.symlink_to(a, target_is_directory=True)
+    monkeypatch.setattr(
+        session_state, "get_source_profile_dir", _resolve_the_configured_profile
+    )
+    set_config(AppConfig(browser=BrowserConfig(user_data_dir=str(alias / "profile"))))
+
+    def retarget(root: Path) -> None:
+        alias.unlink()
+        alias.symlink_to(root, target_is_directory=True)
+
+    return SimpleNamespace(a=a / "profile", b=b / "profile", retarget=retarget)
+
+
+class TestADeadBrowserIsNoticedBeforeTheCall:
+    """Only positive evidence that Chromium is gone shuts the browser down."""
+
+    @pytest.mark.parametrize(
+        ("state", "shut_down"),
+        [
+            ({"page_closed": True}, True),
+            ({"connected": False}, True),
+            # The page decides alone: once teardown has begun the context read
+            # can raise, and that must not erase what the page already said.
+            ({"page_closed": True, "context_error": RuntimeError("gone")}, True),
+            # The coverage boundary. A dead Node driver and a renderer crash
+            # that leaves the page open both read as live here, and fail
+            # inside the tool as they did before.
+            ({}, False),
+            ({"connected": None}, False),
+            ({"page_closed": RuntimeError("unreadable")}, False),
+            ({"context_error": RuntimeError("unreadable")}, False),
+            ({"connected": RuntimeError("unreadable")}, False),
+        ],
+        ids=[
+            "closed-page",
+            "disconnected",
+            "closed-page-unreadable-context",
+            "both-live",
+            "no-browser-handle",
+            "page-read-raises",
+            "context-read-raises",
+            "connection-read-raises",
+        ],
+    )
+    async def test_only_positive_evidence_shuts_it_down(self, driver, state, shut_down):
+        manager, _lease = await _cached_with_a_call_reference(driver)
+        for name, value in state.items():
+            setattr(manager, name, value)
+
+        if shut_down:
+            with pytest.raises(ToolError) as raised:
+                await get_ready_extractor(None, tool_name="get_feed")
+            assert isinstance(raised.value.__cause__, BrowserUnavailableError)
+            assert manager.closes == 1
+            driver.extractor.assert_not_called()
+        else:
+            await get_ready_extractor(None, tool_name="get_feed")
+            assert manager.closes == 0
+            driver.extractor.assert_called_once_with(manager.page)
+        assert len(driver.launched) == 1
+
+
+class TestTheCloseDecidesTheAnswer:
+    """The settlement of the browser's own lease says which error, nothing else."""
+
+    @pytest.mark.parametrize("owner", [False, True], ids=["direct", "owner"])
+    @pytest.mark.parametrize(
+        "verdict",
+        [True, False, RuntimeError("teardown failed")],
+        ids=["confirmed", "unconfirmed", "close-raised"],
+    )
+    async def test_one_close_and_no_login(self, driver, monkeypatch, owner, verdict):
+        from linkedin_mcp_server import dependencies
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        if owner:
+            set_process_role(ServerRole.OWNER)
+        auth_check = AsyncMock()
+        recovery = AsyncMock()
+        relogin = AsyncMock()
+        quiescent = MagicMock()
+        monkeypatch.setattr(dependencies, "ensure_authenticated", auth_check)
+        monkeypatch.setattr(dependencies, "handle_auth_error", recovery)
+        monkeypatch.setattr(
+            dependencies, "invalidate_auth_and_trigger_relogin", relogin
+        )
+        monkeypatch.setattr(dependencies, "go_auth_quiescent", quiescent)
+        manager, lease = await _cached_with_a_call_reference(driver)
+        manager.page_closed = True
+        manager.verdict = verdict
+
+        with pytest.raises(ToolError) as raised:
+            await get_ready_extractor(None, tool_name="get_feed")
+
+        cause = raised.value.__cause__
+        assert manager.closes == 1
+        assert len(driver.launched) == 1, "the rejecting call launched a browser"
+        auth_check.assert_not_awaited()
+        recovery.assert_not_awaited()
+        relogin.assert_not_awaited()
+        quiescent.assert_not_called()
+        driver.extractor.assert_not_called()
+        if verdict is True:
+            assert isinstance(cause, BrowserUnavailableError)
+            assert not lease.browser_open
+            assert driver.drv._browser_lease is None
+            assert stand_down_reason() is None
+            # Only the browser's reference went: the call's is still held.
+            assert lease.held
+            lease.release()
+            assert not lease.held
+        else:
+            assert isinstance(cause, BrowserShutdownUnconfirmedError)
+            if isinstance(verdict, Exception):
+                assert cause.__cause__ is verdict
+            assert lease.browser_open
+            assert driver.drv._browser_lease is lease
+            lease.release()
+            assert lease.held, "the profile was freed with Chromium maybe on it"
+            assert (stand_down_reason() is not None) is owner
+
+    @pytest.mark.parametrize("verdict", [True, False], ids=["confirmed", "unconfirmed"])
+    async def test_a_new_browser_starts_only_after_a_proven_close(
+        self, driver, verdict
+    ):
+        manager, lease = await _cached_with_a_call_reference(driver)
+        manager.page_closed = True
+        manager.verdict = verdict
+        with pytest.raises(ToolError):
+            await get_ready_extractor(None, tool_name="get_feed")
+        lease.release()
+
+        if verdict:
+            await get_ready_extractor(None, tool_name="get_feed")
+            assert len(driver.launched) == 2
+            assert driver.launched[1] is not manager
+            driver.extractor.assert_called_once_with(driver.launched[1].page)
+        else:
+            with pytest.raises(BrowserBusyError):
+                await driver.drv.get_or_create_browser()
+            assert len(driver.launched) == 1
+
+    @pytest.mark.parametrize("owner", [False, True], ids=["direct", "owner"])
+    @pytest.mark.parametrize("verdict", [True, False], ids=["confirmed", "unconfirmed"])
+    async def test_a_retarget_during_the_close_does_not_change_the_answer(
+        self, driver, two_roots, owner, verdict
+    ):
+        """The profile root moving mid-close leaves the browser's lease its own.
+
+        A lookup by path after the close would answer for B, which nothing ever
+        marked, and report an unconfirmed close on A as a clean restart.
+        """
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        if owner:
+            set_process_role(ServerRole.OWNER)
+        manager, a = await _cached_with_a_call_reference(driver)
+        assert a is get_profile_lease(two_roots.a)
+        manager.page_closed = True
+        manager.verdict = verdict
+        manager.during_close = lambda: two_roots.retarget(two_roots.b.parent)
+
+        with pytest.raises(ToolError) as raised:
+            await get_ready_extractor(None, tool_name="get_feed")
+
+        b = get_profile_lease()
+        assert b is get_profile_lease(two_roots.b) and not b.browser_open
+        if verdict:
+            assert isinstance(raised.value.__cause__, BrowserUnavailableError)
+            assert not a.browser_open
+        else:
+            assert isinstance(raised.value.__cause__, BrowserShutdownUnconfirmedError)
+            assert a.browser_open and driver.drv._browser_lease is a
+            assert (stand_down_reason() is not None) is owner
+        a.release()
+
+
+class TestARetainedBrowserBlocksEveryRoot:
+    async def test_a_retarget_after_an_unconfirmed_close_launches_nothing(
+        self, driver, two_roots
+    ):
+        """Retained lease A, then the root moves to B: nothing may start on B.
+
+        B's own marker is clear, so a fence that read only the lease the path
+        resolves to now let B start beside a Chromium that may still be on A,
+        and B's later confirmed close then cleared A without draining it.
+        """
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+
+        call = _on_the_tool_path()
+        await call()
+        a = get_profile_lease(two_roots.a)
+        dead = driver.launched[0]
+        dead.page_closed = True
+        dead.verdict = False
+        with pytest.raises(ToolError) as raised:
+            await call()
+        assert isinstance(raised.value.__cause__, BrowserShutdownUnconfirmedError)
+
+        two_roots.retarget(two_roots.b.parent)
+        with pytest.raises(ToolError) as raised:
+            await call()
+
+        assert isinstance(raised.value.__cause__, BrowserBusyError)
+        assert len(driver.launched) == 1, "a browser started beside the retained one"
+        b = get_profile_lease(two_roots.b)
+        assert not b.browser_open and not b.held
+        assert a.browser_open and a.held
+        assert driver.drv._browser_lease is a
+
+
+class TestABrowserAnotherCloseRetired:
+    """Between the check and the lock, someone else closed it: reacquire once."""
+
+    @pytest.mark.parametrize(
+        ("confirmed", "replaced"),
+        [(True, False), (False, False), (True, True)],
+        ids=["confirmed", "unconfirmed", "replacement-cached"],
+    )
+    async def test_one_reacquisition_and_the_current_browser_is_left_alone(
+        self, driver, monkeypatch, confirmed, replaced
+    ):
+        from linkedin_mcp_server import dependencies
+
+        stale, lease = await _cached_with_a_call_reference(driver)
+        stale.page_closed = True
+        stale.verdict = confirmed
+        await driver.drv.close_browser()
+        replacement = await driver.drv.get_or_create_browser() if replaced else None
+
+        acquisitions = 0
+        getter = dependencies.get_or_create_browser
+        helper = dependencies.close_unusable_browser
+        outcomes: list[bool | None] = []
+
+        async def stale_first() -> Any:
+            nonlocal acquisitions
+            acquisitions += 1
+            return stale if acquisitions == 1 else await getter()
+
+        async def recorded(manager: Any) -> bool | None:
+            outcomes.append(await helper(manager))
+            return outcomes[-1]
+
+        monkeypatch.setattr(dependencies, "get_or_create_browser", stale_first)
+        monkeypatch.setattr(dependencies, "close_unusable_browser", recorded)
+
+        if confirmed:
+            await get_ready_extractor(None, tool_name="get_feed")
+            current = driver.launched[-1]
+            assert current is not stale and current.closes == 0
+            assert replacement is None or current is replacement
+            assert len(driver.launched) == 2
+            driver.extractor.assert_called_once_with(current.page)
+        else:
+            with pytest.raises(ToolError) as raised:
+                await get_ready_extractor(None, tool_name="get_feed")
+            assert isinstance(raised.value.__cause__, BrowserBusyError)
+            assert len(driver.launched) == 1
+        assert outcomes == [None]
+        assert acquisitions == 2
+        assert stale.closes == 1, "only the other closer may have closed it"
+        lease.release()
+
+    async def test_identity_is_read_after_the_lifecycle_lock_is_taken(
+        self, driver, monkeypatch
+    ):
+        """The cache can change while this helper waits behind another close.
+
+        A check made before the lock sees the dead manager still cached, then
+        closes nothing and reports a restart. The check belongs under the lock,
+        where the other close has already cleared the cache.
+        """
+        stale, lease = await _cached_with_a_call_reference(driver)
+        stale.page_closed = True
+        held = asyncio.Event()
+        release = asyncio.Event()
+        real_defer = driver.drv._run_deferring_cancels
+
+        async def hold_the_lock(coroutine: Any) -> Any:
+            held.set()
+            await release.wait()
+            return await real_defer(coroutine)
+
+        monkeypatch.setattr(driver.drv, "_run_deferring_cancels", hold_the_lock)
+        closer = asyncio.create_task(driver.drv.close_browser())
+        await held.wait()
+
+        task = asyncio.create_task(get_ready_extractor(None, tool_name="get_feed"))
+        await asyncio.sleep(0.05)
+        assert not task.done(), "the helper did not wait for the lock"
+        release.set()
+        await closer
+        await task
+
+        current = driver.launched[-1]
+        assert current is not stale and current.closes == 0
+        assert len(driver.launched) == 2
+        assert stale.closes == 1, "only the other closer may have closed it"
+        driver.extractor.assert_called_once_with(current.page)
+        lease.release()
+
+    async def test_the_reacquired_browser_is_not_checked_again(
+        self, driver, monkeypatch
+    ):
+        """One reacquisition, bounded by construction rather than by luck."""
+        from linkedin_mcp_server import dependencies
+
+        handed_out: list[_Browser] = []
+
+        async def never_cached() -> Any:
+            assert len(handed_out) < 2, "a third acquisition: the branch loops"
+            browser = _Browser()
+            browser.page_closed = True
+            handed_out.append(browser)
+            return browser
+
+        monkeypatch.setattr(dependencies, "get_or_create_browser", never_cached)
+        monkeypatch.setattr(dependencies, "ensure_authenticated", AsyncMock())
+
+        await get_ready_extractor(None, tool_name="get_feed")
+
+        assert len(handed_out) == 2
+        driver.extractor.assert_called_once_with(handed_out[1].page)
+
+
+@pytest.fixture
+def real_close(driver, monkeypatch, tmp_path):
+    """A real ``BrowserManager`` as the next launch, its close body intact.
+
+    Its handles and the OS drain are doubles the test can hold, the approach of
+    the R7 control fixture: cancellation has to meet the real export, context
+    close and threaded drain, which a mocked ``close()`` never reaches.
+    """
+    from linkedin_mcp_server.core import browser as core
+    from linkedin_mcp_server.core.browser import BrowserManager
+
+    manager = BrowserManager(user_data_dir=tmp_path / "profile")
+    manager.is_authenticated = True
+    manager._page = MagicMock(is_closed=MagicMock(return_value=True))
+    manager._context = MagicMock(close=AsyncMock(), cookies=AsyncMock(return_value=[]))
+    manager._playwright = MagicMock(stop=AsyncMock())
+    drain = SimpleNamespace(
+        answer=True,
+        hold=False,
+        calls=0,
+        entered=threading.Event(),
+        release=threading.Event(),
+    )
+
+    def drained(marker: str, *, containment: Any = None) -> bool:
+        drain.calls += 1
+        drain.entered.set()
+        if drain.hold:
+            assert drain.release.wait(10), "the drain was never released"
+        return _answer(drain.answer)
+
+    monkeypatch.setattr(core, "drain_browser_process_marker", drained)
+    monkeypatch.setattr(core, "forget_browser_process_marker", lambda marker: None)
+    driver.upcoming.append(manager)
+    return SimpleNamespace(manager=manager, drain=drain)
+
+
+class TestACancelWaitsForTheProfile:
+    @pytest.mark.parametrize("verdict", [True, False], ids=["confirmed", "unconfirmed"])
+    @pytest.mark.parametrize("stage", ["export", "context", "drain"])
+    async def test_the_caller_is_let_go_only_after_settlement(
+        self, driver, real_close, monkeypatch, tmp_path, stage, verdict
+    ):
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        manager = real_close.manager
+        entered, go = asyncio.Event(), asyncio.Event()
+
+        async def held(*args: Any, **kwargs: Any) -> list[Any]:
+            entered.set()
+            await go.wait()
+            return []
+
+        if stage == "export":
+            manager._context.cookies = held
+        elif stage == "context":
+            manager._context.close = held
+        else:
+            real_close.drain.hold = True
+        real_close.drain.answer = verdict
+        cached, lease = await _cached_with_a_call_reference(driver)
+        assert cached is manager
+        if stage == "export":
+            monkeypatch.setattr(
+                driver.drv, "_browser_cookie_export_path", tmp_path / "cookies.json"
+            )
+
+        task = asyncio.ensure_future(get_ready_extractor(None, tool_name="get_feed"))
+        try:
+            await _until(lambda: entered.is_set() or real_close.drain.entered.is_set())
+            for _ in range(2):
+                task.cancel()
+                await asyncio.sleep(0.01)
+            # Still settling: the caller is held, so is the lock, and the profile
+            # is as the browser left it.
+            assert not task.done(), "the caller left before the profile settled"
+            assert driver.drv._browser_lifecycle_lock.locked()
+            assert lease.browser_open and driver.drv._browser_lease is lease
+        finally:
+            go.set()
+            real_close.drain.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert real_close.drain.calls == 1
+        driver.extractor.assert_not_called()
+        if verdict:
+            assert not lease.browser_open and driver.drv._browser_lease is None
+            assert stand_down_reason() is None
+        else:
+            assert lease.browser_open and driver.drv._browser_lease is lease
+            assert stand_down_reason() is not None
+        lease.release()
+        assert lease.held is not verdict
+
+    async def test_a_teardown_that_throws_after_a_cancel_is_unconfirmed(
+        self, driver, real_close
+    ):
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        real_close.drain.hold = True
+        real_close.drain.answer = RuntimeError("the drain failed")
+        _manager, lease = await _cached_with_a_call_reference(driver)
+
+        task = asyncio.ensure_future(get_ready_extractor(None, tool_name="get_feed"))
+        try:
+            await _until(real_close.drain.entered.is_set)
+            for _ in range(2):
+                task.cancel()
+                await asyncio.sleep(0.01)
+            assert not task.done()
+        finally:
+            real_close.drain.release.set()
+        with pytest.raises(ToolError) as raised:
+            await task
+
+        assert isinstance(raised.value.__cause__, BrowserShutdownUnconfirmedError)
+        assert lease.browser_open and driver.drv._browser_lease is lease
+        assert stand_down_reason() is not None
+        lease.release()
+        assert lease.held
+
+    async def test_a_cancel_while_waiting_for_the_lock_closes_nothing(self, driver):
+        manager, lease = await _cached_with_a_call_reference(driver)
+        manager.page_closed = True
+
+        async with driver.drv._browser_lifecycle_lock:
+            task = asyncio.ensure_future(
+                get_ready_extractor(None, tool_name="get_feed")
+            )
+            await asyncio.sleep(0.01)
+            assert not task.done()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert manager.closes == 0
+        assert driver.drv._browser is manager
+        assert lease.browser_open and driver.drv._browser_lease is lease
+        lease.release()
+
+    @pytest.mark.parametrize("verdict", [True, False], ids=["confirmed", "unconfirmed"])
+    async def test_a_queued_call_waits_for_the_cancelled_close(
+        self, driver, real_close, verdict
+    ):
+        real_close.drain.hold = True
+        real_close.drain.answer = verdict
+        dead = await driver.drv.get_or_create_browser()
+        call = _on_the_tool_path()
+
+        first = asyncio.ensure_future(call())
+        try:
+            await _until(real_close.drain.entered.is_set)
+            for _ in range(2):
+                first.cancel()
+                await asyncio.sleep(0.01)
+            follower = asyncio.ensure_future(call())
+            await asyncio.sleep(0.01)
+            assert not first.done() and not follower.done()
+            assert len(driver.launched) == 1
+        finally:
+            real_close.drain.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        if verdict:
+            await follower
+            assert len(driver.launched) == 2 and driver.launched[1] is not dead
+            driver.extractor.assert_called_once_with(driver.launched[1].page)
+        else:
+            with pytest.raises(ToolError) as raised:
+                await follower
+            assert isinstance(raised.value.__cause__, BrowserBusyError)
+            assert len(driver.launched) == 1
+
+
+class TestTheCallerSeesAnOrdinaryFailure:
+    async def test_through_the_mcp_boundary(self, driver):
+        """An error result like any other, then a working call after it."""
+        from linkedin_mcp_server.daemon.auth_repair import (
+            MARKER_KEY,
+            OwnerAuthSignalMiddleware,
+        )
+        from linkedin_mcp_server.sequential_tool_middleware import (
+            SequentialToolExecutionMiddleware,
+        )
+        from linkedin_mcp_server.server_role import ServerRole, set_process_role
+        from linkedin_mcp_server.tools import feed as feed_tools
+
+        set_process_role(ServerRole.OWNER)
+        read = AsyncMock(
+            return_value=SimpleNamespace(text="a post", references=[], error=None)
+        )
+        driver.extractor.return_value.extract_feed = read
+        mcp = FastMCP("dead-browser")
+        mcp.add_middleware(OwnerAuthSignalMiddleware())
+        mcp.add_middleware(SequentialToolExecutionMiddleware())
+        feed_tools.register_feed_tools(mcp)
+
+        async with Client(mcp) as client:
+            first = await client.call_tool("get_feed", {"num_posts": 1})
+            driver.launched[0].page_closed = True
+            failed = await client.call_tool(
+                "get_feed", {"num_posts": 1}, raise_on_error=False
+            )
+            again = await client.call_tool("get_feed", {"num_posts": 1})
+
+        assert not first.is_error and not again.is_error
+        assert failed.is_error
+        text = "\n".join(getattr(part, "text", "") for part in failed.content)
+        assert text.startswith(str(BrowserUnavailableError()))
+        assert "Diagnostics:" in text
+        # No sign-in request for the frontend to act on, and so no replay.
+        assert MARKER_KEY not in (failed.meta or {})
+        assert read.await_count == 2, "the failed call read the page"
+        assert len(driver.launched) == 2
+        assert [c.args for c in driver.extractor.call_args_list] == [
+            (driver.launched[0].page,),
+            (driver.launched[1].page,),
+        ]
+
+    async def test_a_frontend_does_not_repeat_it(self, driver):
+        """Not an owner loss, so the frontend neither elects nor tries again."""
+        from mcp import types as mt
+        from fastmcp.server.middleware import MiddlewareContext
+
+        from linkedin_mcp_server.daemon.proxy import FrontendCallMiddleware
+
+        manager, lease = await _cached_with_a_call_reference(driver)
+        manager.page_closed = True
+        with pytest.raises(ToolError) as raised:
+            await get_ready_extractor(None, tool_name="get_feed")
+        lease.release()
+
+        backend: Any = SimpleNamespace(recover=AsyncMock())
+        attempts = 0
+
+        async def forward(context: Any) -> Any:
+            nonlocal attempts
+            attempts += 1
+            raise raised.value
+
+        context = MiddlewareContext(
+            message=mt.CallToolRequestParams(
+                name="get_feed", arguments={"num_posts": 1}
+            ),
+            method="tools/call",
+        )
+        with pytest.raises(ToolError) as relayed:
+            await FrontendCallMiddleware(backend, budget=30.0).on_call_tool(
+                context, forward
+            )
+
+        assert relayed.value is raised.value
+        assert attempts == 1
+        backend.recover.assert_not_awaited()

@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from linkedin_mcp_server.core.browser import BrowserManager, _harden_linkedin_tree
+from linkedin_mcp_server.common_utils import harden_linkedin_tree
+from linkedin_mcp_server.core.browser import BrowserManager
 
 
 def _mode(path):
@@ -23,7 +24,7 @@ def test_harden_linkedin_tree_hardens_dirs(tmp_path):
     root.mkdir(mode=0o755)
     profile.mkdir(mode=0o755)
 
-    _harden_linkedin_tree(profile)
+    harden_linkedin_tree(profile)
 
     assert _mode(root) == 0o700
     assert _mode(profile) == 0o700
@@ -39,7 +40,7 @@ def test_harden_linkedin_tree_does_not_harden_unrelated_parent(tmp_path):
     parent.mkdir(mode=0o755)
     profile.mkdir(parents=True, mode=0o755)
 
-    _harden_linkedin_tree(profile)
+    harden_linkedin_tree(profile)
 
     assert _mode(parent) == 0o755
     assert _mode(profile) == 0o700
@@ -54,7 +55,7 @@ def test_harden_linkedin_tree_noop_outside_linkedin(tmp_path):
     unrelated = tmp_path / "other" / "data"
     unrelated.mkdir(parents=True, mode=0o755)
 
-    _harden_linkedin_tree(unrelated)
+    harden_linkedin_tree(unrelated)
 
     assert _mode(unrelated) == 0o755
     assert _mode(unrelated.parent) == 0o755

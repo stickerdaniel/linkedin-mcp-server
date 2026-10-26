@@ -1,41 +1,75 @@
-# LinkedIn MCP Server
+# MCP Server for LinkedIn
 
 A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. Access profiles, companies, and job postings through a Docker container.
+
+> **Disclaimer:** This is an independent, community project. It is not affiliated with, authorized by, endorsed by, or sponsored by LinkedIn Corporation or Microsoft. "LinkedIn" is a registered trademark of LinkedIn Corporation and is used here only descriptively to identify the third-party service this software interoperates with.
 
 ## Features
 
 - **Profile Access**: Get detailed LinkedIn profile information including experience, education, skills, projects, certifications, and more
+- **Own Profile**: Fetch the authenticated user's own profile to give agents self-context
 - **Profile Connections**: Send connection requests or accept incoming ones, with optional notes
-- **Company Profiles**: Extract comprehensive company data
+- **Sidebar Profiles**: Extract profile URLs from the sidebar recommendation sections on a profile page ("More profiles for you", "Explore premium profiles", "People you may know")
+- **Messaging**: List the inbox, read a conversation by username or thread ID, search messages by keyword, and compose/send a new message with explicit confirmation (profile-based send may open a separate DM rather than reply in an existing thread)
+- **Company Profiles**: Extract comprehensive company data, including the LinkedIn company URN id (used by LinkedIn's people-search `currentCompany` URL facet)
+- **Company Employees**: List employees at a company with optional keyword filtering
+- **Company Search**: Search for companies by keyword
 - **Job Details**: Retrieve job posting information
 - **Job Search**: Search for jobs with keywords and location filters
+- **Saved Jobs**: List job postings saved by the authenticated user
 - **People Search**: Search for people by keywords and location
 - **Person Posts**: Get recent activity/posts from a person's profile
 - **Company Posts**: Get recent posts from a company's LinkedIn feed
+- **Home Feed**: Get recent posts from the authenticated user's LinkedIn home feed
+- **Post Search**: Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter
 - **Compact References**: Return typed per-section links alongside readable text without shipping full-page markdown
 
 ## Quick Start
 
-Create a browser profile locally, then mount it into Docker. You still need [uv](https://docs.astral.sh/uv/getting-started/installation/) installed on the host for the one-time `uvx linkedin-scraper-mcp@latest --login` step. Docker already includes its own Chromium runtime, so the managed Patchright Chromium browser download used by MCPB/`uvx` is not needed here.
+The image ships full Chromium. Log in once through a browser the container shows you in your own browser tab.
 
-**Step 1: Create profile on the host (one-time setup)**
+macOS / Linux:
 
 ```bash
-uvx linkedin-scraper-mcp@latest --login
+# Create the directory first so the container can save your session into it
+mkdir -p ~/.linkedin-mcp
+docker run -it --rm \
+  -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
+  -p 127.0.0.1:6080:6080 \
+  stickerdaniel/linkedin-mcp-server:latest \
+  --login --login-viewer
 ```
 
-This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile and cookies are saved under `~/.linkedin-mcp/`. On startup, Docker derives a Linux browser profile from your host cookies and creates a fresh session each time. For better stability, consider the [uvx setup](https://github.com/stickerdaniel/linkedin-mcp-server#-uvx-setup-recommended---universal).
+PowerShell (Windows):
 
-**Step 2: Configure Claude Desktop with Docker**
+```powershell
+$sessionDir = Join-Path $env:USERPROFILE ".linkedin-mcp"
+New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null
+docker run -it --rm `
+  -v "${sessionDir}:/home/pwuser/.linkedin-mcp" `
+  -p 127.0.0.1:6080:6080 `
+  stickerdaniel/linkedin-mcp-server:latest `
+  --login --login-viewer
+```
+
+Open the full URL the command prints (it carries the access token) and sign in. The viewer closes itself afterwards; let the command exit on its own so the session is stored completely. It gives up after 30 minutes.
+
+Keep the same host directory mounted at `/home/pwuser/.linkedin-mcp` on every later `docker run`. A session created on the host with `uvx mcp-server-linkedin@latest --login` works too, and the container then rebuilds its own profile from those cookies on each start.
+
+If an older rootful Docker run left that host directory owned by root, repair it with `sudo chown -R "$(id -u):$(id -g)" ~/.linkedin-mcp`.
+
+**Configure Claude Desktop with Docker**
+
+**macOS / Linux (absolute path in JSON):**
 
 ```json
 {
   "mcpServers": {
-    "linkedin": {
+    "mcp-server-linkedin": {
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
-        "-v", "~/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
+        "-v", "/absolute/path/to/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
         "stickerdaniel/linkedin-mcp-server:latest"
       ]
     }
@@ -43,43 +77,106 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 }
 ```
 
-> **Note:** Docker containers don't have a display server, so you can't use the `--login` command in Docker. Create a source profile on your host first.
+Spell that first path out in full. A client runs `docker` directly rather than through a shell, so a leading `~` reaches Docker unexpanded and it refuses the mount.
+
+**PowerShell (Windows):** use a forward-slash JSON path. A backslash path like
+`C:\Users\Alice\.linkedin-mcp` fails JSON parsing because `\U` is an invalid
+escape. Replace `Alice` with your username.
+
+```json
+{
+  "mcpServers": {
+    "mcp-server-linkedin": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-v", "C:/Users/Alice/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
+        "stickerdaniel/linkedin-mcp-server:latest"
+      ]
+    }
+  }
+}
+```
+
+Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSON.
+
+> **Note:** Plain `--login` does not publish a viewer. Use `--login --login-viewer` only for the one-shot login container, with port 6080 published to loopback.
 >
 > **Note:** `stdio` is the default transport. Add `--transport streamable-http` only when you specifically want HTTP mode.
 >
-> **Note:** Tool calls are serialized within one server process to protect the
-> shared LinkedIn browser session. Concurrent client requests queue instead of
-> running in parallel. Use `LOG_LEVEL=DEBUG` to see scraper lock logs.
+> **Note:** In HTTP mode the endpoint has no authentication, so the address it
+> is published on is the only thing limiting who can use your LinkedIn session.
+> Publish to loopback: `-p 127.0.0.1:8080:8080` together with
+> `--host 0.0.0.0`. The wildcard host is required for the server to be reachable
+> inside the container at all; the `127.0.0.1:` prefix on `-p` is what keeps it
+> off your network. Without that prefix Docker publishes on every interface.
+> Only expose it more widely behind something that authenticates.
+>
+> **Note:** Only one process uses the browser at a time; others wait briefly
+> and take over when it finishes a call. That coordination does not reach
+> between the host and a container sharing the mounted `~/.linkedin-mcp`
+> directory, so do not run `--login` or `--logout` on the host while a
+> container is running.
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `USER_DATA_DIR` | `~/.linkedin-mcp/profile` | Path to persistent browser profile directory |
+| `USER_DATA_DIR` | `~/.linkedin-mcp/profile` | Browser profile directory. The container default always works; any other path needs one run with `--claim-profile-root` first. |
 | `LOG_LEVEL` | `WARNING` | Logging level: DEBUG, INFO, WARNING, ERROR |
 | `TIMEOUT` | `5000` | Browser timeout in milliseconds |
-| `TOOL_TIMEOUT` | `180` | Per-tool MCP execution timeout in seconds. Increase further for heavy scrapes (multi-section profiles, cold-start Chromium, slow networks/containers). |
-| `USER_AGENT` | - | Custom browser user agent |
+| `TOOL_TIMEOUT` | `180` | Timeout for a whole tool call, in seconds. Raise it for calls that read many pages, slow networks, or a cold-start browser. |
+| `LOGIN_TIMEOUT` | `1800` | How long the login browser waits for you to finish signing in, in seconds (`0` = no limit). The Docker viewer ends the login after 30 minutes either way. |
+| `LOGIN_INLINE_WAIT` | `25` | How long a tool call waits for a login to finish, in seconds (max 45). Not used in Docker, where `--login --login-viewer` is the login path. |
+| `BROWSER_WAIT` | `25` | How long to wait for another server process to hand over the shared browser, in seconds (max 45; `0` = report busy at once). |
+| `BROWSER_MIN_HOLD` | `20` | Shortest time a process keeps the shared browser before handing it over, in seconds. Clamped to 3 seconds below `BROWSER_WAIT`, so raise that one along with it. Higher means fewer browser restarts but longer waits for other clients. |
+| `BROWSER_IDLE_TIMEOUT` | `600` | Close an idle browser and release the profile after this many seconds without a tool call (`0` = keep it open). |
+| `AUTO_IMPORT_FROM_BROWSER` | on | Import a session from a signed-in local browser on the first tool call that needs one. Skipped in containers, which have no host browser or keychain. |
 | `TRANSPORT` | `stdio` | Transport mode: stdio, streamable-http |
 | `HOST` | `127.0.0.1` | HTTP server host (for streamable-http transport) |
 | `PORT` | `8000` | HTTP server port (for streamable-http transport) |
 | `HTTP_PATH` | `/mcp` | HTTP server path (for streamable-http transport) |
 | `SLOW_MO` | `0` | Delay between browser actions in ms (debugging) |
-| `VIEWPORT` | `1280x720` | Browser viewport size as WIDTHxHEIGHT |
+| `HEADLESS` | `false` | Docker runs full headed Chromium on a virtual display. Set `true` only for Chromium's real headless mode, which identifies itself as `HeadlessChrome`. |
+| `DAEMON_ENABLED` | `false` | The experimental shared-browser daemon is ignored in Docker. |
+| `VIEWPORT` | `1280x720` | Viewport size as WIDTHxHEIGHT. Only applies with `HEADLESS=true`; a headed Docker run uses its real window size. |
 | `CHROME_PATH` | - | Path to Chrome/Chromium executable (rarely needed in Docker) |
-| `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION` | `false` | Experimental: reuse checkpointed derived Linux runtime profiles across Docker restarts instead of fresh-bridging each startup |
-| `LINKEDIN_TRACE_MODE` | `on_error` | Trace/log retention mode: `on_error` keeps ephemeral artifacts only when a failure occurs, `always` keeps every run, `off` disables trace persistence |
+| `PROXY_SERVER` | - | Route browser traffic through a proxy, as `scheme://host:port` (`http`, `https`, `socks4`, `socks5`), or with credentials as `http://user:pass@host:port`. Only the browser is routed, not the MCP transport. Inside a container `127.0.0.1` is the container itself, so a relay on the host is `host.docker.internal` (native Linux Docker also needs `--add-host=host.docker.internal:host-gateway`). A container on your own machine leaves through your address and needs no proxy. One on a cloud host or in another country does: with a paid provider, use a sticky residential session that holds one address (never per-request rotation), and create the session through it with `--login --login-viewer`. Details under [Using a proxy](https://github.com/stickerdaniel/linkedin-mcp-server#using-a-proxy). |
+| `PROXY_USERNAME` | - | Username for the proxy |
+| `PROXY_PASSWORD` | - | Password for the proxy. Env-only, since command-line arguments are readable by every user on the machine. Chromium cannot authenticate to a SOCKS proxy, so credentials need an `http(s)` endpoint. |
+| `PROXY_BYPASS` | - | Comma-separated hosts to reach directly instead of through the proxy |
+| `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION` | `false` | Experimental: keep the container's derived profile across restarts instead of rebuilding it on each start |
+| `LINKEDIN_TRACE_MODE` | `on_error` | Trace retention: `on_error` keeps artifacts only from failed runs, `always` keeps every run, `off` keeps none |
 
-**Example with custom timeouts:**
+**Example with custom timeouts (macOS / Linux):**
 
 ```json
 {
   "mcpServers": {
-    "linkedin": {
+    "mcp-server-linkedin": {
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
-        "-v", "~/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
+        "-v", "/absolute/path/to/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
+        "-e", "TIMEOUT=10000",
+        "-e", "TOOL_TIMEOUT=300",
+        "stickerdaniel/linkedin-mcp-server"
+      ]
+    }
+  }
+}
+```
+
+**Example with custom timeouts (Windows):**
+
+```json
+{
+  "mcpServers": {
+    "mcp-server-linkedin": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-v", "C:/Users/Alice/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
         "-e", "TIMEOUT=10000",
         "-e", "TOOL_TIMEOUT=300",
         "stickerdaniel/linkedin-mcp-server"

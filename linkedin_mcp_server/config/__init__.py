@@ -25,6 +25,25 @@ def get_config() -> AppConfig:
     return _config
 
 
+def set_config(config: AppConfig) -> None:
+    """Install *config* as the configuration this process runs on.
+
+    For the detached daemon owner, which is handed its settings rather than
+    parsing them. Half of what decides which browser opens arrives on the
+    command line of the process the MCP client spawned, and that is the
+    frontend: an owner that called ``load_config`` would see only the
+    environment, come up with a different browser, and be refused by the very
+    client that started it, because ``config_fingerprint`` compares exactly
+    those fields.
+
+    Called before anything reads the configuration. Nothing here unwinds
+    decisions already made from an earlier value.
+    """
+    global _config
+    _config = config
+    logger.debug("Configuration installed")
+
+
 def reset_config() -> None:
     """Reset the configuration to force reloading."""
     global _config
@@ -38,4 +57,5 @@ __all__ = [
     "ServerConfig",
     "get_config",
     "reset_config",
+    "set_config",
 ]

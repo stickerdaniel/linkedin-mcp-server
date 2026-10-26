@@ -1,0 +1,80 @@
+# .github/workflows/forwarder-compat.yml
+#
+# The frontend's forwarder against the newest FastMCP and MCP SDK the declared
+# ranges allow, rather than the locked ones.
+#
+# `uvx` resolves both fresh on every install, so a user can run a release the
+# lock never saw. The forwarder reaches both through public names only
+# (tests/test_daemon_forwarder.py holds that line), and this job is what shows
+# that the public names still behave: the hop's pinned protocol version, the
+# dispatch record read off the wire, progress, and the fidelity of what a
+# client reads. A failure here means a release inside the declared range breaks
+# forwarding, before a user meets it.
+name: Forwarder compatibility
+
+on:
+  schedule:
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "linkedin_mcp_server/daemon/**"
+      - "linkedin_mcp_server/server.py"
+      - "tests/owner_hop.py"
+      - "tests/test_daemon_forwarder.py"
+      - "tests/test_daemon_proxy.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/forwarder-compat.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  newest:
+    name: Forwarding on the newest allowed FastMCP and MCP
+    runs-on: ubuntu-latest
+    # The selection below runs in well under a minute locally; the bound is for
+    # a wedged hop, which would otherwise hold the runner for six hours.
+    timeout-minutes: 15
+    # The camelCase read shims off, for the reason given in ci.yml.
+    env:
+      FASTMCP_MCP_CAMELCASE_COMPAT: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+
+      # Re-resolved inside the ranges `pyproject.toml` declares, so a major
+      # release outside them is not tested here: that is a deliberate bump.
+      # Their own dependencies move with them as the resolver needs. The lock
+      # this writes stays on the runner.
+      - name: Resolve the newest allowed FastMCP and MCP
+        run: uv sync --group dev --upgrade-package fastmcp --upgrade-package mcp
+
+      - name: Report the versions under test
+        run: >-
+          uv run --no-sync python -c "from importlib.metadata import version;
+          print(*(f'{name} {version(name)}' for name in ('fastmcp', 'mcp', 'httpx2', 'anyio')), sep='\n')"
+
+      - name: Run the forwarding tests
+        run: >-
+          uv run --no-sync pytest -n auto -o faulthandler_timeout=120
+          tests/test_daemon_forwarder.py
+          tests/test_daemon_proxy.py
+          tests/test_daemon_auth.py
+          tests/test_daemon_liveness.py
+          tests/test_server.py
+          tests/test_fastmcp_compatibility.py
+          tests/test_daemon_election.py::TestAForwardedCallThroughTheRealOwner
+          tests/test_daemon_election.py::TestTheProbeSpeaksTheHopsVersion
+
+      - run: uv cache prune --ci

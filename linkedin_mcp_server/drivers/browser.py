@@ -1,29 +1,57 @@
 """
-Patchright browser management for LinkedIn scraping.
+Patchright browser management for reading LinkedIn.
 
 Provides async browser lifecycle management using BrowserManager with persistent
 context. Implements a singleton pattern for browser reuse across tool calls with
 automatic profile persistence.
 """
 
+import asyncio
 import logging
 import os
+import time
 from pathlib import Path
+from collections.abc import Coroutine, Mapping, Sequence
+from typing import Any, TypeVar
 
-from linkedin_mcp_server.common_utils import secure_mkdir
+from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
 from linkedin_mcp_server.core import (
     AuthenticationError,
     BrowserManager,
+    OffLinkedInLandingError,
+    await_deferring_cancels,
     detect_auth_barrier_quick,
     detect_rate_limit,
+    goto_reporting_proxy_errors,
+    is_another_site,
+    is_linkedin_landing,
     is_logged_in,
+    proxy_hint,
+    raise_if_off_linkedin,
+    raise_if_proxy_configured,
+    redact_proxy_credentials,
+    raise_if_proxy_error,
     resolve_remember_me_prompt,
 )
 
+
+from linkedin_mcp_server.browser_launch import build_launch_options, describe_launch
 from linkedin_mcp_server.common_utils import utcnow_iso
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
+from linkedin_mcp_server.exceptions import (
+    BrowserBusyError,
+    BrowserDowngradeError,
+    BrowserShutdownUnconfirmedError,
+    ProfileRootRefusedError,
+)
+from linkedin_mcp_server.process_tree import (
+    release_browser_guardian,
+    start_browser_guardian,
+)
+from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
+from linkedin_mcp_server.server_role import a_held_profile_means_this_owner_must_go
 from linkedin_mcp_server.session_state import (
     SourceState,
     clear_runtime_profile,
@@ -47,6 +75,39 @@ DEFAULT_PROFILE_DIR = Path.home() / ".linkedin-mcp" / "profile"
 _browser: BrowserManager | None = None
 _browser_cookie_export_path: Path | None = None
 _headless: bool = True
+# Serializes singleton creation: tool calls are serialized by the tool-call
+# middleware, but the background login flow started at startup can resume into
+# this path and race the first tool call, and an unguarded check-then-create
+# would launch two browsers against the same profile.
+_browser_create_lock = asyncio.Lock()
+# The lease the singleton took, held onto rather than merely noted, so the close
+# settles the object it acquired instead of looking one up again.
+#
+# It used to be a bool, and the difference cost six review rounds. Recording only
+# *that* a lease existed left the close to reconstruct it through
+# ``get_profile_lease()``, which resolves a path and can fail — while ``_browser``
+# is already cleared and every line that keeps the profile safe sits below that
+# call. Ownership was therefore inferred from two globals that could disagree,
+# settled at the one moment one of them was already gone. Each round closed one
+# more way in; keeping the object closes the shape.
+#
+# Always the object the registry handed out (``get_profile_lease``), never one
+# constructed here: ``profile_lease`` clears inherited leases after a fork by
+# walking that registry, and an instance built outside it would silently keep a
+# parent's kernel lock alive in a child.
+_browser_lease: ProfileLease | None = None
+# Monotonic timestamp of the last completed tool call, for the idle timer.
+_last_activity: float | None = None
+# Tool calls currently driving the browser. The background handoff poll must not
+# close a browser out from under a running call: the tool holds a Page from it.
+_calls_in_flight: int = 0
+# Serializes close against create. close_browser() clears _browser and then
+# awaits the cookie export and Chromium teardown; without this a tool call
+# arriving in that window would see no browser and launch a second Chromium on
+# the same profile, which is the very corruption this module prevents.
+_browser_lifecycle_lock = asyncio.Lock()
+
+T = TypeVar("T")
 
 
 def _debug_skip_checkpoint_restart() -> bool:
@@ -82,7 +143,7 @@ def experimental_persist_derived_runtime() -> bool:
 
 
 def _apply_browser_settings(browser: BrowserManager) -> None:
-    """Apply configuration settings to browser instance."""
+    """Apply settings to an authenticated browser."""
     config = get_config()
     browser.page.set_default_timeout(config.browser.default_timeout)
 
@@ -90,9 +151,13 @@ def _apply_browser_settings(browser: BrowserManager) -> None:
 async def _log_feed_failure_context(
     browser: BrowserManager,
     reason: str,
-    exc: Exception | None = None,
 ) -> None:
-    """Log the page state when /feed/ validation fails."""
+    """Log the page state when /feed/ validation fails.
+
+    *reason* must already be redacted. The exception itself is deliberately not
+    logged: a driver error can quote the proxy URL, and this log is what users
+    paste into issue reports.
+    """
     page = browser.page
 
     try:
@@ -120,8 +185,29 @@ async def _log_feed_failure_context(
         title,
         remember_me,
         " ".join(body_text.split())[:200],
-        exc_info=exc,
     )
+
+
+async def _refuse_a_landing_off_linkedin(
+    browser: BrowserManager, step: str, *, hostless_too: bool = True
+) -> None:
+    """Raise when the feed check is looking at a page LinkedIn did not serve.
+
+    Raised, never answered with a verdict. False makes the caller retire the
+    profile and open a login through the portal that is in the way, and True
+    would accept another site's page as a signed-in session.
+
+    *hostless_too* is off after a failed navigation, where a blank document or
+    the browser's own error page is what the failure left behind and the
+    failure itself is the better report.
+    """
+    url = browser.page.url
+    if is_linkedin_landing(url):
+        return
+    if not hostless_too and not is_another_site(url):
+        return
+    await record_page_trace(browser.page, step)
+    raise_if_off_linkedin(url)
 
 
 async def _feed_auth_succeeds(
@@ -129,9 +215,15 @@ async def _feed_auth_succeeds(
     *,
     allow_remember_me: bool = True,
 ) -> bool:
-    """Validate that /feed/ loads without an auth barrier."""
+    """Validate that /feed/ loads without an auth barrier.
+
+    Raises:
+        OffLinkedInLandingError: When the navigation ended on a page LinkedIn
+            did not serve, which says nothing about the session.
+    """
     try:
-        await browser.page.goto(
+        await goto_reporting_proxy_errors(
+            browser.page,
             "https://www.linkedin.com/feed/",
             wait_until="domcontentloaded",
         )
@@ -141,6 +233,9 @@ async def _feed_auth_succeeds(
             "feed-after-goto",
             extra={"allow_remember_me": allow_remember_me},
         )
+        # Ahead of the remember-me click and the barrier check, so neither
+        # runs on another site's page.
+        await _refuse_a_landing_off_linkedin(browser, "feed-off-linkedin")
         if allow_remember_me:
             if await resolve_remember_me_prompt(browser.page):
                 await stabilize_navigation("remember-me resolution", logger)
@@ -151,6 +246,9 @@ async def _feed_auth_succeeds(
                 )
                 return await _feed_auth_succeeds(browser, allow_remember_me=False)
         barrier = await detect_auth_barrier_quick(browser.page)
+        # Again, because the waits above give a redirect time to land, and a
+        # verdict either way is only about LinkedIn while the page still is.
+        await _refuse_a_landing_off_linkedin(browser, "feed-off-linkedin-settled")
         if barrier is not None:
             await record_page_trace(
                 browser.page,
@@ -160,7 +258,17 @@ async def _feed_auth_succeeds(
             await _log_feed_failure_context(browser, barrier)
             return False
         return True
+    except OffLinkedInLandingError:
+        # Also the recursive retries' refusal, which runs inside this try.
+        raise
     except Exception as exc:
+        # Before anything else: a proxy fault is not a dead session. Returning
+        # False here would have the caller retire a valid profile and tell the
+        # user to log in again, which cannot fix an unreachable proxy. Checked
+        # first because no page loaded, so there is no remember-me prompt to
+        # resolve, and it also catches a ProxyConnectionError raised by the
+        # recursive retries above, which run inside this try.
+        raise_if_proxy_error(exc)
         if allow_remember_me and await resolve_remember_me_prompt(browser.page):
             await stabilize_navigation(
                 "remember-me resolution after feed failure", logger
@@ -168,68 +276,234 @@ async def _feed_auth_succeeds(
             await record_page_trace(
                 browser.page,
                 "feed-after-remember-me-error-recovery",
-                extra={"error": f"{type(exc).__name__}: {exc}"},
+                extra={
+                    "error": redact_proxy_credentials(f"{type(exc).__name__}: {exc}")
+                },
             )
             return await _feed_auth_succeeds(browser, allow_remember_me=False)
+        # A failed navigation still leaves a URL and a title behind, and the
+        # quick check reads only those. LinkedIn may have committed a redirect
+        # to /login and merely missed the load event, which is real evidence
+        # about the session and must outrank the proxy explanation below.
+        barrier = await detect_auth_barrier_quick(browser.page)
+        # A navigation that timed out after committing a portal's page is not
+        # evidence about the session either, and neither verdict may be given
+        # about one. After the read, so a redirect during it is seen too.
+        await _refuse_a_landing_off_linkedin(
+            browser, "feed-navigation-error-off-linkedin", hostless_too=False
+        )
+        detail = redact_proxy_credentials(f"{type(exc).__name__}: {exc}")
         await record_page_trace(
             browser.page,
             "feed-navigation-error",
-            extra={"error": f"{type(exc).__name__}: {exc}"},
+            extra={"error": detail, "barrier": barrier},
         )
-        await _log_feed_failure_context(browser, str(exc), exc)
+        # Redacted, and without exc_info: driver errors can quote the proxy URL,
+        # and both destinations here outlive the call -- the trace is written to
+        # disk and the log is what users paste into issue reports.
+        await _log_feed_failure_context(browser, detail)
+        if barrier is None:
+            # Nothing loaded and no barrier, so nothing proves the session is
+            # dead -- and with a proxy in front, the most likely cause is the
+            # proxy. Wrong credentials in particular produce no proxy error code
+            # at all: Chromium retries the 407 challenge until the navigation
+            # times out (verified against a local authenticating relay), so the
+            # marker check above cannot catch it. Reporting False would hand the
+            # caller an AuthenticationError, whose recovery moves the stored
+            # profile aside and starts a login through the same broken proxy.
+            raise_if_proxy_configured(exc)
         return False
 
 
-def _launch_options() -> tuple[dict[str, str], dict[str, int]]:
-    config = get_config()
-    viewport = {
-        "width": config.browser.viewport_width,
-        "height": config.browser.viewport_height,
-    }
-    launch_options: dict[str, str] = {}
-    if config.browser.chrome_path:
-        launch_options["executable_path"] = config.browser.chrome_path
-        logger.info("Using custom Chrome path: %s", config.browser.chrome_path)
+def _launch_options() -> tuple[dict[str, Any], dict[str, int]]:
+    launch_options, viewport = build_launch_options(get_config().browser)
+    describe_launch(launch_options)
     return launch_options, viewport
 
 
 def _make_browser(
     profile_dir: Path,
     *,
-    launch_options: dict[str, str],
+    launch_options: dict[str, Any],
     viewport: dict[str, int],
 ) -> BrowserManager:
+    """Build a BrowserManager on *profile_dir*."""
     config = get_config()
     return BrowserManager(
         user_data_dir=profile_dir,
         headless=_headless,
         slow_mo=config.browser.slow_mo,
-        user_agent=config.browser.user_agent,
         viewport=viewport,
         **launch_options,
     )
 
 
+async def _close_holding_back_cancels(browser: BrowserManager) -> tuple[bool, bool]:
+    """Get one browser's close verdict even while cancels keep arriving.
+
+    Every caller below is holding somebody else's profile, and the verdict is
+    the only thing that says whether it may be handed back. ``close()`` takes
+    its handles before its first await, so a cancel landing inside it escapes
+    with the manager already emptied and the browser unproven: the local manager
+    is dropped, ``_create_browser`` releases the guardian and the lease on the
+    way out, and the next launch opens a second Chromium on a profile the first
+    may still be sitting on. Two cancels are enough and are not exotic -- one to
+    fail the startup, one from the shutdown racing it -- and the second one has
+    nothing left to close, which is exactly why it reads as clean.
+
+    Returns the verdict and whether a cancel was held back. Nothing is
+    swallowed: the caller re-raises the failure it was already handling, or the
+    cancellation where there was no other failure.
+    """
+    return await await_deferring_cancels(browser.close())
+
+
+def _jar_has_linkedin_session(cookies: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether *cookies* holds an ``li_at`` on LinkedIn's own domain."""
+    for cookie in cookies:
+        domain = cookie.get("domain") or ""
+        if cookie.get("name") == "li_at" and (
+            domain == "linkedin.com" or domain.endswith(".linkedin.com")
+        ):
+            return True
+    return False
+
+
+async def _restore_portable_session_if_the_store_lost_it(
+    browser: BrowserManager, profile_dir: Path
+) -> None:
+    """Load ``cookies.json`` when the profile store opened without a session.
+
+    The store is SQLite. A browser that exits while its journal is still hot
+    rolls that journal back on the next open, and the jar comes up empty. The
+    portable file sits beside the profile and is not part of that rollback, but
+    this path otherwise trusts the store alone. The close then exports the
+    empty jar over the file, and the session is gone for good. Measured on
+    Windows CI: the file and the store both held the staged ``li_at`` after
+    staging, every request of the next browser carried none, and the close
+    wrote zero cookies.
+
+    A jar that already has ``li_at`` is left alone, so a session newer than
+    the file is not replaced by it. An empty file is the logged-out state and
+    imports as a no-op.
+    """
+    cookie_path = portable_cookie_path(profile_dir)
+    if not cookie_path.is_file():
+        return
+    if _jar_has_linkedin_session(await browser.context.cookies()):
+        return
+    if await browser.import_cookies(cookie_path):
+        logger.info(
+            "Restored the portable session into %s; its store had no li_at",
+            profile_dir,
+        )
+
+
 async def _authenticate_existing_profile(
     profile_dir: Path,
     *,
-    launch_options: dict[str, str],
+    launch_options: dict[str, Any],
     viewport: dict[str, int],
 ) -> BrowserManager:
     browser = _make_browser(
-        profile_dir, launch_options=launch_options, viewport=viewport
+        profile_dir,
+        launch_options=launch_options,
+        viewport=viewport,
     )
     try:
         await browser.start()
+        # Before the feed check, which is itself a navigation. A store that
+        # rolled back is empty from the first request, and that request is
+        # what the close would then export over the portable file.
+        await _restore_portable_session_if_the_store_lost_it(browser, profile_dir)
         if not await _feed_auth_succeeds(browser):
             raise AuthenticationError(
-                f"Stored runtime profile is invalid: {profile_dir}. Run with --login to refresh the source session."
+                f"Stored runtime profile is invalid: {profile_dir}. "
+                f"Run with --login to refresh the source session.{proxy_hint()}"
             )
         browser.is_authenticated = True
         return browser
-    except Exception:
-        await browser.close()
+    except BaseException as exc:
+        # BaseException so a cancelled startup still tears Chromium down. Left
+        # running it would hold the profile that the caller is about to release.
+        closed, _ = await _close_holding_back_cancels(browser)
+        if not closed:
+            # The original failure is replaced deliberately: the caller's
+            # recovery for it releases the profile, which is unsafe while this
+            # browser may still be on it. Chained so the cause is not lost.
+            raise BrowserShutdownUnconfirmedError(
+                "The browser did not shut down cleanly after a failed startup, "
+                "so the profile is kept. Restart the server to recover."
+            ) from exc
+        # The original goes back out, cancellation included: when the
+        # interruption was a cancel, *exc* already is one.
         raise
+
+
+async def validate_imported_cookies(cookie_path: Path, profile_dir: Path) -> bool:
+    """Validate freshly imported cookies against /feed/ before persisting.
+
+    Starts a headless browser on *profile_dir*, injects the LinkedIn cookies
+    from *cookie_path*, and proves /feed/ with the same validator login and the
+    Docker bridge use (``_feed_auth_succeeds``: remember-me resolution plus
+    auth-barrier detection). Used only by the browser-import CLI path.
+
+    A local :class:`BrowserManager` is used (never the singleton), so
+    ``close_browser()``'s export-on-close is not involved and cannot shrink
+    ``cookies.json``. Injection routes through the existing ``import_cookies``
+    with ``preset_name="bridge_core"`` (the largest existing preset); the
+    on-disk ``cookies.json`` still holds the full superset for the Docker
+    bridge. Always closes the browser in ``finally``.
+    """
+    launch_options, viewport = _launch_options()
+    secure_mkdir(profile_dir)
+    harden_linkedin_tree(profile_dir)
+    browser = _make_browser(
+        profile_dir,
+        launch_options=launch_options,
+        viewport=viewport,
+    )
+    try:
+        await browser.start()
+        await goto_reporting_proxy_errors(
+            browser.page,
+            "https://www.linkedin.com/feed/",
+            wait_until="domcontentloaded",
+        )
+        await stabilize_navigation("import pre-validate feed navigation", logger)
+        if not await browser.import_cookies(cookie_path, preset_name="bridge_core"):
+            accepted = False
+        else:
+            await stabilize_navigation("import cookie injection", logger)
+            accepted = await _feed_auth_succeeds(browser)
+    except BaseException as exc:
+        # The confirmation has to be checked on this path too. A plain finally
+        # would re-raise before it ran, and the caller would then treat an
+        # unconfirmed close as an ordinary failure: wipe the profile, try the
+        # next candidate, restore over it.
+        closed, _ = await _close_holding_back_cancels(browser)
+        if not closed:
+            raise BrowserShutdownUnconfirmedError(
+                "The validation browser did not shut down cleanly, so the "
+                "profile is kept. Restart the server to retry."
+            ) from exc
+        raise
+
+    # Raised rather than returned False: a rejected cookie makes the caller wipe
+    # the profile and try the next candidate, and doing that over a Chromium
+    # that may still be running is the corruption we are avoiding.
+    closed, cancelled = await _close_holding_back_cancels(browser)
+    if not closed:
+        raise BrowserShutdownUnconfirmedError(
+            "The validation browser did not shut down cleanly, so the imported "
+            "session cannot be committed. Restart the server to retry."
+        )
+    if cancelled:
+        # Nothing failed, so there is no original to re-raise and the held-back
+        # cancel is the answer. Returning *accepted* here would commit an
+        # imported session on behalf of a caller that has already gone.
+        raise asyncio.CancelledError
+    return accepted
 
 
 async def _bridge_runtime_profile(
@@ -238,7 +512,7 @@ async def _bridge_runtime_profile(
     cookie_path: Path,
     source_state: SourceState,
     runtime_id: str,
-    launch_options: dict[str, str],
+    launch_options: dict[str, Any],
     viewport: dict[str, int],
     persist_runtime: bool,
 ) -> BrowserManager:
@@ -248,7 +522,9 @@ async def _bridge_runtime_profile(
     secure_mkdir(profile_dir.parent)
     storage_state_path = runtime_storage_state_path(runtime_id, source_profile_dir)
     browser = _make_browser(
-        profile_dir, launch_options=launch_options, viewport=viewport
+        profile_dir,
+        launch_options=launch_options,
+        viewport=viewport,
     )
     try:
         await browser.start()
@@ -257,8 +533,10 @@ async def _bridge_runtime_profile(
             "bridge-browser-started",
             extra={"profile_dir": str(profile_dir)},
         )
-        await browser.page.goto(
-            "https://www.linkedin.com/feed/", wait_until="domcontentloaded"
+        await goto_reporting_proxy_errors(
+            browser.page,
+            "https://www.linkedin.com/feed/",
+            wait_until="domcontentloaded",
         )
         await stabilize_navigation("pre-import feed navigation", logger)
         await record_page_trace(browser.page, "bridge-after-pre-import-feed")
@@ -274,7 +552,8 @@ async def _bridge_runtime_profile(
         )
         if not await _feed_auth_succeeds(browser):
             raise AuthenticationError(
-                "No authentication found. Run with --login to create a profile."
+                "No authentication found. "
+                f"Run with --login to create a profile.{proxy_hint()}"
             )
         await stabilize_navigation("post-import feed validation", logger)
         await record_page_trace(browser.page, "bridge-after-feed-validation")
@@ -300,7 +579,19 @@ async def _bridge_runtime_profile(
             )
         await stabilize_navigation("runtime storage-state export", logger)
         logger.info("Checkpoint-restarting derived runtime profile %s", profile_dir)
-        await browser.close()
+        closed, cancelled = await _close_holding_back_cancels(browser)
+        if not closed:
+            # Reopening the same directory while the first Chromium may still be
+            # running is the concurrent-profile corruption in miniature.
+            raise BrowserShutdownUnconfirmedError(
+                "The bridge browser did not shut down cleanly, so its profile "
+                "cannot be reopened. Restart the server to retry."
+            )
+        if cancelled:
+            # Held back only long enough to prove the first browser is gone. A
+            # reopen from here would put a second Chromium on this profile for
+            # a caller that is no longer waiting for one.
+            raise asyncio.CancelledError
         reopened = _make_browser(
             profile_dir,
             launch_options=launch_options,
@@ -333,12 +624,41 @@ async def _bridge_runtime_profile(
             logger.info("Derived runtime profile committed for %s", runtime_id)
             reopened.is_authenticated = True
             return reopened
-        except Exception:
-            await reopened.close()
+        except BaseException as exc:
+            closed, _ = await _close_holding_back_cancels(reopened)
+            if not closed:
+                raise BrowserShutdownUnconfirmedError(
+                    "The reopened bridge browser did not shut down cleanly, so "
+                    "its profile is kept. Restart the server to recover."
+                ) from exc
             raise
-    except Exception:
-        await browser.close()
-        clear_runtime_profile(runtime_id, source_profile_dir)
+    except BrowserShutdownUnconfirmedError:
+        # Chromium may still be running on this runtime profile, and deleting
+        # the directory underneath a live browser is exactly what this guard
+        # exists to prevent. The manager keeps that answer across calls, so a
+        # second close cannot talk this path out of it either. Leave everything
+        # for the operator.
+        raise
+    except BaseException as exc:
+        # BaseException so a cancelled bridge still closes Chromium before the
+        # caller releases the profile, and before the runtime dir is removed.
+        closed, _ = await _close_holding_back_cancels(browser)
+        if not closed:
+            # Deleting the runtime directory under a browser that may still be
+            # running is the corruption this guard exists for, so stop instead.
+            raise BrowserShutdownUnconfirmedError(
+                "The bridge browser did not shut down cleanly, so its runtime "
+                "profile is kept. Restart the server to recover."
+            ) from exc
+        try:
+            clear_runtime_profile(runtime_id, source_profile_dir)
+        except ProfileRootRefusedError as refusal:
+            # Cleanup, not a precondition. The bridge has already failed and
+            # that failure is what the caller needs to see; a complaint about
+            # who owns the directory would replace it with something nobody can
+            # act on. The clear at the top of this function is the opposite case
+            # and deliberately lets the refusal through.
+            logger.warning("Leaving the runtime profile in place: %s", refusal)
         raise
 
 
@@ -360,13 +680,103 @@ async def get_or_create_browser(
     Raises:
         AuthenticationError: If no valid authentication found
     """
-    global _browser, _browser_cookie_export_path, _headless
+    global _headless
 
     if headless is not None:
         _headless = headless
 
     if _browser is not None:
         return _browser
+
+    # Double-checked: only one concurrent caller may create the singleton. The
+    # lifecycle lock additionally keeps creation out of an in-progress close,
+    # which clears _browser before it has finished tearing Chromium down.
+    async with _browser_create_lock, _browser_lifecycle_lock:
+        if _browser is not None:
+            return _browser
+        return await _create_browser()
+
+
+async def _create_browser() -> BrowserManager:
+    """Create and initialize the singleton (caller holds _browser_create_lock)."""
+    global _browser, _browser_cookie_export_path, _browser_lease
+
+    lease = get_profile_lease()
+
+    # A previous close could not confirm Chromium had exited, so it may still be
+    # running on this profile. Launching a second one now is exactly the
+    # corruption this module exists to prevent, and the operator has to clear it.
+    #
+    # Both halves, because they answer about different profiles. The marker is
+    # read from the lease the path resolves to *now*; a lease this module kept
+    # from an unconfirmed close belongs to the path it resolved to *then*. After
+    # the profile root is retargeted, the first says B is free while the second
+    # still holds A with a Chromium that may be running on it, and creating on B
+    # would leave two marked leases and a later confirmed close on B clearing A
+    # without ever draining it. `close_unusable_browser` reads its verdict from
+    # `_browser_lease` and depends on that never happening.
+    if lease.browser_open or _browser_lease is not None:
+        raise BrowserBusyError(
+            "A previous browser on this profile did not shut down cleanly and "
+            "may still be running. Restart the server to recover."
+        )
+
+    # Own the profile before Chromium touches it. The middleware normally holds a
+    # reference already, so this is usually a cheap second reference; taking it
+    # here as well keeps every launch path covered, including the CLI ones.
+    took_lease = False
+    if _browser_lease is None:
+        if not lease.try_acquire():
+            raise BrowserBusyError()
+        took_lease = True
+
+    try:
+        start_browser_guardian(lease.guardian_fd())
+        browser = await _create_browser_locked()
+    except BrowserShutdownUnconfirmedError:
+        # A browser from this attempt may still be running on the profile. Keep
+        # the lease so nobody launches on top of it. The reference taken here is
+        # deliberately not released, and one extra is taken so the caller's own
+        # release cannot drop the last one; the kernel frees the lock when this
+        # process exits.
+        lease.mark_browser_open()
+        lease.try_acquire()
+        # Recorded even though no browser survives, because the profile is held
+        # and something has to say by whom. There is no ``_browser`` to close, so
+        # nothing will ever settle this lease: that is the point of keeping it.
+        _browser_lease = lease
+        # After the marker, not before, and that ordering is the whole reason
+        # this call is here rather than only in the exception's constructor. The
+        # constructor runs while `_create_browser_locked` is still raising, when
+        # `browser_open` is false, so the helper reads "nothing is held" and
+        # returns; the two lines above then hold the profile with nobody having
+        # asked for a replacement. Measured through `_create_browser` in
+        # production order: `browser_open=True`, `stand_down=None`, and live, a
+        # real owner that three consecutive fresh clients each attached to and
+        # got the same refusal from.
+        a_held_profile_means_this_owner_must_go(lease)
+        raise
+    except BaseException:
+        # BaseException, not Exception: a cancelled startup would otherwise
+        # leave the reference held with nothing tracking it, wedging every other
+        # process until this one exits.
+        release_browser_guardian()
+        if took_lease:
+            lease.release()
+        raise
+
+    if took_lease:
+        _browser_lease = lease
+    # Records that Chromium is live on the profile, which the reference count
+    # cannot express: destructive helpers ask for a reference and would simply
+    # get one from our own lease.
+    lease.mark_browser_open()
+    return browser
+
+
+async def _create_browser_locked() -> BrowserManager:
+    """Build the singleton browser; the profile lease is already held."""
+    global _browser, _browser_cookie_export_path
 
     launch_options, viewport = _launch_options()
     source_profile_dir = get_profile_dir()
@@ -452,10 +862,20 @@ async def get_or_create_browser(
             _browser = browser
             _browser_cookie_export_path = None
             return _browser
-        except AuthenticationError:
+        except (AuthenticationError, BrowserDowngradeError) as exc:
+            # A downgrade belongs here and nowhere else. On the *source* profile
+            # it has to reach the user, because that directory holds the session
+            # and throwing it away to satisfy an old browser is the damage, not
+            # the repair. A derived runtime profile is the opposite: it is
+            # rebuilt from the source cookies on demand, and the re-bridge below
+            # deletes it first, so the older browser gets a directory it wrote
+            # itself. Reachable whenever a container image moves backwards with
+            # EXPERIMENTAL_PERSIST_DERIVED_RUNTIME set.
             logger.warning(
-                "Derived runtime profile auth failed for %s; re-bridging from source cookies",
+                "Derived runtime profile is unusable for %s (%s); re-bridging "
+                "from source cookies",
                 current_runtime_id,
+                type(exc).__name__,
             )
 
     if force_bridge:
@@ -485,13 +905,102 @@ async def get_or_create_browser(
 
 
 async def close_browser() -> None:
-    """Close the browser and cleanup resources."""
-    global _browser, _browser_cookie_export_path
+    """Close the browser, releasing the profile once Chromium is confirmed gone.
+
+    Cancellation is held back until teardown finishes, mirroring
+    ``session_state.run_deferring_cancels``. Interrupting half way leaves a
+    Chromium nobody owns: ``_browser`` is already cleared, so a later call cannot
+    retry, and the lease can be neither confirmed nor released. Shielding alone
+    would not do: it protects the child but re-raises to the caller immediately,
+    releasing the lifecycle lock while teardown is still running, which is
+    exactly when a new launch must not start.
+    """
+    async with _browser_lifecycle_lock:
+        await _run_deferring_cancels(_close_browser_locked())
+
+
+async def _run_deferring_cancels(coroutine: Coroutine[Any, Any, T]) -> T:
+    """Run *coroutine* to completion, holding cancellation back until it ends.
+
+    The caller holds the lifecycle lock. Splitting this out of ``close_browser``
+    lets the conditional close run its own coroutine under the same protection,
+    rather than duplicating the shield loop.
+
+    One primitive, two callers with different endings: here the cancel is always
+    re-raised, because there is nothing else to report, while a failed startup's
+    cleanup re-raises the failure it was already handling instead.
+    """
+    result, cancelled = await await_deferring_cancels(coroutine)
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
+def _settle_the_profile(*, confirmed: bool) -> None:
+    """Hand the profile back, or keep it and ask for a replacement.
+
+    Every way a browser stops arrives here, and there is nothing to look up: the
+    lease is the object this module took, kept for exactly this moment. That is
+    the whole of the refactor. The close used to re-derive it from a path while
+    ``_browser`` was already cleared, so a lookup that failed skipped every line
+    below it — the marker, the release, the warning and the request for a
+    successor, all at once.
+
+    *confirmed* says whether Chromium is provably gone, which is the only thing
+    that decides between the two outcomes:
+
+    * proven gone, so the profile is free: clear the marker, release the
+      reference, and forget the lease.
+    * not proven, so Chromium may still be on the profile: keep both, and say so.
+      Handing it over now is the corruption the lease exists to prevent, and the
+      kernel frees the lock when this process exits.
+
+    Never raises. Callers reach it mid-teardown, sometimes with an exception of
+    their own already on the way out.
+    """
+    global _browser_lease
+
+    lease, _browser_lease = _browser_lease, None
+    if confirmed:
+        release_browser_guardian()
+    if lease is None:
+        # The middleware may own the lease instead. An unconfirmed browser still
+        # requires an owner hard exit before that outer reference is released.
+        if not confirmed:
+            a_held_profile_means_this_owner_must_go()
+        return
+
+    if confirmed:
+        # Only now is Chromium provably gone, so only now may auth state move.
+        lease.mark_browser_closed()
+        lease.release()
+        return
+
+    # close() bounds its cleanup steps and reports failure rather than hanging,
+    # so it can return while Chromium is still running.
+    _browser_lease = lease
+    logger.warning(
+        "Browser shutdown could not be confirmed; keeping the profile "
+        "lease until this process exits."
+    )
+    # And for a shared owner that sentence is the whole problem: it outlives the
+    # client that started it, so nobody is coming to restart it and every later
+    # call meets `BrowserBusyError`. Asked from wherever the lease is *kept*
+    # rather than wherever a failure is reported, because this path reports
+    # nothing at all — a handoff, the idle timeout and `close_session` all return
+    # normally from here, and no exception is ever constructed.
+    a_held_profile_means_this_owner_must_go(lease)
+
+
+async def _close_browser_locked() -> None:
+    """Tear the browser down; the caller holds the lifecycle lock."""
+    global _browser, _browser_cookie_export_path, _last_activity
 
     browser = _browser
     cookie_export_path = _browser_cookie_export_path
     _browser = None
     _browser_cookie_export_path = None
+    _last_activity = None
 
     if browser is None:
         return
@@ -502,8 +1011,45 @@ async def close_browser() -> None:
             await browser.export_cookies(cookie_export_path)
         except Exception:
             logger.debug("Cookie export on close skipped", exc_info=True)
-    await browser.close()
+
+    # In a `finally`, so the profile is settled however `close()` ends. It is
+    # bounded and swallows its own failures today, but the ordering here is what
+    # the whole class of wedge turned on: anything raised between clearing
+    # `_browser` and settling the lease used to leave the profile held by a
+    # process nobody had asked to give way.
+    confirmed = False
+    try:
+        confirmed = await browser.close()
+    finally:
+        _settle_the_profile(confirmed=confirmed)
     logger.info("Browser closed")
+
+
+async def close_unusable_browser(manager: BrowserManager) -> bool | None:
+    """Close *manager* if it is still the cached browser, and say how it ended.
+
+    For a tool call that found its browser dead. The identity is checked under
+    the lifecycle lock, so a manager another closer already retired, or one
+    created since, is never closed from here.
+
+    * ``None``: *manager* is no longer cached, so nothing was closed. This does
+      not say how the other close ended.
+    * ``True``: closed and Chromium proven gone. The browser's reference to the
+      profile is released; a reference the caller's middleware holds can still
+      keep the lease until that call unwinds.
+    * ``False``: closed but not proven gone. The lease is kept, as any close
+      keeps it, and settlement has asked a shared owner to stand down.
+
+    The verdict is ``_browser_lease`` read before the lock is released, not a
+    lookup by path: settlement clears it only on a proven drain, and a lookup
+    answers for whatever the profile root resolves to by then. Cancellation and
+    an exception escaping the teardown behave exactly as in ``close_browser``.
+    """
+    async with _browser_lifecycle_lock:
+        if _browser is not manager:
+            return None
+        await _run_deferring_cancels(_close_browser_locked())
+        return _browser_lease is None
 
 
 def get_profile_dir() -> Path:
@@ -522,11 +1068,16 @@ def set_headless(headless: bool) -> None:
     _headless = headless
 
 
+def current_headless() -> bool:
+    """Return the headless mode future browser creation will use."""
+    return _headless
+
+
 async def validate_session() -> bool:
     """
     Check whether startup authentication has already succeeded for this browser.
 
-    Mid-session expiry is detected during real LinkedIn navigations and scraper
+    Mid-session expiry is detected during real LinkedIn navigations and page-read
     auth checks rather than via a fresh login probe on every tool call.
 
     Returns:
@@ -556,15 +1107,192 @@ async def check_rate_limit() -> None:
     Should be called after navigation to detect if LinkedIn is blocking requests.
 
     Raises:
+        AuthenticationError: If the page is a login or challenge route
+        AccountRestrictedError: If the page is the account-restriction route
         RateLimitError: If rate limiting is detected
     """
     browser = await get_or_create_browser()
     await detect_rate_limit(browser.page)
 
 
+def note_call_started() -> None:
+    """Record that a tool call is now driving the browser."""
+    global _calls_in_flight
+    _calls_in_flight += 1
+
+
+def note_activity() -> None:
+    """Record that a tool call just finished, for the idle timer."""
+    global _last_activity, _calls_in_flight
+    _last_activity = time.monotonic()
+    _calls_in_flight = max(0, _calls_in_flight - 1)
+
+
+# Interval of the background handoff poll. A probe costs about 40 microseconds,
+# so a one-second cadence is free and makes a handover feel immediate.
+_HANDOFF_POLL_INTERVAL_SECONDS = 1.0
+
+
+async def watch_for_handoff_requests() -> None:
+    """Release the profile promptly once another process asks for it.
+
+    Checking only after each tool call is not enough: an owner that finishes its
+    last call, probes, and then goes idle never probes again. A process that
+    announces itself a moment later would wait out its whole budget and get a
+    busy error while the owner sat doing nothing. This poll closes that window,
+    and also drives the idle timeout, which likewise has nothing to trigger it
+    once calls stop arriving.
+    """
+    while True:
+        try:
+            await asyncio.sleep(_HANDOFF_POLL_INTERVAL_SECONDS)
+            await release_profile_if_idle_or_requested()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A poll failure must never take down the server; the next tool call
+            # checks again anyway.
+            logger.debug("Handoff poll failed", exc_info=True)
+
+
+async def release_profile_if_idle_or_requested() -> bool:
+    """Close the browser when another process wants it, or when we are idle.
+
+    Called after each tool call and from a background poller. Polling matters:
+    if the owner only checked between calls, a waiter that announces *after* the
+    owner's last call would block until the idle timeout while the owner sits
+    doing nothing.
+
+    Returns whether the browser was closed.
+    """
+    if _browser is None or _browser_lease is None:
+        return False
+
+    # A tool call is using this browser's Page right now. Closing it here would
+    # fail that call with a closed-target error, which is worse than making the
+    # waiting process wait a few seconds longer; the caller's own post-call check
+    # hands over as soon as the call finishes.
+    if _calls_in_flight > 0:
+        return False
+
+    config = get_config().browser
+    # The lease this browser holds, not one the registry resolves now. Both
+    # questions asked below are about *this* profile: `handoff_requested()`
+    # probes a file under the lease's own auth root, and `held_seconds` counts
+    # from the moment that lease was acquired. A freshly resolved object answers
+    # about whichever path the config points at now and reports a hold of zero,
+    # so a waiter would be either ignored or refused forever. `config` still
+    # comes from settings: the hold window and the idle timeout are not lease
+    # state. Bound to a local because the close below can clear the global, and
+    # the lines under it must keep describing the lease this decision was about.
+    lease = _browser_lease
+    # None means no tool call has ever run, which is idle in the strongest sense.
+    idle_for = time.monotonic() - _last_activity if _last_activity is not None else None
+
+    if lease.handoff_requested():
+        # Every handoff costs a reopen, and a reopen re-validates /feed/, so a
+        # busy pair of clients trading the browser on every call would multiply
+        # LinkedIn requests. The hold window bounds how often ownership can move.
+        #
+        # It is measured from when we took the profile, not from idleness: by
+        # the time this runs the current call has already finished, so any
+        # idle-based test would always pass and the window would never apply.
+        held = lease.held_seconds
+        never_worked = idle_for is None
+        if never_worked or held >= config.browser_min_hold_seconds:
+            logger.info(
+                "Another process is waiting for the browser; handing over (held %.1fs)",
+                held,
+            )
+            return await _close_unless_a_call_arrived()
+        logger.debug(
+            "Handoff requested but held for only %.1fs of %.1fs; keeping the "
+            "browser to avoid a reopen",
+            held,
+            config.browser_min_hold_seconds,
+        )
+        return False
+
+    timeout = config.browser_idle_timeout_seconds
+    if timeout > 0 and idle_for is not None and idle_for >= timeout:
+        logger.info(
+            "Closing idle browser after %.0fs and releasing the profile", idle_for
+        )
+        return await _close_unless_a_call_arrived()
+
+    return False
+
+
+async def _close_unless_a_call_arrived() -> bool:
+    """Close the browser, unless a tool call started while we were deciding.
+
+    The guard in the caller ran outside the lifecycle lock, and taking that lock
+    can wait: a close in progress holds it across the cookie export and the
+    Chromium teardown. A call that starts inside that wait is invisible to a
+    check that already happened. Measured, with the lock held to open the
+    window: the decision was taken with nothing in flight, and Chromium was
+    closed and the profile released with one call running. That call's Page is
+    gone, which is exactly the closed-target error the guard exists to prevent.
+
+    Here rather than in ``close_browser``: that is the general teardown entry
+    point, and ``close_session``, shutdown, login and import all mean "close it"
+    unconditionally. A counter check there would make a deliberate close
+    silently do nothing. This is the one caller whose close is conditional.
+
+    Returns whether the browser was closed.
+    """
+    async with _browser_lifecycle_lock:
+        return await _run_deferring_cancels(_close_browser_if_still_idle())
+
+
+async def _close_browser_if_still_idle() -> bool:
+    """Tear the browser down unless a call claimed it; the lock is held.
+
+    The check has to sit *here*, in the coroutine the teardown task runs, and
+    that placement is the whole point rather than a detail. Checking in the
+    caller and then starting this as a task leaves a scheduling point between
+    the two: ``asyncio.create_task`` does not begin the coroutine, so the loop
+    gets to run whatever else is ready before the first line below executes.
+    Measured with the counter read in the caller instead: the re-check saw zero,
+    a tool call ran next and took the live browser through the fast path in
+    ``get_or_create_browser``, and the teardown then closed that same browser
+    with one call in flight.
+
+    From here there is no such gap. This body runs to its first ``await``
+    without yielding, and ``_close_browser_locked`` clears ``_browser`` before
+    *its* first await, so a call arriving afterwards finds no browser and waits
+    on the lock for a fresh one rather than losing the one it holds.
+
+    Returns whether the browser was closed.
+    """
+    if _calls_in_flight > 0:
+        logger.debug(
+            "A tool call started while the browser was being handed over; "
+            "keeping it, and the caller's post-call check hands over next"
+        )
+        return False
+    # Another close may have run while we waited, and reporting a close we did
+    # not perform would tell the middleware a handover happened.
+    if _browser is None:
+        return False
+    await _close_browser_locked()
+    return True
+
+
 def reset_browser_for_testing() -> None:
-    """Reset global browser state for test isolation."""
+    """Reset global browser state for test isolation.
+
+    The lease is dropped rather than released, deliberately. ``conftest`` resets
+    this module before ``profile_lease`` precisely so a lease the browser still
+    held is settled by its own bookkeeping first; releasing a reference here as
+    well would drop one the test never took, and the next test would find a lease
+    that reports itself free while the kernel lock is still open.
+    """
     global _browser, _browser_cookie_export_path, _headless
+    global _browser_lease, _last_activity, _calls_in_flight
     _browser = None
     _browser_cookie_export_path = None
     _headless = True
+    _browser_lease = None
+    _last_activity = None
+    _calls_in_flight = 0

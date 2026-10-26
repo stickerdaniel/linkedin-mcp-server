@@ -1,20 +1,27 @@
 [project]
-name = "linkedin-scraper-mcp"
-version = "4.10.1"
-description = "MCP server for LinkedIn profile, company, and job scraping with Claude AI integration. Supports direct profile/company/job URL scraping with secure credential storage."
+name = "mcp-server-linkedin"
+version = "4.28.0"
+description = "MCP server that gives AI assistants like Claude access to LinkedIn profiles, companies, and job postings through the user's own browser session."
 readme = "README.md"
-requires-python = ">=3.12,<3.15"
+requires-python = ">=3.12.4,<3.15"
 authors = [
     { name = "Daniel Sticker", email = "daniel@sticker.name" }
 ]
 license = "Apache-2.0"
+# Declared rather than left to setuptools' default globs, which happen to cover
+# NOTICE* today. Apache-2.0 §4(d) binds a derivative only to the notices this
+# project actually distributes, so whether the file reaches the wheel is the
+# whole point and not an incidental of the build backend.
+#
+# Measured with `uv build` at 4.23.0: the wheel carries
+# mcp_server_linkedin-4.23.0.dist-info/licenses/NOTICE with a matching
+# `License-File: NOTICE` in METADATA, and the sdist carries NOTICE at its root.
+# Worth re-running when the build backend or its version changes.
+license-files = ["LICENSE", "NOTICE"]
 keywords = [
-    "linkedin",
     "mcp",
     "model-context-protocol",
-    "scraper",
     "ai",
-    "automation",
     "llm",
     "anthropic",
     "claude",
@@ -33,10 +40,20 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "fastmcp>=3.0.0",
+    "anyio>=4.13.0",
+    "cryptography>=50.0.1",
+    "fastmcp>=4.1.2,<5",
+    "httpx2>=2.13.1,<3",
     "inquirer>=3.4.0",
-    "patchright>=1.40.0",
+    "mcp>=2.2.0,<3",
+    "opentelemetry-api>=1.45.1",
+    "packaging>=26.2",
+    "patchright>=1.55.0",
+    "pydantic-settings>=2.14.2",
     "python-dotenv>=1.1.1",
+    "pywin32>=312 ; sys_platform == 'win32'",
+    "rich>=15.0.0",
+    "starlette>=1.3.1",
 ]
 
 [project.urls]
@@ -47,11 +64,10 @@ Issues = "https://github.com/stickerdaniel/linkedin-mcp-server/issues"
 Changelog = "https://github.com/stickerdaniel/linkedin-mcp-server/releases"
 
 [project.scripts]
-linkedin-mcp-server = "linkedin_mcp_server.cli_main:main"
-linkedin-scraper-mcp = "linkedin_mcp_server.cli_main:main"
+mcp-server-linkedin = "linkedin_mcp_server.cli_main:main"
 
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
@@ -61,14 +77,75 @@ exclude = ["assets*", "docs*", "tests*"]
 [tool.setuptools.package-data]
 linkedin_mcp_server = ["py.typed"]
 
+[tool.ruff.lint]
+# Preserve Ruff's pre-0.16 default rule set instead of adopting new rules implicitly.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.format]
+# Ruff 0.16 added Markdown formatting; keep the formatter's previous file scope.
+exclude = ["*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-v --strict-markers -ra"
+markers = [
+    "browser_dom: evaluates extractor JS against a real chromium DOM; skipped when no browser is installed",
+    "browser_contract: measures browser API behavior against real Chromium; skipped when no browser is installed",
+    "slow: spawns real server processes; each case starts the full server graph",
+    "image_build: shells out to a docker daemon; skipped where there is none",
+    "browser_identity: the identity gate; fails rather than skips in CI",
+    "differential_browser: native differential row; launches real Chromium against the synthetic origin and runs only on a disposable CI runner that trusts the run's test CA",
+    "differential_row(row, experiment, column): a differential harness case, counted per row, experiment and platform in counts.json whether it runs, skips or fails",
+]
+
+[tool.coverage.run]
+source = ["linkedin_mcp_server"]
+branch = true
+omit = ["linkedin_mcp_server/__main__.py"]
+
+[tool.coverage.report]
+fail_under = 45
+show_missing = true
+
 [dependency-groups]
 dev = [
-    "aiohttp>=3.12.13",
-    "pre-commit>=4.2.0",
+    "aiohttp>=3.14.4",
+    "pre-commit>=4.6.2",
+    "psutil>=7.2.2",
     "pytest>=8.3.5",
     "pytest-asyncio>=1.0.0",
     "pytest-cov>=6.1.1",
     "pytest-xdist>=3.8.0",
-    "ruff>=0.11.11",
+    "pyyaml>=6.0.3",
+    "ruff==0.16.10",
+    "towncrier==26.9.0",
     "ty>=0.0.1a12",
+    "virtualenv>=21.14.9",
 ]
+
+[tool.towncrier]
+directory = "changelog.d"
+filename = "docs/CHANGELOG.md"
+start_string = "<!-- towncrier release notes start -->\n"
+title_format = "## {version} ({project_date})"
+issue_format = "[#{issue}](https://github.com/stickerdaniel/linkedin-mcp-server/pull/{issue})"
+# An empty list, not an absent key: only then does `towncrier build` refuse a
+# fragment of an unknown type instead of leaving it out in silence.
+ignore = []
+
+[[tool.towncrier.type]]
+directory = "breaking"
+name = "Breaking Changes"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "feat"
+name = "Features"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "fix"
+name = "Bug Fixes"
+showcontent = true

@@ -1,0 +1,143 @@
+name: Label PR
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+# Labels are for triage: they let the PR list be filtered by kind of change.
+# Release notes do not read them; those come from changelog.d fragments. This
+# derives the label from the conventional-commit type in the PR title so the
+# filtering works without anyone remembering to label by hand.
+# pull_request_target is required so PRs from forks get a writable token.
+# It is safe here only because the job checks out the trusted workflow revision,
+# never the PR branch, and matches current API data against a fixed case list.
+# An untrusted title can at worst yield no label.
+concurrency:
+  group: label-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout the trusted workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Apply label for the current conventional-commit type
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          PR_JSON="$RUNNER_TEMP/pull-request.json"
+          LABELS_JSON="$RUNNER_TEMP/pull-request-labels.json"
+          ATTACHED_DERIVED="$RUNNER_TEMP/attached-derived-labels.txt"
+
+          gh api --method GET "repos/${REPO}/pulls/${PR_NUMBER}" > "$PR_JSON"
+          TITLE_VALID=true
+          if ! python3 scripts/check_pr_title.py --pr-json "$PR_JSON" >/dev/null; then
+            TITLE_VALID=false
+          fi
+
+          gh api --method GET --paginate --slurp \
+            "repos/${REPO}/issues/${PR_NUMBER}/labels?per_page=100" > "$LABELS_JSON"
+
+          PR_TITLE=$(python3 - "$PR_JSON" "$LABELS_JSON" "$ATTACHED_DERIVED" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          derived = {
+              "breaking-change",
+              "enhancement",
+              "bug",
+              "documentation",
+              "refactoring",
+              "chore",
+              "dependencies",
+          }
+          try:
+              pr = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+              label_pages = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+              if not isinstance(pr, dict) or not isinstance(label_pages, list):
+                  raise TypeError
+              if any(not isinstance(page, list) for page in label_pages):
+                  raise TypeError
+              title = pr["title"]
+              attached = {
+                  label["name"]
+                  for page in label_pages
+                  for label in page
+                  if isinstance(label, dict) and label.get("name") in derived
+              }
+          except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError):
+              raise SystemExit("Unable to read current pull request data.") from None
+          if not isinstance(title, str):
+              raise SystemExit("Unable to read current pull request data.")
+          Path(sys.argv[3]).write_text("\n".join(sorted(attached)), encoding="utf-8")
+          print(title)
+          PY
+          )
+
+          # Match only a type at the exact start of a structurally valid prefix.
+          # The title stays in a variable, so a crafted value cannot inject shell.
+          TYPE=""
+          SCOPE=""
+          BREAKING=""
+          if [ "$TITLE_VALID" = true ]; then
+            if [[ "$PR_TITLE" =~ ^([a-z]+)(\([^()]+\))?(!)?:\ [^[:space:]] ]]; then
+              TYPE="${BASH_REMATCH[1]}"
+              SCOPE="${BASH_REMATCH[2]-}"
+              BREAKING="${BASH_REMATCH[3]-}"
+            fi
+          fi
+
+          # Renovate titles runtime updates fix(deps) and the rest chore(deps).
+          # Both are dependency updates, not bug fixes or triage chores.
+          if [ "$BREAKING" = "!" ]; then
+            LABEL="breaking-change"
+          elif [ "$SCOPE" = "(deps)" ] && { [ "$TYPE" = fix ] || [ "$TYPE" = chore ]; }; then
+            LABEL="dependencies"
+          else
+            case "$TYPE" in
+              feat)           LABEL="enhancement" ;;
+              fix)            LABEL="bug" ;;
+              docs)           LABEL="documentation" ;;
+              refactor)       LABEL="refactoring" ;;
+              chore|ci|style|test|perf) LABEL="chore" ;;
+              *)              LABEL="" ;;
+            esac
+          fi
+
+          if [ "$TITLE_VALID" != true ]; then
+            echo "Title is invalid; clearing derived labels."
+          elif [ -n "$LABEL" ]; then
+            echo "Title type '$TYPE' -> label '$LABEL'"
+          else
+            echo "No conventional-commit type in title; clearing derived labels."
+          fi
+
+          is_attached() {
+            grep -Fxq "$1" "$ATTACHED_DERIVED"
+          }
+
+          # Idempotency is explicit: only attached stale derived labels are
+          # removed, and the desired label is added only when it is absent.
+          # Labels outside this fixed derived set are untouched.
+          for stale in breaking-change enhancement bug documentation refactoring chore dependencies; do
+            [ "$stale" = "$LABEL" ] && continue
+            if is_attached "$stale"; then
+              gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$stale"
+            fi
+          done
+
+          if [ -n "$LABEL" ] && ! is_attached "$LABEL"; then
+            gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "$LABEL"
+          fi

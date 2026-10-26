@@ -1,0 +1,543 @@
+"""Helpers for extracting compact, typed references from LinkedIn DOM links."""
+
+from __future__ import annotations
+
+import re
+from typing import Literal, NotRequired, Required, TypedDict
+from urllib.parse import parse_qs, unquote, urlparse, urlunparse
+
+ReferenceKind = Literal[
+    "person",
+    "company",
+    "company_urn",
+    "job",
+    "feed_post",
+    "article",
+    "newsletter",
+    "school",
+    "conversation",
+    "external",
+]
+
+
+class Reference(TypedDict):
+    """Compact reference payload returned to MCP clients."""
+
+    kind: Required[ReferenceKind]
+    url: Required[str]
+    text: NotRequired[str]
+    context: NotRequired[str]
+    value: NotRequired[str]
+
+
+class RawReference(TypedDict, total=False):
+    """Raw anchor data collected from the browser DOM."""
+
+    href: str
+    text: str
+    aria_label: str
+    title: str
+    heading: str
+    in_article: bool
+    in_nav: bool
+    in_footer: bool
+
+
+_GENERIC_LABELS = {
+    "show all",
+    "follow",
+    "following",
+    "connect",
+    "send",
+    "like",
+    "comment",
+    "repost",
+    "post",
+    "play",
+    "pause",
+    "fullscreen",
+    "close",
+    "manage notifications",
+    "view my newsletter",
+    "my newsletter",
+}
+
+_CONTEXT_LABELS = {
+    "about",
+    "experience",
+    "education",
+    "interests",
+    "honors",
+    "languages",
+    "featured",
+    "contact info",
+}
+
+_SECTION_CONTEXTS = {
+    "experience": "experience",
+    "education": "education",
+    "interests": "interests",
+    "honors": "honors",
+    "languages": "languages",
+    "certifications": "certifications",
+    "skills": "skills",
+    "projects": "projects",
+    "contact_info": "contact info",
+    "employees": "employees",
+    "job_posting": "job posting",
+    "inbox": "inbox",
+    "conversation": "conversation",
+    "jobs": "jobs",
+    "saved_jobs": "saved jobs",
+    "feed": "feed",
+}
+
+_DEFAULT_REFERENCE_CAP = 12
+_SEARCH_RESULTS_REFERENCE_CAP = 15
+_REFERENCE_CAPS = {
+    "main_profile": 12,
+    "about": 12,
+    "experience": 12,
+    "education": 12,
+    "interests": 12,
+    "honors": 12,
+    "languages": 12,
+    "certifications": 12,
+    "skills": 12,
+    "projects": 12,
+    "posts": 12,
+    "jobs": 8,
+    "employees": 12,
+    "search_results": _SEARCH_RESULTS_REFERENCE_CAP,
+    # The "More jobs" module sits at the bottom of a posting and lists a dozen
+    # jobs, so a cap applied in page order has to reach past everything above.
+    "job_posting": 25,
+    "contact_info": 8,
+    "inbox": 30,
+    "conversation": 12,
+    # Headroom for get_feed's num_posts ceiling (Field(ge=1, le=50)).
+    # Kept in sync with the literal cap=50 in feed_payload.build_feed_references
+    # where SDUI-derived /posts/<slug> permalinks are appended.
+    "feed": 50,
+}
+
+# A label must carry at least one letter or digit in any script, so the class is
+# Unicode-aware rather than ``[A-Za-z0-9]`` — otherwise every reference on a
+# Cyrillic, CJK or Arabic-script profile is dropped. The four Hangul fillers are
+# excluded because they carry the word property while rendering as nothing: a
+# label made only of them would pass as valid and yield an invisible reference
+# text, shadowing the aria-label fallback. They are the only invisible code
+# points in ``[^\W_]`` (verified by scanning the full Unicode range).
+_LABEL_CONTENT_RE = re.compile("[^\\W_\u115f\u1160\u3164\uffa0]")
+
+_URL_LIKE_RE = re.compile(r"^(?:https?://|/)\S+$", re.IGNORECASE)
+_DUPLICATE_HALVES_RE = re.compile(r"^(?P<value>.+?)\s+(?P=value)$")
+_WHITESPACE_RE = re.compile(r"\s+")
+_CONNECTIONS_FOLLOW_RE = re.compile(r"\bconnections follow this page\b", re.IGNORECASE)
+_COMPANY_PATH_RE = re.compile(r"^/company/([^/?#]+)")
+_PERSON_PATH_RE = re.compile(r"^/in/([^/?#]+)")
+_SCHOOL_PATH_RE = re.compile(r"^/school/([^/?#]+)")
+# LinkedIn serves a job under both /jobs/view/<id>/ and
+# /jobs/view/<title>-at-<company>-<id>/, and both 301 to the same page, so the
+# id is the trailing number of the segment rather than its start. Anchoring to
+# the start dropped the slugged form, and matched the wrong number whenever a
+# title opened with one: "2026-software-engineer-at-acme-4252026496" read as
+# job 2026. Same shape as the pattern the job-id extraction uses, with one
+# difference that has to stay: `[0-9]` and not `\d`, because Python's `\d`
+# also matches Arabic-Indic and other Unicode decimal digits while
+# JavaScript's does not, and `normalize_job_id` refuses anything outside
+# `[0-9]`. Matching them here only produces a reference the next call rejects.
+JOB_PATH_RE = re.compile(r"^/jobs/view/(?:[^/?#]*-)?([0-9]+)(?=[/?#]|$)")
+_NEWSLETTER_PATH_RE = re.compile(r"^/newsletters/([^/?#]+)")
+_PULSE_PATH_RE = re.compile(r"^/pulse/([^/?#]+)")
+_FEED_PATH_RE = re.compile(r"^/feed/update/([^/?#]+)")
+_MESSAGING_THREAD_PATH_RE = re.compile(r"^/messaging/thread/([^/?#]+)")
+_MAX_REDIRECT_UNWRAP_DEPTH = 5
+
+# Accept both quoted-string and bare-integer JSON list elements, e.g.
+# ``["1115","2573558"]`` (the form LinkedIn currently emits — verified live)
+# and ``[1115,2573558]`` (also valid JSON). Optional surrounding quote keeps
+# the matcher resilient if LinkedIn ever drops the string-typing.
+_FIRST_URN_RE = re.compile(r'\[\s*"?(\d+)"?')
+
+
+def _first_company_urn_from_query(query: str) -> str | None:
+    """Pull the first numeric id from a ``currentCompany`` people-search facet.
+
+    LinkedIn's people-search canned-search anchors carry the company URN
+    in the ``currentCompany`` query param as a JSON list, e.g.
+    ``currentCompany=["1115","2573558"]`` (percent-encoded in the href).
+    The first id is the parent company; subsequent ids are subsidiaries.
+    """
+    values = parse_qs(query).get("currentCompany")
+    if not values:
+        return None
+    match = _FIRST_URN_RE.match(values[0])
+    return match.group(1) if match else None
+
+
+def build_references(
+    raw_references: list[RawReference],
+    section_name: str,
+    *,
+    apply_cap: bool = True,
+) -> list[Reference]:
+    """Filter and normalize raw DOM anchors into compact references."""
+    cap = (
+        _REFERENCE_CAPS.get(section_name, _DEFAULT_REFERENCE_CAP) if apply_cap else None
+    )
+    normalized_references: list[Reference] = []
+
+    for raw in raw_references:
+        normalized = normalize_reference(raw, section_name)
+        if normalized is None:
+            continue
+        normalized_references.append(normalized)
+
+    return dedupe_references(normalized_references, cap=cap)
+
+
+def normalize_reference(
+    raw: RawReference,
+    section_name: str,
+) -> Reference | None:
+    """Normalize one raw DOM anchor into a compact reference."""
+    if raw.get("in_nav") or raw.get("in_footer"):
+        return None
+
+    href = normalize_url(raw.get("href", ""))
+    if href is None:
+        return None
+
+    kind_url = classify_link(href)
+    if kind_url is None:
+        return None
+    kind, normalized_url = kind_url
+
+    if kind == "company_urn":
+        text = None
+    else:
+        text = choose_reference_text(raw, kind)
+    # A job is kept without a label because its id is the useful part, and a
+    # card-wide anchor has none: the "More jobs" cards wrap title, company,
+    # location and insights in one link, which no label survives.
+    if text is None and kind not in {
+        "feed_post",
+        "external",
+        "conversation",
+        "company_urn",
+        "job",
+    }:
+        return None
+
+    context = derive_context(section_name, raw, kind)
+
+    reference: Reference = {
+        "kind": kind,
+        "url": normalized_url,
+    }
+    if kind == "company_urn":
+        # ``classify_link`` already extracted the urn while building the
+        # canonical url. Re-parsing here keeps that classifier internal —
+        # callers of ``normalize_reference`` shouldn't have to know the
+        # url shape — and is cheap (the canonical url has a fixed
+        # single-id form, so ``parse_qs`` is O(1) here).
+        urn_id = _first_company_urn_from_query(urlparse(normalized_url).query)
+        if urn_id:
+            reference["value"] = urn_id
+    if text:
+        reference["text"] = text
+    if context:
+        reference["context"] = context
+    return reference
+
+
+def normalize_url(href: str, _depth: int = 0) -> str | None:
+    """Normalize a raw href and unwrap LinkedIn redirect URLs."""
+    if _depth > _MAX_REDIRECT_UNWRAP_DEPTH:
+        return None
+
+    href = href.strip()
+    if not href or href.startswith("#"):
+        return None
+
+    parsed = urlparse(href)
+    scheme = parsed.scheme.lower()
+    if scheme in {"blob", "javascript", "mailto", "tel"}:
+        return None
+    if scheme and scheme not in {"http", "https"}:
+        return None
+
+    host = parsed.netloc.lower()
+    if _is_linkedin_host(host) and parsed.path == "/redir/redirect/":
+        target = unquote((parse_qs(parsed.query).get("url") or [""])[0]).strip()
+        if not target:
+            return None
+        return normalize_url(target, _depth + 1)
+
+    if not parsed.scheme:
+        return None
+
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", parsed.query, ""))
+
+
+def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
+    """Classify and canonicalize one normalized URL."""
+    parsed = urlparse(href)
+    host = parsed.netloc.lower()
+    path = parsed.path or "/"
+
+    if not _is_linkedin_host(host):
+        return "external", urlunparse(
+            (parsed.scheme, parsed.netloc, parsed.path or "/", "", "", "")
+        )
+
+    # The "See all employees on LinkedIn" canned-search anchor carries the
+    # company URN id, which is the only value LinkedIn's currentCompany
+    # people-search facet actually filters on. Match before the chrome
+    # check below, which would otherwise drop every /search/results path.
+    if path.rstrip("/") == "/search/results/people":
+        urn_id = _first_company_urn_from_query(parsed.query)
+        if urn_id:
+            return (
+                "company_urn",
+                f"/search/results/people/?currentCompany=%5B%22{urn_id}%22%5D",
+            )
+
+    if _is_linkedin_chrome(path):
+        return None
+
+    if match := _PERSON_PATH_RE.match(path):
+        person_suffix = path[match.end() :].lstrip("/")
+        first_suffix_segment = person_suffix.split("/", 1)[0] if person_suffix else ""
+        if first_suffix_segment in {"overlay", "details", "recent-activity"}:
+            return None
+        return "person", f"/in/{match.group(1)}/"
+
+    if match := _COMPANY_PATH_RE.match(path):
+        return "company", f"/company/{match.group(1)}/"
+
+    if match := _SCHOOL_PATH_RE.match(path):
+        return "school", f"/school/{match.group(1)}/"
+
+    if match := JOB_PATH_RE.match(path):
+        return "job", f"/jobs/view/{match.group(1)}/"
+
+    # A job card that opens inside a search links to the search with the job
+    # selected rather than to the job, as the "More jobs" cards on a posting
+    # do. Without this every one of them was dropped. ASCII digits for the
+    # same reason as `JOB_PATH_RE`.
+    if path.rstrip("/") in {"/jobs/search", "/jobs/search-results"}:
+        job_id = (parse_qs(parsed.query).get("currentJobId") or [""])[0]
+        if re.fullmatch(r"[0-9]+", job_id):
+            return "job", f"/jobs/view/{job_id}/"
+
+    if match := _NEWSLETTER_PATH_RE.match(path):
+        return "newsletter", f"/newsletters/{match.group(1)}/"
+
+    if match := _PULSE_PATH_RE.match(path):
+        return "article", f"/pulse/{match.group(1)}/"
+
+    if match := _FEED_PATH_RE.match(path):
+        return "feed_post", f"/feed/update/{match.group(1)}/"
+
+    if match := _MESSAGING_THREAD_PATH_RE.match(path):
+        if unquote(match.group(1)) == "new":
+            return None
+        return "conversation", f"/messaging/thread/{match.group(1)}/"
+
+    return None
+
+
+def choose_reference_text(
+    raw: RawReference,
+    kind: ReferenceKind,
+) -> str | None:
+    """Choose the best compact human-readable label for a reference."""
+    candidates: list[tuple[int, str]] = []
+    for priority, candidate in enumerate(
+        (
+            raw.get("text", ""),
+            raw.get("aria_label", ""),
+            raw.get("title", ""),
+        )
+    ):
+        cleaned = clean_label(candidate, kind)
+        if cleaned:
+            candidates.append((priority, cleaned))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (_label_sort_key(item[1]), item[0]))
+    return candidates[0][1]
+
+
+def clean_label(value: str, kind: ReferenceKind) -> str | None:
+    """Normalize and compact a candidate label.
+
+    Rejects the label when nothing visible survives normalization, so
+    non-Latin names are kept while punctuation-only strings are dropped.
+    See ``_LABEL_CONTENT_RE``.
+    """
+    value = _WHITESPACE_RE.sub(" ", value).strip()
+    if not value:
+        return None
+
+    value = re.sub(
+        r"^(?:View:\s*|View\b\s+|Open article:\s*)",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(r"[’']s\s+graphic link$", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\s+graphic link$", "", value, flags=re.IGNORECASE)
+    value = value.strip(" :-")
+
+    if " by " in value and kind in {"article", "external"}:
+        value = value.split(" by ", 1)[0].strip()
+
+    for separator in (" • ", " · ", " | "):
+        if separator in value:
+            value = value.split(separator, 1)[0].strip()
+
+    duplicate_match = _DUPLICATE_HALVES_RE.match(value)
+    if duplicate_match:
+        value = duplicate_match.group("value").strip()
+
+    if _URL_LIKE_RE.match(value):
+        return None
+    if _CONNECTIONS_FOLLOW_RE.search(value):
+        return None
+    if value.lower() in _GENERIC_LABELS:
+        return None
+    if len(value) < 2:
+        return None
+    if len(value) > 80:
+        return None
+    if not _LABEL_CONTENT_RE.search(value):
+        return None
+
+    return value
+
+
+def derive_context(
+    section_name: str,
+    raw: RawReference,
+    kind: ReferenceKind,
+) -> str | None:
+    """Build a compact context hint for one retained reference."""
+    if section_name in _SECTION_CONTEXTS:
+        return _SECTION_CONTEXTS[section_name]
+
+    heading = clean_heading(raw.get("heading", ""))
+
+    if section_name == "search_results":
+        return "job result" if kind == "job" else "search result"
+
+    if section_name == "posts":
+        if kind == "person":
+            return "post author"
+        if kind == "feed_post":
+            return "company post"
+        return "post attachment"
+
+    if section_name in {"main_profile", "about"}:
+        if heading in _CONTEXT_LABELS:
+            return heading
+        if raw.get("in_article"):
+            return "featured"
+        return "top card"
+
+    return heading if heading in _CONTEXT_LABELS else None
+
+
+def clean_heading(value: str) -> str | None:
+    """Normalize a raw heading into a short supported context label."""
+    value = _WHITESPACE_RE.sub(" ", value).strip().lower()
+    if not value:
+        return None
+    return value if value in _CONTEXT_LABELS else None
+
+
+def _choose_better_reference(existing: Reference, new: Reference) -> Reference:
+    """Keep the cleaner, richer of two duplicate-url references."""
+    existing_score = _reference_score(existing)
+    new_score = _reference_score(new)
+    return new if new_score > existing_score else existing
+
+
+def dedupe_references(
+    references: list[Reference],
+    cap: int | None = None,
+) -> list[Reference]:
+    """Dedupe references by URL while keeping the cleaner duplicate in order."""
+    deduped: dict[str, Reference] = {}
+    ordered_urls: list[str] = []
+
+    for reference in references:
+        url = reference["url"]
+        existing = deduped.get(url)
+        if existing is None:
+            deduped[url] = reference
+            ordered_urls.append(url)
+            continue
+        deduped[url] = _choose_better_reference(existing, reference)
+
+    ordered = [deduped[url] for url in ordered_urls]
+    return ordered[:cap] if cap is not None else ordered
+
+
+def _reference_score(reference: Reference) -> tuple[int, int, int | float]:
+    text = reference.get("text")
+    context = reference.get("context")
+    return (
+        1 if text else 0,
+        1 if context else 0,
+        _text_score(text),
+    )
+
+
+def _label_sort_key(label: str) -> tuple[int, int]:
+    """Prefer concise labels, but deprioritize short 2-character strings."""
+    return (1 if len(label) < 3 else 0, len(label))
+
+
+def _text_score(text: str | None) -> int | float:
+    """Prefer richer labels while scoring missing text as strictly worst."""
+    return len(text) if text else float("-inf")
+
+
+def _is_linkedin_chrome(path: str) -> bool:
+    path = path.split("?", 1)[0].split("#", 1)[0]
+    if not path.startswith("/"):
+        path = f"/{path}"
+
+    segments = [segment for segment in path.split("/") if segment]
+    if not segments:
+        return False
+
+    first = segments[0]
+    second = segments[1] if len(segments) > 1 else ""
+
+    if first in {
+        "help",
+        "legal",
+        "about",
+        "accessibility",
+        "mypreferences",
+        "preferences",
+    }:
+        return True
+    if first == "search" and second == "results":
+        return True
+    if first == "overlay" and second in {
+        "background-photo",
+        "browsemap-recommendations",
+    }:
+        return True
+    return first == "preload" and second == "custom-invite"
+
+
+def _is_linkedin_host(host: str) -> bool:
+    return host == "linkedin.com" or host.endswith(".linkedin.com")

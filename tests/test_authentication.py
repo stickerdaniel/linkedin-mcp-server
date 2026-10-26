@@ -4,7 +4,6 @@ import pytest
 
 from linkedin_mcp_server.authentication import (
     clear_auth_state,
-    clear_profile,
     get_authentication_source,
 )
 from linkedin_mcp_server.drivers.browser import profile_exists
@@ -69,13 +68,6 @@ def test_get_authentication_source_accepts_source_session(profile_dir):
 def test_get_authentication_source_none_raises(isolate_profile_dir):
     with pytest.raises(CredentialsNotFoundError):
         get_authentication_source()
-
-
-def test_clear_profile_removes_dir(profile_dir):
-    assert profile_dir.exists()
-    result = clear_profile(profile_dir)
-    assert result is True
-    assert not profile_dir.exists()
 
 
 def test_clear_auth_state_removes_source_and_runtime_files(profile_dir):

@@ -1,24 +1,56 @@
-"""Middleware that serializes MCP tool execution within one server process."""
+"""Middleware that serializes MCP tool execution across server processes."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
+from typing import TYPE_CHECKING
 
 import mcp.types as mt
 
+from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
+
+from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.daemon.liveness import (
+    abandoned_before_browser_work,
+    abandoned_call_error,
+    browser_work_begins,
+)
+from linkedin_mcp_server.exceptions import BrowserBusyError
+from linkedin_mcp_server.profile_lease import get_profile_lease
+
+if TYPE_CHECKING:
+    from linkedin_mcp_server.daemon.discovery import Unanswered
 
 logger = logging.getLogger(__name__)
 
 
 class SequentialToolExecutionMiddleware(Middleware):
-    """Ensure only one MCP tool call executes at a time per server process."""
+    """Ensure only one tool call at a time drives the shared LinkedIn browser.
 
-    def __init__(self) -> None:
+    Two layers, because one is not enough:
+
+    * an ``asyncio.Lock`` serializes calls inside this process, where several MCP
+      sessions can share one server;
+    * the profile lease serializes calls across processes, where each MCP client
+      instance spawns its own server against the same Chromium profile.
+
+    Without the second layer two processes open that profile simultaneously and
+    the last one to close silently overwrites the other's cookies.
+    """
+
+    def __init__(self, *, silent_owner: Unanswered | None = None) -> None:
+        """*silent_owner* is the shared owner a Direct server fell back from.
+
+        Its silence was seen once, at startup, so it explains only a lease wait
+        that fails, and only until this process first gets the lease: after
+        that, whoever holds the browser is not explained by it.
+        """
         self._lock = asyncio.Lock()
+        self._silent_owner = silent_owner
 
     async def _report_progress(
         self,
@@ -43,30 +75,108 @@ class SequentialToolExecutionMiddleware(Middleware):
     ) -> ToolResult:
         tool_name = context.message.name
         wait_started = time.perf_counter()
-        logger.debug("Waiting for scraper lock for tool '%s'", tool_name)
+        logger.debug("Waiting for browser lock for tool '%s'", tool_name)
         await self._report_progress(
             context,
-            message="Queued waiting for scraper lock",
+            message="Queued waiting for the browser lock",
         )
 
         async with self._lock:
             wait_seconds = time.perf_counter() - wait_started
             logger.debug(
-                "Acquired scraper lock for tool '%s' after %.3fs",
+                "Acquired browser lock for tool '%s' after %.3fs",
                 tool_name,
                 wait_seconds,
             )
             await self._report_progress(
                 context,
-                message="Scraper lock acquired, starting tool",
+                message="Browser lock acquired, starting tool",
             )
-            hold_started = time.perf_counter()
+            return await self._run_owning_the_profile(context, call_next, tool_name)
+
+    def _busy_because(self) -> str | None:
+        """The busy text for a silent owner, or ``None`` for the default.
+
+        Worded as history, since nothing has asked the owner since startup.
+        """
+        silent = self._silent_owner
+        if silent is None:
+            return None
+        return (
+            "When this server started, the shared browser process "
+            f"(pid {silent.pid} at startup) did not respond in time. It may "
+            "still be holding the browser, so restarting only your MCP client "
+            "may not release it."
+        )
+
+    async def _run_owning_the_profile(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+        tool_name: str,
+    ) -> ToolResult:
+        """Run the tool while this process owns the browser profile."""
+        # Imported here so the module stays importable without the driver.
+        from linkedin_mcp_server.drivers.browser import (
+            note_activity,
+            note_call_started,
+            release_profile_if_idle_or_requested,
+        )
+
+        lease = get_profile_lease()
+        acquired = lease.try_acquire()
+        if not acquired:
+            await self._report_progress(
+                context,
+                message=(
+                    "Another LinkedIn MCP client is using the browser; "
+                    "waiting for it to hand over"
+                ),
+            )
+            budget = get_config().browser.browser_wait_seconds
+            acquired = await lease.acquire(timeout=budget)
+
+        if not acquired:
+            # Raised as a ToolError here, not via error_handler: an exception
+            # thrown in middleware does not pass through raise_tool_error, and
+            # mask_error_details would otherwise hide the explanation.
+            logger.info("Tool '%s' gave up waiting for the shared browser", tool_name)
+            raise ToolError(str(BrowserBusyError(self._busy_because())))
+        # For good: the startup observation no longer describes the holder.
+        self._silent_owner = None
+
+        # After every wait this call can spend queued, and before the browser is
+        # touched: the last point at which an owner can still decline work its
+        # client has given up on. Nothing awaits between here and the body.
+        # Only the reference taken above is returned, and the browser-call count
+        # is left alone, because the body never began.
+        if abandoned_before_browser_work():
+            lease.release()
+            logger.info("Tool '%s' was abandoned before it began", tool_name)
+            raise abandoned_call_error()
+        # From here on the call may act, so an owner that has to cut it off
+        # reports its outcome as unknown rather than as a call that never ran.
+        browser_work_begins()
+
+        hold_started = time.perf_counter()
+        try:
+            # Marks the browser as in use so the background handoff poll cannot
+            # close it out from under this call. Inside the try so the finally
+            # always balances it, including if the call is cancelled.
+            note_call_started()
+            return await call_next(context)
+        finally:
+            hold_seconds = time.perf_counter() - hold_started
+            logger.debug(
+                "Released browser lock for tool '%s' after %.3fs",
+                tool_name,
+                hold_seconds,
+            )
+            note_activity()
+            lease.release()
+            # Hand the browser over now if someone is waiting, rather than
+            # holding it for the rest of this process's lifetime.
             try:
-                return await call_next(context)
-            finally:
-                hold_seconds = time.perf_counter() - hold_started
-                logger.debug(
-                    "Released scraper lock for tool '%s' after %.3fs",
-                    tool_name,
-                    hold_seconds,
-                )
+                await release_profile_if_idle_or_requested()
+            except Exception:
+                logger.debug("Profile handoff check failed", exc_info=True)

@@ -20,6 +20,8 @@ keeps automated apply runs honest about job-specific questionnaires
 and avoids submitting inaccurate / template answers.
 """
 
+from __future__ import annotations
+
 import logging
 from typing import Annotated, Any
 
@@ -27,9 +29,7 @@ from fastmcp import Context, FastMCP
 from pydantic import Field
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
-from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
-from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.dependencies import get_ready_extractor, tool_errors
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +44,12 @@ def register_application_tools(
         title="Save Job",
         annotations={"destructiveHint": True, "openWorldHint": True},
         tags={"job", "actions"},
-        exclude_args=["extractor"],
     )
+    @tool_errors
     async def save_job(
         job_id: str,
         confirm_send: bool,
         ctx: Context,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Bookmark a job posting on LinkedIn (Save Job).
@@ -69,41 +68,27 @@ def register_application_tools(
         Returns:
             Dict with url, status, message, and saved.
         """
-        try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="save_job"
-            )
-            logger.info("Saving job: %s (confirm_send=%s)", job_id, confirm_send)
+        extractor = await get_ready_extractor(ctx, tool_name="save_job")
+        logger.info("Saving job: %s (confirm_send=%s)", job_id, confirm_send)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Loading job posting"
-            )
+        await ctx.report_progress(progress=0, total=100, message="Loading job posting")
 
-            result = await extractor.save_job(job_id, confirm_send=confirm_send)
+        result = await extractor.save_job(job_id, confirm_send=confirm_send)
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "save_job")
-        except Exception as e:
-            raise_tool_error(e, "save_job")  # NoReturn
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
         title="List Applied Jobs",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "scraping"},
-        exclude_args=["extractor"],
     )
+    @tool_errors
     async def list_applied(
         ctx: Context,
         max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         List jobs the authenticated LinkedIn user has applied to.
@@ -124,41 +109,29 @@ def register_application_tools(
             job_ids (list of numeric job ID strings the user has
             already applied to).
         """
-        try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="list_applied"
-            )
-            logger.info("Listing applied jobs (max_pages=%d)", max_pages)
+        extractor = await get_ready_extractor(ctx, tool_name="list_applied")
+        logger.info("Listing applied jobs (max_pages=%d)", max_pages)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Loading applied-jobs history"
-            )
+        await ctx.report_progress(
+            progress=0, total=100, message="Loading applied-jobs history"
+        )
 
-            result = await extractor.list_applied_jobs(max_pages=max_pages)
+        result = await extractor.list_applied_jobs(max_pages=max_pages)
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "list_applied")
-        except Exception as e:
-            raise_tool_error(e, "list_applied")  # NoReturn
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
         title="Inspect Easy Apply",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "scraping"},
-        exclude_args=["extractor"],
     )
+    @tool_errors
     async def easy_apply_inspect(
         job_id: str,
         ctx: Context,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Inspect the LinkedIn Easy Apply flow for a job posting WITHOUT
@@ -178,42 +151,30 @@ def register_application_tools(
             already_applied, multi_step), step_count, and
             questions (list of dicts with label and field_type).
         """
-        try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="easy_apply_inspect"
-            )
-            logger.info("Inspecting Easy Apply: job_id=%s", job_id)
+        extractor = await get_ready_extractor(ctx, tool_name="easy_apply_inspect")
+        logger.info("Inspecting Easy Apply: job_id=%s", job_id)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Loading Easy Apply dialog"
-            )
+        await ctx.report_progress(
+            progress=0, total=100, message="Loading Easy Apply dialog"
+        )
 
-            result = await extractor.easy_apply_inspect(job_id)
+        result = await extractor.easy_apply_inspect(job_id)
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "easy_apply_inspect")
-        except Exception as e:
-            raise_tool_error(e, "easy_apply_inspect")  # NoReturn
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
         title="Submit Easy Apply",
         annotations={"destructiveHint": True, "openWorldHint": True},
         tags={"job", "actions"},
-        exclude_args=["extractor"],
     )
+    @tool_errors
     async def easy_apply_submit(
         job_id: str,
         confirm_send: bool,
         ctx: Context,
-        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Submit a LinkedIn Easy Apply application.
@@ -237,32 +198,22 @@ def register_application_tools(
             submitted, manual_review, no_easy_apply, already_applied,
             error), questions (when manual_review), and message.
         """
-        try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="easy_apply_submit"
-            )
-            logger.info(
-                "Submitting Easy Apply: job_id=%s confirm_send=%s",
-                job_id,
-                confirm_send,
-            )
+        extractor = await get_ready_extractor(ctx, tool_name="easy_apply_submit")
+        logger.info(
+            "Submitting Easy Apply: job_id=%s confirm_send=%s",
+            job_id,
+            confirm_send,
+        )
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Submitting Easy Apply"
-            )
+        await ctx.report_progress(
+            progress=0, total=100, message="Submitting Easy Apply"
+        )
 
-            result = await extractor.easy_apply_submit(
-                job_id, confirm_send=confirm_send
-            )
+        result = await extractor.easy_apply_submit(job_id, confirm_send=confirm_send)
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
+        return result
 
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "easy_apply_submit")
-        except Exception as e:
-            raise_tool_error(e, "easy_apply_submit")  # NoReturn
+
+register_applications_tools = register_application_tools

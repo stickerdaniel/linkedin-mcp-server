@@ -4,11 +4,11 @@ LinkedIn MCP Server package.
 
 A Model Context Protocol (MCP) server that provides LinkedIn integration capabilities
 for AI assistants. This package enables secure LinkedIn profile, company, and job
-data scraping through a standardized MCP interface.
+data reading through a standardized MCP interface.
 
 Key Features:
 - Secure LinkedIn authentication via session files
-- LinkedIn profile, company, and job data scraping
+- Reading LinkedIn profile, company, and job data
 - MCP-compliant server implementation using FastMCP
 - Playwright browser automation with session persistence
 - Layered configuration system with secure credential storage
@@ -24,7 +24,18 @@ Architecture:
 
 from importlib.metadata import PackageNotFoundError, version
 
+from linkedin_mcp_server.greenlet_runtime import explain_a_missing_runtime
+
+# Before anything reaches patchright, where the failure would otherwise surface
+# as a bare DLL error with nothing pointing at its cause. Both entry paths, the
+# console script and ``python -m``, import this module first.
+explain_a_missing_runtime()
+
 try:
-    __version__ = version("linkedin-scraper-mcp")
+    __version__ = version("mcp-server-linkedin")
 except PackageNotFoundError:
-    __version__ = "0.0.0.dev"  # Running from source without install
+    try:
+        # Fallback for environments installed under the pre-rename name
+        __version__ = version("linkedin-scraper-mcp")
+    except PackageNotFoundError:
+        __version__ = "0.0.0.dev"  # Running from source without install

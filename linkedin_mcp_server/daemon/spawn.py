@@ -1,0 +1,908 @@
+"""Starting one owner child, from the side of the process that wants one.
+
+The spawn adapter of :mod:`linkedin_mcp_server.daemon.election`: it launches a
+detached owner, runs the exchange of :mod:`linkedin_mcp_server.daemon.startup`
+as :mod:`~linkedin_mcp_server.daemon.core.spawn` decides, and stops and
+collects a child that cannot become a usable owner.
+
+The child owns every operation that may mutate daemon state (lock, log,
+endpoint, publication), so the frontend enforces its timeout by killing it; an
+abandoned thread could still take the lock or publish later.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+import os
+import queue
+import subprocess
+import sys
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import BinaryIO, TypeVar, cast
+
+from linkedin_mcp_server.config.schema import AppConfig
+from linkedin_mcp_server.daemon import config as daemon_config
+from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
+from linkedin_mcp_server.daemon import owner as daemon_owner
+from linkedin_mcp_server.daemon import startup
+from linkedin_mcp_server.daemon import version as daemon_version
+from linkedin_mcp_server.daemon.core import spawn as spawn_core
+from linkedin_mcp_server.daemon.core.spawn import Attempt, Started
+from linkedin_mcp_server.daemon.discovery import _DescriptorInspector
+from linkedin_mcp_server.process_protocol import new_nonce
+from linkedin_mcp_server.process_tree import (
+    ProcessTreeError,
+    WindowsJob,
+    release_nonce,
+    release_windows_gate,
+    terminate_process_group,
+    windows_gate_command,
+)
+
+logger = logging.getLogger(__name__)
+
+_IS_WINDOWS = os.name == "nt"
+
+_FAILURE_VERDICT_SECONDS = 0.2
+_PREPARED_READ_SECONDS = 1.0
+_PREPARED_CLEANUP_SECONDS = 1.0
+
+
+@dataclass(frozen=True)
+class _BootstrapDiagnosis:
+    code: str | None
+    log_path: str | None = None
+
+
+class _BootstrapReport:
+    """Collect bounded diagnostics from the child's bootstrap pipe."""
+
+    _CAPTURE_BYTES = 4096
+    _READ_BYTES = 512
+
+    def __init__(
+        self, stream: BinaryIO | None, handshake_nonce: str | None = None
+    ) -> None:
+        self._result: queue.Queue[_BootstrapDiagnosis | None] = queue.Queue(maxsize=1)
+        if stream is None:
+            self._result.put(None)
+            return
+
+        def collect() -> None:
+            code: str | None = None
+            log_path: str | None = None
+            remaining = self._CAPTURE_BYTES
+            pending = bytearray()
+            overflowed = False
+            try:
+                with stream:
+                    while chunk := stream.readline(self._READ_BYTES):
+                        if remaining <= 0:
+                            continue
+                        sample = chunk[:remaining]
+                        remaining -= len(sample)
+                        if overflowed:
+                            if sample.endswith(b"\n"):
+                                overflowed = False
+                            continue
+                        pending.extend(sample)
+                        if len(sample) < len(chunk) or (
+                            remaining <= 0 and not sample.endswith(b"\n")
+                        ):
+                            pending.clear()
+                            overflowed = True
+                            continue
+                        if not sample.endswith(b"\n"):
+                            continue
+                        code, candidate = self._parse_line(
+                            bytes(pending),
+                            code=code,
+                            handshake_nonce=handshake_nonce,
+                        )
+                        if candidate is not None and log_path is None:
+                            log_path = candidate
+                        pending.clear()
+            except OSError:
+                pass
+            self._result.put(_BootstrapDiagnosis(code, log_path))
+
+        threading.Thread(
+            target=collect,
+            name="daemon-bootstrap",
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def _parse_line(
+        raw: bytes, *, code: str | None, handshake_nonce: str | None
+    ) -> tuple[str | None, str | None]:
+        try:
+            text = raw.removesuffix(b"\n").removesuffix(b"\r").decode("utf-8")
+        except UnicodeError:
+            return code, None
+        prefix = f"{daemon_owner.BOOTSTRAP_PREFIX} "
+        if text.startswith(prefix):
+            candidate = text.removeprefix(prefix)
+            if candidate in {
+                daemon_owner.BOOTSTRAP_CONFIGURATION,
+                daemon_owner.BOOTSTRAP_STATE,
+                daemon_owner.BOOTSTRAP_LOCK,
+                daemon_owner.BOOTSTRAP_LOG,
+                daemon_owner.BOOTSTRAP_ATTACHED,
+            }:
+                return candidate, None
+            return code, None
+        fields = text.split(" ", 3)
+        if len(fields) != 4 or fields[0] != daemon_owner.BOOTSTRAP_LOG_HINT_PREFIX:
+            return code, None
+        _, version, nonce, candidate = fields
+        encoded = candidate.encode("utf-8")
+        if (
+            version != daemon_owner.BOOTSTRAP_LOG_HINT_VERSION
+            or handshake_nonce is None
+            or nonce != handshake_nonce
+            or len(encoded) > daemon_owner.BOOTSTRAP_LOG_HINT_MAX_PATH_BYTES
+            or not candidate
+            or any(not character.isprintable() for character in candidate)
+        ):
+            return code, None
+        path = Path(candidate)
+        if not path.is_absolute() or path.name != "daemon.log":
+            return code, None
+        return code, candidate
+
+    def read(
+        self, *, timeout: float = _FAILURE_VERDICT_SECONDS
+    ) -> _BootstrapDiagnosis | None:
+        """Return collected records without letting diagnostics pin fallback."""
+        try:
+            return self._result.get(timeout=max(timeout, 0.0))
+        except queue.Empty:
+            return None
+
+
+def _report_child_failure(report: _BootstrapReport) -> None:
+    """Log the most actionable safe diagnosis available from the child."""
+    diagnosis = report.read()
+    code = None if diagnosis is None else diagnosis.code
+    if code == daemon_owner.BOOTSTRAP_CONFIGURATION:
+        logger.warning("The daemon rejected its startup configuration")
+    elif code == daemon_owner.BOOTSTRAP_STATE:
+        logger.warning("The daemon could not resolve its profile state")
+    elif code == daemon_owner.BOOTSTRAP_LOCK:
+        logger.warning("The daemon could not take ownership")
+    elif code == daemon_owner.BOOTSTRAP_LOG:
+        logger.warning("The daemon log could not be opened")
+    elif code == daemon_owner.BOOTSTRAP_ATTACHED:
+        if diagnosis is not None and diagnosis.log_path is not None:
+            logger.warning(
+                "The daemon could not start; inspect the daemon log at %r",
+                diagnosis.log_path,
+            )
+        else:
+            logger.warning("The daemon could not start; inspect the daemon log")
+    else:
+        logger.warning("The daemon stopped before its diagnostic log became available")
+
+
+def _start_owner(
+    auth_root: Path,
+    config: AppConfig,
+    *,
+    timeout: float,
+    inspector: _DescriptorInspector,
+) -> Attempt:
+    """Start one child that competes for the lock and reports the outcome.
+
+    The child owns every potentially blocking state mutation, and derives the
+    profile from the configuration it is handed.
+    """
+    return spawn_core.attempt_after(
+        _spawn(auth_root, config, timeout=timeout, inspector=inspector)
+    )
+
+
+def _refusal_before_spawn(config: AppConfig) -> Started | None:
+    """Refuse a start that cannot succeed, before there is a child to stop.
+
+    Permanent conditions answer ``ABORTED``, so the election falls back to
+    Direct. The installed-package check is a diagnostic for the log only: a
+    replacement can still land after it, and the child's ACK is the authority.
+    """
+    try:
+        running = daemon_version.build_identity()
+        installed = daemon_version.installed_build_identity()
+    except OSError:
+        logger.warning(
+            "The installed package could not be read; not starting a daemon",
+            exc_info=True,
+        )
+        return Started.ABORTED
+    if installed != running:
+        logger.warning(
+            "The installed package changed after this server started (%s, now "
+            "%s); restart the MCP client to use the shared browser",
+            running,
+            installed,
+        )
+        return Started.ABORTED
+    if not startup.fits(startup.CONFIG, config=daemon_config.encode(config)):
+        logger.warning(
+            "The configuration is too large to hand to a shared browser owner "
+            "(the startup protocol carries at most %d bytes)",
+            startup.MAX_FRAME_BYTES,
+        )
+        return Started.ABORTED
+    return None
+
+
+def _spawn(
+    auth_root: Path,
+    config: AppConfig,
+    *,
+    timeout: float,
+    inspector: _DescriptorInspector,
+) -> Started:
+    """Start a detached owner and atomically commit its prepared descriptor.
+
+    The exchange is :mod:`linkedin_mcp_server.daemon.startup`'s; what follows
+    each step, including when the child may be stopped, is
+    :mod:`linkedin_mcp_server.daemon.core.spawn`'s. Every state-storage
+    operation stays in the child, which a timed-out frontend can kill.
+    """
+    refusal = _refusal_before_spawn(config)
+    if refusal is not None:
+        return refusal
+    windows_job = WindowsJob.named("owner") if os.name == "nt" else None
+    try:
+        nonce = release_nonce() if windows_job is not None else None
+        target = _spawn_command(
+            job_name=windows_job.name if windows_job is not None else None,
+        )
+        command = (
+            windows_gate_command(target, nonce)
+            if windows_job is not None and nonce is not None
+            else target
+        )
+        child = subprocess.Popen(
+            command,
+            env=_owner_environment(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            close_fds=True,
+            creationflags=_detachment_flags(),
+        )
+    except BaseException:
+        if windows_job is not None:
+            windows_job.close()
+        raise
+
+    try:
+        # Created only after Popen returns and carried only by the child's own
+        # standard input. Startup output written before the HELLO cannot know
+        # the token the parent will accept.
+        handshake_nonce = new_nonce()
+        # Inside the same handler as the spawn: the diagnosis starts a thread,
+        # and a host that has run out of them would otherwise leave this child
+        # running with nothing holding it, waiting out its own timeout for a
+        # HELLO no one is left to send.
+        bootstrap = _BootstrapReport(
+            getattr(child, "stderr", None), handshake_nonce=handshake_nonce
+        )
+    except BaseException:
+        _stop_child(child, windows_job=windows_job, assigned=False)
+        if windows_job is not None:
+            windows_job.close()
+        raise
+    return _Startup(
+        auth_root,
+        config,
+        child,
+        windows_job=windows_job,
+        gate_nonce=nonce,
+        handshake_nonce=handshake_nonce,
+        bootstrap=bootstrap,
+        inspector=inspector,
+    ).run(timeout=timeout)
+
+
+class _Startup:
+    """One child's startup exchange, run as ``daemon.core.spawn`` decides.
+
+    The core says what comes next and when the child may be stopped; this runs
+    each step against the child and reports what came of it. Every attempt ends
+    in the core's :func:`~linkedin_mcp_server.daemon.core.spawn.wind_down`,
+    however it ended.
+    """
+
+    def __init__(
+        self,
+        auth_root: Path,
+        config: AppConfig,
+        child: subprocess.Popen[bytes],
+        *,
+        windows_job: WindowsJob | None,
+        gate_nonce: str | None,
+        handshake_nonce: str,
+        bootstrap: _BootstrapReport,
+        inspector: _DescriptorInspector,
+    ) -> None:
+        self._auth_root = auth_root
+        self._config = config
+        self._child = child
+        self._job = windows_job
+        self._gate_nonce = gate_nonce
+        self._handshake_nonce = handshake_nonce
+        self._bootstrap = bootstrap
+        self._inspector = inspector
+        self._channel: startup.FrontendChannel | None = None
+        #: Whether the Job owns the child, which is how it must be stopped.
+        self._assigned = False
+        self._state = spawn_core.spawned(
+            contained=windows_job is not None,
+            budgets=spawn_core.Budgets(
+                failure_verdict=_FAILURE_VERDICT_SECONDS,
+                prepared_read=_PREPARED_READ_SECONDS,
+            ),
+        )
+
+    def run(self, *, timeout: float) -> Started:
+        try:
+            effects = self._decide(self._connect(timeout))
+            while True:
+                event: spawn_core.Event | None = None
+                for effect in effects:
+                    match effect:
+                        case spawn_core.Finish(started=started):
+                            return started
+                        case spawn_core.StopChild(silent=silent):
+                            self._stop(silent=silent)
+                        case spawn_core.ReportFailure():
+                            _report_child_failure(self._bootstrap)
+                        case _:
+                            event = self._carry_out(effect)
+                if event is None:
+                    raise AssertionError(
+                        f"the spawn core left the start waiting on {effects}"
+                    )
+                effects = self._decide(event)
+        finally:
+            for effect in spawn_core.wind_down(self._state):
+                self._wind_down(effect)
+
+    def _decide(self, event: spawn_core.Event) -> list[spawn_core.Effect]:
+        self._state, effects = spawn_core.on_event(self._state, event)
+        return effects
+
+    def _connect(self, timeout: float) -> spawn_core.Event:
+        """Hand the child to its Job, open the channel and say when that was."""
+        try:
+            if self._job is not None and self._gate_nonce is not None:
+                self._job.assign_popen(self._child)
+                self._assigned = True
+                # No owner code exists until the parent owns the Job.
+                release_windows_gate(self._child.stdin, self._gate_nonce)
+            # Only now, because until the gate is released its input is the one
+            # thing that can stop it, and that close belongs to ``_stop_child``.
+            self._channel = startup.FrontendChannel(self._child, self._handshake_nonce)
+        except BaseException:
+            self._interrupted(0)
+            raise
+        return spawn_core.Connected(time.monotonic(), timeout)
+
+    def _carry_out(self, effect: spawn_core.Effect) -> spawn_core.Event:
+        """Run one step until it completes, and say how.
+
+        Failures a step expects become its own events. Anything else is an
+        interruption, which the core answers before it propagates.
+        """
+        if not isinstance(effect, spawn_core.WAITS):
+            raise AssertionError(f"not an effect that waits: {effect!r}")
+        try:
+            return self._step(effect)
+        except BaseException:
+            self._interrupted(effect.op)
+            raise
+
+    def _step(self, effect: spawn_core.Effect) -> spawn_core.Event:
+        channel = self._channel
+        assert channel is not None
+        match effect:
+            case spawn_core.Greet(op=op, timeout=timeout):
+                refusal = _greet(channel, timeout=timeout)
+                return spawn_core.Greeted(op, time.monotonic(), refusal)
+            case spawn_core.HandOver(op=op, timeout=timeout):
+                try:
+                    _hand_over_config(channel, self._config, timeout=timeout)
+                except TimeoutError:
+                    logger.warning(
+                        "The daemon never read its configuration; stopping it so "
+                        "the lock is not held by a process that cannot serve"
+                    )
+                    return spawn_core.HandOverFailed(op, time.monotonic())
+                except Exception:
+                    logger.warning(
+                        "The daemon could not receive its configuration", exc_info=True
+                    )
+                    return spawn_core.HandOverFailed(op, time.monotonic())
+                return spawn_core.HandedOver(op, time.monotonic())
+            case spawn_core.AwaitPrepared(op=op, timeout=timeout):
+                answer = _await_prepared(channel, timeout=timeout)
+                return spawn_core.Prepared(op, time.monotonic(), answer)
+            case spawn_core.Validate(op=op, instance=instance, until=until):
+                try:
+                    profile = _resolve_profile_until(
+                        Path(self._config.browser.user_data_dir),
+                        timeout=until - time.monotonic(),
+                    )
+                    _validate_prepared_until(
+                        self._auth_root,
+                        instance,
+                        profile=profile,
+                        config=self._config,
+                        timeout=until - time.monotonic(),
+                    )
+                except TimeoutError:
+                    return spawn_core.ValidationTimedOut(op, time.monotonic())
+                except Exception:
+                    logger.warning(
+                        "The daemon prepared unusable startup state", exc_info=True
+                    )
+                    return spawn_core.ValidationFailed(op, time.monotonic())
+                return spawn_core.Validated(op, time.monotonic())
+            case spawn_core.SendCommit(op=op, instance=instance, timeout=timeout):
+                try:
+                    _send_commit(channel, instance, timeout=timeout)
+                except Exception:
+                    logger.warning(
+                        "The daemon commit request could not be delivered",
+                        exc_info=True,
+                    )
+                    return spawn_core.CommitUndelivered(op, time.monotonic())
+                return spawn_core.CommitSent(op, time.monotonic())
+            case spawn_core.AwaitVerdict(op=op, timeout=timeout):
+                verdict = _await_committed(channel, timeout=timeout)
+                return spawn_core.Verdict(op, time.monotonic(), verdict)
+            case spawn_core.SettleCommit(op=op, instance=instance, timeout=timeout):
+                verdict = _settle_commit_result(
+                    instance, timeout=timeout, inspector=self._inspector
+                )
+                return spawn_core.Settled(op, time.monotonic(), verdict)
+        raise AssertionError(f"not an effect that waits: {effect!r}")
+
+    def _interrupted(self, op: int) -> None:
+        """Stop the child for an interruption, if the core says this one may."""
+        for effect in self._decide(spawn_core.Interrupted(op)):
+            if isinstance(effect, spawn_core.StopChild):
+                self._stop(silent=effect.silent)
+
+    def _stop(self, *, silent: bool) -> None:
+        if silent:
+            logger.warning(
+                "The daemon did not prepare an endpoint; stopping it so the lock "
+                "is not held by a process that never served"
+            )
+        try:
+            _stop_child(self._child, windows_job=self._job, assigned=self._assigned)
+        finally:
+            if self._job is not None:
+                self._job.close()
+
+    def _wind_down(self, effect: spawn_core.Effect) -> None:
+        match effect:
+            case spawn_core.StopChild(silent=silent):
+                self._stop(silent=silent)
+            case spawn_core.ReleaseJob():
+                if self._job is not None:
+                    self._job.close()
+            case spawn_core.HangUp():
+                if self._channel is not None:
+                    self._channel.close()
+                else:
+                    # The channel never took the pipes, so no thread is inside them.
+                    for stream in (self._child.stdin, self._child.stdout):
+                        if stream is not None:
+                            with contextlib.suppress(OSError, ValueError):
+                                stream.close()
+                _reap(self._child)
+            case spawn_core.DiscardPrepared(instance=instance):
+                try:
+                    _discard_prepared_until(
+                        self._auth_root,
+                        instance,
+                        timeout=_PREPARED_CLEANUP_SECONDS,
+                    )
+                except Exception:
+                    logger.warning(
+                        "The daemon's abandoned prepared state could not be removed",
+                        exc_info=True,
+                    )
+
+
+#: How long to wait for a killed child to be collected. Short by design: this
+#: follows a hard kill (``SIGKILL`` on POSIX and ``TerminateProcess`` on
+#: Windows), which the process cannot decline, so anything but a prompt exit
+#: means the process is stuck in the kernel and no amount of waiting here will
+#: change that.
+_STOP_CHILD_SECONDS = 2.0
+
+
+def _stop_child(
+    child: subprocess.Popen[bytes],
+    *,
+    windows_job: WindowsJob | None = None,
+    assigned: bool = False,
+) -> None:
+    """End a child whose startup cannot produce a usable owner, and collect it.
+
+    A timed-out child may be blocked in log or lock I/O, so it is made terminal
+    before the frontend falls back to an in-process browser. Killed outright:
+    a ``SIGTERM`` grace period would run past the caller's spent budget. The
+    wait normally proves death before this returns; after the bounded-wait
+    warning the caller must not claim the lock is free.
+    """
+    deadline = time.monotonic() + _STOP_CHILD_SECONDS
+    if windows_job is not None:
+        if assigned:
+            try:
+                windows_job.terminate()
+                try:
+                    child.wait(timeout=max(deadline - time.monotonic(), 0.0))
+                except subprocess.TimeoutExpired as exc:
+                    raise ProcessTreeError(
+                        "The Windows owner gate did not exit after Job termination"
+                    ) from exc
+                # ActiveProcesses includes an exited member until every
+                # process-handle reference is released. CPython retains this
+                # direct gate handle after wait(), so release it before asking
+                # the Job to prove it is empty.
+                windows_job.release_popen_handle(child)
+            except BaseException:
+                # Kill-on-close is the one containment that depends on none of
+                # the calls above, and only this branch still holds the Job.
+                # Without it the tree would keep the daemon lock until this
+                # process exits. The installer keeps the same fallback in
+                # ``_cleanup_assigned_windows_job_once``.
+                windows_job.close()
+                raise
+            # Left to settle itself: it closes on a proved drain and retains the
+            # handle on an unproved one, and retention is the deliberate choice
+            # to keep containment authority rather than to abandon it.
+            # Float rounding must never increase the drain beyond the stop budget.
+            windows_job.wait_until_empty(
+                timeout=min(_STOP_CHILD_SECONDS, max(deadline - time.monotonic(), 0.0))
+            )
+        else:
+            # Before assignment EOF is the only contained stop. If the isolated
+            # gate does not accept it, stop and reap that direct child explicitly.
+            # Once the startup channel owns it this is ``None``: the kill below
+            # is bounded, a close racing the writer's blocked write is not.
+            if child.stdin is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    child.stdin.close()
+            try:
+                child.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                child.kill()
+            finally:
+                windows_job.close()
+            try:
+                child.wait(timeout=max(deadline - time.monotonic(), 0.0))
+            except subprocess.TimeoutExpired as exc:
+                raise ProcessTreeError(
+                    "The Windows owner gate did not exit after cleanup"
+                ) from exc
+        return
+
+    stopped_tree = terminate_process_group(
+        child.pid, timeout=_STOP_CHILD_SECONDS, child=child
+    )
+    if not stopped_tree:
+        with contextlib.suppress(OSError):
+            child.kill()
+    try:
+        child.wait(timeout=max(deadline - time.monotonic(), 0.0))
+    except subprocess.TimeoutExpired:
+        # Uninterruptible sleep, or a kernel that has not finished with it.
+        # Reported rather than waited out, since the caller has a deadline and
+        # this is not something a longer wait resolves.
+        logger.warning(
+            "The daemon has not exited after being killed; the profile may stay "
+            "locked until it does"
+        )
+
+
+def _greet(channel: startup.FrontendChannel, *, timeout: float) -> Started | None:
+    """Send HELLO and accept only an ACK from this build. ``None`` means go on.
+
+    The child holds nothing yet, so every failure ends in a stop. Silence, EOF
+    or an unexpected frame may be a slow or crashed child (``NO``); an ACK
+    naming another protocol or build means the installed package changed,
+    which another child would repeat (``ABORTED``).
+    """
+    started = time.monotonic()
+    try:
+        channel.send(startup.HELLO, protocol=startup.PROTOCOL, timeout=timeout)
+        answer = channel.receive(timeout=timeout - (time.monotonic() - started))
+    except TimeoutError:
+        logger.warning(
+            "The daemon did not answer its startup greeting; stopping it so the "
+            "lock is not held by a process that cannot serve"
+        )
+        return Started.NO
+    except (OSError, ValueError):
+        logger.info("The daemon could not be greeted", exc_info=True)
+        return Started.NO
+    try:
+        ack = startup.expect(answer, startup.ACK, nonce=channel.nonce)
+    except startup.ProtocolError:
+        logger.info("The daemon did not answer in the startup protocol")
+        return Started.NO
+    running = daemon_version.build_identity()
+    if ack["protocol"] != startup.PROTOCOL or ack["build"] != running:
+        logger.warning(
+            "The daemon that started is build %s, not this server's %s; the "
+            "installed package changed, so restart the MCP client to use the "
+            "shared browser",
+            ack["build"],
+            running,
+        )
+        return Started.ABORTED
+    return None
+
+
+def _hand_over_config(
+    channel: startup.FrontendChannel, config: AppConfig, *, timeout: float
+) -> None:
+    """Write the CONFIG frame, which is the only place the settings travel."""
+    channel.send(startup.CONFIG, config=daemon_config.encode(config), timeout=timeout)
+
+
+_FilesystemResult = TypeVar("_FilesystemResult")
+
+
+def _filesystem_until(
+    operation: Callable[[], _FilesystemResult],
+    *,
+    timeout: float,
+    thread_name: str,
+    timeout_message: str,
+) -> _FilesystemResult:
+    """Run one parent-side filesystem operation within the caller's wait."""
+    result: queue.Queue[_FilesystemResult | BaseException] = queue.Queue(maxsize=1)
+
+    def run() -> None:
+        try:
+            value = operation()
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the caller
+            result.put(exc)
+        else:
+            result.put(value)
+
+    threading.Thread(target=run, name=thread_name, daemon=True).start()
+    try:
+        value = result.get(timeout=max(timeout, 0.0))
+    except queue.Empty:
+        raise TimeoutError(timeout_message) from None
+    if isinstance(value, BaseException):
+        raise value
+    return value
+
+
+def _resolve_profile_until(profile: Path, *, timeout: float) -> Path:
+    """Resolve the configured profile without pinning a lock-holding child."""
+    return _filesystem_until(
+        lambda: profile.expanduser().resolve(),
+        timeout=timeout,
+        thread_name="daemon-profile-resolve",
+        timeout_message="The daemon profile could not be resolved in time",
+    )
+
+
+def _validate_prepared_until(
+    auth_root: Path,
+    instance_id: str,
+    *,
+    profile: Path,
+    config: AppConfig,
+    timeout: float,
+) -> None:
+    """Validate prepared state without letting a blocked filesystem pin the caller."""
+    _filesystem_until(
+        lambda: daemon_descriptor.validate_prepared(
+            auth_root, instance_id, profile=profile, config=config
+        ),
+        timeout=timeout,
+        thread_name="daemon-prepared-read",
+        timeout_message="Prepared daemon state could not be read in time",
+    )
+
+
+def _discard_prepared_until(
+    auth_root: Path, instance_id: str, *, timeout: float
+) -> None:
+    """Bound cleanup that can only finish against this abandoned generation.
+
+    The worker may complete after the frontend gives up waiting. That is safe only
+    because ``discard_prepared`` names the unique instance's pending descriptor and
+    token directly; it never removes canonical state or scans generations belonging
+    to a later lock holder.
+    """
+    _filesystem_until(
+        lambda: daemon_descriptor.discard_prepared(auth_root, instance_id),
+        timeout=timeout,
+        thread_name="daemon-prepared-cleanup",
+        timeout_message="Prepared daemon state could not be removed in time",
+    )
+
+
+def _send_commit(
+    channel: startup.FrontendChannel, instance_id: str, *, timeout: float
+) -> None:
+    """Tell the lock-holding child to publish the generation it prepared."""
+    channel.send(startup.COMMIT, instance=instance_id, timeout=timeout)
+
+
+def _settle_commit_result(
+    instance_id: str, *, timeout: float, inspector: _DescriptorInspector
+) -> Started:
+    """Settle a missing commit verdict through the election's shared inspection.
+
+    Never from the child's process state, which cannot disambiguate an
+    attempted remote rename.
+    """
+    try:
+        attachment = inspector.inspect_until(timeout=timeout).attachment
+    except Exception:
+        return Started.UNCERTAIN
+    if attachment is not None and attachment.descriptor.instance_id == instance_id:
+        return Started.YES
+    # After the COMMIT frame may have arrived, a dead child is not proof of an
+    # uncommitted generation. NFS may report a failed rename and keep returning a
+    # stale canonical entry until after that child exits. The next successful
+    # owner removes abandoned pending files and superseded tokens while holding
+    # the lock.
+    return Started.UNCERTAIN
+
+
+def _await_committed(channel: startup.FrontendChannel, *, timeout: float) -> Started:
+    """Wait for the lock holder's final commit verdict."""
+    try:
+        answer = channel.receive(timeout=timeout)
+    except TimeoutError:
+        return Started.STILL_TRYING
+    try:
+        verdict = startup.expect(answer, startup.VERDICT, nonce=channel.nonce)
+    except startup.ProtocolError:
+        return Started.NO
+    status = verdict["status"]
+    if status == startup.COMMITTED:
+        return Started.YES
+    if status == startup.ABORTED:
+        return Started.ABORTED
+    if status == startup.RETRY:
+        return Started.RETRY
+    return Started.NO
+
+
+def _spawn_command(*, job_name: str | None = None) -> list[str]:
+    """How the owner is invoked.
+
+    ``-P`` keeps the working directory off ``sys.path`` but keeps the user
+    site, where ``pip install --user`` may have put this package. An isolated
+    frontend's ``-I``, ``-s`` or ``-E`` is preserved, since weakening it would
+    restore startup code it refused before the configuration secrets cross
+    stdin. :func:`_owner_environment` drops ``PYTHONPATH`` for the same reason.
+    """
+    interpreter_flags: list[str] = []
+    if sys.flags.isolated:
+        # ``-I`` already implies ``-E`` and ``-s``. Preserve the mode itself rather
+        # than expanding it, so the child's flags describe the same boundary.
+        interpreter_flags.append("-I")
+    else:
+        if sys.flags.ignore_environment:
+            interpreter_flags.append("-E")
+        if sys.flags.no_user_site:
+            interpreter_flags.append("-s")
+
+    command = [
+        sys.executable,
+        *interpreter_flags,
+        "-P",
+        "-m",
+        "linkedin_mcp_server.daemon.owner",
+    ]
+    if job_name is not None:
+        command += ["--job-name", job_name]
+    return command
+
+
+#: Environment variables carrying a secret the owner has no use for: it gets
+#: every setting on standard input, and its environment stays readable
+#: (``/proc/<pid>/environ``, ``ps e``) for its whole lifetime. ``PROXY_SERVER``
+#: belongs here because its documented form may embed ``user:password@``.
+_SECRETS_TO_DROP = ("PROXY_PASSWORD", "PROXY_USERNAME", "PROXY_SERVER")
+
+
+def _owner_environment() -> dict[str, str]:
+    """The environment to start the owner in, minus what it must not keep.
+
+    Secrets are dropped, not emptied: an empty ``PROXY_USERNAME`` is
+    meaningful to the configuration parser, and the owner gets the real values
+    over the startup channel. ``PYTHONPATH`` is dropped so a workspace cannot
+    shadow the owner module.
+    """
+    environment = dict(os.environ)
+    for name in _SECRETS_TO_DROP:
+        environment.pop(name, None)
+    environment.pop("PYTHONPATH", None)
+    return environment
+
+
+def _detachment_flags() -> int:
+    """What it takes on this platform to survive the client that started us.
+
+    CPython ignores ``start_new_session`` on Windows. There
+    ``CREATE_NEW_PROCESS_GROUP`` escapes the console's ``Ctrl+C``,
+    ``DETACHED_PROCESS`` gives the child no console, and
+    ``CREATE_BREAKAWAY_FROM_JOB`` keeps a host's kill-on-close Job from
+    retaining authority once the owner adopts its own Job.
+    """
+    if not _IS_WINDOWS:
+        return 0
+    return (  # pragma: no cover - exercised on the Windows runner
+        subprocess.CREATE_NEW_PROCESS_GROUP
+        | subprocess.DETACHED_PROCESS
+        | subprocess.CREATE_BREAKAWAY_FROM_JOB
+    )
+
+
+def _reap(child: subprocess.Popen[bytes]) -> None:
+    """Collect a child that has already exited, without waiting for one that has not.
+
+    A successful election leaves a running owner that must outlive this
+    process, so this only polls. ``subprocess`` also reaps abandoned children
+    on its own, but that is a standard-library detail, and this is the one
+    place that knowingly walks away from a child.
+    """
+    with contextlib.suppress(OSError, ValueError):
+        child.poll()
+
+
+def _await_prepared(
+    channel: startup.FrontendChannel, *, timeout: float
+) -> str | Started:
+    """Wait for a prepared generation id, a failure, or silence."""
+    try:
+        answer = channel.receive(timeout=timeout)
+    except TimeoutError:
+        return Started.STILL_TRYING
+    if answer is None:
+        logger.info("The daemon exited before it prepared an endpoint")
+        return Started.NO
+    try:
+        if answer.get("type") == startup.PREPARED:
+            prepared = startup.expect(answer, startup.PREPARED, nonce=channel.nonce)
+            return cast(str, prepared["instance"])
+        verdict = startup.expect(answer, startup.VERDICT, nonce=channel.nonce)
+    except startup.ProtocolError:
+        logger.info("The daemon answered outside the startup protocol")
+        return Started.NO
+    status = verdict["status"]
+    if status == startup.FAILED:
+        logger.info("The daemon reported that it could not start")
+        return Started.NO
+    if status == startup.ABORTED:
+        logger.info("The daemon reported a terminal startup failure")
+        return Started.ABORTED
+    if status == startup.RETRY:
+        logger.info("The daemon released its startup position for another attempt")
+        return Started.RETRY
+    return Started.NO

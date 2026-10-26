@@ -1,0 +1,208 @@
+{
+  // Resource manifest for the btca-local skill: repos pre-cloned into
+  // ~/.btca/agent/sandbox/<name>. The sandbox is shared across projects,
+  // so resource names must identify the repo unambiguously.
+  "resources": [
+    {
+      "type": "git",
+      "name": "fastmcp",
+      "url": "https://github.com/jlowin/fastmcp",
+      "branch": "main",
+      "specialNotes": "FastMCP server framework. Primary MCP library used in this project."
+    },
+    {
+      "type": "git",
+      "name": "playwrightPython",
+      "url": "https://github.com/microsoft/playwright-python",
+      "branch": "main",
+      "specialNotes": "Playwright Python bindings for browser automation."
+    },
+    {
+      "type": "git",
+      "name": "pytest",
+      "url": "https://github.com/pytest-dev/pytest",
+      "branch": "main",
+      "specialNotes": "Python testing framework."
+    },
+    {
+      "type": "git",
+      "name": "ruff",
+      "url": "https://github.com/astral-sh/ruff",
+      "branch": "main",
+      "specialNotes": "Fast Python linter and formatter written in Rust."
+    },
+    {
+      "type": "git",
+      "name": "ty",
+      "url": "https://github.com/astral-sh/ty",
+      "branch": "main",
+      "specialNotes": "Fast Python type checker from Astral, written in Rust."
+    },
+    {
+      "type": "git",
+      "name": "uv",
+      "url": "https://github.com/astral-sh/uv",
+      "branch": "main",
+      "specialNotes": "Fast Python package manager from Astral, written in Rust."
+    },
+    {
+      "type": "git",
+      "name": "inquirer",
+      "url": "https://github.com/magmax/python-inquirer",
+      "branch": "main",
+      "specialNotes": "Python library for CLI interactive prompts."
+    },
+    {
+      "type": "git",
+      "name": "pythonDotenv",
+      "url": "https://github.com/theskumar/python-dotenv",
+      "branch": "main",
+      "specialNotes": "Python library for loading .env files."
+    },
+    {
+      "type": "git",
+      "name": "pyperclip",
+      "url": "https://github.com/asweigart/pyperclip",
+      "branch": "master",
+      "specialNotes": "Cross-platform Python clipboard module."
+    },
+    {
+      "type": "git",
+      "name": "preCommit",
+      "url": "https://github.com/pre-commit/pre-commit",
+      "branch": "main",
+      "specialNotes": "Framework for managing pre-commit hooks."
+    },
+    {
+      "type": "git",
+      "name": "pyyaml",
+      "url": "https://github.com/yaml/pyyaml",
+      "branch": "main",
+      "specialNotes": "YAML parser used by the Ruff toolchain contract test."
+    },
+    {
+      "type": "git",
+      "name": "patchright",
+      "url": "https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python",
+      "branch": "main"
+    },
+    {
+      "type": "git",
+      "name": "rich",
+      "url": "https://github.com/Textualize/rich",
+      "branch": "main",
+      "specialNotes": "Terminal rendering. Used for the browser-install progress bar; the bar glyph is hardcoded in progress_bar.py."
+    },
+    {
+      "type": "git",
+      "name": "pythonCryptography",
+      "url": "https://github.com/pyca/cryptography",
+      "branch": "main",
+      "specialNotes": "PyCA cryptography. AES-CBC/GCM + PBKDF2 for Chromium cookie decryption (browser session import, #534)."
+    },
+    {
+      "type": "git",
+      "name": "packaging",
+      "url": "https://github.com/pypa/packaging",
+      "branch": "main",
+      "specialNotes": "PyPA packaging. version.Version parsing/comparison for the PyPI update check (update_check.py)."
+    },
+    {
+      "type": "git",
+      "name": "openbox",
+      "url": "https://github.com/danakj/openbox",
+      "branch": "main",
+      "specialNotes": "Openbox window manager used to place and focus the Docker login browser."
+    },
+    {
+      "type": "git",
+      "name": "x11vnc",
+      "url": "https://github.com/LibVNC/x11vnc",
+      "branch": "master",
+      "specialNotes": "Loopback-only VNC server for the Docker login viewer."
+    },
+    {
+      "type": "git",
+      "name": "noVNC",
+      "url": "https://github.com/novnc/noVNC",
+      "branch": "master",
+      "specialNotes": "Browser client for the Docker login viewer. Debian Bookworm ships vnc_lite.html from this project."
+    },
+    {
+      "type": "git",
+      "name": "websockify",
+      "url": "https://github.com/novnc/websockify",
+      "branch": "master",
+      "specialNotes": "Token-authenticated WebSocket proxy between noVNC and x11vnc."
+    },
+    {
+      "type": "git",
+      "name": "pywin32",
+      "url": "https://github.com/mhammond/pywin32",
+      "branch": "main",
+      "specialNotes": "Windows API bindings. Used for daemon and installer Job Object containment."
+    },
+    {
+      "type": "git",
+      "name": "anyio",
+      "url": "https://github.com/agronholm/anyio",
+      "branch": "master",
+      "specialNotes": "Structured-concurrency layer FastMCP runs on. Its asyncio CancelScope is what shields the feed listener teardown from the tool-call deadline."
+    },
+    {
+      "type": "git",
+      "name": "githubDependencyReviewAction",
+      "url": "https://github.com/actions/dependency-review-action",
+      "branch": "main",
+      "specialNotes": "GitHub dependency graph comparison action used to block newly introduced high and critical advisories."
+    },
+    {
+      "type": "git",
+      "name": "agentGuardrails",
+      "url": "https://github.com/stickerdaniel/post-no-bills",
+      "branch": "main"
+    },
+    {
+      "type": "git",
+      "name": "mcpPythonSdk",
+      "url": "https://github.com/modelcontextprotocol/python-sdk",
+      "branch": "main",
+      "specialNotes": "Model Context Protocol Python SDK used directly for protocol types and transitively by FastMCP."
+    },
+    {
+      "type": "git",
+      "name": "httpx2",
+      "url": "https://github.com/pydantic/httpx2",
+      "branch": "main",
+      "specialNotes": "HTTP client (fork of httpx) used by MCP SDK v2 and FastMCP 4, and directly by the daemon's loopback clients."
+    },
+    {
+      "type": "git",
+      "name": "pydanticSettings",
+      "url": "https://github.com/pydantic/pydantic-settings",
+      "branch": "main",
+      "specialNotes": "Settings dependency constrained directly to keep FastMCP installations above known security advisories."
+    },
+    {
+      "type": "git",
+      "name": "starlette",
+      "url": "https://github.com/Kludex/starlette",
+      "branch": "main",
+      "specialNotes": "ASGI framework constrained directly to keep MCP transports above known security advisories."
+    },
+    {
+      "type": "git",
+      "name": "towncrier",
+      "url": "https://github.com/twisted/towncrier",
+      "branch": "trunk",
+      "specialNotes": "Builds CHANGELOG.md from changelog.d fragments at release time. Configured in pyproject.toml [tool.towncrier]."
+    },
+    {
+      "type": "git",
+      "name": "psutil",
+      "url": "https://github.com/giampaolo/psutil",
+      "branch": "master",
+      "specialNotes": "Dev only. The differential harness's process watcher samples the process table with it (tests/differential/watcher.py)."
+    }
+  ]
+}
