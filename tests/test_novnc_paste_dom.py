@@ -301,16 +301,18 @@ async def test_a_connection_change_drops_pending_pastes(
     await viewer.evaluate(_PASTE, "a" * 100)
     await viewer.evaluate(_PASTE, "queued text")
     await viewer.clock.run_for(40)
-    already_typed = await _state(viewer, "typed")
 
-    await viewer.evaluate(
+    # Read the boundary in the same page task, before another timer can type.
+    already_typed = await viewer.evaluate(
         """connection => {
+          const alreadyTyped = document.documentElement.dataset.typed;
           document.dispatchEvent(new CustomEvent("viewer-test-connection", {detail: connection}));
           if (connection === "disconnect") {
             // Reconnect before the pending 20 ms sleep ends, even with the
             // same RFB: checking only the current connected flag misses it.
             document.dispatchEvent(new CustomEvent("viewer-test-connection", {detail: "reconnect"}));
           }
+          return alreadyTyped;
         }""",
         connection,
     )
