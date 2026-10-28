@@ -119,6 +119,30 @@
       "send_message"
     ],
     "tool_schemas": {
+      "apply_profile_changes": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "changeSetId": {
+              "description": "id returned by propose_profile_changes",
+              "type": "string"
+            },
+            "confirm": {
+              "default": false,
+              "description": "must be true; the user's explicit approval",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "changeSetId"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "close_session": {
         "input": {
           "additionalProperties": false,
@@ -153,6 +177,44 @@
           },
           "required": [
             "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "describe_profile_form": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "form": {
+              "description": "intro | position | education | publication",
+              "type": "string"
+            }
+          },
+          "required": [
+            "form"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "discard_profile_changes": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "changeSetId": {
+              "description": "id returned by propose_profile_changes",
+              "type": "string"
+            }
+          },
+          "required": [
+            "changeSetId"
           ],
           "type": "object"
         },
@@ -374,6 +436,41 @@
           "type": "object"
         }
       },
+      "get_my_editable_profile": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_my_experience": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "experienceId": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional id from this tool or get_my_editable_profile"
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "get_my_profile": {
         "input": {
           "additionalProperties": false,
@@ -405,6 +502,17 @@
               "description": "Comma-separated list of extra sections to read.\nThe main profile page is always included.\nAvailable sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts\nExamples: \"experience,education\", \"contact_info\", \"skills,projects\"\nDefault (None) reads only the main profile page."
             }
           },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_my_skills": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {},
           "type": "object"
         },
         "output": {
@@ -498,6 +606,809 @@
           },
           "required": [
             "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "list_my_connections": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "preview_profile_changes": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "changeSetId": {
+              "description": "id returned by propose_profile_changes",
+              "type": "string"
+            }
+          },
+          "required": [
+            "changeSetId"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "propose_profile_changes": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "changes": {
+              "additionalProperties": true,
+              "description": "firstName, lastName, headline, about, experiences\n[{experienceId | match, title, description}], skills {add,\nremove}, newPositions, newEducation, newPublications",
+              "properties": {
+                "about": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "entryEdits": {
+                  "items": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "entryId": {
+                        "description": "LinkedIn's id of the existing entry.",
+                        "type": "string"
+                      },
+                      "field": {
+                        "description": "education: grade, activities, description; publication: title, publisher, date (mm/dd/yyyy), url, description.",
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "education",
+                          "publication"
+                        ],
+                        "type": "string"
+                      },
+                      "value": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "entryId",
+                      "field",
+                      "value"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 10,
+                  "type": "array"
+                },
+                "experiences": {
+                  "items": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "description": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "New description, as approved by the user."
+                      },
+                      "experienceId": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "id from get_my_experience. Preferred over match."
+                      },
+                      "match": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": true,
+                            "properties": {
+                              "company": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null
+                              },
+                              "startDate": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null,
+                                "description": "Text from the date range, e.g. 'Jan 2021' or '2021'."
+                              },
+                              "title": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null
+                              }
+                            },
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Used only when experienceId is absent; must match exactly one experience."
+                      },
+                      "title": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "New job title, as approved by the user."
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "maxItems": 20,
+                  "type": "array"
+                },
+                "firstName": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "headline": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "lastName": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                },
+                "newCertifications": {
+                  "items": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "allowDuplicate": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "credentialId": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "credentialUrl": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "endMonth": {
+                        "anyOf": [
+                          {
+                            "maximum": 12,
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Expiration month."
+                      },
+                      "endYear": {
+                        "anyOf": [
+                          {
+                            "maximum": 2100,
+                            "minimum": 1900,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Expiration year."
+                      },
+                      "issuer": {
+                        "description": "Issuing organization.",
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "startMonth": {
+                        "anyOf": [
+                          {
+                            "maximum": 12,
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Issue month."
+                      },
+                      "startYear": {
+                        "anyOf": [
+                          {
+                            "maximum": 2100,
+                            "minimum": 1900,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Issue year."
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "issuer"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 10,
+                  "type": "array"
+                },
+                "newEducation": {
+                  "items": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "activities": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "allowDuplicate": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "degree": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "description": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "endMonth": {
+                        "anyOf": [
+                          {
+                            "maximum": 12,
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "endYear": {
+                        "anyOf": [
+                          {
+                            "maximum": 2100,
+                            "minimum": 1900,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Or expected graduation year."
+                      },
+                      "fieldOfStudy": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "grade": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "school": {
+                        "type": "string"
+                      },
+                      "startMonth": {
+                        "anyOf": [
+                          {
+                            "maximum": 12,
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "startYear": {
+                        "anyOf": [
+                          {
+                            "maximum": 2100,
+                            "minimum": 1900,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      }
+                    },
+                    "required": [
+                      "school"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 10,
+                  "type": "array"
+                },
+                "newLanguages": {
+                  "items": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "allowDuplicate": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "name": {
+                        "description": "Language, as LinkedIn names it (e.g. Kazakh).",
+                        "type": "string"
+                      },
+                      "proficiency": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Elementary, Limited working, Professional working, Full professional or Native or bilingual proficiency (as the form shows it)."
+                      }
+                    },
+                    "required": [
+                      "name"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 10,
+                  "type": "array"
+                },
+                "newPositions": {
+                  "items": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "allowDuplicate": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "company": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Organization name."
+                      },
+                      "current": {
+                        "anyOf": [
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Currently in this role. Defaults to true when no end date is given."
+                      },
+                      "description": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "employmentType": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "e.g. Full-time, Part-time, Internship (as the form shows it)."
+                      },
+                      "endMonth": {
+                        "anyOf": [
+                          {
+                            "maximum": 12,
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "endYear": {
+                        "anyOf": [
+                          {
+                            "maximum": 2100,
+                            "minimum": 1900,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "location": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "locationType": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "On-site, Hybrid or Remote (as the form shows it)."
+                      },
+                      "startMonth": {
+                        "anyOf": [
+                          {
+                            "maximum": 12,
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "startYear": {
+                        "maximum": 2100,
+                        "minimum": 1900,
+                        "type": "integer"
+                      },
+                      "title": {
+                        "description": "Job title.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "title",
+                      "startYear"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 10,
+                  "type": "array"
+                },
+                "newPublications": {
+                  "items": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "allowDuplicate": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "date": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "mm/dd/yyyy"
+                      },
+                      "description": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "publisher": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Journal, conference or publisher."
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "url": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "e.g. the DOI link."
+                      }
+                    },
+                    "required": [
+                      "title"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 20,
+                  "type": "array"
+                },
+                "organizations": {
+                  "items": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "entryId": {
+                        "description": "LinkedIn's id of the existing entry.",
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "position",
+                          "education"
+                        ],
+                        "type": "string"
+                      },
+                      "name": {
+                        "description": "The organization's exact LinkedIn page name; only an exact suggestion is selected.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "entryId",
+                      "name"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 10,
+                  "type": "array"
+                },
+                "skills": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "properties": {
+                        "add": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "maxItems": 20,
+                          "type": "array"
+                        },
+                        "remove": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "maxItems": 20,
+                          "type": "array"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "changes"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "rehearse_profile_changes": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "changeSetId": {
+              "description": "id returned by propose_profile_changes",
+              "type": "string"
+            }
+          },
+          "required": [
+            "changeSetId"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "remove_connections": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "confirm": {
+              "default": false,
+              "description": "must be true for a real removal; the user's approval",
+              "type": "boolean"
+            },
+            "dryRun": {
+              "default": false,
+              "description": "check without removing anyone",
+              "type": "boolean"
+            },
+            "usernames": {
+              "description": "Usernames (or profile URLs) from list_my_connections.",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 5,
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "usernames"
           ],
           "type": "object"
         },

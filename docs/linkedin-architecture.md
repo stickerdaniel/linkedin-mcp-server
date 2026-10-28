@@ -20,6 +20,7 @@ a page-owning collaborator.
 | `company` | `CompanyReader` | `browser-free` |
 | `connection` | `ActionSignals`, `ConnectionState`, `detect_connection_state()` | `browser-free` |
 | `connection_actions` | `ACTION_SIGNALS_JS`, `CLICK_INCOMING_ACCEPT_JS`, `ConnectionActions`, `OPEN_MORE_BUTTON_JS`, `ReadMainProfile` | `page-owning` |
+| `connection_removal` | `ConnectionRemover`, `DIALOG_BUTTONS_JS`, `REMOVE_LABELS`, `ROWS_JS`, `SCROLL_JS` | `page-owning` |
 | `content` | `PageContentReader` | `page-owning` |
 | `contracts` | `ExtractedSection`, `FilterValidationError`, `RATE_LIMITED_SECTION_TEXT`, `SEND_INTERRUPTED_WARNING`, `before_the_reply_deadline()`, `message_action_result()`, `normalize_message_text()`, `rate_limited_section_error()`, `refuse_an_invalid_message()` | `browser-free` |
 | `conversations` | `ConversationReader`, `strip_select_conversation_prefix()` | `page-owning` |
@@ -36,7 +37,9 @@ a page-owning collaborator.
 | `navigation` | `PageNavigator`, `WaitUntil` | `page-owning` |
 | `person` | `PersonReader` | `page-owning` |
 | `posts` | `PostSearch` | `browser-free` |
+| `profile_editor` | `ProfileEditor` | `page-owning` |
 | `profile_page` | `MessageTarget`, `MessageTargetResolution`, `ProfilePageReader`, `ReadMessageTarget` | `browser-free` |
+| `profile_selectors` | `ABOUT`, `CONNECTIONS_URL`, `CURRENT_ROLE_CHECKBOX`, `DATE_SELECTS_JS`, `DEFAULT_LOCALE`, `DESCRIBE_CONNECTIONS_JS`, `DESCRIBE_DIALOG_JS`, `DESCRIBE_FORM_JS`, `DESCRIBE_SELECTS_JS`, `DIALOG`, `DIALOG_HAS`, `ENTRY_EDIT_HREF`, `EXPERIENCE_COMPANY`, `EXPERIENCE_DESCRIPTION`, `EXPERIENCE_EDIT_HREF`, `EXPERIENCE_TITLE`, `FOLLOW_UP_AFTER_SAVE`, `FORM_ERROR`, `FieldSpec`, `HEADINGS`, `HEADLINE`, `LABELS`, `LINKEDIN`, `LIST_ITEMS_JS`, `LOCATION`, `NAME_INPUTS`, `NEW_ENTRY_FORM_PATHS`, `NOTIFY_SWITCH`, `NOTIFY_SWITCH_HANDLE`, `OWN_PROFILE_URL`, `RICH_TEXT`, `SAVE_BUTTON`, `SCROLL_LAST_ITEM_JS`, `SKILL_EDIT_HREF`, `SKILL_FILTER_BUTTONS`, `SKILL_INPUT`, `STATED_MAX`, `TYPEAHEAD_OPTION`, `VANITY_FROM_URL`, `about_form_urls()`, `entry_form_urls()`, `entry_list_url()`, `experience_form_url()`, `experience_list_url()`, `intro_form_url()`, `new_entry_form_urls()`, `new_skill_form_url()`, `profile_url()`, `skill_form_url()`, `skills_list_url()` | `browser-free` |
 | `search_urls` | `CONTENT_DATE_POSTED_MAP`, `EXPERIENCE_LEVEL_MAP`, `JOB_DATE_POSTED_MAP`, `JOB_TYPE_MAP`, `NETWORK_TOKENS`, `SORT_BY_MAP`, `WORK_TYPE_MAP`, `build_company_search_url()`, `build_content_search_url()`, `build_job_search_url()`, `build_people_search_url()` | `browser-free` |
 | `session` | `NAV_DELAY`, `PageSession` | `page-owning` |
 | `text` | `DETAIL_CAPTURE_EN_US`, `DetailCaptureTextTable`, `JOB_APPLY_EN_US`, `JOB_POSTING_EN_US`, `JOB_SEARCH_EN_US`, `JobApplyTextTable`, `JobPostingTextTable`, `JobSearchTextTable`, `SIDEBAR_CHROME_EN`, `SidebarChromeTable`, `filter_linkedin_noise_lines()`, `strip_conversation_chrome()`, `strip_linkedin_noise()`, `truncate_linkedin_noise()` | `browser-free` |
@@ -48,6 +51,7 @@ a page-owning collaborator.
 - `company` -> `capture`, `contracts`, `fields`, `identifiers`, `link_metadata`, `search_urls`, `session`
 - `connection` -> _(none)_
 - `connection_actions` -> `connection`, `identifiers`, `navigation`, `session`
+- `connection_removal` -> `navigation`, `profile_selectors`, `session`
 - `content` -> `session`, `text`
 - `contracts` -> `identifiers`, `link_metadata`
 - `conversations` -> `content`, `identifiers`, `link_metadata`, `navigation`, `profile_page`, `session`, `text`
@@ -64,7 +68,9 @@ a page-owning collaborator.
 - `navigation` -> `session`
 - `person` -> `capture`, `contracts`, `fields`, `identifiers`, `link_metadata`, `navigation`, `profile_page`, `search_urls`, `session`, `text`
 - `posts` -> `capture`, `contracts`, `link_metadata`, `search_urls`
+- `profile_editor` -> `navigation`, `profile_selectors`, `session`
 - `profile_page` -> `session`
+- `profile_selectors` -> _(none)_
 - `search_urls` -> `contracts`
 - `session` -> _(none)_
 - `text` -> _(none)_
