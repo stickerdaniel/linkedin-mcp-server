@@ -125,7 +125,7 @@
     },
     {
       "name": "get_session_status",
-      "description": "Report whether a LinkedIn session is saved and the browser is open, without starting a browser or contacting LinkedIn"
+      "description": "Diagnose saved-session files and the serving process's browser state without opening a browser or contacting LinkedIn"
     },
     {
       "name": "close_session",
