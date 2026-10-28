@@ -214,3 +214,7 @@ scripts/snapshot_dumps/
 
 # Debug artifacts
 .debug/
+
+# Own-profile editing records (change sets, snapshots, audit) if kept in the repo
+data/
+profile-edits/
