@@ -64,20 +64,25 @@
         const APPLE = /mac|iphone|ipad|ipod/i.test(navigator.platform);
         // Unshifted only: a Mac browser has no paste for Cmd+Shift+V.
         const isPasteKey = e => (APPLE ? e.metaKey : e.ctrlKey) && !e.altKey && !e.shiftKey;
+        // The shortcut's V by character, as browsers match it on Latin
+        // layouts such as Dvorak, and by position on the others, where they
+        // fall back to the US layout.
+        const isV = e => /^v$/i.test(e.key) || (e.code === 'KeyV' && !/^[a-z]$/i.test(e.key));
         const modifierHeld = e => e.ctrlKey || e.metaKey || e.altKey || e.shiftKey;
         let shortcut = false; // a paste shortcut is down
-        let hiddenV = false; // noVNC never saw this V go down, so it must not see it go up
+        let hiddenCode = null; // noVNC never saw this key go down, so it must not see it go up
         let pasted = [];
 
         window.addEventListener('keydown', e => {
-            if (e.code !== 'KeyV') return;
-            if (isPasteKey(e)) {
+            if (isPasteKey(e) && isV(e)) {
                 shortcut = true;
-            } else if (!(hiddenV && e.repeat)) {
-                hiddenV = false;
+            } else if (e.code !== hiddenCode) {
+                return;
+            } else if (!e.repeat) {
+                hiddenCode = null;
                 return;
             }
-            hiddenV = true;
+            hiddenCode = e.code;
             e.stopImmediatePropagation();
         }, true);
         window.addEventListener('paste', e => {
@@ -87,8 +92,8 @@
             }
         }, true);
         window.addEventListener('keyup', e => {
-            if (e.code === 'KeyV' && hiddenV) {
-                hiddenV = false;
+            if (e.code === hiddenCode) {
+                hiddenCode = null;
                 e.stopImmediatePropagation();
             }
             if (!shortcut || modifierHeld(e) || !connected) return;
@@ -113,7 +118,7 @@
         }, true);
         window.addEventListener('blur', () => {
             shortcut = false;
-            hiddenV = false;
+            hiddenCode = null;
             pasted = [];
         });
     </script>

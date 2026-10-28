@@ -270,3 +270,38 @@ async def test_a_disconnect_during_the_shortcut_drops_the_paste(viewer):
 
     assert await sent(viewer) == []
     assert await viewer.text_content("#status") == "Connection lost."
+
+
+@pytest.mark.parametrize(
+    ("key", "code", "reaches_screen"),
+    [
+        ("v", "Period", False),  # Dvorak's v: the browser pastes on it
+        ("k", "KeyV", True),  # Dvorak's k on the V position: not a paste
+        ("м", "KeyV", False),  # Cyrillic: browsers fall back to the position
+    ],
+)
+async def test_the_paste_shortcut_follows_the_keyboard_layout(
+    viewer, key, code, reaches_screen
+):
+    await viewer.evaluate(
+        """([key, code, apple]) => document.querySelector('canvas').dispatchEvent(
+            new KeyboardEvent('keydown', {
+                key, code, bubbles: true, ctrlKey: !apple, metaKey: apple,
+            }))""",
+        [key, code, PASTE == "Meta"],
+    )
+
+    forwarded = await viewer.evaluate("window.viewer.forwarded", isolated_context=False)
+    assert (f"keydown {code}" in forwarded) is reaches_screen
+
+
+@pytest.mark.parametrize(("length", "typed"), [(1000, True), (1001, False)])
+async def test_a_paste_is_typed_whole_up_to_1000_characters(viewer, length, typed):
+    await copy(viewer, "a" * length)
+
+    await viewer.keyboard.press(f"{PASTE}+KeyV")
+
+    assert len(await sent(viewer)) == (length if typed else 0)
+    status = await viewer.text_content("#status")
+    assert status is not None
+    assert status.startswith("Only plain ASCII") is not typed
