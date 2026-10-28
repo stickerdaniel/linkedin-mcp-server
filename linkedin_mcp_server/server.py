@@ -329,12 +329,14 @@ def create_mcp_server(
             tags={"session"},
         )
         async def get_session_status() -> dict[str, Any]:
-            """Report whether a LinkedIn session is stored, without opening a browser.
+            """Report local saved-session and serving-process state for requested diagnostics.
 
-            Reads local files and this server's own state only: it starts no
-            browser, setup or login and sends nothing to LinkedIn, so it says
-            whether a session is stored, not whether LinkedIn still accepts it.
-            It answers while another call is using the browser.
+            Reads local observations without opening a browser, starting setup or login,
+            or contacting LinkedIn. Stored files do not prove current authentication.
+            In shared-browser mode these observations belong to the owner, not to a
+            frontend running a login. It answers during browser work without refreshing
+            the browser idle timer. Use ordinary LinkedIn tools directly for their
+            requested work rather than adding a status preflight.
             """
             try:
                 return session_status()

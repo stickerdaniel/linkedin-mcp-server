@@ -560,7 +560,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Report whether a LinkedIn session is stored, without opening a browser.\n\nReads local files and this server's own state only: it starts no\nbrowser, setup or login and sends nothing to LinkedIn, so it says\nwhether a session is stored, not whether LinkedIn still accepts it.\nIt answers while another call is using the browser.",
+    "description": "Report local saved-session and serving-process state for requested diagnostics.\n\nReads local observations without opening a browser, starting setup or login,\nor contacting LinkedIn. Stored files do not prove current authentication.\nIn shared-browser mode these observations belong to the owner, not to a\nfrontend running a login. It answers during browser work without refreshing\nthe browser idle timer. Use ordinary LinkedIn tools directly for their\nrequested work rather than adding a status preflight.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {},

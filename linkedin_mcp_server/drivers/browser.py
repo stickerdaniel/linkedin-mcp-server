@@ -1122,7 +1122,10 @@ def browser_activity() -> dict[str, Any]:
     """
     idle = None if _last_activity is None else time.monotonic() - _last_activity
     return {
-        "open": _browser is not None,
+        "manager_present": _browser is not None,
+        "page_crashed": _browser.page_crashed if _browser is not None else None,
+        "lifecycle_busy": _browser_lifecycle_lock.locked(),
+        "lease_retained": _browser_lease is not None,
         "idle_seconds": None if idle is None else round(idle, 1),
         "calls_in_flight": _calls_in_flight,
     }
