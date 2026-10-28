@@ -20,6 +20,10 @@
         "coroutine": true,
         "signature": "(self, username: 'str', *, note: 'str | None' = None) -> 'dict[str, Any]'"
       },
+      "create_post": {
+        "coroutine": true,
+        "signature": "(self, text: 'str', *, confirm_post: 'bool') -> 'dict[str, Any]'"
+      },
       "extract_feed": {
         "coroutine": true,
         "signature": "(self, num_posts: 'int' = 10) -> 'ExtractedSection'"
@@ -99,6 +103,7 @@
     },
     "tool_methods": [
       "connect_with_person",
+      "create_post",
       "extract_feed",
       "extract_page",
       "get_company_employees",
@@ -153,6 +158,30 @@
           },
           "required": [
             "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "create_post": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "confirm_post": {
+              "description": "Must be True to actually publish.",
+              "type": "boolean"
+            },
+            "text": {
+              "description": "Post body, up to 3000 characters. Line breaks become\nparagraphs; control characters are refused.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "confirm_post"
           ],
           "type": "object"
         },

@@ -1,0 +1,19 @@
+{
+  "call": {
+    "arguments": {
+      "confirm_post": true,
+      "text_case": "blank"
+    },
+    "method": "create_post"
+  },
+  "events": [],
+  "result": {
+    "message": "Post text is empty.",
+    "published": false,
+    "retry_safe": true,
+    "status": "invalid",
+    "url": "https://www.linkedin.com/feed/?shareActive=true"
+  },
+  "scenario": "create_post__invalid_blank",
+  "schema_version": 1
+}
