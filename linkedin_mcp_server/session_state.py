@@ -808,6 +808,12 @@ def profile_in_use_by(profile_dir: Path) -> Path | None:
     out from under a running container. That errs toward refusing to rotate,
     which the operator can resolve by stopping the container, whereas the
     opposite corrupts two sessions silently.
+
+    A matching host does not prove a shared pid namespace either: containers
+    run under one fixed host name (#1381) each number their own processes, so
+    a dead container's Chromium pid can belong to anything in this one. A live
+    pid therefore counts only if it is a Chromium, which is Chromium's own test
+    before it clears such a lock — see ``_is_chromium``.
     """
     candidate = profile_dir / _CHROMIUM_LOCK_NAME
     try:
@@ -830,10 +836,31 @@ def profile_in_use_by(profile_dir: Path) -> Path | None:
     except ProcessLookupError:
         return None  # Stale: the writer is gone.
     except PermissionError:
-        return candidate  # Alive, owned by another user.
+        pass  # Alive, owned by another user.
     except OSError:
         return None
-    return candidate
+    return candidate if _is_chromium(pid) else None
+
+
+#: Where a live pid's name is read. Linux only: with no such directory, as on
+#: macOS, a live pid is taken to be the lock's writer.
+_PROC = Path("/proc")
+
+
+def _is_chromium(pid: int) -> bool:
+    """Whether live *pid* may be the Chromium that wrote a lock.
+
+    Chromium itself compares the pid's executable with its own and clears the
+    lock when they differ. This reads the kernel's process name instead, since
+    which browser binary wrote the lock is not known here: Chrome for Testing
+    and Google Chrome run as ``chrome``, Debian's build as ``chromium``. An
+    unreadable name is no evidence, so it counts as the writer.
+    """
+    try:
+        name = (_PROC / str(pid) / "comm").read_text()
+    except OSError:
+        return True
+    return "chrom" in name.lower()
 
 
 def _held_lock_refusal(lock: Path, action: str) -> str:

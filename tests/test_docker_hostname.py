@@ -61,3 +61,45 @@ async def test_chromium_clears_a_stale_lock_only_from_its_own_host(tmp_path):
         lock.unlink()
         os.symlink(f"{socket.gethostname()}-{gone.pid}", lock)
         await launch()
+
+
+@pytest.mark.browser_contract
+@pytest.mark.xdist_group("browser_runtime")
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="process names come from /proc"
+)
+async def test_a_same_host_lock_holds_only_while_a_chromium_has_its_pid(tmp_path):
+    """Containers sharing the host name number their processes separately, so
+    a killed one's lock can name a pid something else holds. Chromium then
+    clears the lock; ``profile_in_use_by`` has to agree, and still hold a lock
+    a running Chromium wrote."""
+    from patchright.async_api import async_playwright
+
+    from linkedin_mcp_server.session_state import profile_in_use_by
+
+    profile = tmp_path / "profile"
+    lock = profile / "SingletonLock"
+
+    async with async_playwright() as playwright:
+        try:
+            context = await playwright.chromium.launch_persistent_context(
+                profile, channel="chromium", headless=True
+            )
+        except Exception as exc:  # browser binary missing
+            pytest.skip(f"chromium unavailable: {exc}")
+        try:
+            assert profile_in_use_by(profile) == lock
+        finally:
+            await context.close()
+
+        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            os.symlink(f"{socket.gethostname()}-{other.pid}", lock)
+            assert profile_in_use_by(profile) is None
+            context = await playwright.chromium.launch_persistent_context(
+                profile, channel="chromium", headless=True
+            )
+            await context.close()
+        finally:
+            other.kill()
+            other.wait()
