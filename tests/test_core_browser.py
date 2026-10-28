@@ -1340,14 +1340,23 @@ class TestStartingAgainAfterAClose:
             await manager.start()
             page = record["contexts"][0].pages[0]
             assert manager.page_crashed is False
-            for call in page.on.call_args_list:
-                if call.args[0] == "crash":
-                    call.args[1](page)
+            crash = next(
+                call.args[1]
+                for call in page.on.call_args_list
+                if call.args[0] == "crash"
+            )
+            crash(page)
             assert manager.page_crashed is True
             assert await manager.close() is True
 
             await manager.start()
             assert manager.page_crashed is False
+            # A late event from the previous page cannot retire the new one.
+            crash(page)
+            assert manager.page_crashed is False
+            current_page = manager.page
+            crash(current_page)
+            assert manager.page_crashed is True
             assert await manager.close() is True
 
     @pytest.mark.asyncio

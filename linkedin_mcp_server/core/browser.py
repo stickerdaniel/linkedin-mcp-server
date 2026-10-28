@@ -811,7 +811,9 @@ class BrowserManager:
         """
         return self._page_crashed
 
-    def _note_page_crash(self, _page: Page) -> None:
+    def _note_page_crash(self, page: Page) -> None:
+        if page is not self._page:
+            return
         self._page_crashed = True
         logger.warning("The browser page crashed; the next tool call shuts it down")
 
