@@ -670,6 +670,8 @@ def semantic_program_id(program: str) -> str:
 
     compact = " ".join(program.split())
     checks = (
+        ("labels.saved ? 'saved' : 'unsaved'", "job_save_state"),
+        ("controls[0].click()", "job_save_click"),
         ("performance.timeOrigin", "document_origin"),
         ("element.ownerDocument.location.href", "owner_document_address"),
         ("MAX_HEADING_CONTAINERS", "root_content"),
