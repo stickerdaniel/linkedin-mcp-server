@@ -32,6 +32,7 @@ FACADE_PACKAGE_IMPORTERS = {
 PUBLIC_SIGNATURES = {
     "click_button_by_text": "(self, text: 'str', *, scope: 'str' = 'main', timeout: 'int' = 5000) -> 'bool'",
     "connect_with_person": "(self, username: 'str', *, note: 'str | None' = None) -> 'dict[str, Any]'",
+    "create_post": "(self, text: 'str', *, confirm_post: 'bool') -> 'dict[str, Any]'",
     "extract_feed": "(self, num_posts: 'int' = 10) -> 'ExtractedSection'",
     "extract_page": "(self, url: 'str', section_name: 'str', max_scrolls: 'int | None' = None) -> 'ExtractedSection'",
     "get_company_employees": "(self, company_name: 'str', keywords: 'str | None' = None) -> 'dict[str, Any]'",
@@ -56,6 +57,7 @@ PUBLIC_SIGNATURES = {
 DELEGATES = {
     "click_button_by_text": ("_content", "click_button_by_text"),
     "connect_with_person": ("_connection", "connect_with_person"),
+    "create_post": ("_post_publisher", "create_post"),
     "extract_feed": ("_feed", "extract_feed"),
     "extract_page": ("_capture", "extract_page"),
     "get_company_employees": ("_company", "get_company_employees"),
@@ -80,6 +82,7 @@ DELEGATES = {
 DELEGATE_CALLS = {
     "click_button_by_text": "self._content.click_button_by_text(text, scope=scope, timeout=timeout)",
     "connect_with_person": "self._connection.connect_with_person(username, note=note)",
+    "create_post": "self._post_publisher.create_post(text, confirm_post=confirm_post)",
     "extract_feed": "self._feed.extract_feed(num_posts)",
     "extract_page": "self._capture.extract_page(url, section_name, max_scrolls)",
     "get_company_employees": "self._company.get_company_employees(company_name, keywords)",
@@ -111,6 +114,7 @@ FACADE_STATE = {
     "_jobs",
     "_message_sender",
     "_person",
+    "_post_publisher",
     "_posts",
 }
 

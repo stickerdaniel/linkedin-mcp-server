@@ -73,6 +73,45 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "actions",
+          "post"
+        ]
+      }
+    },
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": true
+    },
+    "description": "Publish a text post to the authenticated user's LinkedIn feed.\n\nThis is a write operation. With confirm_post False it opens the post\ncomposer, types the text, verifies it, then empties and closes the\ncomposer without posting (a dry run). Show the user the exact text and\ncall again with confirm_post True only after they approve it. If the\ncomposer already holds a saved draft, nothing is typed and the status\nis composer_occupied.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "confirm_post": {
+          "description": "Must be True to actually publish.",
+          "type": "boolean"
+        },
+        "text": {
+          "description": "Post body, up to 3000 characters. Line breaks become\nparagraphs; control characters are refused.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "confirm_post"
+      ],
+      "type": "object"
+    },
+    "name": "create_post",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Create Post"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "company"
         ]
       }

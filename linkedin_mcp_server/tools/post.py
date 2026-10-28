@@ -18,6 +18,7 @@ from pydantic import Field
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.dependencies import get_ready_extractor, tool_errors
 from linkedin_mcp_server.linkedin.contracts import FilterValidationError
+from linkedin_mcp_server.linkedin.post_publisher import refuse_an_invalid_post
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,64 @@ def register_post_tools(
             # ToolError so mask_error_details doesn't reduce them to a
             # generic "Error calling tool 'search_posts'".
             raise ToolError(str(e)) from e
+
+        await ctx.report_progress(progress=100, total=100, message="Complete")
+
+        return result
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Create Post",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"post", "actions"},
+    )
+    @tool_errors
+    async def create_post(
+        text: str,
+        confirm_post: bool,
+        ctx: Context,
+    ) -> dict[str, Any]:
+        """
+        Publish a text post to the authenticated user's LinkedIn feed.
+
+        This is a write operation. With confirm_post False it opens the post
+        composer, types the text, verifies it, then empties and closes the
+        composer without posting (a dry run). Show the user the exact text and
+        call again with confirm_post True only after they approve it. If the
+        composer already holds a saved draft, nothing is typed and the status
+        is composer_occupied.
+
+        Args:
+            text: Post body, up to 3000 characters. Line breaks become
+                paragraphs; control characters are refused.
+            confirm_post: Must be True to actually publish.
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, status, message, published and retry_safe, plus
+            text_matches, post_button_found and post_button_enabled once the
+            text was typed. status is one of dry_run, published, unconfirmed,
+            composer_unavailable, composer_occupied, text_mismatch,
+            post_button_unavailable or invalid. published is true only when the
+            composer was seen closing after Post was clicked. retry_safe is
+            false from the moment Post is clicked: on unconfirmed, check the
+            user's profile activity before posting again. composer_closed is
+            false only when the composer could not be emptied and closed
+            after a call that did not post; check LinkedIn for leftover text.
+        """
+        # Refused before a session exists so a bad request never starts a
+        # browser or a login attempt.
+        refusal = refuse_an_invalid_post(text)
+        if refusal is not None:
+            return refusal
+        extractor = await get_ready_extractor(ctx, tool_name="create_post")
+        logger.info(
+            "Creating post (%d characters, confirm_post=%s)", len(text), confirm_post
+        )
+
+        await ctx.report_progress(progress=0, total=100, message="Opening composer")
+
+        result = await extractor.create_post(text, confirm_post=confirm_post)
 
         await ctx.report_progress(progress=100, total=100, message="Complete")
 

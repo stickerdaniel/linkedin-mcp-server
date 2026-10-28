@@ -35,6 +35,7 @@ from linkedin_mcp_server.linkedin.extractor import (
 )
 from linkedin_mcp_server.linkedin.jobs import JobReader
 from linkedin_mcp_server.linkedin.message_sender import MessageSender
+from linkedin_mcp_server.linkedin.post_publisher import PostPublisher
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
 from linkedin_mcp_server.linkedin.session import PageSession
@@ -62,6 +63,7 @@ TOOL_DELEGATES = {
     "search_conversations": "search_conversations",
     "search_jobs": "search_jobs",
     "search_people": "search_people",
+    "create_post": "create_post",
     "search_posts": "search_posts",
     "send_message": "send_message",
 }
@@ -101,6 +103,7 @@ async def test_constructor_export_and_dependency_use_the_same_facade(monkeypatch
         "_jobs",
         "_message_sender",
         "_person",
+        "_post_publisher",
         "_posts",
     }
     assert set(vars(extractor)) == expected_state
@@ -458,6 +461,22 @@ async def test_facade_send_message_forwards_every_argument(mock_page):
         confirm_send=False,
         profile_urn="ACoAAB",
     )
+
+
+async def test_facade_create_post_forwards_every_argument(mock_page):
+    extractor = LinkedInExtractor(cast(Page, mock_page))
+    expected = {"url": "https://www.linkedin.com/feed/", "status": "dry_run"}
+
+    with patch.object(
+        PostPublisher,
+        "create_post",
+        new_callable=AsyncMock,
+        return_value=expected,
+    ) as create_post:
+        result = await extractor.create_post("Post text", confirm_post=False)
+
+    assert result is expected
+    create_post.assert_awaited_once_with("Post text", confirm_post=False)
 
 
 async def test_facade_direct_thread_ignores_username_and_index_validation(mock_page):

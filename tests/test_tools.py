@@ -44,6 +44,7 @@ def _make_mock_extractor(result: dict) -> MagicMock:
     mock.get_my_profile = AsyncMock(return_value=result)
     mock.search_companies = AsyncMock(return_value=result)
     mock.search_posts = AsyncMock(return_value=result)
+    mock.create_post = AsyncMock(return_value=result)
     mock.get_company_employees = AsyncMock(return_value=result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
@@ -248,6 +249,7 @@ _A_VALID_CALL = [
     ),
     ("feed", "get_feed", {}),
     ("post", "search_posts", {"keywords": "python"}),
+    ("post", "create_post", {"text": "Hello", "confirm_post": False}),
 ]
 
 
@@ -2631,6 +2633,91 @@ class TestPostTools:
         with pytest.raises(ValidationError, match="max_pages"):
             await mcp.call_tool("search_posts", {"keywords": "python", "max_pages": 0})
 
+    async def test_create_post_dry_run_forwards_the_text(
+        self, mock_context, serve_extractor
+    ):
+        expected = {
+            "url": "https://www.linkedin.com/feed/?shareActive=true",
+            "status": "dry_run",
+            "message": "Composer filled and verified; nothing was posted.",
+            "published": False,
+            "retry_safe": True,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "create_post")
+        result = await tool_fn("Hello\n\nWorld", False, mock_context)
+
+        assert result == expected
+        mock_extractor.create_post.assert_awaited_once_with(
+            "Hello\n\nWorld", confirm_post=False
+        )
+
+    async def test_create_post_forwards_the_confirmation(
+        self, mock_context, serve_extractor
+    ):
+        mock_extractor = _make_mock_extractor({"status": "published"})
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "create_post")
+        await tool_fn("Hello", True, mock_context)
+
+        mock_extractor.create_post.assert_awaited_once_with("Hello", confirm_post=True)
+
+    @pytest.mark.parametrize(
+        "text",
+        ["", "  \n\t ", "x" * 3001, "bell\x07inside", "nul\x00inside"],
+        ids=["empty", "whitespace", "too-long", "bell", "nul"],
+    )
+    async def test_create_post_refuses_before_a_session(self, mock_context, text):
+        """Text LinkedIn cannot take is answered without starting a browser.
+
+        Reaching `get_ready_extractor` can spend a login attempt and answer
+        with an authentication error, which is not the refusal the caller can
+        act on.
+        """
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "create_post")
+        with patch(
+            "linkedin_mcp_server.tools.post.get_ready_extractor",
+            new_callable=AsyncMock,
+        ) as ready:
+            result = await tool_fn(text, True, mock_context)
+
+        ready.assert_not_awaited()
+        assert result["status"] == "invalid"
+        assert result["published"] is False
+        # Nothing was submitted, so calling again cannot publish twice.
+        assert result["retry_safe"] is True
+
+    async def test_create_post_is_marked_destructive(self):
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool = await mcp.get_tool("create_post")
+
+        assert tool is not None
+        assert tool.annotations is not None
+        assert tool.annotations.destructive_hint is True
+        assert tool.annotations.read_only_hint is not True
+
 
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
@@ -2656,6 +2743,7 @@ class TestToolTimeouts:
             "send_message",
             "get_feed",
             "search_posts",
+            "create_post",
             "close_session",
         )
 
@@ -2690,6 +2778,7 @@ class TestToolTimeouts:
             "send_message",
             "get_feed",
             "search_posts",
+            "create_post",
             "close_session",
         )
 
