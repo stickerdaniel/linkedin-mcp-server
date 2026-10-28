@@ -126,7 +126,7 @@
       "name": "noVNC",
       "url": "https://github.com/novnc/noVNC",
       "branch": "master",
-      "specialNotes": "Browser client for the Docker login viewer. Debian Bookworm ships vnc_lite.html from this project."
+      "specialNotes": "Browser client for the Docker login viewer. Debian Bookworm ships 1.3.0; scripts/login-viewer.html uses its RFB API."
     },
     {
       "type": "git",
