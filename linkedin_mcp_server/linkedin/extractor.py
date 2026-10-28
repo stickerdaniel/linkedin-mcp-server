@@ -24,6 +24,7 @@ from linkedin_mcp_server.linkedin.jobs import JobReader
 from linkedin_mcp_server.linkedin.message_sender import MessageSender
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.person import PersonReader
+from linkedin_mcp_server.linkedin.post_publisher import PostPublisher
 from linkedin_mcp_server.linkedin.posts import PostSearch
 from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
 from linkedin_mcp_server.linkedin.session import PageSession
@@ -66,6 +67,7 @@ class LinkedInExtractor:
         job_pages = JobPageReader(session, navigator, content)
         self._jobs = JobReader(navigator, capture, job_pages)
         self._posts = PostSearch(capture)
+        self._post_publisher = PostPublisher(session, navigator)
         self._conversations = ConversationReader(
             session, navigator, content, profile_page
         )
@@ -263,3 +265,7 @@ class LinkedInExtractor:
             confirm_send=confirm_send,
             profile_urn=profile_urn,
         )
+
+    async def create_post(self, text: str, *, confirm_post: bool) -> dict[str, Any]:
+        """Type a feed post into the share composer; publish only if confirmed."""
+        return await self._post_publisher.create_post(text, confirm_post=confirm_post)

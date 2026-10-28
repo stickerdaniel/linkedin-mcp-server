@@ -124,6 +124,10 @@
       "description": "Search LinkedIn posts/content globally by keyword (the 'Posts' tab) with an optional recency filter (past-24h/past-week/past-month); returns unordered candidate permalinks in references"
     },
     {
+      "name": "create_post",
+      "description": "Publish a text post to the authenticated user's LinkedIn feed with explicit confirmation; without confirmation it types and verifies the text in the composer, then empties and closes it without posting"
+    },
+    {
       "name": "get_session_status",
       "description": "Diagnose saved-session files and the serving process's browser state without opening a browser or contacting LinkedIn"
     },
