@@ -1,5 +1,8 @@
 import asyncio
+import json
 import logging
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Coroutine, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -122,7 +125,7 @@ def serve_extractor(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], AsyncMoc
         (
             "job",
             "get_job_details",
-            {"job_id": "/feed/"},
+            {"job_ids": ["4252026496", "/feed/"]},
             "job_id is not a LinkedIn id",
         ),
         (
@@ -234,7 +237,6 @@ _A_VALID_CALL = [
     ("company", "get_company_posts", {"company_name": "anthropic"}),
     ("company", "search_companies", {"keywords": "fintech"}),
     ("company", "get_company_employees", {"company_name": "anthropic"}),
-    ("job", "get_job_details", {"job_id": "4252026496"}),
     ("job", "get_job_apply_url", {"job_id": "4252026496"}),
     ("job", "search_jobs", {"keywords": "python"}),
     ("job", "get_saved_jobs", {}),
@@ -249,6 +251,12 @@ _A_VALID_CALL = [
     ("feed", "get_feed", {}),
     ("post", "search_posts", {"keywords": "python"}),
 ]
+
+
+#: Tools that never reach ``get_ready_extractor``: they read a public endpoint
+#: and need no browser, so the readiness tests around ``_A_VALID_CALL`` do not
+#: apply to them.
+_NO_BROWSER_TOOLS = {"get_job_details"}
 
 
 def _register(mcp: FastMCP, module_name: str) -> None:
@@ -291,7 +299,9 @@ async def test_the_valid_calls_name_every_tool():
 
     registered = {tool.name for tool in await mcp.list_tools()}
 
-    assert registered == {tool_name for _, tool_name, _ in _A_VALID_CALL}
+    assert registered == {tool_name for _, tool_name, _ in _A_VALID_CALL} | (
+        _NO_BROWSER_TOOLS
+    )
 
 
 @pytest.mark.parametrize(("module_name", "tool_name", "arguments"), _A_VALID_CALL)
@@ -1360,27 +1370,60 @@ class TestCompanyTools:
 
 
 class TestJobTools:
-    async def test_get_job_details(self, mock_context, serve_extractor):
-        expected = {
-            "url": "https://www.linkedin.com/jobs/view/12345/",
-            "sections": {"job_posting": "Software Engineer\nGreat opportunity"},
-        }
-        mock_extractor = _make_mock_extractor(expected)
+    async def test_get_job_details_fetches_over_http_without_a_browser(
+        self, mock_context
+    ):
+        fetched = {"jobs": [{"job_id": "12345", "status": "ok"}], "summary": {}}
 
         from linkedin_mcp_server.tools.job import register_job_tools
 
         mcp = FastMCP("test")
         register_job_tools(mcp)
 
-        serve_extractor(mock_extractor)
+        ready = AsyncMock(side_effect=AssertionError("the browser was started"))
         tool_fn = await get_tool_fn(mcp, "get_job_details")
-        result = await tool_fn(
-            "https://www.linkedin.com/jobs/view/12345/",
-            mock_context,
+        with (
+            patch("linkedin_mcp_server.tools.job.get_ready_extractor", ready),
+            patch(
+                "linkedin_mcp_server.tools.job.fetch_jobs",
+                AsyncMock(return_value=fetched),
+            ) as fetch,
+        ):
+            result = await tool_fn(
+                ["https://www.linkedin.com/jobs/view/12345/"],
+                mock_context,
+                n_workers=4,
+            )
+
+        assert result == fetched
+        call = fetch.await_args
+        assert call is not None
+        assert call.args == (["https://www.linkedin.com/jobs/view/12345/"], 4)
+        progress = call.kwargs["on_progress"]
+        await progress(1, 2)
+        mock_context.report_progress.assert_awaited_with(
+            progress=1, total=2, message="Fetched 1 of 2 postings"
         )
-        assert "job_posting" in result["sections"]
-        assert "pages_visited" not in result
-        mock_extractor.read_job.assert_awaited_once_with("12345")
+        ready.assert_not_awaited()
+
+    async def test_get_job_details_refuses_more_than_five_workers(self):
+        """Through the real call path, with the reason the limit exists."""
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        with patch(
+            "linkedin_mcp_server.linkedin.guest_jobs.httpx2.AsyncClient"
+        ) as client:
+            with pytest.raises(ToolError, match="between 1 and 5.*bot detection"):
+                await mcp.call_tool(
+                    "get_job_details", {"job_ids": ["1"], "n_workers": 6}
+                )
+
+        client.assert_not_called()
 
     async def test_get_job_apply_url(self, mock_context, serve_extractor):
         expected = {
@@ -1400,23 +1443,120 @@ class TestJobTools:
         assert result == expected
         mock_extractor.get_job_apply_url.assert_awaited_once_with("12345")
 
-    async def test_search_jobs(self, mock_context, serve_extractor):
-        expected = {
+    async def test_search_jobs_saves_the_full_result_and_returns_a_summary(
+        self, mock_context, serve_extractor, tmp_path
+    ):
+        full = {
             "url": "https://www.linkedin.com/jobs/search/?keywords=python",
-            "sections": {"search_results": "Job 1\nJob 2"},
+            "sections": {"search_results": "Job 1\nJob 2 — é"},
+            "job_ids": ["1", "2"],
+            "total": {"count": 76, "exact": True},
+            "section_errors": {"search_results": {"error_type": "filters_dropped"}},
         }
-        mock_extractor = _make_mock_extractor(expected)
+        serve_extractor(_make_mock_extractor(full))
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+        target = tmp_path / "nested" / "out.json"
+
+        tool_fn = await get_tool_fn(mcp, "search_jobs")
+        result = await tool_fn(
+            "python", mock_context, location="Remote", output_path=str(target)
+        )
+
+        assert json.loads(target.read_text(encoding="utf-8")) == full
+        assert result["output_file"] == str(target.resolve())
+        assert result["job_count"] == 2
+        assert result["total"] == {"count": 76, "exact": True}
+        assert result["section_errors"] == full["section_errors"]
+        assert "output_file" in result["note"]
+        assert "sections" not in result
+        assert "job_ids" not in result
+
+    async def test_search_jobs_summary_omits_empty_section_errors(
+        self, mock_context, serve_extractor, tmp_path
+    ):
+        serve_extractor(
+            _make_mock_extractor(
+                {"url": "u", "sections": {"search_results": "x"}, "job_ids": []}
+            )
+        )
 
         from linkedin_mcp_server.tools.job import register_job_tools
 
         mcp = FastMCP("test")
         register_job_tools(mcp)
 
-        serve_extractor(mock_extractor)
         tool_fn = await get_tool_fn(mcp, "search_jobs")
-        result = await tool_fn("python", mock_context, location="Remote")
-        assert "search_results" in result["sections"]
-        assert "pages_visited" not in result
+        result = await tool_fn(
+            "python", mock_context, output_path=str(tmp_path / "r.json")
+        )
+
+        assert "section_errors" not in result
+        assert result["job_count"] == 0
+
+    async def test_search_jobs_default_file_is_dated_in_documents(
+        self, mock_context, serve_extractor, tmp_path
+    ):
+        serve_extractor(
+            _make_mock_extractor({"url": "u", "sections": {}, "job_ids": ["1"]})
+        )
+
+        from linkedin_mcp_server.tools import job as job_module
+
+        mcp = FastMCP("test")
+        job_module.register_job_tools(mcp)
+        documents = tmp_path / "Documents"
+
+        class _Frozen(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 10, 25, 9, 5, 7)
+
+        tool_fn = await get_tool_fn(mcp, "search_jobs")
+        with (
+            patch.object(job_module, "_documents_dir", lambda: documents),
+            patch.object(job_module, "datetime", _Frozen),
+        ):
+            first = await tool_fn("python", mock_context)
+            second = await tool_fn("python", mock_context)
+
+        assert (
+            Path(first["output_file"])
+            == (documents / "25_10_2026_09_05_07.json").resolve()
+        )
+        # A second search in the same second must not overwrite the first.
+        assert (
+            Path(second["output_file"])
+            == (documents / "25_10_2026_09_05_07_1.json").resolve()
+        )
+        assert len(list(documents.iterdir())) == 2
+
+    async def test_search_jobs_refuses_a_directory_and_an_unwritable_path(
+        self, mock_context, serve_extractor, tmp_path
+    ):
+        from fastmcp.exceptions import ToolError
+
+        serve_extractor(_make_mock_extractor({"url": "u", "sections": {}}))
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "search_jobs")
+
+        with pytest.raises(ToolError, match="is a directory"):
+            await tool_fn("python", mock_context, output_path=str(tmp_path))
+
+        # A parent that is a file cannot be created as a directory.
+        blocker = tmp_path / "blocker"
+        blocker.write_text("x", encoding="utf-8")
+        with pytest.raises(ToolError, match="Could not write"):
+            await tool_fn(
+                "python", mock_context, output_path=str(blocker / "sub" / "r.json")
+            )
 
     async def test_search_jobs_is_bounded_by_the_registered_timeout(
         self, mock_context, serve_extractor

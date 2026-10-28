@@ -1,22 +1,56 @@
-"""
-LinkedIn job reading tools with search and detail extraction.
+"""LinkedIn job tools for browser search and guest-endpoint detail fetching."""
 
-Uses innerText extraction for resilient job data capture.
-"""
-
+import json
 import logging
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.dependencies import get_ready_extractor, tool_errors
+from linkedin_mcp_server.linkedin.guest_jobs import (
+    DEFAULT_WORKERS,
+    fetch_jobs,
+)
 from linkedin_mcp_server.linkedin.identifiers import normalize_job_id
 from linkedin_mcp_server.linkedin.job_policy import JobsTrackerStage
 
 logger = logging.getLogger(__name__)
+
+
+def _documents_dir() -> Path:
+    """Where a search is saved when the caller names no path. A function so tests can move it."""
+    return Path.home() / "Documents"
+
+
+def _write_search_results(result: dict[str, Any], output_path: str | None) -> Path:
+    """Write the whole search result as JSON and return the file it went to."""
+    if output_path:
+        path = Path(output_path).expanduser()
+        if path.is_dir():
+            raise ToolError(f"output_path is a directory, not a file: {path}")
+    else:
+        stem = datetime.now().strftime("%d_%m_%Y_%H_%M_%S")
+        directory = _documents_dir()
+        path = directory / f"{stem}.json"
+        # Two searches in one second must not overwrite each other.
+        suffix = 0
+        while path.exists():
+            suffix += 1
+            path = directory / f"{stem}_{suffix}.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError as exc:
+        raise ToolError(f"Could not write the search results to {path}: {exc}") from exc
+    return path
 
 
 def register_job_tools(
@@ -32,37 +66,53 @@ def register_job_tools(
     )
     @tool_errors
     async def get_job_details(
-        job_id: str,
+        job_ids: list[str],
         ctx: Context,
+        # No Field(le=...) bound: pydantic would answer 6 with a bare "less than
+        # or equal to 5", and fetch_jobs says why the limit exists.
+        n_workers: int = DEFAULT_WORKERS,
     ) -> dict[str, Any]:
         """
-        Get job details for a specific job posting on LinkedIn.
+        Get details for one or more job postings on LinkedIn.
+
+        Reads LinkedIn's public guest endpoint over plain HTTP: no browser,
+        no login, and the postings are fetched concurrently. Replaces the
+        earlier one-job-at-a-time browser reading.
 
         Args:
-            job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
+            job_ids: LinkedIn job IDs (e.g., ["4252026496", "3856789012"]) or
+                /jobs/view/ URLs. Duplicates are fetched once.
             ctx: FastMCP context for progress reporting
+            n_workers: Concurrent requests (1-5, default 3). Above 5 is
+                refused: more parallel requests risk LinkedIn flagging a bot.
 
         Returns:
-            Dict with url, sections (name -> raw text), and optional references.
-            The LLM should parse the raw text to extract job details. Jobs in
-            the posting's "More jobs" list are references with context
-            "similar job"; their ids work with get_job_details.
-            section_errors.job_posting.error_type "description_missing" means
-            the captured text lacks the expected "About the job" heading.
-            The text is kept but may be incomplete; calling again may return more.
-            A posting that shows it was applied to or has closed also carries
-            apply: {type: "applied" | "closed"}; no apply key means neither
-            was read, not that the posting is open.
+            Dict with jobs (one per id, in order) and summary
+            {requested, ok, failed}. A successful job has status "ok", job_id,
+            url, title, company, company_url, location, posted, applicants,
+            criteria (seniority_level, employment_type, job_function,
+            industries, when shown) and description (plain text). A failed
+            job has status "error" and error: not_found, rate_limited,
+            skipped_rate_limited (not sent after a rate limit), http_<code>,
+            request_failed, parse_failed or description_missing (often a
+            closed posting). One failure never discards the other jobs.
+            Not included: the signed-in view (applied/closed state, people to
+            reach out to), similar jobs, apply links; use get_job_apply_url
+            for the application link.
         """
-        job_id = normalize_job_id(job_id)
-        extractor = await get_ready_extractor(ctx, tool_name="get_job_details")
-        logger.info("Reading job: %s", job_id)
+        logger.info("Reading %d job(s) with %d worker(s)", len(job_ids), n_workers)
 
-        await ctx.report_progress(
-            progress=0, total=100, message="Reading the job posting"
-        )
+        async def report_progress(completed: int, total: int) -> None:
+            await ctx.report_progress(
+                progress=completed,
+                total=total,
+                message=f"Fetched {completed} of {total} postings",
+            )
 
-        result = await extractor.read_job(job_id)
+        try:
+            result = await fetch_jobs(job_ids, n_workers, on_progress=report_progress)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
 
         await ctx.report_progress(progress=100, total=100, message="Complete")
 
@@ -125,11 +175,14 @@ def register_job_tools(
         work_type: str | None = None,
         easy_apply: bool = False,
         sort_by: str | None = None,
+        output_path: str | None = None,
     ) -> dict[str, Any]:
         """
         Search for jobs on LinkedIn.
 
-        Returns job_ids that can be passed to get_job_details for full info.
+        The full results are saved to a JSON file and only a short summary is
+        returned, so a large search does not fill the context. Read the file
+        for the results and the job_ids to pass to get_job_details.
 
         LinkedIn is moving accounts to a redesigned job search, which keeps
         only the keywords, date_posted and paging. It drops the filters
@@ -150,17 +203,20 @@ def register_job_tools(
             work_type: Filter by work type, comma-separated (on_site, remote, hybrid). Classic search only.
             easy_apply: Only show Easy Apply jobs (default false). Classic search only.
             sort_by: Sort results (date, relevance). Classic search only.
+            output_path: File to save the full results to (JSON). Default: a
+                file named DD_MM_YYYY_HH_MM_SS.json in the user's Documents folder.
 
         Returns:
-            Dict with url, sections (name -> raw text), job_ids (list of
-            numeric job ID strings usable with get_job_details), and optional references.
-            total ({count, exact}) is the result count LinkedIn advertises,
-            with exact false for a lower bound such as "1,000+".
-            promoted_job_ids is the subset of job_ids LinkedIn marks as
-            promoted, present only when every page could be read.
-            A search with no matches returns empty job_ids and a
-            section_errors entry of type no_matching_jobs, rather than the
-            unrelated recommendations LinkedIn shows in its place.
+            Dict with output_file (absolute path of the saved results), url,
+            job_count, total ({count, exact}; the result count LinkedIn
+            advertises, exact false for a lower bound such as "1,000+"),
+            section_errors (only when present: filters_dropped, or
+            no_matching_jobs for a search with no matches) and note.
+            The file holds the complete result: url, sections (name -> raw
+            text), job_ids (numeric job ID strings usable with
+            get_job_details), promoted_job_ids (the subset LinkedIn marks as
+            promoted, present only when every page could be read), total,
+            references and section_errors.
         """
         # Before the browser, because FastMCP is already timing this call
         # and the extractor's budget is a fraction of the same figure. A
@@ -192,9 +248,23 @@ def register_job_tools(
             tool_timeout=max(0.0, tool_timeout - (time.monotonic() - started)),
         )
 
+        output_file = _write_search_results(result, output_path)
+
         await ctx.report_progress(progress=100, total=100, message="Complete")
 
-        return result
+        summary: dict[str, Any] = {
+            "output_file": str(output_file.resolve()),
+            "url": result.get("url"),
+            "job_count": len(result.get("job_ids", [])),
+            "total": result.get("total"),
+        }
+        if result.get("section_errors"):
+            summary["section_errors"] = result["section_errors"]
+        summary["note"] = (
+            "The full results, including job_ids, are in output_file. Read that "
+            "file when you need them; pass job_ids to get_job_details."
+        )
+        return summary
 
     @mcp.tool(
         timeout=tool_timeout,

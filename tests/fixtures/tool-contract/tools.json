@@ -372,17 +372,25 @@
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Get job details for a specific job posting on LinkedIn.",
+    "description": "Get details for one or more job postings on LinkedIn.\n\nReads LinkedIn's public guest endpoint over plain HTTP: no browser,\nno login, and the postings are fetched concurrently. Replaces the\nearlier one-job-at-a-time browser reading.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "job_id": {
-          "description": "LinkedIn job ID (e.g., \"4252026496\", \"3856789012\")",
-          "type": "string"
+        "job_ids": {
+          "description": "LinkedIn job IDs (e.g., [\"4252026496\", \"3856789012\"]) or\n/jobs/view/ URLs. Duplicates are fetched once.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "n_workers": {
+          "default": 3,
+          "description": "Concurrent requests (1-5, default 3). Above 5 is\nrefused: more parallel requests risk LinkedIn flagging a bot.",
+          "type": "integer"
         }
       },
       "required": [
-        "job_id"
+        "job_ids"
       ],
       "type": "object"
     },
@@ -668,7 +676,7 @@
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Search for jobs on LinkedIn.\n\nReturns job_ids that can be passed to get_job_details for full info.\n\nLinkedIn is moving accounts to a redesigned job search, which keeps\nonly the keywords, date_posted and paging. It drops the filters\nmarked \"Classic search only\" and reports them in section_errors as\nfilters_dropped. When it drops the location or work type, search again\nwith them in the keywords (\"remote python developer in Lyon\") and keep\ndoing so; words such as \"senior\" or \"internship\" there narrow the\nresults too. Quotes do not make a phrase exact on that search.",
+    "description": "Search for jobs on LinkedIn.\n\nThe full results are saved to a JSON file and only a short summary is\nreturned, so a large search does not fill the context. Read the file\nfor the results and the job_ids to pass to get_job_details.\n\nLinkedIn is moving accounts to a redesigned job search, which keeps\nonly the keywords, date_posted and paging. It drops the filters\nmarked \"Classic search only\" and reports them in section_errors as\nfilters_dropped. When it drops the location or work type, search again\nwith them in the keywords (\"remote python developer in Lyon\") and keep\ndoing so; words such as \"senior\" or \"internship\" there narrow the\nresults too. Quotes do not make a phrase exact on that search.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -735,6 +743,18 @@
           "maximum": 10,
           "minimum": 1,
           "type": "integer"
+        },
+        "output_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "File to save the full results to (JSON). Default: a\nfile named DD_MM_YYYY_HH_MM_SS.json in the user's Documents folder."
         },
         "sort_by": {
           "anyOf": [

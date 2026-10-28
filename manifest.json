@@ -81,7 +81,7 @@
     },
     {
       "name": "get_job_details",
-      "description": "Retrieve specific job posting details using LinkedIn job IDs"
+      "description": "Read several job postings at once over LinkedIn's public guest endpoint (job IDs, up to 5 concurrent requests, no browser)"
     },
     {
       "name": "get_job_apply_url",
@@ -89,7 +89,7 @@
     },
     {
       "name": "search_jobs",
-      "description": "Search for jobs with filters like keywords and location"
+      "description": "Search for jobs with filters like keywords and location; saves the full results to a file and returns a summary"
     },
     {
       "name": "get_saved_jobs",

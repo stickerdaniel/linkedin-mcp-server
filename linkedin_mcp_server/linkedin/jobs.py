@@ -101,6 +101,11 @@ class JobReader:
     async def read_job(self, job_id: str) -> dict[str, Any]:
         """Read a single job posting.
 
+        DEPRECATED: no tool calls this any more. get_job_details fetches
+        postings over LinkedIn's guest endpoint with
+        ``linkedin.guest_jobs.fetch_jobs``, which needs no browser. Kept for
+        the signed-in view only (applied/closed state, similar jobs).
+
         Returns:
             {url, sections: {name: text}}, plus {apply: {type}} when the
             posting shows it was applied to or has closed.

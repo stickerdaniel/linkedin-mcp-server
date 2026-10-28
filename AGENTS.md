@@ -144,13 +144,17 @@ Optional additional keys:
 - `references: {section_name: [{kind, url, text?, context?, value?}]}` — LinkedIn URLs are relative paths; `value` carries non-URL identifiers (e.g. company URN id for `kind: "company_urn"`)
 - `section_errors: {section_name: {error_type, error_message, issue_template_path, runtime, ...}}`
 - `unknown_sections: [name, ...]`
-- `job_ids: [id, ...]` (search_jobs and get_saved_jobs)
-- `total: {count, exact}` (search_jobs only) — the result count LinkedIn advertises on the first page; `exact` is false for a lower bound such as "500+"
-- `promoted_job_ids: [id, ...]` (search_jobs only) — the subset of `job_ids` shown as promoted; present only when every page could be read, so an empty list means none were
+- `job_ids: [id, ...]` (get_saved_jobs, and the file `search_jobs` writes)
+- `total: {count, exact}` (the `search_jobs` file and summary) — the result count LinkedIn advertises on the first page; `exact` is false for a lower bound such as "500+"
+- `promoted_job_ids: [id, ...]` (the `search_jobs` file) — the subset of `job_ids` shown as promoted; present only when every page could be read, so an empty list means none were
 - `references["feed"]` (get_feed only) — every entry is `kind: "feed_post"`; non-post anchors (sidebar profiles, employer logos) are filtered. URLs may carry either `/feed/update/<urn>/` (DOM-anchor-derived) or `/posts/<slug>` (SDUI-derived) form; both are valid LinkedIn permalinks. Cap is 50 entries, matching `get_feed`'s `num_posts` ceiling.
 - `references["search_results"]` (search_posts only) — DOM references first, then up to 50 `kind: "feed_post"` permalinks read from the page's JSON/document payload responses (`/feed/update/<urn>/` or `/posts/<slug>`, both valid). Captured permalinks are appended, not aligned to result order.
 - `apply: {type, url?}` (get_job_apply_url, which returns no `sections`) — `type` is `easy_apply`, `external`, `applied`, `closed` or `unknown`; `url` is the employer's application link as LinkedIn gives it, never opened, present for external postings
-- `apply: {type}` (get_job_details) — `type` is `applied` or `closed`, read from the posting's text above its description without clicking; absent for an open posting and for one whose description heading was not captured
+
+Two tools do not follow the `{url, sections}` shape:
+
+- `search_jobs` writes the complete `{url, sections, job_ids, ...}` result as JSON to `output_path` (default `~/Documents/DD_MM_YYYY_HH_MM_SS.json`) and returns only `{output_file, url, job_count, total, section_errors?, note}`, so a large search does not fill the agent's context.
+- `get_job_details(job_ids, n_workers)` returns `{jobs, summary}` and reads LinkedIn's **public guest endpoint** (`/jobs-guest/jobs/api/jobPosting/{id}`) over plain HTTP, with no browser (`linkedin/guest_jobs.py`). It replaces the browser reading in `JobReader.read_job`, which is deprecated and no longer reachable from a tool. This is a deliberate exception to "read the rendered page" in the [decision record](docs/decisions/2026-09-16-rendered-page.md): the endpoint is public and unauthenticated, not a private API, but it is unauthenticated bulk access, so `n_workers` is capped at 5 (`MAX_WORKERS`), failures are never retried, and a rate-limit response stops the jobs not yet started.
 
 ## Tests
 
