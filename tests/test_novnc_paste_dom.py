@@ -2,8 +2,8 @@
 
 These cases load the add-on as the module `vnc.html` loads, in headless
 chromium, against stand-ins for the three noVNC modules it imports: a connected
-RFB that records the keys it is asked to send, its keyboard, which records what
-it presses and releases on the remote side, and keysym tables for plain ASCII.
+RFB that records the keys it is asked to send, noVNC's keyboard, which presses a
+key that reaches it on the remote side, and keysym tables for plain ASCII.
 A synthetic origin serves every file and any other request is refused, so
 nothing leaves the browser.
 
@@ -36,16 +36,17 @@ _ADD_ON = Path(__file__).resolve().parents[1] / "scripts" / "novnc-paste.js"
 _ORIGIN = "https://viewer.invalid"
 
 # Shared through the DOM, which the page and patchright's isolated evaluation
-# world both see: the text the stand-in RFB typed, each key the stand-in
-# keyboard pressed or released with how much text was typed by then, how often
-# the clipboard was read, and what that read returns, whether it is refused, and
-# whether it is held.
+# world both see: the text the stand-in RFB typed, each key pressed or released
+# on the remote side with how much text was typed by then, how often the
+# clipboard was read, and what that read returns, whether it is refused, and
+# whether it is held; and whether the keyboard holds Control back as noVNC does
+# on Windows.
 _VIEWER = """<!DOCTYPE html>
 <html><head>
 <script type="module">
   import UI from "./app/ui.js";
   const state = document.documentElement.dataset;
-  Object.assign(state, { typed: "", keys: "[]", reads: "0", clipboard: "", refused: "", held: "" });
+  Object.assign(state, { typed: "", keys: "[]", reads: "0", clipboard: "", refused: "", held: "", altgr: "" });
   Object.defineProperty(navigator, "clipboard", {
     configurable: true,
     value: {
@@ -64,28 +65,25 @@ _VIEWER = """<!DOCTYPE html>
       },
     },
   });
-  // noVNC's keyboard: a key that reaches it is pressed on the remote side and
-  // stays in _keyDownList until it is released.
-  const keyboard = {
-    _keyDownList: {},
-    _altGrArmed: false,
-    _interruptAltGrSequence() {},
-    _sendKeyEvent(keysym, code, down) {
-      const keys = JSON.parse(state.keys);
-      keys.push([code, down, state.typed.length]);
-      state.keys = JSON.stringify(keys);
-      if (down) this._keyDownList[code] = keysym;
-      else delete this._keyDownList[code];
-    },
+  const record = (code, down) => {
+    const keys = JSON.parse(state.keys);
+    keys.push([code, down, state.typed.length]);
+    state.keys = JSON.stringify(keys);
   };
-  document.addEventListener("keydown", event => keyboard._sendKeyEvent(0, event.code, true));
+  // noVNC's keyboard: a key that reaches it is pressed on the remote side. On
+  // Windows a ControlLeft press waits 100 ms in case AltGr follows.
+  document.addEventListener("keydown", event => {
+    if (event.code === "ControlLeft" && state.altgr) setTimeout(() => record(event.code, true), 100);
+    else record(event.code, true);
+  });
   const newRfb = () => Object.assign(new EventTarget(), {
     viewOnly: false,
-    _keyboard: keyboard,
-    // A press and release, as the add-on sends each character.
+    // A press and release, as the add-on sends each character, or one of them.
     sendKey(keysym, code, down) {
       if (down === undefined) {
         state.typed += keysym === 0xff0d ? "\\n" : keysym === 0xff09 ? "\\t" : String.fromCodePoint(keysym);
+      } else {
+        record(code, down);
       }
     },
   });
@@ -109,6 +107,8 @@ _MODULES = {
     "/app/ui.js": "export default { connected: false, rfb: undefined };",
     "/core/input/keysym.js": """export default {
   XK_Return: 0xff0d, XK_Tab: 0xff09,
+  XK_Shift_L: 0xffe1, XK_Shift_R: 0xffe2, XK_Control_L: 0xffe3, XK_Control_R: 0xffe4,
+  XK_Super_L: 0xffeb, XK_Super_R: 0xffec,
 };""",
     # Latin-1 keysyms are the code points themselves.
     "/core/input/keysymdef.js": "export default { lookup: cp => cp };",
@@ -415,6 +415,40 @@ async def test_control_goes_up_before_the_first_character(viewer):
         ["ControlLeft", True, 0],
         ["ControlLeft", False, 0],
     ]
+
+
+async def test_control_held_back_for_altgr_goes_up_before_the_first_character(
+    viewer,
+):
+    """noVNC on Windows sends a ControlLeft press 100 ms late, in case AltGr
+    follows. A release sent before it would leave Control down for the text."""
+    await viewer.evaluate("document.documentElement.dataset.altgr = '1'")
+    await viewer.evaluate(_CONTROL)
+    await viewer.evaluate(_CTRL_V)
+    await viewer.evaluate(_PASTE, "correct horse")
+    await _settle(viewer)
+
+    assert await _state(viewer, "typed") == "correct horse"
+    assert json.loads(await _state(viewer, "keys")) == [
+        ["ControlLeft", True, 0],
+        ["ControlLeft", False, 0],
+    ]
+
+
+async def test_a_modifier_released_before_the_paste_is_not_released_again(viewer):
+    """Only what is still down goes up: a browser-menu paste after Control was
+    let go sends no key at all."""
+    await viewer.evaluate(_CONTROL)
+    await viewer.evaluate(
+        """() => document.body.dispatchEvent(new KeyboardEvent("keyup", {
+          key: "Control", code: "ControlLeft", bubbles: true, cancelable: true,
+        }))"""
+    )
+    await viewer.evaluate(_PASTE, "correct horse")
+    await _settle(viewer)
+
+    assert await _state(viewer, "typed") == "correct horse"
+    assert json.loads(await _state(viewer, "keys")) == [["ControlLeft", True, 0]]
 
 
 async def test_a_control_character_is_skipped(viewer):

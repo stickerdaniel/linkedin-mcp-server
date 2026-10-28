@@ -6,9 +6,8 @@
 // event with the text; then it releases the modifiers noVNC already pressed on the remote side and types the text key
 // by key, paced, the way noVNC's own on-screen keyboard input does. If no paste event comes, it asks
 // navigator.clipboard.readText() instead. Each Ctrl+V is typed once, by whichever of the two has its text first.
-// Text is kept only while waiting to type; it is never logged or persisted. Releasing held keys uses noVNC's keyboard
-// internals (_keyboard, _keyDownList, _sendKeyEvent, _altGrArmed, _interruptAltGrSequence), so this needs the pinned
-// 1.6.0: 1.3.0 has no _interruptAltGrSequence.
+// Text is kept only while waiting to type; it is never logged or persisted. It uses only noVNC's public RFB API
+// (sendKey, viewOnly, the disconnect event) and the UI's connected/rfb fields.
 import UI from "./app/ui.js";
 import KeyTable from "./core/input/keysym.js";
 import keysyms from "./core/input/keysymdef.js";
@@ -18,9 +17,19 @@ const PACE_MS = 20;
 const FALLBACK_MS = 300;
 const LATE_PASTE_MS = 5000;
 const SPECIAL = { "\n": KeyTable.XK_Return, "\t": KeyTable.XK_Tab };
+// The modifiers a paste shortcut can hold, by KeyboardEvent.code, with the keysym noVNC sends for each.
+const MODIFIERS = {
+  ControlLeft: KeyTable.XK_Control_L, ControlRight: KeyTable.XK_Control_R,
+  ShiftLeft: KeyTable.XK_Shift_L, ShiftRight: KeyTable.XK_Shift_R,
+  MetaLeft: KeyTable.XK_Super_L, MetaRight: KeyTable.XK_Super_R,
+};
+// On Windows noVNC holds a ControlLeft press back for 100 ms, in case AltGr follows, and only then sends it. A release
+// sent sooner would come before the press it releases; this waits that out, with room to spare.
+const ALTGR_MS = 150;
 
 let typing = null;  // the current connection's drain and its pending pastes
 let attempt = null;  // the latest Ctrl+V: when it was pressed, its fallback timer, whether it was typed or replaced
+const held = new Map();  // modifiers that reached noVNC and are still down, with when each went down
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -33,14 +42,13 @@ function editable(target) {
     (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
 }
 
-function releaseHeldKeys(rfb) {
-  // Ctrl/Cmd (and anything else noVNC sent as pressed) goes up on the remote side first, so the text is typed as
-  // plain keys. Going through noVNC's keyboard keeps its own record right: the person's later key-up is ignored.
-  const keyboard = rfb._keyboard;
-  if (keyboard._altGrArmed) keyboard._interruptAltGrSequence();
-  for (const code of Object.keys(keyboard._keyDownList)) {
-    keyboard._sendKeyEvent(keyboard._keyDownList[code], code, false);
-  }
+async function releaseHeldKeys(rfb) {
+  // Ctrl/Cmd (and Shift) go up on the remote side first, so the text is typed as plain keys. noVNC still counts them
+  // as pressed, so the person's own key-up later sends a second release, which changes nothing.
+  const wait = Math.max(0, ...Array.from(held.values(), at => at + ALTGR_MS - Date.now()));
+  if (wait) await sleep(wait);
+  for (const code of held.keys()) rfb.sendKey(MODIFIERS[code], code, false);
+  held.clear();
 }
 
 async function type(text) {
@@ -64,7 +72,7 @@ async function type(text) {
   try {
     while (current.pending.length) {
       if (current.cancelled || !connected() || UI.rfb !== current.rfb) return;
-      releaseHeldKeys(current.rfb);
+      await releaseHeldKeys(current.rfb);
       for (const ch of current.pending.shift()) {
         if (current.cancelled || !connected() || UI.rfb !== current.rfb) return;
         const cp = ch.codePointAt(0);
@@ -87,9 +95,15 @@ for (const kind of ["keydown", "keyup"]) {
     if (typing && !editable(event.target)) {
       event.stopImmediatePropagation();
       event.preventDefault();
+      return;
     }
+    if (!(event.code in MODIFIERS) || editable(event.target)) return;
+    if (kind === "keyup") held.delete(event.code);
+    else if (!held.has(event.code)) held.set(event.code, Date.now());
   }, true);
 }
+// noVNC releases every key when the page loses focus.
+window.addEventListener("blur", () => held.clear());
 
 document.addEventListener("keydown", event => {
   if (typing) return;

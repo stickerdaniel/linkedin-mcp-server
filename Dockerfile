@@ -23,8 +23,8 @@ RUN uv pip install --python /app/.venv/bin/python --no-deps --compile-bytecode \
 # noVNC's own 1.6.0 release rather than Debian's novnc package (1.3.0), for
 # the full vnc.html the viewer prints. Downloaded and checked at build time,
 # never vendored, and in a stage of its own so the tarball stays out of the
-# image. The paste add-on needs 1.6.0's keyboard and loads from one <script>
-# tag added to vnc.html; the build fails if the tag is missing.
+# image. The paste add-on loads from one <script> tag added to vnc.html; the
+# build fails if the tag is missing.
 FROM python:3.13.13-slim-bookworm@sha256:355bfa66770995d7e9a0da4b3473b44d0cb451f6b56f5615ad9c39e3c4eca03f AS novnc
 ADD --checksum=sha256:5066103959ef4e9b10f37e5a148627360dd8414e4cf8a7db92bdbd022e728aaa \
     https://github.com/novnc/noVNC/archive/refs/tags/v1.6.0.tar.gz /tmp/novnc.tar.gz

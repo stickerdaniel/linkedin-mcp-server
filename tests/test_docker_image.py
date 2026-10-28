@@ -563,11 +563,7 @@ def test_the_image_defaults_to_headed_on_a_virtual_display() -> None:
 
 
 def test_the_login_viewer_loads_the_paste_add_on() -> None:
-    """`vnc.html` gets one `<script>` tag for the add-on, or the build fails.
-
-    The add-on calls 1.6.0's keyboard (Debian's 1.3.0 has no
-    `_interruptAltGrSequence`), so it ships only with the pinned release.
-    """
+    """`vnc.html` gets one `<script>` tag for the add-on, or the build fails."""
     (unpack,) = [
         instruction
         for instruction in _DOCKERFILE_INSTRUCTIONS
