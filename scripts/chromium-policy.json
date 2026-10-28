@@ -1,14 +1,5 @@
 {
   "PasswordManagerEnabled": false,
   "AutofillAddressEnabled": false,
-  "AutofillCreditCardEnabled": false,
-  "AllowFileSelectionDialogs": false,
-  "DownloadRestrictions": 3,
-  "URLBlocklist": [
-    "file://*",
-    "chrome://*",
-    "chrome-untrusted://*",
-    "devtools://*",
-    "view-source:*"
-  ]
+  "AutofillCreditCardEnabled": false
 }

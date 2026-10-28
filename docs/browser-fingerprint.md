@@ -128,15 +128,9 @@ connection, after a trusted click, and after disconnect:
 | Chromium active | yes | yes |
 | Trusted click reached page | yes | yes |
 
-The viewer's browser now runs in kiosk mode (`VIEWER_BROWSER_ARGS`), which
-fills the display. Measured 2026-10-23 on amd64, Chrome for Testing
-153.0.8010.12, with the same stack and a page reading the values itself: screen
-1920x1080, outer window 1920x1080, inner 1920x1080, device pixel ratio 1, focus
-`true` / `visible`, `navigator.webdriver` `false`. The outer window still does
-not exceed the screen. arm64 was not measured again.
-
-The four-detector comparison of kiosk and managed-policy launches is recorded
-in [Docker policy and kiosk comparison — 2026-10-25](#docker-policy-and-kiosk-comparison--2026-10-25).
+Kiosk mode for the viewer's browser was measured and not adopted: it fills
+the display, and raised CreepJS's like-headless score. See
+[Docker policy and kiosk comparison — 2026-10-25](#docker-policy-and-kiosk-comparison--2026-10-25).
 
 The client scales the fixed framebuffer locally. x11vnc remote resize remains
 disabled, so connecting cannot change Chromium's reported screen. The package
@@ -394,7 +388,13 @@ All three runs per configuration agreed. Kiosk changes CreepJS's `hasVvpScreenRe
 
 TLS 1.3 / h2, sorted non-GREASE cipher/extension lists, non-GREASE signature algorithms and the JA4 `t13d1517h2_8daaf6152771` prefix match across all 36 captures. The raw JA4 suffix varies because Fingerproxy 1.2.3 includes a GREASE signature algorithm; it is not claimed equal. Filtering that value separately per the [JA4 specification](https://github.com/FoxIO-LLC/ja4/blob/c6469a7b0dbf8fe963810162429fbfd9d1acc4d5/technical_details/JA4.md) yields `t13d1517h2_8daaf6152771_cb7bf5808d99` in every capture. HTTP/2 settings, connection window and pseudo-header order (`m,a,s,p`) match, as do full H2 fingerprints at each request ordinal; priority stream entries accumulate normally between requests.
 
-The policy image contains only the exact root-owned mode-644 `scripts/chromium-policy.json` above the common runtime. A separate synthetic-file control succeeds without it and is blocked with it. Measurements use a temporary locally trusted CA, without certificate bypass settings. They cover native amd64 only, with external egress disabled: no arm64, proxy/STUN, behavior, VNC-client interaction or invisibility claim. Rebrowser's CSP verdict is offline-inconclusive because network failure can trigger the same callback. Detector payload completeness is not a claim that every detector is clean; unavailable WebGPU signals and the existing warnings above remain recorded.
+The policy image contains only the exact root-owned mode-644 policy file as measured (`fb53d9e`'s `scripts/chromium-policy.json`) above the common runtime. A separate synthetic-file control succeeds without it and is blocked with it. Measurements use a temporary locally trusted CA, without certificate bypass settings. They cover native amd64 only, with external egress disabled: no arm64, proxy/STUN, behavior, VNC-client interaction or invisibility claim. Rebrowser's CSP verdict is offline-inconclusive because network failure can trigger the same callback. Detector payload completeness is not a claim that every detector is clean; unavailable WebGPU signals and the existing warnings above remain recorded.
+
+The image adopted neither kiosk mode nor the measured policy's file-dialog,
+download and URL-blocklist rules. Kiosk raised the like-headless score, and the
+policy applies to every launch in the image, the server's own browser too. The
+image's policy keeps only the measured policy's password-manager and autofill
+settings; that subset was not measured on its own.
 
 Main-world values were exported by page scripts, rather than inferred from
 Patchright's isolated `evaluate()` world. The source/import and policy hashes were
