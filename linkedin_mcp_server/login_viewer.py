@@ -171,7 +171,7 @@ def _require_a_writable_auth_root(auth_root: Path, *, profile: Path) -> None:
 
 
 def viewer_url(token: str) -> str:
-    """Build the token-private URL of the image's noVNC 1.6.0 ``vnc.html``.
+    """Build the token-private URL of the image's noVNC 1.7.0 ``vnc.html``.
 
     Every setting sits in the fragment, which the browser never sends, so the
     token reaches only the WebSocket the page opens.

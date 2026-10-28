@@ -20,18 +20,18 @@ RUN uv pip install --python /app/.venv/bin/python --no-deps --compile-bytecode \
 
 
 # -- Stage 2: noVNC for the Docker login viewer --
-# noVNC's own 1.6.0 release rather than Debian's novnc package (1.3.0), for
+# noVNC's own 1.7.0 release rather than Debian's novnc package (1.3.0), for
 # the full vnc.html the viewer prints. Downloaded and checked at build time,
 # never vendored, and in a stage of its own so the tarball stays out of the
 # image. The paste add-on loads from one <script> tag added to vnc.html; the
 # build fails if the tag is missing.
 FROM python:3.13.13-slim-bookworm@sha256:355bfa66770995d7e9a0da4b3473b44d0cb451f6b56f5615ad9c39e3c4eca03f AS novnc
-ADD --checksum=sha256:5066103959ef4e9b10f37e5a148627360dd8414e4cf8a7db92bdbd022e728aaa \
-    https://github.com/novnc/noVNC/archive/refs/tags/v1.6.0.tar.gz /tmp/novnc.tar.gz
+ADD --checksum=sha256:b1003a11b6e6e8d8f7f5e5586daae7f8ca651d8aee0aa155ff9ac841c48f52c6 \
+    https://github.com/novnc/noVNC/archive/refs/tags/v1.7.0.tar.gz /tmp/novnc.tar.gz
 RUN mkdir /novnc && \
     tar -xzf /tmp/novnc.tar.gz -C /novnc --strip-components=1 --no-same-permissions \
-        noVNC-1.6.0/app noVNC-1.6.0/core noVNC-1.6.0/vendor noVNC-1.6.0/vnc.html \
-        noVNC-1.6.0/defaults.json noVNC-1.6.0/mandatory.json noVNC-1.6.0/LICENSE.txt && \
+        noVNC-1.7.0/app noVNC-1.7.0/core noVNC-1.7.0/vendor noVNC-1.7.0/vnc.html \
+        noVNC-1.7.0/defaults.json noVNC-1.7.0/mandatory.json noVNC-1.7.0/LICENSE.txt && \
     sed -i 's|</head>|<script type="module" src="paste.js"></script></head>|' /novnc/vnc.html && \
     grep -q 'src="paste.js"' /novnc/vnc.html
 COPY scripts/novnc-paste.js /novnc/paste.js

@@ -126,7 +126,7 @@
       "name": "noVNC",
       "url": "https://github.com/novnc/noVNC",
       "branch": "master",
-      "specialNotes": "Browser client for the Docker login viewer. The image installs the v1.6.0 release and serves its vnc.html with scripts/novnc-paste.js."
+      "specialNotes": "Browser client for the Docker login viewer. The image installs the v1.7.0 release and serves its vnc.html with scripts/novnc-paste.js."
     },
     {
       "type": "git",

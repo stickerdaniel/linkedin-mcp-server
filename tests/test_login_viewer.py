@@ -42,7 +42,7 @@ def test_viewer_url_is_an_exact_token_private_fragment(
     assert page.endswith("/vnc.html")
     assert "token" not in page
 
-    # noVNC 1.6.0's vnc.html reads its settings with `getHashVar`
+    # noVNC 1.7.0's vnc.html reads its settings with `getHashVar`
     # (app/webutil.js), which matches this pattern against the fragment. It
     # connects only for autoconnect 1 or true, and fits the window for scale.
     def setting(name: str) -> str | None:
@@ -302,7 +302,7 @@ def test_dockerfile_installs_viewer_packages_without_x11_utils() -> None:
     packages = install.group(1).split()
     for package in ("openbox", "x11vnc", "websockify"):
         assert package in packages
-    # The viewer's noVNC is the pinned 1.6.0 release, not Debian's 1.3.0
+    # The viewer's noVNC is the pinned 1.7.0 release, not Debian's 1.3.0
     # (tests/test_docker_image.py).
     assert "novnc" not in packages
     assert "chown -R pwuser:pwuser /opt/patchright" in dockerfile
