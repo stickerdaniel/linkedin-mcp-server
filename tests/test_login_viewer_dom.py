@@ -273,22 +273,24 @@ async def test_a_disconnect_during_the_shortcut_drops_the_paste(viewer):
 
 
 @pytest.mark.parametrize(
-    ("key", "code", "reaches_screen"),
+    ("key", "code", "key_code", "reaches_screen"),
     [
-        ("v", "Period", False),  # Dvorak's v: the browser pastes on it
-        ("k", "KeyV", True),  # Dvorak's k on the V position: not a paste
-        ("м", "KeyV", False),  # Cyrillic: browsers fall back to the position
+        ("v", "Period", 86, False),  # Dvorak's v: the browser pastes on it
+        ("k", "KeyV", 75, True),  # Dvorak's k on the V position: not a paste
+        ("м", "KeyV", 86, False),  # Cyrillic: browsers resolve the US position
+        (",", "KeyV", 188, True),  # a symbol on the V position: not a paste
     ],
 )
 async def test_the_paste_shortcut_follows_the_keyboard_layout(
-    viewer, key, code, reaches_screen
+    viewer, key, code, key_code, reaches_screen
 ):
+    """``key_code`` is what the browser resolves for that layout."""
     await viewer.evaluate(
-        """([key, code, apple]) => document.querySelector('canvas').dispatchEvent(
-            new KeyboardEvent('keydown', {
-                key, code, bubbles: true, ctrlKey: !apple, metaKey: apple,
+        """([key, code, keyCode, apple]) => document.querySelector('canvas')
+            .dispatchEvent(new KeyboardEvent('keydown', {
+                key, code, keyCode, bubbles: true, ctrlKey: !apple, metaKey: apple,
             }))""",
-        [key, code, PASTE == "Meta"],
+        [key, code, key_code, PASTE == "Meta"],
     )
 
     forwarded = await viewer.evaluate("window.viewer.forwarded", isolated_context=False)

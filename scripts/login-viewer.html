@@ -64,10 +64,11 @@
         const APPLE = /mac|iphone|ipad|ipod/i.test(navigator.platform);
         // Unshifted only: a Mac browser has no paste for Cmd+Shift+V.
         const isPasteKey = e => (APPLE ? e.metaKey : e.ctrlKey) && !e.altKey && !e.shiftKey;
-        // The shortcut's V by character, as browsers match it on Latin
-        // layouts such as Dvorak, and by position on the others, where they
-        // fall back to the US layout.
-        const isV = e => /^v$/i.test(e.key) || (e.code === 'KeyV' && !/^[a-z]$/i.test(e.key));
+        // The shortcut's V as the browser resolves it: by character on Latin
+        // layouts such as Dvorak, by US position on non-Latin ones, and never
+        // for a symbol on the V position. The legacy keyCode is that
+        // resolved key; nothing newer exposes it.
+        const isV = e => /^v$/i.test(e.key) || e.keyCode === 86;
         const modifierHeld = e => e.ctrlKey || e.metaKey || e.altKey || e.shiftKey;
         let shortcut = false; // a paste shortcut is down
         let hiddenCode = null; // noVNC never saw this key go down, so it must not see it go up
