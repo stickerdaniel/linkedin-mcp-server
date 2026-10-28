@@ -28,11 +28,7 @@ from linkedin_mcp_server import login_view
 from linkedin_mcp_server.core.auth import PeerSignedInError
 from linkedin_mcp_server.exceptions import BrowserBusyError
 from linkedin_mcp_server.login_attempt import PendingLogin, open_pending_login, promote
-from linkedin_mcp_server.login_viewer import (
-    VIEWER_BROWSER_ARGS,
-    VIEWER_WALL_SECONDS,
-    LoginViewer,
-)
+from linkedin_mcp_server.login_viewer import LoginViewer, VIEWER_WALL_SECONDS
 from linkedin_mcp_server.profile_lease import get_profile_lease
 from linkedin_mcp_server.session_state import (
     UNGUARDED,
@@ -229,13 +225,6 @@ async def _login_into_fresh_profile(
         # setting cannot apply to page reading but not to the login that created the
         # session.
         launch_options, viewport = build_launch_options(config.browser)
-        if login_viewer:
-            # The window only, never where the browser connects from: kiosk mode
-            # for the browser behind the viewer (VIEWER_BROWSER_ARGS).
-            launch_options = {
-                **launch_options,
-                "args": [*launch_options.get("args", ()), *VIEWER_BROWSER_ARGS],
-            }
         describe_launch(launch_options)
         manager = BrowserManager(
             user_data_dir=pending.profile_dir,

@@ -289,19 +289,22 @@ def test_the_image_installs_only_the_full_browser() -> None:
     assert "patchright install chromium --no-shell" in _DOCKERFILE
 
 
-def test_the_sign_in_policy_leaves_linkedin_and_devtools_alone() -> None:
+def test_the_image_policy_only_turns_off_saving_and_autofill() -> None:
     """Every launch in the image runs under the policy, not only the viewer's.
 
-    A LinkedIn or web address on its block list would stop the server reading
-    LinkedIn, and `DeveloperToolsAvailability` would cut the pipe Patchright
-    drives the browser through: set to 2, the launch timed out.
+    So it turns off the password manager and autofill and nothing else: a block
+    list, download or file-dialog rule would apply to the browser the server
+    drives as well, and `DeveloperToolsAvailability` set to 2 cut the pipe
+    Patchright drives it through, so the launch timed out.
     """
     policy = json.loads(
         (_REPO_ROOT / "scripts" / "chromium-policy.json").read_text(encoding="utf-8")
     )
-    assert not [entry for entry in policy["URLBlocklist"] if "linkedin" in entry]
-    assert not [entry for entry in policy["URLBlocklist"] if entry.startswith("http")]
-    assert "DeveloperToolsAvailability" not in policy
+    assert policy == {
+        "PasswordManagerEnabled": False,
+        "AutofillAddressEnabled": False,
+        "AutofillCreditCardEnabled": False,
+    }
 
 
 def test_the_image_builds_the_project_against_the_hashed_backend() -> None:
