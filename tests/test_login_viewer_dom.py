@@ -56,8 +56,21 @@ export default class RFB extends EventTarget {
 
 
 @pytest.fixture
-async def viewer():
-    """The page at the address ``viewer_url`` prints, connected, or a skip."""
+async def viewer(request):
+    """The page at the address ``viewer_url`` prints, connected, or a skip.
+
+    An indirect parameter names the ``navigator.platform`` the page sees, so
+    the Apple and the other branch both run on any host.
+    """
+    platform = getattr(request, "param", None)
+    html = PAGE.read_text()
+    if platform is not None:
+        html = html.replace(
+            "<head>",
+            "<head><script>Object.defineProperty(Navigator.prototype, 'platform',"
+            f" {{ get: () => '{platform}' }});</script>",
+            1,
+        )
     async with async_playwright() as p:
         try:
             browser = await p.chromium.launch(channel="chromium", headless=True)
@@ -69,7 +82,7 @@ async def viewer():
         async def serve(route: Any) -> None:
             path = route.request.url.removeprefix(ORIGIN).split("#")[0]
             if path == "/login.html":
-                await route.fulfill(content_type="text/html", body=PAGE.read_text())
+                await route.fulfill(content_type="text/html", body=html)
             elif path == "/core/rfb.js":
                 await route.fulfill(content_type="text/javascript", body=RFB_STAND_IN)
             else:
@@ -211,8 +224,18 @@ async def test_a_paste_without_the_shortcut_is_never_typed(viewer):
     assert await sent(viewer) == [[ord("x"), None, None]]
 
 
-async def test_v_with_the_other_modifier_reaches_the_screen(viewer):
-    await viewer.keyboard.press(f"{OTHER}+KeyV")
+@pytest.mark.parametrize(
+    ("viewer", "chord"),
+    [
+        (None, f"{OTHER}+KeyV"),
+        (None, f"{PASTE}+Shift+KeyV"),
+        ("MacIntel", "Control+KeyV"),
+        ("Linux x86_64", "Meta+KeyV"),
+    ],
+    indirect=["viewer"],
+)
+async def test_v_without_the_platform_paste_shortcut_reaches_the_screen(viewer, chord):
+    await viewer.keyboard.press(chord)
 
     forwarded = await viewer.evaluate("window.viewer.forwarded", isolated_context=False)
     assert "keydown KeyV" in forwarded
@@ -228,6 +251,22 @@ async def test_a_paste_while_disconnected_is_not_typed(viewer):
     await copy(viewer, "x")
 
     await viewer.keyboard.press(f"{PASTE}+KeyV")
+
+    assert await sent(viewer) == []
+    assert await viewer.text_content("#status") == "Connection lost."
+
+
+async def test_a_disconnect_during_the_shortcut_drops_the_paste(viewer):
+    await copy(viewer, "x")
+
+    await viewer.keyboard.down(PASTE)
+    await viewer.keyboard.press("KeyV")
+    await viewer.evaluate(
+        """window.viewer.rfb.dispatchEvent(
+            new CustomEvent('disconnect', { detail: { clean: false } }))""",
+        isolated_context=False,
+    )
+    await viewer.keyboard.up(PASTE)
 
     assert await sent(viewer) == []
     assert await viewer.text_content("#status") == "Connection lost."

@@ -44,6 +44,8 @@
         });
         rfb.addEventListener('disconnect', e => {
             connected = false;
+            shortcut = false;
+            pasted = [];
             status(e.detail.clean ? 'Disconnected.' : 'Connection lost.');
         });
 
@@ -60,7 +62,8 @@
         // release of V: a Mac browser often reports no V release while Cmd
         // is down.
         const APPLE = /mac|iphone|ipad|ipod/i.test(navigator.platform);
-        const isPasteKey = e => (APPLE ? e.metaKey : e.ctrlKey) && !e.altKey;
+        // Unshifted only: a Mac browser has no paste for Cmd+Shift+V.
+        const isPasteKey = e => (APPLE ? e.metaKey : e.ctrlKey) && !e.altKey && !e.shiftKey;
         const modifierHeld = e => e.ctrlKey || e.metaKey || e.altKey || e.shiftKey;
         let shortcut = false; // a paste shortcut is down
         let hiddenV = false; // noVNC never saw this V go down, so it must not see it go up
@@ -88,7 +91,7 @@
                 hiddenV = false;
                 e.stopImmediatePropagation();
             }
-            if (!shortcut || modifierHeld(e)) return;
+            if (!shortcut || modifierHeld(e) || !connected) return;
             const keysyms = Array.from(pasted.join(''), keysymOf);
             shortcut = false;
             pasted = [];
