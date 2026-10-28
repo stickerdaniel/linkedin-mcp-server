@@ -140,6 +140,7 @@ class BrowserManager:
         self._containment: WindowsJob | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
+        self._page_crashed = False
         self._is_authenticated = False
         #: Set when a headed launch was attempted and refused, which is the only
         #: reliable way to learn that this machine has nowhere to put a window.
@@ -569,6 +570,11 @@ class BrowserManager:
                 self._page = await open_hidden_page(self._context, startup)
             else:
                 self._page = startup
+            # A renderer crash (such as an OOM kill) leaves the page open
+            # and the browser connected, and every later call on the page
+            # fails. Only this event says so; see ``page_crashed``.
+            self._page_crashed = False
+            self._page.on("crash", self._note_page_crash)
 
             logger.info("Browser context and page ready")
 
@@ -795,6 +801,21 @@ class BrowserManager:
                 "Browser not started. Use async context manager or call start()."
             )
         return self._page
+
+    @property
+    def page_crashed(self) -> bool:
+        """Whether the renderer behind :attr:`page` crashed in this launch.
+
+        ``page.is_closed()`` stays false after a crash and the browser stays
+        connected, so neither can say it happened.
+        """
+        return self._page_crashed
+
+    def _note_page_crash(self, page: Page) -> None:
+        if page is not self._page:
+            return
+        self._page_crashed = True
+        logger.warning("The browser page crashed; the next tool call shuts it down")
 
     @property
     def context(self) -> BrowserContext:
