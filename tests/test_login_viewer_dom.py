@@ -28,14 +28,14 @@ pytestmark = [
 PAGE = Path(__file__).parents[1] / "scripts" / "login-viewer.html"
 ORIGIN = "http://127.0.0.1:6080"
 URL = f"{ORIGIN}/login.html#token=abc_123-XYZ"
-#: The modifier that makes the browser paste on this platform.
-PASTE = "Meta" if sys.platform == "darwin" else "Control"
+#: The modifier that makes the browser paste on this platform, and the other one.
+PASTE, OTHER = ("Meta", "Control") if sys.platform == "darwin" else ("Control", "Meta")
 
 RFB_STAND_IN = """
 export default class RFB extends EventTarget {
     constructor(target, url) {
         super();
-        window.viewer = { url, scaleViewport: null, sent: [], forwarded: [] };
+        window.viewer = { rfb: this, url, scaleViewport: null, sent: [], forwarded: [] };
         const canvas = document.createElement('canvas');
         canvas.tabIndex = -1;
         target.append(canvas);
@@ -109,7 +109,10 @@ async def sent(page: Any) -> list[list[Any]]:
 
 
 async def test_the_page_connects_to_the_token_websocket_and_scales(viewer):
-    state = await viewer.evaluate("window.viewer", isolated_context=False)
+    state = await viewer.evaluate(
+        "({ url: window.viewer.url, scaleViewport: window.viewer.scaleViewport })",
+        isolated_context=False,
+    )
 
     assert state["url"] == "ws://127.0.0.1:6080/websockify?token=abc_123-XYZ"
     assert state["scaleViewport"] is True
@@ -149,3 +152,82 @@ async def test_a_plain_v_still_reaches_the_screen(viewer):
     forwarded = await viewer.evaluate("window.viewer.forwarded", isolated_context=False)
     assert forwarded == ["keydown KeyV", "keyup KeyV"]
     assert await sent(viewer) == []
+
+
+async def test_each_paste_under_one_held_modifier_is_typed(viewer):
+    await copy(viewer, "ab")
+
+    await viewer.keyboard.down(PASTE)
+    await viewer.keyboard.press("KeyV")
+    await viewer.keyboard.press("KeyV")
+    await viewer.keyboard.up(PASTE)
+
+    assert await sent(viewer) == [[ord(char), None, None] for char in "abab"]
+
+
+async def test_a_v_still_repeating_after_the_modifier_is_released_stays_hidden(viewer):
+    await copy(viewer, "x")
+
+    await viewer.keyboard.down(PASTE)
+    await viewer.keyboard.down("KeyV")
+    await viewer.keyboard.up(PASTE)
+    await viewer.keyboard.down("KeyV")
+    await viewer.keyboard.up("KeyV")
+
+    forwarded = await viewer.evaluate("window.viewer.forwarded", isolated_context=False)
+    assert [key for key in forwarded if key.endswith("KeyV")] == []
+    assert await sent(viewer) == [[ord("x"), None, None]]
+
+
+async def test_a_release_away_from_the_screen_cancels_the_paste(viewer):
+    """noVNC never sees that release, so its modifier is still down remotely."""
+    await copy(viewer, "x")
+
+    await viewer.keyboard.down(PASTE)
+    await viewer.keyboard.press("KeyV")
+    await viewer.click("#status")
+    await viewer.keyboard.up(PASTE)
+
+    assert await sent(viewer) == []
+    status = await viewer.text_content("#status")
+    assert status is not None and status.startswith("Paste cancelled")
+
+
+async def test_a_paste_without_the_shortcut_is_never_typed(viewer):
+    """A menu paste has no shortcut, so a later unrelated key must not send it."""
+    await viewer.evaluate(
+        """() => {
+            const data = new DataTransfer();
+            data.setData('text/plain', 'secret');
+            document.querySelector('canvas').dispatchEvent(
+                new ClipboardEvent('paste', { clipboardData: data, bubbles: true }));
+        }"""
+    )
+
+    await viewer.keyboard.press("KeyA")
+    await copy(viewer, "x")
+    await viewer.keyboard.press(f"{PASTE}+KeyV")
+
+    assert await sent(viewer) == [[ord("x"), None, None]]
+
+
+async def test_v_with_the_other_modifier_reaches_the_screen(viewer):
+    await viewer.keyboard.press(f"{OTHER}+KeyV")
+
+    forwarded = await viewer.evaluate("window.viewer.forwarded", isolated_context=False)
+    assert "keydown KeyV" in forwarded
+    assert "keyup KeyV" in forwarded
+
+
+async def test_a_paste_while_disconnected_is_not_typed(viewer):
+    await viewer.evaluate(
+        """window.viewer.rfb.dispatchEvent(
+            new CustomEvent('disconnect', { detail: { clean: false } }))""",
+        isolated_context=False,
+    )
+    await copy(viewer, "x")
+
+    await viewer.keyboard.press(f"{PASTE}+KeyV")
+
+    assert await sent(viewer) == []
+    assert await viewer.text_content("#status") == "Connection lost."

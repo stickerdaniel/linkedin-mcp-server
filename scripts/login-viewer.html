@@ -29,46 +29,76 @@
             ?? (char >= ' ' && char <= '~' ? char.charCodeAt(0) : null);
 
         const status = text => { document.getElementById('status').textContent = text; };
+        const screen = document.getElementById('screen');
         const token = new URLSearchParams(location.hash.slice(1)).get('token') ?? '';
         const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
         const rfb = new RFB(
-            document.getElementById('screen'),
+            screen,
             `${scheme}://${location.host}/websockify?token=${encodeURIComponent(token)}`,
         );
+        let connected = false;
         rfb.scaleViewport = true;
-        rfb.addEventListener('connect', () => status(CONNECTED));
-        rfb.addEventListener('disconnect', e => status(e.detail.clean ? 'Disconnected.' : 'Connection lost.'));
+        rfb.addEventListener('connect', () => {
+            connected = true;
+            status(CONNECTED);
+        });
+        rfb.addEventListener('disconnect', e => {
+            connected = false;
+            status(e.detail.clean ? 'Disconnected.' : 'Connection lost.');
+        });
 
         // noVNC sends a paste shortcut on as two keys and cancels the
-        // browser's paste, so the local clipboard never arrives. Keep the V
-        // from noVNC, take the text from the browser's own paste, and type it
-        // once every modifier is up: then nothing is held on the remote side,
-        // including the Ctrl that noVNC delays on Windows to detect AltGr.
-        // Typing rather than setting the server's clipboard, because x11vnc
-        // claims the X selection only for the first text it receives, and
-        // the login browser keeps pasting that one.
-        let pending = null;
-        let heldV = false;
-        const isPasteKey = e => e.code === 'KeyV' && (e.ctrlKey || e.metaKey) && !e.altKey;
+        // browser's paste, so the local clipboard never arrives. Hide the V
+        // from noVNC, collect what the browser pastes while the shortcut is
+        // held, and type it once every modifier is up: then nothing is held
+        // on the remote side, including the Ctrl that noVNC delays on
+        // Windows to detect AltGr. Typing rather than setting the server's
+        // clipboard, because x11vnc claims the X selection only for the
+        // first text it receives, and the login browser keeps pasting that.
+        //
+        // The release of a modifier is what ends the shortcut, never the
+        // release of V: a Mac browser often reports no V release while Cmd
+        // is down.
+        const APPLE = /mac|iphone|ipad|ipod/i.test(navigator.platform);
+        const isPasteKey = e => (APPLE ? e.metaKey : e.ctrlKey) && !e.altKey;
         const modifierHeld = e => e.ctrlKey || e.metaKey || e.altKey || e.shiftKey;
+        let shortcut = false; // a paste shortcut is down
+        let hiddenV = false; // noVNC never saw this V go down, so it must not see it go up
+        let pasted = [];
 
         window.addEventListener('keydown', e => {
-            if (!isPasteKey(e)) return;
-            heldV = true;
+            if (e.code !== 'KeyV') return;
+            if (isPasteKey(e)) {
+                shortcut = true;
+            } else if (!(hiddenV && e.repeat)) {
+                hiddenV = false;
+                return;
+            }
+            hiddenV = true;
             e.stopImmediatePropagation();
         }, true);
         window.addEventListener('paste', e => {
             e.preventDefault();
-            pending = (e.clipboardData?.getData('text/plain') ?? '').replace(/\r\n?/g, '\n');
+            if (shortcut && connected) {
+                pasted.push((e.clipboardData?.getData('text/plain') ?? '').replace(/\r\n?/g, '\n'));
+            }
         }, true);
         window.addEventListener('keyup', e => {
-            if (e.code === 'KeyV' && heldV) {
-                heldV = false;
+            if (e.code === 'KeyV' && hiddenV) {
+                hiddenV = false;
                 e.stopImmediatePropagation();
             }
-            if (pending === null || modifierHeld(e)) return;
-            const keysyms = Array.from(pending, keysymOf);
-            pending = null;
+            if (!shortcut || modifierHeld(e)) return;
+            const keysyms = Array.from(pasted.join(''), keysymOf);
+            shortcut = false;
+            pasted = [];
+            if (keysyms.length === 0) return;
+            // noVNC listens on its own canvas: a release elsewhere never
+            // reached it, so a modifier may still be down on the remote side.
+            if (!screen.contains(e.target)) {
+                status('Paste cancelled. Click into the login browser and paste again.');
+                return;
+            }
             // Half a password is worse than none: type all of it or nothing.
             if (keysyms.length > MAX_PASTE || keysyms.includes(null)) {
                 status(`Only plain ASCII text up to ${MAX_PASTE} characters can be pasted. Type this one by hand.`);
@@ -79,8 +109,9 @@
             setTimeout(() => keysyms.forEach(keysym => rfb.sendKey(keysym, null)));
         }, true);
         window.addEventListener('blur', () => {
-            pending = null;
-            heldV = false;
+            shortcut = false;
+            hiddenV = false;
+            pasted = [];
         });
     </script>
 </head>
