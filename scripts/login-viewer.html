@@ -75,14 +75,17 @@
         let pasted = [];
 
         window.addEventListener('keydown', e => {
-            if (isPasteKey(e) && isV(e)) {
-                shortcut = true;
-            } else if (e.code !== hiddenCode) {
-                return;
-            } else if (!e.repeat) {
-                hiddenCode = null;
+            // A repeat goes wherever the first press went, whatever the
+            // modifiers are by now.
+            if (e.repeat) {
+                if (e.code === hiddenCode) e.stopImmediatePropagation();
                 return;
             }
+            if (!(isPasteKey(e) && isV(e))) {
+                if (e.code === hiddenCode) hiddenCode = null;
+                return;
+            }
+            shortcut = true;
             hiddenCode = e.code;
             e.stopImmediatePropagation();
         }, true);

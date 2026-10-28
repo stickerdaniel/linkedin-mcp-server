@@ -307,3 +307,18 @@ async def test_a_paste_is_typed_whole_up_to_1000_characters(viewer, length, type
     status = await viewer.text_content("#status")
     assert status is not None
     assert status.startswith("Only plain ASCII") is not typed
+
+
+async def test_a_v_held_before_the_modifier_stays_with_the_screen(viewer):
+    """noVNC saw this V go down, so it must also see it go up."""
+    await copy(viewer, "x")
+
+    await viewer.keyboard.down("KeyV")
+    await viewer.keyboard.down(PASTE)
+    await viewer.keyboard.down("KeyV")
+    await viewer.keyboard.up("KeyV")
+    await viewer.keyboard.up(PASTE)
+
+    forwarded = await viewer.evaluate("window.viewer.forwarded", isolated_context=False)
+    assert "keyup KeyV" in forwarded
+    assert await sent(viewer) == []
