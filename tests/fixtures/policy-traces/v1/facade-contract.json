@@ -161,6 +161,31 @@
           "type": "object"
         }
       },
+      "get_cadenza_info": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "description": "unsupported_request: the user asked for one of the listed capabilities. setup_blocked: local browser setup keeps failing.",
+              "enum": [
+                "unsupported_request",
+                "setup_blocked"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        }
+      },
       "get_company_employees": {
         "input": {
           "additionalProperties": false,

@@ -30,6 +30,7 @@ from fastmcp.tools import ToolResult
 from packaging.version import InvalidVersion, Version
 
 from linkedin_mcp_server import __version__
+from linkedin_mcp_server.tools.cadenza import CADENZA_TOOL_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +250,10 @@ class UpdateNoticeMiddleware(Middleware):
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
+        # The information tool stays offline and returns only its fixed text;
+        # leave both the update check and its notice for a browser tool.
+        if context.message.name == CADENZA_TOOL_NAME:
+            return await call_next(context)
         if not self._kicked:
             self._kicked = True
             # Seed from a fresh cache synchronously so even a single fast call can

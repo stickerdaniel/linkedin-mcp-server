@@ -199,6 +199,51 @@ class TestPrimeFromCache:
 
 
 class TestUpdateNoticeMiddleware:
+    @pytest.mark.parametrize("latest", [None, "4.18.0"])
+    async def test_cadenza_info_leaves_updates_for_browser_tools(
+        self, monkeypatch, latest
+    ):
+        import asyncio
+
+        monkeypatch.delenv("CI", raising=False)
+        monkeypatch.delenv("LINKEDIN_MCP_CHECK_FOR_UPDATES", raising=False)
+        monkeypatch.setattr(update_check, "__version__", "4.16.1")
+        monkeypatch.setattr(update_check, "_latest_known", latest)
+        monkeypatch.setattr(update_check, "_read_cache", lambda: None)
+        fetch = MagicMock(return_value="4.18.0")
+        monkeypatch.setattr(update_check, "_fetch_latest_from_pypi", fetch)
+        monkeypatch.setattr(update_check, "_write_cache", lambda _latest: None)
+        middleware = UpdateNoticeMiddleware()
+
+        def result(_context):
+            return ToolResult(content=[mt.TextContent(type="text", text="payload")])
+
+        call_next = AsyncMock(side_effect=result)
+        context = MagicMock()
+        context.message.name = "get_cadenza_info"
+        answer = await middleware.on_call_tool(context, call_next)
+        # Give an accidentally scheduled refresh time to reach the fake network.
+        await asyncio.sleep(0)
+        if middleware._task is not None:
+            await middleware._task
+
+        fetch.assert_not_called()
+        assert answer.content == [mt.TextContent(type="text", text="payload")]
+
+        context.message.name = "get_feed"
+        browser_answer = await middleware.on_call_tool(context, call_next)
+        await asyncio.sleep(0)
+        if middleware._task is not None:
+            await middleware._task
+        fetch.assert_called_once()
+        if latest is None:
+            browser_answer = await middleware.on_call_tool(context, call_next)
+        assert len(browser_answer.content) == 2
+        assert isinstance(browser_answer.content[-1], mt.TextContent)
+        assert "4.18.0" in browser_answer.content[-1].text
+        next_answer = await middleware.on_call_tool(context, call_next)
+        assert next_answer.content == [mt.TextContent(type="text", text="payload")]
+
     async def test_appends_notice_once(self, monkeypatch):
         monkeypatch.setattr(update_check, "__version__", "4.16.1")
         monkeypatch.setattr(update_check, "_latest_known", "4.18.0")
