@@ -12,9 +12,7 @@ from fastmcp import Context, FastMCP
 from pydantic import Field
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
-from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
-from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.dependencies import get_ready_extractor, tool_errors
 from linkedin_mcp_server.linkedin.identifiers import normalize_job_id
 from linkedin_mcp_server.linkedin.job_policy import JobsTrackerStage
 
@@ -32,6 +30,7 @@ def register_job_tools(
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job"},
     )
+    @tool_errors
     async def get_job_details(
         job_id: str,
         ctx: Context,
@@ -55,28 +54,19 @@ def register_job_tools(
             apply: {type: "applied" | "closed"}; no apply key means neither
             was read, not that the posting is open.
         """
-        try:
-            job_id = normalize_job_id(job_id)
-            extractor = await get_ready_extractor(ctx, tool_name="get_job_details")
-            logger.info("Reading job: %s", job_id)
+        job_id = normalize_job_id(job_id)
+        extractor = await get_ready_extractor(ctx, tool_name="get_job_details")
+        logger.info("Reading job: %s", job_id)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Reading the job posting"
-            )
+        await ctx.report_progress(
+            progress=0, total=100, message="Reading the job posting"
+        )
 
-            result = await extractor.read_job(job_id)
+        result = await extractor.read_job(job_id)
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "get_job_details")
-        except Exception as e:
-            raise_tool_error(e, "get_job_details")  # NoReturn
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
@@ -84,6 +74,7 @@ def register_job_tools(
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job"},
     )
+    @tool_errors
     async def get_job_apply_url(
         job_id: str,
         ctx: Context,
@@ -104,28 +95,17 @@ def register_job_tools(
             it is not opened, so a short link is returned unexpanded.
             A posting that could not be read returns section_errors instead.
         """
-        try:
-            job_id = normalize_job_id(job_id)
-            extractor = await get_ready_extractor(ctx, tool_name="get_job_apply_url")
-            logger.info("Reading apply link: %s", job_id)
+        job_id = normalize_job_id(job_id)
+        extractor = await get_ready_extractor(ctx, tool_name="get_job_apply_url")
+        logger.info("Reading apply link: %s", job_id)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Opening job posting"
-            )
+        await ctx.report_progress(progress=0, total=100, message="Opening job posting")
 
-            result = await extractor.get_job_apply_url(job_id)
+        result = await extractor.get_job_apply_url(job_id)
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "get_job_apply_url")
-        except Exception as e:
-            raise_tool_error(e, "get_job_apply_url")  # NoReturn
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
@@ -133,6 +113,7 @@ def register_job_tools(
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "search"},
     )
+    @tool_errors
     async def search_jobs(
         keywords: str,
         ctx: Context,
@@ -150,17 +131,25 @@ def register_job_tools(
 
         Returns job_ids that can be passed to get_job_details for full info.
 
+        LinkedIn is moving accounts to a redesigned job search, which keeps
+        only the keywords, date_posted and paging. It drops the filters
+        marked "Classic search only" and reports them in section_errors as
+        filters_dropped. When it drops the location or work type, search again
+        with them in the keywords ("remote python developer in Lyon") and keep
+        doing so; words such as "senior" or "internship" there narrow the
+        results too. Quotes do not make a phrase exact on that search.
+
         Args:
             keywords: Search keywords (e.g., "software engineer", "data scientist")
             ctx: FastMCP context for progress reporting
-            location: Optional location filter (e.g., "San Francisco", "Remote")
+            location: Optional location filter (e.g., "San Francisco", "Remote"). Classic search only.
             max_pages: Maximum number of result pages to load (1-10, default 3)
             date_posted: Filter by posting date (past_hour, past_24_hours, past_week, past_month)
-            job_type: Filter by job type, comma-separated (full_time, part_time, contract, temporary, volunteer, internship, other)
-            experience_level: Filter by experience level, comma-separated (internship, entry, associate, mid_senior, director, executive)
-            work_type: Filter by work type, comma-separated (on_site, remote, hybrid)
-            easy_apply: Only show Easy Apply jobs (default false)
-            sort_by: Sort results (date, relevance)
+            job_type: Filter by job type, comma-separated (full_time, part_time, contract, temporary, volunteer, internship, other). Classic search only.
+            experience_level: Filter by experience level, comma-separated (internship, entry, associate, mid_senior, director, executive). Classic search only.
+            work_type: Filter by work type, comma-separated (on_site, remote, hybrid). Classic search only.
+            easy_apply: Only show Easy Apply jobs (default false). Classic search only.
+            sort_by: Sort results (date, relevance). Classic search only.
 
         Returns:
             Dict with url, sections (name -> raw text), job_ids (list of
@@ -178,50 +167,39 @@ def register_job_tools(
             no_new_ids (a page repeated earlier results). It is absent when a
             failure stopped the search, which section_errors then explains.
         """
-        try:
-            # Before the browser, because FastMCP is already timing this call
-            # and the extractor's budget is a fraction of the same figure. A
-            # cold start that spends three of ten seconds left it planning
-            # against eight it no longer had, and the call was cancelled with
-            # every page it had gathered.
-            started = time.monotonic()
-            extractor = await get_ready_extractor(ctx, tool_name="search_jobs")
-            logger.info(
-                "Searching jobs: keywords='%s', location='%s', max_pages=%d",
-                keywords,
-                location,
-                max_pages,
-            )
+        # Before the browser, because FastMCP is already timing this call
+        # and the extractor's budget is a fraction of the same figure. A
+        # cold start that spends three of ten seconds left it planning
+        # against eight it no longer had, and the call was cancelled with
+        # every page it had gathered.
+        started = time.monotonic()
+        extractor = await get_ready_extractor(ctx, tool_name="search_jobs")
+        logger.info(
+            "Searching jobs: keywords='%s', location='%s', max_pages=%d",
+            keywords,
+            location,
+            max_pages,
+        )
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Starting job search"
-            )
+        await ctx.report_progress(progress=0, total=100, message="Starting job search")
 
-            result = await extractor.search_jobs(
-                keywords,
-                location=location,
-                max_pages=max_pages,
-                date_posted=date_posted,
-                job_type=job_type,
-                experience_level=experience_level,
-                work_type=work_type,
-                easy_apply=easy_apply,
-                sort_by=sort_by,
-                # What is left of the figure FastMCP cancels this call on.
-                tool_timeout=max(0.0, tool_timeout - (time.monotonic() - started)),
-            )
+        result = await extractor.search_jobs(
+            keywords,
+            location=location,
+            max_pages=max_pages,
+            date_posted=date_posted,
+            job_type=job_type,
+            experience_level=experience_level,
+            work_type=work_type,
+            easy_apply=easy_apply,
+            sort_by=sort_by,
+            # What is left of the figure FastMCP cancels this call on.
+            tool_timeout=max(0.0, tool_timeout - (time.monotonic() - started)),
+        )
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "search_jobs")
-        except Exception as e:
-            raise_tool_error(e, "search_jobs")  # NoReturn
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
@@ -229,6 +207,7 @@ def register_job_tools(
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job"},
     )
+    @tool_errors
     async def get_saved_jobs(
         ctx: Context,
         max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
@@ -250,24 +229,13 @@ def register_job_tools(
             Dict with url, sections (name -> raw text), job_ids (list of
             numeric job ID strings usable with get_job_details), and optional references.
         """
-        try:
-            extractor = await get_ready_extractor(ctx, tool_name="get_saved_jobs")
-            logger.info("Fetching %s jobs (max_pages=%d)", stage, max_pages)
+        extractor = await get_ready_extractor(ctx, tool_name="get_saved_jobs")
+        logger.info("Fetching %s jobs (max_pages=%d)", stage, max_pages)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Loading saved jobs"
-            )
+        await ctx.report_progress(progress=0, total=100, message="Loading saved jobs")
 
-            result = await extractor.get_saved_jobs(max_pages=max_pages, stage=stage)
+        result = await extractor.get_saved_jobs(max_pages=max_pages, stage=stage)
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "get_saved_jobs")
-        except Exception as e:
-            raise_tool_error(e, "get_saved_jobs")  # NoReturn
+        return result

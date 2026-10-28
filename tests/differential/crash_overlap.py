@@ -39,7 +39,8 @@ samples is in neither, a known limit. A lease seen free is never an O1
 finding by itself; it is reported as a number. The comparison
 (``o1_findings``) is the contract's O1:
 an overlap in K3 that K1 does not show, the watcher's second root included
-(``lane_failures``). K2 is not applicable.
+(``lane_failures``). K0 runs K3 again and must reach its verdict
+(``repeat_findings``). K2 is not applicable.
 """
 
 from __future__ import annotations
@@ -661,6 +662,16 @@ def o1_findings(direct: Reading | None, daemon: Reading | None) -> list[str]:
             f"O1: the successor owner's browser ran beside the killed owner's "
             f"{list(daemon.overlapping)}, which the frozen Direct server's did not"
         ]
+    return []
+
+
+def repeat_findings(candidate: Reading | None, repeat: Reading | None) -> list[str]:
+    """K0 against K3: the same verdict. The milliseconds are a race's and
+    differ between two healthy runs, so they are reported, never compared."""
+    if candidate is None or repeat is None:
+        return ["K3 and K0 must both have been read in this process first"]
+    if repeat.verdict != candidate.verdict:
+        return [f"K3 read {candidate.verdict}, its repeat {repeat.verdict}"]
     return []
 
 

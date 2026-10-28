@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
-import functools
 import json
 import os
 import socket
@@ -591,9 +590,18 @@ _K3_FAULTS = {
 
 
 async def _k3(
-    row, monkeypatch, tmp_path, *, fault=None, stood=None, native=None, extra=()
+    row,
+    monkeypatch,
+    tmp_path,
+    *,
+    fault=None,
+    stood=None,
+    native=None,
+    extra=(),
+    experiment="K3",
 ):
-    """K3 through the real entry, whole unless *fault* names one piece.
+    """K3 through the real entry, whole unless *fault* names one piece; K0 is
+    the same row under its own label.
 
     The owner that closes (42) reaches the planted failure about installer 700
     inside its close and reaches core.close's consumption of the drain's
@@ -733,7 +741,7 @@ async def _k3(
         summary=summary,
         observed=records,
         job_query_shim=shim,
-        experiment="K3",
+        experiment=experiment,
     )
     return result
 
@@ -1276,8 +1284,8 @@ async def test_failed_private_setup_closes_the_listener_and_removes_its_links(
 
 @pytest.fixture
 def cells(row, monkeypatch, tmp_path):
-    """K1, K2 and K3 as three real rows of one run, K1 and K2 importing the
-    pinned baseline's process_tree and K3 this checkout's."""
+    """K1, K2, K3 and K0 as four real rows of one run, K1 and K2 importing the
+    pinned baseline's process_tree and K3 and K0 this checkout's."""
     import asyncio
 
     baseline = _baseline_module(tmp_path)
@@ -1286,7 +1294,8 @@ def cells(row, monkeypatch, tmp_path):
         k1 = await _k1(row, monkeypatch, tmp_path, module=baseline)
         k2 = await _k2(row, monkeypatch, tmp_path, module=baseline)
         k3 = await _k3(row, monkeypatch, tmp_path)
-        return k1.continuation, k2.continuation, k3.continuation
+        k0 = await _k3(row, monkeypatch, tmp_path, experiment="K0")
+        return k1.continuation, k2.continuation, k3.continuation, k0.continuation
 
     return asyncio.run(run())
 
@@ -1301,7 +1310,7 @@ def model():
     )
 
 
-_REVISIONS = {"K1": _HEAD, "K2": _HEAD, "K3": _HEAD}
+_REVISIONS = {"K1": _HEAD, "K2": _HEAD, "K3": _HEAD, "K0": _HEAD}
 
 
 def _ledger(*continuations, run="gate") -> harness.R11Ledger:
@@ -1318,10 +1327,10 @@ def test_the_composition_holds_for_a_calibrated_whole_run(cells, model):
 async def test_unreadable_restoration_cannot_pass_a_calibrated_composition(
     cells, model, row, monkeypatch, tmp_path
 ):
-    k1, k2, _ = cells
+    k1, k2, _, k0 = cells
     result = await _k3(row, monkeypatch, tmp_path, fault="unreadable-directory")
     problems = harness.r11_composition(
-        model, _ledger(k1, k2, result.continuation), revisions=_REVISIONS
+        model, _ledger(k1, k2, result.continuation, k0), revisions=_REVISIONS
     )
     assert any("profile/blocked could not be compared" in p for p in problems)
 
@@ -1341,11 +1350,11 @@ async def test_a_k3_cell_missing_its_own_continuation_cannot_be_composed(
     cells, model, row, monkeypatch, tmp_path, fault
 ):
     # From the producer, through the row and the cell's gate, to the
-    # composition with a fresh calibration and valid K1 and K2 cells.
-    k1, k2, _ = cells
+    # composition with a fresh calibration and valid K1, K2 and K0 cells.
+    k1, k2, _, k0 = cells
     result = await _k3(row, monkeypatch, tmp_path, fault=fault)
     problems = harness.r11_composition(
-        model, _ledger(k1, k2, result.continuation), revisions=_REVISIONS
+        model, _ledger(k1, k2, result.continuation, k0), revisions=_REVISIONS
     )
     assert any(
         problem.startswith("K3: ") and _K3_FAULTS[fault] in problem
@@ -1361,34 +1370,41 @@ def test_the_composition_needs_a_calibration_from_this_invocation(cells, model):
     assert problems == ["source model: unknown, candidate: ended 700"]
 
 
-@pytest.mark.parametrize("missing", ["K1", "K2", "K3"])
+@pytest.mark.parametrize("missing", ["K1", "K2", "K3", "K0"])
 def test_the_composition_needs_every_native_cell(cells, model, missing):
-    # K1 and K3 selected without K2 compose nothing, nor does any other pair.
+    # K1 and K3 selected without K2 compose nothing, nor does any other
+    # selection short of all four.
     present = [c for c in cells if c.experiment != missing]
     problems = harness.r11_composition(model, _ledger(*present), revisions=_REVISIONS)
     assert f"{missing}: {missing} left no native continuation" in problems
 
 
 def test_a_valid_looking_cell_from_another_revision_or_run_fails(cells, model):
-    k1, k2, k3 = cells
+    k1, k2, k3, k0 = cells
     moved = dataclasses.replace(k3, revision="d" * 40)
     problems = harness.r11_composition(
-        model, _ledger(k1, k2, moved), revisions=_REVISIONS
+        model, _ledger(k1, k2, moved, k0), revisions=_REVISIONS
     )
     assert any(p.startswith("K3: the actors ran dddd") for p in problems), problems
     problems = harness.r11_composition(
         model, _ledger(*cells, run="another"), revisions=_REVISIONS
     )
-    assert sum("from run gate, not another" in p for p in problems) == 3
+    assert sum("from run gate, not another" in p for p in problems) == 4
 
 
 def test_a_cell_that_ran_other_code_than_the_model_fails(cells, model):
-    k1, k2, k3 = cells
+    k1, k2, k3, k0 = cells
     swapped = dataclasses.replace(k3, process_tree_sha256=k1.process_tree_sha256)
     problems = harness.r11_composition(
-        model, _ledger(k1, k2, swapped), revisions=_REVISIONS
+        model, _ledger(k1, k2, swapped, k0), revisions=_REVISIONS
     )
     assert any(p.startswith("K3: the actors imported process_tree") for p in problems)
+    # K0 repeats the candidate, so the baseline's process_tree is not its own.
+    swapped = dataclasses.replace(k0, process_tree_sha256=k1.process_tree_sha256)
+    problems = harness.r11_composition(
+        model, _ledger(k1, k2, k3, swapped), revisions=_REVISIONS
+    )
+    assert any(p.startswith("K0: the actors imported process_tree") for p in problems)
 
 
 def test_an_invocation_takes_each_cell_once(cells, model):
@@ -1397,7 +1413,7 @@ def test_an_invocation_takes_each_cell_once(cells, model):
     # Emptied by the composition: nothing is left over for a later one.
     again = harness.r11_composition(model, ledger, revisions=_REVISIONS)
     assert {p for p in again if "left no native continuation" in p} == {
-        f"{k}: {k} left no native continuation" for k in ("K1", "K2", "K3")
+        f"{k}: {k} left no native continuation" for k in ("K1", "K2", "K3", "K0")
     }
     doubled = harness.r11_composition(
         model, _ledger(*cells, cells[2]), revisions=_REVISIONS
@@ -1406,15 +1422,47 @@ def test_an_invocation_takes_each_cell_once(cells, model):
 
 
 def test_k3_worse_than_k1_fails_the_composition(cells, model):
-    k1, k2, k3 = cells
+    k1, k2, k3, k0 = cells
     assert k3.vector is not None
     worse = dataclasses.replace(
         k3, vector=dataclasses.replace(k3.vector, o4_session="lost")
     )
     problems = harness.r11_composition(
-        model, _ledger(k1, k2, worse), revisions=_REVISIONS
+        model, _ledger(k1, k2, worse, k0), revisions=_REVISIONS
     )
     assert any(p.startswith("K3 differs from K1 frozen: o4_session") for p in problems)
+
+
+def test_a_repeat_that_reads_unlike_k3_fails_the_composition(cells, model):
+    # Valid through K3's own gate, and still not the same reading.
+    k1, k2, k3, k0 = cells
+    assert k0.vector is not None
+    unlike = dataclasses.replace(
+        k0, vector=dataclasses.replace(k0.vector, fell_back=True)
+    )
+    assert (
+        harness.continuation_problems(
+            unlike, experiment="K0", revision=_HEAD, run="gate"
+        )
+        == []
+    )
+    problems = harness.r11_composition(
+        model, _ledger(k1, k2, k3, unlike), revisions=_REVISIONS
+    )
+    assert problems == ["K0 differs from K3: fell_back: False then True"]
+    blind = dataclasses.replace(k0, vector=None)
+    problems = harness.r11_composition(
+        model, _ledger(k1, k2, k3, blind), revisions=_REVISIONS
+    )
+    assert problems == ["K3 or K0 left no vector to compare"]
+    # K0 is held to all of K3's gate, not only to K2's entry.
+    standing = dataclasses.replace(k0, stood_down=False)
+    assert any(
+        "held-profile stand-down" in p
+        for p in harness.continuation_problems(
+            standing, experiment="K0", revision=_HEAD, run="gate"
+        )
+    )
 
 
 async def test_a_settled_complete_census_starts_the_post_quit_session_once(row):
@@ -1615,21 +1663,78 @@ def test_a_zombie_leaves_the_census_only_once_the_whole_process_exited(
     tmp_path, monkeypatch, linux, threads, complete
 ):
     monkeypatch.setattr(harness, "process_user", lambda process: process.user)
-    monkeypatch.setattr(
-        harness,
-        "exited_zombie",
-        functools.partial(
-            harness.exited_zombie, linux=linux, threads_of=lambda _: threads
-        ),
-    )
     account = harness.ActorAccount(tmp_path / "auth" / "profile")
     census = harness.profile_census(
         account,
         process_iter=lambda *a, **k: [_process(6, cmdline=[], status="zombie")],
         user=ME,
+        linux=linux,
+        threads_of=lambda _: threads,
+        # The zombie is still listed, so only the count can settle it.
+        open_process=_looked_up(None),
     )
     assert census.complete is complete
     assert census.unresolved == ([] if complete else [6])
+
+
+def _looked_up(error: BaseException | None):
+    """``open_process`` that finds a process at any pid, or raises *error*."""
+
+    def open_process(pid: int) -> Any:
+        if error is not None:
+            raise error
+        return SimpleNamespace(pid=pid)
+
+    return open_process
+
+
+@pytest.mark.parametrize(
+    ("threads", "error", "lookup"),
+    [
+        pytest.param(None, psutil.NoSuchProcess(6), None, id="reaped-since-the-table"),
+        pytest.param(2, psutil.NoSuchProcess(6), None, id="ended-after-a-count"),
+        pytest.param(2, None, "present", id="leader-with-live-threads"),
+        # Possibly a later process at a reused pid; never told apart by start.
+        pytest.param(None, None, "present", id="count-denied-process-still-there"),
+        pytest.param(
+            None, psutil.ZombieProcess(6), "present", id="count-denied-still-a-zombie"
+        ),
+        pytest.param(
+            None,
+            psutil.AccessDenied(6),
+            "unknown: AccessDenied",
+            id="count-and-liveness-unreadable",
+        ),
+    ],
+)
+def test_a_linux_zombie_is_excluded_only_once_its_pid_is_gone(
+    tmp_path, monkeypatch, threads, error, lookup
+):
+    # The table listed a zombie; whatever the count says short of the dead
+    # leader alone, its pid is looked up again.
+    monkeypatch.setattr(harness, "process_user", lambda process: process.user)
+    account = harness.ActorAccount(tmp_path / "auth" / "profile")
+    census = harness.profile_census(
+        account,
+        process_iter=lambda *a, **k: [_process(6, cmdline=None, status="zombie")],
+        user=ME,
+        linux=True,
+        threads_of=lambda _: threads,
+        open_process=_looked_up(error),
+    )
+    if lookup is None:
+        assert census.complete and census.provenance == []
+    else:
+        assert census.unresolved == [6]
+        assert census.provenance == [
+            {
+                "pid": 6,
+                "phase": "zombie",
+                "status": psutil.STATUS_ZOMBIE,
+                "threads": threads,
+                "lookup": lookup,
+            }
+        ]
 
 
 def _status(pid: int, want: str, seconds: float = 10.0) -> bool:
@@ -1730,6 +1835,45 @@ def test_a_real_fully_exited_unreaped_child_leaves_the_census(tmp_path):
         census = harness.profile_census(account)
         assert child.pid not in census.unresolved
         assert child.pid not in census.pids
+    finally:
+        child.wait(timeout=10)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="psutil reports no zombie on Windows")
+def test_a_zombie_reaped_after_the_table_was_read_leaves_the_census(
+    tmp_path, monkeypatch
+):
+    # A possible cause of run 38600969897's unresolved pid: the table lists a
+    # browser's zombie, its parent reaps it, and the thread count, read only
+    # then, finds nothing at all. Judged as Linux judges a zombie, so the
+    # count is what is asked first.
+    account = harness.ActorAccount(tmp_path / "auth" / "profile")
+    child = subprocess.Popen(
+        [sys.executable, "-c", "pass", f"--user-data-dir={account.profile}"]
+    )
+    try:
+        assert _status(child.pid, psutil.STATUS_ZOMBIE), "it never became a zombie"
+        monkeypatch.setattr(
+            psutil, "process_iter", lambda: iter([psutil.Process(child.pid)])
+        )
+
+        def listed_then_reaped(attrs):
+            listed = list(harness.process_table(attrs))
+            assert [p.info["status"] for p in listed] == [psutil.STATUS_ZOMBIE]
+            child.wait(timeout=10)
+            return listed
+
+        counted: list[int | None] = []
+
+        def threads_of(process):
+            counted.append(harness.thread_count(process))
+            return counted[-1]
+
+        census = harness.profile_census(
+            account, process_iter=listed_then_reaped, linux=True, threads_of=threads_of
+        )
+        assert counted == [None], "the count was read before the reap"
+        assert census.complete and census.pids == []
     finally:
         child.wait(timeout=10)
 

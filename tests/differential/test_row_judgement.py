@@ -3,8 +3,9 @@
 The native row cannot run here, so these drive the functions it decides with:
 ``judge_row`` on observations that differ from a healthy row in one respect
 each, ``settle_owner`` and ``retire_daemon_state`` on a modelled process and
-descriptor, and the K0 test itself with its row replaced. Every family has a
-clean control, so a verdict that refuses everything cannot pass.
+descriptor, and the K0 tests of H-R1, H-R6 and H-R12 with their row replaced.
+Every family has a clean control, so a verdict that refuses everything cannot
+pass.
 """
 
 from __future__ import annotations
@@ -21,7 +22,9 @@ import pytest
 
 from differential import harness
 from differential.daemon_state import CANDIDATE_LAYOUT
+from differential import test_frozen_rows as frozen_rows
 from differential import test_host_quit_row as rows
+from differential import test_owner_killed_rows as owner_killed_rows
 from differential.harness import (
     GENERATION_CHANGED,
     GENERATION_REMOVED,
@@ -982,6 +985,83 @@ async def test_k0_fails_a_repeat_in_another_mode(profile, monkeypatch):
 def test_k0_without_a_valid_reference_fails(profile):
     vector = _valid_vector(profile)
     assert repeat_verdict(None, RowResult("K0", "daemon", vector=vector))
+
+
+def _killed_owner(vector):
+    """*vector* as H-R6's candidate reads on any platform: guardian told 0,
+    recovered, traced completely where Linux requires it."""
+    return dataclasses.replace(
+        vector,
+        guardian_owner_group=0,
+        recovered=True,
+        o2_required=True,
+        oracle_collection=harness.ORACLE_COMPLETE,
+    )
+
+
+#: The K0 cell of H-R6 and H-R12, with its row replaced: the module, the cell,
+#: K3's key there, and what makes a valid vector that row's.
+_REPEAT_CELLS = {
+    "H-R6": (
+        owner_killed_rows,
+        owner_killed_rows.test_the_candidate_owner_killed_repeats,
+        "K3",
+        _killed_owner,
+    ),
+    "H-R12": (
+        frozen_rows,
+        frozen_rows.test_the_candidate_with_a_custom_browser_repeats,
+        "H-R12 K3",
+        lambda vector: vector,
+    ),
+}
+
+
+@pytest.mark.parametrize("row", list(_REPEAT_CELLS))
+async def test_a_repeat_cell_fails_only_a_repeat_that_reads_unlike_k3(
+    profile, monkeypatch, row
+):
+    module, cell, key, shaped = _REPEAT_CELLS[row]
+    vector = shaped(_valid_vector(profile))
+    killed = {"exit": "killed"}
+
+    async def repeat(changed):
+        result = RowResult("K0", "daemon", vector=changed, killed=killed)
+
+        async def run(*args, **kwargs):
+            return result
+
+        monkeypatch.setattr(module, "_run", run)
+        monkeypatch.setitem(module._VECTORS, key, vector)
+        await cell(None, (None, None), None, monkeypatch)
+
+    await repeat(vector)
+    with pytest.raises(AssertionError, match="o4_session"):
+        await repeat(dataclasses.replace(vector, o4_session=LOST_SILENT))
+
+
+async def test_the_contended_repeat_fails_a_vector_unlike_k3(profile, monkeypatch):
+    """H-R6-contended's K0 with the same verdict as K3 (its own test judges
+    verdicts) still compares the vectors."""
+    from differential import test_crash_overlap_rows as contended
+
+    vector = _valid_vector(profile)
+    monkeypatch.setattr(contended, "_recorded", lambda result: None)
+    monkeypatch.setattr(contended, "repeat_findings", lambda candidate, repeat: [])
+    monkeypatch.setitem(contended._VECTORS, "K3", vector)
+
+    async def repeat(changed):
+        async def run(*args, **kwargs):
+            return RowResult("K0", "daemon", vector=changed)
+
+        monkeypatch.setattr(contended, "_run", run)
+        await contended.test_the_candidate_owner_killed_under_a_contender_repeats(
+            None, (None, None), None, monkeypatch
+        )
+
+    await repeat(vector)
+    with pytest.raises(AssertionError, match="o4_session"):
+        await repeat(dataclasses.replace(vector, o4_session=LOST_SILENT))
 
 
 # --- The e1cb census model, judged in full -------------------------------------------

@@ -1,6 +1,9 @@
 """Helpers used by MCP tools after bootstrap gating."""
 
+import functools
+import inspect
 import logging
+from collections.abc import Awaitable, Callable
 from typing import NoReturn
 
 from fastmcp import Context
@@ -77,11 +80,11 @@ async def handle_auth_error(
     *nothing_ran_yet* says whether the tool had done any work before the failure,
     which decides whether a client may safely run the call again after signing in.
     Only :func:`get_ready_extractor` can answer yes: boundary validation may run
-    first, but no tool work has started when it fails. The 18
-    catch sites in the tool bodies leave it at the default, because by then the
-    page read may be part done, and some of these tools send messages and connection
-    requests. A 19th added later is non-replayable until someone says otherwise,
-    which is the safe direction for a default to point.
+    first, but no tool work has started when it fails. :func:`tool_errors`, which
+    catches the failure everywhere else in a tool, leaves it at the default,
+    because by then the page read may be part done, and some tools send messages
+    and connection requests. A new caller is non-replayable until someone says
+    otherwise, which is the safe direction for a default to point.
     """
     if get_runtime_policy() == RuntimePolicy.DOCKER:
         raise DockerHostLoginRequiredError(
@@ -162,14 +165,43 @@ async def handle_auth_error(
     )  # always raises
 
 
+def tool_errors[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
+    """Shape a tool's failures for the client, and start a login on a dead session.
+
+    Applied under ``@mcp.tool``, and the failures are reported under
+    ``fn.__name__``. ``functools.wraps`` is what keeps the published schema the
+    body's own: FastMCP reads the signature, docstring and annotations through
+    ``__wrapped__``.
+    """
+    signature = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return await fn(*args, **kwargs)
+        except AuthenticationError as e:
+            # Bound rather than read from kwargs: FastMCP passes every argument
+            # by keyword, but a direct caller may pass ctx by position.
+            ctx = signature.bind_partial(*args, **kwargs).arguments.get("ctx")
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, wrapper.__name__)
+        except Exception as e:
+            raise_tool_error(e, wrapper.__name__)
+
+    return wrapper
+
+
 def _browser_is_unusable(browser: BrowserManager) -> bool:
     """Whether the cached browser is known to be dead, from local state alone.
 
-    Two signals, both already delivered by the driver: the active page closed, or
-    the browser it belongs to disconnected (Chromium exited while the Node driver
-    lived on). Neither costs a round trip. They miss a driver that died itself
-    and a renderer crash that leaves the page open; those still fail inside the
-    tool, as before. An event that has not arrived yet is caught by a later call.
+    Three signals, all already delivered by the driver: the active page closed,
+    its renderer crashed (the page stays open, so only the crash event says so),
+    or the browser it belongs to disconnected (Chromium exited while the Node
+    driver lived on). None costs a round trip. They miss a driver that died
+    itself; that still fails inside the tool, as before. An event that has not
+    arrived yet is caught by a later call.
 
     Only positive evidence counts. A missing browser handle or a property that
     raises says nothing about whether Chromium is gone, and closing a browser
@@ -178,7 +210,7 @@ def _browser_is_unusable(browser: BrowserManager) -> bool:
     try:
         # The page first: a closed page is enough, and the context read below
         # can raise once the manager has started tearing down.
-        if browser.page.is_closed():
+        if browser.page.is_closed() or browser.page_crashed:
             return True
         handle = browser.context.browser
         return handle is not None and not handle.is_connected()

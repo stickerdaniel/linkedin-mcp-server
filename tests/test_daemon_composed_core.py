@@ -42,8 +42,10 @@ It stops at a horizon no election or call can outlast, so a world still working
 there has failed to end. A tool body alone may run across ticks, which is how a
 drain reaches its cutoff with work running. A completion is: a descriptor read
 or pause; a probe (a live owner answers, a gone one refuses); COMMIT (it arrives
-and is reported sent); a verdict; a call reaching its owner; a body beginning or
-ending; an answer reaching its frontend; an owner's loop turn, which runs only
+and is reported sent, which makes the descriptor canonical); the published
+child's shell telling its owner the endpoint is live, a separate move so a call
+can reach a canonical owner that has not yet heard it; a verdict; a call
+reaching its owner; a body beginning or ending; an answer reaching its frontend; an owner's loop turn, which runs only
 when it can decide (after a turnover request, and when the drain is empty or
 past its cutoff); an owner's exit, once its loop chose ``Stop``; a call's
 expiry. A greeting, the hand-over, the prepared answer, the validation, the
@@ -73,7 +75,8 @@ no removal of a published generation, no repeated call.
    owner. Cannot see PIDs, process groups, guardians or Jobs.
 3. No mutation Direct refuses: a published generation is never discarded.
    Cannot see profile claims, files or Direct's own mutations.
-4. No silent session loss: no admission after retirement; a call that may have
+4. No silent session loss: no admission before the owner heard it was
+   published, nor after retirement; a call that may have
    acted is admitted again only if it is read-only or its owner said nothing
    ran; an owner says nothing ran only of a body that never began; a call whose
    body began is told "not sent" only after a read-only classification and
@@ -161,7 +164,10 @@ class _Proc:
     config: int = 1
     alive: bool = True
     holds_lock: bool = False
+    #: Its descriptor is canonical.
     published: bool = False
+    #: Its shell told the owner reducer so, which is what admission waits for.
+    live: bool = False
     #: The owner reducer, once the process serves.
     owner: lifecycle.Owner | None = None
     #: A turnover request reached it.
@@ -513,10 +519,17 @@ def _commit(world: _World, name: str, event: spawn.Event, arrives: bool) -> _Wor
 
 
 def _publish(world: _World, child: str) -> _World:
+    """The descriptor becomes canonical; the owner hears it on a later move."""
     owner, _ = _owner_on(lifecycle.Owner(), lifecycle.Named(child))
-    owner, _ = _owner_on(owner, lifecycle.Published(world.now))
     proc = replace(world.proc(child), published=True, owner=owner)
     return replace(world.with_proc(child, proc), canonical=child)
+
+
+def _go_live(world: _World, name: str) -> _World:
+    proc = world.proc(name)
+    assert proc.owner is not None
+    owner, _ = _owner_on(proc.owner, lifecycle.Published(world.now))
+    return world.with_proc(name, replace(proc, owner=owner, live=True))
 
 
 # --- Calls and owners -----------------------------------------------------------------
@@ -589,6 +602,7 @@ def _deliver(world: _World, name: str) -> _World:
         lost = calls.OwnerLost(op, world.now, owner, True, (owner, RETIRING))
         return _call_event(world, name, lost)
     assert isinstance(effect, lifecycle.StartTask)
+    _expect(proc.live, "admitted before publication")
     _expect(proc.holds_lock, "admitted without the lock")
     _expect(not proc.asked_to_go, "admitted after retirement")
     _expect(not (MUTATING[name] and run.exposed), "a mutation run again")
@@ -791,6 +805,8 @@ def _urgent(world: _World) -> _Moves:
             yield f"{name} exits", partial(_exit, world, name)
         if proc.ended_by is not None:
             continue
+        if proc.published and not proc.live:
+            yield f"{name} goes live", partial(_go_live, world, name)
         if (owner.turnover and owner.phase is lifecycle.Phase.SERVING) or (
             owner.phase is lifecycle.Phase.DRAINING
             and (not owner.calls or world.now >= (owner.drain_until or 0.0))
@@ -871,7 +887,7 @@ def _initial(resident: bool, g_build: int, g_config: int) -> _World:
     world = replace(
         world.with_front("f", _Front(build=1, attached=R)),
         calls=tuple(runs),
-        procs=((R, _Proc(1, holds_lock=True, published=True, owner=owner)),),
+        procs=((R, _Proc(1, holds_lock=True, published=True, live=True, owner=owner)),),
         lock=R,
         canonical=R,
         tasks=(_Task(R, 1, C1, op=1, began=True),),
@@ -1146,6 +1162,19 @@ def _admit_while_retiring(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(lifecycle, "_admit", admit)
 
 
+def _admit_before_published(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Admission that no longer waits for the endpoint to be published."""
+    real = lifecycle._admit
+
+    def admit(
+        owner: lifecycle.Owner, event: lifecycle.Admit
+    ) -> tuple[lifecycle.Owner, list[lifecycle.Effect]]:
+        after, effects = real(replace(owner, published=True), event)
+        return replace(after, published=owner.published), effects
+
+    monkeypatch.setattr(lifecycle, "_admit", admit)
+
+
 def _drain_without_cutoff(monkeypatch: pytest.MonkeyPatch) -> None:
     """A drain that waits for its calls however long they take."""
     real = lifecycle._drain
@@ -1217,6 +1246,7 @@ _BREAKS: list[tuple[_Break, str]] = [
     (_everyone_older, "turnover asked of an owner not older"),
     (_read_buried_as_usable, "attached to a non-owner"),
     (_admit_while_retiring, "admitted after retirement"),
+    (_admit_before_published, "admitted before publication"),
     (_drain_without_cutoff, "work that never ends"),
     (_stop_as_gone, "an owner asked to go never exited"),
     (_cut_as_not_run, "said nothing ran after it began"),

@@ -1,4 +1,4 @@
-"""Row H-R11, a failed Job-membership query at a routine close: K1, K2 and K3.
+"""Row H-R11, a failed Job-membership query at a routine close: K1, K2, K3, K0.
 
 Windows only. Each experiment's actors start from a venv of their own that
 adds one declared shim to the runtime's code (``job_query``): it fails
@@ -29,6 +29,8 @@ composes these, never adds them up.
 * **K3** (candidate, daemon): the same entry; then core.close logs consuming
   the drain's False, the owner stands down and exits, the family settles, and
   after the harness's restoration a successor serves the probe.
+* **K0** (candidate, daemon): K3 again, through K3's gate, and its vector
+  reading as K3's did in the composition.
 
 Native like the other rows: only where CI opted in after trusting the CA,
 never under xdist, in file order.
@@ -271,6 +273,35 @@ async def test_the_candidate_owner_stands_down_and_a_successor_serves(
     assert not problems, f"{problems}\n{result.report()}"
 
 
+@pytest.mark.differential_row(row=ROW_H_R11, experiment="K0", column="integrated")
+async def test_the_candidate_owner_stands_down_again(
+    candidate_shim,
+    isolate_profile_dir,
+    synthetic_egress,
+    differential_run,
+    ledger,
+    monkeypatch,
+):
+    result = await _run(
+        "K0",
+        daemon=True,
+        shim=candidate_shim,
+        reference="candidate daemon, failed Job query, repeated",
+        profile=isolate_profile_dir,
+        egress=synthetic_egress,
+        log=differential_run,
+        ledger=ledger,
+        monkeypatch=monkeypatch,
+    )
+    problems = result.failures + continuation_problems(
+        result.continuation,
+        experiment="K0",
+        revision=_candidate_revision(),
+        run=ledger.run,
+    )
+    assert not problems, f"{problems}\n{result.report()}"
+
+
 def test_the_failed_job_query_composes_from_this_invocation_only(ledger):
     # The source model runs here, in this process, on the pinned baseline's
     # and this checkout's process_tree; the composition then binds it to what
@@ -288,6 +319,7 @@ def test_the_failed_job_query_composes_from_this_invocation_only(ledger):
             "K1": BASELINE_SHA,
             "K2": BASELINE_SHA,
             "K3": _candidate_revision(),
+            "K0": _candidate_revision(),
         },
     )
     assert not problems, problems

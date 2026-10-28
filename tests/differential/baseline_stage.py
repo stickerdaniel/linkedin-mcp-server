@@ -28,7 +28,11 @@ from pathlib import Path
 sys.path[0] = str(Path(__file__).resolve().parents[1])
 
 from differential.first_navigation import observe_navigation  # noqa: E402
-from differential.session import StagingError, stage_installed_browser  # noqa: E402
+from differential.session import (  # noqa: E402
+    StagingError,
+    stage_installed_browser,
+    validate_past_a_stall,
+)
 from linkedin_mcp_server.drivers.browser import (  # noqa: E402
     get_profile_dir,
     validate_imported_cookies,
@@ -38,6 +42,14 @@ from linkedin_mcp_server.session_state import (  # noqa: E402
     portable_cookie_path,
     write_source_state,
 )
+
+#: How the baseline's validation reports the stall ``validate_past_a_stall``
+#: relaunches after. The baseline predates the request-timed budget (#1245):
+#: its ``goto`` runs out Patchright's own 30s from the call, in one wording
+#: whether the request left or not. Measured 2026-10-15 with Patchright
+#: 1.61.2: a request that left and got no answer reads exactly so. Here a
+#: staging answer slower than 30s is therefore relaunched too.
+BASELINE_STALL = "Page.goto: Timeout 30000ms exceeded."
 
 
 def main(profile: Path, diagnostics: Path | None = None) -> int:
@@ -52,7 +64,12 @@ def main(profile: Path, diagnostics: Path | None = None) -> int:
             )
         stage_installed_browser()
         if not asyncio.run(
-            validate_imported_cookies(portable_cookie_path(profile), profile)
+            validate_past_a_stall(
+                validate_imported_cookies,
+                portable_cookie_path(profile),
+                profile,
+                stall=BASELINE_STALL,
+            )
         ):
             raise StagingError(
                 "the baseline's own import validation rejected the synthetic session"

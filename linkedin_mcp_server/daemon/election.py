@@ -481,32 +481,23 @@ def _ask_to_stand_down(attachment: Attachment) -> None:
 def _reachable(attachment: Attachment, timeout: float) -> Reach:
     """What the published endpoint says when asked with this token.
 
-    An authenticated tool listing: a TCP connect succeeds against any listener
-    on a reused port, and protocol 2026-07-28 removed ping. A timeout is
-    ``SILENT``, kept apart from a refusal, because a stalled owner may answer a
-    moment later and must not be buried like a dead one.
+    The round trip the owner proved before publishing (``owner.prove_hop``): a
+    TCP connect succeeds against any listener on a reused port, and an owner
+    whose dependencies no longer serve the pinned version would answer an
+    unpinned probe and then fail every call. A timeout is ``SILENT``, kept
+    apart from a refusal, because a stalled owner may answer a moment later
+    and must not be buried like a dead one.
     """
     import asyncio
 
     async def ask() -> Reach:
-        from fastmcp import Client
-        from fastmcp.client.transports import StreamableHttpTransport
-
         try:
-            async with Client(
-                StreamableHttpTransport(
-                    attachment.descriptor.url,
-                    auth=attachment.token,
-                    # Never through a proxy: this is a loopback hop carrying the
-                    # token to a logged-in session. See ``direct_http_client``.
-                    httpx_client_factory=daemon_owner.direct_async_http_client,
-                )
-            ) as client:
-                await client.list_tools()
+            await daemon_owner.prove_hop(attachment.descriptor.url, attachment.token)
         except Exception:
             # Answered, and wrongly: a refused connection, a rejected token, a
-            # stranger on the port. All of them say this descriptor is not an
-            # owner to attach to, and saying so again would not change it.
+            # stranger on the port, an owner without the pinned version. All
+            # of them say this descriptor is not an owner to attach to, and
+            # saying so again would not change it.
             logger.debug("The published daemon did not answer", exc_info=True)
             return Reach.REFUSED
         return Reach.ANSWERED

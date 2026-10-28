@@ -64,8 +64,11 @@ def test_template_ends_with_editable_attribution_placeholder() -> None:
     lines = [
         line.strip() for line in _TEMPLATE.read_text().splitlines() if line.strip()
     ]
-    assert lines[-1] == "Generated with [model] for [job] in [tool] via [host]."
-    assert "name the model, the job, the tool, and the host" in lines[-2]
+    assert lines[-1] == "[job] with [model] ([effort]) in [tool] via [host]."
+    assert (
+        "name each job with its model and the model's reasoning effort, the tool, and the host"
+        in lines[-2]
+    )
     assert "end with a period" in lines[-2]
     assert "coding-agent runtime" in lines[-2]
     assert "in Claude Code via T3 Code" in lines[-2]

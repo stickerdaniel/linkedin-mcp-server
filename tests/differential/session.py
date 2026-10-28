@@ -61,14 +61,18 @@ waives an earlier loss.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
 import os
 import re
 import secrets
+import shutil
+import sys
+import tempfile
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -187,6 +191,18 @@ class StagingError(RuntimeError):
     """The synthetic session could not be established; the row cannot start."""
 
 
+#: Browsers the staging launches before it gives up on ones that stall.
+#: A fresh Windows browser has held its first ``/feed/`` request past the
+#: product's ``STARTUP_BUDGET_MS`` and then needed a kill to close. Why is not
+#: established, but it happens before the row starts and before any session is
+#: valid: so one more browser, on a fresh profile, after that stall only. A
+#: rejection, or any other failure, ends staging at once.
+STAGING_LAUNCHES = 2
+
+#: How ``core.proxy_errors`` reports a navigation whose request never left.
+NEVER_SENT = "before the request was sent"
+
+
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
@@ -276,10 +292,7 @@ async def stage_signed_in_session(
     staged session before the product validates it, so the origin can judge
     the staging requests too.
     """
-    from linkedin_mcp_server.drivers.browser import (
-        get_profile_dir,
-        validate_imported_cookies,
-    )
+    from linkedin_mcp_server.drivers.browser import get_profile_dir
 
     if canonical(get_profile_dir()) != canonical(profile):
         raise StagingError(
@@ -291,13 +304,86 @@ async def stage_signed_in_session(
     staged = write_synthetic_cookie_file(cookie_path)
     if accept is not None:
         accept(staged)
-    if not await validate_imported_cookies(cookie_path, profile):
+    from linkedin_mcp_server.drivers.browser import validate_imported_cookies
+
+    if not await validate_past_a_stall(validate_imported_cookies, cookie_path, profile):
         raise StagingError(
             "the product's own import validation rejected the synthetic "
             "session, so the synthetic /feed/ does not pass its auth check"
         )
     write_source_state(profile)
     return staged
+
+
+async def validate_past_a_stall(
+    validate: Callable[[Path, Path], Awaitable[bool]],
+    cookie_path: Path,
+    profile: Path,
+    *,
+    stall: str = NEVER_SENT,
+) -> bool:
+    """*validate*, again in a new browser on a fresh profile after a stall.
+
+    *validate* is the import validation of whichever code stages, and *stall*
+    the text its Patchright timeout carries for the stall; any other failure
+    is raised at once. No more than ``STAGING_LAUNCHES`` browsers launch.
+    Before the next, the profile and the cookie file are put back as the first
+    launch found them, as the product's own import does between candidates, so
+    no browser opens what a killed one left. A close the validation could not
+    confirm raises something else and ends here. The row's
+    ``first-navigation.json`` keeps every launch.
+    """
+    from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
+    with _as_first_found(profile, cookie_path) as reset:
+        launches = 0
+        while True:
+            launches += 1
+            try:
+                return await validate(cookie_path, profile)
+            except PlaywrightTimeoutError as exc:
+                if stall not in str(exc):
+                    raise
+                if launches >= STAGING_LAUNCHES:
+                    raise StagingError(
+                        f"all {launches} staging browsers stalled on /feed/: {exc}"
+                    ) from exc
+                print(
+                    f"staging: browser {launches} of {STAGING_LAUNCHES} stalled "
+                    f"on /feed/ ({exc}); launching another on a fresh profile",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                reset()
+
+
+@contextlib.contextmanager
+def _as_first_found(profile: Path, cookie_path: Path) -> Iterator[Callable[[], None]]:
+    """Keep *profile* and *cookie_path* as they are now; yield what puts them back.
+
+    The copy lives outside the auth root and goes when the block ends. A reset
+    that cannot remove what a browser left raises rather than half-reset.
+    """
+    cookies = cookie_path.read_text()
+    with tempfile.TemporaryDirectory(prefix="staging-profile-") as kept:
+        copy = Path(kept) / "profile"
+        if profile.exists():
+            shutil.copytree(profile, copy, symlinks=True)
+
+        def reset() -> None:
+            try:
+                if profile.exists():
+                    shutil.rmtree(profile)
+                if copy.exists():
+                    shutil.copytree(copy, profile, symlinks=True)
+                secure_write_text(cookie_path, cookies, mode=0o600)
+            except OSError as exc:
+                raise StagingError(
+                    f"the profile a stalled staging browser left could not be "
+                    f"reset: {exc}"
+                ) from exc
+
+        yield reset
 
 
 @dataclass(frozen=True)

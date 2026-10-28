@@ -32,6 +32,7 @@ on:
           - auth
           - eligibility
           - crash
+          - models
           - all
 
 # A later dispatch or a push does not cancel evidence that is already running.
@@ -66,7 +67,7 @@ jobs:
     # The camelCase read shims off, for the reason given at `windows-daemon`.
     env:
       FASTMCP_MCP_CAMELCASE_COMPAT: "false"
-    # Eight groups of rows per leg, so no job's bound comes near the hosted
+    # Ten groups of rows per leg, so no job's bound comes near the hosted
     # runner's six hours. The sum of a group's step bounds: 45 for a cold
     # browser download for each runtime and the frozen baseline (bound 15),
     # with room for Windows, the slowest leg, to sync and install twice; then
@@ -80,13 +81,14 @@ jobs:
     # for H-R16's cold and second-frontend cells, 60 for its failed login and
     # 55 for H-R10a's login (265), and `eligibility` 55 for the daemon switched
     # off, 30 for a container, 40 for HTTP, 80 for synced storage, 30 for
-    # unknown storage and 75 for H-R14 (355), and `crash` 30 for #808's
-    # discriminator on Windows (75).
+    # unknown storage and 75 for H-R14 (355), `crash` 45 for #808's
+    # discriminator on Windows (90), and `models` 15 for the frozen witnesses
+    # and 15 for the mapped model nodes, with no browser or baseline (45).
     # `native` takes 10 for the synthetic origin, 20 for H-R1, 5 for the
     # oracle on Linux, 25 for a custom browser, 45 for H-R3 and H-R2, 25 for
     # the killed owner, 25 for the failed Job query on Windows and 45 for the
     # unconfirmed close (240, from Windows, its largest leg).
-    timeout-minutes: ${{ matrix.rows == 'native' && 240 || matrix.rows == 'pipes' && 165 || matrix.rows == 'processes' && 185 || matrix.rows == 'owner' && 265 || matrix.rows == 'commands' && 185 || matrix.rows == 'auth' && 265 || matrix.rows == 'eligibility' && 355 || matrix.rows == 'crash' && 75 || 285 }}
+    timeout-minutes: ${{ matrix.rows == 'native' && 240 || matrix.rows == 'pipes' && 165 || matrix.rows == 'processes' && 185 || matrix.rows == 'owner' && 265 || matrix.rows == 'commands' && 185 || matrix.rows == 'auth' && 265 || matrix.rows == 'eligibility' && 355 || matrix.rows == 'crash' && 90 || matrix.rows == 'models' && 45 || 285 }}
     strategy:
       fail-fast: false
       matrix:
@@ -130,7 +132,10 @@ jobs:
 
       # As in `platform-behaviour`: the browser is keyed on the resolved
       # patchright version, and `shell: bash` because one leg is Windows.
+      # Every browser step, the trust step and the baseline below are skipped
+      # for `models`: source-model evidence needs neither a browser nor a CA.
       - name: Resolve the patchright version
+        if: matrix.rows != 'models'
         id: patchright
         shell: bash
         run: |
@@ -138,6 +143,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Restore the browser
+        if: matrix.rows != 'models'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ matrix.browsers }}
@@ -145,10 +151,11 @@ jobs:
 
       # `--with-deps` on Linux only, for the reason given in `platform-behaviour`.
       - name: Install the browser
+        if: matrix.rows != 'models'
         run: uv run patchright install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium --no-shell
 
       - name: Start a display
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.rows != 'models'
         run: |
           Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
           for _ in $(seq 1 100); do
@@ -160,6 +167,7 @@ jobs:
           exit 1
 
       - name: Issue the synthetic origin certificates
+        if: matrix.rows != 'models'
         shell: bash
         run: uv run python tests/differential/synthetic_origin.py "$RUNNER_TEMP/synthetic-origin"
 
@@ -167,6 +175,7 @@ jobs:
       # per platform, the hosts file, and the guard that admits nothing but a
       # disposable GitHub-hosted runner.
       - name: Trust the synthetic CA and fence off the real names
+        if: matrix.rows != 'models'
         timeout-minutes: 3
         shell: bash
         run: |
@@ -279,6 +288,7 @@ jobs:
       # clean. The system libraries `--with-deps` installed above serve its
       # Chromium too.
       - name: Prepare the frozen baseline
+        if: matrix.rows != 'models'
         env:
           LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
         timeout-minutes: 15
@@ -329,9 +339,9 @@ jobs:
           echo "kernel.yama.ptrace_scope: $(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)"
           sudo -n true
 
-      # K1 frozen on H-R1, and H-R12 (custom browser) in K1 frozen, K2 and K3.
-      # Its own pytest run, so its packet is its own run directory next to the
-      # H-R1 one in the evidence upload below.
+      # K1 frozen on H-R1, and H-R12 (custom browser) in K1 frozen, K2, K3
+      # and K0. Its own pytest run, so its packet is its own run directory
+      # next to the H-R1 one in the evidence upload below.
       - name: Compare the frozen baseline and a custom browser
         if: matrix.rows == 'native'
         env:
@@ -372,7 +382,8 @@ jobs:
 
       # Row H-R6, owner killed: K1 frozen (the Direct server killed), K2 (the
       # baseline owner killed, whose guardian must be seen killing the owner's
-      # group) and K3 (the candidate owner killed, drained and recovered).
+      # group), K3 (the candidate owner killed, drained and recovered) and K0
+      # (K3 again, reading as K3 did).
       - name: Kill the owner and the Direct server
         if: matrix.rows == 'native'
         env:
@@ -387,10 +398,11 @@ jobs:
       # Row H-R11, a failed Job-membership query at a routine close, Windows
       # only: K1 frozen, K2 (the baseline owner reaches the failed query in
       # its close) and K3 (the candidate reaches it, stands down, and a
-      # successor serves), then their composition with the source model of
-      # the branch each routine takes. Each runs from a venv with one declared
-      # shim (tests/differential/job_query.py), whose hash the evidence
-      # records; no native evidence names the caller that ended an installer.
+      # successor serves) and K0 (K3 again), then their composition with the
+      # source model of the branch each routine takes. Each runs from a venv
+      # with one declared shim (tests/differential/job_query.py), whose hash
+      # the evidence records; no native evidence names the caller that ended
+      # an installer.
       - name: Fail the drain's Job query
         if: runner.os == 'Windows' && matrix.rows == 'native'
         env:
@@ -645,15 +657,16 @@ jobs:
 
       # Row H-R6-contended, #808's discriminator, Windows only: a contender
       # armed on the profile's real lock before a hard kill of the frozen
-      # Direct server (K1) or the candidate owner (K3), the old browser's
-      # processes watched through process handles and never a Job handle,
-      # and a successor's read sent at once (tests/differential/
+      # Direct server (K1) or the candidate owner (K3, and again as K0), the
+      # old browser's processes watched through process handles and never a
+      # Job handle, and a successor's read sent at once (tests/differential/
       # crash_overlap.py). Each cell adds to the calibration's seven minutes:
       # the tree read twice and the contender's first answer (30s each), the
       # successor's read through an election (bound 180s) or a fresh host's
-      # (two minutes), the contender's stop (15s), in K3 the successor's idle
-      # exit (60 + 90s), and the residual browser wait (60s). Two cells come
-      # to at most 26 minutes: 30. Other platforms run nothing in this group.
+      # (two minutes), the contender's stop (15s), in K3 and K0 the
+      # successor's idle exit (60 + 90s), and the residual browser wait
+      # (60s). Three cells come to at most 43 minutes: 45. Other platforms
+      # run nothing in this group.
       - name: Race a contender against a hard kill
         if: runner.os == 'Windows' && matrix.rows == 'crash'
         env:
@@ -662,7 +675,7 @@ jobs:
           LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
           DEBUG: ${{ matrix.os == 'windows-latest' && 'pw:browser' || '' }}
           LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
-        timeout-minutes: 30
+        timeout-minutes: 45
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_crash_overlap_rows.py
 
       # Row H-R10a, a confirmed logout beside an idle owner, on a terminal:
@@ -887,6 +900,34 @@ jobs:
           LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
         timeout-minutes: 75
         run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_eligibility_rows.py -k rival
+
+      # K2's source-model witnesses (tests/differential/frozen_witnesses.py):
+      # the pin's own strict-xfail tests for W-UNMARKED and W-OWNER-UNMARKED,
+      # run from its checkout under its locked dev dependencies, each counted
+      # only when its intended assertion failed, judged per node in
+      # `witnesses.json`. The judgement's own tests run first, on this leg.
+      - name: Reproduce the frozen witnesses at the pin
+        if: matrix.rows == 'models'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 15
+        run: uv run pytest -v -s tests/differential/test_frozen_witnesses.py tests/differential/test_frozen_witness_rows.py
+
+      # Every test tests/differential/model_coverage.py maps a branch to,
+      # counted K3 in column `unit` and published by node id with any skip
+      # reason: source-model unit evidence, never a native cell. A mapped node
+      # that no longer exists fails the step.
+      - name: Run the mapped model nodes
+        if: matrix.rows == 'models'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-calls-evidence
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          uv run python tests/differential/model_coverage.py > "$RUNNER_TEMP/model-nodes.txt"
+          uv run pytest -v "@$RUNNER_TEMP/model-nodes.txt"
 
       # Windows' own record of the job's window, into the evidence folder the
       # step below uploads, under `windows/`: Application faults, hangs and

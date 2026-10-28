@@ -987,8 +987,6 @@ def _run_protection_steps(
         "plugins/linkedin-mcp-server/.codex-plugin/plugin.json",
         "plugins/linkedin-mcp-server/.claude-plugin/plugin.json",
         "plugins/linkedin-mcp-server/.cursor-plugin/plugin.json",
-        "plugins/linkedin-mcp-server/.mcp.json",
-        "README.md",
     )
     for name in files:
         path = repo / name
@@ -1195,7 +1193,7 @@ def test_release_rejects_invalid_restore_input_before_put(
 # The prepare-release job holds the admin token. Intentional strict-policy
 # preservation and file moves update its reviewed digest alongside behavioral coverage.
 _PREPARE_RELEASE_SHA256 = (
-    "2a3290da5d7418192c4f531e9a5ab17b5d6bea216e9ade8d287860e883694998"
+    "b16372cdf0938e1c12ef61f62b2a6d62559a0e3fe01387690b5bf7731cf61069"
 )
 
 

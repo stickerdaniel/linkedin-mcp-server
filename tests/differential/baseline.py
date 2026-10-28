@@ -32,6 +32,11 @@ in ``__PYVENV_LAUNCHER__``, which the watcher records for a server's
 processes as ``launcher`` (``watcher.read_launcher``), so the rule reads that
 as well as ``argv[0]``.
 
+**The pin's own tests get a venv of their own.** The regression witnesses the
+pin carries (``frozen_witnesses``) run under its locked dev dependencies, in
+``tests-venv`` beside the checkout, so the actors' venv keeps runtime
+dependencies only.
+
 Run as a script, it prepares the runtime: ``python baseline.py DIRECTORY``.
 """
 
@@ -40,9 +45,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
+import tomllib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,8 +65,16 @@ PACKAGE = "mcp-server-linkedin"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STAGE_SCRIPT = Path(__file__).with_name("baseline_stage.py")
 
-#: Environment that would point ``uv`` at another project's venv.
-_FOREIGN_VENV = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT")
+#: Environment that would point ``uv`` at another project, its venv or its
+#: configuration. ``UV_PROJECT`` set to the candidate binds a sync in the pin's
+#: checkout to the candidate's lock, and the checkout stays clean throughout.
+_FOREIGN_PROJECT = (
+    "VIRTUAL_ENV",
+    "UV_PROJECT_ENVIRONMENT",
+    "UV_PROJECT",
+    "UV_WORKING_DIR",
+    "UV_CONFIG_FILE",
+)
 
 
 class BaselineRefused(RuntimeError):
@@ -176,10 +191,14 @@ def baseline_file(
     return shown
 
 
-def venv_python(checkout: Path) -> Path:
+def _interpreter(venv: Path) -> Path:
     if sys.platform == "win32":
-        return checkout / ".venv" / "Scripts" / "python.exe"
-    return checkout / ".venv" / "bin" / "python"
+        return venv / "Scripts" / "python.exe"
+    return venv / "bin" / "python"
+
+
+def venv_python(checkout: Path) -> Path:
+    return _interpreter(checkout / ".venv")
 
 
 def _checked(result: subprocess.CompletedProcess[str], what: str) -> None:
@@ -188,6 +207,29 @@ def _checked(result: subprocess.CompletedProcess[str], what: str) -> None:
             f"{what} failed with status {result.returncode}: "
             f"{(result.stderr or result.stdout)[-2000:]}"
         )
+
+
+def _pinned_checkout(directory: Path, pinned: str, repo: Path) -> Path:
+    """``directory/checkout``, a detached worktree at *pinned*: added once,
+    fetched first when a shallow clone lacks the pin, verified every time."""
+    directory.mkdir(parents=True, exist_ok=True)
+    checkout = directory / "checkout"
+    if not checkout.exists():
+        if git(repo, "cat-file", "-e", f"{pinned}^{{commit}}") is None:
+            fetched = _run(
+                ["git", "fetch", "--no-tags", "--depth=1", "origin", pinned],
+                cwd=repo,
+                timeout=300,
+            )
+            _checked(fetched, f"fetching {pinned}")
+        added = _run(
+            ["git", "worktree", "add", "--detach", str(checkout), pinned],
+            cwd=repo,
+            timeout=300,
+        )
+        _checked(added, f"adding the baseline worktree at {checkout}")
+    verify_checkout(checkout, pinned)
+    return checkout
 
 
 def prepare_baseline(
@@ -206,33 +248,23 @@ def prepare_baseline(
     everything in place and so verify it, then checks the checkout again.
     """
     timings = {} if timings is None else timings
-    directory.mkdir(parents=True, exist_ok=True)
-    checkout = directory / "checkout"
+    # Absolute: uv reads ``--project`` and ``UV_PROJECT_ENVIRONMENT`` from inside
+    # the checkout, where a relative path names a directory within it.
+    directory = directory.resolve()
     browsers = directory / "ms-playwright"
 
     began = time.monotonic()
-    if not checkout.exists():
-        if git(repo, "cat-file", "-e", f"{pinned}^{{commit}}") is None:
-            fetched = _run(
-                ["git", "fetch", "--no-tags", "--depth=1", "origin", pinned],
-                cwd=repo,
-                timeout=300,
-            )
-            _checked(fetched, f"fetching {pinned}")
-        added = _run(
-            ["git", "worktree", "add", "--detach", str(checkout), pinned],
-            cwd=repo,
-            timeout=300,
-        )
-        _checked(added, f"adding the baseline worktree at {checkout}")
-    verify_checkout(checkout, pinned)
+    checkout = _pinned_checkout(directory, pinned, repo)
     timings["checkout"] = round(time.monotonic() - began, 1)
 
-    env = {k: v for k, v in os.environ.items() if k not in _FOREIGN_VENV}
+    env = {k: v for k, v in os.environ.items() if k not in _FOREIGN_PROJECT}
     began = time.monotonic()
     # Runtime dependencies only, exactly as the baseline's lock pins them.
     synced = _run(
-        ["uv", "sync", "--frozen", "--no-dev"], cwd=checkout, env=env, timeout=900
+        ["uv", "sync", "--frozen", "--no-dev", "--project", str(checkout)],
+        cwd=checkout,
+        env=env,
+        timeout=900,
     )
     _checked(synced, "uv sync in the baseline checkout")
     timings["uv_sync"] = round(time.monotonic() - began, 1)
@@ -252,6 +284,75 @@ def prepare_baseline(
     # After the venv and the browser: neither may leave the checkout dirty.
     verify_checkout(checkout, pinned)
     return Runtime(str(python), checkout, browsers, pinned)
+
+
+def prepare_frozen_tests(
+    directory: Path, *, pinned: str = BASELINE_SHA, repo: Path = REPO_ROOT
+) -> Runtime:
+    """The pin's own test suite, runnable: its checkout under *directory* and
+    ``directory/tests-venv`` synced with its locked dev dependencies.
+
+    ``--locked`` rather than ``--frozen``: a lock that no longer matches the
+    pin's ``pyproject.toml`` is refused, not installed. A venv of its own, so
+    the actors' ``.venv`` keeps runtime dependencies only. Nothing here
+    installs a browser; ``browsers`` is where the baseline's would be.
+    """
+    directory = directory.resolve()  # as in ``prepare_baseline``
+    checkout = _pinned_checkout(directory, pinned, repo)
+    venv = directory / "tests-venv"
+    env = {k: v for k, v in os.environ.items() if k not in _FOREIGN_PROJECT}
+    synced = _run(
+        ["uv", "sync", "--locked", "--group", "dev", "--project", str(checkout)],
+        cwd=checkout,
+        env={**env, "UV_PROJECT_ENVIRONMENT": str(venv)},
+        timeout=900,
+    )
+    _checked(synced, "uv sync of the pin's dev dependencies")
+    python = _interpreter(venv)
+    if not python.exists():
+        raise BaselineRefused(f"uv sync left no interpreter at {python}")
+    verify_locked_venv(python, checkout / "uv.lock")
+    verify_checkout(checkout, pinned)
+    return Runtime(str(python), checkout, directory / "ms-playwright", pinned)
+
+
+_INSTALLED_PROGRAM = """
+import json
+from importlib.metadata import distributions
+print(json.dumps({d.metadata["Name"]: d.version for d in distributions()}))
+"""
+
+
+def _normalized(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def verify_locked_venv(python: Path, lock: Path) -> None:
+    """Refuse a venv holding any distribution at a version *lock* does not pin.
+
+    The checkout staying clean proves nothing about the venv: a sync bound to
+    another project's lock leaves the pin's files untouched while installing
+    that project's dependencies. Only what is installed answers that.
+    """
+    locked = {
+        _normalized(package["name"]): package["version"]
+        for package in tomllib.loads(lock.read_text())["package"]
+        if "version" in package
+    }
+    # ``-I``, as in ``_ask``: a caller's ``PYTHONPATH`` or working directory
+    # would add distributions that are not in the venv at all.
+    listed = _run([str(python), "-I", "-c", _INSTALLED_PROGRAM], timeout=120)
+    _checked(listed, "listing the pin's installed distributions")
+    installed = {_normalized(n): v for n, v in json.loads(listed.stdout).items()}
+    foreign = {
+        name: (version, locked.get(name))
+        for name, version in installed.items()
+        if locked.get(name) != version
+    }
+    if foreign:
+        raise BaselineRefused(
+            f"the pin's venv does not match its lock {lock}: {sorted(foreign.items())}"
+        )
 
 
 def remove_baseline(directory: Path, *, repo: Path = REPO_ROOT) -> None:

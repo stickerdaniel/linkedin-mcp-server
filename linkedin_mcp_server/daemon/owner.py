@@ -34,7 +34,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, NoReturn, Protocol, TextIO, cast
 
@@ -112,7 +112,6 @@ MCP_PATH = "/mcp"
 #: validated and committed.
 _STARTUP_PROBE_SECONDS = 30.0
 _COMMIT_AUTH_SECONDS = 30.0
-_UNCERTAIN_PUBLICATION_RETRY_SECONDS = 0.2
 _WINDOWS_REPLACE_RETRY_SECONDS = 0.01
 _WINDOWS_RETRYABLE_REPLACE_ERRORS = frozenset({5, 32, 33})
 
@@ -142,18 +141,16 @@ def _publish_windows_daemon_log(log_path: Path) -> None:
     published = False
     try:
         harden_created_file(staged)
-        try:
-            staged.rename(log_path)
-        except FileExistsError:
-            harden_file(log_path)
-            return
+        # Never an overwriting replace: an entry that appeared since the check
+        # above is foreign, and the rename refuses it.
+        staged.rename(log_path)
         published = True
         harden_file(log_path)
     finally:
         # A published log is left where it is, even when the verification after
-        # it failed. Another candidate may already have opened this inode and be
-        # writing its own startup into it, and this process cannot tell; an
-        # empty file hardened before publication is the cheaper thing to leave.
+        # it failed. Once published, the path no longer proves which file it
+        # names, so removing it could take a foreign entry with it; an empty
+        # file hardened before publication is the cheaper thing to leave.
         if not published:
             with contextlib.suppress(OSError):
                 staged.unlink()
@@ -163,7 +160,9 @@ def _attach_daemon_log(auth_root: Path) -> Path:
     """Open the daemon log inside the child and attach both output streams.
 
     May block on unavailable state storage, so it runs only in the owner
-    process, which the frontend can hard-kill.
+    process, which the frontend can hard-kill. Runs only under the daemon lock,
+    so no cooperating owner creates this file at the same time: an entry that
+    appears between the check and the creation is foreign and fails startup.
     """
     directory = daemon_descriptor.prepare_daemon_state(auth_root)
     log_path = directory / _LOG_FILE
@@ -188,17 +187,8 @@ def _attach_daemon_log(auth_root: Path) -> Path:
         | getattr(os, "O_CLOEXEC", 0)
     )
     if created:
-        try:
-            descriptor = os.open(log_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            # A second candidate reached the same absent path. Only the process
-            # that created the file may remove it again below, or a failure here
-            # unlinks the log the candidate that won the lock is writing to.
-            created = False
-            harden_file(log_path)
-            descriptor = os.open(log_path, flags, 0o600)
-    else:
-        descriptor = os.open(log_path, flags, 0o600)
+        flags |= os.O_CREAT | os.O_EXCL
+    descriptor = os.open(log_path, flags, 0o600)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise PrivateStateError(f"{log_path} is not a regular file")
@@ -213,8 +203,8 @@ def _attach_daemon_log(auth_root: Path) -> Path:
         os.dup2(descriptor, sys.stderr.fileno())
     finally:
         # No removal on failure, for the reason _publish_windows_daemon_log
-        # gives: the loser of the creation race above is already appending to
-        # this inode, and an owner-only empty file costs nothing to leave.
+        # gives: the path may no longer name this inode, and an owner-only
+        # empty file costs nothing to leave.
         os.close(descriptor)
     return log_path
 
@@ -298,22 +288,31 @@ def direct_async_http_client(
     )
 
 
-async def _probe(url: str, token: str) -> None:
-    """Prove the endpoint answers this token before anything is published.
+async def prove_hop(url: str, token: str) -> None:
+    """Prove the endpoint serves the hop a frontend forwards over, or raise.
 
     An authenticated MCP round trip, because a TCP connect succeeds before any
     route is mounted. A tool listing rather than a ping: protocol 2026-07-28
-    removed ping, and listing touches no browser.
+    removed ping, and listing touches no browser. Negotiated as the forwarder
+    negotiates (``forwarder.pin_hop_version``): with the SDK's default, an
+    endpoint whose dependencies no longer serve the pinned version answered
+    through an older era and then failed every call. The owner asks this of
+    itself before publishing; a frontend asks it at discovery.
     """
-    from fastmcp import Client
-    from fastmcp.client.transports import StreamableHttpTransport
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
 
-    async with Client(
-        StreamableHttpTransport(
-            url, auth=token, httpx_client_factory=direct_async_http_client
-        )
-    ) as client:
-        await client.list_tools()
+    from linkedin_mcp_server.daemon.forwarder import pin_hop_version
+
+    async with (
+        # Never through a proxy: this is a loopback hop carrying the token to a
+        # logged-in session. See ``direct_http_client``.
+        direct_async_http_client(headers={"Authorization": f"Bearer {token}"}) as http,
+        streamable_http_client(url, http_client=http) as (read, write),
+        ClientSession(read, write) as session,
+    ):
+        await pin_hop_version(session)
+        await session.list_tools()
 
 
 #: The route a frontend uses to ask an owner to stand down, with the bearer
@@ -494,9 +493,9 @@ def create_owner_server(
 
         Checks the token itself, like the stand-down route. An unknown call
         gets ``watched: false``: a late beat or a preflight, not a fault. Once
-        retiring, an unknown call gets a signed 409 so the frontend learns
-        before dispatching that it would be refused; an admitted call keeps
-        getting 200 while it runs.
+        the owner would refuse a call, unpublished or retiring, an unknown call
+        gets a signed 409 so the frontend learns before dispatching that it
+        would be refused; an admitted call keeps getting 200 while it runs.
         """
         header = request.headers.get("authorization", "")
         scheme, _, presented = header.partition(" ")
@@ -508,7 +507,9 @@ def create_owner_server(
         liveness = get_liveness()
         if liveness.heard(call_id):
             return JSONResponse({"watched": True})
-        if liveness.retiring:
+        # The same readiness admission checks, so a preflight that passes is
+        # not followed by a refused call.
+        if not liveness.admitting:
             return JSONResponse(
                 {
                     "daemon": RETIRING,
@@ -558,16 +559,10 @@ def _commit_definitely_failed(exc: BaseException) -> bool:
 
 
 async def _commit_prepared_until(
-    auth_root: Path,
-    instance_id: str,
-    deadline: float,
-    *,
-    maintenance: Callable[[], None] | None = None,
+    auth_root: Path, instance_id: str, deadline: float
 ) -> None:
     """Commit after transient Windows descriptor readers release their handles."""
     while True:
-        if maintenance is not None:
-            maintenance()
         try:
             # Kept in the lock-holding thread deliberately. An abandoned worker
             # could complete the replacement after this owner released the lock
@@ -588,311 +583,6 @@ async def _commit_prepared_until(
                     "Descriptor replacement stayed blocked until its deadline"
                 ) from exc
             await asyncio.sleep(min(_WINDOWS_REPLACE_RETRY_SECONDS, remaining))
-
-
-def _start_canonical_read(
-    auth_root: Path,
-) -> asyncio.Future[daemon_descriptor.DaemonDescriptor | None]:
-    """Start one canonical read whose native thread is never cancelled."""
-    loop = asyncio.get_running_loop()
-    result: asyncio.Future[daemon_descriptor.DaemonDescriptor | None] = (
-        loop.create_future()
-    )
-
-    def read() -> None:
-        try:
-            descriptor = daemon_descriptor.read(auth_root)
-        except BaseException as exc:  # noqa: BLE001 - delivered to the event loop
-
-            def fail(error: BaseException = exc) -> None:
-                if not result.done():
-                    result.set_exception(error)
-
-            complete = fail
-        else:
-
-            def succeed(
-                value: daemon_descriptor.DaemonDescriptor | None = descriptor,
-            ) -> None:
-                if not result.done():
-                    result.set_result(value)
-
-            complete = succeed
-        with contextlib.suppress(RuntimeError):
-            # A lambda, because ty cannot solve call_soon_threadsafe's *args
-            # against a union of callbacks whose parameters have defaults.
-            loop.call_soon_threadsafe(lambda: complete())
-
-    threading.Thread(target=read, name="daemon-canonical-read", daemon=True).start()
-    return result
-
-
-def _exit_uncertain_publication(_reason: str, *, lock: DaemonLock | None) -> NoReturn:
-    """Exit without I/O or unwinding after an already logged ambiguity.
-
-    *lock* is passed in so :func:`_exit_hard` frees the election before the
-    process ends. Admission closes first (a flag, no I/O), because a descriptor
-    this process could not confirm may already name the endpoint.
-    """
-    get_liveness().retire(Retirement.UNCERTAIN_PUBLICATION)
-    _exit_hard(lock)
-    raise RuntimeError("The hard exit returned during uncertain publication")
-
-
-def _require_uncertain_endpoint(
-    server: Any, serving: asyncio.Task[None], *, lock: DaemonLock | None
-) -> None:
-    """Refuse to publish an uncertain generation after its endpoint stops."""
-    if getattr(server, "should_exit", False):
-        _exit_uncertain_publication(
-            "The daemon endpoint was asked to stop during publication reconciliation",
-            lock=lock,
-        )
-    if not serving.done():
-        return
-    if not serving.cancelled():
-        with contextlib.suppress(BaseException):
-            serving.exception()
-    _exit_uncertain_publication(
-        "The daemon endpoint stopped during publication reconciliation", lock=lock
-    )
-
-
-class _TurnoverDecided(BaseException):
-    """A newer build asked this owner to stand down while it was reconciling.
-
-    Raised by the synchronous maintenance step so the asynchronous caller can
-    await the drain turnover owes admitted calls. A ``BaseException`` so no
-    ``except Exception`` on the way out reads it as a failed read or commit and
-    retries publication; broader handlers let it through by name. *ending* is
-    the stop the drain already decided on, when it had nothing to wait for.
-    """
-
-    def __init__(self, ending: Effect | None) -> None:
-        super().__init__()
-        self.ending = ending
-
-
-def _maintain_uncertain_publication(
-    server: Any,
-    serving: asyncio.Task[None],
-    *,
-    lock: DaemonLock | None,
-) -> None:
-    """Keep frontend-visible lifecycle controls active before startup completes.
-
-    A stopped endpoint or an undrivable browser ends the owner here. Turnover
-    is raised as :class:`_TurnoverDecided` instead: an unconfirmed descriptor
-    may already have admitted calls, and they are owed the serving loop's drain.
-    """
-    _require_uncertain_endpoint(server, serving, lock=lock)
-    if stand_down_reason() is not None:
-        server.should_exit = True
-        _exit_uncertain_publication(
-            "The daemon became unable to serve during publication reconciliation",
-            lock=lock,
-        )
-    # The tick's defaults are the observations that do not apply here: no idle
-    # exit before publication is proved, and the two checks above already
-    # answered a wedge and a stopped endpoint.
-    effects = get_liveness().tick()
-    ending = _carry_out_now(effects)
-    if ending is not None or any(isinstance(effect, Drain) for effect in effects):
-        raise _TurnoverDecided(ending)
-
-
-async def _await_uncertain_read_until(
-    read: asyncio.Future[daemon_descriptor.DaemonDescriptor | None],
-    deadline: float,
-    maintenance: Callable[[], None],
-) -> daemon_descriptor.DaemonDescriptor | None:
-    """Wait for canonical state while preserving the owner's maintenance cadence."""
-    while True:
-        maintenance()
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError
-        try:
-            return await asyncio.wait_for(
-                asyncio.shield(read), min(_STAND_DOWN_POLL_SECONDS, remaining)
-            )
-        except TimeoutError:
-            if read.done():
-                return read.result()
-            if time.monotonic() >= deadline:
-                raise
-
-
-async def _sleep_during_uncertain_publication(
-    seconds: float, maintenance: Callable[[], None]
-) -> None:
-    """Sleep without leaving lifecycle maintenance dormant between retries."""
-    deadline = time.monotonic() + seconds
-    while True:
-        maintenance()
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return
-        await asyncio.sleep(min(_STAND_DOWN_POLL_SECONDS, remaining))
-
-
-async def _reconcile_uncertain_publication(
-    auth_root: Path,
-    instance_id: str,
-    *,
-    server: Any,
-    serving: asyncio.Task[None],
-    lock: DaemonLock | None,
-) -> None:
-    """Keep a live endpoint locked until its publication is provable.
-
-    On NFS an ``os.replace`` error can describe either side of the rename, so
-    the lock holder retries the same pending generation until a read observes
-    it or a replacement succeeds. Releasing the lock earlier would let a
-    successor start before a delayed canonical entry names this endpoint.
-
-    - Every mutating retry runs synchronously in this task, so no worker can
-      publish after the lock moved to a successor. Reads may block in a native
-      thread, so one in-flight read is reused until it settles.
-    - No elapsed-time fallback: a non-definitive error is no proof publication
-      failed, so the lock is held until storage recovers (#796).
-    - Every terminal path is a hard exit given *lock*, which frees the election;
-      the profile lease keeps a successor off the browser.
-    - Turnover drains admitted calls (:func:`_follow_the_lifecycle`) under the
-      lock, then hard-exits even if the drain is interrupted.
-    """
-    try:
-        await _reconcile_until_published(
-            auth_root, instance_id, server=server, serving=serving, lock=lock
-        )
-    except _TurnoverDecided as decided:
-        try:
-            if decided.ending is not None:
-                await _carry_out_ending(decided.ending, server, serving, lock=lock)
-            else:
-                # No idle exit: the core is draining, and the drain decides.
-                await _follow_the_lifecycle(server, serving, 0.0, lock=lock)
-        finally:
-            _exit_uncertain_publication(
-                "A newer build requested stand-down during publication reconciliation",
-                lock=lock,
-            )
-
-
-async def _reconcile_until_published(
-    auth_root: Path,
-    instance_id: str,
-    *,
-    server: Any,
-    serving: asyncio.Task[None],
-    lock: DaemonLock | None,
-) -> None:
-    """The retry loop of :func:`_reconcile_uncertain_publication`.
-
-    Raises :class:`_TurnoverDecided` out of every await, past each handler that
-    would otherwise treat an interruption as terminal on its own.
-    """
-    canonical_read: asyncio.Future[daemon_descriptor.DaemonDescriptor | None] | None = (
-        None
-    )
-
-    def maintenance() -> None:
-        _maintain_uncertain_publication(server, serving, lock=lock)
-
-    while True:
-        maintenance()
-        deadline = time.monotonic() + _COMMIT_AUTH_SECONDS
-        canonical: daemon_descriptor.DaemonDescriptor | None = None
-        if canonical_read is None:
-            try:
-                canonical_read = _start_canonical_read(auth_root)
-            except Exception:
-                # Inside the loop, because a read that will not start is one more
-                # thing that has not proved publication, and no such thing may
-                # leave here: an escape from this line stops an endpoint the
-                # canonical descriptor may already name and releases its lock.
-                logger.warning(
-                    "Could not start a canonical descriptor read; retrying",
-                    exc_info=True,
-                )
-        if canonical_read is not None:
-            try:
-                canonical = await _await_uncertain_read_until(
-                    canonical_read, deadline, maintenance
-                )
-            except _TurnoverDecided:
-                raise
-            except asyncio.CancelledError:
-                _exit_uncertain_publication(
-                    "Publication reconciliation was cancelled", lock=lock
-                )
-            except Exception:
-                # Retain a read that timed out: its native thread cannot be
-                # cancelled, and starting another on the next pass would leak one
-                # thread per retry.
-                if canonical_read.done():
-                    with contextlib.suppress(BaseException):
-                        canonical_read.exception()
-                    canonical_read = None
-                canonical = None
-            except BaseException:
-                _exit_uncertain_publication(
-                    "Publication reconciliation was interrupted", lock=lock
-                )
-            else:
-                canonical_read = None
-        maintenance()
-        if canonical is not None and canonical.instance_id == instance_id:
-            return
-
-        try:
-            await _commit_prepared_until(
-                auth_root, instance_id, deadline, maintenance=maintenance
-            )
-        except _TurnoverDecided:
-            raise
-        except asyncio.CancelledError:
-            _exit_uncertain_publication(
-                "Publication reconciliation was cancelled", lock=lock
-            )
-        except Exception:
-            # No error here authorizes releasing the lock; the next pass asks both
-            # the canonical state and the same pending replacement again.
-            pass
-        except BaseException:
-            _exit_uncertain_publication(
-                "Publication reconciliation was interrupted", lock=lock
-            )
-        else:
-            try:
-                # Commit is synchronous. Let the endpoint task and pending
-                # cancellation run before declaring the returned replacement live.
-                await asyncio.sleep(0)
-            except asyncio.CancelledError:
-                _exit_uncertain_publication(
-                    "Publication reconciliation was cancelled", lock=lock
-                )
-            except BaseException:
-                _exit_uncertain_publication(
-                    "Publication reconciliation was interrupted", lock=lock
-                )
-            maintenance()
-            return
-
-        try:
-            await _sleep_during_uncertain_publication(
-                _UNCERTAIN_PUBLICATION_RETRY_SECONDS, maintenance
-            )
-        except _TurnoverDecided:
-            raise
-        except asyncio.CancelledError:
-            _exit_uncertain_publication(
-                "Publication reconciliation was cancelled", lock=lock
-            )
-        except BaseException:
-            _exit_uncertain_publication(
-                "Publication reconciliation was interrupted", lock=lock
-            )
 
 
 class StartupControl(Protocol):
@@ -1000,7 +690,7 @@ async def _serve(
         # use was malformed. An IPv6 endpoint is exactly that case, since the
         # literal has to be bracketed.
         await asyncio.wait_for(
-            _probe(descriptor.url, token),
+            prove_hop(descriptor.url, token),
             max(startup_deadline - time.monotonic(), 0.0),
         )
 
@@ -1051,32 +741,44 @@ async def _serve(
             await _commit_prepared_until(auth_root, instance_id, commit_deadline)
         except BaseException as exc:
             # A preflight failure means replacement was never attempted, so it is
-            # terminal without another state read. An error from the replacement
-            # itself may instead arrive after an NFS server applied the rename; only
-            # that case is reconciled against canonical state.
+            # terminal without another state read.
             if _commit_definitely_failed(exc):
                 logger.exception("Daemon descriptor publication failed definitively")
                 handshake.abort()
                 server.should_exit = True
                 await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS, lock=lock)
                 raise
-            # The replacement may already name this live endpoint. Preserve both
-            # its token and its process while the existing reconciliation loop
-            # performs the first bounded read. Its maintenance cadence keeps call
-            # cancellation, turnover, wedge detection and endpoint death active
-            # from that first ambiguous-state wait onward.
-            logger.warning(
-                "Daemon descriptor publication is ambiguous; retaining the lock "
-                "while it is reconciled",
-                exc_info=True,
-            )
-            await _reconcile_uncertain_publication(
-                auth_root, instance_id, server=server, serving=serving, lock=lock
-            )
+            # An error from the replacement itself may arrive after an NFS server
+            # applied the rename, so the canonical descriptor may already name
+            # this endpoint. Admission closes before the first yield: a frontend
+            # that reads it is refused with a signed answer and looks for a
+            # successor. FAILED, never ABORTED, which would claim nothing was
+            # published; the frontend settles from canonical state. No retry,
+            # and the token stays for ordinary successor handling.
+            get_liveness().retire(Retirement.UNCERTAIN_PUBLICATION)
+            # The log sits on the same storage that just stalled the rename, so
+            # the watchdog bounds every synchronous write, and FAILED goes out
+            # before them. The process ends inside the guard, even after a
+            # clean or cancelled stop: anything later, such as `main` logging
+            # the error, would run with the lock held and nothing bounding it.
+            with _hard_exit_after(_FAILED_STARTUP_SHUTDOWN_SECONDS, lock):
+                handshake.fail()
+                logger.warning(
+                    "Daemon descriptor publication is ambiguous; exiting without serving",
+                    exc_info=True,
+                )
+                server.should_exit = True
+                try:
+                    await _stop_within(
+                        serving, _FAILED_STARTUP_SHUTDOWN_SECONDS, lock=lock
+                    )
+                finally:
+                    _exit_hard(lock)
 
         # Publication is now proved. Only in-memory startup state and the verdict
         # follow, so a blocked log or state mount cannot strand a canonical owner
-        # before the frontend learns it is ready.
+        # before the frontend learns it is ready. No await separates the commit
+        # from admission opening, so no request is served in between.
         get_liveness().the_endpoint_is_live()
         handshake.committed()
     except BaseException:
@@ -1110,8 +812,8 @@ _STAND_DOWN_POLL_SECONDS = 0.1
 _STAND_DOWN_SHUTDOWN_SECONDS = 30.0
 
 #: The same bound for a startup that failed. Shorter, because nothing is being
-#: preserved: no client was ever told this owner existed, and the descriptor was
-#: never published.
+#: preserved: admission never opened, so no call ran on this owner, even when an
+#: ambiguous commit may have published its descriptor.
 _FAILED_STARTUP_SHUTDOWN_SECONDS = 10.0
 
 
@@ -1132,17 +834,6 @@ async def _serve_until_stopped(
     The descriptor is left behind on every way out: the next election probes
     and replaces it, while deleting it here would race whoever publishes next.
     """
-    await _follow_the_lifecycle(server, serving, idle_timeout, lock=lock)
-
-
-async def _follow_the_lifecycle(
-    server: Any,
-    serving: asyncio.Task[None],
-    idle_timeout: float,
-    *,
-    lock: DaemonLock | None,
-) -> None:
-    """The loop of :func:`_serve_until_stopped`, also the drain after reconciling."""
     liveness = get_liveness()
     while True:
         effects = liveness.tick(
@@ -1254,6 +945,22 @@ async def _stop_within(
         return
 
     _exit_hard(lock)
+
+
+@contextlib.contextmanager
+def _hard_exit_after(seconds: float, lock: DaemonLock | None) -> Iterator[None]:
+    """Exit hard from a timer thread unless the block finishes within *seconds*.
+
+    Bounds synchronous work no ``wait_for`` can interrupt, such as a log write
+    to a stalled mount.
+    """
+    watchdog = threading.Timer(seconds, _exit_hard, args=(lock,))
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        yield
+    finally:
+        watchdog.cancel()
 
 
 def _exit_hard(lock: DaemonLock | None) -> NoReturn:

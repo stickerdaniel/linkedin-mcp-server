@@ -227,7 +227,7 @@ gt create -m "chore(release): Bump version to X.Y.Z"
 gt submit                        # merge PR to trigger release workflow
 ```
 
-The CI release workflow automatically updates `manifest.json`, `docker-compose.yml`, `.github/mcp/server.json`, the Codex, Claude Code, and Cursor plugin manifests under `plugins/linkedin-mcp-server/` (including the shared `.mcp.json`), and the Cursor one-click install link in `README.md`. Do not update them manually.
+The CI release workflow automatically updates `manifest.json`, `docker-compose.yml`, `.github/mcp/server.json` and the Codex, Claude Code, and Cursor plugin manifests under `plugins/linkedin-mcp-server/`. Do not update them manually.
 
 After the workflow completes, file a PR against
 [`docker/mcp-registry`](https://github.com/docker/mcp-registry) updating
@@ -287,9 +287,10 @@ can ask for that.
 Always read [`CONTRIBUTING.md`](.github/CONTRIBUTING.md) before filing an issue or working on this repository.
 
 - Write a short synthetic prompt that would reproduce the PR diff if given to a fresh Claude Code session. Don't copy the user's first message — distill the conversation into a single instruction that captures the full scope of changes. This tells the maintainer what was intended, which is often more useful than reviewing the full diff. Use a Markdown blockquote under a `## Synthetic prompt` heading.
-- End PR bodies with `Generated with <model> for <job> in <tool> via <host>.`
-  Repeat `<model> for <job>` joined by `and`; join jobs with `/`.
-  Humans are `Human`. Ask for unknown values.
+- End PR bodies with `<Job> with <model> (<effort>) in <tool> via <host>.`
+  Repeat `<job> with <model> (<effort>)` joined by `and` for each model that did a job.
+  Example: `Implemented with Claude Opus 5.5 (xhigh) and reviewed with GPT-6 Pro (max) in Claude Code via T3 Code.`
+  Effort is the run's reasoning setting, or `effort unknown` if nothing states it. Humans are `Human`. Ask for other unknown values.
   Keep attribution in that line: before pushing, amend agent `Co-authored-by` trailers out of your commits.
 - When implementing a new feature/fix:
   1. Packet: before filing or commenting on a GitHub issue, read [.agents/skills/issue-packet/SKILL.md](.agents/skills/issue-packet/SKILL.md).

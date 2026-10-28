@@ -25,6 +25,7 @@ from differential.harness import (
     GUARDIAN_OWNER_GROUP_KILL,
     RowResult,
     associate_server,
+    compare_repeat,
     compare_to_direct,
     guardian_launch,
     judge_row,
@@ -655,7 +656,7 @@ def _r6(
     )
 
 
-@pytest.mark.parametrize("experiment", ["K1", "K2", "K3"])
+@pytest.mark.parametrize("experiment", ["K1", "K2", "K3", "K0"])
 @pytest.mark.parametrize("windows", [False, True])
 def test_a_kill_after_a_first_call_that_read_nothing_does_not_count(
     experiment, windows
@@ -689,17 +690,23 @@ def test_k2_whose_oracle_missed_the_group_kill_is_a_harness_defect():
     assert "oracle saw no kill" in problem
 
 
-def test_k3_must_read_equal_and_recover():
-    assert r6_verdict(_r6(group=0), experiment="K3", windows=False, linux=False) == []
-    assert r6_verdict(_r6(group=4321), experiment="K3", windows=False, linux=False)
+@pytest.mark.parametrize("experiment", ["K3", "K0"])
+def test_the_candidate_and_its_repeat_must_read_equal_and_recover(experiment):
+    assert (
+        r6_verdict(_r6(group=0), experiment=experiment, windows=False, linux=False)
+        == []
+    )
+    assert r6_verdict(
+        _r6(group=4321), experiment=experiment, windows=False, linux=False
+    )
     assert r6_verdict(
         _r6(group=0, classes=[GUARDIAN_OWNER_GROUP_KILL]),
-        experiment="K3",
+        experiment=experiment,
         windows=False,
         linux=False,
     )
     (problem,) = r6_verdict(
-        _r6(group=0, recovered=False), experiment="K3", windows=False, linux=False
+        _r6(group=0, recovered=False), experiment=experiment, windows=False, linux=False
     )
     assert "did not recover" in problem
 
@@ -719,10 +726,17 @@ def test_h_r6_needs_the_kill_and_on_posix_the_guardian():
     assert r6_verdict(_r6(group=None), experiment="K2", windows=True, linux=False) == []
 
 
-def test_on_windows_the_candidate_must_still_recover():
-    assert r6_verdict(_r6(group=None), experiment="K3", windows=True, linux=False) == []
+@pytest.mark.parametrize("experiment", ["K3", "K0"])
+def test_on_windows_the_candidate_must_still_recover(experiment):
+    assert (
+        r6_verdict(_r6(group=None), experiment=experiment, windows=True, linux=False)
+        == []
+    )
     (problem,) = r6_verdict(
-        _r6(group=None, recovered=False), experiment="K3", windows=True, linux=False
+        _r6(group=None, recovered=False),
+        experiment=experiment,
+        windows=True,
+        linux=False,
     )
     assert "did not recover" in problem
 
@@ -1342,6 +1356,17 @@ def test_unknown_is_recorded_not_failed(profile_pair):
     assert compare_to_direct(held, vector) == []
     violated = dataclasses.replace(held, o2_traced=VIOLATED)
     assert compare_to_direct(violated, vector)
+
+
+@pytest.mark.parametrize("other", [VIOLATED, INCOMPLETE, UNOBSERVED])
+def test_a_repeat_reads_held_against_unknown_as_timing_only(profile_pair, other):
+    vector, _ = judge_row(_healthy(profile_pair, daemon=True))
+    unknown = dataclasses.replace(vector, o2_traced=UNKNOWN)
+    held = dataclasses.replace(vector, o2_traced=HELD)
+    assert compare_repeat(unknown, held) == []
+    assert compare_repeat(unknown, dataclasses.replace(vector, o2_traced=other))
+    # Only the traced state is sampled; the signals sent still count.
+    assert compare_repeat(unknown, dataclasses.replace(held, signal_classes=("x",)))
 
 
 # --- E1EB-02: a group that could not be read is not the last one read ---------------

@@ -47,6 +47,8 @@ instances, clear profiles, or replace the user's browser session.
 - Messages: `get_inbox`, `get_conversation`, and `search_conversations`.
 - Writes: `send_message` and `connect_with_person`, subject to the explicit
   authorization rules above.
+- Session: `get_session_status` says whether a login is saved without opening
+  a browser or a login window; it does not prove LinkedIn still accepts it.
 - Cleanup: use `close_session` only when the user asks to end the managed
   browser session or when the current LinkedIn task is finished and no follow-up
   call is expected.
