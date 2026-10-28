@@ -263,3 +263,29 @@ class LinkedInExtractor:
             confirm_send=confirm_send,
             profile_urn=profile_urn,
         )
+
+    async def save_job(
+        self,
+        job_id: str,
+        *,
+        confirm_send: bool,
+    ) -> dict[str, Any]:
+        """Bookmark a job posting with explicit confirmation gating."""
+        return await self._jobs.save_job(job_id, confirm_send=confirm_send)
+
+    async def list_applied_jobs(self, max_pages: int = 3) -> dict[str, Any]:
+        """List jobs the authenticated user has applied to."""
+        return await self._jobs.list_applied_jobs(max_pages)
+
+    async def easy_apply_inspect(self, job_id: str) -> dict[str, Any]:
+        """Inspect the Easy Apply flow without submitting an application."""
+        return await self._jobs.easy_apply_inspect(job_id)
+
+    async def easy_apply_submit(
+        self,
+        job_id: str,
+        *,
+        confirm_send: bool,
+    ) -> dict[str, Any]:
+        """Submit a zero-question Easy Apply application."""
+        return await self._jobs.easy_apply_submit(job_id, confirm_send=confirm_send)

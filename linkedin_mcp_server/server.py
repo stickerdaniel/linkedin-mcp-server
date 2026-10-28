@@ -42,6 +42,7 @@ from linkedin_mcp_server.server_role import (
     process_role,
     set_process_role,
 )
+from linkedin_mcp_server.tools.applications import register_application_tools
 from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.feed import register_feed_tools
@@ -297,6 +298,7 @@ def create_mcp_server(
         register_company_tools(mcp, tool_timeout=tool_timeout)
         register_job_tools(mcp, tool_timeout=tool_timeout)
         register_messaging_tools(mcp, tool_timeout=tool_timeout)
+        register_application_tools(mcp, tool_timeout=tool_timeout)
         register_feed_tools(mcp, tool_timeout=tool_timeout)
         register_post_tools(mcp, tool_timeout=tool_timeout)
 

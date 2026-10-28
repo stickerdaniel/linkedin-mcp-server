@@ -25,7 +25,7 @@ from linkedin_mcp_server.linkedin.session import PageSession
 
 from . import policy_scenarios
 from .policy_scenarios import (
-    TOOL_FACADE_METHODS,
+    POLICY_TRACED_METHODS,
     TRACE_ROOT,
     _complete_mapping_result,
     boundaries,
@@ -148,10 +148,10 @@ async def test_trace_set_exercises_every_tool_facing_facade_method():
     called = {
         trace["call"]["method"]
         for trace in traces.values()
-        if trace["call"]["method"] in TOOL_FACADE_METHODS
+        if trace["call"]["method"] in POLICY_TRACED_METHODS
     }
 
-    assert called == TOOL_FACADE_METHODS
+    assert called == POLICY_TRACED_METHODS
 
 
 async def test_tool_schema_trace_keeps_people_boundary_coercion_and_inventory():
@@ -159,7 +159,7 @@ async def test_tool_schema_trace_keeps_people_boundary_coercion_and_inventory():
         "tool_schemas"
     ]
 
-    assert len(schemas) == 20
+    assert len(schemas) == 24
     network = schemas["search_people"]["input"]["properties"]["network"]
     assert network["anyOf"] == [
         {"items": {"type": "string"}, "type": "array"},

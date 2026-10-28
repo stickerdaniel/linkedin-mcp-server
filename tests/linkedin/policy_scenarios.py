@@ -1093,7 +1093,7 @@ async def _facade_contract_trace() -> dict[str, Any]:
     }
 
 
-TOOL_FACADE_METHODS = {
+POLICY_TRACED_METHODS = {
     "connect_with_person",
     "extract_feed",
     "extract_page",
@@ -1113,6 +1113,13 @@ TOOL_FACADE_METHODS = {
     "search_people",
     "search_posts",
     "send_message",
+}
+TOOL_FACADE_METHODS = {
+    *POLICY_TRACED_METHODS,
+    "easy_apply_inspect",
+    "easy_apply_submit",
+    "list_applied_jobs",
+    "save_job",
 }
 COMPATIBILITY_METHODS = {"get_page_text", "click_button_by_text"}
 

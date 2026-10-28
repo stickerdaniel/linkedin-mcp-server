@@ -46,6 +46,8 @@ from .support.policy_trace import ScriptedPage, TraceRecorder
 
 TOOL_DELEGATES = {
     "connect_with_person": "connect_with_person",
+    "easy_apply_inspect": "easy_apply_inspect",
+    "easy_apply_submit": "easy_apply_submit",
     "get_company_employees": "get_company_employees",
     "get_company_posts": "extract_page",
     "get_company_profile": "read_company",
@@ -58,6 +60,8 @@ TOOL_DELEGATES = {
     "get_person_profile": "read_person",
     "get_saved_jobs": "get_saved_jobs",
     "get_sidebar_profiles": "get_sidebar_profiles",
+    "list_applied": "list_applied_jobs",
+    "save_job": "save_job",
     "search_companies": "search_companies",
     "search_conversations": "search_conversations",
     "search_jobs": "search_jobs",

@@ -20,6 +20,14 @@
         "coroutine": true,
         "signature": "(self, username: 'str', *, note: 'str | None' = None) -> 'dict[str, Any]'"
       },
+      "easy_apply_inspect": {
+        "coroutine": true,
+        "signature": "(self, job_id: 'str') -> 'dict[str, Any]'"
+      },
+      "easy_apply_submit": {
+        "coroutine": true,
+        "signature": "(self, job_id: 'str', *, confirm_send: 'bool') -> 'dict[str, Any]'"
+      },
       "extract_feed": {
         "coroutine": true,
         "signature": "(self, num_posts: 'int' = 10) -> 'ExtractedSection'"
@@ -60,6 +68,10 @@
         "coroutine": true,
         "signature": "(self, username: 'str') -> 'dict[str, Any]'"
       },
+      "list_applied_jobs": {
+        "coroutine": true,
+        "signature": "(self, max_pages: 'int' = 3) -> 'dict[str, Any]'"
+      },
       "read_company": {
         "coroutine": true,
         "signature": "(self, company_name: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None) -> 'dict[str, Any]'"
@@ -71,6 +83,10 @@
       "read_person": {
         "coroutine": true,
         "signature": "(self, username: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None, max_scrolls: 'int | None' = None, *, main_profile_already_loaded: 'bool' = False, allow_self_alias: 'bool' = False) -> 'dict[str, Any]'"
+      },
+      "save_job": {
+        "coroutine": true,
+        "signature": "(self, job_id: 'str', *, confirm_send: 'bool') -> 'dict[str, Any]'"
       },
       "search_companies": {
         "coroutine": true,
@@ -99,6 +115,8 @@
     },
     "tool_methods": [
       "connect_with_person",
+      "easy_apply_inspect",
+      "easy_apply_submit",
       "extract_feed",
       "extract_page",
       "get_company_employees",
@@ -108,9 +126,11 @@
       "get_my_profile",
       "get_saved_jobs",
       "get_sidebar_profiles",
+      "list_applied_jobs",
       "read_company",
       "read_job",
       "read_person",
+      "save_job",
       "search_companies",
       "search_conversations",
       "search_jobs",
@@ -153,6 +173,49 @@
           },
           "required": [
             "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "easy_apply_inspect": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "job_id": {
+              "description": "LinkedIn job ID.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "easy_apply_submit": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "confirm_send": {
+              "description": "Must be True to actually click Submit.\nFalse returns a preview without submitting.",
+              "type": "boolean"
+            },
+            "job_id": {
+              "description": "LinkedIn job ID.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id",
+            "confirm_send"
           ],
           "type": "object"
         },
@@ -498,6 +561,49 @@
           },
           "required": [
             "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "list_applied": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "max_pages": {
+              "default": 3,
+              "description": "Maximum pages of applied-jobs history to load\n(1-10, default 3). LinkedIn paginates 25 entries per\npage.",
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "save_job": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "confirm_send": {
+              "description": "Must be True to click Save. False returns a\npreview without changing state.",
+              "type": "boolean"
+            },
+            "job_id": {
+              "description": "LinkedIn job ID (e.g. \"4252026496\").",
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id",
+            "confirm_send"
           ],
           "type": "object"
         },
