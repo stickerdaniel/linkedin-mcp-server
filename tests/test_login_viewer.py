@@ -5,12 +5,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from pathlib import Path
-import re
 import signal
 import stat
 from types import SimpleNamespace
 from typing import Any, cast
-from urllib.parse import unquote
 
 import pytest
 
@@ -24,30 +22,11 @@ from linkedin_mcp_server.login_viewer import (
 )
 
 
-@pytest.mark.parametrize(
-    ("token", "expected"),
-    [
-        (
-            "abc_123-XYZ",
-            "http://127.0.0.1:6080/vnc_lite.html#?"
-            "path=websockify%3Ftoken%3Dabc_123-XYZ&scale=true",
-        )
-    ],
-)
-def test_viewer_url_is_an_exact_token_private_fragment(
-    token: str, expected: str
-) -> None:
-    assert viewer_url(token) == expected
-    assert "?token=" not in expected.split("#", 1)[0]
-    assert "scale=true" in expected
-    assert "resize=" not in expected
+def test_viewer_url_carries_the_token_only_in_the_fragment() -> None:
+    url = viewer_url("abc_123-XYZ")
 
-    # Debian Bookworm's vnc_lite.html uses this exact `[?&]` parser. The `?`
-    # after `#` is load-bearing: a fragment beginning with bare `#path=` does
-    # not match even though the upstream source comment suggests it does.
-    match = re.match(r".*[?&]path=([^&#]*)", expected)
-    assert match is not None
-    assert unquote(match.group(1)) == f"websockify?token={token}"
+    assert url == "http://127.0.0.1:6080/login.html#token=abc_123-XYZ"
+    assert "token" not in url.split("#", 1)[0]
 
 
 def test_mountinfo_decodes_escaped_mount_paths() -> None:

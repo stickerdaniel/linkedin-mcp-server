@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<!--
+  The Docker login viewer's page, served by websockify from /usr/share/novnc
+  next to Debian's noVNC, whose documented RFB API it uses. login_viewer.py
+  prints its address as login.html#token=<token>; the fragment never reaches
+  the HTTP server, so only the WebSocket carries the token.
+-->
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LinkedIn MCP login</title>
+    <style>
+        html, body { height: 100%; margin: 0; background: #282828; }
+        body { display: flex; flex-direction: column; font: 13px system-ui, sans-serif; }
+        #status { padding: 6px 10px; color: #fff; background: #6e84a3; text-align: center; }
+        #screen { flex: 1; overflow: hidden; }
+    </style>
+    <script type="module">
+        import RFB from './core/rfb.js';
+
+        const CONNECTED = 'Connected. Ctrl+V (Cmd+V on a Mac) pastes plain text into the login browser.';
+        const MAX_PASTE = 1000;
+        // X11 keysyms. Printable ASCII is its own keysym. The virtual
+        // display's keyboard has keys for nothing else, so other characters
+        // never arrive, even through x11vnc's added keysyms.
+        const CONTROL_KEYSYMS = { '\n': 0xff0d, '\t': 0xff09 };
+        const keysymOf = char => CONTROL_KEYSYMS[char]
+            ?? (char >= ' ' && char <= '~' ? char.charCodeAt(0) : null);
+
+        const status = text => { document.getElementById('status').textContent = text; };
+        const token = new URLSearchParams(location.hash.slice(1)).get('token') ?? '';
+        const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+        const rfb = new RFB(
+            document.getElementById('screen'),
+            `${scheme}://${location.host}/websockify?token=${encodeURIComponent(token)}`,
+        );
+        rfb.scaleViewport = true;
+        rfb.addEventListener('connect', () => status(CONNECTED));
+        rfb.addEventListener('disconnect', e => status(e.detail.clean ? 'Disconnected.' : 'Connection lost.'));
+
+        // noVNC sends a paste shortcut on as two keys and cancels the
+        // browser's paste, so the local clipboard never arrives. Keep the V
+        // from noVNC, take the text from the browser's own paste, and type it
+        // once every modifier is up: then nothing is held on the remote side,
+        // including the Ctrl that noVNC delays on Windows to detect AltGr.
+        // Typing rather than setting the server's clipboard, because x11vnc
+        // claims the X selection only for the first text it receives, and
+        // the login browser keeps pasting that one.
+        let pending = null;
+        let heldV = false;
+        const isPasteKey = e => e.code === 'KeyV' && (e.ctrlKey || e.metaKey) && !e.altKey;
+        const modifierHeld = e => e.ctrlKey || e.metaKey || e.altKey || e.shiftKey;
+
+        window.addEventListener('keydown', e => {
+            if (!isPasteKey(e)) return;
+            heldV = true;
+            e.stopImmediatePropagation();
+        }, true);
+        window.addEventListener('paste', e => {
+            e.preventDefault();
+            pending = (e.clipboardData?.getData('text/plain') ?? '').replace(/\r\n?/g, '\n');
+        }, true);
+        window.addEventListener('keyup', e => {
+            if (e.code === 'KeyV' && heldV) {
+                heldV = false;
+                e.stopImmediatePropagation();
+            }
+            if (pending === null || modifierHeld(e)) return;
+            const keysyms = Array.from(pending, keysymOf);
+            pending = null;
+            // Half a password is worse than none: type all of it or nothing.
+            if (keysyms.length > MAX_PASTE || keysyms.includes(null)) {
+                status(`Only plain ASCII text up to ${MAX_PASTE} characters can be pasted. Type this one by hand.`);
+                return;
+            }
+            status(CONNECTED);
+            // After noVNC has sent this release.
+            setTimeout(() => keysyms.forEach(keysym => rfb.sendKey(keysym, null)));
+        }, true);
+        window.addEventListener('blur', () => {
+            pending = null;
+            heldV = false;
+        });
+    </script>
+</head>
+<body>
+    <div id="status">Connecting.</div>
+    <div id="screen"></div>
+</body>
+</html>
