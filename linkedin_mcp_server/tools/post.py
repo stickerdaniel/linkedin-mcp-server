@@ -135,7 +135,9 @@ def register_post_tools(
             post_button_unavailable or invalid. published is true only when the
             composer was seen closing after Post was clicked. retry_safe is
             false from the moment Post is clicked: on unconfirmed, check the
-            user's profile activity before posting again.
+            user's profile activity before posting again. composer_closed is
+            false only when the composer could not be emptied and closed
+            after a call that did not post; check LinkedIn for leftover text.
         """
         # Refused before a session exists so a bad request never starts a
         # browser or a login attempt.

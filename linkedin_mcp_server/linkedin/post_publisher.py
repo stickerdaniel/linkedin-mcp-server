@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
@@ -153,6 +154,13 @@ def _same_text(composer_text: str, wanted: str) -> bool:
     return _lines(composer_text) == _lines(wanted)
 
 
+@dataclass
+class _Progress:
+    """Whether Post may have been clicked; once it has, cleanup must not run."""
+
+    submitted: bool = False
+
+
 class PostPublisher:
     """Own the share composer: type a post, verify it, publish on confirmation."""
 
@@ -226,70 +234,117 @@ class PostPublisher:
                 "Empty or finish that draft on LinkedIn, then retry.",
             )
 
-        published = False
-        details: dict[str, Any] = {}
+        progress = _Progress()
         try:
-            await self._type(wanted)
-            await self._session.delay(0.8)
-            state = await self._composer()
-            details = {
-                "text_matches": _same_text(state.get("text", ""), wanted),
-                "post_button_found": state.get("postButtons") == 1,
-                "post_button_enabled": bool(state.get("postEnabled")),
+            result = await self._fill_and_submit(wanted, confirm_post, progress)
+        except BaseException as exc:
+            if progress.submitted:
+                # Post may already have been clicked, so the composer is left
+                # alone and the caller is told not to retry blindly.
+                if not isinstance(exc, Exception):
+                    raise
+                logger.warning(
+                    "Post may have been submitted but its outcome could not be read",
+                    exc_info=True,
+                )
+                return _result(
+                    "unconfirmed",
+                    "Post may have been clicked but its outcome could not be "
+                    "read; check your profile activity before retrying.",
+                    retry_safe=False,
+                )
+            await self._empty_and_close()
+            raise
+
+        if progress.submitted:
+            # Never touch the composer once Post was clicked.
+            return result
+        if not await self._empty_and_close():
+            logger.warning("The post composer could not be closed")
+            result = {
+                **result,
+                "composer_closed": False,
+                "message": f"{result['message']} The composer could not be "
+                "cleared or closed; check LinkedIn for leftover text before "
+                "retrying.",
             }
-            if not details["text_matches"]:
-                return _result(
-                    "text_mismatch",
-                    "The composer text differs from the requested post; "
-                    "nothing was posted.",
-                    composer_text=state.get("text", "")[:500],
-                    **details,
-                )
-            if not confirm_post:
-                return _result(
-                    "dry_run",
-                    "Composer filled and verified; nothing was posted. "
-                    "Call again with confirm_post=True to publish.",
-                    **details,
-                )
-            if not details["post_button_enabled"]:
-                return _result(
-                    "post_button_unavailable",
-                    "LinkedIn's Post button was not found exactly once or is "
-                    "disabled; nothing was posted.",
-                    **details,
-                )
-            clicked = await self._composer("post")
-            if clicked.get("result") != "clicked":
+        return result
+
+    async def _fill_and_submit(
+        self, wanted: str, confirm_post: bool, progress: _Progress
+    ) -> dict[str, Any]:
+        """Type and verify *wanted*, then click Post when confirmed.
+
+        ``progress.submitted`` turns true before Post is clicked and goes back
+        to false only when the page script proves that no click happened.
+        """
+        await self._type(wanted)
+        await self._session.delay(0.8)
+        state = await self._composer()
+        details: dict[str, Any] = {
+            "text_matches": _same_text(state.get("text", ""), wanted),
+            "post_button_found": state.get("postButtons") == 1,
+            "post_button_enabled": bool(state.get("postEnabled")),
+        }
+        if not details["text_matches"]:
+            return _result(
+                "text_mismatch",
+                "The composer text differs from the requested post; "
+                "nothing was posted.",
+                composer_text=state.get("text", "")[:500],
+                **details,
+            )
+        if not confirm_post:
+            return _result(
+                "dry_run",
+                "Composer filled and verified; nothing was posted. "
+                "Call again with confirm_post=True to publish.",
+                **details,
+            )
+        if not details["post_button_enabled"]:
+            return _result(
+                "post_button_unavailable",
+                "LinkedIn's Post button was not found exactly once or is "
+                "disabled; nothing was posted.",
+                **details,
+            )
+
+        progress.submitted = True
+        clicked = await self._composer("post")
+        if clicked.get("result") != "clicked":
+            # Only an answer that says nothing was clicked clears the flag; an
+            # empty or odd answer leaves the click possible.
+            if clicked and clicked.get("result") in (None, "unavailable"):
+                progress.submitted = False
                 return _result(
                     "post_button_unavailable",
                     "The Post button could not be clicked; nothing was posted.",
                     **details,
                 )
-            published = True
-
-            deadline = self._session.monotonic() + _PUBLISH_WAIT_SECONDS
-            while self._session.monotonic() < deadline:
-                await self._session.delay(_POLL_SECONDS)
-                if (await self._composer()).get("dialogs") == 0:
-                    return _result(
-                        "published",
-                        "The composer closed after Post was clicked. "
-                        "Check your profile activity to confirm.",
-                        published=True,
-                        retry_safe=False,
-                        **details,
-                    )
             return _result(
                 "unconfirmed",
-                "Post was clicked but the composer did not close; check your "
-                "profile activity before retrying.",
+                "The Post click could not be confirmed; check your profile "
+                "activity before retrying.",
                 retry_safe=False,
                 **details,
             )
-        finally:
-            # Never touch the composer once Post was clicked.
-            if not published:
-                closed = await self._empty_and_close()
-                if not closed:
-                    logger.warning("The post composer could not be closed")
+
+        deadline = self._session.monotonic() + _PUBLISH_WAIT_SECONDS
+        while self._session.monotonic() < deadline:
+            await self._session.delay(_POLL_SECONDS)
+            if (await self._composer()).get("dialogs") == 0:
+                return _result(
+                    "published",
+                    "The composer closed after Post was clicked. "
+                    "Check your profile activity to confirm.",
+                    published=True,
+                    retry_safe=False,
+                    **details,
+                )
+        return _result(
+            "unconfirmed",
+            "Post was clicked but the composer did not close; check your "
+            "profile activity before retrying.",
+            retry_safe=False,
+            **details,
+        )

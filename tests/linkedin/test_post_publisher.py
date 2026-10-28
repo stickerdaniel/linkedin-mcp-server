@@ -28,6 +28,11 @@ class FakeComposer:
         post_enabled: bool = True,
         mangle: bool = False,
         closes_on_post: bool = True,
+        post_raises: bool = False,
+        reads_raise_after_post: bool = False,
+        post_reply_empty: bool = False,
+        dismiss_fails: bool = False,
+        typing_raises: bool = False,
     ) -> None:
         self.dialog_open = opens
         self.text = initial_text
@@ -35,6 +40,11 @@ class FakeComposer:
         self.post_enabled = post_enabled
         self.mangle = mangle
         self.closes_on_post = closes_on_post
+        self.post_raises = post_raises
+        self.reads_raise_after_post = reads_raise_after_post
+        self.post_reply_empty = post_reply_empty
+        self.dismiss_fails = dismiss_fails
+        self.typing_raises = typing_raises
         self.selected = False
         self.posted = False
         self.keys: list[str] = []
@@ -42,6 +52,8 @@ class FakeComposer:
 
     # keyboard
     async def insert_text(self, text: str) -> None:
+        if self.typing_raises:
+            raise RuntimeError("keyboard failed")
         self.text += text + ("!" if self.mangle else "")
 
     async def press(self, key: str) -> None:
@@ -56,6 +68,8 @@ class FakeComposer:
 
     # page script
     def script(self, mode: str) -> dict[str, Any]:
+        if self.posted and mode == "read" and self.reads_raise_after_post:
+            raise RuntimeError("page closed while reading")
         if not self.dialog_open:
             return {"dialogs": 0, "editors": 0, "text": "", "postButtons": 0}
         state: dict[str, Any] = {
@@ -70,11 +84,15 @@ class FakeComposer:
             if state["postEnabled"]:
                 self.posted = True
                 self.dialog_open = not self.closes_on_post
+                if self.post_raises:
+                    raise RuntimeError("page closed after the click")
+                if self.post_reply_empty:
+                    return {}
                 state["result"] = "clicked"
             else:
                 state["result"] = "unavailable"
         elif mode == "dismiss":
-            self.dialog_open = False
+            self.dialog_open = self.dismiss_fails
             state["result"] = "clicked"
         elif mode == "focus":
             state["result"] = "focused"
@@ -154,6 +172,57 @@ async def test_a_post_whose_composer_stays_open_is_unconfirmed_and_not_retryable
     assert result["published"] is False
     assert result["retry_safe"] is False
     assert composer.dialog_open is True
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"post_raises": True},
+        {"reads_raise_after_post": True},
+        {"post_reply_empty": True},
+    ],
+    ids=["click-reply-raises", "closure-check-raises", "click-reply-empty"],
+)
+async def test_a_click_whose_outcome_is_unknown_is_unconfirmed_and_left_alone(kwargs):
+    publisher, composer, _ = make(**kwargs)
+
+    result = await publisher.create_post("Hello", confirm_post=True)
+
+    assert result["status"] == "unconfirmed"
+    assert result["published"] is False
+    assert result["retry_safe"] is False
+    # The composer may already be submitting, so it is never cleared or closed.
+    assert composer.text == "Hello"
+    assert "ControlOrMeta+A" not in composer.keys
+
+
+async def test_an_error_before_the_click_still_cleans_up_and_propagates():
+    publisher, composer, _ = make(typing_raises=True)
+
+    with pytest.raises(RuntimeError, match="keyboard failed"):
+        await publisher.create_post("Hello", confirm_post=True)
+
+    assert composer.posted is False
+    assert composer.dialog_open is False
+
+
+async def test_a_dry_run_that_cannot_close_the_composer_says_so():
+    publisher, composer, _ = make(dismiss_fails=True)
+
+    result = await publisher.create_post("Hello", confirm_post=False)
+
+    assert result["status"] == "dry_run"
+    assert result["composer_closed"] is False
+    assert "leftover text" in result["message"]
+    assert composer.dialog_open is True
+
+
+async def test_a_clean_dry_run_has_no_cleanup_warning():
+    publisher, _, _ = make()
+
+    result = await publisher.create_post("Hello", confirm_post=False)
+
+    assert "composer_closed" not in result
 
 
 async def test_paragraph_padding_added_by_the_editor_is_not_a_mismatch():
