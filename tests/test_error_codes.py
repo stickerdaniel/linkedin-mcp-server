@@ -1,7 +1,5 @@
 """The error code a failed call names, beside the message written for people."""
 
-import re
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -222,11 +220,3 @@ async def test_a_client_reads_the_code_beside_the_message(
     assert (result.meta or {}).get(ERROR_META_KEY) == marker
     if text is not None:
         assert [block.text for block in result.content] == [text]
-
-
-def test_the_readme_lists_every_code():
-    readme = Path(__file__).resolve().parents[1] / "README.md"
-    table = readme.read_text(encoding="utf-8").split("| Code | Meaning |", 1)[1]
-    rows = re.findall(r"^\| `([a-z_]+)` \|", table.split("\n\n", 1)[0], re.M)
-
-    assert rows == [code.value for code in ErrorCode]

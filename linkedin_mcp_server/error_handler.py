@@ -65,7 +65,7 @@ class ErrorCode(StrEnum):
 
     A closed set, and part of the contract: a value is never renamed or given a
     new meaning, because clients match on it instead of on the message, which is
-    written for people and changes between releases. README.md lists them.
+    written for people and changes between releases.
     """
 
     AUTH_REQUIRED = "auth_required"
