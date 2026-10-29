@@ -301,6 +301,24 @@ async def test_facade_search_posts_forwards_its_recency_filter(mock_page):
         await extractor.search_posts("unity", date_posted="last-year")
 
 
+async def test_facade_search_posts_forwards_its_content_type_filter(mock_page):
+    # Same boundary as the recency filter above: no trace passes a content
+    # type, so dropping the forward would otherwise survive the suite.
+    extractor = LinkedInExtractor(cast(Page, mock_page))
+
+    with patch.object(
+        SectionCapture,
+        "extract_page",
+        new_callable=AsyncMock,
+        return_value=ExtractedSection(text="post", references=[], error=None),
+    ):
+        result = await extractor.search_posts("unity", content_type="documents")
+
+    assert "contentType=%5B%22documents%22%5D" in result["url"]
+    with pytest.raises(FilterValidationError):
+        await extractor.search_posts("unity", content_type="articles")
+
+
 async def test_facade_search_jobs_forwards_every_filter_in_order(mock_page):
     # Several filters have the same type, so a positional swap is valid Python
     # and changes the query silently. That exact mutation survived the full
