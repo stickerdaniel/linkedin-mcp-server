@@ -115,6 +115,129 @@ class TestBuildFeedReferences:
         assert kinds == {"feed_post"}
 
 
+class TestFeedPostBoundaries:
+    """Post-boundary extraction merged into build_feed_references (#817)."""
+
+    def test_a_urn_boundary_pairs_text_with_the_canonical_url(self):
+        posts = [
+            {
+                "text": "Ada writes about engines",
+                "urn": "urn:li:activity:7214916299838103554",
+            }
+        ]
+        refs = build_feed_references([], [], post_boundaries=posts)
+        assert refs == [
+            {
+                "kind": "feed_post",
+                "url": "/feed/update/urn:li:activity:7214916299838103554/",
+                "context": "feed",
+                "text": "Ada writes about engines",
+                "value": "urn:li:activity:7214916299838103554",
+            }
+        ]
+
+    def test_a_boundary_without_a_urn_is_not_paired(self):
+        # A post whose own markup names no URN gets no guessed URL; the
+        # anchor and SDUI fallbacks still cover it.
+        posts = [{"text": "Grace on compilers", "urn": None}]
+        refs = build_feed_references([], [], post_boundaries=posts)
+        assert refs == []
+
+    def test_the_excerpt_is_capped(self):
+        posts = [
+            {
+                "text": "x" * 900,
+                "urn": "urn:li:activity:7000000000000000000",
+            }
+        ]
+        (ref,) = build_feed_references([], [], post_boundaries=posts)
+        assert len(ref["text"]) == 240
+
+    def test_a_boundary_richer_than_the_same_dom_anchor_wins(self):
+        # The old anchor-derived reference and the boundary reference name
+        # the same URL; the one carrying the post's text must survive.
+        raw_anchors = [
+            {
+                "href": "https://www.linkedin.com/feed/update/urn:li:activity:1234567890/",
+            }
+        ]
+        posts = [
+            {
+                "text": "The post's own words",
+                "urn": "urn:li:activity:1234567890",
+            }
+        ]
+        refs = build_feed_references(raw_anchors, [], post_boundaries=posts)
+        assert len(refs) == 1
+        assert refs[0]["text"] == "The post's own words"
+
+    def test_boundaries_precede_sdui_appends_and_share_the_cap(self):
+        posts = [
+            {
+                "text": f"Post {i}",
+                "urn": f"urn:li:activity:{7000000000000000000 + i}",
+            }
+            for i in range(55)
+        ]
+        captured = ["https://www.linkedin.com/posts/sdui-ugcPost-1-xx"]
+        refs = build_feed_references([], captured, post_boundaries=posts)
+        assert len(refs) == 50
+        assert all(r["url"].startswith("/feed/update/") for r in refs)
+        assert "/posts/sdui-ugcPost-1-xx" not in [r["url"] for r in refs]
+
+    def test_no_text_still_yields_the_identified_post(self):
+        posts = [
+            {
+                "text": "",
+                "urn": "urn:li:activity:7000000000000000000",
+            }
+        ]
+        (ref,) = build_feed_references([], [], post_boundaries=posts)
+        assert ref["url"] == "/feed/update/urn:li:activity:7000000000000000000/"
+        assert "text" not in ref
+
+    def test_boundaries_survive_a_cap_filling_anchor_slice(self):
+        # A rendered post must not lose its paired entry because earlier
+        # anchor-derived references already filled the 50-entry cap.
+        raw_anchors = [
+            {
+                "href": "https://www.linkedin.com/feed/update/"
+                f"urn:li:activity:{7000000000000000000 + i}/"
+            }
+            for i in range(50)
+        ]
+        posts = [
+            {
+                "text": "The paired post",
+                "urn": "urn:li:activity:1",
+            }
+        ]
+        refs = build_feed_references(raw_anchors, [], post_boundaries=posts)
+        assert len(refs) == 50
+        assert refs[0]["value"] == "urn:li:activity:1"
+
+    def test_a_wordier_same_url_anchor_loses_to_the_boundary(self):
+        # A permalink anchor's label ("3 comments") can outscore a short
+        # excerpt on text length; the boundary's pairing must still win
+        # or the URN and the post's own words are lost.
+        raw_anchors = [
+            {
+                "href": "https://www.linkedin.com/feed/update/urn:li:activity:1234567890/",
+                "text": "42 comments and a very long anchor label",
+            }
+        ]
+        posts = [
+            {
+                "text": "Short",
+                "urn": "urn:li:activity:1234567890",
+            }
+        ]
+        refs = build_feed_references(raw_anchors, [], post_boundaries=posts)
+        assert len(refs) == 1
+        assert refs[0]["text"] == "Short"
+        assert refs[0]["value"] == "urn:li:activity:1234567890"
+
+
 class TestIsPermalinkPayloadResponse:
     def test_voyager_normalized_json_counts(self):
         assert is_permalink_payload_response(

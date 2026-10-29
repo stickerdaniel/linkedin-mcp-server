@@ -393,6 +393,11 @@
       "101",
       "102"
     ],
+    "pagination": {
+      "next_offset": 2,
+      "pages_fetched": 1,
+      "reason": "max_pages"
+    },
     "promoted_job_ids": [
       "102"
     ],

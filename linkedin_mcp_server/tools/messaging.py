@@ -12,11 +12,9 @@ from pydantic import Field
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import (
-    AuthenticationError,
     InvalidReferenceError,
 )
-from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
-from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.dependencies import get_ready_extractor, tool_errors
 from linkedin_mcp_server.linkedin.contracts import (
     SEND_INTERRUPTED_WARNING,
     before_the_reply_deadline,
@@ -42,6 +40,7 @@ def register_messaging_tools(
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"messaging"},
     )
+    @tool_errors
     async def get_inbox(
         ctx: Context,
         limit: Annotated[int, Field(ge=1, le=50)] = 20,
@@ -68,27 +67,18 @@ def register_messaging_tools(
             optional section_errors (inbox -> why click-derived references are
             incomplete).
         """
-        try:
-            extractor = await get_ready_extractor(ctx, tool_name="get_inbox")
-            logger.info("Fetching inbox (limit=%d)", limit)
+        extractor = await get_ready_extractor(ctx, tool_name="get_inbox")
+        logger.info("Fetching inbox (limit=%d)", limit)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Loading messaging inbox"
-            )
+        await ctx.report_progress(
+            progress=0, total=100, message="Loading messaging inbox"
+        )
 
-            result = await extractor.get_inbox(limit=limit)
+        result = await extractor.get_inbox(limit=limit)
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "get_inbox")
-        except Exception as e:
-            raise_tool_error(e, "get_inbox")  # NoReturn
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
@@ -100,6 +90,7 @@ def register_messaging_tools(
         annotations={"openWorldHint": True},
         tags={"messaging"},
     )
+    @tool_errors
     async def get_conversation(
         ctx: Context,
         linkedin_username: str | None = None,
@@ -140,46 +131,32 @@ def register_messaging_tools(
             Dict with url, sections (conversation -> raw text), and optional references.
         """
         if not linkedin_username and not thread_id:
-            raise_tool_error(
-                InvalidReferenceError(
-                    "Provide at least one of linkedin_username or thread_id"
-                ),
-                "get_conversation",
+            raise InvalidReferenceError(
+                "Provide at least one of linkedin_username or thread_id"
             )
-        try:
-            if thread_id:
-                thread_id = normalize_thread_id(thread_id)
-            else:
-                linkedin_username = normalize_person_identifier(linkedin_username or "")
-            extractor = await get_ready_extractor(ctx, tool_name="get_conversation")
-            logger.info(
-                "Fetching conversation: username=%s, thread_id=%s, index=%d",
-                linkedin_username,
-                thread_id,
-                index,
-            )
+        if thread_id:
+            thread_id = normalize_thread_id(thread_id)
+        else:
+            linkedin_username = normalize_person_identifier(linkedin_username or "")
+        extractor = await get_ready_extractor(ctx, tool_name="get_conversation")
+        logger.info(
+            "Fetching conversation: username=%s, thread_id=%s, index=%d",
+            linkedin_username,
+            thread_id,
+            index,
+        )
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Loading conversation"
-            )
+        await ctx.report_progress(progress=0, total=100, message="Loading conversation")
 
-            result = await extractor.get_conversation(
-                linkedin_username=linkedin_username,
-                thread_id=thread_id,
-                index=index,
-            )
+        result = await extractor.get_conversation(
+            linkedin_username=linkedin_username,
+            thread_id=thread_id,
+            index=index,
+        )
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "get_conversation")
-        except Exception as e:
-            raise_tool_error(e, "get_conversation")  # NoReturn
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
@@ -190,6 +167,7 @@ def register_messaging_tools(
         annotations={"openWorldHint": True},
         tags={"messaging", "search"},
     )
+    @tool_errors
     async def search_conversations(
         keywords: str,
         ctx: Context,
@@ -218,29 +196,16 @@ def register_messaging_tools(
             references, and optional section_errors (search_results -> where
             click-derived references stopped).
         """
-        try:
-            extractor = await get_ready_extractor(ctx, tool_name="search_conversations")
-            logger.info(
-                "Searching conversations: keywords='%s', limit=%d", keywords, limit
-            )
+        extractor = await get_ready_extractor(ctx, tool_name="search_conversations")
+        logger.info("Searching conversations: keywords='%s', limit=%d", keywords, limit)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Searching messages"
-            )
+        await ctx.report_progress(progress=0, total=100, message="Searching messages")
 
-            result = await extractor.search_conversations(keywords, limit=limit)
+        result = await extractor.search_conversations(keywords, limit=limit)
 
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+        await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "search_conversations")
-        except Exception as e:
-            raise_tool_error(e, "search_conversations")  # NoReturn
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
@@ -248,6 +213,7 @@ def register_messaging_tools(
         annotations={"destructiveHint": True, "openWorldHint": True},
         tags={"messaging", "actions"},
     )
+    @tool_errors
     async def send_message(
         linkedin_username: str,
         message: str,
@@ -315,61 +281,46 @@ def register_messaging_tools(
             process, so ``sent`` is absent instead of false and only LinkedIn
             itself can say whether the message left.
         """
+        # Answered before a session is acquired. Caller-owned message
+        # validation needs no browser, and acquiring one can spend a login
+        # attempt and come back as an authentication error instead of the
+        # refusal the caller can act on.
+        refusal = refuse_an_invalid_message(linkedin_username, message)
+        if refusal is not None:
+            return refusal
+        linkedin_username = normalize_person_identifier(linkedin_username)
+        if profile_urn is not None:
+            profile_urn = normalize_profile_urn(profile_urn)
+        extractor = await get_ready_extractor(ctx, tool_name="send_message")
+        logger.info(
+            "Sending message to %s (confirm_send=%s)",
+            linkedin_username,
+            confirm_send,
+        )
+
+        await ctx.report_progress(progress=0, total=100, message="Sending message")
+
+        result = await extractor.send_message(
+            linkedin_username,
+            message,
+            confirm_send=confirm_send,
+            profile_urn=profile_urn,
+        )
+
         try:
-            # Answered before a session is acquired. Caller-owned message
-            # validation needs no browser, and acquiring one can spend a login
-            # attempt and come back as an authentication error instead of the
-            # refusal the caller can act on. Inside the `try` because building
-            # the refusal normalizes the recipient, and an unusable one raises
-            # `InvalidReferenceError`; outside, that error would skip
-            # `raise_tool_error` and reach the caller masked by
-            # `mask_error_details` instead of naming the correction.
-            refusal = refuse_an_invalid_message(linkedin_username, message)
-            if refusal is not None:
-                return refusal
-            linkedin_username = normalize_person_identifier(linkedin_username)
-            if profile_urn is not None:
-                profile_urn = normalize_profile_urn(profile_urn)
-            extractor = await get_ready_extractor(ctx, tool_name="send_message")
-            logger.info(
-                "Sending message to %s (confirm_send=%s)",
-                linkedin_username,
-                confirm_send,
-            )
+            # The send has already answered, and this notification is the
+            # last await inside FastMCP's `anyio.fail_after()`. A deadline
+            # landing here would discard a result that may say the send was
+            # confirmed, so a notification that stalls gives up first.
+            with before_the_reply_deadline():
+                await ctx.report_progress(progress=100, total=100, message="Complete")
+        except BaseException:
+            # Cancellation from outside, such as a client that cancels,
+            # which nothing can answer, so the log line is all that is
+            # left. Quiet where the result says a retry is safe, because
+            # then there is nothing to warn about.
+            if result.get("retry_safe") is False:
+                logger.warning(SEND_INTERRUPTED_WARNING)
+            raise
 
-            await ctx.report_progress(progress=0, total=100, message="Sending message")
-
-            result = await extractor.send_message(
-                linkedin_username,
-                message,
-                confirm_send=confirm_send,
-                profile_urn=profile_urn,
-            )
-
-            try:
-                # The send has already answered, and this notification is the
-                # last await inside FastMCP's `anyio.fail_after()`. A deadline
-                # landing here would discard a result that may say the send was
-                # confirmed, so a notification that stalls gives up first.
-                with before_the_reply_deadline():
-                    await ctx.report_progress(
-                        progress=100, total=100, message="Complete"
-                    )
-            except BaseException:
-                # Cancellation from outside, such as a client that cancels,
-                # which nothing can answer, so the log line is all that is
-                # left. Quiet where the result says a retry is safe, because
-                # then there is nothing to warn about.
-                if result.get("retry_safe") is False:
-                    logger.warning(SEND_INTERRUPTED_WARNING)
-                raise
-
-            return result
-
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "send_message")
-        except Exception as e:
-            raise_tool_error(e, "send_message")  # NoReturn
+        return result

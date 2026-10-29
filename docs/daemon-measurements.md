@@ -387,6 +387,21 @@ Symbols are named relative to `linkedin_mcp_server`. Tests are named as
   `daemon.auth_repair.say_why`. Source `52370602`, 2026-07-31. Test
   `tests/test_daemon_auth.py::TestTheRepairRunsForReal::test_a_tool_that_changes_something_is_never_replayed`.
 
+## Process scans
+
+- **A full `ps eww` takes close to a second on an idle Mac.** `ps eww -A`
+  prints every process's environment. On macOS with about 900 processes it
+  took 0.1 to 0.95 s with no other load (source PR #1368, 2026-10-19) and 0.31
+  to 0.95 s at a load average of 70, so a one-second bound leaves almost no
+  margin. Justifies `process_guardian._SNAPSHOT_SECONDS`. Source PR #1370,
+  2026-10-20. Test
+  `tests/test_process_tree.py::test_crash_guardian_scan_waits_for_a_ps_slowed_by_load`.
+- **Load stretches a daemon child's startup to seconds.** At a load average of
+  70, a child importing `daemon.owner` took 4.25 to 11.45 s to start its
+  descendant and write its marker. Justifies the 30 s deadline in
+  `tests/test_process_tree.py::test_daemon_hard_exit_signals_nothing_itself`.
+  Source PR #1370, 2026-10-20.
+
 ## Release gates
 
 - **Gate 1 passes on `f39a2893`.** One dispatch of
