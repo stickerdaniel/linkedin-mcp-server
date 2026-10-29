@@ -1884,7 +1884,10 @@ class _RaceScene(_CalibrationScene):
         self.closed = False
         self.on_stderr: Callable[[str], None] = lambda _line: None
         self.background: list[asyncio.Future[Any]] = []
-        self.last_end = time.monotonic()
+        #: When the last call ended. The quiet period starts there and not at
+        #: construction: under a slow setup, a clock started here would let
+        #: ``closes_under_call`` spend its one close on the warm-up.
+        self.last_end: float | None = None
         for name, value in (
             ("IDLE_RACE_TIMEOUT_SECONDS", self.idle),
             ("OWNER_GRACE_SECONDS", 0.2),
@@ -1913,13 +1916,13 @@ class _RaceScene(_CalibrationScene):
     async def _idle_closer(self) -> None:
         while True:
             await asyncio.sleep(0.05)
-            quiet = time.monotonic() - self.last_end
             if (
-                self.browser
+                self.last_end is not None
+                and self.browser
                 and not self.never_closes
                 and not self.closed
                 and (self.in_flight == 0 or self.closes_under_call)
-                and quiet >= self.idle
+                and time.monotonic() - self.last_end >= self.idle
             ):
                 self.closed = True
                 self._close()

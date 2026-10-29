@@ -1,4 +1,4 @@
-"""Row H-R6, owner killed: K1 frozen, K2 and K3.
+"""Row H-R6, owner killed: K1 frozen, K2, K3 and K0.
 
 After the row's one call the harness kills the process that drives the
 browser, SIGKILL on POSIX and TerminateProcess on Windows, through the handle
@@ -13,6 +13,8 @@ it took when it tied that process to the watcher's record of it:
 * **K3** (candidate, daemon): the owner. Its guardian gets 0, sends no group
   kill, and the frontend recovers on a second call; O1, O2 and O4 must be no
   worse than K1 frozen's.
+* **K0**: K3 again, valid on its own and reading as K3 did
+  (``harness.repeat_verdict``).
 
 The ``!`` rests on the guardian's argv, which the watcher reads on every POSIX
 platform before the kill; on Linux the signal oracle also records the group
@@ -47,6 +49,7 @@ from differential.harness import (
     measure_host_quit_row,
     r6_reading,
     r6_verdict,
+    repeat_verdict,
 )
 from differential.synthetic_origin import (
     OPT_IN_ENV,
@@ -193,6 +196,28 @@ async def test_the_candidate_owner_killed_drains_and_recovers(
     assert not problems, f"{problems}\n{result.report()}"
     assert result.vector is not None
     _VECTORS["K3"] = result.vector
+
+
+@pytest.mark.differential_row(row=ROW_H_R6, experiment="K0", column="integrated")
+async def test_the_candidate_owner_killed_repeats(
+    isolate_profile_dir, synthetic_egress, differential_run, monkeypatch
+):
+    reference = _VECTORS.get("K3")
+    if reference is None:
+        pytest.fail("K3 produced no valid result in this run, so nothing to repeat")
+    result = await _run(
+        "K0",
+        daemon=True,
+        reference="candidate daemon, owner killed, repeated",
+        profile=isolate_profile_dir,
+        egress=synthetic_egress,
+        log=differential_run,
+        monkeypatch=monkeypatch,
+    )
+    problems = repeat_verdict(reference, result) + r6_verdict(
+        result, experiment="K0", windows=WINDOWS
+    )
+    assert not problems, f"K0: {problems}\n{result.report()}"
 
 
 def test_the_candidate_is_no_worse_than_the_frozen_direct_server_killed():

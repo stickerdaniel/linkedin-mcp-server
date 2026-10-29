@@ -91,28 +91,26 @@ def test_counts_keep_skips_apart_from_executed_and_failed(tmp_path):
     )
 
     written = json.loads(counts.write(tmp_path).read_text())
-    assert written == {
-        "cases": [
-            {
-                "experiment": "K1",
-                "row": "H-R1",
-                "platform": "p",
-                "column": "integrated",
-                "executed": 0,
-                "skipped": 1,
-                "failed": 0,
-            },
-            {
-                "experiment": "K3",
-                "row": "H-R1",
-                "platform": "p",
-                "column": "integrated",
-                "executed": 2,
-                "skipped": 1,
-                "failed": 1,
-            },
-        ]
-    }
+    assert written["cases"] == [
+        {
+            "experiment": "K1",
+            "row": "H-R1",
+            "platform": "p",
+            "column": "integrated",
+            "executed": 0,
+            "skipped": 1,
+            "failed": 0,
+        },
+        {
+            "experiment": "K3",
+            "row": "H-R1",
+            "platform": "p",
+            "column": "integrated",
+            "executed": 2,
+            "skipped": 1,
+            "failed": 1,
+        },
+    ]
 
 
 def test_counts_refuse_an_unknown_status():

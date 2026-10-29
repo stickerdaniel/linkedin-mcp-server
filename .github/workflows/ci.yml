@@ -107,7 +107,9 @@ jobs:
         run: python3 scripts/ci_changes.py
 
   windows-daemon:
-    name: Windows daemon (Python ${{ matrix.python-version }})
+    # No matrix expression in the name: a skipped job shows it unexpanded, and
+    # GitHub appends the matrix values to a running one by itself.
+    name: Windows daemon
     # Pull requests only, and only when the diff can affect these tests. Main
     # does not repeat the matrix. `test` rejects a skip when this was required.
     needs: changes
@@ -182,6 +184,10 @@ jobs:
           tests/test_bootstrap.py::TestInstallerSupervisorLaunch::test_real_cpython_wait_unregister_contract
           tests/test_daemon_descriptor.py::TestPreparedCommit
           tests/test_daemon_descriptor.py::TestStateLocation
+          tests/test_daemon_config.py::TestDaemonLogState::test_log_file_uses_the_private_file_acl
+          tests/test_daemon_config.py::TestDaemonLogState::test_windows_log_is_hardened_before_publication
+          tests/test_daemon_config.py::TestDaemonLogState::test_a_published_windows_log_survives_a_failed_verification
+          tests/test_daemon_config.py::TestDaemonLogState::test_a_windows_log_planted_before_publication_fails_startup
           tests/test_daemon_startup.py
           tests/test_daemon_lock.py
           tests/test_installer_supervisor.py
@@ -191,6 +197,8 @@ jobs:
           tests/test_windows_guardian_probe.py
           tests/test_private_state.py
           tests/test_storage_class.py
+          tests/test_daemon_pilot.py::test_the_status_survives_a_console_without_the_check_mark
+          tests/test_daemon_pilot.py::test_a_status_timeout_ends_everything_the_candidate_started
 
       # Only on failure, and tolerant of an empty folder: a Python exception
       # fails this job without ever reaching Windows Error Reporting, and that
@@ -300,7 +308,9 @@ jobs:
   # tests spawn their own competing processes, and xdist would only add
   # scheduling noise on top of that.
   platform-behaviour:
-    name: Platform behaviour (${{ matrix.os }})
+    # No matrix expression in the name, as at `windows-daemon`. GitHub appends
+    # every matrix value, so the matrix holds only `os`.
+    name: Platform behaviour
     # Same gate as `windows-daemon`: relevant pull requests only, not main.
     needs: changes
     if: >-
@@ -318,19 +328,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-latest
-            browsers: ~/Library/Caches/ms-playwright
-          - os: windows-latest
-            browsers: ~\AppData\Local\ms-playwright
+        os:
+          - macos-latest
+          - windows-latest
           # Here for the browser rather than for the operating system. The
           # release publishes an arm64 image, and its browser is a separate
           # build from every other leg's: Chrome for Testing for linux-arm64
           # at the lock, Playwright's own Chromium through patchright 1.61.2.
           # Without this leg an identity regression in that build reaches the
           # container with both other jobs green.
-          - os: ubuntu-24.04-arm
-            browsers: ~/.cache/ms-playwright
+          - ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -393,7 +400,8 @@ jobs:
       - name: Restore the browser
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ matrix.browsers }}
+          # Playwright's default browser directory on each runner.
+          path: ${{ runner.os == 'macOS' && '~/Library/Caches/ms-playwright' || runner.os == 'Windows' && '~\AppData\Local\ms-playwright' || '~/.cache/ms-playwright' }}
           key: ms-playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.patchright.outputs.version }}
 
       # `--with-deps` on Linux only. It is the platform where a missing

@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Iterator
 from dataclasses import fields
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -192,6 +194,25 @@ class TestRoundTrip:
         assert restored.server.tool_timeout_seconds == 42.5
 
 
+@pytest.fixture
+def owner_streams(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Give the owner output streams of its own to redirect into the log.
+
+    `_attach_daemon_log` points stdout and stderr at the log with a real
+    `os.dup2`. On the runner's own descriptors that would send pytest's output
+    into a temporary file, and stubbing `os.dup2` instead replaces it for the
+    whole process, so pytest's capture loses the calls that restore its streams.
+    """
+    from linkedin_mcp_server.daemon import owner as daemon_owner
+
+    with open(os.devnull, "w") as stdout, open(os.devnull, "w") as stderr:
+        monkeypatch.setattr(
+            daemon_owner, "sys", SimpleNamespace(stdout=stdout, stderr=stderr)
+        )
+        yield
+
+
+@pytest.mark.usefixtures("owner_streams")
 class TestDaemonLogState:
     @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are required")
     def test_fresh_log_state_is_private_under_umask_zero(
@@ -201,13 +222,6 @@ class TestDaemonLogState:
         from linkedin_mcp_server.daemon import owner as daemon_owner
 
         monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
-        monkeypatch.setattr(daemon_owner.os, "dup2", lambda *args: None)
-        stream = type("Stream", (), {"fileno": lambda self: 1})()
-        monkeypatch.setattr(
-            daemon_owner,
-            "sys",
-            type("Streams", (), {"stdout": stream, "stderr": stream})(),
-        )
         previous = os.umask(0)
         try:
             log_path = daemon_owner._attach_daemon_log(tmp_path / "auth")
@@ -229,13 +243,6 @@ class TestDaemonLogState:
         from linkedin_mcp_server.windows_acl import describe_dacl
 
         monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
-        monkeypatch.setattr(daemon_owner.os, "dup2", lambda *args: None)
-        stream = type("Stream", (), {"fileno": lambda self: 1})()
-        monkeypatch.setattr(
-            daemon_owner,
-            "sys",
-            type("Streams", (), {"stdout": stream, "stderr": stream})(),
-        )
 
         log_path = daemon_owner._attach_daemon_log(tmp_path / "auth")
 
@@ -277,9 +284,9 @@ class TestDaemonLogState:
     ):
         """Publication hands the file over, so the publisher stops owning it.
 
-        Another candidate can open the published inode before the verification
-        below fails, and withdrawing the path then unlinks a log that is
-        already being written to.
+        Once published, the path no longer proves which file it names, so
+        withdrawing it after the verification below fails could remove a
+        foreign entry instead of the log this process staged.
         """
         from linkedin_mcp_server.daemon import owner as daemon_owner
         from linkedin_mcp_server.private_state import PrivateStateError
@@ -297,15 +304,18 @@ class TestDaemonLogState:
         assert log_path.is_file()
         assert not list(tmp_path.glob(".daemon-log-*")), "and nothing stayed staged"
 
+    @pytest.mark.skipif(
+        os.name == "nt", reason="Windows hardens a staged file before publishing it"
+    )
     def test_failed_fresh_log_hardening_leaves_the_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """A candidate that fails does not take the log away from one that did not.
+        """An owner whose hardening fails leaves the log it created in place.
 
-        Its own creation may have lost the race by a syscall, in which case
-        another candidate is already appending to this inode and nothing here
-        can tell. The file was opened owner-only, so leaving it costs nothing
-        and the next attachment hardens it through the existing-file path.
+        The path may no longer name the inode it created, so removing it could
+        take a foreign entry. The file was opened owner-only, so leaving it
+        costs nothing and the next attachment hardens it through the
+        existing-file path.
         """
         from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
         from linkedin_mcp_server.daemon import owner as daemon_owner
@@ -325,53 +335,51 @@ class TestDaemonLogState:
         assert log_path.is_file()
         assert stat.S_IMODE(log_path.stat().st_mode) & 0o077 == 0
 
-    @pytest.mark.skipif(os.name == "nt", reason="POSIX open flags decide this")
-    def test_a_lost_creation_race_leaves_the_winners_log_alone(
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX creates the log in place")
+    def test_a_log_planted_after_the_check_fails_startup(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """Two candidates can both find the path absent, and one has to yield.
-
-        A candidate that did not create the file may not remove it again, or
-        its own failure unlinks the log the candidate that went on to win the
-        daemon lock is already writing to.
-        """
+        """Only the lock holder creates the log, so a late entry is foreign."""
         from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
         from linkedin_mcp_server.daemon import owner as daemon_owner
-        from linkedin_mcp_server.private_state import PrivateStateError
 
         monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
-        monkeypatch.setattr(daemon_owner.os, "dup2", lambda *args: None)
-        stream = type("Stream", (), {"fileno": lambda self: 1})()
-        monkeypatch.setattr(
-            daemon_owner,
-            "sys",
-            type("Streams", (), {"stdout": stream, "stderr": stream})(),
-        )
-        monkeypatch.setattr(
-            daemon_owner,
-            "harden_created_file",
-            lambda _path: (_ for _ in ()).throw(PrivateStateError("ACL failure")),
-        )
-
         log_path = daemon_owner.daemon_log_path(tmp_path / "auth")
         real_open = os.open
-        raced: list[bool] = []
 
-        def racing_open(path, flags, mode=0o777, **rest):
-            if Path(path) == log_path and not raced:
-                raced.append(True)
-                # The other candidate creates the file between this one's
-                # absence check and its own open.
-                log_path.write_bytes(b"winner\n")
+        def planting_open(path, flags, mode=0o777, **rest):
+            if Path(path) == log_path and not log_path.exists():
+                log_path.write_bytes(b"foreign\n")
             return real_open(path, flags, mode, **rest)
 
-        monkeypatch.setattr(daemon_owner.os, "open", racing_open)
+        monkeypatch.setattr(daemon_owner.os, "open", planting_open)
 
-        attached = daemon_owner._attach_daemon_log(tmp_path / "auth")
+        with pytest.raises(FileExistsError):
+            daemon_owner._attach_daemon_log(tmp_path / "auth")
 
-        assert raced, "the creation race was actually exercised"
-        assert attached == log_path
-        assert log_path.read_bytes() == b"winner\n"
+        assert log_path.read_bytes() == b"foreign\n"
+
+    @pytest.mark.skipif(os.name != "nt", reason="POSIX rename replaces its target")
+    def test_a_windows_log_planted_before_publication_fails_startup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Publication refuses an entry that appeared after the check."""
+        from linkedin_mcp_server.daemon import owner as daemon_owner
+
+        log_path = tmp_path / "daemon.log"
+        real_harden = daemon_owner.harden_created_file
+
+        def harden_then_plant(staged: Path) -> None:
+            real_harden(staged)
+            log_path.write_bytes(b"foreign\n")
+
+        monkeypatch.setattr(daemon_owner, "harden_created_file", harden_then_plant)
+
+        with pytest.raises(FileExistsError):
+            daemon_owner._publish_windows_daemon_log(log_path)
+
+        assert log_path.read_bytes() == b"foreign\n"
+        assert not list(tmp_path.glob(".daemon-log-*")), "and nothing stayed staged"
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics are required")
     def test_a_planted_log_symlink_is_refused_before_open(
@@ -404,13 +412,6 @@ class TestDaemonLogState:
         from linkedin_mcp_server.daemon import owner as daemon_owner
 
         monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
-        monkeypatch.setattr(daemon_owner.os, "dup2", lambda *args: None)
-        stream = type("Stream", (), {"fileno": lambda self: 1})()
-        monkeypatch.setattr(
-            daemon_owner,
-            "sys",
-            type("Streams", (), {"stdout": stream, "stderr": stream})(),
-        )
         directory = daemon_descriptor.daemon_dir(tmp_path / "auth")
         directory.mkdir(parents=True, mode=0o777)
         directory.chmod(0o777)
@@ -421,6 +422,7 @@ class TestDaemonLogState:
         attached = daemon_owner._attach_daemon_log(tmp_path / "auth")
 
         assert attached == log_path
+        assert log_path.read_text() == "existing\n"
         assert stat.S_IMODE(directory.stat().st_mode) == 0o700
         assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
 

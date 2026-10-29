@@ -94,7 +94,10 @@ async def _expanded_sidebar(page: Any) -> Any:
     page.url = "https://www.linkedin.com/in/testuser/"
     answers = iter(
         [
-            {"sections": {}, "showAllUrls": {"more": "/in/testuser/more/"}},
+            {
+                "sections": {},
+                "showAllUrls": {"more": "https://www.linkedin.com/in/testuser/more/"},
+            },
             ["/in/someone/"],
         ]
     )

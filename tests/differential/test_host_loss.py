@@ -14,6 +14,7 @@ arms, waits for, loses, releases and watches a real gate.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import os
@@ -54,6 +55,7 @@ from differential.call_loss import (
     ROW_H_R5,
     SECOND_USERNAME,
     TIMING_UNCLAIMED,
+    _release_at,
     invalid_evidence,
     loss_comparison,
     loss_problems,
@@ -1292,6 +1294,7 @@ class _LostHost:
     def mark_lost(self, termination: str) -> None:
         self.lost = termination
         self.lost_monotonic_ns = time.monotonic_ns()
+        self.scene.lost_ns = self.lost_monotonic_ns
         self.scene.gone.set()
         self.scene.replaced = self.scene.replace_on_loss
         self.scene.owner_left = self.scene.owner_dies_on_loss
@@ -1337,6 +1340,13 @@ class _LossScene(_CalibrationScene):
     ``goes_on`` the lost read carries on after its held page is answered,
     and with ``second_goes_on`` the second read is served after the loss: the
     two continuations the row exists to catch.
+
+    The row schedules its release from the entry and needs the loss at least
+    ``LOSS_TO_RELEASE_SECONDS`` before it. With the times shortened, a runner
+    that stalls a few tenths of a second between the entry and the loss
+    leaves too little of that, and the row rightly reads its evidence as
+    invalid. So here the release also waits for the loss and that window
+    after it: on a prompt loss it comes at its scheduled time as before.
     """
 
     def __init__(self, monkeypatch, tmp_path, profile, origin, certificates):  # noqa: F811
@@ -1351,6 +1361,8 @@ class _LossScene(_CalibrationScene):
         self.hosts = 0
         self.background: list[asyncio.Future[Any]] = []
         self.gone = asyncio.Event()
+        self.lost_ns: int | None = None
+        monkeypatch.setattr(call_loss, "_release_at", self._release_after_the_loss)
         for name, value in (
             ("RELEASE_SECONDS", 0.5),
             ("RELEASE_TOLERANCE_SECONDS", 1.0),
@@ -1364,6 +1376,22 @@ class _LossScene(_CalibrationScene):
             "read_lock",
             lambda _path: {"now": None, "answer": {"state": lease_probe.FREE}},
         )
+
+    async def _release_after_the_loss(self, gate, monotonic_ns: int) -> None:
+        """The row's own release, asked for no sooner than *monotonic_ns* and
+        the owner's expiry window after the loss. A loss that has not come
+        within the release's tolerance is not waited for: the release goes as
+        scheduled and the row judges what it recorded."""
+        late = monotonic_ns + int(call_loss.RELEASE_TOLERANCE_SECONDS * 1e9)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(
+                self.gone.wait(), max(0.0, (late - time.monotonic_ns()) / 1e9)
+            )
+        if self.lost_ns is None:
+            await _release_at(gate, monotonic_ns)
+            return
+        window = int(call_loss.LOSS_TO_RELEASE_SECONDS * 1e9)
+        await _release_at(gate, max(monotonic_ns, self.lost_ns + window))
 
     async def _went_on(self, held: asyncio.Future[Any], username: str) -> None:
         await held

@@ -10,6 +10,8 @@ teardown separately, and a finalizer that fails runs after the call already
 passed. So a case is ``failed`` if any phase failed, ``skipped`` if setup or
 call skipped, and ``executed`` only when its call passed and nothing failed
 around it. The verdict is taken at session finish, after the last teardown.
+Each case is also kept by node id, with the reason a skipped one gave
+(``Counts``), so a packet says which tests ran and not only how many.
 
 **Under xdist the controller counts.** Workers attach the case's marker to each
 report as a user property, which xdist forwards to the controller with the
@@ -47,6 +49,8 @@ class _Case:
     experiment: str
     column: str
     phases: dict[str, str] = field(default_factory=dict)
+    #: Why the case skipped, from the phase that skipped it.
+    reason: str | None = None
 
     def status(self) -> str:
         outcomes = self.phases
@@ -89,7 +93,14 @@ class Accounting:
                 self._directory = Path(tempfile.mkdtemp(prefix="differential-"))
         return self._directory
 
-    def note(self, nodeid: str, marker: dict[str, Any], when: str, outcome: str):
+    def note(
+        self,
+        nodeid: str,
+        marker: dict[str, Any],
+        when: str,
+        outcome: str,
+        reason: str | None = None,
+    ):
         case = self.cases.setdefault(
             nodeid,
             _Case(
@@ -99,6 +110,8 @@ class Accounting:
             ),
         )
         case.phases[when] = outcome
+        if reason is not None and case.reason is None:
+            case.reason = reason
 
     def finish(self) -> None:
         if self.is_worker:
@@ -110,12 +123,15 @@ class Accounting:
             return
         if self.cases:
             counts = Counts()
-            for case in self.cases.values():
+            for nodeid, case in self.cases.items():
+                status = case.status()
                 counts.record(
                     experiment=case.experiment,
                     row=case.row,
                     column=case.column,
-                    status=case.status(),
+                    status=status,
+                    node=nodeid,
+                    reason=case.reason if status == "skipped" else None,
                 )
             counts.write(self.directory)
             print(f"\ndifferential evidence for run {self.run}: {self.directory}")
@@ -187,7 +203,22 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     marker = dict(report.user_properties).get(PROPERTY)
     if not isinstance(marker, dict) or report.when not in _PHASE_ORDER:
         return
-    accounting.note(report.nodeid, marker, report.when, report.outcome)
+    accounting.note(
+        report.nodeid, marker, report.when, report.outcome, _skip_reason(report)
+    )
+
+
+def _skip_reason(report: pytest.TestReport) -> str | None:
+    """What a skipped phase gave as its reason; an xfail says it was one."""
+    if not report.skipped:
+        return None
+    wasxfail = getattr(report, "wasxfail", None)
+    if wasxfail is not None:
+        return f"xfail: {wasxfail}"
+    longrepr = report.longrepr
+    if isinstance(longrepr, tuple) and len(longrepr) == 3:
+        return str(longrepr[2]).removeprefix("Skipped: ")
+    return str(longrepr)
 
 
 def pytest_sessionfinish(session: pytest.Session) -> None:

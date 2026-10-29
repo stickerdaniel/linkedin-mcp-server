@@ -37,6 +37,7 @@ from differential.crash_overlap import (
     lane_failures,
     o1_findings,
     problems_for,
+    repeat_findings,
 )
 from differential.watcher import (
     ProcessRecord,
@@ -461,6 +462,17 @@ def test_only_an_overlap_the_daemon_alone_shows_is_an_o1_finding():
     assert o1_findings(overlap, clean) == []
     assert o1_findings(clean, undecided) != []
     assert o1_findings(None, clean) != []
+
+
+def test_the_repeat_must_reach_the_candidates_verdict_whatever_its_timings():
+    clean = crash_reading(_record(_settled_tree()))
+    overlap = crash_reading(_record(_lingering_member()))
+    slower = replace(clean, ms={name: 2 * (ms or 0) for name, ms in clean.ms.items()})
+    assert repeat_findings(clean, slower) == []
+    assert repeat_findings(overlap, overlap) == []
+    [finding] = repeat_findings(clean, overlap)
+    assert f"K3 read {NO_OVERLAP}, its repeat {OVERLAP}" == finding
+    assert repeat_findings(clean, None) != []
 
 
 def test_a_second_root_is_the_comparisons_and_an_unhealthy_watcher_still_fails():

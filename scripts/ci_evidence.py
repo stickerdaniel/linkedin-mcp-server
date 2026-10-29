@@ -27,6 +27,7 @@ GROUPS = (
     "auth",
     "eligibility",
     "crash",
+    "models",
 )
 #: Groups whose rows run on some platforms only; elsewhere a job would
 #: prepare browsers and a baseline for nothing.

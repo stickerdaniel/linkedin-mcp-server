@@ -487,6 +487,17 @@
           "type": "object"
         }
       },
+      "get_session_status": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "get_sidebar_profiles": {
         "input": {
           "additionalProperties": false,
@@ -569,7 +580,7 @@
             },
             "easy_apply": {
               "default": false,
-              "description": "Only show Easy Apply jobs (default false)",
+              "description": "Only show Easy Apply jobs (default false). Classic search only.",
               "type": "boolean"
             },
             "experience_level": {
@@ -582,7 +593,7 @@
                 }
               ],
               "default": null,
-              "description": "Filter by experience level, comma-separated (internship, entry, associate, mid_senior, director, executive)"
+              "description": "Filter by experience level, comma-separated (internship, entry, associate, mid_senior, director, executive). Classic search only."
             },
             "job_type": {
               "anyOf": [
@@ -594,7 +605,7 @@
                 }
               ],
               "default": null,
-              "description": "Filter by job type, comma-separated (full_time, part_time, contract, temporary, volunteer, internship, other)"
+              "description": "Filter by job type, comma-separated (full_time, part_time, contract, temporary, volunteer, internship, other). Classic search only."
             },
             "keywords": {
               "description": "Search keywords (e.g., \"software engineer\", \"data scientist\")",
@@ -610,7 +621,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional location filter (e.g., \"San Francisco\", \"Remote\")"
+              "description": "Optional location filter (e.g., \"San Francisco\", \"Remote\"). Classic search only."
             },
             "max_pages": {
               "default": 3,
@@ -629,7 +640,7 @@
                 }
               ],
               "default": null,
-              "description": "Sort results (date, relevance)"
+              "description": "Sort results (date, relevance). Classic search only."
             },
             "work_type": {
               "anyOf": [
@@ -641,7 +652,7 @@
                 }
               ],
               "default": null,
-              "description": "Filter by work type, comma-separated (on_site, remote, hybrid)"
+              "description": "Filter by work type, comma-separated (on_site, remote, hybrid). Classic search only."
             }
           },
           "required": [

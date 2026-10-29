@@ -60,17 +60,20 @@ UNKNOWN_OUTCOME_STATUS = "outcome_unknown"
 
 
 def unknown_outcome(
-    *, tool: str, reason: str, owner: str = "went away"
+    *, tool: str, reason: str, owner: str = "stopped answering it"
 ) -> dict[str, Any]:
     """The structured half of a call whose effect nobody can vouch for.
 
     Uses `linkedin.contracts.message_action_result`'s field names (`status`,
     `retry_safe`) without importing from `linkedin/`. `sent` and the other
     unknowns are omitted rather than null, since a null reads as "no". Used by
-    the frontend when an owner vanished mid-call and by the owner when it cut a
-    call off to stand down. *owner* says what the shared browser process did;
-    the frontend replaces the default when the owner did not answer its
-    heartbeats, which says nothing about whether it is gone.
+    the frontend when a call's answer never arrived and by the owner when it
+    cut a call off to stand down. *owner* says what the shared browser process
+    did. The default claims no more than the lost answer: the process may still
+    be running, as when only the hop dropped its answer or its heartbeats kept
+    coming. The frontend replaces it when the owner did not answer its
+    heartbeats or a recovery probe either, which still says nothing about
+    whether it is gone.
     """
     return {
         "status": UNKNOWN_OUTCOME_STATUS,

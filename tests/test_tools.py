@@ -221,33 +221,44 @@ async def test_invalid_reference_is_rejected_before_extractor(
     ready.assert_not_awaited()
 
 
-@pytest.mark.parametrize(
-    ("module_name", "tool_name", "arguments"),
-    [
-        ("person", "get_person_profile", {"linkedin_username": "alice"}),
-        ("person", "search_people", {"keywords": "engineer"}),
-        ("person", "connect_with_person", {"linkedin_username": "alice"}),
-        ("person", "get_sidebar_profiles", {"linkedin_username": "alice"}),
-        ("person", "get_my_profile", {}),
-        ("company", "get_company_profile", {"company_name": "anthropic"}),
-        ("company", "get_company_posts", {"company_name": "anthropic"}),
-        ("company", "search_companies", {"keywords": "fintech"}),
-        ("company", "get_company_employees", {"company_name": "anthropic"}),
-        ("job", "get_job_details", {"job_id": "4252026496"}),
-        ("job", "search_jobs", {"keywords": "python"}),
-        ("job", "get_saved_jobs", {}),
-        ("messaging", "get_inbox", {}),
-        ("messaging", "get_conversation", {"linkedin_username": "alice"}),
-        ("messaging", "search_conversations", {"keywords": "hello"}),
-        (
-            "messaging",
-            "send_message",
-            {"linkedin_username": "alice", "message": "Hello", "confirm_send": False},
-        ),
-        ("feed", "get_feed", {}),
-        ("post", "search_posts", {"keywords": "python"}),
-    ],
-)
+#: One call per registered tool that passes boundary validation, so the tool
+#: reaches its readiness call. `test_the_valid_calls_name_every_tool` keeps it
+#: complete, which is what makes the tests below cover a tool added later.
+_A_VALID_CALL = [
+    ("person", "get_person_profile", {"linkedin_username": "alice"}),
+    ("person", "search_people", {"keywords": "engineer"}),
+    ("person", "connect_with_person", {"linkedin_username": "alice"}),
+    ("person", "get_sidebar_profiles", {"linkedin_username": "alice"}),
+    ("person", "get_my_profile", {}),
+    ("company", "get_company_profile", {"company_name": "anthropic"}),
+    ("company", "get_company_posts", {"company_name": "anthropic"}),
+    ("company", "search_companies", {"keywords": "fintech"}),
+    ("company", "get_company_employees", {"company_name": "anthropic"}),
+    ("job", "get_job_details", {"job_id": "4252026496"}),
+    ("job", "get_job_apply_url", {"job_id": "4252026496"}),
+    ("job", "search_jobs", {"keywords": "python"}),
+    ("job", "get_saved_jobs", {}),
+    ("messaging", "get_inbox", {}),
+    ("messaging", "get_conversation", {"linkedin_username": "alice"}),
+    ("messaging", "search_conversations", {"keywords": "hello"}),
+    (
+        "messaging",
+        "send_message",
+        {"linkedin_username": "alice", "message": "Hello", "confirm_send": False},
+    ),
+    ("feed", "get_feed", {}),
+    ("post", "search_posts", {"keywords": "python"}),
+]
+
+
+def _register(mcp: FastMCP, module_name: str) -> None:
+    import importlib
+
+    module = importlib.import_module(f"linkedin_mcp_server.tools.{module_name}")
+    getattr(module, f"register_{module_name}_tools")(mcp)
+
+
+@pytest.mark.parametrize(("module_name", "tool_name", "arguments"), _A_VALID_CALL)
 async def test_valid_input_reaches_the_patched_readiness_call(
     module_name, tool_name, arguments
 ):
@@ -271,6 +282,180 @@ async def test_valid_input_reaches_the_patched_readiness_call(
     ready.assert_awaited_once()
     assert ready.await_args is not None
     assert ready.await_args.kwargs == {"tool_name": tool_name}
+
+
+async def test_the_valid_calls_name_every_tool():
+    mcp = FastMCP("test")
+    for module_name in _TOOL_MODULES:
+        _register(mcp, module_name)
+
+    registered = {tool.name for tool in await mcp.list_tools()}
+
+    assert registered == {tool_name for _, tool_name, _ in _A_VALID_CALL}
+
+
+@pytest.mark.parametrize(("module_name", "tool_name", "arguments"), _A_VALID_CALL)
+async def test_a_session_that_dies_during_a_call_asks_for_a_login(
+    module_name, tool_name, arguments, caplog
+):
+    """Every tool starts a login, and does not claim the call may run again.
+
+    The readiness call is only where the failure is injected, being the one call
+    every tool makes; the real readiness call answers its own auth failures.
+    """
+    from fastmcp import Context
+    from fastmcp.exceptions import ToolError
+
+    from linkedin_mcp_server.core.exceptions import AuthenticationError
+    from linkedin_mcp_server.exceptions import AuthenticationStartedError
+
+    mcp = FastMCP("test", mask_error_details=True)
+    _register(mcp, module_name)
+    signed_out = AuthenticationError("LinkedIn signed this session out")
+
+    with (
+        patch(
+            f"linkedin_mcp_server.tools.{module_name}.get_ready_extractor",
+            AsyncMock(side_effect=signed_out),
+        ),
+        patch(
+            "linkedin_mcp_server.dependencies.handle_auth_error",
+            AsyncMock(side_effect=AuthenticationStartedError("A login window opened")),
+        ) as relogin,
+        caplog.at_level(logging.INFO, logger="linkedin_mcp_server.error_handler"),
+        pytest.raises(ToolError, match="A login window opened"),
+    ):
+        await mcp.call_tool(tool_name, arguments)
+
+    relogin.assert_awaited_once()
+    assert relogin.await_args is not None
+    (failure, ctx), options = relogin.await_args
+    assert failure is signed_out
+    assert isinstance(ctx, Context)
+    assert options.get("nothing_ran_yet", False) is False
+    assert f"Authentication started in {tool_name}:" in caplog.text
+
+
+@pytest.mark.parametrize(("module_name", "tool_name", "arguments"), _A_VALID_CALL)
+async def test_a_known_failure_reaches_a_masked_client_shaped(
+    module_name, tool_name, arguments, caplog
+):
+    from fastmcp.exceptions import ToolError
+
+    from linkedin_mcp_server.core.exceptions import RateLimitError
+
+    mcp = FastMCP("test", mask_error_details=True)
+    _register(mcp, module_name)
+
+    with (
+        patch(
+            f"linkedin_mcp_server.tools.{module_name}.get_ready_extractor",
+            AsyncMock(side_effect=RateLimitError("throttled", suggested_wait_time=60)),
+        ),
+        patch(
+            "linkedin_mcp_server.dependencies.handle_auth_error",
+            new_callable=AsyncMock,
+        ) as relogin,
+        caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.error_handler"),
+        pytest.raises(ToolError, match="Rate limit detected. Wait 60 seconds"),
+    ):
+        await mcp.call_tool(tool_name, arguments)
+
+    relogin.assert_not_awaited()
+    assert f"Rate limit in {tool_name}:" in caplog.text
+
+
+@pytest.mark.parametrize(("module_name", "tool_name", "arguments"), _A_VALID_CALL)
+async def test_a_quiescent_owner_lets_every_tool_be_replayed_after_sign_in(
+    module_name, tool_name, arguments
+):
+    """The readiness refusal crosses the tool with its replay marker intact.
+
+    Readiness runs for real up to the owner's latch, so the refusal says that
+    nothing ran yet from where it was raised, and the marker has to carry that
+    through the tool's own failure handling to the client.
+    """
+    from fastmcp import Client
+
+    from linkedin_mcp_server.bootstrap import go_auth_quiescent
+    from linkedin_mcp_server.daemon.auth_repair import (
+        MARKER_KEY,
+        OwnerAuthSignalMiddleware,
+    )
+    from linkedin_mcp_server.server_role import ServerRole, set_process_role
+
+    set_process_role(ServerRole.OWNER)
+    go_auth_quiescent("broken-generation")
+    mcp = FastMCP("owner", mask_error_details=True)
+    _register(mcp, module_name)
+    mcp.add_middleware(OwnerAuthSignalMiddleware())
+
+    with patch(
+        "linkedin_mcp_server.dependencies.get_or_create_browser",
+        AsyncMock(side_effect=AssertionError("a quiescent owner opened a browser")),
+    ):
+        async with Client(mcp) as client:
+            result = await client.call_tool(tool_name, arguments, raise_on_error=False)
+
+    assert result.is_error
+    marker = (result.meta or {})[MARKER_KEY]
+    assert marker["replayable"] is True
+    assert marker["generation"] == "broken-generation"
+
+
+@pytest.mark.parametrize(("module_name", "tool_name", "arguments"), _A_VALID_CALL)
+async def test_no_tool_hands_a_proxy_credential_to_the_client(
+    module_name, tool_name, arguments, monkeypatch
+):
+    """An error that is already shaped is still checked for the credentials."""
+    from fastmcp.exceptions import ToolError
+
+    from linkedin_mcp_server.config.schema import AppConfig
+
+    config = AppConfig()
+    config.browser.proxy_server = "http://gate.example:7000"
+    config.browser.proxy_username = "acctzone9"
+    config.browser.proxy_password = "s3cr3t"
+    monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+    mcp = FastMCP("test", mask_error_details=True)
+    _register(mcp, module_name)
+    shaped = ToolError("Proxy refused http://acctzone9:s3cr3t@gate.example:7000")
+
+    with (
+        patch(
+            f"linkedin_mcp_server.tools.{module_name}.get_ready_extractor",
+            AsyncMock(side_effect=shaped),
+        ),
+        pytest.raises(ToolError) as excinfo,
+    ):
+        await mcp.call_tool(tool_name, arguments)
+
+    assert "gate.example:7000" in str(excinfo.value)
+    assert "s3cr3t" not in str(excinfo.value)
+    assert "acctzone9" not in str(excinfo.value)
+
+
+async def test_a_search_filter_refusal_does_not_echo_a_proxy_credential(
+    monkeypatch,
+):
+    """The refusal quotes the filter back, and is answered before readiness."""
+    from fastmcp.exceptions import ToolError
+
+    from linkedin_mcp_server.config.schema import AppConfig
+
+    config = AppConfig()
+    config.browser.proxy_server = "http://gate.example:7000"
+    config.browser.proxy_password = "s3cr3t"
+    monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+    mcp = FastMCP("test", mask_error_details=True)
+    _register(mcp, "person")
+
+    with pytest.raises(ToolError, match="numeric LinkedIn company URN id") as excinfo:
+        await mcp.call_tool(
+            "search_people", {"keywords": "engineer", "current_company": "s3cr3t"}
+        )
+
+    assert "s3cr3t" not in str(excinfo.value)
 
 
 @pytest.mark.parametrize(
@@ -332,7 +517,7 @@ async def test_a_landing_off_linkedin_reaches_a_masked_client_by_name(
             AsyncMock(return_value=extractor),
         ),
         patch(
-            f"linkedin_mcp_server.tools.{module_name}.handle_auth_error",
+            "linkedin_mcp_server.dependencies.handle_auth_error",
             new_callable=AsyncMock,
         ) as relogin,
         pytest.raises(ToolError) as excinfo,
@@ -526,6 +711,7 @@ class TestPersonTool:
         # the auth failure this test is about.
         mock_browser = MagicMock()
         mock_browser.page.is_closed.return_value = False
+        mock_browser.page_crashed = False
         mock_browser.context.browser.is_connected.return_value = True
         monkeypatch.setattr(
             "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
@@ -821,6 +1007,7 @@ class TestPersonTool:
         # the auth failure this test is about.
         mock_browser = MagicMock()
         mock_browser.page.is_closed.return_value = False
+        mock_browser.page_crashed = False
         mock_browser.context.browser.is_connected.return_value = True
         monkeypatch.setattr(
             "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
