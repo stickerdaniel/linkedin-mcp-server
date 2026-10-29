@@ -487,6 +487,17 @@
           "type": "object"
         }
       },
+      "get_session_status": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "get_sidebar_profiles": {
         "input": {
           "additionalProperties": false,
