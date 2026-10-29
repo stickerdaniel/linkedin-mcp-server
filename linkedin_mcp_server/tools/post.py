@@ -12,11 +12,11 @@ import logging
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
-from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.dependencies import get_ready_extractor, tool_errors
+from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode
 from linkedin_mcp_server.linkedin.contracts import FilterValidationError
 
 logger = logging.getLogger(__name__)
@@ -99,7 +99,7 @@ def register_post_tools(
             # Validation messages carry actionable detail; surface them as
             # ToolError so mask_error_details doesn't reduce them to a
             # generic "Error calling tool 'search_posts'".
-            raise ToolError(str(e)) from e
+            raise CodedToolError(str(e), ErrorCode.INVALID_ARGUMENT) from e
 
         await ctx.report_progress(progress=100, total=100, message="Complete")
 

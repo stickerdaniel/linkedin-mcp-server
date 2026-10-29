@@ -30,6 +30,7 @@ from fastmcp.tools import ToolResult
 
 from linkedin_mcp_server.daemon.core import owner as lifecycle
 from linkedin_mcp_server.daemon.descriptor import PROTOCOL_VERSION
+from linkedin_mcp_server.error_handler import ErrorCode, error_result
 
 logger = logging.getLogger(__name__)
 
@@ -399,10 +400,12 @@ def _refusal(kind: str, message: str) -> ToolResult:
 
     Signed with the protocol and this owner's instance, so a frontend accepts
     it only from the owner it dispatched to. ``is_error`` stays true for
-    clients that read no metadata.
+    clients that read no metadata. A retiring owner is turnover, so calling
+    again reaches the next one; an unmarked call needs an updated client first.
     """
-    return ToolResult(
-        content=[mt.TextContent(type="text", text=message)],
+    return error_result(
+        message,
+        ErrorCode.BROWSER_BUSY if kind == RETIRING else ErrorCode.BROWSER_UNAVAILABLE,
         meta={
             REFUSAL_KEY: {
                 "daemon": kind,
@@ -410,7 +413,6 @@ def _refusal(kind: str, message: str) -> ToolResult:
                 "instance": _liveness.instance_id,
             }
         },
-        is_error=True,
     )
 
 
@@ -485,10 +487,10 @@ class OwnerCallLivenessMiddleware(Middleware):
                         tool=context.message.name,
                         reason="it was replaced and stopped waiting for this call",
                     )
-                    return ToolResult(
-                        content=[mt.TextContent(type="text", text=answer["message"])],
+                    return error_result(
+                        answer["message"],
+                        ErrorCode.OUTCOME_UNKNOWN,
                         structured_content=answer,
-                        is_error=True,
                     )
                 case lifecycle.Stopped.ABANDONED:
                     # Expired because nobody was waiting. Reported as an error

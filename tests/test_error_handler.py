@@ -11,7 +11,7 @@ from linkedin_mcp_server.core.exceptions import (
     RateLimitError,
     PageReadError,
 )
-from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.error_handler import CodedToolError, raise_tool_error
 from linkedin_mcp_server.exceptions import (
     AuthenticationInProgressError,
     AuthMissingOnOwnerError,
@@ -409,7 +409,7 @@ class TestAnAlreadyShapedToolErrorPassesThrough:
         while current is not None:
             chain.append(type(current))
             current = current.__cause__
-        assert chain == [ToolError, SessionExpiredError]
+        assert chain == [CodedToolError, SessionExpiredError]
 
     def test_the_second_pass_is_not_logged_as_an_unexpected_error(self, caplog):
         # The catch-all logs at ERROR as "Unexpected error". A failure a branch
@@ -466,7 +466,7 @@ class TestAnAlreadyShapedToolErrorPassesThrough:
 
         asyncio.run(drive())
 
-        assert seen["chain"] == [ToolError, SessionExpiredError]
+        assert seen["chain"] == [CodedToolError, SessionExpiredError]
 
     def test_a_shaped_error_carrying_a_credential_is_still_redacted(self, monkeypatch):
         # The pass-through must not become a way around redaction. Before this

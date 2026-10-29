@@ -33,7 +33,7 @@ from linkedin_mcp_server.drivers.browser import (
     watch_for_handoff_requests,
 )
 from linkedin_mcp_server.daemon.auth_repair import OwnerAuthSignalMiddleware
-from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.error_handler import ErrorCodeMiddleware, raise_tool_error
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
@@ -224,6 +224,9 @@ def create_mcp_server(
         mask_error_details=True,
         auth=_StaticTokenAuth(auth_token) if auth_token is not None else None,
     )
+    # First, so it is the outermost layer on every role: everything inside it
+    # still sees a failure as the exception it raised.
+    mcp.add_middleware(ErrorCodeMiddleware())
     # Added before the serializing middleware below, which makes it the outer one.
     # An inner position would work: `close_browser` does not consult the in-flight
     # count, so quiescence succeeds from there, and the lease reference the inner

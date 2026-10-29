@@ -30,6 +30,7 @@ from owner_hop import reach_owners_in_process as _reach_owners_in_process
 
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon.discovery import Attachment
+from linkedin_mcp_server.error_handler import ERROR_META_KEY
 from linkedin_mcp_server.daemon.descriptor import build, new_instance_id, new_token
 from linkedin_mcp_server.daemon import descriptor as daemon_descriptor
 from linkedin_mcp_server.daemon.forwarder import (
@@ -1076,6 +1077,7 @@ class TestRepeatingOnlyWhatIsSafe:
         )
         assert answer.is_error is True
         assert answer.structured_content is not None
+        assert answer.meta[ERROR_META_KEY]["code"] == "outcome_unknown"
         return answer.structured_content
 
     @staticmethod

@@ -54,6 +54,7 @@ from linkedin_mcp_server.daemon.discovery import (
     Unanswered,
 )
 from linkedin_mcp_server.daemon.forwarder import OwnerUnreachableError
+from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode
 from linkedin_mcp_server.daemon.proxy import (
     FrontendCallHeartbeatMiddleware,
     FrontendCallMiddleware,
@@ -478,13 +479,14 @@ class TestWhatACallIsTold:
                 cause=httpx2.ReadTimeout("no answer"),
             )
 
-        with pytest.raises(ToolError) as told:
+        with pytest.raises(CodedToolError) as told:
             await _call(
                 _backend(owner, tmp_path), _beats(_watched()), lost, read_only=True
             )
 
         expected = _silent_and_unsent(4242) if nothing_was_sent else _silent(4242)
         assert str(told.value) == expected
+        assert told.value.code is ErrorCode.BROWSER_UNAVAILABLE
 
     async def test_an_owner_that_answers_again_is_used_again(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
