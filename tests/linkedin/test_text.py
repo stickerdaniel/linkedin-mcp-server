@@ -31,6 +31,24 @@ class TestJobSearchText:
     def test_empty_text_is_not_a_no_match_page(self):
         assert not JOB_SEARCH_EN_US.shows_no_match("")
 
+    def test_the_redesigned_notice_is_found_as_a_whole_line(self):
+        """Measured text of the redesigned search on a nonsense query."""
+        notice = (
+            "We found more results related to your search that may not be "
+            "exact matches, but could still be a great fit."
+        )
+        text = f"99+ results\nParis (80 km)\nPromoted\n  {notice}\nData Engineer"
+
+        assert JOB_SEARCH_EN_US.inexact_notice(text) == notice
+
+    def test_a_posting_quoting_the_notice_in_part_is_no_notice(self):
+        assert (
+            JOB_SEARCH_EN_US.inexact_notice(
+                "99+ results\nWe found more results related to your search"
+            )
+            is None
+        )
+
     def test_the_result_count_under_the_heading_is_exact(self):
         """Classic layout, measured: the count is the second line."""
         assert JOB_SEARCH_EN_US.result_count(

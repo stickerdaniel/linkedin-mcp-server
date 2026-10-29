@@ -57,7 +57,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 
 | Tool | Description |
 |------|-------------|
-| `get_person_profile` | Read profile sections such as experience, education, skills, projects, and posts. |
+| `get_person_profile` | Read profile sections such as experience, education, skills, projects, volunteering, and posts. |
 | `get_my_profile` | Read your own profile, with the same section selection as other profiles. |
 | `connect_with_person` | Send a connection request with an optional note, or accept an incoming one. |
 | `get_sidebar_profiles` | Find recommended profile links, including people you may know. |
@@ -342,6 +342,14 @@ On startup, the MCP Bundle prepares the shared Patchright Chromium browser cache
 - *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout: `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
 - *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host. Create the session on the host with `--login`, or use the explicit Docker `--login --login-viewer` command.
 - Users on slow connections may need higher values for either.
+
+</details>
+
+<details>
+<summary>Use your own Chrome</summary>
+
+- Set **Chrome executable** in the extension's settings to a Chrome, Chromium or Chrome for Testing binary, such as `/usr/bin/google-chrome`. Leave it blank to keep the bundled Chromium. It sets `CHROME_PATH`, described under *Custom Chrome path* in the uvx setup help.
+- This is the fix when tool calls refuse to open the profile because a newer browser last opened it: point the setting at that newer browser instead of signing in again.
 
 </details>
 

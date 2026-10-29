@@ -612,6 +612,26 @@ class TestBuildReferences:
                 }
             ]
 
+    def test_uses_volunteering_context(self):
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/company/codeforportugal/",
+                    "text": "Code for Portugal",
+                }
+            ],
+            "volunteering",
+        )
+
+        assert references == [
+            {
+                "kind": "company",
+                "url": "/company/codeforportugal/",
+                "text": "Code for Portugal",
+                "context": "volunteering",
+            }
+        ]
+
     def test_uses_employees_context_for_company_people_pages(self):
         references = build_references(
             [
