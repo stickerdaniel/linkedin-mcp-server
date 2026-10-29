@@ -42,10 +42,6 @@ logger = logging.getLogger(__name__)
 
 THROTTLED_STATUSES = frozenset({429, 999})
 
-# How many throttled responses are kept. The count is exact regardless; this
-# caps only the sample, and a throttled page can produce hundreds.
-_SAMPLE_LIMIT = 20
-
 
 @dataclass(frozen=True, slots=True)
 class ThrottleHit:
@@ -56,7 +52,6 @@ class ThrottleHit:
     retry_after: int | None = None
 
 
-_hits: list[ThrottleHit] = []
 _latest: ThrottleHit | None = None
 _statuses: set[int] = set()
 _count: int = 0
@@ -111,7 +106,6 @@ def reset_throttle_record() -> None:
     _call += 1
     _count = 0
     _latest = None
-    _hits.clear()
     _statuses.clear()
 
 
@@ -144,11 +138,15 @@ def throttle_evidence() -> str | None:
 
 
 def _path(url: str) -> str:
-    """The path alone: a throttled URL's query carries ids and no diagnosis."""
+    """The path alone: a throttled URL's query carries ids and no diagnosis.
+
+    Never the URL itself, which would bring the query along: a URL with no
+    path is the root, and one that does not parse names nothing useful.
+    """
     try:
-        return urlsplit(url).path or url
+        return urlsplit(url).path or "/"
     except ValueError:
-        return url
+        return "/"
 
 
 def _retry_after(response: Any) -> int | None:
@@ -210,5 +208,3 @@ def _record(response: Any) -> None:
     _count += 1
     _latest = hit
     _statuses.add(status)
-    if len(_hits) < _SAMPLE_LIMIT:
-        _hits.append(hit)

@@ -175,8 +175,16 @@ class TestTheEvidenceSentence:
         assert "2 requests" in evidence
         assert "/voyager/api/messaging/b" in evidence
 
-    def test_it_leaves_the_query_out(self):
-        record(response(429, "https://www.linkedin.com/voyager/api/x?keywords=secret"))
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.linkedin.com/voyager/api/x?keywords=secret",
+            "https://www.linkedin.com?session=secret",
+        ],
+        ids=["with a path", "without one"],
+    )
+    def test_it_leaves_the_query_out(self, url):
+        record(response(429, url))
 
         evidence = throttle_evidence()
         assert evidence is not None and "secret" not in evidence
@@ -193,9 +201,9 @@ class TestTheEvidenceSentence:
         evidence = throttle_evidence()
         assert evidence is not None and "60 seconds" in evidence
 
-    def test_the_most_recent_refusal_is_named_past_the_sample_cap(self):
-        # The sample stops growing at twenty; the sentence must not freeze on
-        # the twentieth refusal while the count goes on.
+    def test_the_most_recent_of_many_refusals_is_named(self):
+        # A throttled page produces refusals by the dozen; the sentence names
+        # the last one and counts them all.
         record(
             *(
                 response(429, f"https://www.linkedin.com/voyager/api/old{n}")
@@ -209,7 +217,7 @@ class TestTheEvidenceSentence:
         assert "31 requests" in evidence
         assert "/voyager/api/latest" in evidence
 
-    def test_a_status_first_seen_past_the_sample_cap_is_named(self):
+    def test_a_status_first_seen_late_is_named(self):
         record(
             *(
                 response(429, f"https://www.linkedin.com/voyager/api/old{n}")
