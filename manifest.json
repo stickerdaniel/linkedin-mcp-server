@@ -50,7 +50,7 @@
   "tools": [
     {
       "name": "get_person_profile",
-      "description": "Get detailed information from a LinkedIn profile including work history, education, certifications, skills, projects, connections, and recent posts"
+      "description": "Get detailed information from a LinkedIn profile including work history, education, certifications, skills, projects, volunteering, connections, and recent posts"
     },
     {
       "name": "get_my_profile",
