@@ -147,7 +147,8 @@ Optional additional keys:
 - `job_ids: [id, ...]` (search_jobs and get_saved_jobs)
 - `total: {count, exact}` (search_jobs only) — the result count LinkedIn advertises on the first page; `exact` is false for a lower bound such as "500+"
 - `promoted_job_ids: [id, ...]` (search_jobs only) — the subset of `job_ids` shown as promoted; present only when every page could be read, so an empty list means none were
-- `references["feed"]` (get_feed only) — every entry is `kind: "feed_post"`; non-post anchors (sidebar profiles, employer logos) are filtered. URLs may carry either `/feed/update/<urn>/` (DOM-anchor-derived) or `/posts/<slug>` (SDUI-derived) form; both are valid LinkedIn permalinks. Cap is 50 entries, matching `get_feed`'s `num_posts` ceiling.
+- `pagination: {pages_fetched, next_offset, reason}` (search_jobs only) — why paging stopped: `complete`, `max_pages`, `time_budget` or `no_new_ids`; `next_offset` is the `start` the next page would have used. Absent when a failure stopped the search, which `section_errors` then explains; a `filters_dropped` or `no_matching_jobs` entry is not a failure and keeps it
+- `references["feed"]` (get_feed only) — every entry is `kind: "feed_post"`; non-post anchors (sidebar profiles, employer logos) are filtered. URLs may carry either `/feed/update/<urn>/` (DOM-anchor-derived) or `/posts/<slug>` (SDUI-derived) form; both are valid LinkedIn permalinks. An entry paired with a rendered post carries that post's URN as `value` and may carry `text` (an excerpt of the post); a post whose own markup does not name exactly one post URN is not paired, rather than given a guessed URL. Cap is 50 entries, matching `get_feed`'s `num_posts` ceiling.
 - `references["search_results"]` (search_posts only) — DOM references first, then up to 50 `kind: "feed_post"` permalinks read from the page's JSON/document payload responses (`/feed/update/<urn>/` or `/posts/<slug>`, both valid). Captured permalinks are appended, not aligned to result order.
 - `apply: {type, url?}` (get_job_apply_url, which returns no `sections`) — `type` is `easy_apply`, `external`, `applied`, `closed` or `unknown`; `url` is the employer's application link as LinkedIn gives it, never opened, present for external postings
 - `apply: {type}` (get_job_details) — `type` is `applied` or `closed`, read from the posting's text above its description without clicking; absent for an open posting and for one whose description heading was not captured
@@ -286,9 +287,10 @@ can ask for that.
 Always read [`CONTRIBUTING.md`](.github/CONTRIBUTING.md) before filing an issue or working on this repository.
 
 - Write a short synthetic prompt that would reproduce the PR diff if given to a fresh Claude Code session. Don't copy the user's first message — distill the conversation into a single instruction that captures the full scope of changes. This tells the maintainer what was intended, which is often more useful than reviewing the full diff. Use a Markdown blockquote under a `## Synthetic prompt` heading.
-- End PR bodies with `Generated with <model> for <job> in <tool> via <host>.`
-  Repeat `<model> for <job>` joined by `and`; join jobs with `/`.
-  Humans are `Human`. Ask for unknown values.
+- End PR bodies with `<Job> with <model> (<effort>) in <tool> via <host>.`
+  Repeat `<job> with <model> (<effort>)` joined by `and` for each model that did a job.
+  Example: `Implemented with Claude Opus 5.5 (xhigh) and reviewed with GPT-6 Pro (max) in Claude Code via T3 Code.`
+  Effort is the run's reasoning setting, or `effort unknown` if nothing states it. Humans are `Human`. Ask for other unknown values.
   Keep attribution in that line: before pushing, amend agent `Co-authored-by` trailers out of your commits.
 - When implementing a new feature/fix:
   1. Packet: before filing or commenting on a GitHub issue, read [.agents/skills/issue-packet/SKILL.md](.agents/skills/issue-packet/SKILL.md).
