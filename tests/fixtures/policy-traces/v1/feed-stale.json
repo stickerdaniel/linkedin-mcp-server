@@ -275,7 +275,7 @@
       "call": "extract_feed",
       "kind": "evaluate",
       "operation": "feed_post_boundaries",
-      "program_digest": "bab8ced246c9",
+      "program_digest": "ba5215411a6a",
       "section": "feed"
     },
     {

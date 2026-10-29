@@ -32,14 +32,17 @@ from linkedin_mcp_server.linkedin.text import (
 
 logger = logging.getLogger(__name__)
 
-# collectPostBoundaries: pair each rendered feed post with its own permalink.
+# collectPostBoundaries: pair each rendered feed post with its own URN.
 # The scroll-progress signal and the text read stay as they are; this second
 # walk answers the question the flat structures cannot — which post a
-# captured URL belongs to (#817). Identity comes from inside one boundary:
-# the post URN on the container or, failing that, its single permalink
-# anchor. A boundary that cannot name exactly one post reports ambiguous
-# and is emitted without a URL rather than paired by position.
+# captured URL belongs to (#817). Identity comes only from a post URN in a
+# `data-urn` or `data-id` attribute that belongs to the boundary itself: an
+# element inside a nested article belongs to that embedded post, and a
+# permalink anchor proves only that a post is linked, not that it is this
+# one. A boundary that does not name exactly one post gets no URN, and the
+# caller emits no paired reference for it rather than a guessed one.
 FEED_POST_BOUNDARIES_JS = r"""() => {
+    const POST_URN = /^urn:li:(activity|share|ugcPost):\d+$/;
     const collectPostBoundaries = main => {
         const roots = Array.from(
             main.querySelectorAll('article, [data-id^="urn:li:activity:"]')
@@ -48,45 +51,22 @@ FEED_POST_BOUNDARIES_JS = r"""() => {
             root => !roots.some(other => other !== root && other.contains(root))
         );
         return outermost.map(root => {
-            const urls = [...new Set(
-                Array.from(root.querySelectorAll('a[href]'))
-                    .map(anchor => {
-                        try {
-                            const u = new URL(anchor.href, location.href);
-                            // The path alone does not make a permalink: an
-                            // outside host's /posts/ link is still external.
-                            if (!/(^|\.)linkedin\.com$/.test(u.hostname)) {
-                                return null;
-                            }
-                            return /^\/feed\/update\//.test(u.pathname) ||
-                                /^\/posts\//.test(u.pathname)
-                                ? u.pathname
-                                : null;
-                        } catch {
-                            return null;
-                        }
-                    })
-                    .filter(Boolean)
-            )];
-            const ids = [...new Set([
-                ...[root, ...root.querySelectorAll('[data-urn],[data-id]')]
+            const owned = element => {
+                const article = element.closest('article');
+                return !article || article === root || !root.contains(article);
+            };
+            const ids = [...new Set(
+                [root, ...root.querySelectorAll('[data-urn],[data-id]')]
+                    .filter(owned)
                     .flatMap(element => [
                         element.getAttribute('data-urn'),
                         element.getAttribute('data-id'),
                     ])
-                    .filter(value =>
-                        /^urn:li:(activity|share|ugcPost):\d+$/.test(value || '')
-                    ),
-                ...urls.flatMap(
-                    url => url.match(/urn:li:activity:\d+/g) || []
-                ),
-            ])];
-            const ambiguous = urls.length > 1 || ids.length > 1;
+                    .filter(value => POST_URN.test(value || ''))
+            )];
             return {
                 text: (root.innerText || '').trim(),
                 urn: ids.length === 1 ? ids[0] : null,
-                url: urls.length === 1 && !ambiguous ? urls[0] : null,
-                ambiguous,
             };
         });
     };

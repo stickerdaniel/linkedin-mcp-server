@@ -151,8 +151,10 @@ def build_feed_references(
 
     ``post_boundaries`` is the per-post read of the same page (see
     ``FEED_POST_BOUNDARIES_JS`` in feed.py): each entry names one rendered
-    post by its own URN or permalink anchor, so the reference can carry
-    the post's text as an excerpt and its URN as ``value``. Boundary
+    post by its own URN, or carries ``urn: None`` when the post's own
+    markup does not name exactly one, so the reference can carry the
+    post's text as an excerpt and its URN as ``value``. A post without
+    a URN is not paired: no URL is guessed for it. Boundary
     entries sit before the anchor-derived slice, and an anchor whose URL
     a boundary already claimed is skipped outright — a paired post never
     competes with its bare anchor on label richness or cap space (#817).
@@ -160,15 +162,17 @@ def build_feed_references(
     paired: list[Reference] = []
     for post in post_boundaries or []:
         urn = post.get("urn")
-        url = f"/feed/update/{urn}/" if urn else post.get("url")
-        if not url:
+        if not urn:
             continue
-        ref: Reference = {"kind": "feed_post", "url": url, "context": "feed"}
+        ref: Reference = {
+            "kind": "feed_post",
+            "url": f"/feed/update/{urn}/",
+            "context": "feed",
+            "value": urn,
+        }
         text = post.get("text") or ""
         if text:
             ref["text"] = text[:_POST_EXCERPT_LIMIT]
-        if urn:
-            ref["value"] = urn
         paired.append(ref)
     paired_urls = {ref["url"] for ref in paired}
     refs = paired + [

@@ -1,8 +1,8 @@
 """Browser-DOM tests for the post-boundary read in ``linkedin/feed.py``.
 
 The unit suite mocks ``page.evaluate``, so ``FEED_POST_BOUNDARIES_JS`` never
-runs there: boundary selection, nesting, URN and permalink reading and the
-ambiguity verdict are asserted as source text and nothing else. These cases
+runs there: boundary selection, nesting and URN ownership are asserted as source
+text and nothing else. These cases
 execute that program in headless chromium.
 
 Every fixture drives a synthetic container, so each case is a claim about the
@@ -89,7 +89,7 @@ class TestBoundaryIdentityAgainstRealDom:
             "Grace on compilers",
         ]
 
-    async def test_a_nested_boundary_is_read_once_at_the_outer_post(self, dom_page):
+    async def test_a_nested_post_does_not_dilute_the_outer_posts_urn(self, dom_page):
         result = await snapshot(
             dom_page,
             """
@@ -102,80 +102,71 @@ class TestBoundaryIdentityAgainstRealDom:
             """,
         )
 
-        # One post is emitted for the outer boundary — but two post URNs
-        # inside it cannot name one post, so the identity is ambiguous
-        # rather than attributed to the outer container.
+        # One post is emitted for the outer boundary, named by its own URN:
+        # the nested card's URN belongs to the embedded post.
+        assert len(result["posts"]) == 1
+        assert result["posts"][0]["urn"] == "urn:li:activity:7214916299838103554"
+
+    async def test_an_outer_post_never_borrows_a_nested_posts_urn(self, dom_page):
+        result = await snapshot(
+            dom_page,
+            """
+            <article>
+              <p>Outer commentary about another post</p>
+              <article data-urn="urn:li:activity:7000000000000000001">
+                <p>Quoted inner content</p>
+              </article>
+            </article>
+            """,
+        )
+
         assert len(result["posts"]) == 1
         assert result["posts"][0]["urn"] is None
-        assert result["posts"][0]["ambiguous"] is True
 
-
-class TestBoundaryPermalinksAgainstRealDom:
-    async def test_the_single_post_anchor_inside_a_boundary_is_its_url(self, dom_page):
+    async def test_a_urn_on_a_wrapper_inside_the_article_names_it(self, dom_page):
         result = await snapshot(
             dom_page,
             """
             <article>
-              <p>A post with a timestamp link</p>
-              <a href="https://www.linkedin.com/feed/update/urn:li:activity:7214916299838103554/">3d</a>
-              <a href="https://www.linkedin.com/in/ada-lovelace/">Ada</a>
+              <div data-id="urn:li:activity:7214916299838103554">
+                <p>A post keyed one level down</p>
+              </div>
             </article>
             """,
         )
 
-        assert result["posts"][0]["url"] == (
-            "/feed/update/urn:li:activity:7214916299838103554/"
-        )
-        assert result["posts"][0]["ambiguous"] is False
+        assert result["posts"][0]["urn"] == "urn:li:activity:7214916299838103554"
 
-    async def test_a_posts_slug_anchor_is_accepted_the_same_way(self, dom_page):
+    async def test_two_post_urns_of_its_own_name_no_post(self, dom_page):
         result = await snapshot(
             dom_page,
             """
-            <article>
-              <p>A post whose card links the /posts/ form</p>
-              <a href="https://www.linkedin.com/posts/ada_engines-ugcPost-7214916299838103554-abc/">Full post</a>
-            </article>
+            <div data-id="urn:li:activity:7214916299838103554">
+              <span data-urn="urn:li:activity:9999999999999999999">x</span>
+            </div>
             """,
         )
 
-        assert result["posts"][0]["url"] == (
-            "/posts/ada_engines-ugcPost-7214916299838103554-abc/"
-        )
+        assert result["posts"][0]["urn"] is None
 
-    async def test_two_different_post_anchors_mark_the_boundary_ambiguous(
-        self, dom_page
-    ):
+
+class TestBoundaryAnchorsAgainstRealDom:
+    async def test_a_lone_post_link_does_not_name_the_post(self, dom_page):
+        # The only post link in a card can cite someone else's post, so a
+        # link alone never names the boundary.
         result = await snapshot(
             dom_page,
             """
             <article>
-              <p>Original and embedded link different posts</p>
-              <a href="https://www.linkedin.com/feed/update/urn:li:activity:7214916299838103554/">3d</a>
-              <a href="https://www.linkedin.com/feed/update/urn:li:activity:9999999999999999999/">
-                embedded
+              <p>Outer post criticizing a different post</p>
+              <a href="https://www.linkedin.com/posts/quoted_topic-ugcPost-7000000000000000001-xyz">
+                A link to someone else's post
               </a>
             </article>
             """,
         )
 
-        assert result["posts"][0]["url"] is None
-        assert result["posts"][0]["ambiguous"] is True
-
-    async def test_the_permalinks_urn_names_a_post_without_attributes(self, dom_page):
-        # Cards without data-urn still carry their identity in the
-        # /feed/update/<urn>/ permalink they link.
-        result = await snapshot(
-            dom_page,
-            """
-            <article>
-              <p>Identity lives in the timestamp link</p>
-              <a href="https://www.linkedin.com/feed/update/urn:li:activity:7214916299838103554/">3d</a>
-            </article>
-            """,
-        )
-
-        assert result["posts"][0]["urn"] == ("urn:li:activity:7214916299838103554")
+        assert result["posts"][0]["urn"] is None
 
     async def test_non_post_urns_do_not_dilute_the_identity(self, dom_page):
         # Comment and profile URNs ride inside a card without being the
@@ -192,7 +183,6 @@ class TestBoundaryPermalinksAgainstRealDom:
         )
 
         assert result["posts"][0]["urn"] == ("urn:li:activity:7214916299838103554")
-        assert result["posts"][0]["ambiguous"] is False
 
     async def test_data_id_names_a_post_the_same_as_data_urn(self, dom_page):
         result = await snapshot(
@@ -206,36 +196,17 @@ class TestBoundaryPermalinksAgainstRealDom:
 
         assert result["posts"][0]["urn"] == ("urn:li:activity:7214916299838103554")
 
-    async def test_urn_and_link_disagreeing_marks_the_post_ambiguous(self, dom_page):
+    async def test_a_urn_with_a_link_to_another_post_keeps_its_own_urn(self, dom_page):
         result = await snapshot(
             dom_page,
             """
             <article data-urn="urn:li:activity:111">
-              <p>Conflicting post</p>
+              <p>A post linking another one</p>
               <a href="https://www.linkedin.com/feed/update/urn:li:activity:222/">
-                1w
+                the other post
               </a>
             </article>
             """,
         )
 
-        assert result["posts"][0]["ambiguous"] is True
-        assert result["posts"][0]["url"] is None
-
-    async def test_a_same_path_anchor_off_linkedin_is_not_a_permalink(self, dom_page):
-        # An external site's /posts/ path is not a LinkedIn permalink;
-        # only the host decides that, never the path shape.
-        result = await snapshot(
-            dom_page,
-            """
-            <article>
-              <p>A card quoting an outside blog</p>
-              <a href="https://blog.example/posts/ada_engines-ugcPost-1-abc">
-                Read more
-              </a>
-            </article>
-            """,
-        )
-
-        assert result["posts"][0]["url"] is None
-        assert result["posts"][0]["ambiguous"] is False
+        assert result["posts"][0]["urn"] == "urn:li:activity:111"

@@ -54,10 +54,9 @@ def register_feed_tools(
               entries. URLs are relative paths and may carry either
               ``/feed/update/<urn>/`` (DOM-anchor-derived) or
               ``/posts/<slug>`` (SDUI-derived) shape — both are valid
-              LinkedIn permalinks. An entry read from a rendered post's
-              own DOM boundary is paired with that post: it may carry
-              ``text`` (an excerpt of the post) and ``value`` (its post
-              URN, when the boundary names one).
+              LinkedIn permalinks. An entry paired with a rendered post
+              carries that post's URN as ``value`` and may carry ``text``
+              (an excerpt of the post).
             - section_errors: present when the feed is rate-limited or
               extraction fails.
 

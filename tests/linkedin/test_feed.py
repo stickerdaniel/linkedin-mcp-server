@@ -462,8 +462,6 @@ class TestFeedPostBoundaries:
                     {
                         "text": "Ada writes about engines",
                         "urn": "urn:li:activity:7214916299838103554",
-                        "url": None,
-                        "ambiguous": False,
                     }
                 ]
             },
