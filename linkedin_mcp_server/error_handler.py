@@ -11,7 +11,7 @@ from enum import StrEnum
 from typing import Any, NoReturn
 
 import mcp.types as mt
-from fastmcp.exceptions import ToolError, ValidationError
+from fastmcp.exceptions import NotFoundError, ToolError, ValidationError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
@@ -76,6 +76,7 @@ class ErrorCode(StrEnum):
     NETWORK = "network"
     BROWSER_BUSY = "browser_busy"
     BROWSER_UNAVAILABLE = "browser_unavailable"
+    OUTCOME_UNKNOWN = "outcome_unknown"
     INTERNAL = "internal"
 
 
@@ -83,6 +84,32 @@ class ErrorCode(StrEnum):
 #: ``{"v", "code"}`` plus ``retry_after`` (seconds) on ``rate_limited``.
 ERROR_META_KEY = "linkedin.dev/error"
 ERROR_META_VERSION = 1
+
+
+def error_result(
+    message: str,
+    code: ErrorCode,
+    *,
+    retry_after: int | None = None,
+    meta: dict[str, Any] | None = None,
+    structured_content: dict[str, Any] | None = None,
+) -> ToolResult:
+    """The error result every failure this server answers with is built from.
+
+    A raised failure reaches it through :class:`ErrorCodeMiddleware`; an answer
+    the daemon returns instead of raising (a marker for the frontend, an unknown
+    outcome) calls it directly, so both carry the code the same way. *meta* and
+    *structured_content* are kept as given beside the code.
+    """
+    marker: dict[str, Any] = {"v": ERROR_META_VERSION, "code": code}
+    if retry_after is not None:
+        marker["retry_after"] = retry_after
+    return ToolResult(
+        content=[mt.TextContent(type="text", text=message)],
+        structured_content=structured_content,
+        meta={**(meta or {}), ERROR_META_KEY: marker},
+        is_error=True,
+    )
 
 
 class CodedToolError(ToolError):
@@ -111,6 +138,10 @@ class ErrorCodeMiddleware(Middleware):
     the code has to leave as a result. Outermost on every role: the middleware
     inside it still sees the exception, including the owner's auth marker, which
     walks ``__cause__``. Text and ``isError`` are what FastMCP would have sent.
+
+    A returned error result passes as it is. One from this server already names
+    its code through :func:`error_result`; one forwarded from an older owner may
+    not, and its own markers say more than ``internal`` would.
     """
 
     async def on_call_tool(
@@ -120,21 +151,16 @@ class ErrorCodeMiddleware(Middleware):
     ) -> ToolResult:
         try:
             return await call_next(context)
-        except (ToolError, ValidationError) as exc:
-            marker: dict[str, Any] = {"v": ERROR_META_VERSION, "code": _code_of(exc)}
-            if isinstance(exc, CodedToolError) and exc.retry_after is not None:
-                marker["retry_after"] = exc.retry_after
-            return ToolResult(
-                content=[mt.TextContent(type="text", text=str(exc))],
-                meta={ERROR_META_KEY: marker},
-                is_error=True,
-            )
+        except (ToolError, ValidationError, NotFoundError) as exc:
+            retry_after = exc.retry_after if isinstance(exc, CodedToolError) else None
+            return error_result(str(exc), _code_of(exc), retry_after=retry_after)
 
 
 def _code_of(exc: Exception) -> ErrorCode:
     if isinstance(exc, CodedToolError):
         return exc.code
-    if isinstance(exc, ValidationError):
+    # An unknown or disabled tool is a wrong name in the request.
+    if isinstance(exc, (ValidationError, NotFoundError)):
         return ErrorCode.INVALID_ARGUMENT
     # FastMCP's own masked "Error calling tool", and any ToolError raised
     # without a code.

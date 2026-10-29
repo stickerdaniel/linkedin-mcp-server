@@ -199,8 +199,14 @@ _PROFILE = ("get_person_profile", {"linkedin_username": "someone"})
             None,
             {"v": 1, "code": "invalid_argument"},
         ),
+        (
+            ("get_person_profiles", {"linkedin_username": "someone"}),
+            None,
+            None,
+            {"v": 1, "code": "invalid_argument"},
+        ),
     ],
-    ids=["shaped", "masked", "schema", "filter"],
+    ids=["shaped", "masked", "schema", "filter", "unknown tool"],
 )
 async def test_a_client_reads_the_code_beside_the_message(
     server, mode, call, failure, text, marker

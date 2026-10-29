@@ -27,6 +27,7 @@ from fastmcp.tools import ToolResult
 
 from linkedin_mcp_server.core.exceptions import AccountRestrictedError
 from linkedin_mcp_server.daemon.core.call import AuthRequest, Because, Repair, SignIn
+from linkedin_mcp_server.error_handler import ErrorCode, error_result
 from linkedin_mcp_server.session_state import PeerSessionInPlaceError
 from linkedin_mcp_server.exceptions import (
     AuthenticationInProgressError,
@@ -108,10 +109,8 @@ class OwnerAuthSignalMiddleware(Middleware):
             # An error result rather than a raise, and `is_error` kept true so a
             # client that never learns about markers still sees a failure with the
             # owner's own wording rather than a success carrying no data.
-            return ToolResult(
-                content=[mt.TextContent(type="text", text=str(exc))],
-                meta={MARKER_KEY: marker},
-                is_error=True,
+            return error_result(
+                str(exc), ErrorCode.AUTH_REQUIRED, meta={MARKER_KEY: marker}
             )
 
 
@@ -260,10 +259,7 @@ def restricted_answer(exc: BaseException | None) -> ToolResult:
     as bad auth to repair.
     """
     logger.warning("LinkedIn restricted the account; not signing in")
-    return ToolResult(
-        content=[mt.TextContent(type="text", text=str(exc))],
-        is_error=True,
-    )
+    return error_result(str(exc), ErrorCode.ACCOUNT_RESTRICTED)
 
 
 async def a_repeat_could_change_something(
