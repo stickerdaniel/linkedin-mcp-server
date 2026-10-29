@@ -357,11 +357,11 @@ class TestBuildPeopleSearchUrl:
     def test_every_parameter_keeps_its_recorded_position(self):
         assert build_people_search_url(
             "engineer",
-            location="Seattle",
+            location="103644278",
             network=["F"],
             current_company="1115",
         ) == (
-            f"{PEOPLE}keywords=engineer&location=Seattle"
+            f"{PEOPLE}keywords=engineer&geoUrn=%5B%22103644278%22%5D"
             "&network=%5B%22F%22%5D&currentCompany=%5B%221115%22%5D"
         )
 
@@ -450,10 +450,54 @@ class TestBuildPeopleSearchUrl:
             f"{PEOPLE}keywords=engineer"
         )
 
-    def test_location_is_percent_encoded(self):
-        assert build_people_search_url("engineer", location="São Paulo") == (
-            f"{PEOPLE}keywords=engineer&location=S%C3%A3o+Paulo"
+    def test_numeric_location_becomes_a_geo_urn_facet(self):
+        assert build_people_search_url("engineer", location="103644278") == (
+            f"{PEOPLE}keywords=engineer&geoUrn=%5B%22103644278%22%5D"
         )
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "Seattle",
+            "São Paulo",
+            "Remote",
+            "103644278 ",
+            " 103644278",
+            "103 644278",
+            "+103644278",
+            "-103644278",
+            "103644278.0",
+            "urn:li:fsd_geo:103644278",
+            # ASCII decimal only, for the same reason currentCompany is:
+            # str.isdigit() accepts Arabic-Indic digits and LinkedIn's URN
+            # ids are never written in them.
+            "١٠٣٦٤٤٢٧٨",
+        ],
+    )
+    def test_non_numeric_location_is_refused(self, value: str):
+        with pytest.raises(FilterValidationError) as error:
+            build_people_search_url("engineer", location=value)
+
+        assert repr(value) in str(error.value)
+        assert "numeric LinkedIn geo URN id" in str(error.value)
+
+    def test_empty_location_is_omitted_rather_than_refused(self):
+        assert build_people_search_url("engineer", location="") == (
+            f"{PEOPLE}keywords=engineer"
+        )
+
+    def test_absent_location_is_omitted(self):
+        assert build_people_search_url("engineer", location=None) == (
+            f"{PEOPLE}keywords=engineer"
+        )
+
+    def test_location_is_refused_before_a_company_urn_is_looked_at(self):
+        # Same ordering contract the network check already has: the first
+        # wrong filter is the one named back to the caller.
+        with pytest.raises(FilterValidationError, match="numeric LinkedIn geo URN"):
+            build_people_search_url(
+                "engineer", location="Berlin", current_company="SAP"
+            )
 
     def test_network_is_refused_before_a_company_urn_is_looked_at(self):
         # Order matters for the message a caller reads back: both filters are

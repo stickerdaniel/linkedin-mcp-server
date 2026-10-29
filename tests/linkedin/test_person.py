@@ -1961,12 +1961,12 @@ class TestSearchPeople:
         ):
             result = await reader.search_people(
                 "engineer",
-                location="Seattle",
+                location="103644278",
                 network=["F"],
                 current_company="1115",
             )
 
         assert "keywords=engineer" in result["url"]
-        assert "location=Seattle" in result["url"]
+        assert "geoUrn=%5B%22103644278%22%5D" in result["url"]
         assert "network=%5B%22F%22%5D" in result["url"]
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
