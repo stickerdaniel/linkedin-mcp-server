@@ -60,6 +60,18 @@ CONTENT_DATE_POSTED_MAP = {
     "past_month": "past-month",
 }
 
+# Content-search ``contentType`` facet: the "Content type" menu's options,
+# keyed by their label, valued by the token LinkedIn writes into the URL.
+# Measured on the live menu; the labels are not the tokens ("Images" writes
+# "photos", "Job posts" writes "jobs"). There is no Articles option.
+CONTENT_TYPE_MAP = {
+    "videos": "videos",
+    "images": "photos",
+    "job_posts": "jobs",
+    "live_videos": "liveVideos",
+    "documents": "documents",
+}
+
 # Valid tokens for the people-search ``network`` facet.
 # LinkedIn accepts "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
 NETWORK_TOKENS = ("F", "S", "O")
@@ -127,11 +139,16 @@ def build_people_search_url(
 ) -> str:
     """Build a LinkedIn people search URL, refusing filters LinkedIn ignores.
 
-    Both refusals happen before a URL exists, so a workflow calling this can
+    Every refusal happens before a URL exists, so a workflow calling this can
     never navigate on a filter LinkedIn would swallow. An unknown ``network``
-    token and a plain-text ``currentCompany`` are each accepted by the URL and
-    then dropped, which answers with the unfiltered result set while the
-    request still reads as filtered.
+    token, a plain-text ``location`` and a plain-text ``currentCompany`` are
+    each accepted by the URL and then dropped, which answers with the
+    unfiltered result set while the request still reads as filtered.
+
+    ``location`` is the same shape of mistake as ``currentCompany``: people
+    search filters on the numeric geo URN id via the ``geoUrn`` list facet, and
+    a ``location=`` query parameter is ignored outright -- so a search that
+    reads as scoped to one city returns the whole world.
     """
     if network is not None:
         invalid = [t for t in network if t not in NETWORK_TOKENS]
@@ -140,6 +157,15 @@ def build_people_search_url(
                 "Invalid network token(s) "
                 f"{invalid!r}; expected any of {list(NETWORK_TOKENS)!r}"
             )
+
+    if location and not re.fullmatch(r"[0-9]+", location):
+        raise FilterValidationError(
+            f"location must be a numeric LinkedIn geo URN id "
+            f"(e.g. '103644278' for the United States); got {location!r}. "
+            f"Plain-text place names are silently ignored by LinkedIn and "
+            f"return the unfiltered result set. Use keywords when the geo URN "
+            f"is not available."
+        )
 
     if current_company and not re.fullmatch(r"[0-9]+", current_company):
         raise FilterValidationError(
@@ -151,7 +177,7 @@ def build_people_search_url(
 
     params = f"keywords={quote_plus(keywords)}"
     if location:
-        params += f"&location={quote_plus(location)}"
+        params += f"&geoUrn={_encode_list_facet([location])}"
     if network:
         params += f"&network={_encode_list_facet(network)}"
     if current_company:
@@ -177,6 +203,7 @@ def build_company_search_url(keywords: str) -> str:
 def build_content_search_url(
     keywords: str,
     date_posted: str | None = None,
+    content_type: str | None = None,
 ) -> str:
     """Build a LinkedIn content (post) search URL.
 
@@ -191,6 +218,9 @@ def build_content_search_url(
     reaches LinkedIn in the form it recognizes. An unmapped value is refused
     here rather than sent, because LinkedIn ignores one instead of rejecting
     it and answers an unfiltered search that reads as a filtered one.
+
+    ``content_type`` is refused the same way and for the same reason. It is
+    written after ``datePosted``, the order the live page produces.
     """
     if (
         date_posted is not None
@@ -202,8 +232,21 @@ def build_content_search_url(
             f"{list(CONTENT_DATE_POSTED_MAP)!r}."
         )
 
+    if (
+        content_type is not None
+        and content_type.strip()
+        and content_type.strip() not in CONTENT_TYPE_MAP
+    ):
+        raise FilterValidationError(
+            f"Invalid content_type {content_type!r}; expected one of "
+            f"{list(CONTENT_TYPE_MAP)!r}."
+        )
+
     params = f"keywords={quote_plus(keywords)}&origin=FACETED_SEARCH"
     if date_posted and date_posted.strip():
         token = CONTENT_DATE_POSTED_MAP.get(date_posted.strip(), date_posted.strip())
         params += f"&datePosted={_encode_list_facet([token])}"
+    if content_type and content_type.strip():
+        token = CONTENT_TYPE_MAP[content_type.strip()]
+        params += f"&contentType={_encode_list_facet([token])}"
     return f"https://www.linkedin.com/search/results/content/?{params}"

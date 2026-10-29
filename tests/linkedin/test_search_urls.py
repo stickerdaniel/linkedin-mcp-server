@@ -16,6 +16,7 @@ import pytest
 from linkedin_mcp_server.linkedin.contracts import FilterValidationError
 from linkedin_mcp_server.linkedin.search_urls import (
     CONTENT_DATE_POSTED_MAP,
+    CONTENT_TYPE_MAP,
     EXPERIENCE_LEVEL_MAP,
     JOB_DATE_POSTED_MAP,
     JOB_TYPE_MAP,
@@ -114,6 +115,62 @@ class TestFilterTables:
             "past-week",
             "past-month",
         }
+
+
+class TestBuildContentSearchUrlContentType:
+    def test_every_content_type_maps_to_the_token_linkedin_writes(self):
+        # Read off the live "Content type" menu: the Images option writes
+        # "photos" and Job posts writes "jobs", so the labels are not the
+        # tokens and each pairing is a measurement.
+        assert CONTENT_TYPE_MAP == {
+            "videos": "videos",
+            "images": "photos",
+            "job_posts": "jobs",
+            "live_videos": "liveVideos",
+            "documents": "documents",
+        }
+
+    def test_content_type_follows_date_posted(self):
+        assert build_content_search_url(
+            "robotics", date_posted="past-week", content_type="documents"
+        ) == (
+            f"{CONTENT}keywords=robotics&origin=FACETED_SEARCH"
+            "&datePosted=%5B%22past-week%22%5D&contentType=%5B%22documents%22%5D"
+        )
+
+    @pytest.mark.parametrize(("content_type", "token"), list(CONTENT_TYPE_MAP.items()))
+    def test_content_type_alone(self, content_type: str, token: str):
+        assert build_content_search_url("robotics", content_type=content_type) == (
+            f"{CONTENT}keywords=robotics&origin=FACETED_SEARCH"
+            f"&contentType=%5B%22{token}%22%5D"
+        )
+
+    def test_padded_content_type_is_trimmed_before_lookup(self):
+        assert build_content_search_url("robotics", content_type=" documents ") == (
+            f"{CONTENT}keywords=robotics&origin=FACETED_SEARCH"
+            "&contentType=%5B%22documents%22%5D"
+        )
+
+    @pytest.mark.parametrize("content_type", [None, "", "   "])
+    def test_absent_content_type_omits_the_facet(self, content_type):
+        assert "contentType" not in build_content_search_url(
+            "robotics", content_type=content_type
+        )
+
+    @pytest.mark.parametrize(
+        "content_type", ["articles", "photos", "jobs", "Documents", "pdf"]
+    )
+    def test_unknown_content_type_is_refused_rather_than_passed_through(
+        self, content_type: str
+    ):
+        # LinkedIn has no Articles option, and the raw tokens are not accepted
+        # as input either: one public spelling per option keeps the schema
+        # honest about what the menu offers.
+        with pytest.raises(FilterValidationError) as error:
+            build_content_search_url("robotics", content_type=content_type)
+
+        assert repr(content_type) in str(error.value)
+        assert "documents" in str(error.value)
 
 
 class TestBuildJobSearchUrl:
@@ -357,11 +414,11 @@ class TestBuildPeopleSearchUrl:
     def test_every_parameter_keeps_its_recorded_position(self):
         assert build_people_search_url(
             "engineer",
-            location="Seattle",
+            location="103644278",
             network=["F"],
             current_company="1115",
         ) == (
-            f"{PEOPLE}keywords=engineer&location=Seattle"
+            f"{PEOPLE}keywords=engineer&geoUrn=%5B%22103644278%22%5D"
             "&network=%5B%22F%22%5D&currentCompany=%5B%221115%22%5D"
         )
 
@@ -450,10 +507,54 @@ class TestBuildPeopleSearchUrl:
             f"{PEOPLE}keywords=engineer"
         )
 
-    def test_location_is_percent_encoded(self):
-        assert build_people_search_url("engineer", location="São Paulo") == (
-            f"{PEOPLE}keywords=engineer&location=S%C3%A3o+Paulo"
+    def test_numeric_location_becomes_a_geo_urn_facet(self):
+        assert build_people_search_url("engineer", location="103644278") == (
+            f"{PEOPLE}keywords=engineer&geoUrn=%5B%22103644278%22%5D"
         )
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "Seattle",
+            "São Paulo",
+            "Remote",
+            "103644278 ",
+            " 103644278",
+            "103 644278",
+            "+103644278",
+            "-103644278",
+            "103644278.0",
+            "urn:li:fsd_geo:103644278",
+            # ASCII decimal only, for the same reason currentCompany is:
+            # str.isdigit() accepts Arabic-Indic digits and LinkedIn's URN
+            # ids are never written in them.
+            "١٠٣٦٤٤٢٧٨",
+        ],
+    )
+    def test_non_numeric_location_is_refused(self, value: str):
+        with pytest.raises(FilterValidationError) as error:
+            build_people_search_url("engineer", location=value)
+
+        assert repr(value) in str(error.value)
+        assert "numeric LinkedIn geo URN id" in str(error.value)
+
+    def test_empty_location_is_omitted_rather_than_refused(self):
+        assert build_people_search_url("engineer", location="") == (
+            f"{PEOPLE}keywords=engineer"
+        )
+
+    def test_absent_location_is_omitted(self):
+        assert build_people_search_url("engineer", location=None) == (
+            f"{PEOPLE}keywords=engineer"
+        )
+
+    def test_location_is_refused_before_a_company_urn_is_looked_at(self):
+        # Same ordering contract the network check already has: the first
+        # wrong filter is the one named back to the caller.
+        with pytest.raises(FilterValidationError, match="numeric LinkedIn geo URN"):
+            build_people_search_url(
+                "engineer", location="Berlin", current_company="SAP"
+            )
 
     def test_network_is_refused_before_a_company_urn_is_looked_at(self):
         # Order matters for the message a caller reads back: both filters are

@@ -102,6 +102,12 @@ def serve_extractor(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], AsyncMoc
             "numeric LinkedIn company URN id",
         ),
         (
+            "person",
+            "search_people",
+            {"keywords": "engineer", "location": "New York"},
+            "numeric LinkedIn geo URN id",
+        ),
+        (
             "company",
             "get_company_profile",
             {"company_name": "/feed/"},
@@ -752,7 +758,10 @@ class TestPersonTool:
 
     async def test_search_people(self, mock_context, serve_extractor):
         expected = {
-            "url": "https://www.linkedin.com/search/results/people/?keywords=AI+engineer&location=New+York",
+            "url": (
+                "https://www.linkedin.com/search/results/people/"
+                "?keywords=AI+engineer&geoUrn=%5B%22103644278%22%5D"
+            ),
             "sections": {"search_results": "Jane Doe\nAI Engineer at Acme\nNew York"},
         }
         mock_extractor = _make_mock_extractor(expected)
@@ -764,12 +773,12 @@ class TestPersonTool:
 
         serve_extractor(mock_extractor)
         tool_fn = await get_tool_fn(mcp, "search_people")
-        result = await tool_fn("AI engineer", mock_context, location="New York")
+        result = await tool_fn("AI engineer", mock_context, location="103644278")
         assert "search_results" in result["sections"]
         assert "pages_visited" not in result
         mock_extractor.search_people.assert_awaited_once_with(
             "AI engineer",
-            "New York",
+            "103644278",
             network=None,
             current_company=None,
         )
@@ -2582,11 +2591,13 @@ class TestPostTools:
             "Buscamos Unity",
             mock_context,
             date_posted="past-week",
+            content_type="documents",
         )
         assert "search_results" in result["sections"]
         mock_extractor.search_posts.assert_awaited_once_with(
             "Buscamos Unity",
             date_posted="past-week",
+            content_type="documents",
             max_pages=3,
         )
 

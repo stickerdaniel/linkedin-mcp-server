@@ -90,7 +90,7 @@
       },
       "search_posts": {
         "coroutine": true,
-        "signature": "(self, keywords: 'str', date_posted: 'str | None' = None, max_pages: 'int' = 3) -> 'dict[str, Any]'"
+        "signature": "(self, keywords: 'str', date_posted: 'str | None' = None, max_pages: 'int' = 3, content_type: 'str | None' = None) -> 'dict[str, Any]'"
       },
       "send_message": {
         "coroutine": true,
@@ -695,7 +695,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional location filter (e.g., \"New York\", \"Remote\")"
+              "description": "Optional location filter, as LinkedIn's numeric geo URN\nid (e.g., \"103644278\" for the United States). Plain-text place\nnames are silently ignored by LinkedIn and return unfiltered\nresults, so they are refused here. The id is the geoUrn value\nin the URL of a LinkedIn people search filtered to that place;\nwithout one, put the place in keywords instead."
             },
             "network": {
               "anyOf": [
@@ -727,6 +727,18 @@
         "input": {
           "additionalProperties": false,
           "properties": {
+            "content_type": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional \"Content type\" filter. One of\n\"documents\" (PDFs and slide decks people upload), \"images\",\n\"videos\", \"live_videos\", \"job_posts\". Omit for all posts."
+            },
             "date_posted": {
               "anyOf": [
                 {
