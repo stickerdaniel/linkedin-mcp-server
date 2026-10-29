@@ -495,7 +495,9 @@ class TestBuildPeopleSearchUrl:
         # Same ordering contract the network check already has: the first
         # wrong filter is the one named back to the caller.
         with pytest.raises(FilterValidationError, match="numeric LinkedIn geo URN"):
-            build_people_search_url("engineer", location="Berlin", current_company="SAP")
+            build_people_search_url(
+                "engineer", location="Berlin", current_company="SAP"
+            )
 
     def test_network_is_refused_before_a_company_urn_is_looked_at(self):
         # Order matters for the message a caller reads back: both filters are
