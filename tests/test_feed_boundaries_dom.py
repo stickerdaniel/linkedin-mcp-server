@@ -47,12 +47,7 @@ async def dom_page():
 
 
 async def snapshot(page: Any, main_body: str) -> dict[str, Any]:
-    """Run the boundary read against `main_body` served from a feed address.
-
-    A real LinkedIn document address is required: the program resolves
-    permalinks against ``location.href``, and an ``about:blank`` origin would
-    prove nothing about what a caller receives.
-    """
+    """Run the boundary read against `main_body` served from the feed address."""
     await page.route(
         "https://www.linkedin.com/**",
         lambda route: route.fulfill(
