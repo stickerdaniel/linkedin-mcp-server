@@ -269,6 +269,7 @@ class TestReadPersonUrls:
             "education",
             "interests",
             "honors",
+            "volunteering",
             "languages",
             "certifications",
             "skills",
@@ -299,13 +300,13 @@ class TestReadPersonUrls:
         page_urls = [call.args[0] for call in mock_extract.call_args_list]
         overlay_urls = [call.args[0] for call in mock_overlay.call_args_list]
         all_urls = page_urls + overlay_urls
-        # 10 full-page sections + 1 overlay (contact_info)
-        assert len(page_urls) == 10
+        # 11 full-page sections + 1 overlay (contact_info)
+        assert len(page_urls) == 11
         assert len(overlay_urls) == 1
         assert [
             capture_call.kwargs["plan"].mode
             for capture_call in mock_extract.call_args_list
-        ] == [CaptureMode.STANDARD, *([CaptureMode.DETAILS] * 8), CaptureMode.ACTIVITY]
+        ] == [CaptureMode.STANDARD, *([CaptureMode.DETAILS] * 9), CaptureMode.ACTIVITY]
         assert mock_overlay.call_args.kwargs["plan"].mode is CaptureMode.OVERLAY
         # Verify each expected suffix was navigated
         assert any(u.endswith("/in/testuser/") for u in all_urls)
@@ -313,6 +314,7 @@ class TestReadPersonUrls:
         assert any("/details/education/" in u for u in all_urls)
         assert any("/details/interests/" in u for u in all_urls)
         assert any("/details/honors/" in u for u in all_urls)
+        assert any("/details/volunteering-experiences/" in u for u in all_urls)
         assert any("/details/languages/" in u for u in all_urls)
         assert any("/details/certifications/" in u for u in all_urls)
         assert any("/details/skills/" in u for u in all_urls)
@@ -372,6 +374,32 @@ class TestReadPersonUrls:
         urls = [call.args[0] for call in mock_extract.call_args_list]
         assert any("/details/certifications/" in url for url in urls)
         assert "certifications" in result["sections"]
+
+    async def test_volunteering_visits_details_page(self, mock_page):
+        reader = _reader(mock_page)
+        with (
+            patch.object(
+                reader._capture,
+                "capture",
+                new_callable=AsyncMock,
+                return_value=extracted("Mentor\nCode for Portugal"),
+            ) as mock_extract,
+            patch.object(
+                reader._capture,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.linkedin.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await reader.read_person("test-user", {"volunteering"})
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert any("/details/volunteering-experiences/" in url for url in urls)
+        assert "volunteering" in result["sections"]
 
     async def test_skills_visits_details_page(self, mock_page):
         reader = _reader(mock_page)
