@@ -38,8 +38,8 @@ def register_post_tools(
         keywords: str,
         ctx: Context,
         date_posted: str | None = None,
-        content_type: str | None = None,
         max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
+        content_type: str | None = None,
     ) -> dict[str, Any]:
         """
         Search LinkedIn posts/content globally by keyword (the "Posts" tab).
