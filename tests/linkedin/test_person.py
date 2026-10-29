@@ -1665,6 +1665,45 @@ class TestGetSidebarProfiles:
         mock_page.evaluate.assert_awaited_once()  # no show_all JS call
         assert result["sidebar_profiles"]["explore_premium_profiles"] == ["/in/carol/"]
 
+    @pytest.mark.parametrize(
+        "show_all_url",
+        [
+            "https://evil.example/in/alice/",
+            "https://linkedin.com.evil.example/search/results/people/",
+            "http://www.linkedin.com/search/results/people/",
+            "javascript:alert(1)",
+        ],
+    )
+    async def test_skips_show_all_that_is_not_a_linkedin_url(
+        self, mock_page, show_all_url
+    ):
+        """A Show all href off LinkedIn is never navigated to."""
+        sidebar_js_result = {
+            "sections": {"more_profiles_for_you": ["/in/alice/"]},
+            "showAllUrls": {"more_profiles_for_you": show_all_url},
+        }
+        mock_page.evaluate = AsyncMock(return_value=sidebar_js_result)
+        mock_page.url = "https://www.linkedin.com/in/testuser/"
+
+        reader = _reader(mock_page)
+        navigate_mock = AsyncMock()
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", navigate_mock),
+            patch(
+                "linkedin_mcp_server.linkedin.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.linkedin.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await reader.get_sidebar_profiles("testuser")
+
+        navigate_mock.assert_awaited_once_with("https://www.linkedin.com/in/testuser/")
+        assert result["sidebar_profiles"]["more_profiles_for_you"] == ["/in/alice/"]
+
     async def test_skips_show_all_when_page_redirects_to_premium(self, mock_page):
         """If navigating to Show all lands on a /premium URL, skip that section."""
         sidebar_js_result = {
