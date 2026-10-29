@@ -94,7 +94,10 @@ async def _expanded_sidebar(page: Any) -> Any:
     page.url = "https://www.linkedin.com/in/testuser/"
     answers = iter(
         [
-            {"sections": {}, "showAllUrls": {"more": "/in/testuser/more/"}},
+            {
+                "sections": {},
+                "showAllUrls": {"more": "https://www.linkedin.com/in/testuser/more/"},
+            },
             ["/in/someone/"],
         ]
     )
@@ -147,6 +150,11 @@ CASES: list[tuple[str, Read, Any]] = [
         "promoted job ids",
         lambda p: _jobs(p)._extract_promoted_job_ids("Promoted"),
         ["123"],
+    ),
+    (
+        "results above the notice",
+        lambda p: _jobs(p)._count_organic_before_notice("Notice", "Promoted"),
+        0,
     ),
     ("search page count", lambda p: _jobs(p)._get_total_search_pages(), "1 of 9"),
     ("saved page count", lambda p: _jobs(p)._get_total_list_pages(), 9),

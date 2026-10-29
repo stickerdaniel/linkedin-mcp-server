@@ -24,6 +24,7 @@ from linkedin_mcp_server.daemon.core.owner import (
     quiet_for,
 )
 from linkedin_mcp_server.daemon.descriptor import PROTOCOL_VERSION
+from linkedin_mcp_server.error_handler import ERROR_META_KEY
 from linkedin_mcp_server.daemon.liveness import (
     CALL_HEADER,
     HEARTBEAT_SECONDS,
@@ -285,7 +286,9 @@ class TestTheOwnerSideMiddleware:
                 "daemon": "unmarked_call",
                 "protocol": PROTOCOL_VERSION,
                 "instance": "the-owner",
-            }
+            },
+            # Nothing is busy: the client has to be updated before it can call.
+            ERROR_META_KEY: {"v": 1, "code": "browser_unavailable"},
         }
         assert len(liveness.state.calls) == 0
         assert liveness.state.calls == {}

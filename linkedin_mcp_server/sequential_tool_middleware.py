@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 
 import mcp.types as mt
 
-from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
@@ -19,6 +18,7 @@ from linkedin_mcp_server.daemon.liveness import (
     abandoned_call_error,
     browser_work_begins,
 )
+from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode
 from linkedin_mcp_server.exceptions import BrowserBusyError
 from linkedin_mcp_server.profile_lease import get_profile_lease
 
@@ -26,6 +26,13 @@ if TYPE_CHECKING:
     from linkedin_mcp_server.daemon.discovery import Unanswered
 
 logger = logging.getLogger(__name__)
+
+#: Tools that read only local state and never touch the browser. They skip the
+#: lock and the profile lease, so they answer while another call holds the
+#: browser, and they are not browser activity, so asking does not keep an idle
+#: browser open. Only a tool whose body cannot reach Chromium belongs here:
+#: anything else would drive the profile unserialized.
+_BROWSERLESS_TOOLS = frozenset({"get_session_status"})
 
 
 class SequentialToolExecutionMiddleware(Middleware):
@@ -74,6 +81,8 @@ class SequentialToolExecutionMiddleware(Middleware):
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
         tool_name = context.message.name
+        if tool_name in _BROWSERLESS_TOOLS:
+            return await call_next(context)
         wait_started = time.perf_counter()
         logger.debug("Waiting for browser lock for tool '%s'", tool_name)
         await self._report_progress(
@@ -117,6 +126,9 @@ class SequentialToolExecutionMiddleware(Middleware):
     ) -> ToolResult:
         """Run the tool while this process owns the browser profile."""
         # Imported here so the module stays importable without the driver.
+        # `core.throttle` needs no driver itself, but reaching it runs
+        # `core/__init__`, which imports patchright.
+        from linkedin_mcp_server.core.throttle import browser_call_record
         from linkedin_mcp_server.drivers.browser import (
             note_activity,
             note_call_started,
@@ -141,7 +153,9 @@ class SequentialToolExecutionMiddleware(Middleware):
             # thrown in middleware does not pass through raise_tool_error, and
             # mask_error_details would otherwise hide the explanation.
             logger.info("Tool '%s' gave up waiting for the shared browser", tool_name)
-            raise ToolError(str(BrowserBusyError(self._busy_because())))
+            raise CodedToolError(
+                str(BrowserBusyError(self._busy_because())), ErrorCode.BROWSER_BUSY
+            )
         # For good: the startup observation no longer describes the holder.
         self._silent_owner = None
 
@@ -164,7 +178,11 @@ class SequentialToolExecutionMiddleware(Middleware):
             # close it out from under this call. Inside the try so the finally
             # always balances it, including if the call is cancelled.
             note_call_started()
-            return await call_next(context)
+            # Evidence is per call: the throttled requests of the call before
+            # this one would otherwise be offered as the diagnosis of a
+            # failure they had nothing to do with.
+            with browser_call_record():
+                return await call_next(context)
         finally:
             hold_seconds = time.perf_counter() - hold_started
             logger.debug(

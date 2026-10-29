@@ -10,6 +10,7 @@ import re
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from linkedin_mcp_server.core.destination import is_linkedin_landing
 from linkedin_mcp_server.core.exceptions import LinkedInOperationError
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.linkedin.capture import (
@@ -384,8 +385,8 @@ class PersonReader:
 
         Reads "More profiles for you", "Explore premium profiles", and
         "People you may know" sidebar sections. Follows each "Show all" link to
-        collect the full list; skips any section whose "Show all" URL contains or
-        redirects to /premium.
+        collect the full list; skips any section whose "Show all" URL is not on
+        LinkedIn, or contains or redirects to /premium.
 
         Returns:
             Dict with url and sidebar_profiles mapping section key to list of
@@ -413,6 +414,14 @@ class PersonReader:
         first_show_all = True
         for section_key, show_all_url in show_all_urls.items():
             if "/premium" in show_all_url:
+                continue
+            # The href is read from the page, so it is checked before the
+            # browser goes there, not only after it lands.
+            if not is_linkedin_landing(show_all_url):
+                logger.debug(
+                    "Show all for section %s is not a LinkedIn URL, skipping",
+                    section_key,
+                )
                 continue
 
             if not first_show_all:
@@ -477,7 +486,11 @@ class PersonReader:
 
         Args:
             keywords: Free-text query ("software engineer", "recruiter at Google").
-            location: Optional location filter ("New York", "Remote").
+            location: Optional location filter. LinkedIn's ``geoUrn`` facet
+                only filters on the numeric geo URN id (e.g. ``"103644278"``
+                for the United States); plain-text place names are accepted by
+                the URL but ignored by LinkedIn and return the unfiltered
+                result set, so they raise ``FilterValidationError`` here.
             network: Optional connection-degree filter. Each element is one of
                 ``"F"`` (1st-degree), ``"S"`` (2nd-degree), ``"O"`` (3rd-degree
                 and beyond). Example: ``["F"]`` to only return 1st-degree

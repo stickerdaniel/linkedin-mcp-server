@@ -57,7 +57,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 
 | Tool | Description |
 |------|-------------|
-| `get_person_profile` | Read profile sections such as experience, education, skills, projects, and posts. |
+| `get_person_profile` | Read profile sections such as experience, education, skills, projects, volunteering, and posts. |
 | `get_my_profile` | Read your own profile, with the same section selection as other profiles. |
 | `connect_with_person` | Send a connection request with an optional note, or accept an incoming one. |
 | `get_sidebar_profiles` | Find recommended profile links, including people you may know. |
@@ -75,8 +75,25 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `get_job_details` | Read a job posting's description, requirements, and company details. |
 | `get_job_apply_url` | Check whether a job uses Easy Apply or links to an employer's application. |
 | `get_feed` | Read recent posts from your home feed, with links to the original posts. |
-| `search_posts` | Search posts by keyword, optionally limited to the past day, week, or month. |
+| `search_posts` | Search posts by keyword, optionally filtered by recency or content type. |
+| `get_session_status` | Check your saved login and browser state without opening a browser. |
 | `close_session` | Close the shared browser session without deleting your saved login. |
+
+A failed call is an error result (`isError`) with the usual message. For programs that branch on the kind of failure, its `_meta["linkedin.dev/error"]` is `{"v": 1, "code": ...}`, and `rate_limited` adds `retry_after` in seconds. A shared browser started by an older release may leave the code out. The codes:
+
+| Code | Meaning |
+|------|---------|
+| `auth_required` | No usable LinkedIn session. Someone has to sign in; a login window may already be open. |
+| `account_restricted` | LinkedIn restricted the account. Signing in again cannot lift it. |
+| `rate_limited` | LinkedIn is limiting requests. Wait `retry_after` seconds. |
+| `not_found` | The profile or page does not exist. |
+| `page_unreadable` | The page could not be read; LinkedIn's layout may have changed. |
+| `invalid_argument` | An argument or the tool name is unusable; the message says how to correct it. |
+| `network` | LinkedIn could not be reached: the connection, a proxy or a captive portal. |
+| `browser_busy` | Another call or client is using or changing the browser. Call again shortly. |
+| `browser_unavailable` | The browser cannot run yet: still installing, failed to set up, older than the profile, or the shared browser cannot be reached. |
+| `outcome_unknown` | The shared browser stopped answering after the call was sent, so it may have acted. `structuredContent` says whether a retry is safe. |
+| `internal` | Anything else, including failures the server does not classify. |
 
 <br/>
 <br/>
@@ -345,6 +362,14 @@ On startup, the MCP Bundle prepares the shared Patchright Chromium browser cache
 </details>
 
 <details>
+<summary>Use your own Chrome</summary>
+
+- Set **Chrome executable** in the extension's settings to a Chrome, Chromium or Chrome for Testing binary, such as `/usr/bin/google-chrome`. Leave it blank to keep the bundled Chromium. It sets `CHROME_PATH`, described under *Custom Chrome path* in the uvx setup help.
+- This is the fix when tool calls refuse to open the profile because a newer browser last opened it: point the setting at that newer browser instead of signing in again.
+
+</details>
+
+<details>
 <summary>Told to run <code>--login</code> on the host when you already did</summary>
 
 - If tool calls answer "No valid LinkedIn session is available in Docker" on a machine that is *not* a container, the runtime was misdetected. This happened on Linux hosts running a Docker daemon for unrelated services. Set `LINKEDIN_MCP_CONTAINER=false` to override the detection; `true` forces the opposite.
@@ -453,7 +478,7 @@ docker run -it --rm `
   --login --login-viewer
 ```
 
-Open the full URL the command prints (it carries the access token) and sign in. The viewer closes itself afterwards; let the command exit on its own so the session is stored completely. It gives up after 30 minutes.
+Open the full URL the command prints (it carries the access token) and sign in. Ctrl+V (Cmd+V on a Mac) pastes plain ASCII text, such as a password from your password manager, into the login browser. The viewer closes itself afterwards; let the command exit on its own so the session is stored completely. It gives up after 30 minutes.
 
 Keep the same host directory mounted at `/home/pwuser/.linkedin-mcp` on every later `docker run`, otherwise the server cannot find the session.
 

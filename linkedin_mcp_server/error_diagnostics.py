@@ -17,6 +17,7 @@ from linkedin_mcp_server.common_utils import (
     slugify_fragment,
     utcnow_iso,
 )
+from linkedin_mcp_server.core.proxy_errors import redact_proxy_credentials
 from linkedin_mcp_server.debug_trace import get_trace_dir, mark_trace_for_retention
 from linkedin_mcp_server.session_state import (
     auth_root_dir,
@@ -89,7 +90,7 @@ def build_issue_diagnostics(
         "section_name": section_name,
         "target_url": target_url,
         "error_type": type(exception).__name__,
-        "error_message": str(exception),
+        "error_message": redact_proxy_credentials(str(exception)),
         "runtime": runtime_details,
         "suggested_issue_title": _suggest_issue_title(
             context=context,

@@ -10,12 +10,12 @@ import logging
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
-from fastmcp.exceptions import ToolError
 from pydantic import BeforeValidator, Field
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.dependencies import get_ready_extractor, tool_errors
+from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode
 from linkedin_mcp_server.linkedin import parse_person_sections
 from linkedin_mcp_server.linkedin.contracts import FilterValidationError
 from linkedin_mcp_server.linkedin.identifiers import normalize_person_identifier
@@ -82,7 +82,7 @@ def register_person_tools(
             ctx: FastMCP context for progress reporting
             sections: Comma-separated list of extra sections to read.
                 The main profile page is always included.
-                Available sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts
+                Available sections: experience, education, interests, honors, volunteering, languages, certifications, skills, projects, contact_info, posts
                 Examples: "experience,education", "contact_info", "skills,projects", "honors,languages", "posts"
                 Default (None) reads only the main profile page.
             max_scrolls: Maximum pagination attempts per section to load more content.
@@ -147,7 +147,12 @@ def register_person_tools(
         Args:
             keywords: Search keywords (e.g., "software engineer", "recruiter at Google")
             ctx: FastMCP context for progress reporting
-            location: Optional location filter (e.g., "New York", "Remote")
+            location: Optional location filter, as LinkedIn's numeric geo URN
+                id (e.g., "103644278" for the United States). Plain-text place
+                names are silently ignored by LinkedIn and return unfiltered
+                results, so they are refused here. The id is the geoUrn value
+                in the URL of a LinkedIn people search filtered to that place;
+                without one, put the place in keywords instead.
             network: Optional connection-degree filter. Each element is one of
                 "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
                 Example: ["F"] to only return 1st-degree connections. A single
@@ -177,7 +182,7 @@ def register_person_tools(
                 current_company=current_company,
             )
         except FilterValidationError as e:
-            raise ToolError(str(e)) from e
+            raise CodedToolError(str(e), ErrorCode.INVALID_ARGUMENT) from e
 
         extractor = await get_ready_extractor(ctx, tool_name="search_people")
         logger.info(
@@ -203,7 +208,7 @@ def register_person_tools(
             # Validation messages carry actionable detail; surface
             # them as ToolError so mask_error_details doesn't reduce
             # them to "Error calling tool 'search_people'".
-            raise ToolError(str(e)) from e
+            raise CodedToolError(str(e), ErrorCode.INVALID_ARGUMENT) from e
 
         await ctx.report_progress(progress=100, total=100, message="Complete")
 
@@ -345,7 +350,7 @@ def register_person_tools(
             ctx: FastMCP context for progress reporting
             sections: Comma-separated list of extra sections to read.
                 The main profile page is always included.
-                Available sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts
+                Available sections: experience, education, interests, honors, volunteering, languages, certifications, skills, projects, contact_info, posts
                 Examples: "experience,education", "contact_info", "skills,projects"
                 Default (None) reads only the main profile page.
             max_scrolls: Maximum pagination attempts per section (same as get_person_profile).

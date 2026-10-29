@@ -7,9 +7,13 @@ to handle.
 """
 
 import logging
-from typing import NoReturn
+from enum import StrEnum
+from typing import Any, NoReturn
 
-from fastmcp.exceptions import ToolError
+import mcp.types as mt
+from fastmcp.exceptions import NotFoundError, ToolError, ValidationError
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.tools import ToolResult
 
 from linkedin_mcp_server.core.proxy_errors import (
     redact_proxy_credentials,
@@ -46,6 +50,7 @@ from linkedin_mcp_server.exceptions import (
     OwnerCannotAuthenticateError,
     SessionExpiredError,
 )
+from linkedin_mcp_server.core.throttle import throttle_evidence
 from linkedin_mcp_server.session_state import PeerSessionInPlaceError
 from linkedin_mcp_server.error_diagnostics import (
     build_issue_diagnostics,
@@ -55,11 +60,120 @@ from linkedin_mcp_server.error_diagnostics import (
 logger = logging.getLogger(__name__)
 
 
+class ErrorCode(StrEnum):
+    """What kind of failure a tool call ended in, for a program to branch on.
+
+    A closed set, and part of the contract: a value is never renamed or given a
+    new meaning, because clients match on it instead of on the message, which is
+    written for people and changes between releases. README.md lists them.
+    """
+
+    AUTH_REQUIRED = "auth_required"
+    ACCOUNT_RESTRICTED = "account_restricted"
+    RATE_LIMITED = "rate_limited"
+    NOT_FOUND = "not_found"
+    PAGE_UNREADABLE = "page_unreadable"
+    INVALID_ARGUMENT = "invalid_argument"
+    NETWORK = "network"
+    BROWSER_BUSY = "browser_busy"
+    BROWSER_UNAVAILABLE = "browser_unavailable"
+    OUTCOME_UNKNOWN = "outcome_unknown"
+    INTERNAL = "internal"
+
+
+#: Namespaced beside the daemon's ``linkedin.dev/auth`` marker. Version 1 is
+#: ``{"v", "code"}`` plus ``retry_after`` (seconds) on ``rate_limited``.
+ERROR_META_KEY = "linkedin.dev/error"
+ERROR_META_VERSION = 1
+
+
+def error_result(
+    message: str,
+    code: ErrorCode,
+    *,
+    retry_after: int | None = None,
+    meta: dict[str, Any] | None = None,
+    structured_content: dict[str, Any] | None = None,
+) -> ToolResult:
+    """The error result every failure this server answers with is built from.
+
+    A raised failure reaches it through :class:`ErrorCodeMiddleware`; an answer
+    the daemon returns instead of raising (a marker for the frontend, an unknown
+    outcome) calls it directly, so both carry the code the same way. *meta* and
+    *structured_content* are kept as given beside the code.
+    """
+    marker: dict[str, Any] = {"v": ERROR_META_VERSION, "code": code}
+    if retry_after is not None:
+        marker["retry_after"] = retry_after
+    return ToolResult(
+        content=[mt.TextContent(type="text", text=message)],
+        structured_content=structured_content,
+        meta={**(meta or {}), ERROR_META_KEY: marker},
+        is_error=True,
+    )
+
+
+class CodedToolError(ToolError):
+    """A shaped tool failure that names its :class:`ErrorCode`.
+
+    The code has a default because ``redacted_copy`` rebuilds an exception from
+    its message alone; the pass-through below puts the code back.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        code: ErrorCode = ErrorCode.INTERNAL,
+        *,
+        retry_after: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retry_after = retry_after
+
+
+class ErrorCodeMiddleware(Middleware):
+    """Answer a failed call with an error result whose ``_meta`` names its code.
+
+    FastMCP turns a raised ``ToolError`` into a result carrying only its text, so
+    the code has to leave as a result. Outermost on every role: the middleware
+    inside it still sees the exception, including the owner's auth marker, which
+    walks ``__cause__``. Text and ``isError`` are what FastMCP would have sent.
+
+    A returned error result passes as it is. One from this server already names
+    its code through :func:`error_result`; one forwarded from an older owner may
+    not, and its own markers say more than ``internal`` would.
+    """
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        try:
+            return await call_next(context)
+        except (ToolError, ValidationError, NotFoundError) as exc:
+            retry_after = exc.retry_after if isinstance(exc, CodedToolError) else None
+            return error_result(str(exc), _code_of(exc), retry_after=retry_after)
+
+
+def _code_of(exc: Exception) -> ErrorCode:
+    if isinstance(exc, CodedToolError):
+        return exc.code
+    # An unknown or disabled tool is a wrong name in the request.
+    if isinstance(exc, (ValidationError, NotFoundError)):
+        return ErrorCode.INVALID_ARGUMENT
+    # FastMCP's own masked "Error calling tool", and any ToolError raised
+    # without a code.
+    return ErrorCode.INTERNAL
+
+
 def _raise_tool_error_with_diagnostics(
     exception: Exception,
     message: str,
     *,
     context: str,
+    code: ErrorCode,
 ) -> NoReturn:
     try:
         diagnostics = build_issue_diagnostics(exception, context=context)
@@ -69,10 +183,60 @@ def _raise_tool_error_with_diagnostics(
 
     if diagnostics is not None:
         message = format_tool_error_with_diagnostics(message, diagnostics)
-    raise ToolError(message) from exception
+    raise CodedToolError(message, code) from exception
 
 
 def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
+    """Shape the failure, then say so when LinkedIn was throttling this call.
+
+    The evidence is appended rather than substituted: throttling explains why
+    a call failed, but the shaped message is what says *which* call and what it
+    was doing, and a session that expired while LinkedIn happened to refuse one
+    beacon is still an expired session.
+
+    An unclassified exception is the case this exists for. It is re-raised for
+    ``mask_error_details`` to reduce to "Error calling tool", which is the
+    right answer for an internal error and the wrong one for a throttled
+    LinkedIn: the diagnosis was in the browser and reaching the client with
+    nothing is what makes throttling read as a parser bug. When the record has
+    something to say, it is said as a ``ToolError``, which survives masking;
+    the underlying exception still goes nowhere.
+
+    The evidence changes no code. A shaped failure keeps the one it was given,
+    and an unclassified one stays ``internal``: a refused beacon during the
+    call does not prove it is why the call failed.
+    """
+    try:
+        _shape_tool_error(exception, context=context)
+    except ToolError as shaped:
+        evidence = throttle_evidence()
+        if evidence is None or evidence in str(shaped):
+            raise
+        coded = shaped if isinstance(shaped, CodedToolError) else None
+        # `from shaped.__cause__`, not `from shaped`: a chain walked by the
+        # daemon middleware has to keep reaching the domain exception in one
+        # hop, which `tests/test_error_handler.py` pins.
+        raise CodedToolError(
+            f"{shaped}\n\n{evidence}",
+            coded.code if coded else ErrorCode.INTERNAL,
+            retry_after=coded.retry_after if coded else None,
+        ) from (shaped.__cause__ or shaped)
+    except Exception as unclassified:
+        evidence = throttle_evidence()
+        if evidence is None:
+            raise
+        logger.warning(
+            "Masked failure%s arrived while LinkedIn was throttling",
+            f" in {context}" if context else "",
+        )
+        # Chained to what the catch-all raised, which is already the redacted
+        # copy with its own chain severed, so no credential is reachable here.
+        # It keeps the failure's type one hop from the ToolError, where the
+        # daemon middleware walks `__cause__` to classify it.
+        raise CodedToolError(evidence, ErrorCode.INTERNAL) from unclassified
+
+
+def _shape_tool_error(exception: Exception, context: str = "") -> NoReturn:
     """
     Raise a ToolError for known LinkedIn exceptions, or re-raise unknown ones.
 
@@ -123,6 +287,10 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
         if safe is exception:
             raise exception
         logger.warning("Redacted an already-shaped tool error%s", ctx)
+        if isinstance(exception, CodedToolError):
+            safe = CodedToolError(
+                str(safe), exception.code, retry_after=exception.retry_after
+            )
         raise safe from None
 
     if isinstance(exception, CredentialsNotFoundError):
@@ -131,35 +299,39 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
             exception,
             "Authentication not found. Run with --login to create a browser profile.",
             context=context,
+            code=ErrorCode.AUTH_REQUIRED,
         )
 
     elif isinstance(exception, BrowserSetupInProgressError):
         logger.info("Browser setup in progress%s: %s", ctx, exception)
-        raise ToolError(str(exception)) from exception
+        raise CodedToolError(
+            str(exception), ErrorCode.BROWSER_UNAVAILABLE
+        ) from exception
 
     elif isinstance(exception, BrowserSetupFailedError):
         logger.warning("Browser setup failed%s: %s", ctx, exception)
         detail = redact_proxy_credentials(str(exception))
-        raise ToolError(
+        raise CodedToolError(
             f"LinkedIn browser setup was not ready: {detail}. Retry this tool to "
-            "start a fresh background setup attempt."
+            "start a fresh background setup attempt.",
+            ErrorCode.BROWSER_UNAVAILABLE,
         ) from exception
 
     elif isinstance(exception, OwnerStandingDownError):
         logger.info("Browser owner standing down%s: %s", ctx, exception)
-        raise ToolError(str(exception)) from exception
+        raise CodedToolError(str(exception), ErrorCode.BROWSER_BUSY) from exception
 
     elif isinstance(exception, AuthenticationStartedError):
         logger.info("Authentication started%s: %s", ctx, exception)
-        raise ToolError(str(exception)) from exception
+        raise CodedToolError(str(exception), ErrorCode.AUTH_REQUIRED) from exception
 
     elif isinstance(exception, AuthenticationInProgressError):
         logger.info("Authentication in progress%s: %s", ctx, exception)
-        raise ToolError(str(exception)) from exception
+        raise CodedToolError(str(exception), ErrorCode.AUTH_REQUIRED) from exception
 
     elif isinstance(exception, AuthenticationBootstrapFailedError):
         logger.warning("Authentication bootstrap failed%s: %s", ctx, exception)
-        raise ToolError(str(exception)) from exception
+        raise CodedToolError(str(exception), ErrorCode.AUTH_REQUIRED) from exception
 
     # Not a failure at all: another client signed in while this one was asking
     # to. Diagnostics-free for the same reason as the branches above, and worth a
@@ -167,7 +339,7 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
     # RuntimeError is masked into something the user cannot act on.
     elif isinstance(exception, PeerSessionInPlaceError):
         logger.info("Another client already signed in%s", ctx)
-        raise ToolError(str(exception)) from exception
+        raise CodedToolError(str(exception), ErrorCode.BROWSER_BUSY) from exception
 
     # Its own branch rather than the LinkedInMCPError catch-all, which appends an
     # issue-report template. A shared browser that cannot log in by itself is the
@@ -177,24 +349,28 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
     # reason.
     elif isinstance(exception, OwnerCannotAuthenticateError):
         logger.info("The shared browser needs this client to log in%s", ctx)
-        raise ToolError(str(exception)) from exception
+        raise CodedToolError(str(exception), ErrorCode.AUTH_REQUIRED) from exception
 
     # Contention, not a bug: no issue diagnostics, following RateLimitError.
     elif isinstance(exception, BrowserBusyError):
         logger.info("Shared browser busy%s: %s", ctx, exception)
-        raise ToolError(str(exception)) from exception
+        raise CodedToolError(str(exception), ErrorCode.BROWSER_BUSY) from exception
 
     elif isinstance(exception, DockerHostLoginRequiredError):
         logger.warning("Docker host login required%s: %s", ctx, exception)
-        raise ToolError(str(exception)) from exception
+        raise CodedToolError(str(exception), ErrorCode.AUTH_REQUIRED) from exception
 
     elif isinstance(exception, LinuxBrowserDependencyError):
         logger.warning("Linux browser dependency missing%s: %s", ctx, exception)
-        raise ToolError(str(exception)) from exception
+        raise CodedToolError(
+            str(exception), ErrorCode.BROWSER_UNAVAILABLE
+        ) from exception
 
     elif isinstance(exception, BrowserBinaryMissingError):
         logger.warning("Browser binary missing%s: %s", ctx, exception)
-        raise ToolError(str(exception)) from exception
+        raise CodedToolError(
+            str(exception), ErrorCode.BROWSER_UNAVAILABLE
+        ) from exception
 
     # Diagnostics-free, following BrowserBusyError. A browser refusing a profile
     # a newer one wrote is the guard doing its job, and the message already
@@ -202,14 +378,18 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
     # would send users to the tracker for something working as intended.
     elif isinstance(exception, BrowserDowngradeError):
         logger.warning("Browser older than the profile%s: %s", ctx, exception)
-        raise ToolError(str(exception)) from exception
+        raise CodedToolError(
+            str(exception), ErrorCode.BROWSER_UNAVAILABLE
+        ) from exception
 
     # Diagnostics-free, following BrowserDowngradeError: LinkedIn's decision
     # about the account is not a bug, and the message already names the only
     # way out.
     elif isinstance(exception, AccountRestrictedError):
         logger.warning("LinkedIn account restricted%s", ctx)
-        raise ToolError(str(exception)) from exception
+        raise CodedToolError(
+            str(exception), ErrorCode.ACCOUNT_RESTRICTED
+        ) from exception
 
     elif isinstance(exception, SessionExpiredError):
         logger.warning("Session expired%s: %s", ctx, exception)
@@ -217,6 +397,7 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
             exception,
             "Session expired. Run with --login to create a new browser profile.",
             context=context,
+            code=ErrorCode.AUTH_REQUIRED,
         )
 
     elif isinstance(exception, AuthenticationError):
@@ -225,19 +406,23 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
             exception,
             "Authentication failed. Run with --login to re-authenticate.",
             context=context,
+            code=ErrorCode.AUTH_REQUIRED,
         )
 
     elif isinstance(exception, RateLimitError):
         wait_time = getattr(exception, "suggested_wait_time", 300)
         logger.warning("Rate limit%s: %s (wait=%ds)", ctx, exception, wait_time)
-        raise ToolError(
-            f"Rate limit detected. Wait {wait_time} seconds before trying again."
+        raise CodedToolError(
+            f"Rate limit detected. Wait {wait_time} seconds before trying again.",
+            ErrorCode.RATE_LIMITED,
+            retry_after=wait_time,
         ) from exception
 
     elif isinstance(exception, ProfileNotFoundError):
         logger.warning("Profile not found%s: %s", ctx, exception)
-        raise ToolError(
-            "Profile not found. Check the profile URL is correct."
+        raise CodedToolError(
+            "Profile not found. Check the profile URL is correct.",
+            ErrorCode.NOT_FOUND,
         ) from exception
 
     elif isinstance(exception, ElementNotFoundError):
@@ -246,20 +431,21 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
             exception,
             "Element not found. LinkedIn page structure may have changed.",
             context=context,
+            code=ErrorCode.PAGE_UNREADABLE,
         )
 
     elif isinstance(exception, ProxyConnectionError):
         # Ahead of NetworkError, which it subclasses. No issue diagnostics: a
         # proxy that is down or misconfigured is not a bug worth reporting.
         logger.warning("Proxy error%s: %s", ctx, exception)
-        raise ToolError(str(exception)) from exception
+        raise CodedToolError(str(exception), ErrorCode.NETWORK) from exception
 
     # Also ahead of NetworkError, whose generic text drops the one useful fact:
     # where the browser landed. No issue diagnostics, following
     # ProxyConnectionError: a portal on the user's network is not a bug.
     elif isinstance(exception, OffLinkedInLandingError):
         logger.warning("Navigation ended off LinkedIn%s: %s", ctx, exception)
-        raise ToolError(str(exception)) from exception
+        raise CodedToolError(str(exception), ErrorCode.NETWORK) from exception
 
     elif isinstance(exception, NetworkError):
         logger.warning("Network error%s: %s", ctx, exception)
@@ -267,6 +453,7 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
             exception,
             "Network error. Check your connection and try again.",
             context=context,
+            code=ErrorCode.NETWORK,
         )
 
     elif isinstance(exception, PageReadError):
@@ -275,6 +462,7 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
             exception,
             "Could not read the page. LinkedIn page structure may have changed.",
             context=context,
+            code=ErrorCode.PAGE_UNREADABLE,
         )
 
     # Ahead of the catch-all, which it subclasses. No issue diagnostics: a
@@ -282,7 +470,7 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
     # issue template appended to it buries the correction it already names.
     elif isinstance(exception, InvalidReferenceError):
         logger.info("Invalid reference%s: %s", ctx, exception)
-        raise ToolError(str(exception)) from exception
+        raise CodedToolError(str(exception), ErrorCode.INVALID_ARGUMENT) from exception
 
     elif isinstance(exception, (LinkedInOperationError, LinkedInMCPError)):
         # Catch-all for base exception types and any future subclasses
@@ -292,6 +480,7 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
             exception,
             str(exception),
             context=context,
+            code=ErrorCode.INTERNAL,
         )
 
     else:

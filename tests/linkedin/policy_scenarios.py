@@ -307,7 +307,7 @@ async def _person_sections_scenario() -> dict[str, Any]:
         "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
         "show_more.filtered",
     )
-    page.script("show_more.filtered.count", *([0] * 8))
+    page.script("show_more.filtered.count", *([0] * 9))
     extractor = _extractor(page)
     callbacks = TraceCallbacks(recorder)
     async with boundaries(recorder, clock):
@@ -510,6 +510,7 @@ async def _feed_stale_scenario() -> dict[str, Any]:
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
     clock = FakeClock(recorder)
     page = _page(recorder).script("evaluate:root_content", _root("Feed content"))
+    page.script("evaluate:feed_post_boundaries", {"posts": []})
     extractor = _extractor(page)
     async with boundaries(recorder, clock):
         with recorder.context("extract_feed", "feed"):
@@ -543,6 +544,7 @@ async def _feed_response_scenario(*, body_failure: bool) -> dict[str, Any]:
         body,
     )
     page.script("mouse.wheel", lambda: page.emit("response", response))
+    page.script("evaluate:feed_post_boundaries", {"posts": []})
     extractor = _extractor(page)
     async with boundaries(recorder, clock):
         with recorder.context("extract_feed", "feed"):

@@ -253,6 +253,10 @@ class TestTheWindowlessLaunchEndToEnd:
             def __init__(self, url: str):
                 self.url = url
                 self.closed = False
+                self.listeners: list[tuple[str, object]] = []
+
+            def on(self, event, handler):
+                self.listeners.append((event, handler))
 
             async def close(self):
                 self.closed = True
@@ -353,6 +357,33 @@ class TestTheWindowlessLaunchEndToEnd:
         # The startup page went, and only once the hidden one existed.
         assert pages[0].closed is True
         assert recorder["hidden_present_at_close"] is True
+
+    async def test_the_working_page_is_watched_for_throttling(self, tmp_path):
+        """The recorder has to land on the page that navigates.
+
+        Installed on the startup page instead, it would record nothing at all
+        on a windowless launch, and the 429 that explains a failed call would
+        go unseen exactly where it is hardest to diagnose.
+        """
+        recorder: dict = {}
+        start, pages = self._fake_playwright(recorder)
+        manager = BrowserManager(user_data_dir=tmp_path / "p", headless=True)
+
+        with mock.patch(
+            "linkedin_mcp_server.core.browser.hidden_target_is_supported",
+            return_value=True,
+        ):
+            with mock.patch(
+                "linkedin_mcp_server.core.browser.async_playwright"
+            ) as playwright:
+                playwright.return_value.start = start
+                await manager.start()
+
+        hidden = [page for page in pages if page.url.startswith("about:blank#")]
+        assert len(hidden) == 1
+        assert manager.page is hidden[0]
+        events = [event for event, _ in hidden[0].listeners]
+        assert {"request", "response"} <= set(events)
 
     async def test_detached_groups_are_retained_before_page_setup(
         self, tmp_path, monkeypatch
@@ -1324,6 +1355,36 @@ class TestStartingAgainAfterAClose:
 
             await manager.start()
             assert manager.is_authenticated is False
+            assert await manager.close() is True
+
+    @pytest.mark.asyncio
+    async def test_a_renderer_crash_marks_only_its_own_launch(
+        self, tmp_path, monkeypatch
+    ):
+        """The page stays open after a crash; only its event can say so."""
+        manager, record, start_driver = self._wired(tmp_path, monkeypatch)
+
+        with self._driving(start_driver):
+            await manager.start()
+            page = record["contexts"][0].pages[0]
+            assert manager.page_crashed is False
+            crash = next(
+                call.args[1]
+                for call in page.on.call_args_list
+                if call.args[0] == "crash"
+            )
+            crash(page)
+            assert manager.page_crashed is True
+            assert await manager.close() is True
+
+            await manager.start()
+            assert manager.page_crashed is False
+            # A late event from the previous page cannot retire the new one.
+            crash(page)
+            assert manager.page_crashed is False
+            current_page = manager.page
+            crash(current_page)
+            assert manager.page_crashed is True
             assert await manager.close() is True
 
     @pytest.mark.asyncio

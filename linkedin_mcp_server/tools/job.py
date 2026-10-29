@@ -131,17 +131,25 @@ def register_job_tools(
 
         Returns job_ids that can be passed to get_job_details for full info.
 
+        LinkedIn is moving accounts to a redesigned job search, which keeps
+        only the keywords, date_posted and paging. It drops the filters
+        marked "Classic search only" and reports them in section_errors as
+        filters_dropped. When it drops the location or work type, search again
+        with them in the keywords ("remote python developer in Lyon") and keep
+        doing so; words such as "senior" or "internship" there narrow the
+        results too. Quotes do not make a phrase exact on that search.
+
         Args:
             keywords: Search keywords (e.g., "software engineer", "data scientist")
             ctx: FastMCP context for progress reporting
-            location: Optional location filter (e.g., "San Francisco", "Remote")
+            location: Optional location filter (e.g., "San Francisco", "Remote"). Classic search only.
             max_pages: Maximum number of result pages to load (1-10, default 3)
             date_posted: Filter by posting date (past_hour, past_24_hours, past_week, past_month)
-            job_type: Filter by job type, comma-separated (full_time, part_time, contract, temporary, volunteer, internship, other)
-            experience_level: Filter by experience level, comma-separated (internship, entry, associate, mid_senior, director, executive)
-            work_type: Filter by work type, comma-separated (on_site, remote, hybrid)
-            easy_apply: Only show Easy Apply jobs (default false)
-            sort_by: Sort results (date, relevance)
+            job_type: Filter by job type, comma-separated (full_time, part_time, contract, temporary, volunteer, internship, other). Classic search only.
+            experience_level: Filter by experience level, comma-separated (internship, entry, associate, mid_senior, director, executive). Classic search only.
+            work_type: Filter by work type, comma-separated (on_site, remote, hybrid). Classic search only.
+            easy_apply: Only show Easy Apply jobs (default false). Classic search only.
+            sort_by: Sort results (date, relevance). Classic search only.
 
         Returns:
             Dict with url, sections (name -> raw text), job_ids (list of
@@ -153,6 +161,11 @@ def register_job_tools(
             A search with no matches returns empty job_ids and a
             section_errors entry of type no_matching_jobs, rather than the
             unrelated recommendations LinkedIn shows in its place.
+            pagination ({pages_fetched, next_offset, reason}) says why paging
+            stopped: complete (the results ran out), max_pages, time_budget
+            (the tool timeout was near, so more results may exist) or
+            no_new_ids (a page repeated earlier results). It is absent when a
+            failure stopped the search, which section_errors then explains.
         """
         # Before the browser, because FastMCP is already timing this call
         # and the extractor's budget is a fraction of the same figure. A

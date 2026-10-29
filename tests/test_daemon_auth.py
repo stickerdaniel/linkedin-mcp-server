@@ -33,7 +33,7 @@ from linkedin_mcp_server.daemon.auth_repair import (
 from linkedin_mcp_server.daemon.forwarder import OwnerForwarder
 from linkedin_mcp_server.daemon.proxy import FrontendCallMiddleware
 from linkedin_mcp_server.core.exceptions import AccountRestrictedError
-from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.error_handler import ERROR_META_KEY, raise_tool_error
 from linkedin_mcp_server.exceptions import (
     AuthenticationStartedError,
     AuthMissingOnOwnerError,
@@ -136,6 +136,7 @@ class TestTheMarkerSurvivesTheHop:
             "browser_open": False,
             "generation": None,
         }
+        assert result.meta[ERROR_META_KEY]["code"] == "auth_required"
 
     async def test_the_marker_reaches_the_outer_client_through_the_proxy(self):
         # The property the whole design rests on. Measured before this existed: a
@@ -304,6 +305,7 @@ class TestTheFrontendActsOnTheMarker:
         assert len(calls) == 1
         assert result.is_error is True
         assert result.content[0].text == str(AccountRestrictedError())
+        assert result.meta[ERROR_META_KEY]["code"] == "account_restricted"
 
     async def test_a_call_that_had_already_started_is_never_run_again(self):
         # The one that protects LinkedIn state. Some of these tools send messages
@@ -993,6 +995,7 @@ class TestALostMarkerResponse:
         async def a_live_browser() -> MagicMock:
             browser = MagicMock()
             browser.page.is_closed.return_value = False
+            browser.page_crashed = False
             browser.context.browser.is_connected.return_value = True
             acquired.append(browser)
             return browser

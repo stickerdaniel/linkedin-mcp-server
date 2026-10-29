@@ -336,6 +336,21 @@ class TestServerRoles:
             # not, which is a test failing at the wrong thing.
             assert serializes == role.drives_browser, role
 
+    def test_the_error_code_is_the_outermost_layer_on_every_role(self):
+        # It turns a failure into a result, so every layer it wraps still sees
+        # the exception: the owner's auth marker walks its causes, and the update
+        # notice is only ever appended to a result.
+        from linkedin_mcp_server.error_handler import ErrorCodeMiddleware
+
+        for role in ServerRole:
+            ours = [
+                middleware
+                for middleware in _server_for(role).middleware
+                if type(middleware).__module__.startswith("linkedin_mcp_server")
+            ]
+
+            assert isinstance(ours[0], ErrorCodeMiddleware), role
+
     def test_the_update_notice_goes_only_where_a_user_reads_it(self):
         # Appended to one tool result per process, so it belongs wherever a user
         # reads results and nowhere else. On the shared owner it would reach

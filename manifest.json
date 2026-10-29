@@ -39,6 +39,7 @@
       ],
       "env": {
         "LINKEDIN_MCP_RUNTIME": "mcpb",
+        "CHROME_PATH": "${user_config.chrome_path}",
         "PROXY_SERVER": "${user_config.proxy_server}",
         "PROXY_USERNAME": "${user_config.proxy_username}",
         "PROXY_PASSWORD": "${user_config.proxy_password}",
@@ -49,7 +50,7 @@
   "tools": [
     {
       "name": "get_person_profile",
-      "description": "Get detailed information from a LinkedIn profile including work history, education, certifications, skills, projects, connections, and recent posts"
+      "description": "Get detailed information from a LinkedIn profile including work history, education, certifications, skills, projects, volunteering, connections, and recent posts"
     },
     {
       "name": "get_my_profile",
@@ -121,7 +122,11 @@
     },
     {
       "name": "search_posts",
-      "description": "Search LinkedIn posts/content globally by keyword (the 'Posts' tab) with an optional recency filter (past-24h/past-week/past-month); returns unordered candidate permalinks in references"
+      "description": "Search LinkedIn posts/content globally by keyword (the 'Posts' tab) with an optional recency filter (past-24h/past-week/past-month) and content-type filter (e.g. documents); returns unordered candidate permalinks in references"
+    },
+    {
+      "name": "get_session_status",
+      "description": "Diagnose saved-session files and the serving process's browser state without opening a browser or contacting LinkedIn"
     },
     {
       "name": "close_session",
@@ -129,6 +134,13 @@
     }
   ],
   "user_config": {
+    "chrome_path": {
+      "type": "file",
+      "title": "Chrome executable",
+      "description": "Optional. Path to a Chrome, Chromium or Chrome for Testing executable to use instead of the bundled Chromium, such as /usr/bin/google-chrome. Leave blank to use the bundled browser.",
+      "required": false,
+      "default": ""
+    },
     "proxy_server": {
       "type": "string",
       "title": "Proxy server",

@@ -269,6 +269,7 @@ class TestReadPersonUrls:
             "education",
             "interests",
             "honors",
+            "volunteering",
             "languages",
             "certifications",
             "skills",
@@ -299,13 +300,13 @@ class TestReadPersonUrls:
         page_urls = [call.args[0] for call in mock_extract.call_args_list]
         overlay_urls = [call.args[0] for call in mock_overlay.call_args_list]
         all_urls = page_urls + overlay_urls
-        # 10 full-page sections + 1 overlay (contact_info)
-        assert len(page_urls) == 10
+        # 11 full-page sections + 1 overlay (contact_info)
+        assert len(page_urls) == 11
         assert len(overlay_urls) == 1
         assert [
             capture_call.kwargs["plan"].mode
             for capture_call in mock_extract.call_args_list
-        ] == [CaptureMode.STANDARD, *([CaptureMode.DETAILS] * 8), CaptureMode.ACTIVITY]
+        ] == [CaptureMode.STANDARD, *([CaptureMode.DETAILS] * 9), CaptureMode.ACTIVITY]
         assert mock_overlay.call_args.kwargs["plan"].mode is CaptureMode.OVERLAY
         # Verify each expected suffix was navigated
         assert any(u.endswith("/in/testuser/") for u in all_urls)
@@ -313,6 +314,7 @@ class TestReadPersonUrls:
         assert any("/details/education/" in u for u in all_urls)
         assert any("/details/interests/" in u for u in all_urls)
         assert any("/details/honors/" in u for u in all_urls)
+        assert any("/details/volunteering-experiences/" in u for u in all_urls)
         assert any("/details/languages/" in u for u in all_urls)
         assert any("/details/certifications/" in u for u in all_urls)
         assert any("/details/skills/" in u for u in all_urls)
@@ -372,6 +374,32 @@ class TestReadPersonUrls:
         urls = [call.args[0] for call in mock_extract.call_args_list]
         assert any("/details/certifications/" in url for url in urls)
         assert "certifications" in result["sections"]
+
+    async def test_volunteering_visits_details_page(self, mock_page):
+        reader = _reader(mock_page)
+        with (
+            patch.object(
+                reader._capture,
+                "capture",
+                new_callable=AsyncMock,
+                return_value=extracted("Mentor\nCode for Portugal"),
+            ) as mock_extract,
+            patch.object(
+                reader._capture,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.linkedin.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await reader.read_person("test-user", {"volunteering"})
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert any("/details/volunteering-experiences/" in url for url in urls)
+        assert "volunteering" in result["sections"]
 
     async def test_skills_visits_details_page(self, mock_page):
         reader = _reader(mock_page)
@@ -1665,6 +1693,45 @@ class TestGetSidebarProfiles:
         mock_page.evaluate.assert_awaited_once()  # no show_all JS call
         assert result["sidebar_profiles"]["explore_premium_profiles"] == ["/in/carol/"]
 
+    @pytest.mark.parametrize(
+        "show_all_url",
+        [
+            "https://evil.example/in/alice/",
+            "https://linkedin.com.evil.example/search/results/people/",
+            "http://www.linkedin.com/search/results/people/",
+            "javascript:alert(1)",
+        ],
+    )
+    async def test_skips_show_all_that_is_not_a_linkedin_url(
+        self, mock_page, show_all_url
+    ):
+        """A Show all href off LinkedIn is never navigated to."""
+        sidebar_js_result = {
+            "sections": {"more_profiles_for_you": ["/in/alice/"]},
+            "showAllUrls": {"more_profiles_for_you": show_all_url},
+        }
+        mock_page.evaluate = AsyncMock(return_value=sidebar_js_result)
+        mock_page.url = "https://www.linkedin.com/in/testuser/"
+
+        reader = _reader(mock_page)
+        navigate_mock = AsyncMock()
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", navigate_mock),
+            patch(
+                "linkedin_mcp_server.linkedin.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.linkedin.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await reader.get_sidebar_profiles("testuser")
+
+        navigate_mock.assert_awaited_once_with("https://www.linkedin.com/in/testuser/")
+        assert result["sidebar_profiles"]["more_profiles_for_you"] == ["/in/alice/"]
+
     async def test_skips_show_all_when_page_redirects_to_premium(self, mock_page):
         """If navigating to Show all lands on a /premium URL, skip that section."""
         sidebar_js_result = {
@@ -1894,12 +1961,12 @@ class TestSearchPeople:
         ):
             result = await reader.search_people(
                 "engineer",
-                location="Seattle",
+                location="103644278",
                 network=["F"],
                 current_company="1115",
             )
 
         assert "keywords=engineer" in result["url"]
-        assert "location=Seattle" in result["url"]
+        assert "geoUrn=%5B%22103644278%22%5D" in result["url"]
         assert "network=%5B%22F%22%5D" in result["url"]
         assert "currentCompany=%5B%221115%22%5D" in result["url"]

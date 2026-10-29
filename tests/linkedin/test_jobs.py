@@ -710,6 +710,11 @@ class TestSearchJobs:
         # start=30, which is exactly what a stride regression would produce.
         page2 = parse_qs(urlparse(urls_visited[1]).query)
         assert page2["start"] == ["3"]  # page 1 rendered three cards
+        assert result["pagination"] == {
+            "pages_fetched": 2,
+            "next_offset": 5,
+            "reason": "max_pages",
+        }
 
     async def test_references_keep_all_jobs_beyond_the_per_section_cap(self, mock_page):
         reader = _reader(mock_page)
@@ -875,6 +880,9 @@ class TestSearchJobs:
         error = result["section_errors"]["search_results"]
         assert error["error_type"] == "filters_dropped"
         assert "location" in error["error_message"]
+        # A warning about the results kept, not a failure: the search still
+        # says why it stopped.
+        assert result["pagination"]["reason"] == "max_pages"
 
     @pytest.mark.parametrize(
         "lands_on,expected_dropped",
@@ -989,6 +997,8 @@ class TestSearchJobs:
         message = result["section_errors"]["search_results"]["error_message"]
         assert "location" in message
         assert RATE_LIMITED_SECTION_TEXT in message
+        # Page one was kept, and the list still ends on a failure.
+        assert "pagination" not in result
 
     async def test_a_search_answered_for_something_else_stops_the_loop(self, mock_page):
         """The route can be right and the offset right while the query is gone.
@@ -1231,6 +1241,7 @@ class TestSearchJobs:
             result["section_errors"]["search_results"]["error_type"]
             == "pagination_stopped"
         )
+        assert "pagination" not in result
 
     async def test_no_new_id_page_can_upgrade_duplicate_metadata(self, mock_page):
         """The stopping page still contributes richer duplicate metadata."""
@@ -1314,6 +1325,11 @@ class TestSearchJobs:
                 },
             ]
         }
+        assert result["pagination"] == {
+            "pages_fetched": 2,
+            "next_offset": 4,
+            "reason": "no_new_ids",
+        }
 
     async def test_stops_once_past_the_advertised_results(self, mock_page):
         """Stop when the offset passes the last result LinkedIn advertises.
@@ -1357,6 +1373,11 @@ class TestSearchJobs:
         assert mock_extract.await_count == 1
         assert mock_total_pages.await_count == 1
         assert result["job_ids"] == [str(i) for i in range(25)]
+        assert result["pagination"] == {
+            "pages_fetched": 1,
+            "next_offset": 25,
+            "reason": "complete",
+        }
 
     async def test_the_scroll_budget_is_spent_and_not_divided(self, mock_page):
         """Asking for more pages must not shorten the first one.
@@ -1542,6 +1563,11 @@ class TestSearchJobs:
         # Seven pages end at 142.9s; an eighth would need 163.6s.
         assert len(seen) == 7
         assert result["job_ids"] == [jid for page in pages[:7] for jid in page]
+        assert result["pagination"] == {
+            "pages_fetched": 7,
+            "next_offset": 70,
+            "reason": "time_budget",
+        }
 
     async def test_the_next_navigation_delay_is_part_of_the_prediction(self, mock_page):
         """The guard budgets the delay before a page, not just the page.
@@ -1687,6 +1713,11 @@ class TestSearchJobs:
 
         assert result["job_ids"] == []
         assert mock_extract.await_count == 0
+        assert result["pagination"] == {
+            "pages_fetched": 0,
+            "next_offset": 0,
+            "reason": "max_pages",
+        }
 
     async def test_single_page(self, mock_page):
         """max_pages=1 should only visit one page; filters appear in URL."""
@@ -1802,6 +1833,11 @@ class TestSearchJobs:
         assert result["sections"] == {}
         # Empty text should skip ID extraction to avoid stale DOM
         mock_ids.assert_not_awaited()
+        assert result["pagination"] == {
+            "pages_fetched": 1,
+            "next_offset": 0,
+            "reason": "complete",
+        }
 
     async def test_empty_redesign_page_reports_dropped_keywords(self, mock_page):
         """An empty destination must still prove it answered the question.
@@ -2023,6 +2059,98 @@ class TestSearchJobs:
         assert "founder's associate" in error["error_message"]
         mock_ids.assert_not_awaited()
         assert mock_extract.await_count == 1
+        assert result["pagination"] == {
+            "pages_fetched": 1,
+            "next_offset": 0,
+            "reason": "complete",
+        }
+
+    _NOTICE = (
+        "We found more results related to your search that may not be exact "
+        "matches, but could still be a great fit."
+    )
+
+    async def _search_redesigned(self, mock_page, organic):
+        """One redesigned page holding the notice, with `organic` above it.
+
+        `organic` is what the DOM read answers, or an exception it raises.
+        """
+        reader = _reader(mock_page)
+        page = extracted(
+            f"99+ results\nParis (80 km)\nTransformation Success Engineer\n"
+            f"Promoted\n{self._NOTICE}\nData Engineer - F/H"
+        )
+        count_kwargs = (
+            {"side_effect": organic}
+            if isinstance(organic, Exception)
+            else {"return_value": organic}
+        )
+        with (
+            patch.object(
+                reader._pages,
+                "_extract_search_page",
+                side_effect=self._navigating(mock_page, [page] * 2),
+            ) as mock_extract,
+            patch.object(
+                reader._pages,
+                "_count_organic_before_notice",
+                new_callable=AsyncMock,
+                **count_kwargs,
+            ) as mock_count,
+            patch.object(
+                reader._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["4458422026", "4458003726"],
+            ) as mock_ids,
+            patch.object(
+                reader._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.linkedin.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await reader.search_jobs("qzxvwk plorbnaut", max_pages=1)
+        mock_count.assert_awaited_with(self._NOTICE, "Promoted")
+        return result, mock_extract, mock_ids
+
+    async def test_nothing_but_ads_above_the_notice_is_no_match(self, mock_page):
+        """The redesigned search's answer to a query matching nothing.
+
+        It has no no-match page: the promoted cards, the notice, then a page
+        of unrelated postings under "99+ results". Read as a result page, they
+        came back as `job_ids` with nothing to say they were not matches.
+        """
+        result, mock_extract, mock_ids = await self._search_redesigned(mock_page, 0)
+
+        assert result["job_ids"] == []
+        assert result["sections"] == {}
+        error = result["section_errors"]["search_results"]
+        assert error["error_type"] == "no_matching_jobs"
+        assert "qzxvwk plorbnaut" in error["error_message"]
+        mock_ids.assert_not_awaited()
+        assert mock_extract.await_count == 1
+
+    async def test_matches_above_the_notice_keep_the_page(self, mock_page):
+        """The notice also ends a short list of real matches."""
+        result, _, mock_ids = await self._search_redesigned(mock_page, 24)
+
+        assert result["job_ids"] == ["4458422026", "4458003726"]
+        assert "section_errors" not in result
+        mock_ids.assert_awaited()
+
+    async def test_a_failed_read_above_the_notice_keeps_the_page(self, mock_page):
+        """Zero would discard real matches, so a failed read is not zero."""
+        result, _, _ = await self._search_redesigned(
+            mock_page, TypeError("Organic results read returned str")
+        )
+
+        assert result["job_ids"] == ["4458422026", "4458003726"]
+        assert "section_errors" not in result
 
     async def test_recommendations_after_real_results_end_the_list(self, mock_page):
         """Past a page of matches, the substitute page is just the end.
@@ -2067,6 +2195,11 @@ class TestSearchJobs:
         assert "section_errors" not in result
         assert mock_ids.await_count == 1
         assert mock_extract.await_count == 2
+        assert result["pagination"] == {
+            "pages_fetched": 2,
+            "next_offset": 1,
+            "reason": "complete",
+        }
 
     async def test_discarded_recommendations_do_not_warn_about_filters(self, mock_page):
         """A dropped filter on the discarded substitute page changes no result."""
@@ -2577,6 +2710,7 @@ class TestSearchJobs:
         assert "search_results" not in result["sections"]
         assert "references" not in result
         assert "search_results" in result["section_errors"]
+        assert "pagination" not in result
 
     async def test_rate_limited_skips_ids_and_text(self, mock_page):
         """Rate-limited pages should yield no IDs or text."""
@@ -2611,6 +2745,7 @@ class TestSearchJobs:
         assert result["sections"] == {}
         assert result["section_errors"]["search_results"]["error_type"] == "rate_limit"
         mock_ids.assert_not_awaited()
+        assert "pagination" not in result
 
     async def test_rate_limit_wins_over_an_unexpected_landing(self, mock_page):
         """The specific diagnosis survives a simultaneous route failure."""

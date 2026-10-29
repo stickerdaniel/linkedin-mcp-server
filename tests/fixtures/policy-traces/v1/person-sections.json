@@ -7,6 +7,7 @@
         "education",
         "interests",
         "honors",
+        "volunteering",
         "languages",
         "certifications",
         "skills",
@@ -126,8 +127,8 @@
     {
       "call": "read_person",
       "kind": "callback.progress",
-      "message": "Read main_profile (1/11)",
-      "percent": 9
+      "message": "Read main_profile (1/12)",
+      "percent": 8
     },
     {
       "call": "read_person",
@@ -249,8 +250,8 @@
     {
       "call": "read_person",
       "kind": "callback.progress",
-      "message": "Read experience (2/11)",
-      "percent": 17
+      "message": "Read experience (2/12)",
+      "percent": 16
     },
     {
       "call": "read_person",
@@ -372,8 +373,8 @@
     {
       "call": "read_person",
       "kind": "callback.progress",
-      "message": "Read education (3/11)",
-      "percent": 26
+      "message": "Read education (3/12)",
+      "percent": 24
     },
     {
       "call": "read_person",
@@ -495,8 +496,8 @@
     {
       "call": "read_person",
       "kind": "callback.progress",
-      "message": "Read interests (4/11)",
-      "percent": 35
+      "message": "Read interests (4/12)",
+      "percent": 32
     },
     {
       "call": "read_person",
@@ -618,8 +619,8 @@
     {
       "call": "read_person",
       "kind": "callback.progress",
-      "message": "Read honors (5/11)",
-      "percent": 43
+      "message": "Read honors (5/12)",
+      "percent": 40
     },
     {
       "call": "read_person",
@@ -630,6 +631,129 @@
     {
       "call": "read_person",
       "callback_id": "callback-6",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "read_person",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/ada-lovelace/details/volunteering-experiences/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "read_person",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/in/ada-lovelace/details/volunteering-experiences/",
+      "requested_url": "https://www.linkedin.com/in/ada-lovelace/details/volunteering-experiences/",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "read_person",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/details/volunteering-experiences/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "read_person",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/ada-lovelace/details/volunteering-experiences/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "read_person",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "read_person",
+      "callback_id": "callback-6",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "read_person",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "read_person",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "read_person",
+      "dismissed": false,
+      "kind": "boundary.modal"
+    },
+    {
+      "arg": null,
+      "call": "read_person",
+      "kind": "wait_for_function",
+      "operation": "profile_details_ready",
+      "program_digest": "652e003606ba",
+      "timeout_ms": 10000
+    },
+    {
+      "call": "read_person",
+      "kind": "locator.create",
+      "locator": "show_more",
+      "parent": null,
+      "selector": "main button"
+    },
+    {
+      "call": "read_person",
+      "kind": "locator.derive",
+      "locator": "show_more.filtered",
+      "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
+      "parent": "show_more"
+    },
+    {
+      "call": "read_person",
+      "kind": "locator.count",
+      "locator": "show_more.filtered"
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "read_person",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 5,
+      "pause_time": 0.5
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "read_person",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e6b2be4ebddd"
+    },
+    {
+      "call": "read_person",
+      "kind": "callback.progress",
+      "message": "Read volunteering (6/12)",
+      "percent": 48
+    },
+    {
+      "call": "read_person",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 2.0
+    },
+    {
+      "call": "read_person",
+      "callback_id": "callback-7",
       "event": "framenavigated",
       "kind": "listener.add"
     },
@@ -672,7 +796,7 @@
     },
     {
       "call": "read_person",
-      "callback_id": "callback-6",
+      "callback_id": "callback-7",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
@@ -741,8 +865,8 @@
     {
       "call": "read_person",
       "kind": "callback.progress",
-      "message": "Read languages (6/11)",
-      "percent": 52
+      "message": "Read languages (7/12)",
+      "percent": 55
     },
     {
       "call": "read_person",
@@ -752,7 +876,7 @@
     },
     {
       "call": "read_person",
-      "callback_id": "callback-7",
+      "callback_id": "callback-8",
       "event": "framenavigated",
       "kind": "listener.add"
     },
@@ -795,7 +919,7 @@
     },
     {
       "call": "read_person",
-      "callback_id": "callback-7",
+      "callback_id": "callback-8",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
@@ -864,8 +988,8 @@
     {
       "call": "read_person",
       "kind": "callback.progress",
-      "message": "Read certifications (7/11)",
-      "percent": 60
+      "message": "Read certifications (8/12)",
+      "percent": 63
     },
     {
       "call": "read_person",
@@ -875,7 +999,7 @@
     },
     {
       "call": "read_person",
-      "callback_id": "callback-8",
+      "callback_id": "callback-9",
       "event": "framenavigated",
       "kind": "listener.add"
     },
@@ -918,7 +1042,7 @@
     },
     {
       "call": "read_person",
-      "callback_id": "callback-8",
+      "callback_id": "callback-9",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
@@ -987,8 +1111,8 @@
     {
       "call": "read_person",
       "kind": "callback.progress",
-      "message": "Read skills (8/11)",
-      "percent": 69
+      "message": "Read skills (9/12)",
+      "percent": 71
     },
     {
       "call": "read_person",
@@ -998,7 +1122,7 @@
     },
     {
       "call": "read_person",
-      "callback_id": "callback-9",
+      "callback_id": "callback-10",
       "event": "framenavigated",
       "kind": "listener.add"
     },
@@ -1041,7 +1165,7 @@
     },
     {
       "call": "read_person",
-      "callback_id": "callback-9",
+      "callback_id": "callback-10",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
@@ -1110,8 +1234,8 @@
     {
       "call": "read_person",
       "kind": "callback.progress",
-      "message": "Read projects (9/11)",
-      "percent": 78
+      "message": "Read projects (10/12)",
+      "percent": 79
     },
     {
       "call": "read_person",
@@ -1121,7 +1245,7 @@
     },
     {
       "call": "read_person",
-      "callback_id": "callback-10",
+      "callback_id": "callback-11",
       "event": "framenavigated",
       "kind": "listener.add"
     },
@@ -1164,7 +1288,7 @@
     },
     {
       "call": "read_person",
-      "callback_id": "callback-10",
+      "callback_id": "callback-11",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
@@ -1195,8 +1319,8 @@
     {
       "call": "read_person",
       "kind": "callback.progress",
-      "message": "Read contact_info (10/11)",
-      "percent": 86
+      "message": "Read contact_info (11/12)",
+      "percent": 87
     },
     {
       "call": "read_person",
@@ -1206,7 +1330,7 @@
     },
     {
       "call": "read_person",
-      "callback_id": "callback-11",
+      "callback_id": "callback-12",
       "event": "framenavigated",
       "kind": "listener.add"
     },
@@ -1249,7 +1373,7 @@
     },
     {
       "call": "read_person",
-      "callback_id": "callback-11",
+      "callback_id": "callback-12",
       "event": "framenavigated",
       "kind": "listener.remove"
     },
@@ -1299,7 +1423,7 @@
     {
       "call": "read_person",
       "kind": "callback.progress",
-      "message": "Read posts (11/11)",
+      "message": "Read posts (12/12)",
       "percent": 95
     },
     {
@@ -1393,6 +1517,7 @@
       "education",
       "interests",
       "honors",
+      "volunteering",
       "languages",
       "certifications",
       "skills",
@@ -1411,7 +1536,8 @@
       "main_profile": "main_profile content",
       "posts": "posts content",
       "projects": "projects content",
-      "skills": "skills content"
+      "skills": "skills content",
+      "volunteering": "volunteering content"
     },
     "url": "https://www.linkedin.com/in/ada-lovelace/"
   },
