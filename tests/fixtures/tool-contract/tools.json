@@ -610,6 +610,50 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "actions",
+          "messaging"
+        ]
+      }
+    },
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": true
+    },
+    "description": "Reply inside an existing LinkedIn messaging thread, InMail included.\n\nOpens /messaging/thread/<thread_id>/ and types into that thread's own\nreply composer, so the message lands in the same conversation. This is\nthe path for answering a recruiter InMail, whose sender may have no\nMessage action on their profile. Get the thread_id from get_inbox,\nsearch_conversations or get_conversation.\n\nThe thread is verified before anything is typed: the page must land on\nexactly the requested thread and stay there, and the composer must be\nthe page's one visible editor, inside the thread's main region, with\none submit button in its own form. Any doubt fails closed. Quick-reply\nbuttons an InMail shows (\"Yes, interested...\", \"No thanks...\") are\nnever clicked; a thread that offers only those has no composer and\nreturns composer_unavailable. A draft already in the composer is left\nuntouched and returns composer_occupied. A ``status`` of\n``enter_to_send_enabled`` means LinkedIn's \"Press Enter to Send\"\npreference hides the Send button; relay the returned instructions as\nfor send_message. The dry run reports it too. No Voyager or other\nprivate API is used. This is a write operation when confirm_send is\nTrue.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "confirm_send": {
+          "description": "Must be True to send. False is a dry run that verifies\nthe thread and composer, types nothing, and says who the reply\nwould go to.",
+          "type": "boolean"
+        },
+        "message": {
+          "description": "Message text, read as send_message reads it: LF, CRLF and\nCR all end a line, empty lines are kept, and the whole message\nis trimmed. Tab, other control characters, DEL, U+0085, U+2028\nand U+2029 are refused.",
+          "type": "string"
+        },
+        "thread_id": {
+          "description": "LinkedIn messaging thread ID, or a /messaging/thread/<id>/\nreference as another tool returned it",
+          "type": "string"
+        }
+      },
+      "required": [
+        "thread_id",
+        "message",
+        "confirm_send"
+      ],
+      "type": "object"
+    },
+    "name": "reply_to_conversation",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Reply to Conversation"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "company",
           "search"
         ]
@@ -937,7 +981,7 @@
       "destructiveHint": true,
       "openWorldHint": true
     },
-    "description": "Compose and send a new message to a LinkedIn user.\n\nProfile-based targeting opens LinkedIn's compose flow. It is not a safe\nreply path for an existing recruiter/InMail or messaging thread: it may\ncreate a separate DM even after you inspect that thread with\nget_conversation or search_conversations. Those tools only read an\nexisting thread; they do not send a reply. Until a thread-targeted send\npath is available, do not treat profile-based send_message as a reply.\n\nThe recipient must be directly messageable from the profile page. If\nLinkedIn does not expose a normal Message action, use connect_with_person\nfirst, then retry send_message only after the connection request is\naccepted. A ``status`` of ``enter_to_send_enabled`` means the account\nhas LinkedIn's \"Press Enter to Send\" preference on, which hides the Send\nbutton; relay the returned instructions to the user, who switches it to\n\"Click Send to send\" before retrying. The dry run (confirm_send False)\nreports it too. Recipient authorization comes from validating one\nrecipient-specific Message action carrying the target URN, then following\nits browser navigation and pinning the exact final route. Visible profile\nlinks or recipient URNs in the composer are optional corroboration; any\ncontradiction fails closed. No Voyager or other private API is used. This\nis a write operation when confirm_send is True.\n\n``thread_id`` is present only on ``sent``: the conversation the\nconfirmed message was observed in, or null when the page stayed on\nthe compose route. ``retry_safe`` stays the authority for whether a\nretry is safe.",
+    "description": "Compose and send a new message to a LinkedIn user.\n\nProfile-based targeting opens LinkedIn's compose flow. It is not a safe\nreply path for an existing recruiter/InMail or messaging thread: it may\ncreate a separate DM even after you inspect that thread with\nget_conversation or search_conversations. To answer an existing thread,\nincluding an InMail from someone who is not a connection, use\nreply_to_conversation with the thread's id instead.\n\nThe recipient must be directly messageable from the profile page. If\nLinkedIn does not expose a normal Message action, use connect_with_person\nfirst, then retry send_message only after the connection request is\naccepted. A ``status`` of ``enter_to_send_enabled`` means the account\nhas LinkedIn's \"Press Enter to Send\" preference on, which hides the Send\nbutton; relay the returned instructions to the user, who switches it to\n\"Click Send to send\" before retrying. The dry run (confirm_send False)\nreports it too. Recipient authorization comes from validating one\nrecipient-specific Message action carrying the target URN, then following\nits browser navigation and pinning the exact final route. Visible profile\nlinks or recipient URNs in the composer are optional corroboration; any\ncontradiction fails closed. No Voyager or other private API is used. This\nis a write operation when confirm_send is True.\n\n``thread_id`` is present only on ``sent``: the conversation the\nconfirmed message was observed in, or null when the page stayed on\nthe compose route. ``retry_safe`` stays the authority for whether a\nretry is safe.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

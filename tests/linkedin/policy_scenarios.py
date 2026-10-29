@@ -837,6 +837,52 @@ async def _invalid_message_scenario(message: str, label: str) -> dict[str, Any]:
     )
 
 
+_REPLY_THREAD_ROUTE = "https://www.linkedin.com/messaging/thread/2-policy-thread==/"
+
+
+async def _reply_scenario(outcome: str) -> dict[str, Any]:
+    recorder = TraceRecorder(f"reply_to_conversation__{outcome}", _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    if outcome == "other_thread":
+        page.goto_landings.append(
+            "https://www.linkedin.com/messaging/thread/2-other-thread/"
+        )
+    else:
+        page.goto_landings.append(_REPLY_THREAD_ROUTE)
+        page.script("wait_for_function:message_composer_ready", None)
+        states = (_VALID_COMPOSER,) * (1 if outcome == "dry_run" else 2)
+        page.script("evaluate:message_composer_state", *states)
+        page.script("evaluate:thread_participant", "Ada Lovelace")
+    if outcome == "sent":
+        _script_message_owner(page)
+        page.script("handle-1.evaluate:message_submit_ready", "ready")
+        page.script("evaluate:message_confirmation_prepare", "confirmation-1")
+        page.script("handle-1.evaluate:message_submit", "clicked")
+        page.script(
+            "wait_for_function:message_confirmation_ready",
+            {"path": "/messaging/thread/2-policy-thread==/"},
+        )
+        _script_confirmation_cleanup(page)
+    extractor = _extractor(page)
+    arguments = {
+        "thread_id": "2-policy-thread==",
+        "message": "New text",
+        "confirm_send": outcome == "sent",
+    }
+    async with boundaries(recorder, clock):
+        with recorder.context("reply_to_conversation", "message"):
+            result = await extractor.reply_to_conversation(
+                arguments["thread_id"],
+                arguments["message"],
+                confirm_send=arguments["confirm_send"],
+            )
+    page.assert_clean()
+    return recorder.trace(
+        {"method": "reply_to_conversation", "arguments": arguments}, result
+    )
+
+
 async def _single_capture_facade_scenario(method: str) -> dict[str, Any]:
     name = f"{method}__baseline"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
@@ -1115,6 +1161,7 @@ TOOL_FACADE_METHODS = {
     "search_people",
     "search_posts",
     "send_message",
+    "reply_to_conversation",
 }
 COMPATIBILITY_METHODS = {"get_page_text", "click_button_by_text"}
 
@@ -1177,6 +1224,9 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         "message-blank.json": await _invalid_message_scenario("   ", "blank"),
         "message-c0.json": await _invalid_message_scenario("before\tafter", "c0"),
         "message-del.json": await _invalid_message_scenario("text\x7f", "del"),
+        "reply-dry-run.json": await _reply_scenario("dry_run"),
+        "reply-sent.json": await _reply_scenario("sent"),
+        "reply-other-thread.json": await _reply_scenario("other_thread"),
         "connect.json": await _connect_scenario(),
         "get-my-profile.json": await _get_my_profile_scenario(),
         "sidebar-profiles.json": await _sidebar_scenario(),
