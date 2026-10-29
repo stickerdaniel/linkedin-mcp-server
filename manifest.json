@@ -39,6 +39,7 @@
       ],
       "env": {
         "LINKEDIN_MCP_RUNTIME": "mcpb",
+        "CHROME_PATH": "${user_config.chrome_path}",
         "PROXY_SERVER": "${user_config.proxy_server}",
         "PROXY_USERNAME": "${user_config.proxy_username}",
         "PROXY_PASSWORD": "${user_config.proxy_password}",
@@ -133,6 +134,13 @@
     }
   ],
   "user_config": {
+    "chrome_path": {
+      "type": "file",
+      "title": "Chrome executable",
+      "description": "Optional. Path to a Chrome, Chromium or Chrome for Testing executable to use instead of the bundled Chromium, such as /usr/bin/google-chrome. Leave blank to use the bundled browser.",
+      "required": false,
+      "default": ""
+    },
     "proxy_server": {
       "type": "string",
       "title": "Proxy server",
