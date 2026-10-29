@@ -16,12 +16,18 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from linkedin_mcp_server.core.throttle import (
+    browser_call_record,
     reset_throttle_record,
     throttle_evidence,
     throttled_count,
     watch_responses,
 )
-from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.core.exceptions import ProfileNotFoundError, RateLimitError
+from linkedin_mcp_server.error_handler import (
+    CodedToolError,
+    ErrorCode,
+    raise_tool_error,
+)
 from linkedin_mcp_server.exceptions import SessionExpiredError
 
 
@@ -56,6 +62,14 @@ def record(*responses: SimpleNamespace) -> None:
         listeners["response"](item)
 
 
+@pytest.fixture
+def in_a_browser_call():
+    """Run the test as the browser-owning call the record describes."""
+    with browser_call_record():
+        yield
+
+
+@pytest.mark.usefixtures("in_a_browser_call")
 class TestWhatTheListenerRecords:
     def test_a_refused_request_inside_a_served_page_is_counted(self):
         # The messaging page's own fetch. The page itself was served; only its
@@ -147,6 +161,7 @@ class TestWhatTheListenerRecords:
         assert throttle_evidence() is None
 
 
+@pytest.mark.usefixtures("in_a_browser_call")
 class TestTheEvidenceSentence:
     def test_it_names_the_status_the_count_and_the_path(self):
         record(
@@ -207,6 +222,7 @@ class TestTheEvidenceSentence:
         assert evidence is not None and "HTTP 429 and HTTP 999" in evidence
 
 
+@pytest.mark.usefixtures("in_a_browser_call")
 class TestTheClientIsToldAboutThrottling:
     def test_an_unclassified_failure_is_no_longer_masked_to_nothing(self):
         # The reported failure: mask_error_details turns anything that is not
@@ -234,6 +250,26 @@ class TestTheClientIsToldAboutThrottling:
         assert "Session expired" in str(caught.value)
         assert "HTTP 429" in str(caught.value)
 
+    @pytest.mark.parametrize(
+        ("failure", "code", "retry_after"),
+        [
+            (RateLimitError("x", suggested_wait_time=120), ErrorCode.RATE_LIMITED, 120),
+            (ProfileNotFoundError("x"), ErrorCode.NOT_FOUND, None),
+            (RuntimeError("list index out of range"), ErrorCode.INTERNAL, None),
+        ],
+        ids=["rate limit", "not found", "unclassified"],
+    )
+    def test_the_evidence_keeps_the_failures_code(self, failure, code, retry_after):
+        # The sentence is evidence beside the classification, never a new one:
+        # a refused beacon does not turn a missing profile into a rate limit.
+        record(response(429, "https://www.linkedin.com/voyager/api/messaging/x"))
+
+        with pytest.raises(CodedToolError) as caught:
+            raise_tool_error(failure, "get_person_profile")
+
+        assert "HTTP 429" in str(caught.value)
+        assert (caught.value.code, caught.value.retry_after) == (code, retry_after)
+
     def test_the_evidence_is_not_repeated_when_a_tool_wraps_twice(self):
         # 16 of the 18 tool catch sites hand the ToolError back through here.
         record(response(429, "https://www.linkedin.com/voyager/api/messaging/x"))
@@ -259,7 +295,7 @@ class TestTheClientIsToldAboutThrottling:
         while current is not None:
             chain.append(type(current))
             current = current.__cause__
-        assert chain == [ToolError, SessionExpiredError]
+        assert chain == [CodedToolError, SessionExpiredError]
 
     def test_an_unclassified_failure_keeps_its_credentials_redacted(self, monkeypatch):
         # The catch-all redacts a proxy password before FastMCP logs the
@@ -339,4 +375,31 @@ class TestTheRecordBelongsToOneCall:
 
         await SequentialToolExecutionMiddleware().on_call_tool(context, call_next)
 
+        assert seen["evidence"] is None
+
+    async def test_a_browserless_call_is_not_told_about_another_calls_refusals(
+        self,
+    ):
+        # get_session_status runs beside the browser lock and never clears the
+        # record, so a refusal the last browser call met is still in it.
+        from linkedin_mcp_server.sequential_tool_middleware import (
+            SequentialToolExecutionMiddleware,
+        )
+
+        with browser_call_record():
+            record(response(429, "https://www.linkedin.com/voyager/api/messaging/x"))
+
+        seen: dict[str, str | None] = {}
+
+        async def call_next(context):
+            seen["evidence"] = throttle_evidence()
+            return "ok"
+
+        context = MagicMock()
+        context.message.name = "get_session_status"
+        context.fastmcp_context = None
+
+        await SequentialToolExecutionMiddleware().on_call_tool(context, call_next)
+
+        assert throttled_count() == 1
         assert seen["evidence"] is None

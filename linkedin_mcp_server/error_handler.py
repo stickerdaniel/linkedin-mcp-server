@@ -201,6 +201,10 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
     nothing is what makes throttling read as a parser bug. When the record has
     something to say, it is said as a ``ToolError``, which survives masking;
     the underlying exception still goes nowhere.
+
+    The evidence changes no code. A shaped failure keeps the one it was given,
+    and an unclassified one stays ``internal``: a refused beacon during the
+    call does not prove it is why the call failed.
     """
     try:
         _shape_tool_error(exception, context=context)
@@ -208,10 +212,15 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
         evidence = throttle_evidence()
         if evidence is None or evidence in str(shaped):
             raise
+        coded = shaped if isinstance(shaped, CodedToolError) else None
         # `from shaped.__cause__`, not `from shaped`: a chain walked by the
         # daemon middleware has to keep reaching the domain exception in one
         # hop, which `tests/test_error_handler.py` pins.
-        raise ToolError(f"{shaped}\n\n{evidence}") from (shaped.__cause__ or shaped)
+        raise CodedToolError(
+            f"{shaped}\n\n{evidence}",
+            coded.code if coded else ErrorCode.INTERNAL,
+            retry_after=coded.retry_after if coded else None,
+        ) from (shaped.__cause__ or shaped)
     except Exception as unclassified:
         evidence = throttle_evidence()
         if evidence is None:
@@ -224,7 +233,7 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
         # copy with its own chain severed, so no credential is reachable here.
         # It keeps the failure's type one hop from the ToolError, where the
         # daemon middleware walks `__cause__` to classify it.
-        raise ToolError(evidence) from unclassified
+        raise CodedToolError(evidence, ErrorCode.INTERNAL) from unclassified
 
 
 def _shape_tool_error(exception: Exception, context: str = "") -> NoReturn:

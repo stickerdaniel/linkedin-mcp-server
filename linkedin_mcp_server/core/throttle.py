@@ -28,6 +28,9 @@ not a person.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
@@ -80,8 +83,30 @@ def watch_responses(page: Any) -> None:
     page.on("response", _record)
 
 
+# Whether the running task is a call that owns the browser. The record
+# describes that call only: a browserless call such as get_session_status runs
+# beside it, never clears the record, and must not report the refusals of the
+# browser call it overlaps or follows.
+_owns_the_browser: ContextVar[bool] = ContextVar("owns_the_browser", default=False)
+
+
+@contextmanager
+def browser_call_record() -> Iterator[None]:
+    """Start a fresh record for the browser call this block runs.
+
+    Entered by the serializing middleware around the tool body, once it holds
+    the browser, so only that call and what it awaits can read the record.
+    """
+    reset_throttle_record()
+    token = _owns_the_browser.set(True)
+    try:
+        yield
+    finally:
+        _owns_the_browser.reset(token)
+
+
 def reset_throttle_record() -> None:
-    """Forget the previous call's evidence. Called as a tool call starts."""
+    """Forget the previous call's evidence."""
     global _call, _count, _latest
     _call += 1
     _count = 0
@@ -96,9 +121,12 @@ def throttled_count() -> int:
 
 
 def throttle_evidence() -> str | None:
-    """One sentence naming the throttling, or None when there was none."""
+    """One sentence naming this call's throttling, or None when there was none.
+
+    None outside a browser call, whose record belongs to another call.
+    """
     last = _latest
-    if last is None:
+    if last is None or not _owns_the_browser.get():
         return None
 
     statuses = " and ".join(f"HTTP {status}" for status in sorted(_statuses))
