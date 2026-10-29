@@ -43,6 +43,7 @@ from linkedin_mcp_server.process_tree import (
 )
 
 from .exceptions import NetworkError, ProxyConnectionError
+from .throttle import watch_responses
 
 logger = logging.getLogger(__name__)
 
@@ -575,6 +576,11 @@ class BrowserManager:
             # fails. Only this event says so; see ``page_crashed``.
             self._page_crashed = False
             self._page.on("crash", self._note_page_crash)
+
+            # Before anything navigates: a status nobody was listening for is
+            # gone, and the first navigation is the one that most often
+            # arrives throttled.
+            watch_responses(self._page)
 
             logger.info("Browser context and page ready")
 

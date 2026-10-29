@@ -639,7 +639,9 @@ def _fake_playwright(
         url = "about:blank"
 
         def on(self, event, handler):
-            pass
+            # A real page carries listeners; the launch subscribes to its
+            # events before anything navigates.
+            return None
 
         async def close(self):
             return None
