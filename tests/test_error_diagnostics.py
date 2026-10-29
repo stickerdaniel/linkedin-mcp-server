@@ -265,3 +265,27 @@ def test_build_issue_diagnostics_keeps_sensitive_runtime_details_out_of_mcp_payl
     assert "## Local runtime" in issue_body
     assert "Source profile (local):" in issue_body
     assert "upload" not in issue_body.lower()
+
+
+def test_build_issue_diagnostics_redacts_proxy_credentials(monkeypatch, tmp_path):
+    from linkedin_mcp_server.config import get_config
+
+    monkeypatch.setenv("USER_DATA_DIR", str(tmp_path / "profile"))
+    monkeypatch.setattr(
+        "linkedin_mcp_server.error_diagnostics._find_existing_issues",
+        lambda payload: [],
+    )
+    config = get_config()
+    config.browser.proxy_server = "http://gate.example:7000"
+    config.browser.proxy_username = "acctzone9"
+    config.browser.proxy_password = "s3cr3t"
+
+    diagnostics = build_issue_diagnostics(
+        RuntimeError("failed via http://acctzone9:s3cr3t@gate.example:7000"),
+        context="read_person",
+    )
+
+    issue_body = Path(diagnostics["issue_template_path"]).read_text()
+    assert diagnostics["error_message"] == "failed via http://***:***@gate.example:7000"
+    assert "s3cr3t" not in issue_body
+    assert "acctzone9" not in issue_body

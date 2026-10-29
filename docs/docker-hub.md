@@ -23,6 +23,7 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 - **Home Feed**: Get recent posts from the authenticated user's LinkedIn home feed
 - **Post Search**: Search posts/content globally by keyword (the "Posts" tab) with optional recency and content-type filters, such as uploaded documents
 - **Compact References**: Return typed per-section links alongside readable text without shipping full-page markdown
+- **Session Status**: Diagnose saved-session files and the serving process's browser state without opening a browser or contacting LinkedIn
 
 ## Quick Start
 
@@ -52,7 +53,7 @@ docker run -it --rm `
   --login --login-viewer
 ```
 
-Open the full URL the command prints (it carries the access token) and sign in. The viewer closes itself afterwards; let the command exit on its own so the session is stored completely. It gives up after 30 minutes.
+Open the full URL the command prints (it carries the access token) and sign in. Ctrl+V (Cmd+V on a Mac) pastes plain ASCII text, such as a password from your password manager, into the login browser. The viewer closes itself afterwards; let the command exit on its own so the session is stored completely. It gives up after 30 minutes.
 
 Keep the same host directory mounted at `/home/pwuser/.linkedin-mcp` on every later `docker run`. A session created on the host with `uvx mcp-server-linkedin@latest --login` works too, and the container then rebuilds its own profile from those cookies on each start.
 

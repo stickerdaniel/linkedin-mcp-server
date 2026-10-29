@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<!--
+  The Docker login viewer's page, served by websockify from /usr/share/novnc
+  next to Debian's noVNC, whose documented RFB API it uses. login_viewer.py
+  prints its address as login.html#token=<token>; the fragment never reaches
+  the HTTP server, so only the WebSocket carries the token.
+-->
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LinkedIn MCP login</title>
+    <style>
+        html, body { height: 100%; margin: 0; background: #282828; }
+        body { display: flex; flex-direction: column; font: 13px system-ui, sans-serif; }
+        #status { padding: 6px 10px; color: #fff; background: #6e84a3; text-align: center; }
+        #screen { flex: 1; overflow: hidden; }
+    </style>
+    <script type="module">
+        import RFB from './core/rfb.js';
+
+        const CONNECTED = 'Connected. Ctrl+V (Cmd+V on a Mac) pastes plain text into the login browser.';
+        const MAX_PASTE = 1000;
+        // X11 keysyms. Printable ASCII is its own keysym. The virtual
+        // display's keyboard has keys for nothing else, so other characters
+        // never arrive, even through x11vnc's added keysyms.
+        const CONTROL_KEYSYMS = { '\n': 0xff0d, '\t': 0xff09 };
+        const keysymOf = char => CONTROL_KEYSYMS[char]
+            ?? (char >= ' ' && char <= '~' ? char.charCodeAt(0) : null);
+
+        const status = text => { document.getElementById('status').textContent = text; };
+        const screen = document.getElementById('screen');
+        const token = new URLSearchParams(location.hash.slice(1)).get('token') ?? '';
+        const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+        const rfb = new RFB(
+            screen,
+            `${scheme}://${location.host}/websockify?token=${encodeURIComponent(token)}`,
+        );
+        let connected = false;
+        rfb.scaleViewport = true;
+        rfb.addEventListener('connect', () => {
+            connected = true;
+            status(CONNECTED);
+        });
+        rfb.addEventListener('disconnect', e => {
+            connected = false;
+            shortcut = false;
+            pasted = [];
+            status(e.detail.clean ? 'Disconnected.' : 'Connection lost.');
+        });
+
+        // noVNC sends a paste shortcut on as two keys and cancels the
+        // browser's paste, so the local clipboard never arrives. Hide the V
+        // from noVNC, collect what the browser pastes while the shortcut is
+        // held, and type it once every modifier is up: then nothing is held
+        // on the remote side, including the Ctrl that noVNC delays on
+        // Windows to detect AltGr. Typing rather than setting the server's
+        // clipboard, because x11vnc claims the X selection only for the
+        // first text it receives, and the login browser keeps pasting that.
+        //
+        // The release of a modifier is what ends the shortcut, never the
+        // release of V: a Mac browser often reports no V release while Cmd
+        // is down.
+        const APPLE = /mac|iphone|ipad|ipod/i.test(navigator.platform);
+        // Unshifted only: a Mac browser has no paste for Cmd+Shift+V.
+        const isPasteKey = e => (APPLE ? e.metaKey : e.ctrlKey) && !e.altKey && !e.shiftKey;
+        // The shortcut's V as the browser resolves it: by character on Latin
+        // layouts such as Dvorak, by US position on non-Latin ones, and never
+        // for a symbol on the V position. The legacy keyCode is that
+        // resolved key; nothing newer exposes it.
+        const isV = e => /^v$/i.test(e.key) || e.keyCode === 86;
+        const modifierHeld = e => e.ctrlKey || e.metaKey || e.altKey || e.shiftKey;
+        let shortcut = false; // a paste shortcut is down
+        let hiddenCode = null; // noVNC never saw this key go down, so it must not see it go up
+        let pasted = [];
+
+        window.addEventListener('keydown', e => {
+            // A repeat goes wherever the first press went, whatever the
+            // modifiers are by now.
+            if (e.repeat) {
+                if (e.code === hiddenCode) e.stopImmediatePropagation();
+                return;
+            }
+            if (!(isPasteKey(e) && isV(e))) {
+                if (e.code === hiddenCode) hiddenCode = null;
+                return;
+            }
+            shortcut = true;
+            hiddenCode = e.code;
+            e.stopImmediatePropagation();
+        }, true);
+        window.addEventListener('paste', e => {
+            e.preventDefault();
+            if (shortcut && connected) {
+                pasted.push((e.clipboardData?.getData('text/plain') ?? '').replace(/\r\n?/g, '\n'));
+            }
+        }, true);
+        window.addEventListener('keyup', e => {
+            if (e.code === hiddenCode) {
+                hiddenCode = null;
+                e.stopImmediatePropagation();
+            }
+            if (!shortcut || modifierHeld(e) || !connected) return;
+            const keysyms = Array.from(pasted.join(''), keysymOf);
+            shortcut = false;
+            pasted = [];
+            if (keysyms.length === 0) return;
+            // noVNC listens on its own canvas: a release elsewhere never
+            // reached it, so a modifier may still be down on the remote side.
+            if (!screen.contains(e.target)) {
+                status('Paste cancelled. Click into the login browser and paste again.');
+                return;
+            }
+            // Half a password is worse than none: type all of it or nothing.
+            if (keysyms.length > MAX_PASTE || keysyms.includes(null)) {
+                status(`Only plain ASCII text up to ${MAX_PASTE} characters can be pasted. Type this one by hand.`);
+                return;
+            }
+            status(CONNECTED);
+            // After noVNC has sent this release.
+            setTimeout(() => keysyms.forEach(keysym => rfb.sendKey(keysym, null)));
+        }, true);
+        window.addEventListener('blur', () => {
+            shortcut = false;
+            hiddenCode = null;
+            pasted = [];
+        });
+    </script>
+</head>
+<body>
+    <div id="status">Connecting.</div>
+    <div id="screen"></div>
+</body>
+</html>

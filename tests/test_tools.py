@@ -711,6 +711,7 @@ class TestPersonTool:
         # the auth failure this test is about.
         mock_browser = MagicMock()
         mock_browser.page.is_closed.return_value = False
+        mock_browser.page_crashed = False
         mock_browser.context.browser.is_connected.return_value = True
         monkeypatch.setattr(
             "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
@@ -1003,6 +1004,7 @@ class TestPersonTool:
         # the auth failure this test is about.
         mock_browser = MagicMock()
         mock_browser.page.is_closed.return_value = False
+        mock_browser.page_crashed = False
         mock_browser.context.browser.is_connected.return_value = True
         monkeypatch.setattr(
             "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",

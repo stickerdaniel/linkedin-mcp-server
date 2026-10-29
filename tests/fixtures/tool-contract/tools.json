@@ -552,6 +552,31 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "session"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Report local saved-session and serving-process state for requested diagnostics.\n\nReads local observations without opening a browser, starting setup or login,\nor contacting LinkedIn. Stored files do not prove current authentication.\nIn shared-browser mode these observations belong to the owner, not to a\nfrontend running a login. It answers during browser work without refreshing\nthe browser idle timer. Use ordinary LinkedIn tools directly for their\nrequested work rather than adding a status preflight.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_session_status",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Session Status"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "person"
         ]
       }
@@ -668,7 +693,7 @@
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Search for jobs on LinkedIn.\n\nReturns job_ids that can be passed to get_job_details for full info.",
+    "description": "Search for jobs on LinkedIn.\n\nReturns job_ids that can be passed to get_job_details for full info.\n\nLinkedIn is moving accounts to a redesigned job search, which keeps\nonly the keywords, date_posted and paging. It drops the filters\nmarked \"Classic search only\" and reports them in section_errors as\nfilters_dropped. When it drops the location or work type, search again\nwith them in the keywords (\"remote python developer in Lyon\") and keep\ndoing so; words such as \"senior\" or \"internship\" there narrow the\nresults too. Quotes do not make a phrase exact on that search.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -686,7 +711,7 @@
         },
         "easy_apply": {
           "default": false,
-          "description": "Only show Easy Apply jobs (default false)",
+          "description": "Only show Easy Apply jobs (default false). Classic search only.",
           "type": "boolean"
         },
         "experience_level": {
@@ -699,7 +724,7 @@
             }
           ],
           "default": null,
-          "description": "Filter by experience level, comma-separated (internship, entry, associate, mid_senior, director, executive)"
+          "description": "Filter by experience level, comma-separated (internship, entry, associate, mid_senior, director, executive). Classic search only."
         },
         "job_type": {
           "anyOf": [
@@ -711,7 +736,7 @@
             }
           ],
           "default": null,
-          "description": "Filter by job type, comma-separated (full_time, part_time, contract, temporary, volunteer, internship, other)"
+          "description": "Filter by job type, comma-separated (full_time, part_time, contract, temporary, volunteer, internship, other). Classic search only."
         },
         "keywords": {
           "description": "Search keywords (e.g., \"software engineer\", \"data scientist\")",
@@ -727,7 +752,7 @@
             }
           ],
           "default": null,
-          "description": "Optional location filter (e.g., \"San Francisco\", \"Remote\")"
+          "description": "Optional location filter (e.g., \"San Francisco\", \"Remote\"). Classic search only."
         },
         "max_pages": {
           "default": 3,
@@ -746,7 +771,7 @@
             }
           ],
           "default": null,
-          "description": "Sort results (date, relevance)"
+          "description": "Sort results (date, relevance). Classic search only."
         },
         "work_type": {
           "anyOf": [
@@ -758,7 +783,7 @@
             }
           ],
           "default": null,
-          "description": "Filter by work type, comma-separated (on_site, remote, hybrid)"
+          "description": "Filter by work type, comma-separated (on_site, remote, hybrid). Classic search only."
         }
       },
       "required": [

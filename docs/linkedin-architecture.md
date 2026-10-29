@@ -24,7 +24,7 @@ a page-owning collaborator.
 | `contracts` | `ExtractedSection`, `FilterValidationError`, `RATE_LIMITED_SECTION_TEXT`, `SEND_INTERRUPTED_WARNING`, `before_the_reply_deadline()`, `message_action_result()`, `normalize_message_text()`, `rate_limited_section_error()`, `refuse_an_invalid_message()` | `browser-free` |
 | `conversations` | `ConversationReader`, `strip_select_conversation_prefix()` | `page-owning` |
 | `extractor` | `LinkedInExtractor` | `page-owning` |
-| `feed` | `FeedReader` | `page-owning` |
+| `feed` | `FEED_POST_BOUNDARIES_JS`, `FeedReader` | `page-owning` |
 | `feed_payload` | `POST_SLUG_URL_RE`, `append_permalink_references()`, `build_feed_references()`, `is_feed_payload_response()`, `is_permalink_payload_response()`, `permalink_paths_from_payload()` | `browser-free` |
 | `fields` | `COMPANY_SECTIONS`, `PERSON_SECTIONS`, `parse_company_sections()`, `parse_person_sections()` | `browser-free` |
 | `identifiers` | `company_page_url()`, `job_view_url()`, `messaging_thread_url()`, `normalize_company_identifier()`, `normalize_job_id()`, `normalize_opaque_id()`, `normalize_person_identifier()`, `normalize_profile_urn()`, `normalize_thread_id()`, `person_profile_url()` | `browser-free` |
