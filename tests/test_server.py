@@ -81,27 +81,19 @@ _THE_OWNER_IS_GONE = (
 
 
 #: The rules initialize hands a client. Written here, not imported from the
-#: server: the contract is this text, including the failed-write retry limit
-#: and the user-owned authentication boundary.
+#: server: the contract is this text, including the write-authorization rule
+#: and the user-owned verification step.
 _THE_OPERATING_RULES = """\
-Use this server only when the user explicitly asks for LinkedIn data or a
-LinkedIn action.
+send_message and connect_with_person act for the user. Use them only for the
+exact action, recipient and text the user approved; when the user asks for a
+draft, or for something these tools cannot do, reply with the text instead. If
+a write's outcome is unknown, ask the user to check LinkedIn before acting
+again.
 
-Start with the smallest read that can answer the request. Treat profile,
-company, job, post, feed, and message results as live LinkedIn evidence, and
-distinguish retrieved facts from inference. Keep searches and result pages
-modest. Do not collect data in bulk or spam.
+Report what the tools returned, and say when a result may be incomplete.
 
-send_message and connect_with_person are write actions. Use them only when
-the user authorizes the exact recipient and action. Confirm the final message
-or connection note unless the user has already supplied it. Do not retry a
-failed write unless the result proves it was not sent.
-
-If LinkedIn presents a captcha, two-factor prompt, or other user-owned
-authentication step, stop and ask the user to complete it. If browser setup
-or authentication is still pending, report that state and retry once after it
-finishes. Do not loop, launch extra browsers, clear profiles, or replace the
-user's session.
+If LinkedIn waits for a captcha or other verification, ask the user to
+complete it in the browser, then continue when they say so.
 """
 
 
