@@ -1,4 +1,4 @@
-"""Browser-DOM tests for reading which job search results are promoted.
+"""Browser-DOM tests for reading promoted results and what sits above a notice.
 
 The unit suite mocks ``page.evaluate``, so the program behind
 ``JobPageReader._extract_promoted_job_ids`` never runs there. These run it
@@ -109,3 +109,62 @@ class TestPromotedJobIds:
         promoted = await _reader(dom_page)._extract_promoted_job_ids("Promoted")
 
         assert promoted == ["401"]
+
+
+_NOTICE = (
+    "We found more results related to your search that may not be exact "
+    "matches, but could still be a great fit."
+)
+
+
+def _redesigned_card(job_id: str, title: str, *, promoted: bool = False) -> str:
+    footer = "<p>Promoted</p>" if promoted else "<p>1 week ago</p>"
+    return (
+        f'<div componentkey="job-card-component-ref-{job_id}">'
+        f"<p>{title}</p><p>Acme</p>{footer}</div>"
+    )
+
+
+class TestOrganicBeforeNotice:
+    async def _count(self, page, cards: str) -> int | None:
+        await page.set_content(f'<main><div style="{_SCROLLABLE}">{cards}</div></main>')
+        return await _reader(page)._count_organic_before_notice(_NOTICE, "Promoted")
+
+    async def test_only_promoted_cards_above_the_notice_count_zero(self, dom_page):
+        """The nonsense-query shape: ads, the notice, then unrelated jobs."""
+        cards = (
+            _redesigned_card("501", "Success Engineer", promoted=True)
+            + _redesigned_card("502", "Data Engineer", promoted=True)
+            + f"<div><p>{_NOTICE}</p></div>"
+            + _redesigned_card("503", "Solutions Architect")
+        )
+
+        assert await self._count(dom_page, cards) == 0
+
+    async def test_unpromoted_cards_above_the_notice_are_counted(self, dom_page):
+        cards = (
+            _redesigned_card("601", "Forward Deployed Engineer")
+            + _redesigned_card("602", "AI Engineer", promoted=True)
+            + _redesigned_card("603", "Forward Deployed Engineer - L5")
+            + f"<div><p>{_NOTICE}</p></div>"
+            + _redesigned_card("604", "Solutions Architect")
+        )
+
+        assert await self._count(dom_page, cards) == 2
+
+    async def test_a_notice_split_across_inline_elements_is_found(self, dom_page):
+        """The visible line is whole while its text sits in several nodes."""
+        head, tail = _NOTICE.split(", but ")
+        cards = (
+            _redesigned_card("801", "Success Engineer", promoted=True)
+            + f"<div><p><span>{head}</span>, <b>but</b> {tail}</p></div>"
+            + _redesigned_card("802", "Solutions Architect")
+        )
+
+        assert await self._count(dom_page, cards) == 0
+
+    async def test_a_page_without_the_notice_reads_as_none(self, dom_page):
+        """Not zero, which would discard a page of matches as a no-match."""
+        cards = _redesigned_card("701", "Python Developer")
+
+        assert await self._count(dom_page, cards) is None
