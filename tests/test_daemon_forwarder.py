@@ -190,6 +190,42 @@ class TestWhatAClientReads:
         assert expected.is_error is True
         assert _comparable(forwarded) == _comparable(expected)
 
+    async def test_the_owners_error_code_reaches_the_client_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The frontend runs the same error-code layer as the owner. A code the
+        # owner already named must come through as the owner named it, not be
+        # reclassified on the way.
+        from linkedin_mcp_server.error_handler import (
+            ERROR_META_KEY,
+            CodedToolError,
+            ErrorCode,
+            ErrorCodeMiddleware,
+        )
+
+        owner = FastMCP("owner", mask_error_details=True)
+        owner.add_middleware(ErrorCodeMiddleware())
+
+        @owner.tool(name="get_person_profile")
+        async def get_person_profile(linkedin_username: str) -> str:
+            raise CodedToolError("Wait.", ErrorCode.RATE_LIMITED, retry_after=30)
+
+        reach_owners_in_process(monkeypatch, lambda _url: owner)
+        arguments = {"linkedin_username": "someone"}
+
+        async with Client(owner) as direct:
+            expected = await direct.call_tool_mcp("get_person_profile", arguments)
+        async with Client(_proxy(tmp_path)) as client:
+            forwarded = await client.call_tool_mcp("get_person_profile", arguments)
+
+        assert forwarded.is_error is True
+        assert (forwarded.meta or {})[ERROR_META_KEY] == {
+            "v": 1,
+            "code": "rate_limited",
+            "retry_after": 30,
+        }
+        assert _comparable(forwarded) == _comparable(expected)
+
     async def test_a_listing_carries_everything_the_owner_lists(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

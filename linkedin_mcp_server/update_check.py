@@ -249,6 +249,10 @@ class UpdateNoticeMiddleware(Middleware):
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
+        # The status tool reads local state only; leave both the update check
+        # and its notice for a browser tool.
+        if context.message.name == "get_session_status":
+            return await call_next(context)
         if not self._kicked:
             self._kicked = True
             # Seed from a fresh cache synchronously so even a single fast call can

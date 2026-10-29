@@ -255,8 +255,10 @@ from differential.session import (
     write_synthetic_cookie_file,
 )
 from differential.signals import COMPLETE as ORACLE_COMPLETE
+from differential.signals import HELD as O2_HELD
 from differential.signals import INCOMPLETE as O2_INCOMPLETE
 from differential.signals import UNAVAILABLE as ORACLE_UNAVAILABLE
+from differential.signals import UNKNOWN as O2_UNKNOWN
 from differential.signals import UNOBSERVED as O2_UNOBSERVED
 from differential.signals import VIOLATED as O2_VIOLATED
 from differential.signals import (
@@ -1330,19 +1332,25 @@ class HostQuitTransport(ClientTransport):
         its next write finds the pipe broken: what the kernel does to both
         pipes when a host goes away, named pipe loss here and never host
         death, which ``StubHost`` makes. A failure is ``loss_error``.
+
+        Stdout goes first. Both closes reach their descriptors from the loop's
+        callback queue, which runs in order, so the server cannot read EOF
+        while its stdout still takes a write. Closed after stdin, the server
+        had until this coroutine was next scheduled to answer the EOF with a
+        write that went through.
         """
         process = self.process
         assert process is not None and process.stdin is not None
         self.mark_lost(termination)
         errors = []
-        try:
-            await process.stdin.aclose()
-        except Exception as exc:  # noqa: BLE001 - recorded, and judged by the row
-            errors.append(f"closing stdin: {type(exc).__name__}: {exc}")
         if termination == call_loss.PIPE_LOSS:
             problem = close_read_end(process, 1)
             if problem is not None:
                 errors.append(problem)
+        try:
+            await process.stdin.aclose()
+        except Exception as exc:  # noqa: BLE001 - recorded, and judged by the row
+            errors.append(f"closing stdin: {type(exc).__name__}: {exc}")
         self.loss_error = "; ".join(errors) or None
 
     async def server_exit(self, seconds: float) -> dict[str, Any]:
@@ -2641,13 +2649,16 @@ class ProfileCensus:
     ``complete`` only when every process could be judged: its command line
     read, or it established as unrelated the way the watcher establishes it
     (another user, or a readable executable that cannot be the browser), or,
-    for a zombie, the whole process shown to have exited. An empty
-    ``processes`` from an incomplete census is not an empty profile.
+    for a zombie, the whole process shown to have exited (``zombie_unresolved``).
+    An empty ``processes`` from an incomplete census is not an empty profile.
     """
 
     processes: list[Any] = field(default_factory=list)
     #: Processes whose arguments could not be read and that were not excluded.
     unresolved: list[int] = field(default_factory=list)
+    #: Why each of ``unresolved`` was kept, in the same order, each with its
+    #: ``pid`` and the ``phase`` that could not judge it. Evidence only.
+    provenance: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def pids(self) -> list[int]:
@@ -2656,6 +2667,37 @@ class ProfileCensus:
     @property
     def complete(self) -> bool:
         return not self.unresolved
+
+    def unresolve(self, pid: int, **why: Any) -> None:
+        """Keep *pid* unresolved, with what the census read of it."""
+        self.unresolved.append(pid)
+        self.provenance.append({"pid": pid, **why})
+
+
+#: ``pid_state``: nothing is at the pid any more.
+PID_GONE = "gone"
+#: ``pid_state``: a process, a zombie included, is at the pid.
+PID_PRESENT = "present"
+
+
+def pid_state(pid: int, *, open_process: Callable[[int], Any] = psutil.Process) -> str:
+    """Whether anything is at *pid*, looked up now.
+
+    ``PID_GONE`` only when the lookup finds nothing, ``PID_PRESENT`` for any
+    process there, and otherwise ``unknown: ...`` with what failed. A zombie
+    is present even though psutil raises it as a ``NoSuchProcess``. A later
+    process at a reused pid is present too: telling it apart would take a
+    start time, and the public one moves with the wall clock.
+    """
+    try:
+        open_process(pid)
+    except psutil.ZombieProcess:
+        return PID_PRESENT
+    except psutil.NoSuchProcess:
+        return PID_GONE
+    except (psutil.Error, OSError) as exc:
+        return f"unknown: {type(exc).__name__}"
+    return PID_PRESENT
 
 
 def thread_count(process: Any) -> int | None:
@@ -2689,6 +2731,40 @@ def exited_zombie(
     if not (sys.platform.startswith("linux") if linux is None else linux):
         return True
     return threads_of(process) == 1
+
+
+def zombie_unresolved(
+    process: Any,
+    *,
+    linux: bool | None = None,
+    threads_of: Callable[[Any], int | None] = thread_count,
+    open_process: Callable[[int], Any] = psutil.Process,
+) -> dict[str, Any] | None:
+    """Why a zombie the census listed cannot be excluded; None once its whole
+    process is shown to have exited.
+
+    First ``exited_zombie``. A count that shows nothing on Linux can also mean
+    the zombie was reaped after the table was read, which takes its
+    ``/proc/<pid>/task`` with it, so the pid is looked up again: excluded only
+    once nothing is there, never because a read failed.
+    """
+    counted: list[int | None] = []
+
+    def count(target: Any) -> int | None:
+        counted.append(threads_of(target))
+        return counted[-1]
+
+    if exited_zombie(process, linux=linux, threads_of=count):
+        return None
+    lookup = pid_state(process.pid, open_process=open_process)
+    if lookup == PID_GONE:
+        return None
+    return {
+        "phase": "zombie",
+        "status": psutil.STATUS_ZOMBIE,
+        "threads": counted[-1] if counted else None,
+        "lookup": lookup,
+    }
 
 
 def process_table(attrs: Sequence[str]) -> Iterator[Any]:
@@ -2725,6 +2801,9 @@ def profile_census(
     browser_dir: str | Path | None = None,
     process_iter: Callable[..., Iterable[Any]] | None = None,
     user: object | None = None,
+    linux: bool | None = None,
+    threads_of: Callable[[Any], int | None] = thread_count,
+    open_process: Callable[[int], Any] = psutil.Process,
 ) -> ProfileCensus:
     """Every process, root or child, running a browser on this row's profile.
 
@@ -2736,17 +2815,25 @@ def profile_census(
     census = ProfileCensus()
     try:
         processes = list((process_iter or process_table)(["cmdline", "exe", "status"]))
-    except psutil.Error:
-        return ProfileCensus(unresolved=[-1])
+    except psutil.Error as exc:
+        census.unresolve(-1, phase="table", error=type(exc).__name__)
+        return census
     for process in processes:
         info = getattr(process, "info", {}) or {}
         cmdline = info.get("cmdline")
         if info.get("status") == psutil.STATUS_ZOMBIE:
             # Exited and not yet reaped, then nothing is running there; but
             # a zombie leader can still have threads that hold the profile.
-            if exited_zombie(process) or another_user(process_user(process), owner):
+            if another_user(process_user(process), owner):
                 continue
-            census.unresolved.append(process.pid)
+            why = zombie_unresolved(
+                process,
+                linux=linux,
+                threads_of=threads_of,
+                open_process=open_process,
+            )
+            if why is not None:
+                census.unresolve(process.pid, **why)
             continue
         if cmdline is None:
             if another_user(process_user(process), owner):
@@ -2754,7 +2841,9 @@ def profile_census(
             exe = info.get("exe")
             if exe and not possible_browser(exe, browser_exe, directory):
                 continue
-            census.unresolved.append(process.pid)
+            census.unresolve(
+                process.pid, phase="arguments", status=info.get("status"), exe=exe
+            )
             continue
         for argument in cmdline:
             if not argument.startswith(USER_DATA_DIR_FLAG):
@@ -4047,10 +4136,10 @@ def r6_verdict(
     that witness: K2 needs a complete required trace that shows the class
     ``guardian:principal-group``, while the rest of K2's outcome stays the
     baseline's to record. On macOS the guardian's argv is the witness. K3
-    (candidate daemon) must read ``=`` and have recovered on the second call.
-    K1 (Direct killed) reads ``=`` as the non-leader server a host starts. On
-    Windows there is no guardian, so the reading is not applicable; the kill
-    and K3's recovery still are.
+    (candidate daemon) and K0, its repeat, must read ``=`` and have recovered
+    on the second call. K1 (Direct killed) reads ``=`` as the non-leader
+    server a host starts. On Windows there is no guardian, so the reading is
+    not applicable; the kill and the candidate's recovery still are.
     """
     if linux is None:
         linux = sys.platform.startswith("linux")
@@ -4063,7 +4152,7 @@ def r6_verdict(
     # post; one that failed before reading is not the row this measures.
     if vector is None or not vector.tool_succeeded:
         problems.append("the first call did not read the synthetic post")
-    if experiment == "K3" and (vector is None or vector.recovered is not True):
+    if experiment in ("K3", "K0") and (vector is None or vector.recovered is not True):
         problems.append("the frontend did not recover on the call after the kill")
     if windows:
         return problems
@@ -4605,7 +4694,13 @@ def auth_files(root: Path) -> dict[str, str]:
                     names.remove(name)
             else:
                 try:
-                    files[key] = hashlib.sha256(path.read_bytes()).hexdigest()
+                    # An empty file has nothing to read, and its read may be
+                    # refused: on Windows a live trace writer's exclusive
+                    # byte-range lock on its empty `.alive` marker denies
+                    # every other handle's read.
+                    empty = path.lstat().st_size == 0
+                    content = b"" if empty else path.read_bytes()
+                    files[key] = hashlib.sha256(content).hexdigest()
                 except OSError:
                     files[key] = "unreadable"
     return files
@@ -5032,11 +5127,11 @@ def continuation_problems(
     cleanup, census, installer family, script, runtime, restoration, clock).
     K1 is the reference: Direct has no adopted Job, so no planted failure is
     required, and one reached there is the wrong topology. K2 and K3: the
-    owner that closed and a positive fault witness inside its close. K3 also:
-    core.close's negative consumption, the stand-down, the owner's exit, a
-    post-settlement recovery with nothing protected changed by its boundary,
-    and a successor that served it. No cell says which caller ended an
-    installer.
+    owner that closed and a positive fault witness inside its close. K3, and
+    K0 as its repeat, also: core.close's negative consumption, the
+    stand-down, the owner's exit, a post-settlement recovery with nothing
+    protected changed by its boundary, and a successor that served it. No
+    cell says which caller ended an installer.
     """
     if continuation is None:
         return [f"{experiment} left no native continuation"]
@@ -5149,9 +5244,10 @@ def r11_composition(
     model's conditional branch, calibrated in this process against the exact
     sources the native runtimes imported (the baseline's prohibited
     selection, the candidate's abstention and every positive control); each
-    native continuation of this run through the common gate; and K3 no worse
-    than K1 on O1, O2 and O4. A missing calibration or cell fails it: K1 and
-    K3 selected alone compose nothing. Whole-system O2 stays what the vectors
+    native continuation of this run through the common gate; K3 no worse
+    than K1 on O1, O2 and O4; and K0, K3 repeated, reading as K3 did
+    (``compare_repeat``). A missing calibration or cell fails it: K1 and K3
+    selected alone compose nothing. Whole-system O2 stays what the vectors
     say, unobserved where nothing traced it.
     """
     cells, problems = ledger.take()
@@ -5161,7 +5257,7 @@ def r11_composition(
         if model.evidence != SOURCE_MODEL:
             problems.append(f"the calibration is {model.evidence!r}, not source-model")
         problems += [f"source model: {problem}" for problem in model.problems]
-    for experiment in ("K1", "K2", "K3"):
+    for experiment in ("K1", "K2", "K3", "K0"):
         cell = cells.get(experiment)
         problems += [
             f"{experiment}: {problem}"
@@ -5174,7 +5270,9 @@ def r11_composition(
         ]
         if cell is None or model is None:
             continue
-        modelled = model.sha256.get(CANDIDATE if experiment == "K3" else BASELINE)
+        modelled = model.sha256.get(
+            CANDIDATE if experiment in ("K3", "K0") else BASELINE
+        )
         if cell.process_tree_sha256 != modelled:
             problems.append(
                 f"{experiment}: the actors imported process_tree "
@@ -5188,6 +5286,15 @@ def r11_composition(
             problems += [
                 f"K3 differs from K1 frozen: {difference}"
                 for difference in compare_to_direct(reference.vector, candidate.vector)
+            ]
+    repeat = cells.get("K0")
+    if candidate is not None and repeat is not None:
+        if candidate.vector is None or repeat.vector is None:
+            problems.append("K3 or K0 left no vector to compare")
+        else:
+            problems += [
+                f"K0 differs from K3: {difference}"
+                for difference in compare_repeat(candidate.vector, repeat.vector)
             ]
     return problems
 
@@ -5638,6 +5745,7 @@ def observe_checkpoint(
     point["census"] = {
         "entries": [census_entry(process) for process in census.processes],
         "unresolved": list(census.unresolved),
+        "unresolved_provenance": list(census.provenance),
     }
     roots = host_comparison.census_roots(point["census"], account.browser_key) or []
     point["lineages"] = [
@@ -5721,6 +5829,7 @@ def observe_roots(
     roots = host_comparison.census_roots(found, account.browser_key)
     point["roots"] = [list(root) for root in roots] if roots is not None else None
     point["unresolved"] = list(census.unresolved)
+    point["unresolved_provenance"] = list(census.provenance)
     return point
 
 
@@ -5857,13 +5966,20 @@ def bind_responder(
     return responder, found
 
 
+#: Traced O2 states that differ by timing alone (``compare_to_direct``).
+_SAMPLED_ALIKE = frozenset({O2_HELD, O2_UNKNOWN})
+
+
 def compare_repeat(first: RowVector, second: RowVector) -> list[str]:
-    """K0: every field of two runs of the same experiment must agree."""
+    """K0: every field of two runs of the same experiment must agree, except a
+    traced O2 of ``held`` against ``unknown``, which says only whether a
+    recipient outlived the next sample."""
     one, two = asdict(first), asdict(second)
     return [
         f"{name}: {one[name]!r} then {two[name]!r}"
         for name in one
         if one[name] != two[name]
+        and not (name == "o2_traced" and {one[name], two[name]} <= _SAMPLED_ALIKE)
     ]
 
 
@@ -8233,6 +8349,7 @@ async def measure_host_quit_row(
                 comparison["b_settlement"] = {
                     "remaining": census.pids,
                     "unresolved": list(census.unresolved),
+                    "unresolved_provenance": list(census.provenance),
                     "ended_ns": time.monotonic_ns(),
                 }
             except Exception as exc:  # noqa: BLE001 - the settlement's own evidence
@@ -8842,6 +8959,7 @@ async def measure_host_quit_row(
             )
             found["remaining"] = census.pids
             found["unresolved"] = list(census.unresolved)
+            found["unresolved_provenance"] = list(census.provenance)
             lock = await run_owned(
                 "the lock after the loss", read_lock, lock_path, seconds=60.0
             )

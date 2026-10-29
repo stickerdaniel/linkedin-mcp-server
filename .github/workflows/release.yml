@@ -276,37 +276,18 @@ jobs:
         run: |
           set -e
           python3 - "$VERSION" <<'PY'
-          import base64
           import json
-          import re
           import sys
           from pathlib import Path
-          from urllib.parse import quote
 
+          # Only the manifests carry the release. The shared .mcp.json runs
+          # mcp-server-linkedin@latest, so it has no version to rewrite.
           version = sys.argv[1]
-          deeplink_prefix = (
-              "https://cursor.com/en/install-mcp?name=linkedin&config="
-          )
           manifest_paths = (
               Path("plugins/linkedin-mcp-server/.codex-plugin/plugin.json"),
               Path("plugins/linkedin-mcp-server/.claude-plugin/plugin.json"),
               Path("plugins/linkedin-mcp-server/.cursor-plugin/plugin.json"),
           )
-          mcp_path = Path("plugins/linkedin-mcp-server/.mcp.json")
-
-          mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
-          args = mcp["mcpServers"]["linkedin"]["args"]
-          package_args = [
-              index
-              for index, value in enumerate(args)
-              if value.startswith("mcp-server-linkedin@")
-          ]
-          if len(package_args) != 1:
-              raise SystemExit(
-                  "Codex plugin must contain exactly one versioned "
-                  "mcp-server-linkedin package argument"
-              )
-          args[package_args[0]] = f"mcp-server-linkedin@{version}"
 
           for manifest_path in manifest_paths:
               plugin = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -315,34 +296,6 @@ jobs:
                   json.dumps(plugin, indent=2, ensure_ascii=False) + "\n",
                   encoding="utf-8",
               )
-          mcp_path.write_text(
-              json.dumps(mcp, indent=2, ensure_ascii=False) + "\n",
-              encoding="utf-8",
-          )
-
-          readme_path = Path("README.md")
-          readme = readme_path.read_text(encoding="utf-8")
-          config_b64 = base64.b64encode(
-              json.dumps(
-                  mcp["mcpServers"]["linkedin"],
-                  separators=(",", ":"),
-              ).encode("utf-8")
-          ).decode("ascii")
-          # Percent-encoded, because a raw `+` in a query string reads as a space.
-          deeplink = f"{deeplink_prefix}{quote(config_b64, safe='')}"
-          deeplink_matches = list(
-              re.finditer(
-                  re.escape(deeplink_prefix) + r"[A-Za-z0-9%]+",
-                  readme,
-              )
-          )
-          if len(deeplink_matches) != 1:
-              raise SystemExit(
-                  "README must contain exactly one Cursor MCP install deeplink"
-              )
-          match = deeplink_matches[0]
-          readme = readme[: match.start()] + deeplink + readme[match.end() :]
-          readme_path.write_text(readme, encoding="utf-8")
           PY
           echo "✅ Updated the Codex, Claude Code, and Cursor plugins to version $VERSION"
 
@@ -359,18 +312,12 @@ jobs:
           docker compose -f docker-compose.yml config --no-interpolate \
             --format json > /tmp/compose.json
           python3 - "$VERSION" <<'PY'
-          import base64
           import json
-          import re
           import sys
           import tomllib
           from pathlib import Path
-          from urllib.parse import unquote
 
           version = sys.argv[1]
-          deeplink_prefix = (
-              "https://cursor.com/en/install-mcp?name=linkedin&config="
-          )
           server = json.loads(Path(".github/mcp/server.json").read_text(encoding="utf-8"))
           manifest = json.loads(Path("manifest.json").read_text(encoding="utf-8"))
           plugin = json.loads(
@@ -387,11 +334,6 @@ jobs:
               Path(
                   "plugins/linkedin-mcp-server/.cursor-plugin/plugin.json"
               ).read_text(encoding="utf-8")
-          )
-          plugin_mcp = json.loads(
-              Path("plugins/linkedin-mcp-server/.mcp.json").read_text(
-                  encoding="utf-8"
-              )
           )
           project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
           name = project["project"]["name"]
@@ -443,25 +385,7 @@ jobs:
               "Codex plugin": [plugin["version"]],
               "Claude Code plugin": [claude_plugin["version"]],
               "Cursor plugin": [cursor_plugin["version"]],
-              "Codex plugin MCP": [
-                  value.removeprefix("mcp-server-linkedin@")
-                  for value in plugin_mcp["mcpServers"]["linkedin"]["args"]
-                  if value.startswith("mcp-server-linkedin@")
-              ],
           }
-          readme = Path("README.md").read_text(encoding="utf-8")
-          deeplink_match = re.search(
-              re.escape(deeplink_prefix) + r"([A-Za-z0-9%]+)",
-              readme,
-          )
-          if deeplink_match is None:
-              raise SystemExit("README is missing the Cursor MCP install deeplink")
-          decoded = json.loads(base64.b64decode(unquote(deeplink_match.group(1))))
-          found["README Cursor deeplink"] = [
-              value.removeprefix("mcp-server-linkedin@")
-              for value in decoded["args"]
-              if value.startswith("mcp-server-linkedin@")
-          ]
           for site, values in found.items():
               if not values:
                   raise SystemExit(f"{site}: no version found; the rewrite missed it")
@@ -500,11 +424,9 @@ jobs:
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add manifest.json docker-compose.yml .github/mcp/server.json \
-            README.md \
             plugins/linkedin-mcp-server/.codex-plugin/plugin.json \
             plugins/linkedin-mcp-server/.claude-plugin/plugin.json \
-            plugins/linkedin-mcp-server/.cursor-plugin/plugin.json \
-            plugins/linkedin-mcp-server/.mcp.json
+            plugins/linkedin-mcp-server/.cursor-plugin/plugin.json
           if git diff --staged --quiet; then
             echo "ℹ️ No changes to commit"
           else

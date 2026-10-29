@@ -76,7 +76,24 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `get_job_apply_url` | Check whether a job uses Easy Apply or links to an employer's application. |
 | `get_feed` | Read recent posts from your home feed, with links to the original posts. |
 | `search_posts` | Search posts by keyword, optionally limited to the past day, week, or month. |
+| `get_session_status` | Check your saved login and browser state without opening a browser. |
 | `close_session` | Close the shared browser session without deleting your saved login. |
+
+A failed call is an error result (`isError`) with the usual message. For programs that branch on the kind of failure, its `_meta["linkedin.dev/error"]` is `{"v": 1, "code": ...}`, and `rate_limited` adds `retry_after` in seconds. A shared browser started by an older release may leave the code out. The codes:
+
+| Code | Meaning |
+|------|---------|
+| `auth_required` | No usable LinkedIn session. Someone has to sign in; a login window may already be open. |
+| `account_restricted` | LinkedIn restricted the account. Signing in again cannot lift it. |
+| `rate_limited` | LinkedIn is limiting requests. Wait `retry_after` seconds. |
+| `not_found` | The profile or page does not exist. |
+| `page_unreadable` | The page could not be read; LinkedIn's layout may have changed. |
+| `invalid_argument` | An argument or the tool name is unusable; the message says how to correct it. |
+| `network` | LinkedIn could not be reached: the connection, a proxy or a captive portal. |
+| `browser_busy` | Another call or client is using or changing the browser. Call again shortly. |
+| `browser_unavailable` | The browser cannot run yet: still installing, failed to set up, older than the profile, or the shared browser cannot be reached. |
+| `outcome_unknown` | The shared browser stopped answering after the call was sent, so it may have acted. `structuredContent` says whether a retry is safe. |
+| `internal` | Anything else, including failures the server does not classify. |
 
 <br/>
 <br/>
@@ -369,7 +386,7 @@ codex plugin marketplace add stickerdaniel/linkedin-mcp-server
 codex plugin add linkedin-mcp-server@linkedin-mcp-server
 ```
 
-The plugin pins a server release, and Codex picks up each new one in the background when it starts. On the first tool call that needs authentication, the server reuses a LinkedIn session from a signed-in local browser or opens a login window.
+The plugin runs the latest server release. On the first tool call that needs authentication, the server reuses a LinkedIn session from a signed-in local browser or opens a login window.
 
 > [!NOTE]
 > Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. Retry the tool call once the browser download or sign-in completes.
@@ -390,7 +407,7 @@ claude plugin marketplace add stickerdaniel/linkedin-mcp-server
 claude plugin install linkedin-mcp-server@linkedin-mcp-server
 ```
 
-The plugin pins a server release. To move to a newer one, run `claude plugin update linkedin-mcp-server@linkedin-mcp-server` and restart Claude Code. On the first tool call that needs authentication, the server reuses a LinkedIn session from a signed-in local browser or opens a login window.
+The plugin runs the latest server release. On the first tool call that needs authentication, the server reuses a LinkedIn session from a signed-in local browser or opens a login window.
 
 > [!NOTE]
 > Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. Retry the tool call once the browser download or sign-in completes.
@@ -404,13 +421,13 @@ The plugin pins a server release. To move to a newer one, run `claude plugin upd
 
 ### Installation
 
-**From the Cursor Marketplace:** open **Customize** in the sidebar, search for **LinkedIn MCP**, and choose **Install**. The plugin pins a server release and bundles the LinkedIn skill.
+**From the Cursor Marketplace:** open **Customize** in the sidebar, search for **LinkedIn MCP**, and choose **Install**. The plugin bundles the LinkedIn skill.
 
 **One-click MCP install** (server only, without the skill):
 
-[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=linkedin&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJtY3Atc2VydmVyLWxpbmtlZGluQDQuMjcuMCIsIi0tdHJhbnNwb3J0Iiwic3RkaW8iLCItLXRpbWVvdXQiLCIxMDAwMCIsIi0tdG9vbC10aW1lb3V0IiwiMTgwIl0sImVudiI6eyJVVl9IVFRQX1RJTUVPVVQiOiIzMDAifX0%3D)
+[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=linkedin&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJtY3Atc2VydmVyLWxpbmtlZGluQGxhdGVzdCIsIi0tdHJhbnNwb3J0Iiwic3RkaW8iXSwiZW52Ijp7IlVWX0hUVFBfVElNRU9VVCI6IjMwMCJ9fQ%3D%3D)
 
-On the first tool call that needs authentication, the server reuses a LinkedIn session from a signed-in local browser or opens a login window.
+Both run the latest server release. On the first tool call that needs authentication, the server reuses a LinkedIn session from a signed-in local browser or opens a login window.
 
 > [!NOTE]
 > Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. Retry the tool call once the browser download or sign-in completes.
@@ -453,7 +470,7 @@ docker run -it --rm `
   --login --login-viewer
 ```
 
-Open the full URL the command prints (it carries the access token) and sign in. The viewer closes itself afterwards; let the command exit on its own so the session is stored completely. It gives up after 30 minutes.
+Open the full URL the command prints (it carries the access token) and sign in. Ctrl+V (Cmd+V on a Mac) pastes plain ASCII text, such as a password from your password manager, into the login browser. The viewer closes itself afterwards; let the command exit on its own so the session is stored completely. It gives up after 30 minutes.
 
 Keep the same host directory mounted at `/home/pwuser/.linkedin-mcp` on every later `docker run`, otherwise the server cannot find the session.
 
@@ -695,37 +712,6 @@ belongs behind something that provides it.
 
 
 ## Using a proxy
-
-<details open>
-<summary><strong>Sponsored proxy providers</strong></summary>
-
-<br/>
-<a href="https://www.swiftproxy.net/?ref=stickerdaniel">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/872f4efb-f329-4f3c-b864-cd1fac7a331b" />
-    <img src="https://github.com/user-attachments/assets/c413a236-a49f-4480-8dcc-b67de3093920" alt="Swiftproxy logo" width="240">
-  </picture>
-</a>
-
-> Swiftproxy offers residential proxies with sticky sessions and worldwide geo-targeting. Its dedicated static ISP options include networks such as AT&T, Sky UK, and Rogers, with unlimited traffic and renewable addresses.
-
-Use code <strong>PROXY90</strong> for 10% off <a href="https://www.swiftproxy.net/?ref=stickerdaniel">Try Swiftproxy →</a>
-<br/>
-
-<a href="https://www.rapidproxy.io/?ref=linkedin">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/47680db7-360f-4128-9e66-73f784c0fa85" />
-    <img src="https://github.com/user-attachments/assets/3daa30e1-ead1-4884-8388-b3024c026ba9" alt="RapidProxy logo" width="240">
-  </picture>
-</a>
-
-> RapidProxy offers 90M+ residential IPs worldwide for LinkedIn automation and browser workflows, with sticky sessions, geo-targeting, and high-concurrency support. Plans start at $0.55/GB with non-expiring traffic.
-
-Use code <strong>RAPID10</strong> for 10% off <a href="https://www.rapidproxy.io/?ref=linkedin">Try RapidProxy for free →</a>
-<br/>
-
-<br/>
-</details>
 
 LinkedIn scores the address a session signs in from. Your account's usual IP address is the safe one. You should use a proxy in your country when the server cannot use it: a VPS, another country, or a second account that must not share the first one's address.
 

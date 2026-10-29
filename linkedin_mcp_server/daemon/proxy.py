@@ -38,6 +38,7 @@ from linkedin_mcp_server.daemon.auth_repair import a_repeat_could_change_somethi
 from linkedin_mcp_server.daemon.core import call as call_core
 from linkedin_mcp_server.daemon.descriptor import PROTOCOL_VERSION
 from linkedin_mcp_server.daemon.discovery import Unanswered
+from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode, error_result
 from linkedin_mcp_server.daemon.forwarder import (
     CallBinding,
     DispatchRecord,
@@ -423,7 +424,7 @@ def _owner_lost_from_a_call(
     message = _owner_lost(unanswered)
     if unanswered is not None and nothing_was_sent:
         message += " Nothing was sent."
-    return ToolError(message)
+    return CodedToolError(message, ErrorCode.BROWSER_UNAVAILABLE)
 
 
 @dataclass(frozen=True)
@@ -779,10 +780,8 @@ class FrontendCallMiddleware(Middleware):
                 reason=reason,
                 owner=f"did not respond (pid {unanswered.pid})",
             )
-        return ToolResult(
-            content=[mt.TextContent(type="text", text=answer["message"])],
-            structured_content=answer,
-            is_error=True,
+        return error_result(
+            answer["message"], ErrorCode.OUTCOME_UNKNOWN, structured_content=answer
         )
 
 

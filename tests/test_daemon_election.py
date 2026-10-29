@@ -35,6 +35,7 @@ from types import SimpleNamespace
 from typing import Any, NoReturn, cast
 
 import pytest
+from mcp import MCPError
 
 import linkedin_mcp_server.daemon.discovery as daemon_module
 import linkedin_mcp_server.daemon.config as daemon_config
@@ -357,9 +358,12 @@ class TestThePublicationProbe:
 
         with _a_healthy_owner(profile, config, monkeypatch) as attachment:
             url = attachment.descriptor.url
-            asyncio.run(daemon_owner._probe(url, attachment.token))
-            with pytest.raises(Exception, match="Server returned an error response"):
-                asyncio.run(daemon_owner._probe(url, new_token()))
+            asyncio.run(daemon_owner.prove_hop(url, attachment.token))
+            with pytest.raises(ExceptionGroup) as refused:
+                asyncio.run(daemon_owner.prove_hop(url, new_token()))
+            assert refused.group_contains(
+                MCPError, match="Server returned an error response", depth=None
+            )
 
 
 class TestLiveness:
@@ -725,6 +729,255 @@ class TestSilenceIsNotDeath:
         # that are not interrupted mid-flight. What it catches is an unbounded
         # loop, which is the only real risk of never burying anything.
         assert elapsed < 15, f"the election ran {elapsed:.1f}s past a 1.0s budget"
+
+
+@contextlib.contextmanager
+def _a_published_owner_on_loopback(
+    profile: Path, config: AppConfig, *, serves_the_pin: bool
+):
+    """A published owner of this build, answering by hand on a loopback socket.
+
+    The answers are a FastMCP owner's, trimmed, on the hop's era and on the
+    handshake era. Without *serves_the_pin* it refuses ``server/discover`` at
+    the hop's version as an owner whose MCP no longer serves it would, and
+    still serves the handshake, which a client negotiating by the SDK's
+    default falls back to. Yields the published attachment and every
+    JSON-RPC method that reached the owner, in order.
+    """
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from linkedin_mcp_server.daemon.forwarder import HOP_PROTOCOL_VERSION
+    from linkedin_mcp_server.daemon.liveness import HEARTBEAT_PATH
+
+    token = new_token()
+    methods: list[str] = []
+
+    class Owner(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+        def respond(self, status: int, body: object = None) -> None:
+            encoded = b"" if body is None else json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def do_GET(self) -> None:
+            self.respond(405)
+
+        def do_DELETE(self) -> None:
+            self.respond(405)
+
+        def do_POST(self) -> None:
+            if self.headers.get("Authorization") != f"Bearer {token}":
+                self.respond(401)
+                return
+            if self.path == HEARTBEAT_PATH:
+                self.respond(200, {"watched": False})
+                return
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if "id" not in body:
+                self.respond(202)
+                return
+            method = body["method"]
+            methods.append(method)
+            modern: dict[str, object] = {
+                "ttlMs": 0,
+                "cacheScope": "private",
+                "resultType": "complete",
+            }
+            if method == "server/discover" and not serves_the_pin:
+                self.respond(
+                    400,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": body["id"],
+                        "error": {
+                            "code": -32022,
+                            "message": "Unsupported protocol version",
+                            "data": {
+                                "supported": ["2025-11-25"],
+                                "requested": HOP_PROTOCOL_VERSION,
+                            },
+                        },
+                    },
+                )
+                return
+            if method == "server/discover":
+                result: dict[str, object] = {
+                    **modern,
+                    "supportedVersions": [HOP_PROTOCOL_VERSION],
+                    "capabilities": {"tools": {}},
+                }
+            elif method == "initialize":
+                result = {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "owner", "version": __version__},
+                }
+            elif method == "tools/list":
+                tool = {"name": "probe_echo", "inputSchema": {"type": "object"}}
+                result = {"tools": [tool], **(modern if serves_the_pin else {})}
+            elif method == "tools/call":
+                result = {
+                    "content": [{"type": "text", "text": "probe ran"}],
+                    "isError": False,
+                    "resultType": "complete",
+                }
+            else:
+                self.respond(
+                    404,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": body["id"],
+                        "error": {"code": -32601, "message": "Method not found"},
+                    },
+                )
+                return
+            self.respond(200, {"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Owner)
+    server.daemon_threads = True
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+    )
+    thread.start()
+    try:
+        auth_root = profile.parent
+        attachment = Attachment(
+            descriptor=build(
+                instance_id=new_instance_id(),
+                package_version=__version__,
+                runtime_id=_RUNTIME,
+                profile=profile,
+                host="127.0.0.1",
+                port=server.server_port,
+                path="/mcp",
+                token=token,
+                config=config,
+                log_path=auth_root / "daemon.log",
+            ),
+            token=token,
+        )
+        prepare(auth_root, attachment.descriptor, token)
+        commit_prepared(auth_root, attachment.descriptor.instance_id)
+        yield attachment, methods
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=_PARKED)
+
+
+async def _call_through_a_frontend(backend: Any) -> Any:
+    """One tool call from an external client, through a proxy around *backend*."""
+    from fastmcp import Client
+
+    from linkedin_mcp_server.server import create_mcp_server
+    from linkedin_mcp_server.server_role import ServerRole
+
+    frontend = create_mcp_server(
+        role=ServerRole.PROXY, proxy_backend=backend, tool_timeout=5.0
+    )
+    async with Client(frontend) as client:
+        return await client.call_tool("probe_echo", {}, raise_on_error=False)
+
+
+class TestTheProbeSpeaksTheHopsVersion:
+    """An owner is attached to only if it serves the version every call proposes.
+
+    The probe once negotiated by the SDK's default, which falls back to the
+    handshake era when the pinned one is refused, while every forwarded call
+    proposes only the pin. An owner of this package version whose MCP served
+    only an older era was selected, failed each call before the tool request
+    left, and was selected again by the recovery, so every call came back as
+    a lost owner. Same package version, different dependencies: a ``uvx``
+    resolve beside a locked install.
+    """
+
+    def test_an_owner_without_the_pinned_version_is_not_attached_to(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server.daemon.forwarder import OwnerFailure
+
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+        # Burying the owner sends the election to start one. The lock is the
+        # owner's in production, so a start contends; failing it here keeps
+        # the published owner the only one.
+        monkeypatch.setattr(
+            spawn_module, "_start_owner", lambda *a, **k: Attempt.FAILED
+        )
+        # The recovery's election, real but on a budget a test can wait for.
+        real = election_module.obtain_owner
+
+        def briefly(*args: Any, **kwargs: Any) -> ElectionOutcome:
+            return real(*args, deadline_seconds=0.5, settlement_seconds=0, **kwargs)
+
+        monkeypatch.setattr(election_module, "obtain_owner", briefly)
+
+        with _a_published_owner_on_loopback(profile, config, serves_the_pin=False) as (
+            attachment,
+            methods,
+        ):
+            outcome = briefly(auth_root, profile, config)
+            # What a proxy already attached to this generation does when a
+            # call fails at entry: an owner error, which buries nothing.
+            backend = _proxy_backend_for(attachment)
+            recovered = asyncio.run(
+                backend.recover(
+                    attachment.descriptor.instance_id,
+                    classification=OwnerFailure.OWNER_ERROR,
+                )
+            )
+            answer = asyncio.run(_call_through_a_frontend(backend))
+            # The owner asks itself the same before publishing, so one whose own
+            # dependencies lack the pin never advertises an unusable endpoint.
+            with pytest.raises(ExceptionGroup) as refused:
+                asyncio.run(
+                    daemon_owner.prove_hop(attachment.descriptor.url, attachment.token)
+                )
+            assert refused.group_contains(
+                MCPError, match="Unsupported protocol version", depth=None
+            )
+
+        assert not outcome.worth_connecting, outcome.attachment_lookup.reason
+        assert recovered.attachment is None, "recovery chose the same owner again"
+        assert answer.is_error
+        assert "server/discover" in methods, "the owner was never asked"
+        assert "tools/call" not in methods
+        assert daemon_descriptor_module.read(auth_root) == attachment.descriptor
+
+    def test_the_same_owner_serving_the_pin_is_attached_to_and_runs_calls(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+
+        def never(*_a: Any, **_k: Any) -> NoReturn:
+            raise AssertionError("an answering owner was replaced")
+
+        monkeypatch.setattr(spawn_module, "_start_owner", never)
+
+        with _a_published_owner_on_loopback(profile, config, serves_the_pin=True) as (
+            attachment,
+            methods,
+        ):
+            outcome = obtain_owner(
+                auth_root, profile, config, deadline_seconds=5.0, settlement_seconds=0
+            )
+            found = outcome.attachment_lookup.attachment
+            assert outcome.worth_connecting, outcome.attachment_lookup.reason
+            assert found is not None
+            answer = asyncio.run(_call_through_a_frontend(_proxy_backend_for(found)))
+
+        assert found.descriptor == attachment.descriptor
+        assert not answer.is_error, answer
+        assert [c.text for c in answer.content] == ["probe ran"]
+        assert methods.count("tools/call") == 1
 
 
 class TestRetryPacing:
@@ -4295,6 +4548,8 @@ class TestAForwardedCallThroughTheRealOwner:
         calls: list[asyncio.Task[Any]] = []
         try:
             await daemon_owner._await_started(server, serving)
+            # Where `_serve` opens admission: once the endpoint is published.
+            get_liveness().the_endpoint_is_live()
             reset_process_role_for_testing()
             yield SimpleNamespace(
                 frontend=build(
@@ -6370,7 +6625,7 @@ class TestTheHardExitFreesTheElectionFirst:
 
         monkeypatch.setattr(daemon_owner.os, "_exit", exit_now)
         monkeypatch.setattr(daemon_owner, "hard_exit_required", lambda: True)
-        monkeypatch.setattr(daemon_owner, "_probe", probe)
+        monkeypatch.setattr(daemon_owner, "prove_hop", probe)
         monkeypatch.setattr(
             daemon_owner, "_bind_loopback", lambda: _FakeSocket(("127.0.0.1", 49152))
         )
@@ -6523,7 +6778,7 @@ class TestPublishingLast:
             def committed(self) -> None:
                 order.append("committed")
 
-            def fail(self) -> None:  # pragma: no cover - not reached here
+            def fail(self) -> None:
                 order.append("failed")
 
             def abort(self) -> None:
@@ -6557,7 +6812,7 @@ class TestPublishingLast:
         default_server = _StoppedServer()
         servers: list[object] = []
 
-        monkeypatch.setattr(daemon_owner, "_probe", probe)
+        monkeypatch.setattr(daemon_owner, "prove_hop", probe)
         monkeypatch.setattr(daemon_owner.daemon_descriptor, "prepare", prepare)
 
         def no_adoption(name: str) -> None:
@@ -7123,11 +7378,6 @@ class TestPublishingLast:
             lambda *args, **kwargs: order.append("logged"),
         )
 
-        async def reconcile(*_args: object, **_kwargs: object) -> None:
-            pytest.fail("a failed MoveFileEx attempt entered reconciliation")
-
-        monkeypatch.setattr(daemon_owner, "_reconcile_uncertain_publication", reconcile)
-
         with pytest.raises(daemon_owner._CommitPublicationUnpublished):
             self._run_serve(
                 tmp_path,
@@ -7139,139 +7389,7 @@ class TestPublishingLast:
         assert order.count("commit") >= 1
         assert order[:4] == ["probe", "prepare", "prepared", "control"]
         assert order[-2:] == ["logged", "aborted"]
-
-    def test_unreadable_state_after_commit_interrupt_is_uncertain(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        order: list[str] = []
-        monkeypatch.setattr(
-            daemon_owner.daemon_descriptor,
-            "read",
-            lambda root: (_ for _ in ()).throw(OSError("cannot read canonical state")),
-        )
-
-        outcome = self._run_serve(
-            tmp_path,
-            monkeypatch,
-            order,
-            commit_failures=[KeyboardInterrupt()],
-        )
-
-        assert outcome == 0
-        assert order == [
-            "probe",
-            "prepare",
-            "prepared",
-            "control",
-            "commit",
-            "commit",
-            "live",
-            "committed",
-        ]
-
-    def test_commit_recovery_read_is_bounded(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        blocked = threading.Event()
-        release = threading.Event()
-        order: list[str] = []
-
-        def read(root: Path) -> None:
-            blocked.set()
-            release.wait()
-            return None
-
-        monkeypatch.setattr(daemon_owner.daemon_descriptor, "read", read)
-        # Above one timer tick, which on Windows is about 15 ms. The same
-        # constant also bounds the startup handshake this helper drives, and at
-        # 0.01 that half timed out before the recovery read under test was ever
-        # reached. The bound is still short enough that an unbounded read shows
-        # up as the whole fallback below.
-        monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 0.25)
-        # So a read that is never bounded ends the test instead of hanging it.
-        fallback = threading.Timer(5.0, release.set)
-        fallback.start()
-        started = time.monotonic()
-        try:
-            outcome = self._run_serve(
-                tmp_path,
-                monkeypatch,
-                order,
-                commit_failures=[OSError("rename result was lost")],
-            )
-        finally:
-            release.set()
-            fallback.cancel()
-
-        elapsed = time.monotonic() - started
-        assert outcome == 0
-        assert order[-3:] == ["commit", "live", "committed"]
-        assert blocked.is_set()
-        assert elapsed < 2.0, f"the recovery read was not bounded ({elapsed:.2f}s)"
-
-    def test_first_ambiguous_read_keeps_turnover_active(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        import asyncio
-
-        blocked = threading.Event()
-        release = threading.Event()
-        turnover_sent = threading.Event()
-        exited: list[object] = []
-        order: list[str] = []
-
-        def read(root: Path) -> None:
-            blocked.set()
-            release.wait()
-            return None
-
-        class _TurnoverServer:
-            started = True
-            should_exit = False
-
-            def __init__(self, stand_down: Callable[[], None]) -> None:
-                self._stand_down = stand_down
-
-            async def serve(self, sockets: object = None) -> None:
-                while not blocked.is_set() and not self.should_exit:
-                    await asyncio.sleep(0)
-                if not self.should_exit:
-                    self._stand_down()
-                    turnover_sent.set()
-                while not self.should_exit:
-                    await asyncio.sleep(0)
-
-        monkeypatch.setattr(daemon_owner.daemon_descriptor, "read", read)
-        monkeypatch.setattr(daemon_owner, "_STAND_DOWN_POLL_SECONDS", 0.001)
-        monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 1.0)
-        monkeypatch.setattr(
-            daemon_owner, "_exit_hard", lambda received: exited.append(received)
-        )
-        started = time.monotonic()
-        try:
-            with pytest.raises(RuntimeError, match="hard exit returned"):
-                self._run_serve(
-                    tmp_path,
-                    monkeypatch,
-                    order,
-                    commit_failures=[OSError("rename result was lost")],
-                    server_factory=_TurnoverServer,
-                )
-        finally:
-            release.set()
-
-        assert blocked.is_set(), "the first canonical read never started"
-        assert turnover_sent.is_set(), "the endpoint could not request turnover"
-        # Driven through the real `_serve`, so what `_exit_hard` receives here is
-        # the owner's own lock and not a value this case handed to the helper.
-        # The lock must reach the terminal helper so it can release this owner's
-        # election reference before process exit; the removed owner-side drain is
-        # not part of this path.
-        assert exited and all(
-            isinstance(candidate, DaemonLock) for candidate in exited
-        ), "the uncertain-publication exit did not free the election first"
-        assert order.count("commit") == 1, "publication retried after turnover"
-        assert time.monotonic() - started < 0.5
+        assert "failed" not in order
 
     def test_preflight_after_windows_retry_aborts_as_unpublished(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -7313,140 +7431,6 @@ class TestPublishingLast:
             "aborted",
         ]
 
-    def test_delayed_publication_is_proved_before_listening(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        order: list[str] = []
-        monkeypatch.setattr(
-            daemon_owner.logger,
-            "warning",
-            lambda *args, **kwargs: order.append("diagnostic"),
-        )
-        monkeypatch.setattr(
-            daemon_owner.logger,
-            "info",
-            lambda *args, **kwargs: pytest.fail("publication proof performed log I/O"),
-        )
-
-        outcome = self._run_serve(
-            tmp_path,
-            monkeypatch,
-            order,
-            commit_error=OSError("rename reply was lost"),
-            canonical_after_reads=0,
-            idle_timeout=0,
-        )
-
-        assert outcome == 0
-        assert order == [
-            "probe",
-            "prepare",
-            "prepared",
-            "control",
-            "commit",
-            "diagnostic",
-            "canonical",
-            "live",
-            "committed",
-        ]
-
-    def test_attempted_rename_failure_is_reconciled_before_listening(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        order: list[str] = []
-        monkeypatch.setattr(daemon_owner.daemon_descriptor, "read", lambda root: None)
-        monkeypatch.setattr(
-            daemon_owner.logger,
-            "warning",
-            lambda *args, **kwargs: order.append("diagnostic"),
-        )
-        monkeypatch.setattr(
-            daemon_owner.logger,
-            "info",
-            lambda *args, **kwargs: pytest.fail("publication proof performed log I/O"),
-        )
-
-        outcome = self._run_serve(
-            tmp_path,
-            monkeypatch,
-            order,
-            commit_failures=[OSError("rename reply was lost")],
-            idle_timeout=0,
-        )
-
-        assert outcome == 0
-        assert order == [
-            "probe",
-            "prepare",
-            "prepared",
-            "control",
-            "commit",
-            "diagnostic",
-            "commit",
-            "live",
-            "committed",
-        ]
-
-    def test_endpoint_death_during_reconciliation_hard_exits_before_retry(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        import asyncio
-
-        class _Server:
-            should_exit = False
-
-        commits: list[str] = []
-        exited: list[object] = []
-        lock = DaemonLock(tmp_path)
-
-        async def exercise() -> None:
-            stopped = asyncio.Event()
-
-            async def serve() -> None:
-                await stopped.wait()
-                raise RuntimeError("endpoint failed")
-
-            serving = asyncio.create_task(serve())
-
-            async def read(root: Path, deadline: float) -> None:
-                stopped.set()
-                with contextlib.suppress(RuntimeError):
-                    await serving
-                return None
-
-            async def commit(
-                root: Path,
-                instance_id: str,
-                deadline: float,
-                *,
-                maintenance: Callable[[], None] | None = None,
-            ) -> None:
-                commits.append(instance_id)
-
-            monkeypatch.setattr(
-                daemon_owner,
-                "_start_canonical_read",
-                lambda root: asyncio.create_task(read(root, 0)),
-            )
-            monkeypatch.setattr(daemon_owner, "_commit_prepared_until", commit)
-            monkeypatch.setattr(
-                daemon_owner, "_exit_hard", lambda received: exited.append(received)
-            )
-
-            with pytest.raises(RuntimeError, match="hard exit returned"):
-                await daemon_owner._reconcile_uncertain_publication(
-                    tmp_path,
-                    new_instance_id(),
-                    server=_Server(),
-                    serving=serving,
-                    lock=lock,
-                )
-
-        asyncio.run(exercise())
-
-        assert exited == [lock], "the hard exit did not receive the owner lock"
-        assert commits == [], "a dead endpoint was published during reconciliation"
-
     @pytest.mark.parametrize(
         "winerror,retryable",
         [(5, True), (32, True), (33, True), (2, False), (183, False)],
@@ -7468,609 +7452,6 @@ class TestPublishingLast:
 
         assert daemon_owner._retryable_windows_replace(refusal) is retryable
 
-    def test_a_read_that_cannot_start_does_not_end_the_owner(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        """A thread that will not start has not disproved publication.
-
-        Leaving here stops an endpoint the canonical descriptor may already
-        name and releases the election behind it, which is the one outcome this
-        loop exists to prevent.
-        """
-        import asyncio
-
-        class _Server:
-            should_exit = False
-
-        instance_id = new_instance_id()
-        starts = 0
-        exited: list[object] = []
-        lock = DaemonLock(tmp_path)
-
-        async def exercise() -> None:
-            async def serve() -> None:
-                await asyncio.Event().wait()
-
-            serving = asyncio.create_task(serve())
-
-            def start(root: Path) -> Any:
-                nonlocal starts
-                starts += 1
-                if starts == 1:
-                    raise RuntimeError("can't start new thread")
-                answer = asyncio.get_running_loop().create_future()
-                answer.set_result(SimpleNamespace(instance_id=instance_id))
-                return answer
-
-            async def commit(
-                root: Path,
-                identifier: str,
-                deadline: float,
-                *,
-                maintenance: Callable[[], None] | None = None,
-            ) -> None:
-                raise OSError("the replacement is still ambiguous")
-
-            monkeypatch.setattr(daemon_owner, "_start_canonical_read", start)
-            monkeypatch.setattr(daemon_owner, "_commit_prepared_until", commit)
-            monkeypatch.setattr(
-                daemon_owner, "_UNCERTAIN_PUBLICATION_RETRY_SECONDS", 0.0
-            )
-            monkeypatch.setattr(
-                daemon_owner, "_exit_hard", lambda received: exited.append(received)
-            )
-
-            await daemon_owner._reconcile_uncertain_publication(
-                tmp_path,
-                instance_id,
-                server=_Server(),
-                serving=serving,
-                lock=lock,
-            )
-            serving.cancel()
-
-        asyncio.run(exercise())
-
-        assert starts == 2, "the failed start was retried rather than raised"
-        assert exited == [], "and nothing ended the process over it"
-
-    def test_endpoint_death_after_replacement_hard_exits_before_live(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        import asyncio
-
-        class _Server:
-            should_exit = False
-
-        exited: list[object] = []
-        lock = DaemonLock(tmp_path)
-
-        async def exercise() -> None:
-            stopped = asyncio.Event()
-
-            async def serve() -> None:
-                await stopped.wait()
-
-            serving = asyncio.create_task(serve())
-
-            async def read(root: Path, deadline: float) -> None:
-                return None
-
-            async def commit(
-                root: Path,
-                instance_id: str,
-                deadline: float,
-                *,
-                maintenance: Callable[[], None] | None = None,
-            ) -> None:
-                stopped.set()
-
-            monkeypatch.setattr(
-                daemon_owner,
-                "_start_canonical_read",
-                lambda root: asyncio.create_task(read(root, 0)),
-            )
-            monkeypatch.setattr(daemon_owner, "_commit_prepared_until", commit)
-            monkeypatch.setattr(
-                daemon_owner, "_exit_hard", lambda received: exited.append(received)
-            )
-
-            with pytest.raises(RuntimeError, match="hard exit returned"):
-                await daemon_owner._reconcile_uncertain_publication(
-                    tmp_path,
-                    new_instance_id(),
-                    server=_Server(),
-                    serving=serving,
-                    lock=lock,
-                )
-
-        asyncio.run(exercise())
-
-        assert exited == [lock], "the hard exit did not receive the owner lock"
-
-    def test_reconciliation_cancels_a_call_after_heartbeats_stop(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        import asyncio
-
-        import linkedin_mcp_server.daemon.liveness as daemon_liveness_module
-        from linkedin_mcp_server.daemon.core import owner as lifecycle
-
-        class _Server:
-            should_exit = False
-
-        exited: list[object] = []
-        lock = DaemonLock(tmp_path)
-
-        async def exercise() -> None:
-            serving = asyncio.create_task(asyncio.sleep(3600))
-            canonical_read = asyncio.get_running_loop().create_future()
-            marker = daemon_liveness_module.new_call_id()
-            abandoned = daemon_owner.get_liveness().admit(
-                marker, lambda: asyncio.sleep(3600)
-            )
-            assert abandoned is not None
-            # All three above one timer tick, which on Windows is about 15 ms
-            # against well under a millisecond here. Below it, the poll that
-            # drives the expiry scan does not run at the cadence these numbers
-            # describe, and the test measures the platform instead of the code.
-            monkeypatch.setattr(lifecycle, "EXPIRY_SECONDS", 0.05)
-            monkeypatch.setattr(daemon_owner, "_STAND_DOWN_POLL_SECONDS", 0.02)
-            # Long, on purpose: the canonical read has to stay held for the
-            # whole window below, so reaching the commit stub is a real failure
-            # rather than the deadline arriving first.
-            monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 30.0)
-            monkeypatch.setattr(daemon_owner, "stand_down_reason", lambda: None)
-            monkeypatch.setattr(
-                daemon_owner, "_start_canonical_read", lambda root: canonical_read
-            )
-            monkeypatch.setattr(
-                daemon_owner,
-                "_commit_prepared_until",
-                lambda *args, **kwargs: pytest.fail(
-                    "reconciliation left its held canonical read"
-                ),
-            )
-            monkeypatch.setattr(
-                daemon_owner, "_exit_hard", lambda received: exited.append(received)
-            )
-            reconciling = asyncio.create_task(
-                daemon_owner._reconcile_uncertain_publication(
-                    tmp_path,
-                    new_instance_id(),
-                    server=_Server(),
-                    serving=serving,
-                    lock=lock,
-                )
-            )
-            try:
-                # A wall-clock budget rather than an iteration count. One
-                # iteration is a whole timer tick on Windows, so a fixed count
-                # is a different amount of real time on each platform.
-                waited = await _until(lambda: abandoned.cancelled(), seconds=10.0)
-                if reconciling.done():
-                    pytest.fail(f"reconciliation ended early: {_outcome(reconciling)}")
-                assert abandoned.cancelled(), (
-                    f"the abandoned call kept running for {waited:.2f}s"
-                )
-                reconciling.cancel()
-                with pytest.raises(RuntimeError, match="hard exit returned"):
-                    await reconciling
-            finally:
-                if not reconciling.done():
-                    reconciling.cancel()
-                    with contextlib.suppress(RuntimeError, asyncio.CancelledError):
-                        await reconciling
-                canonical_read.cancel()
-                abandoned.cancel()
-                serving.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await serving
-                with contextlib.suppress(asyncio.CancelledError):
-                    await abandoned
-
-        asyncio.run(exercise())
-
-        assert exited == [lock], "the hard exit did not receive the owner lock"
-
-    def test_stand_down_remains_active_during_reconciliation(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        import asyncio
-
-        class _Server:
-            should_exit = False
-
-        server = _Server()
-        exited: list[object] = []
-        lock = DaemonLock(tmp_path)
-        commits: list[str] = []
-
-        async def exercise() -> None:
-            # Stops once asked to, as uvicorn does. Turnover now stops the
-            # endpoint gracefully before the hard exit, and an endpoint that
-            # ignored `should_exit` would hold that stop for its whole bound.
-            async def serves() -> None:
-                while not server.should_exit:
-                    await asyncio.sleep(0.001)
-
-            serving = asyncio.create_task(serves())
-            canonical_read = asyncio.get_running_loop().create_future()
-            monkeypatch.setattr(daemon_owner, "_STAND_DOWN_POLL_SECONDS", 0.001)
-            monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 1.0)
-            monkeypatch.setattr(daemon_owner, "stand_down_reason", lambda: None)
-            monkeypatch.setattr(
-                daemon_owner, "_start_canonical_read", lambda root: canonical_read
-            )
-
-            async def commit(*args: object, **kwargs: object) -> None:
-                commits.append("attempted")
-
-            monkeypatch.setattr(daemon_owner, "_commit_prepared_until", commit)
-            monkeypatch.setattr(
-                daemon_owner, "_exit_hard", lambda received: exited.append(received)
-            )
-            reconciling = asyncio.create_task(
-                daemon_owner._reconcile_uncertain_publication(
-                    tmp_path,
-                    new_instance_id(),
-                    server=server,
-                    serving=serving,
-                    lock=lock,
-                )
-            )
-            try:
-                await asyncio.sleep(0)
-                daemon_owner.get_liveness().turn_over()
-                for _ in range(100):
-                    if reconciling.done():
-                        break
-                    await asyncio.sleep(0.001)
-                assert reconciling.done(), "the stand-down request was not noticed"
-                with pytest.raises(RuntimeError, match="hard exit returned"):
-                    await reconciling
-            finally:
-                if not reconciling.done():
-                    reconciling.cancel()
-                    with contextlib.suppress(RuntimeError, asyncio.CancelledError):
-                        await reconciling
-                canonical_read.cancel()
-                serving.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await serving
-
-        asyncio.run(exercise())
-
-        # More than one exit is possible only because the stand-in returns where
-        # the real one ends the process: the commit retry swallows `Exception`,
-        # so the next pass asks again. Every one of them still frees the election.
-        assert exited and all(candidate is lock for candidate in exited), (
-            "the hard exit did not receive the owner lock"
-        )
-        assert server.should_exit
-        assert commits == []
-
-    @pytest.mark.parametrize(
-        "outlives_the_drain",
-        [False, True],
-        ids=["finishes within the drain", "outlives the drain"],
-    )
-    def test_turnover_while_reconciling_drains_the_admitted_call(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        outlives_the_drain: bool,
-    ):
-        """Turnover during uncertain publication owes admitted calls the drain.
-
-        The endpoint is serving while its publication is still being
-        reconciled, so a frontend that already read the descriptor can have a
-        call admitted. Then the real stand-down callback that `_serve` hands the
-        server fires. The call is kept if it finishes inside the drain, and
-        answered as an unknown outcome if it does not; either way no further
-        publication is attempted and the owner still exits hard at the end.
-        The canonical read is doubled and never shows this generation, which is
-        reconciliation not yet succeeding.
-        """
-        import asyncio
-        from unittest.mock import MagicMock
-
-        from linkedin_mcp_server.daemon.core import owner as lifecycle
-        from linkedin_mcp_server.daemon.liveness import (
-            CALL_HEADER,
-            OwnerCallLivenessMiddleware,
-            new_call_id,
-        )
-        from linkedin_mcp_server.profile_lease import get_profile_lease
-        from linkedin_mcp_server.sequential_tool_middleware import (
-            SequentialToolExecutionMiddleware,
-        )
-
-        order: list[str] = []
-        observed: dict[str, object] = {}
-        monkeypatch.setattr(daemon_owner, "_STAND_DOWN_POLL_SECONDS", 0.01)
-        monkeypatch.setattr(daemon_owner, "_UNCERTAIN_PUBLICATION_RETRY_SECONDS", 0.02)
-        monkeypatch.setattr(
-            lifecycle, "TURNOVER_DRAIN_SECONDS", 0.3 if outlives_the_drain else 10.0
-        )
-        monkeypatch.setattr(daemon_owner, "stand_down_reason", lambda: None)
-        monkeypatch.setattr(
-            daemon_owner,
-            "_exit_hard",
-            lambda _lock: observed.setdefault("exited_with_call_done", call_done()),
-        )
-        marker = new_call_id()
-        monkeypatch.setattr(
-            "fastmcp.server.dependencies.get_http_headers",
-            lambda **_kw: {CALL_HEADER: marker},
-        )
-        lease = get_profile_lease(tmp_path / "held-profile")
-        monkeypatch.setattr(
-            "linkedin_mcp_server.sequential_tool_middleware.get_profile_lease",
-            lambda: lease,
-        )
-        calls: list[asyncio.Task[Any]] = []
-
-        def call_done() -> bool:
-            return bool(calls) and calls[0].done()
-
-        class _Server:
-            started = True
-            should_exit = False
-
-            def __init__(self, stand_down: Callable[[], None]) -> None:
-                self.stand_down = stand_down
-
-            async def serve(self, sockets: object = None) -> None:
-                # A second commit attempt means reconciliation is under way.
-                while order.count("commit") < 2:
-                    await asyncio.sleep(0.005)
-                release = asyncio.Event()
-
-                async def work(_context: Any) -> str:
-                    observed["ran"] = True
-                    if outlives_the_drain:
-                        await asyncio.sleep(3600)
-                    await release.wait()
-                    return "the result"
-
-                # Through the real serializing middleware, so the call's body
-                # visibly begins and a cut reports an unknown outcome.
-                sequential = SequentialToolExecutionMiddleware()
-
-                async def through_the_lock(context: Any) -> Any:
-                    return await sequential.on_call_tool(context, work)  # ty: ignore
-
-                context = MagicMock()
-                context.message.name = "send_message"
-                context.fastmcp_context = None
-                calls.append(
-                    asyncio.create_task(
-                        OwnerCallLivenessMiddleware().on_call_tool(
-                            context,
-                            through_the_lock,
-                        )
-                    )
-                )
-                while "ran" not in observed:
-                    await asyncio.sleep(0.001)
-                self.stand_down()
-                commits_at_turnover = order.count("commit")
-                if not outlives_the_drain:
-                    await asyncio.sleep(0.1)
-                    observed["stopped_while_running"] = self.should_exit
-                    release.set()
-                while not self.should_exit:
-                    await asyncio.sleep(0.005)
-                observed["done_when_stopped"] = calls[0].done()
-                observed["result"] = await asyncio.wait_for(calls[0], 5)
-                observed["commits_after_turnover"] = (
-                    order.count("commit") - commits_at_turnover
-                )
-
-        with pytest.raises(RuntimeError, match="hard exit returned"):
-            self._run_serve(
-                tmp_path,
-                monkeypatch,
-                order,
-                commit_error=OSError("rename reply was lost"),
-                canonical_after_reads=10**9,
-                server_factory=_Server,
-            )
-
-        assert observed["commits_after_turnover"] == 0
-        # Answered before the process went, on both paths.
-        assert observed["exited_with_call_done"] is True
-        result = observed["result"]
-        if outlives_the_drain:
-            # Cut at the end of the drain. The stop may be requested before the
-            # cancelled call has unwound, which is what uvicorn's connection
-            # grace is for, so only the answer and its timing are asserted.
-            assert getattr(result, "is_error", None) is True
-            assert getattr(result, "structured_content", {})["status"] == (
-                "outcome_unknown"
-            )
-        else:
-            assert observed["stopped_while_running"] is False
-            assert observed["done_when_stopped"] is True
-            assert result == "the result"
-
-    def test_persistent_ambiguity_holds_the_lock_until_cancelled_hard_exit(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        """A bounded release needs local coordination state tracked by #796."""
-        import asyncio
-
-        class _Server:
-            should_exit = False
-
-        attempts: list[str] = []
-        exited: list[object] = []
-        lock = DaemonLock(tmp_path)
-        recover = threading.Event()
-
-        async def read(root: Path, deadline: float) -> None:
-            return None
-
-        async def commit(
-            root: Path,
-            instance_id: str,
-            deadline: float,
-            *,
-            maintenance: Callable[[], None] | None = None,
-        ) -> None:
-            attempts.append(instance_id)
-            if recover.is_set():
-                return
-            raise OSError("persistent remote rename failure")
-
-        async def exercise() -> None:
-            serving = asyncio.create_task(asyncio.sleep(3600))
-            monkeypatch.setattr(
-                daemon_owner,
-                "_start_canonical_read",
-                lambda root: asyncio.create_task(read(root, 0)),
-            )
-            monkeypatch.setattr(daemon_owner, "_commit_prepared_until", commit)
-            monkeypatch.setattr(
-                daemon_owner, "_exit_hard", lambda received: exited.append(received)
-            )
-            monkeypatch.setattr(daemon_owner, "_UNCERTAIN_PUBLICATION_RETRY_SECONDS", 0)
-            reconciling = asyncio.create_task(
-                daemon_owner._reconcile_uncertain_publication(
-                    tmp_path,
-                    new_instance_id(),
-                    server=_Server(),
-                    serving=serving,
-                    lock=lock,
-                )
-            )
-            try:
-                for _ in range(100):
-                    if len(attempts) >= 3:
-                        break
-                    await asyncio.sleep(0)
-                assert len(attempts) >= 3
-                assert not reconciling.done()
-                assert exited == []
-
-                reconciling.cancel()
-                for _ in range(100):
-                    if reconciling.done():
-                        break
-                    await asyncio.sleep(0)
-                assert reconciling.done(), "cancellation was ignored"
-                with pytest.raises(RuntimeError, match="hard exit returned"):
-                    await reconciling
-            finally:
-                recover.set()
-                if not reconciling.done():
-                    for _ in range(100):
-                        if reconciling.done():
-                            break
-                        await asyncio.sleep(0)
-                serving.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await serving
-
-        asyncio.run(exercise())
-
-        assert exited == [lock], "the hard exit did not receive the owner lock"
-
-    def test_reconciliation_reuses_one_blocked_canonical_read(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        import asyncio
-
-        class _Server:
-            should_exit = False
-
-        reads: list[Path] = []
-        attempts: list[str] = []
-        lock = DaemonLock(tmp_path)
-        blocked = threading.Event()
-        release = threading.Event()
-
-        def read(root: Path) -> None:
-            reads.append(root)
-            blocked.set()
-            release.wait()
-            return None
-
-        async def commit(
-            root: Path,
-            instance_id: str,
-            deadline: float,
-            *,
-            maintenance: Callable[[], None] | None = None,
-        ) -> None:
-            attempts.append(instance_id)
-            raise OSError("persistent remote rename failure")
-
-        async def exercise() -> None:
-            serving = asyncio.create_task(asyncio.sleep(3600))
-            monkeypatch.setattr(daemon_owner.daemon_descriptor, "read", read)
-            monkeypatch.setattr(daemon_owner, "_commit_prepared_until", commit)
-            # Above one timer tick: this bounds each round's wait on the read
-            # that never finishes, and below a tick a round takes whatever the
-            # platform's timer happens to cost rather than what it asks for.
-            monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 0.05)
-            monkeypatch.setattr(daemon_owner, "_UNCERTAIN_PUBLICATION_RETRY_SECONDS", 0)
-            monkeypatch.setattr(daemon_owner, "_exit_hard", lambda received: None)
-            reconciling = asyncio.create_task(
-                daemon_owner._reconcile_uncertain_publication(
-                    tmp_path,
-                    new_instance_id(),
-                    server=_Server(),
-                    serving=serving,
-                    lock=lock,
-                )
-            )
-            try:
-                waited = await _until(
-                    lambda: blocked.is_set() and len(attempts) >= 3, seconds=10.0
-                )
-                if reconciling.done():
-                    pytest.fail(f"reconciliation ended early: {_outcome(reconciling)}")
-                assert blocked.is_set()
-                assert len(attempts) >= 3, (
-                    f"only {len(attempts)} commit attempts in {waited:.2f}s"
-                )
-                assert reads == [tmp_path]
-                reconciling.cancel()
-                with pytest.raises(RuntimeError, match="hard exit returned"):
-                    await reconciling
-            finally:
-                release.set()
-                if not reconciling.done():
-                    reconciling.cancel()
-                    with contextlib.suppress(RuntimeError, asyncio.CancelledError):
-                        await reconciling
-                serving.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await serving
-
-        asyncio.run(exercise())
-
-    def test_uncertain_hard_exit_performs_no_diagnostic_io(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        exited: list[object] = []
-        lock = DaemonLock(tmp_path)
-        monkeypatch.setattr(
-            daemon_owner.logger,
-            "error",
-            lambda *a, **k: pytest.fail("hard exit attempted a diagnostic write"),
-        )
-        monkeypatch.setattr(
-            daemon_owner, "_exit_hard", lambda received: exited.append(received)
-        )
-
-        with pytest.raises(RuntimeError, match="hard exit returned"):
-            daemon_owner._exit_uncertain_publication("already logged", lock=lock)
-
-        assert exited == [lock], "the hard exit did not receive the owner lock"
-
     def test_hard_exit_skips_logging_shutdown(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(
             daemon_owner.logging,
@@ -8088,33 +7469,299 @@ class TestPublishingLast:
 
         assert exited.value.code == 1
 
-    def test_permission_error_with_stale_state_remains_uncertain(
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            OSError("rename reply was lost"),
+            PermissionError("rename retry observed changed permissions"),
+            KeyboardInterrupt(),
+        ],
+        ids=["lost reply", "changed permissions", "interrupted"],
+    )
+    def test_an_ambiguous_commit_exits_without_serving(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: BaseException,
+    ):
+        """A rename that may have taken effect ends the owner, unpublished.
+
+        Only the first attempt fails, so an owner that tried again would
+        publish and serve. FAILED rather than ABORTED, because ABORTED tells the
+        frontend nothing was published; the prepared state and the token stay
+        where a successor's election finds them.
+        """
+        from linkedin_mcp_server.daemon.core.owner import Retirement
+
+        order: list[str] = []
+        monkeypatch.setattr(
+            daemon_owner.daemon_descriptor,
+            "read",
+            lambda root: pytest.fail("an ambiguous commit was reconciled"),
+        )
+        monkeypatch.setattr(
+            daemon_owner.daemon_descriptor,
+            "discard_prepared",
+            lambda *a: pytest.fail("an ambiguous commit removed its prepared state"),
+        )
+        monkeypatch.setattr(
+            daemon_owner.logger,
+            "warning",
+            lambda *args, **kwargs: order.append("diagnostic"),
+        )
+        exited: list[object] = []
+
+        def exit_hard(lock: object) -> NoReturn:
+            exited.append(lock)
+            raise _ProcessEnded
+
+        monkeypatch.setattr(daemon_owner, "_exit_hard", exit_hard)
+
+        # Even after the endpoint stopped cleanly: the error would otherwise
+        # travel on to `main`, which logs it with the lock still held.
+        with pytest.raises(_ProcessEnded):
+            self._run_serve(tmp_path, monkeypatch, order, commit_failures=[failure])
+
+        assert order == [
+            "probe",
+            "prepare",
+            "prepared",
+            "control",
+            "commit",
+            "failed",
+            "diagnostic",
+        ]
+        liveness = daemon_owner.get_liveness()
+        assert liveness.state.retirement is Retirement.UNCERTAIN_PUBLICATION
+        assert not liveness.admitting
+        assert len(exited) == 1 and isinstance(exited[0], DaemonLock)
+
+    def test_a_call_reaching_an_ambiguous_owner_is_refused_unrun(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        order: list[str] = []
-        monkeypatch.setattr(daemon_owner.daemon_descriptor, "read", lambda root: None)
+        """A frontend that read the descriptor the rename may have published.
 
-        outcome = self._run_serve(
-            tmp_path,
-            monkeypatch,
-            order,
-            commit_failures=[
-                PermissionError("rename retry observed changed permissions")
-            ],
+        Its call arrives on the first turn the endpoint gets after the failed
+        rename, through the real admission middleware. It is refused with the
+        owner's signed retiring answer, which the frontend reads as never sent,
+        so its call core looks for a successor and retries there, or reports
+        the call lost when none is found. Nothing reaches the tool.
+        """
+        import asyncio
+        from unittest.mock import MagicMock
+
+        from linkedin_mcp_server.daemon import proxy
+        from linkedin_mcp_server.daemon.core import call as calls
+        from linkedin_mcp_server.daemon.liveness import (
+            CALL_HEADER,
+            OwnerCallLivenessMiddleware,
+            new_call_id,
         )
 
-        assert outcome == 0
-        assert order[-3:] == ["commit", "live", "committed"]
-        assert "discard" not in order
+        order: list[str] = []
+        announced: list[str] = []
+        ran: list[str] = []
+        answers: list[object] = []
+        marker = new_call_id()
+        monkeypatch.setattr(
+            "fastmcp.server.dependencies.get_http_headers",
+            lambda **_kw: {CALL_HEADER: marker},
+        )
 
-    def test_preflight_failure_aborts_without_canonical_reconciliation(
+        class _Server:
+            started = True
+            should_exit = False
+
+            def __init__(self, stand_down: Callable[[], None]) -> None:
+                pass
+
+            async def serve(self, sockets: object = None) -> None:
+                while "commit" not in order:
+                    await asyncio.sleep(0)
+
+                async def tool(_context: Any) -> str:
+                    ran.append("the tool")
+                    return "the result"
+
+                context = MagicMock()
+                context.message.name = "send_message"
+                context.fastmcp_context = None
+                middleware = OwnerCallLivenessMiddleware()
+                answers.append(await middleware.on_call_tool(context, tool))  # ty: ignore
+                while not self.should_exit:
+                    await asyncio.sleep(0)
+
+        def exit_hard(lock: object) -> NoReturn:
+            raise _ProcessEnded
+
+        monkeypatch.setattr(daemon_owner, "_exit_hard", exit_hard)
+
+        with pytest.raises(_ProcessEnded):
+            self._run_serve(
+                tmp_path,
+                monkeypatch,
+                order,
+                commit_error=OSError("rename reply was lost"),
+                server_factory=_Server,
+                announced=announced,
+            )
+
+        assert ran == []
+        [answer] = answers
+        attachment = SimpleNamespace(
+            descriptor=SimpleNamespace(instance_id=announced[-1])
+        )
+        refusal = proxy._owner_refused(answer, cast(Any, attachment))
+        assert refusal is proxy.OwnerFailure.RETIRING
+
+        def recovered(found: bool) -> list[calls.Effect]:
+            call, [attempt] = calls.arrive(now=0.0, budget=60.0, sign_in_share=0.5)
+            assert isinstance(attempt, calls.Attempt)
+            lost = calls.OwnerLost(
+                attempt.op, 1.0, announced[-1], True, (announced[-1], refusal)
+            )
+            call, effects = calls.on_event(call, lost)
+            [recover] = [e for e in effects if isinstance(e, calls.Recover)]
+            return calls.on_event(call, calls.Recovered(recover.op, 2.0, found))[1]
+
+        [retry] = recovered(True)
+        assert isinstance(retry, calls.Attempt)
+        assert retry.kind is calls.AttemptKind.RETRY
+        [lost] = recovered(False)
+        assert isinstance(lost, calls.ReportLost)
+
+    def test_an_ambiguous_owner_whose_endpoint_will_not_stop_still_exits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The failed-startup bound holds, and the hard exit frees the election."""
+        import asyncio
+
+        exited: list[object] = []
+        # Ignores `should_exit`, but gives up eventually, so an owner that
+        # serves on fails this case instead of hanging it.
+        gives_up = time.monotonic() + 5.0
+
+        class _Stubborn:
+            started = True
+            should_exit = False
+
+            def __init__(self, stand_down: Callable[[], None]) -> None:
+                pass
+
+            async def serve(self, sockets: object = None) -> None:
+                while time.monotonic() < gives_up:
+                    await asyncio.sleep(0.001)
+
+        def exit_hard(lock: object) -> None:
+            exited.append(lock)
+            # The watchdog shares this bound and may fire first, from its own
+            # thread, where raising would only print; the owner's exit ends it.
+            if threading.current_thread() is threading.main_thread():
+                raise _ProcessEnded
+
+        monkeypatch.setattr(daemon_owner, "_FAILED_STARTUP_SHUTDOWN_SECONDS", 0.05)
+        monkeypatch.setattr(daemon_owner, "_exit_hard", exit_hard)
+        started = time.monotonic()
+
+        with pytest.raises(_ProcessEnded):
+            self._run_serve(
+                tmp_path,
+                monkeypatch,
+                [],
+                commit_error=OSError("rename reply was lost"),
+                server_factory=_Stubborn,
+            )
+
+        assert time.monotonic() - started < 2.0
+        # The first exit ends a real process; later ones are reached only
+        # because the test's exit returns control.
+        assert exited and isinstance(exited[0], DaemonLock)
+
+    def test_an_ambiguous_owner_whose_log_stalls_still_exits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The log sits on the storage that stalled the rename.
+
+        FAILED is already out when the diagnostic blocks, and the hard exit
+        arrives from the watchdog, since no await can interrupt the write.
+        """
+        order: list[str] = []
+        exited: list[tuple[threading.Thread, object]] = []
+        released = threading.Event()
+
+        def exit_hard(lock: object) -> None:
+            exited.append((threading.current_thread(), lock))
+            released.set()
+            # The watchdog's exit ends a real process from its own thread; here
+            # it only releases the log, and the owner's own exit ends the case.
+            if threading.current_thread() is threading.main_thread():
+                raise _ProcessEnded
+
+        def stalled_log(*args: object, **kwargs: object) -> None:
+            order.append("diagnostic")
+            # Its own deadline, so a missing watchdog fails instead of hanging.
+            released.wait(5.0)
+
+        monkeypatch.setattr(daemon_owner, "_FAILED_STARTUP_SHUTDOWN_SECONDS", 0.05)
+        monkeypatch.setattr(daemon_owner, "_exit_hard", exit_hard)
+        monkeypatch.setattr(daemon_owner.logger, "warning", stalled_log)
+        started = time.monotonic()
+
+        with pytest.raises(_ProcessEnded):
+            self._run_serve(
+                tmp_path,
+                monkeypatch,
+                order,
+                commit_error=OSError("rename reply was lost"),
+            )
+
+        assert time.monotonic() - started < 2.0
+        assert order[-2:] == ["failed", "diagnostic"]
+        [(thread, lock), *_] = exited
+        assert thread is not threading.main_thread()
+        assert isinstance(lock, DaemonLock)
+
+    def test_an_ambiguous_owner_cancelled_while_stopping_still_exits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A shutdown signal that cancels the stop does not skip the hard exit."""
+        import asyncio
+
+        exited: list[object] = []
+        stops: list[object] = []
+
+        async def cancelled_stop(*args: object, **kwargs: object) -> None:
+            # Only the first stop is cancelled; the outer handler's own stop is
+            # reached only because the test's exit raises instead of ending.
+            stops.append(args)
+            if len(stops) == 1:
+                raise asyncio.CancelledError
+
+        def exit_hard(lock: object) -> NoReturn:
+            exited.append(lock)
+            raise _ProcessEnded
+
+        monkeypatch.setattr(daemon_owner, "_stop_within", cancelled_stop)
+        monkeypatch.setattr(daemon_owner, "_exit_hard", exit_hard)
+
+        with pytest.raises(_ProcessEnded):
+            self._run_serve(
+                tmp_path,
+                monkeypatch,
+                [],
+                commit_error=OSError("rename reply was lost"),
+            )
+
+        assert len(exited) == 1 and isinstance(exited[0], DaemonLock)
+
+    def test_preflight_failure_aborts_without_reading_canonical_state(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         order: list[str] = []
         monkeypatch.setattr(
             daemon_owner.daemon_descriptor,
             "read",
-            lambda root: pytest.fail("a preflight failure triggered reconciliation"),
+            lambda root: pytest.fail("a preflight failure read canonical state"),
         )
         monkeypatch.setattr(
             daemon_owner.logger,
@@ -8143,7 +7790,7 @@ class TestPublishingLast:
             "aborted",
         ]
 
-    def test_initial_state_preparation_failure_aborts_without_reconciliation(
+    def test_initial_state_preparation_failure_aborts_without_reading_state(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         order: list[str] = []
@@ -8161,7 +7808,7 @@ class TestPublishingLast:
         monkeypatch.setattr(
             daemon_owner.daemon_descriptor,
             "read",
-            lambda root: pytest.fail("state preparation failure was reconciled"),
+            lambda root: pytest.fail("state preparation failure read canonical state"),
         )
         monkeypatch.setattr(
             daemon_owner.logger,

@@ -168,6 +168,72 @@ def _wait_gone(*pids: int, within: float = 5.0) -> bool:
         time.sleep(0.01)
 
 
+def _first_line(process: subprocess.Popen[Any], within: float = 30.0) -> str:
+    # The whole line under one deadline: readiness says only that some bytes
+    # arrived, and a process can stall before the newline. Reads the pipe
+    # beneath any text wrapper, so the wrapper must not be read afterwards.
+    assert process.stdout is not None
+    fd = process.stdout.fileno()
+    deadline = time.monotonic() + within
+    line = b""
+    while not line.endswith(b"\n"):
+        left = deadline - time.monotonic()
+        assert left > 0, f"{process.pid} never wrote its first line"
+        ready, _, _ = select.select([fd], [], [], left)
+        if ready:
+            chunk = os.read(fd, 64)
+            assert chunk, f"{process.pid} closed its output before a line"
+            line += chunk
+    return line.decode()
+
+
+def _acquire_within(lease: ProfileLease, within: float = 30.0) -> None:
+    # The crash guardian holds the profile until a process scan answers, and a
+    # loaded host can keep ps past its bound for as long as the load lasts.
+    # Nothing in the guardian ends that hold, so the wait for it is
+    # a deadline, not a count of polls that lasts a few seconds.
+    deadline = time.monotonic() + within
+    while not lease.try_acquire():
+        if time.monotonic() >= deadline:
+            pytest.fail("the crash guardian did not release the profile")
+        time.sleep(0.01)
+
+
+def _marked_environment(marker: str) -> dict[str, str]:
+    # The crash guardian inherits its owner's environment, so a marker given
+    # to the owner names the guardian too, which no argv of it does.
+    return {**os.environ, process_tree._BROWSER_PROCESS_MARKER: marker}
+
+
+def _end_marked(*markers: str) -> None:
+    # Ends whatever still carries one of *markers*. The guardian and a detached
+    # browser lead their own sessions, so the owner's group never reaches them,
+    # and a stalled owner may never name them. A PID reported earlier is no
+    # identity either: once its process exits, the number can belong to anyone.
+    # A guardian left running keeps the profile locked after the test.
+    # One marker at a time, parents first: a driver still alive between a
+    # scan and its kill could launch a browser the scan never saw.
+    # Failures are reported only after every marker, so one marker's failure
+    # never skips the cleanup of the next.
+    deadline = time.monotonic() + 30.0
+    failures: list[str] = []
+    for marker in markers:
+        while (
+            not (scan := process_tree._scan_marked_posix_processes(marker)).conclusive
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.1)
+        if not scan.conclusive:
+            failures.append("no process scan answered, so a marked process may survive")
+        for pid in scan.processes:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+        if not _wait_gone(*scan.processes):
+            failures.append("a marked process outlived SIGKILL")
+    if failures:
+        pytest.fail("; ".join(failures))
+
+
 @pytest.mark.parametrize(("exit_code", "expected"), [(259, True), (7, False)])
 def test_windows_liveness_query_does_not_signal(
     exit_code: int, expected: bool, monkeypatch: pytest.MonkeyPatch
@@ -1536,12 +1602,15 @@ def test_marked_group_kill_revalidates_kernel_identity(
     monkeypatch.setattr(
         process_tree,
         "_posix_process_rows",
-        lambda: {457: (1, 456, "same-member", "S"), 790: (1, 789, None, "S")},
+        lambda _deadline=None: {
+            457: (1, 456, "same-member", "S"),
+            790: (1, 789, None, "S"),
+        },
     )
     monkeypatch.setattr(
         process_tree,
         "_scan_marked_posix_processes",
-        lambda _marker: process_tree._MarkerScan((), True),
+        lambda _marker, _deadline=None: process_tree._MarkerScan((), True),
     )
     monkeypatch.setattr(process_tree, "process_group_exists", lambda group: True)
     monkeypatch.setattr(os, "getpgrp", lambda: 100)
@@ -1605,12 +1674,12 @@ def test_marked_kill_rescans_for_later_browser_groups(
     monkeypatch.setattr(
         process_tree,
         "_scan_marked_posix_processes",
-        lambda marker: process_tree._MarkerScan((900,), True),
+        lambda _marker, _deadline=None: process_tree._MarkerScan((900,), True),
     )
     monkeypatch.setattr(
         process_tree,
         "_posix_process_rows",
-        lambda: {900: (1, 789, "late-member", "S")},
+        lambda _deadline=None: {900: (1, 789, "late-member", "S")},
     )
     monkeypatch.setattr(process_tree, "_kernel_start_identity", lambda process: None)
     monkeypatch.setattr(process_tree, "process_group_exists", lambda group: True)
@@ -1651,7 +1720,7 @@ def test_group_wait_polls_until_targeted_groups_disappear(
     monkeypatch.setattr(
         process_tree,
         "_posix_process_rows",
-        lambda: {457: (1, 456, "member-start", "S")},
+        lambda _deadline=None: {457: (1, 456, "member-start", "S")},
     )
     monkeypatch.setattr(
         process_tree, "process_group_exists", lambda group: next(checks)
@@ -1685,7 +1754,9 @@ def test_group_wait_stops_when_a_group_identity_is_reused(
             )
         },
     )
-    monkeypatch.setattr(process_tree, "_posix_process_rows", lambda: next(snapshots))
+    monkeypatch.setattr(
+        process_tree, "_posix_process_rows", lambda _deadline=None: next(snapshots)
+    )
     monkeypatch.setattr(process_tree, "process_group_exists", lambda _group: True)
     monkeypatch.setattr(process_tree.time, "sleep", slept.append)
 
@@ -1772,7 +1843,7 @@ class TestOneLaunchesResidualBrowser:
         monkeypatch.setattr(
             process_tree,
             "_scan_marked_posix_processes",
-            lambda _m: process_tree._MarkerScan((), True),
+            lambda _m, _deadline=None: process_tree._MarkerScan((), True),
         )
         monkeypatch.setattr(process_tree, "_kernel_start_identity", lambda _p: None)
         monkeypatch.setattr(os, "getpgrp", lambda: 100)
@@ -1802,7 +1873,7 @@ class TestOneLaunchesResidualBrowser:
         monkeypatch.setattr(
             process_tree,
             "_posix_process_rows",
-            lambda: {
+            lambda _deadline=None: {
                 457: (1, 456, "browser-member", "S"),
                 790: (1, 789, "installer-member", "S"),
             },
@@ -1835,7 +1906,9 @@ class TestOneLaunchesResidualBrowser:
             },
         )
         monkeypatch.setattr(
-            process_tree, "_posix_process_rows", lambda: {101: (1, 100, "member", "S")}
+            process_tree,
+            "_posix_process_rows",
+            lambda _deadline=None: {101: (1, 100, "member", "S")},
         )
         monkeypatch.setattr(process_tree, "process_group_exists", lambda _group: True)
         monkeypatch.setattr(os, "killpg", lambda group, _sig: killed.append(group))
@@ -1861,7 +1934,7 @@ class TestOneLaunchesResidualBrowser:
         monkeypatch.setattr(
             process_tree,
             "_posix_process_rows",
-            lambda: {457: (1, 456, "browser-member", "S")},
+            lambda _deadline=None: {457: (1, 456, "browser-member", "S")},
         )
         monkeypatch.setattr(process_tree, "process_group_exists", lambda _group: True)
         monkeypatch.setattr(os, "killpg", lambda group, _sig: killed.append(group))
@@ -1880,12 +1953,12 @@ class TestOneLaunchesResidualBrowser:
         monkeypatch.setattr(
             process_tree,
             "_scan_marked_posix_processes",
-            lambda _m: process_tree._MarkerScan((900,), True),
+            lambda _m, _deadline=None: process_tree._MarkerScan((900,), True),
         )
         monkeypatch.setattr(
             process_tree,
             "_posix_process_rows",
-            lambda: {900: (1, 100, "owner-group", "S")},
+            lambda _deadline=None: {900: (1, 100, "owner-group", "S")},
         )
         monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
 
@@ -1900,7 +1973,9 @@ class TestOneLaunchesResidualBrowser:
         monkeypatch.setattr(
             process_tree,
             "_scan_marked_posix_processes",
-            lambda _m: pytest.fail("scanned for a marker no browser was given"),
+            lambda _m, _deadline=None: pytest.fail(
+                "scanned for a marker no browser was given"
+            ),
         )
 
         assert process_tree.drain_browser_process_marker("browser") is True
@@ -1918,7 +1993,7 @@ class TestOneLaunchesResidualBrowser:
         monkeypatch.setattr(
             process_tree,
             "_scan_marked_posix_processes",
-            lambda _m: process_tree._MarkerScan((), False),
+            lambda _m, _deadline=None: process_tree._MarkerScan((), False),
         )
         monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
 
@@ -2022,6 +2097,121 @@ class TestTheMarkerScanSeparatesEmptyFromUnanswerable:
             process_tree._MarkerScan((902,), True)
         )
 
+    def test_a_ps_slowed_by_load_still_answers(self, monkeypatch: pytest.MonkeyPatch):
+        """A slow ``ps`` is still a working one, and its answer is still proof.
+
+        Printing every process's environment takes up to about a second on an
+        unloaded Mac, and load stretches it past that. Reading such a scan as
+        unanswerable made a drain report a clean close as unconfirmed, which
+        keeps the profile until the server restarts.
+        """
+        self._bsd(monkeypatch)
+        monkeypatch.setattr(process_tree.Path, "is_file", lambda _self: True)
+        answers_after = 3.0
+        rows = b"  902 /chromium LINKEDIN_MCP_BROWSER_PROCESS_MARKER=marker\n"
+
+        def run(*_args: Any, timeout: float, **_kwargs: Any) -> Any:
+            # What `subprocess.run` does with a child that needs longer than it
+            # is given, without spending the seconds.
+            if timeout < answers_after:
+                raise subprocess.TimeoutExpired(cmd="ps", timeout=timeout)
+            return SimpleNamespace(stdout=rows)
+
+        monkeypatch.setattr(process_tree.subprocess, "run", run)
+
+        assert process_tree._scan_marked_posix_processes("marker") == (
+            process_tree._MarkerScan((902,), True)
+        )
+
+    @pytest.mark.parametrize(
+        ("group", "ancestry_delays", "marker_delays", "proved", "unscanned"),
+        [
+            pytest.param(None, (0.1,), (3.0, 6.0), False, True, id="marker-proof"),
+            pytest.param(456, (0.1,), (3.0, 6.0), False, False, id="marker-wait"),
+            pytest.param(100, (0.01, 1.0), (4.95,), False, True, id="ancestry-kill"),
+            pytest.param(
+                456, (0.01, 0.01, 1.0), (4.95,), False, False, id="ancestry-wait"
+            ),
+            pytest.param(100, (0.005, 1.0), (4.995,), False, False, id="pause-proof"),
+            pytest.param(
+                456, (0.005, 0.0, 1.0), (4.995,), False, False, id="pause-wait"
+            ),
+            pytest.param(None, (0.1,), (3.0,), True, False, id="slow-but-conclusive"),
+        ],
+    )
+    def test_slow_scans_do_not_stretch_the_drain_past_its_budget(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        group: int | None,
+        ancestry_delays: tuple[float, ...],
+        marker_delays: tuple[float, ...],
+        proved: bool,
+        unscanned: bool,
+    ):
+        """Ancestry, marker scans and polling all spend the same close budget.
+
+        Both scanners run for real; only the subprocess waits and the clock
+        are simulated. The pause cases leave less than a polling interval,
+        and the ancestry cases leave less than a snapshot's usual allowance.
+        This bounds waits we control, not OS process creation or scheduling.
+
+        *unscanned* is whether the drain may say it could not scan. A pause
+        that spends the budget must end the drain on the scan that answered,
+        rather than on a further round whose scans no longer may run.
+        """
+        self._bsd(monkeypatch)
+        monkeypatch.setattr(process_tree.Path, "is_file", lambda _self: True)
+        now = 0.0
+        ancestry = chain(ancestry_delays, repeat(ancestry_delays[-1]))
+        markers = chain(marker_delays, repeat(marker_delays[-1]))
+        rows = b"  902 /chromium LINKEDIN_MCP_BROWSER_PROCESS_MARKER=browser\n"
+        killed: list[int] = []
+
+        def run(args: list[str], *, timeout: float, **_kwargs: Any) -> Any:
+            nonlocal now
+            assert now < process_tree._MARKER_DRAIN_SECONDS, (
+                "A drain must not start another ps after its deadline"
+            )
+            marked = "eww" in args
+            need = next(markers if marked else ancestry)
+            if need > timeout:
+                now += timeout
+                raise subprocess.TimeoutExpired(cmd="ps", timeout=timeout)
+            now += need
+            if marked:
+                return SimpleNamespace(stdout=rows if group is not None else b"")
+            return SimpleNamespace(stdout=f"902 1 {group} S\n" if group else "")
+
+        def sleep(seconds: float) -> None:
+            nonlocal now
+            now += seconds
+
+        monkeypatch.setattr(process_tree.subprocess, "run", run)
+        # A shim rather than a patch on ``time`` itself, which pytest and
+        # asyncio read as well.
+        monkeypatch.setattr(
+            process_tree, "time", SimpleNamespace(monotonic=lambda: now, sleep=sleep)
+        )
+        monkeypatch.setattr(process_tree, "_registered_browser_markers", {"browser"})
+        monkeypatch.setattr(process_tree, "_registered_posix_groups", {})
+        monkeypatch.setattr(process_tree, "process_group_exists", lambda _group: True)
+        monkeypatch.setattr(
+            process_tree, "_kernel_start_identity", lambda _p: "browser-member"
+        )
+        monkeypatch.setattr(os, "getpgrp", lambda: 100)
+        monkeypatch.setattr(os, "getpgid", lambda _pid: group)
+        monkeypatch.setattr(os, "killpg", lambda group, _sig: killed.append(group))
+        monkeypatch.setattr(os, "waitpid", lambda _pid, _options: (0, 0))
+
+        with caplog.at_level(logging.ERROR, logger=process_tree.__name__):
+            assert process_tree.drain_browser_process_marker("browser") is proved
+        assert now <= process_tree._MARKER_DRAIN_SECONDS + 1e-9, (
+            "Ancestry scans and polling must share the marker drain's deadline"
+        )
+        assert killed == ([456] if group == 456 else [])
+        assert ("could not be scanned" in caplog.text) is unscanned
+
     @pytest.mark.parametrize("mode", ["missing", "failing"])
     def test_an_unusable_ps_is_reported_once_rather_than_once_per_poll(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, mode
@@ -2051,19 +2241,24 @@ class TestTheMarkerScanSeparatesEmptyFromUnanswerable:
 
         monkeypatch.setattr(process_tree, "_registered_browser_markers", {"browser"})
         monkeypatch.setattr(process_tree, "_registered_posix_groups", {})
-        monkeypatch.setattr(process_tree, "_posix_process_rows", dict)
+        monkeypatch.setattr(
+            process_tree, "_posix_process_rows", lambda _deadline=None: {}
+        )
         monkeypatch.setattr(os, "getpgrp", lambda: 100)
         # A shim rather than a patch on the real module: ``process_tree.time``
         # *is* ``time``, so replacing ``monotonic`` there hands a scripted clock
         # to pytest and asyncio as well and the run never ends.
         #
-        # One reading sets the deadline, then one per round decides whether to
-        # poll again. Three rounds of polling, then a clock past the deadline.
-        clock = chain([0.0] * 4, repeat(100.0))
+        # Only the poll pause moves this clock, so the drain polls for its
+        # whole budget however often it reads the time.
+        now = 0.0
+
+        def sleep(seconds: float) -> None:
+            nonlocal now
+            now += seconds
+
         monkeypatch.setattr(
-            process_tree,
-            "time",
-            SimpleNamespace(monotonic=lambda: next(clock), sleep=lambda _seconds: None),
+            process_tree, "time", SimpleNamespace(monotonic=lambda: now, sleep=sleep)
         )
 
         # Counted around the real scan rather than around ``ps``, so a missing
@@ -2071,10 +2266,12 @@ class TestTheMarkerScanSeparatesEmptyFromUnanswerable:
         scans = 0
         real_scan = process_tree._scan_marked_posix_processes
 
-        def counting(marker: str) -> process_tree._MarkerScan:
+        def counting(
+            marker: str, deadline: float | None = None
+        ) -> process_tree._MarkerScan:
             nonlocal scans
             scans += 1
-            return real_scan(marker)
+            return real_scan(marker, deadline)
 
         monkeypatch.setattr(process_tree, "_scan_marked_posix_processes", counting)
 
@@ -2103,10 +2300,10 @@ class TestTheMarkerScanSeparatesEmptyFromUnanswerable:
         is the one assertion that ``ps`` is where the code looks for it and
         speaks the flags it is given.
 
-        A loaded host can hold ``ps`` past its one-second snapshot bound, and
-        the scan then rightly answers inconclusive. So the scan is asked again
-        within the drain's own budget, the way a drain would ask it; a ``ps``
-        that never answers still fails at the deadline.
+        A loaded host can hold ``ps`` past the scan's bound, and the scan then
+        rightly answers inconclusive. So the scan is asked again within the
+        drain's own budget, the way a drain would ask it; a ``ps`` that never
+        answers still fails at the deadline.
         """
         marker = secrets.token_hex(32)
         deadline = time.monotonic() + process_tree._MARKER_DRAIN_SECONDS
@@ -2143,23 +2340,6 @@ def test_marker_drain_buries_a_group_whose_leader_already_exited():
     leaders: list[subprocess.Popen[bytes]] = []
     children: list[int] = []
 
-    def first_line(leader: subprocess.Popen[bytes], within: float) -> bytes:
-        # The whole line under one deadline: readiness says only that some
-        # bytes arrived, and a leader can stall before the newline.
-        assert leader.stdout is not None
-        fd = leader.stdout.fileno()
-        deadline = time.monotonic() + within
-        line = b""
-        while not line.endswith(b"\n"):
-            left = deadline - time.monotonic()
-            assert left > 0, "the leader never named its child"
-            ready, _, _ = select.select([fd], [], [], left)
-            if ready:
-                chunk = os.read(fd, 64)
-                assert chunk, "the leader closed its output without a child"
-                line += chunk
-        return line
-
     def launch(marker: str) -> tuple[int, int]:
         environment = dict(os.environ)
         environment[process_tree._BROWSER_PROCESS_MARKER] = marker
@@ -2170,7 +2350,7 @@ def test_marker_drain_buries_a_group_whose_leader_already_exited():
             env=environment,
         )
         leaders.append(leader)
-        child_pid = int(first_line(leader, 30.0))
+        child_pid = int(_first_line(leader))
         children.append(child_pid)
         # The leader exits at once, exactly as it does once Patchright has
         # closed the browser it spawned; its group outlives it.
@@ -2543,18 +2723,21 @@ daemon_owner._exit_hard(None)
         text=True,
     )
     try:
-        for _ in range(500):
-            if marker.exists():
-                break
-            if process.poll() is not None:
+        # A deadline, not a count of polls: the child imports the daemon before
+        # it starts anything, which a loaded host stretches to seconds (see
+        # docs/daemon-measurements.md). The marker is checked again once an
+        # exit is seen, because the child exits right after writing it.
+        deadline = time.monotonic() + 30.0
+        while not marker.exists():
+            if process.poll() is not None and not marker.exists():
                 stderr = process.stderr.read() if process.stderr is not None else ""
                 pytest.fail(
                     "the daemon exited before creating its descendant: "
                     f"stderr={stderr!r}"
                 )
+            if time.monotonic() >= deadline:
+                pytest.fail("the daemon did not create its descendant")
             time.sleep(0.01)
-        else:
-            pytest.fail("the daemon did not create its descendant")
 
         descendant_pid = int(marker.read_text())
         assert process.wait(timeout=30) == 1
@@ -2627,13 +2810,41 @@ def test_crash_guardian_requires_a_quiet_interval_after_an_empty_scan(
     assert killed == [456]
 
 
+def test_crash_guardian_scan_waits_for_a_ps_slowed_by_load(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A slow ``ps`` still answers, and the guardian has to wait for it.
+
+    A scan cut off by its bound is asked again, so a bound that a loaded host's
+    ``ps`` keeps exceeding never lets the drain see the browser at all: the
+    profile stays held and the browser keeps running.
+    """
+    answers_after = 3.0
+    rows = b"  902   902 /chromium LINKEDIN_MCP_BROWSER_PROCESS_MARKER=marker\n"
+
+    def run(*_args: Any, timeout: float, **_kwargs: Any) -> Any:
+        # What `subprocess.run` does with a child that needs longer than it is
+        # given, without spending the seconds.
+        if timeout < answers_after:
+            raise subprocess.TimeoutExpired(cmd="ps", timeout=timeout)
+        return SimpleNamespace(stdout=rows)
+
+    monkeypatch.setattr(process_guardian.Path, "is_file", lambda _self: True)
+    monkeypatch.setattr(process_guardian.subprocess, "run", run)
+
+    assert process_guardian._ps_groups({"marker"}) == {902}
+
+
 @_POSIX_ONLY
 def test_crash_guardian_holds_profile_until_detached_browser_is_gone(
     tmp_path: Path,
 ):
     auth_root = tmp_path / "auth"
+    marker = secrets.token_hex(32)
+    browser_marker = secrets.token_hex(32)
     script = r"""
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -2651,7 +2862,12 @@ auth_root.mkdir(parents=True)
 lease = ProfileLease(auth_root)
 assert lease.try_acquire()
 start_browser_guardian(lease.guardian_fd())
+# The test chooses the browser's marker value, so its teardown finds the
+# browser even if this owner stalls before reporting it. Sized as asked, so a
+# production marker of the wrong length still fails the assert below.
+secrets.token_hex = lambda nbytes: sys.argv[2][: 2 * nbytes]
 marker, marker_environment = new_browser_process_marker()
+assert marker == sys.argv[2]
 environment = dict(os.environ)
 environment.update(marker_environment)
 browser = subprocess.Popen(
@@ -2667,31 +2883,24 @@ print(os.getpid(), browser.pid, flush=True)
 time.sleep(600)
 """
     process = subprocess.Popen(
-        [sys.executable, "-c", script, str(auth_root)],
+        [sys.executable, "-c", script, str(auth_root), browser_marker],
         cwd=_REPO_ROOT,
         start_new_session=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=_marked_environment(marker),
     )
     contender = None
-    browser_pid: int | None = None
     try:
-        assert process.stdout is not None
-        reported_owner, browser_pid = map(int, process.stdout.readline().split())
+        reported_owner, browser_pid = map(int, _first_line(process).split())
         assert reported_owner == process.pid
         os.kill(process.pid, signal.SIGKILL)
         assert process.wait(timeout=30) == -signal.SIGKILL
 
         contender = ProfileLease(auth_root)
-        acquired = False
-        for _ in range(500):
-            if contender.try_acquire():
-                acquired = True
-                assert not _alive(browser_pid)
-                break
-            time.sleep(0.01)
-        assert acquired
+        _acquire_within(contender)
+        assert not _alive(browser_pid)
         assert _wait_gone(browser_pid)
     finally:
         if contender is not None:
@@ -2699,31 +2908,42 @@ time.sleep(600)
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=30)
-        if browser_pid is not None and _liveness(browser_pid) is not False:
-            os.killpg(browser_pid, signal.SIGKILL)
+        _end_marked(marker, browser_marker)
 
 
 @_POSIX_ONLY
 def test_crash_guardian_stops_a_driver_before_its_delayed_browser_launch(
     tmp_path: Path,
 ):
+    # The driver is unmarked, like the Node driver, and hands the marker only to
+    # the browser it launches. It launches once the test holds the profile
+    # again: the latest a surviving driver could, ordered by the lease rather
+    # than by a wall-clock delay that a loaded scheduler can outlast.
     auth_root = tmp_path / "auth"
+    marker = secrets.token_hex(32)
+    browser_marker = secrets.token_hex(32)
+    go = tmp_path / "launch"
     launched = tmp_path / "browser-pid"
     driver_code = r"""
+import json
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-time.sleep(0.25)
+go = Path(sys.argv[2])
+while not go.exists():
+    time.sleep(0.01)
+environment = dict(os.environ)
+environment.update(json.loads(sys.argv[3]))
 browser = subprocess.Popen(
     [sys.executable, "-c", "import time; time.sleep(600)"],
     stdin=subprocess.DEVNULL,
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL,
     start_new_session=True,
-    env=dict(os.environ),
+    env=environment,
 )
 marker = Path(sys.argv[1])
 partial = marker.with_name(marker.name + ".partial")
@@ -2732,7 +2952,9 @@ partial.replace(marker)
 time.sleep(600)
 """
     owner_code = r"""
+import json
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -2749,43 +2971,56 @@ auth_root.mkdir(parents=True)
 lease = ProfileLease(auth_root)
 assert lease.try_acquire()
 start_browser_guardian(lease.guardian_fd())
-_marker, marker_environment = new_browser_process_marker()
-environment = dict(os.environ)
-environment.update(marker_environment)
+# The test chooses the browser's marker value, so its teardown finds the
+# browser even if this owner stalls before reporting it. Sized as asked, so a
+# production marker of the wrong length still fails the assert below.
+secrets.token_hex = lambda nbytes: sys.argv[5][: 2 * nbytes]
+marker, marker_environment = new_browser_process_marker()
+assert marker == sys.argv[5]
 driver = subprocess.Popen(
-    [sys.executable, "-c", sys.argv[3], sys.argv[2]],
+    [
+        sys.executable,
+        "-c",
+        sys.argv[4],
+        sys.argv[2],
+        sys.argv[3],
+        json.dumps(marker_environment),
+    ],
     stdin=subprocess.DEVNULL,
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL,
-    env=environment,
 )
 print(os.getpid(), driver.pid, flush=True)
 time.sleep(600)
 """
     process = subprocess.Popen(
-        [sys.executable, "-c", owner_code, str(auth_root), str(launched), driver_code],
+        [
+            sys.executable,
+            "-c",
+            owner_code,
+            str(auth_root),
+            str(launched),
+            str(go),
+            driver_code,
+            browser_marker,
+        ],
         cwd=_REPO_ROOT,
         start_new_session=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=_marked_environment(marker),
     )
     contender = None
-    driver_pid: int | None = None
     try:
-        assert process.stdout is not None
-        reported_owner, driver_pid = map(int, process.stdout.readline().split())
+        reported_owner, driver_pid = map(int, _first_line(process).split())
         assert reported_owner == process.pid
         os.kill(process.pid, signal.SIGKILL)
         assert process.wait(timeout=30) == -signal.SIGKILL
 
         contender = ProfileLease(auth_root)
-        for _ in range(500):
-            if contender.try_acquire():
-                break
-            time.sleep(0.01)
-        else:
-            pytest.fail("the crash guardian did not release the profile")
+        _acquire_within(contender)
+        go.touch()
         assert _wait_gone(driver_pid)
         assert not launched.exists()
     finally:
@@ -2794,12 +3029,7 @@ time.sleep(600)
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=30)
-        if driver_pid is not None and _liveness(driver_pid) is not False:
-            os.kill(driver_pid, signal.SIGKILL)
-        if launched.exists():
-            browser_pid = int(launched.read_text())
-            if _liveness(browser_pid) is not False:
-                os.killpg(browser_pid, signal.SIGKILL)
+        _end_marked(marker, browser_marker)
 
 
 @_POSIX_ONLY

@@ -53,6 +53,8 @@ RUN patchright install-deps chromium && \
 RUN install -d -m 0700 -o pwuser -g pwuser /home/pwuser/.linkedin-mcp
 
 COPY --chmod=755 scripts/docker-entrypoint.sh /usr/local/bin/linkedin-mcp-entrypoint
+# The login viewer's page, next to the noVNC it imports (`websockify --web`).
+COPY --chmod=644 scripts/login-viewer.html /usr/share/novnc/login.html
 
 # A full headed browser on a virtual display. No window reaches the host, and
 # HEADLESS stays overridable for anyone who deliberately wants Chromium's real

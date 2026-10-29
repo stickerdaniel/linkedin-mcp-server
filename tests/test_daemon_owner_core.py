@@ -33,6 +33,7 @@ from linkedin_mcp_server.daemon.core.owner import (
     Finished,
     Forgave,
     Heard,
+    Named,
     Owner,
     Published,
     Refused,
@@ -136,6 +137,65 @@ class TestAdmission:
 
         assert after.retirement is None
         assert run(after, Admit(B, 2.0))[1] == [StartTask(after.next_ticket)]
+
+
+class TestPublication:
+    """Nothing is admitted before the endpoint is published, nor after retiring."""
+
+    def test_a_call_before_publication_is_refused_and_changes_nothing(self):
+        owner = run(Owner(), Named("the-owner"))[0]
+
+        after, effects = run(owner, Admit(A, 1.0))
+
+        assert effects == [Refused()]
+        assert after == owner
+
+    def test_publication_opens_admission(self):
+        owner, effects = run(Owner(), Admit(A, 0.5), Published(1.0), Admit(B, 2.0))
+
+        assert effects == [Refused(), StartTask(1)]
+        assert lifecycle.watching(owner, B)
+        assert not lifecycle.watching(owner, A)
+
+    def test_an_owner_that_retired_unpublished_never_admits(self):
+        # An ambiguous commit retires before the endpoint is ever published.
+        effects = run(
+            Owner(),
+            Retire(Retirement.UNCERTAIN_PUBLICATION),
+            Published(1.0),
+            Admit(A, 2.0),
+        )[1]
+
+        assert effects == [Refused()]
+
+    @pytest.mark.parametrize(
+        "events, admits",
+        [
+            ((), False),
+            ((Published(0.0),), True),
+            ((Retire(Retirement.UNCERTAIN_PUBLICATION),), False),
+            ((Published(0.0), Retire(Retirement.WEDGED)), False),
+            ((Published(0.0), TurnOver()), False),
+            ((Published(0.0), RetireIfIdle(Retirement.PROFILE_COMMAND)), False),
+        ],
+        ids=[
+            "unpublished",
+            "published",
+            "retired unpublished",
+            "retired",
+            "turning over",
+            "retired for a profile command",
+        ],
+    )
+    def test_the_preflight_answers_as_admission_would(
+        self, events: tuple[Event, ...], admits: bool
+    ):
+        owner = run(Owner(), *events)[0]
+
+        decided = run(owner, Admit(A, 1.0))[1]
+
+        assert lifecycle.admitting(owner) is admits
+        assert (decided == [StartTask(owner.next_ticket)]) is admits
 
 
 class TestHeartbeats:

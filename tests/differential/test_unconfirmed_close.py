@@ -1423,7 +1423,7 @@ def test_a_change_the_close_runs_fails_the_model():
     # the primitive through ``linkedin_mcp_server.core``, whether or not the
     # core's own text still names it.
     unnamed = core.replace("await await_deferring_cancels(", "await _held_back(")
-    assert unnamed.count("await _held_back(") == 3
+    assert unnamed.count("await _held_back(") == 4
     held = _changed(
         unnamed,
         (

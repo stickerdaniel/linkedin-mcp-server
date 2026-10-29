@@ -30,6 +30,7 @@ from fastmcp.tools import ToolResult
 
 from linkedin_mcp_server.daemon.core import owner as lifecycle
 from linkedin_mcp_server.daemon.descriptor import PROTOCOL_VERSION
+from linkedin_mcp_server.error_handler import ErrorCode, error_result
 
 logger = logging.getLogger(__name__)
 
@@ -60,17 +61,20 @@ UNKNOWN_OUTCOME_STATUS = "outcome_unknown"
 
 
 def unknown_outcome(
-    *, tool: str, reason: str, owner: str = "went away"
+    *, tool: str, reason: str, owner: str = "stopped answering it"
 ) -> dict[str, Any]:
     """The structured half of a call whose effect nobody can vouch for.
 
     Uses `linkedin.contracts.message_action_result`'s field names (`status`,
     `retry_safe`) without importing from `linkedin/`. `sent` and the other
     unknowns are omitted rather than null, since a null reads as "no". Used by
-    the frontend when an owner vanished mid-call and by the owner when it cut a
-    call off to stand down. *owner* says what the shared browser process did;
-    the frontend replaces the default when the owner did not answer its
-    heartbeats, which says nothing about whether it is gone.
+    the frontend when a call's answer never arrived and by the owner when it
+    cut a call off to stand down. *owner* says what the shared browser process
+    did. The default claims no more than the lost answer: the process may still
+    be running, as when only the hop dropped its answer or its heartbeats kept
+    coming. The frontend replaces it when the owner did not answer its
+    heartbeats or a recovery probe either, which still says nothing about
+    whether it is gone.
     """
     return {
         "status": UNKNOWN_OUTCOME_STATUS,
@@ -153,8 +157,17 @@ class CallLiveness:
 
     @property
     def retiring(self) -> bool:
-        """Whether admission is closed. It never reopens in the same process."""
+        """Whether the owner is retiring, which closes admission for good.
+
+        Admission is also closed before publication without retiring; ask
+        ``admitting`` for whether a call would be admitted.
+        """
         return self._state.retirement is not None
+
+    @property
+    def admitting(self) -> bool:
+        """Whether a new call would be admitted: published and not retiring."""
+        return lifecycle.admitting(self._state)
 
     @property
     def instance_id(self) -> str | None:
@@ -204,7 +217,7 @@ class CallLiveness:
     def admit(
         self, call_id: str, start: Callable[[], Coroutine[Any, Any, _T]]
     ) -> asyncio.Task[_T] | None:
-        """Take one marked call, or refuse it because this owner is retiring.
+        """Take one marked call, or refuse it: unpublished, or retiring.
 
         *start* is called only after admission, so a refused call has no task,
         and an admitted call is counted and watched before its task can take a
@@ -258,8 +271,9 @@ class CallLiveness:
     def retire(self, reason: lifecycle.Retirement) -> None:
         """Close admission unconditionally, whatever is in flight.
 
-        No I/O, not even a log line: one caller is on its way to a hard exit
-        that must not wait on a diagnostic. Callers say why themselves.
+        No I/O, not even a log line: an owner whose publication is ambiguous
+        closes admission before anything that could block on storage. Callers
+        say why themselves.
         """
         self._apply(lifecycle.Retire(reason))
 
@@ -277,7 +291,7 @@ class CallLiveness:
         self._apply(lifecycle.BackgroundFinished(time.monotonic()))
 
     def the_endpoint_is_live(self) -> None:
-        """Start the idle clock once the descriptor is published.
+        """Open admission and start the idle clock once the descriptor is published.
 
         Not at startup: counting import and Chromium launch as quiet would let
         a short timeout expire before the frontend could reach this owner.
@@ -386,10 +400,12 @@ def _refusal(kind: str, message: str) -> ToolResult:
 
     Signed with the protocol and this owner's instance, so a frontend accepts
     it only from the owner it dispatched to. ``is_error`` stays true for
-    clients that read no metadata.
+    clients that read no metadata. A retiring owner is turnover, so calling
+    again reaches the next one; an unmarked call needs an updated client first.
     """
-    return ToolResult(
-        content=[mt.TextContent(type="text", text=message)],
+    return error_result(
+        message,
+        ErrorCode.BROWSER_BUSY if kind == RETIRING else ErrorCode.BROWSER_UNAVAILABLE,
         meta={
             REFUSAL_KEY: {
                 "daemon": kind,
@@ -397,7 +413,6 @@ def _refusal(kind: str, message: str) -> ToolResult:
                 "instance": _liveness.instance_id,
             }
         },
-        is_error=True,
     )
 
 
@@ -472,10 +487,10 @@ class OwnerCallLivenessMiddleware(Middleware):
                         tool=context.message.name,
                         reason="it was replaced and stopped waiting for this call",
                     )
-                    return ToolResult(
-                        content=[mt.TextContent(type="text", text=answer["message"])],
+                    return error_result(
+                        answer["message"],
+                        ErrorCode.OUTCOME_UNKNOWN,
                         structured_content=answer,
-                        is_error=True,
                     )
                 case lifecycle.Stopped.ABANDONED:
                     # Expired because nobody was waiting. Reported as an error

@@ -537,6 +537,12 @@ _CALL_ROWS = (
     "tests/differential/test_crash_overlap_rows.py",
 )
 
+#: Source-model evidence: the frozen witnesses and the mapped model nodes.
+_MODEL_ROWS = (
+    "tests/differential/test_frozen_witness_rows.py",
+    "tests/differential/model_coverage.py",
+)
+
 
 def _runs(job: dict[str, Any]) -> str:
     return "\n".join(step.get("run", "") for step in job["steps"])
@@ -675,7 +681,7 @@ def test_manual_evidence_is_dispatch_only_and_defaults_to_one_linux_job() -> Non
     assert evidence["env"]["FASTMCP_MCP_CAMELCASE_COMPAT"] == "false"
     assert _cache_keys(evidence) == [_BROWSER_CACHE_KEY]
     evidence_run = _runs(evidence)
-    for row in (*_NATIVE_ROWS, *_CALL_ROWS):
+    for row in (*_NATIVE_ROWS, *_CALL_ROWS, *_MODEL_ROWS):
         assert row in evidence_run
     assert "baseline.py" in evidence_run
     uploads = [
