@@ -42,6 +42,7 @@ from linkedin_mcp_server.server_role import (
     process_role,
     set_process_role,
 )
+from linkedin_mcp_server.session_status import session_status
 from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.feed import register_feed_tools
@@ -323,5 +324,26 @@ def create_mcp_server(
                 }
             except Exception as e:
                 raise_tool_error(e, "close_session")  # NoReturn
+
+        @mcp.tool(
+            timeout=tool_timeout,
+            title="Get Session Status",
+            annotations={"readOnlyHint": True, "openWorldHint": False},
+            tags={"session"},
+        )
+        async def get_session_status() -> dict[str, Any]:
+            """Report local saved-session and serving-process state for requested diagnostics.
+
+            Reads local observations without opening a browser, starting setup or login,
+            or contacting LinkedIn. Stored files do not prove current authentication.
+            In shared-browser mode these observations belong to the owner, not to a
+            frontend running a login. It answers during browser work without refreshing
+            the browser idle timer. Use ordinary LinkedIn tools directly for their
+            requested work rather than adding a status preflight.
+            """
+            try:
+                return session_status()
+            except Exception as e:
+                raise_tool_error(e, "get_session_status")  # NoReturn
 
     return mcp

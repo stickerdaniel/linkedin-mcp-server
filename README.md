@@ -76,6 +76,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `get_job_apply_url` | Check whether a job uses Easy Apply or links to an employer's application. |
 | `get_feed` | Read recent posts from your home feed, with links to the original posts. |
 | `search_posts` | Search posts by keyword, optionally limited to the past day, week, or month. |
+| `get_session_status` | Check your saved login and browser state without opening a browser. |
 | `close_session` | Close the shared browser session without deleting your saved login. |
 
 A failed call is an error result (`isError`) with the usual message. For programs that branch on the kind of failure, its `_meta["linkedin.dev/error"]` is `{"v": 1, "code": ...}`, and `rate_limited` adds `retry_after` in seconds:

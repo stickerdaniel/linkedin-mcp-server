@@ -27,6 +27,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Tools that read only local state and never touch the browser. They skip the
+#: lock and the profile lease, so they answer while another call holds the
+#: browser, and they are not browser activity, so asking does not keep an idle
+#: browser open. Only a tool whose body cannot reach Chromium belongs here:
+#: anything else would drive the profile unserialized.
+_BROWSERLESS_TOOLS = frozenset({"get_session_status"})
+
 
 class SequentialToolExecutionMiddleware(Middleware):
     """Ensure only one tool call at a time drives the shared LinkedIn browser.
@@ -74,6 +81,8 @@ class SequentialToolExecutionMiddleware(Middleware):
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
         tool_name = context.message.name
+        if tool_name in _BROWSERLESS_TOOLS:
+            return await call_next(context)
         wait_started = time.perf_counter()
         logger.debug("Waiting for browser lock for tool '%s'", tool_name)
         await self._report_progress(
