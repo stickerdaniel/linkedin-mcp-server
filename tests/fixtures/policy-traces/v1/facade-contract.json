@@ -695,7 +695,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional location filter, as LinkedIn's numeric geo URN\nid (e.g., \"103644278\" for the United States). Plain-text place\nnames are silently ignored by LinkedIn and return unfiltered\nresults, so they are refused here. Use keywords instead when\nthe geo URN is not available."
+              "description": "Optional location filter, as LinkedIn's numeric geo URN\nid (e.g., \"103644278\" for the United States). Plain-text place\nnames are silently ignored by LinkedIn and return unfiltered\nresults, so they are refused here. The id is the geoUrn value\nin the URL of a LinkedIn people search filtered to that place;\nwithout one, put the place in keywords instead."
             },
             "network": {
               "anyOf": [

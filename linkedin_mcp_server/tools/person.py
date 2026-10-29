@@ -150,8 +150,9 @@ def register_person_tools(
             location: Optional location filter, as LinkedIn's numeric geo URN
                 id (e.g., "103644278" for the United States). Plain-text place
                 names are silently ignored by LinkedIn and return unfiltered
-                results, so they are refused here. Use keywords instead when
-                the geo URN is not available.
+                results, so they are refused here. The id is the geoUrn value
+                in the URL of a LinkedIn people search filtered to that place;
+                without one, put the place in keywords instead.
             network: Optional connection-degree filter. Each element is one of
                 "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
                 Example: ["F"] to only return 1st-degree connections. A single

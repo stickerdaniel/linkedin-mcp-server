@@ -102,6 +102,12 @@ def serve_extractor(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], AsyncMoc
             "numeric LinkedIn company URN id",
         ),
         (
+            "person",
+            "search_people",
+            {"keywords": "engineer", "location": "New York"},
+            "numeric LinkedIn geo URN id",
+        ),
+        (
             "company",
             "get_company_profile",
             {"company_name": "/feed/"},
