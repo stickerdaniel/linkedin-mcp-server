@@ -9,11 +9,13 @@ diagnostics that decide what a page *means* stay with the workflow.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import asyncio
 import logging
 import re
 import time
+from urllib.parse import parse_qs, urlparse
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -33,15 +35,17 @@ from linkedin_mcp_server.linkedin.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     ExtractedSection,
 )
+from linkedin_mcp_server.linkedin.identifiers import job_view_url
 from linkedin_mcp_server.linkedin.job_policy import (
     SAFETY_REDIRECT_PATH,
     SCROLL_DEADLINE_MAX,
     ApplyType,
     employer_apply_url,
+    parse_posting_title,
     route,
     same_job_search,
 )
-from linkedin_mcp_server.linkedin.link_metadata import build_references
+from linkedin_mcp_server.linkedin.link_metadata import JOB_PATH_RE, build_references
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.linkedin.text import (
@@ -285,6 +289,90 @@ class JobApplyRead:
 
     type: ApplyType
     url: str | None = None
+
+
+# A search result card and its dismiss control, in both of LinkedIn's job
+# searches, measured on signed-in en-US accounts. The job named only by
+# `currentJobId` sits in the detail pane, which has no card and no dismiss
+# control.
+#
+# - Classic `/jobs/search/` (2026-09-28): each result is an
+#   `li[data-occludable-job-id]` holding the job id. The dismiss control is
+#   the card's `button` around an icon with `data-test-icon="close-small"`
+#   (some cards also carry a "More options" button around
+#   `overflow-web-ios-small`).
+# - Redesigned `/jobs/search-results/` (2026-10-14): each result is an element
+#   whose `componentkey` is `job-card-component-ref-<job id>`, with a nested
+#   element repeating that key, so only the outermost counts. The dismiss
+#   control is its `button` around `svg#close-small`.
+#
+# In both, clicking it keeps the card and swaps the button for one around
+# `undo-small`, which is the only undo there is: a reload drops the job from
+# that search and every later one. Applied jobs carry the same control. The
+# button's `aria-label` names the job in the account's language and is never
+# read. More than one card for the id, or more than one dismiss button in it,
+# is refused rather than guessed at.
+SEARCH_CARD_JS = r"""(opts) => {
+    const {jobId, mark} = opts;
+    for (const old of document.querySelectorAll('[' + mark + ']')) {
+        old.removeAttribute(mark);
+    }
+    const refKey = '[componentkey^="job-card-component-ref-"]';
+    const classic = [...document.querySelectorAll('li[data-occludable-job-id]')];
+    const redesigned = [...document.querySelectorAll(refKey)].filter(
+        (card) => !card.parentElement || !card.parentElement.closest(refKey)
+    );
+    const idOf = (card) => card.getAttribute('data-occludable-job-id')
+        ?? card.getAttribute('componentkey').slice('job-card-component-ref-'.length);
+    const cards = [...classic, ...redesigned];
+    const own = cards.filter((card) => idOf(card) === jobId);
+    const result = {cards: cards.length, matches: own.length, dismiss: 0, undo: 0};
+    if (own.length !== 1) return result;
+    const card = own[0];
+    // Occluded cards render their content only near the viewport.
+    card.scrollIntoView({block: 'center'});
+    const around = (icon) => [...card.querySelectorAll('button')].filter(
+        (button) => button.querySelector(
+            '[data-test-icon="' + icon + '"], svg#' + icon
+        )
+    );
+    const dismiss = around('close-small');
+    result.dismiss = dismiss.length;
+    result.undo = around('undo-small').length;
+    if (dismiss.length === 1) dismiss[0].setAttribute(mark, '');
+    return result;
+}"""
+
+_SEARCH_CARD_SELECTOR = (
+    'li[data-occludable-job-id], [componentkey^="job-card-component-ref-"]'
+)
+# The job search parameters a landed search has to keep by value: what the
+# search is about and where. The worldwide `geoId` is ours, never a location
+# string LinkedIn turns into one, so its value is comparable.
+_SEARCH_VALUE_PARAMS = frozenset({"keywords", "geoId"})
+_DISMISS_MARK = "data-mcp-dismiss"
+
+# How long a search gets to render its cards, a found card its buttons, and a
+# clicked card its undo state.
+_SEARCH_READY_TIMEOUT = 10.0
+_SEARCH_CARD_RENDER_TIMEOUT = 5.0
+_DISMISS_TIMEOUT = 5.0
+# How long a posting gets to set its "<title> | <company> | LinkedIn" title.
+_POSTING_TITLE_TIMEOUT = 10.0
+_SEARCH_POLL = 0.25
+
+SearchCardOutcome = Literal[
+    # The dismiss button was clicked and the card turned to its undo state.
+    "dismissed",
+    # The card is already in its undo state.
+    "already_dismissed",
+    # No card for the job in the search's results, scrolled to the end.
+    "absent",
+    # The card is there but no single dismiss button could be told to be its.
+    "no_button",
+    # The button was clicked and the card did not change.
+    "not_dismissed",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -882,3 +970,168 @@ class JobPageReader:
             }"""
         )
         return int(value) if value is not None else None
+
+    async def read_posting_title(self, job_id: str) -> tuple[str, str]:
+        """Open ``job_id``'s posting and read its card title and company.
+
+        Both come from the document title, which LinkedIn sets once the
+        posting renders. Raises when the navigation ends anywhere but that
+        posting, after offering the page to the auth-barrier check, or when
+        the title never takes that shape.
+        """
+        url = job_view_url(job_id, "/")
+        await self._navigator._navigate_to_page(url)
+        await self._session.check_rate_limit()
+        page = self._session.page
+        landed = JOB_PATH_RE.match(route(page.url)[1])
+        if landed is None or landed.group(1) != job_id:
+            await self._navigator._raise_if_auth_barrier(page.url)
+            raise LinkedInOperationError(
+                f"The navigation to job {job_id}'s posting ended on {page.url}"
+            )
+        deadline = self._session.monotonic() + _POSTING_TITLE_TIMEOUT
+        while True:
+            title = await page.title()
+            parsed = parse_posting_title(title)
+            if parsed is not None:
+                return parsed
+            if self._session.monotonic() >= deadline:
+                raise LinkedInOperationError(
+                    f"Job {job_id}'s posting never named its title and company: "
+                    f"its page title read {title!r}"
+                )
+            await self._session.delay(_SEARCH_POLL)
+
+    async def _open_job_search(self, url: str) -> None:
+        """Navigate to a job search and wait for its result cards to render.
+
+        Raises when the navigation ends anywhere but a job search, after
+        offering the page to the auth-barrier check, or on a search that lost
+        part of its query: a redirect to the bare search page keeps the route
+        and drops the query whole, and its results are an answer to another
+        question. The keywords and `geoId` are compared by value, since a
+        search with other words or in another place is not the one asked
+        for, and the other parameters by presence, as `search_jobs` does,
+        since LinkedIn re-encodes some of them. `currentJobId`, which LinkedIn
+        appends by itself, was never asked for and is not compared. A search with no results
+        renders no card, so that wait ends in silence.
+        """
+        await self._navigator._navigate_to_page(url)
+        await self._session.check_rate_limit()
+        page = self._session.page
+        if not same_job_search(route(url), route(page.url)):
+            await self._navigator._raise_if_auth_barrier(page.url)
+            raise LinkedInOperationError(
+                f"The job search navigation ended on {page.url}"
+            )
+        asked = parse_qs(urlparse(url).query)
+        landed = parse_qs(urlparse(page.url).query)
+        lost = sorted(
+            name
+            for name in asked
+            if not landed.get(name)
+            or (name in _SEARCH_VALUE_PARAMS and landed[name][0] != asked[name][0])
+        )
+        if lost:
+            raise LinkedInOperationError(
+                f"The job search lost its {', '.join(lost)} on the way to {page.url}"
+            )
+        await self._session.dismiss_modal()
+        try:
+            await page.wait_for_selector(
+                _SEARCH_CARD_SELECTOR,
+                state="attached",
+                timeout=int(_SEARCH_READY_TIMEOUT * 1000),
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("No result card rendered on %s", url)
+
+    async def _find_search_card(self, job_id: str) -> dict[str, int]:
+        """Count ``job_id``'s cards and buttons, and mark its dismiss button."""
+        found = await self._session.page.evaluate(
+            SEARCH_CARD_JS, {"jobId": job_id, "mark": _DISMISS_MARK}
+        )
+        if not isinstance(found, dict):
+            raise LinkedInOperationError("The job search page could not be read")
+        return found
+
+    async def _locate_search_card(self, job_id: str) -> dict[str, int]:
+        """Find ``job_id``'s card, scrolling the rail once when it is not there.
+
+        A found card is polled until its buttons render, since an occluded
+        card is empty until it nears the viewport. A scroll that
+        raised leaves the rest of the rail unread, so it is an error rather
+        than a job the search does not list.
+        """
+        found = await self._find_search_card(job_id)
+        if not found["matches"]:
+            if await self._session.scroll_job_sidebar(deadline=SCROLL_DEADLINE_MAX):
+                raise LinkedInOperationError(
+                    "The job search results could not be scrolled to the end"
+                )
+            found = await self._find_search_card(job_id)
+        deadline = self._session.monotonic() + _SEARCH_CARD_RENDER_TIMEOUT
+        while (
+            found["matches"] == 1
+            and not (found["dismiss"] or found["undo"])
+            and self._session.monotonic() < deadline
+        ):
+            await self._session.delay(_SEARCH_POLL)
+            found = await self._find_search_card(job_id)
+        return found
+
+    async def search_lists_job(self, url: str, job_id: str, min_cards: int = 1) -> bool:
+        """Whether the job search at ``url`` shows a card for ``job_id``.
+
+        Only a search that rendered other cards can say the job is not among
+        them: a reload that rendered none, blank or still loading, raises
+        instead, since reading it as "not listed" would confirm a dismissal
+        nothing confirmed. So does one that rendered fewer than ``min_cards``,
+        which the caller sets from what the same search showed before, since
+        a partly rendered rail may stop short of the job's card.
+        """
+        await self._open_job_search(url)
+        found = await self._locate_search_card(job_id)
+        if found["matches"]:
+            return True
+        if not found["cards"]:
+            raise LinkedInOperationError(
+                f"The job search at {url} rendered no result cards, so whether "
+                f"it still lists job {job_id} could not be read"
+            )
+        if found["cards"] < min_cards:
+            raise LinkedInOperationError(
+                f"The job search at {url} rendered {found['cards']} result cards "
+                f"where {min_cards} were expected, so whether it still lists job "
+                f"{job_id} could not be read"
+            )
+        return False
+
+    async def dismiss_search_card(
+        self, url: str, job_id: str
+    ) -> tuple[SearchCardOutcome, int]:
+        """Click the dismiss button on ``job_id``'s card in the search at ``url``.
+
+        Success is the card turning to its undo state; the caller confirms it
+        against a fresh load of the search, which should render as many cards
+        as this one, returned alongside the outcome, less the job's own.
+        """
+        await self._open_job_search(url)
+        found = await self._locate_search_card(job_id)
+        cards = found["cards"]
+        if not found["matches"]:
+            return "absent", cards
+        if found["dismiss"] != 1:
+            if found["matches"] == 1 and found["undo"] and not found["dismiss"]:
+                return "already_dismissed", cards
+            return "no_button", cards
+
+        page = self._session.page
+        await page.locator(f"button[{_DISMISS_MARK}]").click(timeout=5000)
+        deadline = self._session.monotonic() + _DISMISS_TIMEOUT
+        while self._session.monotonic() < deadline:
+            await self._session.delay(_SEARCH_POLL)
+            found = await self._find_search_card(job_id)
+            if found["undo"] and not found["dismiss"]:
+                return "dismissed", cards
+        return "not_dismissed", cards

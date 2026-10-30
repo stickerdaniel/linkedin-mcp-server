@@ -1,0 +1,300 @@
+{
+  "call": {
+    "arguments": {
+      "job_id": "123"
+    },
+    "method": "dismiss_job"
+  },
+  "events": [
+    {
+      "call": "dismiss_job",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "dismiss_job",
+      "extra": {
+        "target_url": "https://www.linkedin.com/jobs/view/123/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/jobs/view/123/",
+      "requested_url": "https://www.linkedin.com/jobs/view/123/",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "dismiss_job",
+      "description": "goto https://www.linkedin.com/jobs/view/123/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "dismiss_job",
+      "extra": {
+        "target_url": "https://www.linkedin.com/jobs/view/123/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "dismiss_job",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "title"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.25
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "title"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 2.0
+    },
+    {
+      "call": "dismiss_job",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "dismiss_job",
+      "extra": {
+        "target_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
+      "requested_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "dismiss_job",
+      "description": "goto https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "dismiss_job",
+      "extra": {
+        "target_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "dismiss_job",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "dismiss_job",
+      "dismissed": false,
+      "kind": "boundary.modal"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "wait_for_selector",
+      "operation": "job_search_cards",
+      "selector": "li[data-occludable-job-id], [componentkey^=\"job-card-component-ref-\"]",
+      "state": "attached",
+      "timeout_ms": 10000
+    },
+    {
+      "arg": {
+        "jobId": "123",
+        "mark": "data-mcp-dismiss"
+      },
+      "call": "dismiss_job",
+      "kind": "evaluate",
+      "operation": "job_search_card",
+      "program_digest": "3f48c29d7f4b"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "locator.create",
+      "locator": "search_card_dismiss",
+      "parent": null,
+      "selector": "button[data-mcp-dismiss]"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "locator.click",
+      "locator": "search_card_dismiss",
+      "timeout_ms": 5000
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.25
+    },
+    {
+      "arg": {
+        "jobId": "123",
+        "mark": "data-mcp-dismiss"
+      },
+      "call": "dismiss_job",
+      "kind": "evaluate",
+      "operation": "job_search_card",
+      "program_digest": "3f48c29d7f4b"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 2.0
+    },
+    {
+      "call": "dismiss_job",
+      "callback_id": "callback-3",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "dismiss_job",
+      "extra": {
+        "target_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
+      "requested_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "dismiss_job",
+      "description": "goto https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "dismiss_job",
+      "extra": {
+        "target_url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "dismiss_job",
+      "callback_id": "callback-3",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "dismiss_job",
+      "dismissed": false,
+      "kind": "boundary.modal"
+    },
+    {
+      "call": "dismiss_job",
+      "kind": "wait_for_selector",
+      "operation": "job_search_cards",
+      "selector": "li[data-occludable-job-id], [componentkey^=\"job-card-component-ref-\"]",
+      "state": "attached",
+      "timeout_ms": 10000
+    },
+    {
+      "arg": {
+        "jobId": "123",
+        "mark": "data-mcp-dismiss"
+      },
+      "call": "dismiss_job",
+      "kind": "evaluate",
+      "operation": "job_search_card",
+      "program_digest": "3f48c29d7f4b"
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "dismiss_job",
+      "deadline": 12.0,
+      "kind": "boundary.scroll_sidebar",
+      "max_scrolls": 10,
+      "min_budget": 0.4,
+      "moved": false,
+      "poll_interval": 0.15,
+      "settle_timeout": 3.0
+    },
+    {
+      "arg": {
+        "jobId": "123",
+        "mark": "data-mcp-dismiss"
+      },
+      "call": "dismiss_job",
+      "kind": "evaluate",
+      "operation": "job_search_card",
+      "program_digest": "3f48c29d7f4b"
+    }
+  ],
+  "result": {
+    "already_dismissed": false,
+    "dismissed": true,
+    "job_id": "123",
+    "keywords": "Applied AI Engineer Acme",
+    "url": "https://www.linkedin.com/jobs/search/?keywords=Applied+AI+Engineer+Acme&geoId=92000000"
+  },
+  "scenario": "dismiss_job__dismissed",
+  "schema_version": 1
+}

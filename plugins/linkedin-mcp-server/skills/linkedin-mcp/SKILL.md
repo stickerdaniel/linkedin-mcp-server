@@ -24,6 +24,8 @@ work, health checks, or background maintenance.
 - `archive_conversation` is a write action too: it moves a thread out of the
   user's inbox. Use it only when the user explicitly asks to archive that
   thread.
+- `dismiss_job` hides a job from every later search and cannot be undone. Use
+  it only for jobs the user asked to dismiss.
 - Do not retry a failed write action unless the result proves it was not sent.
 
 ## Browser and authentication
@@ -48,8 +50,8 @@ instances, clear profiles, or replace the user's browser session.
   `get_job_apply_url`.
 - Content: `get_feed` and `search_posts`.
 - Messages: `get_inbox`, `get_conversation`, and `search_conversations`.
-- Writes: `send_message`, `connect_with_person`, and `archive_conversation`,
-  subject to the explicit authorization rules above.
+- Writes: `send_message`, `connect_with_person`, `archive_conversation` and
+  `dismiss_job`, subject to the explicit authorization rules above.
 - Session: `get_session_status` says whether a login is saved without opening
   a browser or a login window; it does not prove LinkedIn still accepts it.
 - Cleanup: use `close_session` only when the user asks to end the managed
