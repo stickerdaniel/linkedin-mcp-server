@@ -2342,7 +2342,7 @@ def test_browser_gate_opens_only_after_armed_observation() -> None:
 
 def test_by_handle_file_information_matches_win32_layout() -> None:
     fields = probe._ByHandleFileInformation._fields_
-    assert [name for name, _field_type in fields] == [
+    assert [field[0] for field in fields] == [
         "dwFileAttributes",
         "ftCreationTime",
         "ftLastAccessTime",
@@ -2358,7 +2358,8 @@ def test_by_handle_file_information_matches_win32_layout() -> None:
     cursor = 0
     maximum_alignment = 1
     expected_offsets: dict[str, int] = {}
-    for name, field_type in fields:
+    for field in fields:
+        name, field_type = field[0], field[1]
         alignment = ctypes.alignment(field_type)
         maximum_alignment = max(maximum_alignment, alignment)
         cursor = (cursor + alignment - 1) // alignment * alignment
@@ -2381,8 +2382,8 @@ def test_by_handle_file_information_matches_win32_layout() -> None:
         "nFileIndexLow": 48,
     }
     assert {
-        name: getattr(probe._ByHandleFileInformation, name).offset
-        for name, _field_type in fields
+        field[0]: getattr(probe._ByHandleFileInformation, field[0]).offset
+        for field in fields
     } == expected_offsets
     assert expected_size == 52
     assert ctypes.sizeof(probe._ByHandleFileInformation) == expected_size

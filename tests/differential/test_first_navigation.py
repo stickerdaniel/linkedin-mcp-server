@@ -22,7 +22,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -139,7 +139,7 @@ class _Origin:
 
 
 @contextlib.asynccontextmanager
-async def _browser(profile: Path) -> AsyncIterator[Any]:
+async def _browser(profile: Path) -> AsyncGenerator[Any]:
     """A driver and a persistent context on *profile*, both ended after."""
     playwright = await async_playwright().start()
     try:

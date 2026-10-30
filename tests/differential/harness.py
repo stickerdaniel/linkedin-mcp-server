@@ -127,9 +127,10 @@ import sys
 import threading
 import time
 from collections.abc import (
-    AsyncIterator,
+    AsyncGenerator,
     Awaitable,
     Callable,
+    Generator,
     Iterable,
     Iterator,
     Mapping,
@@ -687,7 +688,7 @@ def actor_environment(
 
 
 @contextlib.contextmanager
-def process_environment(settings: Mapping[str, str]) -> Iterator[None]:
+def process_environment(settings: Mapping[str, str]) -> Generator[None]:
     """*settings* over this process's own environment for the block, then
     exactly what was there before, an absent name absent again.
 
@@ -1384,7 +1385,7 @@ class HostQuitTransport(ClientTransport):
         *,
         transport_options: TransportOptions | None = None,
         **session_kwargs: Unpack[SessionKwargs],
-    ) -> AsyncIterator[ClientSession]:
+    ) -> AsyncGenerator[ClientSession]:
         options = transport_options or TransportOptions()
         process = await anyio.open_process(
             self.command,
@@ -1957,7 +1958,7 @@ class StubHost:
             self.on_stderr(buffer.rstrip("\r"))
 
     @contextlib.asynccontextmanager
-    async def running(self) -> AsyncIterator[StubHost]:
+    async def running(self) -> AsyncGenerator[StubHost]:
         """The stub started, its server started and initialized, until left;
         then the corrective stop, whatever ended it."""
         process = await anyio.open_process(
@@ -2298,7 +2299,7 @@ class HttpHost:
             await process.wait()
 
     @contextlib.asynccontextmanager
-    async def running(self) -> AsyncIterator[HttpHost]:
+    async def running(self) -> AsyncGenerator[HttpHost]:
         """The server started and listening, until left; then the corrective
         stop, whatever ended it."""
         process = await anyio.open_process(
@@ -9694,7 +9695,7 @@ async def measure_host_quit_row(
                 else None
             ),
             after_exit=first_post_exit if comparing else None,
-            **({"row_script": declared_script} if lifecycle.script is not None else {}),
+            row_script=declared_script if lifecycle.script is not None else None,
         )
         # Before the owner's exit is waited for: a stopped owner never leaves,
         # and a profile command still running could keep one from it.

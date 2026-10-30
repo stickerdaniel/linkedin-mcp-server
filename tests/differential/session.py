@@ -72,7 +72,7 @@ import shutil
 import sys
 import tempfile
 import time
-from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Generator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -358,7 +358,7 @@ async def validate_past_a_stall(
 
 
 @contextlib.contextmanager
-def _as_first_found(profile: Path, cookie_path: Path) -> Iterator[Callable[[], None]]:
+def _as_first_found(profile: Path, cookie_path: Path) -> Generator[Callable[[], None]]:
     """Keep *profile* and *cookie_path* as they are now; yield what puts them back.
 
     The copy lives outside the auth root and goes when the block ends. A reset

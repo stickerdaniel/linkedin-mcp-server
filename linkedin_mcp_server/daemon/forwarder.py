@@ -27,7 +27,7 @@ import enum
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any, NoReturn, TypeVar, cast
@@ -256,7 +256,7 @@ _call_being_made: contextvars.ContextVar[CallBinding | None] = contextvars.Conte
 
 
 @contextmanager
-def bound_to(binding: CallBinding) -> Iterator[None]:
+def bound_to(binding: CallBinding) -> Generator[None]:
     """Address every request this task makes to *binding*'s owner and call."""
     token = _call_being_made.set(binding)
     try:

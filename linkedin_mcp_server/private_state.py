@@ -32,7 +32,7 @@ import sys
 import tempfile
 import threading
 import contextlib
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -80,7 +80,7 @@ def _same_entry(first: os.stat_result, second: os.stat_result) -> bool:
 
 
 @contextmanager
-def _as_private_state_error(path: Path, action: str) -> Iterator[None]:
+def _as_private_state_error(path: Path, action: str) -> Generator[None]:
     """Turn a filesystem failure into this module's own error.
 
     Every entry point here promises to raise :class:`PrivateStateError` when it

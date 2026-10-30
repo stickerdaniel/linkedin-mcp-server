@@ -25,7 +25,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1153,7 +1153,7 @@ class _BlockableOwner:
 
 
 @contextlib.contextmanager
-def _a_blockable_owner(root: Path, token: str) -> Iterator[_BlockableOwner]:
+def _a_blockable_owner(root: Path, token: str) -> Generator[_BlockableOwner]:
     owner = _BlockableOwner(root, token)
     try:
         yield owner

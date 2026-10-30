@@ -6,7 +6,7 @@ with persistent context. Profile state auto-persists to user_data_dir.
 """
 
 import asyncio
-from collections.abc import Callable, Coroutine, Iterator
+from collections.abc import Callable, Coroutine, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 import functools
@@ -410,7 +410,7 @@ class _ViewerInterrupted(Exception):
 
 
 @contextmanager
-def _viewer_signal_handlers(notify: Callable[[int], None]) -> Iterator[None]:
+def _viewer_signal_handlers(notify: Callable[[int], None]) -> Generator[None]:
     """Schedule viewer cancellation without raising inside asyncio internals."""
     watched = [signal.SIGTERM, signal.SIGINT]
     if sighup := getattr(signal, "SIGHUP", None):

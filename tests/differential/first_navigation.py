@@ -76,7 +76,7 @@ import re
 import sqlite3
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Generator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -755,7 +755,7 @@ def _uninstall() -> None:
 
 
 @contextlib.contextmanager
-def observe_navigation(path: Path, *, label: str) -> Iterator[NavigationRecorder]:
+def observe_navigation(path: Path, *, label: str) -> Generator[NavigationRecorder]:
     """Record every browser this process launches while entered, into *path*.
 
     The block's own exception, a cancellation included, leaves unchanged.
@@ -1193,7 +1193,7 @@ class LifetimeSampler:
 @contextlib.contextmanager
 def observing(
     directory: Path, *, profile: Path, label: str, in_process: bool = True
-) -> Iterator[Path]:
+) -> Generator[Path]:
     """One launch's navigation and lifetimes, in *directory*, from before it.
 
     Yields where the navigation is recorded. *in_process* False is a launch
