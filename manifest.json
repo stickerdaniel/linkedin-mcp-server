@@ -101,6 +101,10 @@
       "description": "List job postings saved by the authenticated LinkedIn user"
     },
     {
+      "name": "dismiss_job",
+      "description": "Dismiss a job from job search so later searches no longer show it"
+    },
+    {
       "name": "search_people",
       "description": "Search for people on LinkedIn by keywords, location, connection degree (1st/2nd/3rd), and current company"
     },
@@ -115,6 +119,10 @@
     {
       "name": "search_conversations",
       "description": "Search LinkedIn messages by keyword"
+    },
+    {
+      "name": "archive_conversation",
+      "description": "Archive a LinkedIn messaging thread by thread ID, confirmed on a reload and never unarchived by a repeat call"
     },
     {
       "name": "send_message",

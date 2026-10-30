@@ -35,12 +35,14 @@ def _make_mock_extractor(result: dict) -> MagicMock:
     mock.search_jobs = AsyncMock(return_value=result)
     mock.get_saved_jobs = AsyncMock(return_value=result)
     mock.get_job_apply_url = AsyncMock(return_value=result)
+    mock.dismiss_job = AsyncMock(return_value=result)
     mock.get_easy_apply_form = AsyncMock(return_value=result)
     mock.search_people = AsyncMock(return_value=result)
     mock.get_sidebar_profiles = AsyncMock(return_value=result)
     mock.get_inbox = AsyncMock(return_value=result)
     mock.get_conversation = AsyncMock(return_value=result)
     mock.search_conversations = AsyncMock(return_value=result)
+    mock.archive_conversation = AsyncMock(return_value=result)
     mock.send_message = AsyncMock(return_value=result)
     mock.get_my_profile = AsyncMock(return_value=result)
     mock.search_companies = AsyncMock(return_value=result)
@@ -245,10 +247,12 @@ _A_VALID_CALL = [
     ("job", "get_job_apply_url", {"job_id": "4252026496"}),
     ("job", "search_jobs", {"keywords": "python"}),
     ("job", "get_saved_jobs", {}),
+    ("job", "dismiss_job", {"job_id": "4252026496"}),
     ("job", "get_easy_apply_form", {"job_id": "4252026496"}),
     ("messaging", "get_inbox", {}),
     ("messaging", "get_conversation", {"linkedin_username": "alice"}),
     ("messaging", "search_conversations", {"keywords": "hello"}),
+    ("messaging", "archive_conversation", {"thread_id": "2-abc123"}),
     (
         "messaging",
         "send_message",
@@ -1545,6 +1549,41 @@ class TestJobTools:
             max_pages=2, stage="saved"
         )
 
+    async def test_dismiss_job(self, mock_context, serve_extractor):
+        expected = {
+            "url": (
+                "https://www.linkedin.com/jobs/search/"
+                "?keywords=Engineer+Acme&geoId=92000000"
+            ),
+            "job_id": "12345",
+            "keywords": "Engineer Acme",
+            "dismissed": True,
+            "already_dismissed": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "dismiss_job")
+        result = await tool_fn("12345", mock_context)
+        assert result == expected
+        mock_extractor.dismiss_job.assert_awaited_once_with("12345")
+
+    async def test_dismiss_job_is_marked_destructive(self):
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        tool = await mcp.get_tool("dismiss_job")
+        assert tool is not None and tool.annotations is not None
+        assert tool.annotations.read_only_hint is False
+        assert tool.annotations.destructive_hint is True
+
 
 class TestGetSidebarProfilesTool:
     async def test_get_sidebar_profiles_success(self, mock_context, serve_extractor):
@@ -1744,6 +1783,44 @@ class TestMessagingTools:
 
         assert result["sections"]["search_results"] == "Result 1\nResult 2"
         mock_extractor.search_conversations.assert_awaited_once_with("hello", limit=20)
+
+    async def test_archive_conversation_normalizes_the_thread_id(
+        self, mock_context, serve_extractor
+    ):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/2-abc/",
+            "thread_id": "2-abc",
+            "participant": "Ada Lovelace",
+            "status": "archived",
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "archive_conversation")
+        result = await tool_fn("/messaging/thread/2-abc/", mock_context)
+
+        assert result == expected
+        mock_extractor.archive_conversation.assert_awaited_once_with("2-abc")
+
+    async def test_archive_conversation_refuses_a_path_before_the_browser(self):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+        ready = AsyncMock(side_effect=AssertionError("get_ready_extractor was called"))
+
+        with patch("linkedin_mcp_server.tools.messaging.get_ready_extractor", ready):
+            with pytest.raises(ToolError, match="thread_id is not a LinkedIn id"):
+                await mcp.call_tool("archive_conversation", {"thread_id": "../feed"})
+
+        ready.assert_not_awaited()
 
     @pytest.mark.parametrize(
         ("tool", "section"),
@@ -2685,6 +2762,7 @@ class TestToolTimeouts:
             "get_inbox",
             "get_conversation",
             "search_conversations",
+            "archive_conversation",
             "send_message",
             "get_feed",
             "search_posts",
@@ -2719,6 +2797,7 @@ class TestToolTimeouts:
             "get_inbox",
             "get_conversation",
             "search_conversations",
+            "archive_conversation",
             "send_message",
             "get_feed",
             "search_posts",

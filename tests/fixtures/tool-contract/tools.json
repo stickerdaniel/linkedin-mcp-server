@@ -3,6 +3,42 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "actions",
+          "messaging"
+        ]
+      }
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Archive one LinkedIn messaging thread, InMail included, by thread ID.\n\nOpens the thread, which marks it read, and chooses Archive from its\noptions menu. A thread LinkedIn already files as archived is left\nalone and reported already_archived, so a repeated call clicks\nnothing. The change is confirmed by loading the thread again.\nReversible on LinkedIn; a new message moves the thread back to the\ninbox.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "thread_id": {
+          "description": "LinkedIn messaging thread ID, as get_inbox,\nsearch_conversations or get_conversation return it",
+          "type": "string"
+        }
+      },
+      "required": [
+        "thread_id"
+      ],
+      "type": "object"
+    },
+    "name": "archive_conversation",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Archive Conversation"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "session"
         ]
       }
@@ -68,6 +104,41 @@
       "type": "object"
     },
     "title": "Connect With Person"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "job"
+        ]
+      }
+    },
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Dismiss a job from LinkedIn job search so later searches never show it.\n\nFor jobs already applied to or rejected. Reads the job's title and\ncompany from its posting, clicks the dismiss button on its card in a\nworldwide search for them, then reloads that search to confirm the job\nis gone. Irreversible: LinkedIn offers no undo after a reload. A job\nthat search does not list on its first page is an error, since an\nalready dismissed job and a search that missed it look the same.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "job_id": {
+          "description": "LinkedIn job ID (e.g., \"4252026496\", \"3856789012\")",
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "type": "object"
+    },
+    "name": "dismiss_job",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Dismiss Job"
   },
   {
     "_meta": {

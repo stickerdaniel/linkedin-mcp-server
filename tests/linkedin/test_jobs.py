@@ -11,7 +11,10 @@ import pytest
 from patchright.async_api import Error as PatchrightError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    LinkedInOperationError,
+)
 from linkedin_mcp_server.linkedin import jobs as jobs_module
 from linkedin_mcp_server.linkedin.capture import (
     CaptureMode,
@@ -3741,3 +3744,116 @@ class TestGetSavedJobs:
             },
             {"kind": "job", "url": "/jobs/view/200/", "text": "Two"},
         ]
+
+
+class TestDismissJob:
+    """dismiss_job, over a stubbed posting and search page reader."""
+
+    URL = (
+        "https://www.linkedin.com/jobs/search/"
+        "?keywords=Applied+AI+Engineer+Acme&geoId=92000000"
+    )
+
+    @staticmethod
+    def _stub(reader, outcome, *listed, posting=("Applied AI Engineer", "Acme")):
+        title = patch.object(
+            reader._pages,
+            "read_posting_title",
+            new_callable=AsyncMock,
+            return_value=posting,
+        )
+        act = patch.object(
+            reader._pages,
+            "dismiss_search_card",
+            new_callable=AsyncMock,
+            return_value=(outcome, 25),
+        )
+        read = patch.object(
+            reader._pages,
+            "search_lists_job",
+            new_callable=AsyncMock,
+            side_effect=list(listed),
+        )
+        sleep = patch(
+            "linkedin_mcp_server.linkedin.jobs.asyncio.sleep", new_callable=AsyncMock
+        )
+        return title, act, read, sleep
+
+    async def test_dismisses_from_a_worldwide_search_for_the_posting_and_rechecks(
+        self, mock_page
+    ):
+        reader = _reader(mock_page)
+        title, act, read, sleep = self._stub(reader, "dismissed", False)
+        with title as titling, act as acting, read as reading, sleep:
+            result = await reader.dismiss_job("/jobs/view/4400000201/")
+
+        titling.assert_awaited_once_with("4400000201")
+        acting.assert_awaited_once_with(self.URL, "4400000201")
+        reading.assert_awaited_once_with(self.URL, "4400000201", 24)
+        assert result == {
+            "url": self.URL,
+            "job_id": "4400000201",
+            "keywords": "Applied AI Engineer Acme",
+            "dismissed": True,
+            "already_dismissed": False,
+        }
+
+    async def test_a_card_already_in_its_undo_state_is_already_dismissed(
+        self, mock_page
+    ):
+        reader = _reader(mock_page)
+        title, act, read, sleep = self._stub(reader, "already_dismissed")
+        with title, act, read as reading, sleep:
+            result = await reader.dismiss_job("123")
+
+        reading.assert_not_awaited()
+        assert result["already_dismissed"] is True
+
+    async def test_a_job_back_after_a_reload_is_an_error(self, mock_page):
+        reader = _reader(mock_page)
+        title, act, read, sleep = self._stub(reader, "dismissed", True)
+        with title, act, read, sleep:
+            with pytest.raises(LinkedInOperationError, match="back in the search"):
+                await reader.dismiss_job("123")
+
+    async def test_an_absent_job_names_the_search_it_ran(self, mock_page):
+        reader = _reader(mock_page)
+        title, act, read, sleep = self._stub(
+            reader, "absent", posting=("Backend Engineer", "Globex")
+        )
+        with title, act, read, sleep:
+            with pytest.raises(LinkedInOperationError) as raised:
+                await reader.dismiss_job("4400000202")
+
+        message = str(raised.value)
+        assert "worldwide search for 'Backend Engineer Globex'" in message
+        assert "already dismissed" in message
+        assert "first page" in message
+
+    @pytest.mark.parametrize(
+        ("outcome", "message"),
+        [
+            ("no_button", "dismiss button could not be found"),
+            ("not_dismissed", "did not change"),
+        ],
+    )
+    async def test_a_dismissal_that_did_not_happen_is_an_error(
+        self, mock_page, outcome, message
+    ):
+        reader = _reader(mock_page)
+        title, act, read, sleep = self._stub(reader, outcome)
+        with title, act, read as reading, sleep:
+            with pytest.raises(LinkedInOperationError, match=message):
+                await reader.dismiss_job("123")
+
+        reading.assert_not_awaited()
+
+    async def test_an_unreadable_posting_stops_before_any_search(self, mock_page):
+        reader = _reader(mock_page)
+        title, act, read, sleep = self._stub(reader, "dismissed", False)
+        with title as titling, act as acting, read, sleep:
+            titling.side_effect = LinkedInOperationError("never named")
+            with pytest.raises(LinkedInOperationError, match="never named"):
+                await reader.dismiss_job("123")
+
+        acting.assert_not_awaited()
