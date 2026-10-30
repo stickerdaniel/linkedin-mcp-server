@@ -12,6 +12,10 @@
       "get_page_text"
     ],
     "methods": {
+      "archive_conversation": {
+        "coroutine": true,
+        "signature": "(self, thread_id: 'str') -> 'dict[str, Any]'"
+      },
       "click_button_by_text": {
         "coroutine": true,
         "signature": "(self, text: 'str', *, scope: 'str' = 'main', timeout: 'int' = 5000) -> 'bool'"
@@ -102,6 +106,7 @@
       }
     },
     "tool_methods": [
+      "archive_conversation",
       "connect_with_person",
       "dismiss_job",
       "extract_feed",
@@ -124,6 +129,25 @@
       "send_message"
     ],
     "tool_schemas": {
+      "archive_conversation": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "thread_id": {
+              "description": "LinkedIn messaging thread ID, as get_inbox,\nsearch_conversations or get_conversation return it",
+              "type": "string"
+            }
+          },
+          "required": [
+            "thread_id"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "close_session": {
         "input": {
           "additionalProperties": false,

@@ -117,6 +117,10 @@
       "description": "Search LinkedIn messages by keyword"
     },
     {
+      "name": "archive_conversation",
+      "description": "Archive a LinkedIn messaging thread by thread ID, confirmed on a reload and never unarchived by a repeat call"
+    },
+    {
       "name": "send_message",
       "description": "Compose and send a new message, line breaks and empty lines included, without tab or other control characters to a LinkedIn user with explicit confirmation and optional profile URN support; profile-based targeting may create a separate DM instead of replying in an existing thread, and when no normal Message action is exposed, use connect_with_person and retry after acceptance"
     },
