@@ -5911,19 +5911,31 @@ class TestVersionSkew:
 
         from linkedin_mcp_server.daemon import owner as daemon_owner
 
+        # Any local process may connect to a fresh loopback port: some desktop
+        # apps probe every new listener with `GET /`. So the capture keeps
+        # accepting, and only a request for this test's target counts.
         received: list[bytes] = []
         listener = socket.socket()
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
-        listener.settimeout(5)
+        listener.listen(8)
+        listener.settimeout(0.2)
         proxy_port = listener.getsockname()[1]
+        done = threading.Event()
 
         def capture() -> None:
-            with contextlib.suppress(OSError):
-                connection, _ = listener.accept()
-                received.append(connection.recv(4096))
-                connection.close()
+            while True:
+                try:
+                    connection, _ = listener.accept()
+                except TimeoutError:
+                    if done.is_set():
+                        return
+                    continue
+                except OSError:
+                    return
+                with connection, contextlib.suppress(OSError):
+                    connection.settimeout(2)
+                    received.append(connection.recv(4096))
 
         watcher = threading.Thread(target=capture, daemon=True)
         watcher.start()
@@ -5941,11 +5953,13 @@ class TestVersionSkew:
                         "http://127.0.0.1:9/control/stand-down",
                         headers={"Authorization": "Bearer SUPERSECRET"},
                     )
-            watcher.join(timeout=3)
         finally:
+            done.set()
+            watcher.join(timeout=5)
             listener.close()
 
-        assert not received, "the request was routed through the proxy"
+        routed = [seen for seen in received if b"/control/stand-down" in seen]
+        assert not routed, "the request was routed through the proxy"
         assert not any(b"SUPERSECRET" in seen for seen in received)
 
     @pytest.mark.parametrize(
