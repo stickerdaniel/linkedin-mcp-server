@@ -5,6 +5,39 @@ described on [GitHub Releases](https://github.com/stickerdaniel/linkedin-mcp-ser
 
 <!-- towncrier release notes start -->
 
+## 4.29.0 (2026-10-31)
+
+### Highlights
+
+- **Stable error codes.** Failed calls name a code in `_meta` that clients can branch on. ([#1390](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1390))
+- **Usage rules at connect.** Clients receive the server's usage rules as MCP server instructions. ([#1402](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1402))
+- **Crashed pages recover.** A crashed browser page is replaced instead of failing every later call. ([#1382](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1382))
+
+### Features
+
+- A failed tool call now says when LinkedIn answered HTTP 429 or 999 during it. ([#1264](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1264))
+- MCPB bundle settings can point the server at your own Chrome or Chromium executable. ([#1303](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1303))
+- search_jobs reports why paging stopped, so a caller knows whether more results may exist. ([#1323](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1323))
+- dismiss_job dismisses a job from job search so later searches no longer show it. ([#1326](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1326))
+- New `get_easy_apply_form` tool reads an Easy Apply form's questions without answering. ([#1343](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1343))
+- New `archive_conversation` tool archives a messaging thread by its id, InMail included. ([#1354](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1354))
+- `get_person_profile` and `get_my_profile` can now read a profile's volunteering section. ([#1357](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1357))
+- search_posts can filter by content type, such as uploaded documents. ([#1377](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1377))
+- Failed tool calls name a stable error code in `_meta`, beside the unchanged message. ([#1390](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1390))
+- Add `get_session_status`, which reports the saved session without opening a browser. ([#1392](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1392))
+- The server now sends its usage rules to MCP clients as server instructions. ([#1402](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1402))
+- get_feed pairs a post's permalink with its text excerpt and URN when its markup has one. ([#1409](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1409))
+- Ctrl+V (Cmd+V on a Mac) in the Docker login viewer pastes plain text. ([#1414](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1414))
+
+### Bug Fixes
+
+- search_people refuses a plain-text location and filters by a numeric geo URN id instead. ([#722](https://github.com/stickerdaniel/linkedin-mcp-server/pull/722))
+- search_jobs reports no_matching_jobs when LinkedIn's redesigned search matches nothing. ([#1363](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1363))
+- A crashed browser page is now shut down and replaced instead of failing every later call. ([#1382](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1382))
+- Raise fastmcp to 4.1.3, fixing the M2M OAuth advisory GHSA-vqqp-x5qm-5qp4. ([#1408](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1408))
+- Sidebar "Show all" links off LinkedIn are skipped, and diagnostics hide proxy credentials. ([#1417](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1417))
+
+
 ## 4.28.0 (2026-10-23)
 
 ### Highlights
