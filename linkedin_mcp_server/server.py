@@ -58,6 +58,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# For clients that never load the plugin skill. Every client reads this on
+# every turn, so it holds only lines that measurably changed what cheap
+# client models did (Claude Haiku 5.5, GPT-5.6 Terra). Rules they already
+# follow unprompted, such as reading only what a request needs, are left out,
+# and a generic "retry once" made Haiku retry while setup was still running.
+_SERVER_INSTRUCTIONS = """\
+send_message and connect_with_person act for the user. Use them only for the
+exact action, recipient and text the user approved; when the user asks for a
+draft, or for something these tools cannot do, reply with the text instead. If
+a write's outcome is unknown, ask the user to check LinkedIn before acting
+again.
+
+Report what the tools returned, and say when a result may be incomplete.
+
+If LinkedIn waits for a captcha or other verification, ask the user to
+complete it in the browser, then continue when they say so.
+"""
+
+
 class _StaticTokenAuth(TokenVerifier):
     """Accepts exactly the one token the owner published, and nothing else.
 
@@ -217,6 +236,10 @@ def create_mcp_server(
     mcp = FastMCP(
         "mcp-server-linkedin",
         version=__version__,
+        # Before any role wiring, and not only on a role that drives a browser.
+        # A proxy registers no local tools, but it is the server the client
+        # initializes, so gating this would leave that client with no rules.
+        instructions=_SERVER_INSTRUCTIONS,
         # Selected here rather than gated inside, because for a proxy every step
         # of it is wrong: it would install a Chromium this process never opens,
         # and then claim to be closing a browser it never had.
