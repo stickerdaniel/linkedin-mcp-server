@@ -10,8 +10,8 @@ described on [GitHub Releases](https://github.com/stickerdaniel/linkedin-mcp-ser
 ### Highlights
 
 - **Stable error codes.** Failed calls name a code in `_meta` that clients can branch on. ([#1390](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1390))
-- **Usage rules at connect.** Clients receive the server's usage rules as MCP server instructions. ([#1402](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1402))
-- **Crashed pages recover.** A crashed browser page is replaced instead of failing every later call. ([#1382](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1382))
+- **Usage rules at connect.** Clients get the usage rules as MCP server instructions. ([#1402](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1402))
+- **Crashed pages recover.** A crashed page is replaced instead of failing every later call. ([#1382](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1382))
 
 ### Features
 
