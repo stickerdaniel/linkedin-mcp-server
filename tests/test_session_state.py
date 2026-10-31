@@ -29,6 +29,20 @@ from linkedin_mcp_server.session_state import (
 )
 
 
+@pytest.fixture
+def process_names(monkeypatch, tmp_path):
+    """A stand-in /proc: each entry names the process with that pid."""
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    monkeypatch.setattr("linkedin_mcp_server.session_state._PROC", proc)
+
+    def name(pid: int, comm: str) -> None:
+        (proc / str(pid)).mkdir()
+        (proc / str(pid) / "comm").write_text(f"{comm}\n")
+
+    return name
+
+
 def test_write_source_state_creates_generation(monkeypatch, isolate_profile_dir):
     monkeypatch.setattr(
         "linkedin_mcp_server.session_state.get_runtime_id",
@@ -576,11 +590,14 @@ class TestRotateSourceProfile:
         assert rotate_source_profile(isolate_profile_dir) is None
         assert quarantine_dirs(isolate_profile_dir) == []
 
-    def test_refuses_while_another_process_holds_the_profile(self, isolate_profile_dir):
+    def test_refuses_while_another_process_holds_the_profile(
+        self, isolate_profile_dir, process_names
+    ):
         """Rotating underneath a live Chromium — a second CLI run, or a
         container sharing the mounted auth root — corrupts both sessions."""
         profile_dir = isolate_profile_dir
         _seed_session(profile_dir)
+        process_names(os.getpid(), "chrome")
         # Chromium encodes the owning <host>-<pid> in the lock's symlink target.
         (profile_dir / "SingletonLock").symlink_to(
             f"{socket.gethostname()}-{os.getpid()}"
@@ -945,13 +962,14 @@ class TestRestoreSourceProfile:
 
 
 def test_rotation_refuses_while_a_container_holds_a_derived_profile(
-    isolate_profile_dir,
+    isolate_profile_dir, process_names
 ):
     """Docker runs Chromium out of runtime-profiles/<runtime>/profile while
     sharing the mounted auth root, and rotation moves that tree too. Checking
     only the source profile would pull it out from under a live container."""
     profile_dir = isolate_profile_dir
     _seed_session(profile_dir)
+    process_names(os.getpid(), "chromium")
     derived = runtime_profiles_root(profile_dir) / "linux-amd64-container" / "profile"
     derived.mkdir(parents=True)
     (derived / "SingletonLock").symlink_to(f"{socket.gethostname()}-{os.getpid()}")
@@ -1017,17 +1035,49 @@ def test_a_foreign_host_lock_names_what_would_free_the_profile(isolate_profile_d
     assert profile_dir.exists()
 
 
-def test_a_live_lock_on_this_host_does_not_suggest_deleting_it(isolate_profile_dir):
+def test_a_live_lock_on_this_host_does_not_suggest_deleting_it(
+    isolate_profile_dir, process_names
+):
     profile_dir = isolate_profile_dir
     _seed_session(profile_dir)
     lock = profile_dir / "SingletonLock"
     lock.symlink_to(f"{socket.gethostname()}-{os.getpid()}")
+    process_names(os.getpid(), "chrome")
 
     with pytest.raises(RuntimeError, match="in use by another process") as refused:
         rotate_source_profile(profile_dir)
 
     assert str(lock) in str(refused.value)
     assert "delete" not in str(refused.value)
+
+
+def test_a_live_pid_that_is_not_a_browser_does_not_hold_the_lock(
+    isolate_profile_dir, process_names
+):
+    """Containers sharing one host name (#1381) number their processes
+    separately, so a killed container's lock can name a pid that something
+    else holds here. Chromium clears such a lock itself; refusing it would
+    wedge every login with no hint that the lock is left over."""
+    profile_dir = isolate_profile_dir
+    _seed_session(profile_dir)
+    (profile_dir / "SingletonLock").symlink_to(f"{socket.gethostname()}-{os.getpid()}")
+    process_names(os.getpid(), "python3")
+
+    assert rotate_source_profile(profile_dir) is not None
+
+
+def test_a_live_pid_whose_name_cannot_be_read_still_holds_the_lock(
+    isolate_profile_dir, monkeypatch, tmp_path
+):
+    """macOS has no /proc. Without a name there is no evidence the pid is
+    not the browser, so the lock stands as it did before."""
+    monkeypatch.setattr("linkedin_mcp_server.session_state._PROC", tmp_path / "no-proc")
+    profile_dir = isolate_profile_dir
+    _seed_session(profile_dir)
+    (profile_dir / "SingletonLock").symlink_to(f"{socket.gethostname()}-{os.getpid()}")
+
+    with pytest.raises(RuntimeError, match="in use by another process"):
+        rotate_source_profile(profile_dir)
 
 
 def test_uncommitted_debris_is_parked_not_deleted(isolate_profile_dir):
