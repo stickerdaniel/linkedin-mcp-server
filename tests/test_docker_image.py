@@ -167,10 +167,15 @@ _PROBE_IMAGE = (
 
 # `test_the_built_project_records_the_pinned_backend` builds the builder stage,
 # so a missing input fails it: that stage is where the pin is decided and it is
-# cheap to build. `scripts/docker-entrypoint.sh` is the exception, copied in the second
-# stage, which only a full image build would reach. Excluding it produced a
-# green suite and a broken `docker build .`, so it is named here.
-_CONTEXT_INPUTS = ("requirements/build-constraints.txt", "scripts/docker-entrypoint.sh")
+# cheap to build. `scripts/docker-entrypoint.sh` and `scripts/chromium-policy.json`
+# are the exception, copied in the second stage, which only a full image build
+# would reach. Excluding the first produced a green suite and a broken
+# `docker build .`, so both are named here.
+_CONTEXT_INPUTS = (
+    "requirements/build-constraints.txt",
+    "scripts/docker-entrypoint.sh",
+    "scripts/chromium-policy.json",
+)
 
 # These must not reach the build. The environment names cover the root, a
 # suffix and a nested directory, which is the whole of what `**/.env*` claims.
@@ -282,6 +287,24 @@ def build_context(tmp_path_factory: pytest.TempPathFactory) -> frozenset[str]:
 def test_the_image_installs_only_the_full_browser() -> None:
     """The shell is a different product and nothing in the image launches it."""
     assert "patchright install chromium --no-shell" in _DOCKERFILE
+
+
+def test_the_image_policy_only_turns_off_saving_and_autofill() -> None:
+    """Every launch in the image runs under the policy, not only the viewer's.
+
+    So it turns off the password manager and autofill and nothing else: a block
+    list, download or file-dialog rule would apply to the browser the server
+    drives as well, and `DeveloperToolsAvailability` set to 2 cut the pipe
+    Patchright drives it through, so the launch timed out.
+    """
+    policy = json.loads(
+        (_REPO_ROOT / "scripts" / "chromium-policy.json").read_text(encoding="utf-8")
+    )
+    assert policy == {
+        "PasswordManagerEnabled": False,
+        "AutofillAddressEnabled": False,
+        "AutofillCreditCardEnabled": False,
+    }
 
 
 def test_the_image_builds_the_project_against_the_hashed_backend() -> None:
