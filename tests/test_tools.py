@@ -3,6 +3,7 @@ import logging
 from typing import Any, Callable, Coroutine, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anyio
 import pytest
 from fastmcp import FastMCP
 from fastmcp.tools import FunctionTool
@@ -2354,6 +2355,41 @@ class TestMessagingTools:
         mock_extractor.reply_to_conversation.assert_awaited_once_with(
             "2-abc", "Hello!", confirm_send=True
         )
+
+    async def test_reply_to_conversation_outlives_a_stalled_notification(
+        self, mock_context, serve_extractor
+    ):
+        """A deadline in the last await would discard a confirmed reply."""
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/2-abc/",
+            "status": "sent",
+            "sent": True,
+            "retry_safe": False,
+            "thread_id": "2-abc",
+            "participant": "Ada Lovelace",
+        }
+        calls = 0
+
+        async def stall_on_completion(**_: Any) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                await anyio.sleep_forever()
+
+        mock_context.report_progress = stall_on_completion
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        serve_extractor(_make_mock_extractor(expected))
+        tool_fn = await get_tool_fn(mcp, "reply_to_conversation")
+        with anyio.fail_after(1):
+            result = await tool_fn("2-abc", "Hello!", True, mock_context)
+
+        assert calls == 2
+        assert result == expected
 
     async def test_reply_to_conversation_is_a_write(self):
         from linkedin_mcp_server.tools.messaging import register_messaging_tools

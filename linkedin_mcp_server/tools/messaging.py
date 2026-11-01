@@ -450,10 +450,12 @@ def register_messaging_tools(
         )
 
         try:
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+            # Same window as send_message: a deadline here discards a result
+            # that may say the reply was confirmed, so a notification that
+            # stalls gives up first.
+            with before_the_reply_deadline():
+                await ctx.report_progress(progress=100, total=100, message="Complete")
         except BaseException:
-            # Same window as send_message: a deadline here discards a
-            # result that may say the reply was confirmed.
             if result.get("retry_safe") is False:
                 logger.warning(SEND_INTERRUPTED_WARNING)
             raise
