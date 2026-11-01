@@ -763,7 +763,19 @@ _MESSAGE_CONFIRMATION_READY_JS = (
         // sent, or one whose sender cannot be found. In a thread, refuse one
         // a participant sent, or any node when the pane links no participant.
         // Only the link path counts, never its text.
+        // A group's header need not link every member, and links carry an
+        // opaque member id the page does not tie to the signed-in account. So
+        // a thread also takes LinkedIn's own marking: every message from
+        // someone else carries the --other class, follow-ups included, and
+        // ours does not (measured). A node without the base class says
+        // nothing either way, so it is refused too.
         const sentByRecipient = (scope, node) => {
+            if (arg.threadKey && (
+                !node.classList.contains('msg-s-event-listitem') ||
+                node.classList.contains('msg-s-event-listitem--other')
+            )) {
+                return true;
+            }
             const all = Array.from(scope.querySelectorAll(itemSelector));
             const sender = all.slice(0, all.indexOf(node) + 1).reverse().find(
                 item => item.querySelector('a[href*="/in/"]')

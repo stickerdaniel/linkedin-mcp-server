@@ -76,9 +76,10 @@ SILENT_COMPOSER = COMPOSER.replace('id="send"', 'id="silent-send"')
 # The submit renders a client placeholder, then LinkedIn inserts a separate
 # node under a server message URN, headed by a link to its sender. With
 # ``echo`` false the submit is ignored and only the sender's message arrives,
-# carrying the same text.
+# carrying the same text. ``classes`` is the node's class list: LinkedIn adds
+# the ``--other`` class to a message from anyone but the signed-in member.
 SERVER_ARM_JS = """
-  function serverMessage({sender, echo}) {
+  function serverMessage({sender, echo, classes}) {
     document.getElementById('silent-send').addEventListener('click', event => {
       event.preventDefault();
       const composer = document.getElementById('composer');
@@ -96,6 +97,7 @@ SERVER_ARM_JS = """
         const entry = document.createElement('div');
         entry.dataset.viewName = 'message-list-item';
         entry.dataset.eventUrn = 'urn:li:msg_message:(thread,server-new)';
+        entry.className = classes;
         const link = document.createElement('a');
         link.href = `https://www.linkedin.com/in/${sender}/`;
         entry.appendChild(link);
@@ -110,10 +112,15 @@ SERVER_ARM_JS = """
 """
 
 
-def server_arm_page(*, sender: str, echo: bool) -> str:
+OWN_MESSAGE = "msg-s-event-listitem"
+OTHER_MESSAGE = "msg-s-event-listitem msg-s-event-listitem--other"
+
+
+def server_arm_page(*, sender: str, echo: bool, classes: str = OWN_MESSAGE) -> str:
     script = (
         f"<script>{SERVER_ARM_JS}"
-        f"serverMessage({{sender: '{sender}', echo: {str(echo).lower()}}});</script>"
+        f"serverMessage({{sender: '{sender}', echo: {str(echo).lower()}, "
+        f"classes: '{classes}'}});</script>"
     )
     return thread_page(composer=SILENT_COMPOSER, outside_main=script)
 
@@ -300,6 +307,28 @@ class TestReplyToConversationDom:
         assert result["status"] == "send_unconfirmed", result
         assert result["sent"] is False
         assert result["retry_safe"] is False
+
+    async def test_group_member_the_header_omits_is_not_confirmed(self, dom_page):
+        """Only LinkedIn's marking tells this sender apart: the header links Ada."""
+        result = await reply(
+            dom_page,
+            server_arm_page(
+                sender="grace-hopper-example", echo=False, classes=OTHER_MESSAGE
+            ),
+        )
+
+        assert result["status"] == "send_unconfirmed", result
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+
+    async def test_a_message_without_linkedins_marking_is_not_confirmed(self, dom_page):
+        result = await reply(
+            dom_page,
+            server_arm_page(sender="grace-hopper-example", echo=True, classes=""),
+        )
+
+        assert result["status"] == "send_unconfirmed", result
+        assert result["sent"] is False
 
     async def test_a_pane_linking_no_participant_confirms_nothing(self, dom_page):
         html = server_arm_page(sender="grace-hopper-example", echo=True).replace(
