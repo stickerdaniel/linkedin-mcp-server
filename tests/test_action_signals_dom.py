@@ -47,6 +47,7 @@ from linkedin_mcp_server.linkedin.connection import (
 from linkedin_mcp_server.linkedin.connection_actions import (
     ACTION_SIGNALS_JS,
     CLICK_INCOMING_ACCEPT_JS,
+    INVITATION_PENDING_JS,
     OPEN_MORE_BUTTON_JS,
     ConnectionActions,
 )
@@ -654,3 +655,48 @@ class TestAClickOnlyLandsOnLinkedIn:
             await dom_page.evaluate("document.body.getAttribute('data-clicked')")
             == "first-labeled"
         )
+
+
+class TestSentInvitationsLookup:
+    """INVITATION_PENDING_JS finds an invitee by the URL of their profile.
+
+    The sent-invitations page lists each outstanding invitation with an
+    anchor to ``/in/<username>/``. The script matches that URL only, so the
+    answer cannot depend on the page's language.
+    """
+
+    @staticmethod
+    async def _pending(page, html: str, username: str = USER) -> bool:
+        await page.set_content(_page_html(html))
+        return bool(await page.evaluate(INVITATION_PENDING_JS, username))
+
+    async def test_finds_the_invitee(self, dom_page):
+        html = (
+            '<ul><li><a href="https://www.linkedin.com/in/someone/">Someone</a></li>'
+            f'<li><a href="https://www.linkedin.com/in/{USER}/">Name</a></li></ul>'
+        )
+        assert await self._pending(dom_page, html) is True
+
+    async def test_empty_list_has_no_invitee(self, dom_page):
+        assert await self._pending(dom_page, "<ul></ul>") is False
+
+    async def test_other_profiles_do_not_match(self, dom_page):
+        # A username that only starts the same way is another member.
+        html = (
+            f'<a href="https://www.linkedin.com/in/{USER}-two/">Other</a>'
+            f'<a href="https://www.linkedin.com/in/x{USER}/">Other</a>'
+            '<a href="https://www.linkedin.com/company/testuser/">Company</a>'
+        )
+        assert await self._pending(dom_page, html) is False
+
+    async def test_anchors_outside_main_do_not_match(self, dom_page):
+        await dom_page.set_content(
+            f'<html><body><nav><a href="/in/{USER}/">Me</a></nav>'
+            "<main></main></body></html>"
+        )
+        assert await dom_page.evaluate(INVITATION_PENDING_JS, USER) is False
+
+    async def test_username_with_a_dot_is_matched_literally(self, dom_page):
+        html = '<a href="https://www.linkedin.com/in/jo.doe/">Jo</a>'
+        assert await self._pending(dom_page, html, "jo.doe") is True
+        assert await self._pending(dom_page, html, "joxdoe") is False
