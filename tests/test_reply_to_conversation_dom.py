@@ -74,12 +74,12 @@ SEND_JS = """
 SILENT_COMPOSER = COMPOSER.replace('id="send"', 'id="silent-send"')
 
 # The submit renders a client placeholder, then LinkedIn inserts a separate
-# node under a server message URN, headed by a link to its sender. With
-# ``echo`` false the submit is ignored and only the sender's message arrives,
-# carrying the same text. ``classes`` is the node's class list: LinkedIn adds
-# the ``--other`` class to a message from anyone but the signed-in member.
+# node under a server message URN, headed by a link to its sender. An empty
+# ``sender`` leaves the node unheaded, as a follow-up is. With ``echo`` false
+# the submit is ignored and only the sender's message arrives, carrying the
+# same text. The URN opens with the signed-in member whoever sent the message.
 SERVER_ARM_JS = """
-  function serverMessage({sender, echo, classes}) {
+  function serverMessage({sender, echo, urn}) {
     document.getElementById('silent-send').addEventListener('click', event => {
       event.preventDefault();
       const composer = document.getElementById('composer');
@@ -96,11 +96,12 @@ SERVER_ARM_JS = """
       setTimeout(() => {
         const entry = document.createElement('div');
         entry.dataset.viewName = 'message-list-item';
-        entry.dataset.eventUrn = 'urn:li:msg_message:(thread,server-new)';
-        entry.className = classes;
-        const link = document.createElement('a');
-        link.href = `https://www.linkedin.com/in/${sender}/`;
-        entry.appendChild(link);
+        entry.dataset.eventUrn = urn;
+        if (sender) {
+          const link = document.createElement('a');
+          link.href = `https://www.linkedin.com/in/${sender}/`;
+          entry.appendChild(link);
+        }
         const unit = document.createElement('span');
         unit.textContent = text;
         entry.appendChild(unit);
@@ -111,18 +112,26 @@ SERVER_ARM_JS = """
   }
 """
 
+SIGNED_IN_MEMBER = "ACoAAExampleSignedInMember0"
+GROUP_MEMBER = "ACoAAExampleGroupMember0000"
+SERVER_URN = f"urn:li:msg_message:(urn:li:fsd_profile:{SIGNED_IN_MEMBER},2-server-new)"
 
-OWN_MESSAGE = "msg-s-event-listitem"
-OTHER_MESSAGE = "msg-s-event-listitem msg-s-event-listitem--other"
 
-
-def server_arm_page(*, sender: str, echo: bool, classes: str = OWN_MESSAGE) -> str:
+def server_arm_page(*, sender: str, echo: bool, urn: str = SERVER_URN) -> str:
     script = (
         f"<script>{SERVER_ARM_JS}"
         f"serverMessage({{sender: '{sender}', echo: {str(echo).lower()}, "
-        f"classes: '{classes}'}});</script>"
+        f"urn: '{urn}'}});</script>"
     )
     return thread_page(composer=SILENT_COMPOSER, outside_main=script)
+
+
+def headed_by(html: str, sender: str) -> str:
+    """Give the thread's existing message a link to ``sender``."""
+    return html.replace(
+        "<span>Would you be open",
+        f'<a href="https://www.linkedin.com/in/{sender}/"></a><span>Would you be open',
+    )
 
 
 def thread_page(
@@ -290,52 +299,62 @@ class TestReplyToConversationDom:
 
     async def test_own_reply_under_a_server_urn_is_confirmed(self, dom_page):
         result = await reply(
-            dom_page, server_arm_page(sender="grace-hopper-example", echo=True)
+            dom_page, server_arm_page(sender=SIGNED_IN_MEMBER, echo=True)
         )
 
         assert result["status"] == "sent", result
         assert result["sent"] is True
 
-    async def test_participant_message_with_the_same_text_is_not_confirmed(
+    async def test_own_follow_up_is_confirmed(self, dom_page):
+        html = headed_by(server_arm_page(sender="", echo=True), SIGNED_IN_MEMBER)
+
+        result = await reply(dom_page, html)
+
+        assert result["status"] == "sent", result
+        assert result["sent"] is True
+
+    async def test_a_pane_linking_no_participant_still_confirms_our_reply(
         self, dom_page
     ):
-        """A reply names no recipient, so the header's participant stands in."""
-        result = await reply(
-            dom_page, server_arm_page(sender="ada-lovelace", echo=False)
-        )
-
-        assert result["status"] == "send_unconfirmed", result
-        assert result["sent"] is False
-        assert result["retry_safe"] is False
-
-    async def test_group_member_the_header_omits_is_not_confirmed(self, dom_page):
-        """Only LinkedIn's marking tells this sender apart: the header links Ada."""
-        result = await reply(
-            dom_page,
-            server_arm_page(
-                sender="grace-hopper-example", echo=False, classes=OTHER_MESSAGE
-            ),
-        )
-
-        assert result["status"] == "send_unconfirmed", result
-        assert result["sent"] is False
-        assert result["retry_safe"] is False
-
-    async def test_a_message_without_linkedins_marking_is_not_confirmed(self, dom_page):
-        result = await reply(
-            dom_page,
-            server_arm_page(sender="grace-hopper-example", echo=True, classes=""),
-        )
-
-        assert result["status"] == "send_unconfirmed", result
-        assert result["sent"] is False
-
-    async def test_a_pane_linking_no_participant_confirms_nothing(self, dom_page):
-        html = server_arm_page(sender="grace-hopper-example", echo=True).replace(
+        html = server_arm_page(sender=SIGNED_IN_MEMBER, echo=True).replace(
             '<a href="https://www.linkedin.com/in/ada-lovelace/">View profile</a>', ""
         )
 
         result = await reply(dom_page, html)
+
+        assert result["status"] == "sent", result
+        assert result["sent"] is True
+
+    @pytest.mark.parametrize(
+        "sender", ["ada-lovelace", GROUP_MEMBER], ids=["linked", "omitted"]
+    )
+    async def test_someone_elses_message_with_the_same_text_is_not_confirmed(
+        self, dom_page, sender
+    ):
+        """The header links Ada only, so it cannot name a group's other members."""
+        result = await reply(dom_page, server_arm_page(sender=sender, echo=False))
+
+        assert result["status"] == "send_unconfirmed", result
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+
+    async def test_a_group_members_follow_up_is_not_confirmed(self, dom_page):
+        html = headed_by(server_arm_page(sender="", echo=False), GROUP_MEMBER)
+
+        result = await reply(dom_page, html)
+
+        assert result["status"] == "send_unconfirmed", result
+        assert result["sent"] is False
+
+    async def test_an_event_id_naming_no_member_confirms_nothing(self, dom_page):
+        result = await reply(
+            dom_page,
+            server_arm_page(
+                sender=SIGNED_IN_MEMBER,
+                echo=True,
+                urn="urn:li:msg_message:(thread,server-new)",
+            ),
+        )
 
         assert result["status"] == "send_unconfirmed", result
         assert result["sent"] is False

@@ -198,7 +198,7 @@
       "call": "reply_to_conversation",
       "kind": "wait_for_function",
       "operation": "message_confirmation_ready",
-      "program_digest": "82facbb13ca3",
+      "program_digest": "742af79a95f3",
       "section": "message",
       "timeout_ms": null
     },

@@ -746,36 +746,22 @@ _MESSAGE_CONFIRMATION_READY_JS = (
                 identifier === arg.profileUrn || `/in/${identifier}/` === arg.profilePath
             );
         };
-        // A reply names a thread, not a person. Its other participants are
-        // the profiles the pane links outside the messages, its header.
-        const participants = scope => new Set(
-            Array.from(scope.querySelectorAll('a[href*="/in/"]'))
-                .filter(anchor => !anchor.closest(itemSelector))
-                .map(profileIdentifier)
-                .filter(Boolean)
-        );
         // LinkedIn heads a message with links to its sender's profile
         // (measured). A follow-up from the same sender is assumed to be
         // unheaded, so the sender of a node is the nearest item at or before
         // it that links a profile. A
         // message from the recipient can carry the same text without this
         // submission ever reaching LinkedIn, so refuse a node the recipient
-        // sent, or one whose sender cannot be found. In a thread, refuse one
-        // a participant sent, or any node when the pane links no participant.
+        // sent, or one whose sender cannot be found.
+        // A reply names a thread, not a person, and a group's header need not
+        // link every member, so a thread asks the opposite question: did we
+        // send it? A message's event ID opens with the signed-in member's
+        // profile id whoever sent it, and sender links carry that same id
+        // (measured), so ours is the node whose sender is that profile.
         // Only the link path counts, never its text.
-        // A group's header need not link every member, and links carry an
-        // opaque member id the page does not tie to the signed-in account. So
-        // a thread also takes LinkedIn's own marking: every message from
-        // someone else carries the --other class, follow-ups included, and
-        // ours does not (measured). A node without the base class says
-        // nothing either way, so it is refused too.
+        const signedInMember = node => /^urn:li:msg_message:\(urn:li:fsd_profile:([A-Za-z0-9_-]+),/
+            .exec((node.getAttribute('data-event-urn') || '').trim())?.[1] || null;
         const sentByRecipient = (scope, node) => {
-            if (arg.threadKey && (
-                !node.classList.contains('msg-s-event-listitem') ||
-                node.classList.contains('msg-s-event-listitem--other')
-            )) {
-                return true;
-            }
             const all = Array.from(scope.querySelectorAll(itemSelector));
             const sender = all.slice(0, all.indexOf(node) + 1).reverse().find(
                 item => item.querySelector('a[href*="/in/"]')
@@ -783,9 +769,8 @@ _MESSAGE_CONFIRMATION_READY_JS = (
             if (!sender) return true;
             const links = Array.from(sender.querySelectorAll('a[href*="/in/"]'));
             if (!arg.threadKey) return links.some(linksRecipient);
-            const others = participants(scope);
-            return others.size === 0 ||
-                links.some(anchor => others.has(profileIdentifier(anchor)));
+            const member = signedInMember(node);
+            return !member || !links.some(anchor => profileIdentifier(anchor) === member);
         };
         // LinkedIn acknowledges a send by rendering a node whose event ID is
         // a server message URN. In an open thread it inserts that node and
