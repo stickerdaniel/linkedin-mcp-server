@@ -10,6 +10,7 @@ import copy
 import re
 
 import pytest
+from patchright.async_api import Error as PlaywrightError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import (
@@ -2270,6 +2271,27 @@ class TestSubmitEasyApply:
         assert result.submitted is True
         assert result.confirmation == ""
         assert "submit" in dialog.log
+
+    async def test_a_confirmation_read_that_fails_does_not_unsend_it(self, mock_page):
+        dialog, run, reader, answers, _ = self._run(mock_page)
+        evaluate = mock_page.evaluate.side_effect
+
+        async def fail_after_submit(script, *args, **kwargs):
+            if script is job_pages_module.EASY_APPLY_CONFIRMATION_JS:
+                raise PlaywrightError("Execution context was destroyed")
+            return await evaluate(script, *args, **kwargs)
+
+        mock_page.evaluate.side_effect = fail_after_submit
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert result.submitted is True
+        assert result.complete is True
+        assert result.confirmation == ""
+        assert dialog.log.count("submit") == 1
 
     async def test_a_required_field_nothing_answers_stops_before_any_click(
         self, mock_page
