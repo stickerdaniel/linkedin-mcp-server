@@ -2286,6 +2286,57 @@ class TestSubmitEasyApply:
         assert "submit" not in dialog.log
         assert "discard" in dialog.log
 
+    @pytest.mark.parametrize(
+        ("field", "answer", "action"),
+        [
+            (
+                {
+                    "label": "Mobile phone number",
+                    "type": "text",
+                    "required": True,
+                    "value": "+33600000000",
+                    "ids": ["phone"],
+                },
+                "",
+                ("phone", "fill", ""),
+            ),
+            (
+                {
+                    "label": "I agree to the terms",
+                    "type": "checkbox",
+                    "required": True,
+                    "options": ["I agree to the terms"],
+                    "selected": ["I agree to the terms"],
+                    "ids": ["terms"],
+                },
+                False,
+                ("terms", "uncheck", ""),
+            ),
+        ],
+    )
+    async def test_a_required_field_an_answer_emptied_stops_before_next(
+        self, mock_page, field, answer, action
+    ):
+        # Answered, and answered with nothing: the field reads back as empty
+        # as one no answer named, and LinkedIn would refuse it the same way.
+        steps = copy.deepcopy(self.QUESTIONS)
+        steps[0]["fields"].append(field)
+        dialog, run, reader, _, _ = self._run(mock_page, steps)
+
+        with run:
+            with pytest.raises(InvalidAnswerError, match=field["label"]):
+                await reader.submit_easy_apply(
+                    self.URL,
+                    "123",
+                    JOB_APPLY_EN_US,
+                    {**self.ANSWERS, field["label"]: answer},
+                    confirm_submit=True,
+                )
+
+        assert action in dialog.log
+        assert "next" not in dialog.log
+        assert "submit" not in dialog.log
+
     async def test_a_step_linkedin_refuses_ends_the_run_carrying_its_errors(
         self, mock_page
     ):

@@ -525,8 +525,8 @@ def easy_apply_required_unanswered_error(fields: list[dict[str, Any]]) -> str:
         for field in fields
     )
     return (
-        f"This step requires an answer for: {named}. LinkedIn prefilled none of "
-        "them and none was supplied, so nothing further was sent."
+        f"This step requires an answer for: {named}. None of them holds one, "
+        "prefilled or supplied, so nothing further was sent."
     )
 
 
