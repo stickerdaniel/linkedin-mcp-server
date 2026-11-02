@@ -1480,7 +1480,14 @@ class JobPageReader:
             )
         except PlaywrightTimeoutError:
             raise RuntimeError(EASY_APPLY_SUBMIT_UNCONFIRMED) from None
-        return await self._read_easy_apply_confirmation(text)
+        # Sent from here on. A read that fails now costs the account of it,
+        # never the send: raised, it would report a sent application as not
+        # sent, and a caller would be right to send it again.
+        try:
+            return await self._read_easy_apply_confirmation(text)
+        except Exception as e:
+            logger.warning("A sent application's confirmation was not read (%s)", e)
+            return ""
 
     async def _read_easy_apply_confirmation(self, text: JobApplyTextTable) -> str:
         """What LinkedIn says about the application once the form is gone.
