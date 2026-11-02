@@ -414,7 +414,12 @@ EASY_APPLY_STEP_JS = (
         if (first.tagName === 'SELECT') {
             const options = [...first.options].map((option) => option.text.trim());
             field.options = options.slice(0, maxOptions);
-            if (options.length > maxOptions) field.options_total = options.length;
+            if (options.length > maxOptions) {
+                field.options_total = options.length;
+                // The whole list, for the walk to check an answer against.
+                // Dropped from what the caller sees (`_public_step`).
+                field.all_options = options;
+            }
             const picked = first.options[first.selectedIndex];
             if (picked) field.value = picked.text.trim();
         } else if (isChoice(first)) {
@@ -845,6 +850,11 @@ def _unanswered_required(
     return missing
 
 
+# What the step read carries for the walk alone: the controls behind a field,
+# and the whole of a select list the read cut.
+_PRIVATE_KEYS = frozenset({"ids", "all_options"})
+
+
 def _public_step(step: dict[str, Any]) -> dict[str, Any]:
     """One read step as returned to the caller, without the walk's bookkeeping."""
     public: dict[str, Any] = {}
@@ -853,7 +863,7 @@ def _public_step(step: dict[str, Any]) -> dict[str, Any]:
     if step["progress"] is not None:
         public["progress"] = step["progress"]
     public["fields"] = [
-        {key: value for key, value in field.items() if key != "ids"}
+        {key: value for key, value in field.items() if key not in _PRIVATE_KEYS}
         for field in step["fields"]
     ]
     return public
@@ -1004,11 +1014,11 @@ def plan_easy_apply_answer(
         )
     if kind == "select":
         # A country list runs past the read's cap and comes back cut, with its
-        # real length beside it. The options that were kept cannot say the
-        # answer is wrong, so a cut list is left for the browser to match and
-        # refuse; only a whole one is checked here.
-        options = field.get("options") or []
-        if answer not in options and not field.get("options_total"):
+        # real length beside it, so it is checked against the whole list the
+        # read kept aside. Left to the browser, a label it lacks would wait out
+        # the timeout after the step's other answers went in.
+        options = field.get("all_options") or field.get("options") or []
+        if answer not in options:
             raise InvalidAnswerError(
                 easy_apply_answer_refused(field, f"No option is labelled {answer!r}.")
             )

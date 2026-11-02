@@ -94,6 +94,18 @@ HINTED: dict[str, Any] = dict(
 )
 assert HINTED["body"] != QUESTIONS["body"]
 
+# The contact step with a country list longer than the read keeps, as the
+# 250-entry one measured live: the read returns its first 50 options.
+COUNTRIES = [f"Country {index:02d} (+{index})" for index in range(60)]
+WITH_COUNTRY: dict[str, Any] = dict(
+    CONTACT,
+    body=CONTACT["body"]
+    + '<div data-test-form-element><label for="country">Phone country code</label>'
+    + '<select id="country" required>'
+    + "".join(f"<option>{name}</option>" for name in COUNTRIES)
+    + "</select></div>",
+)
+
 # What the typeahead is offering to look up, and the entity behind each label.
 # Two of them share a prefix, so an answer that stops at the prefix names none.
 CITIES: dict[str, str] = {
@@ -896,3 +908,39 @@ async def test_a_hint_on_the_step_next_reaches_does_not_stop_the_run(dom_page):
     )
     assert why["value"] == "Because agents."
     assert "error" not in why
+
+
+async def test_a_country_past_the_reads_cut_is_selected(dom_page):
+    result = await answer(
+        dom_page,
+        [WITH_COUNTRY],
+        {
+            "First name": "Noor",
+            "Mobile phone number": "600000000",
+            "Phone country code": COUNTRIES[55],
+        },
+    )
+
+    country = next(
+        field
+        for field in result.steps[0]["fields"]
+        if field["label"] == "Phone country code"
+    )
+    assert country["value"] == COUNTRIES[55]
+    assert country["options_total"] == 60
+    assert "all_options" not in country
+
+
+async def test_a_country_the_whole_list_lacks_refuses_with_the_step_untouched(
+    dom_page,
+):
+    with pytest.raises(InvalidAnswerError, match="No option is labelled 'Atlantis'"):
+        await answer(
+            dom_page,
+            [WITH_COUNTRY],
+            {"First name": "Noor", "Phone country code": "Atlantis"},
+        )
+
+    events = await log(dom_page)
+    assert not [event for event in events if event.startswith("first=")]
+    assert "discard" in events
