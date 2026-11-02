@@ -10,6 +10,7 @@ from linkedin_mcp_server.core.exceptions import (
     AccountRestrictedError,
     AuthenticationError,
     ElementNotFoundError,
+    InvalidAnswerError,
     InvalidReferenceError,
     LinkedInOperationError,
     NetworkError,
@@ -80,6 +81,7 @@ _BRANCHES = [
     (NetworkError("x"), C.NETWORK),
     (PageReadError("x"), C.PAGE_UNREADABLE),
     (InvalidReferenceError("x"), C.INVALID_ARGUMENT),
+    (InvalidAnswerError("x"), C.INVALID_ARGUMENT),
     (LinkedInOperationError("x"), C.INTERNAL),
     (LinkedInMCPError("x"), C.INTERNAL),
 ]

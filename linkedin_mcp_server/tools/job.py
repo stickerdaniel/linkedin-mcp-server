@@ -158,6 +158,83 @@ def register_job_tools(
 
     @mcp.tool(
         timeout=tool_timeout,
+        title="Submit Easy Apply",
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        },
+        tags={"job"},
+    )
+    @tool_errors
+    async def submit_easy_apply(
+        job_id: str,
+        ctx: Context,
+        answers: dict[str, str | bool | list[str]] | None = None,
+        follow_company: bool = False,
+        confirm_submit: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Answer a job posting's Easy Apply form, and send it when asked to.
+
+        Read the form with get_easy_apply_form first: answers are keyed by the
+        exact field labels it returned. Nothing is inferred or defaulted. A
+        field no answer names keeps whatever LinkedIn prefilled, and an answer
+        no field wears, an option that does not exist or a required field left
+        empty stops the run before anything is sent.
+
+        confirm_submit is the only thing that clicks Submit, and it does so
+        only once every step was reached with its required fields answered.
+        Without it the form is filled, read back and the draft discarded, which
+        rehearses the application without sending it.
+
+        Every run writes to the LinkedIn account, submitted or not: LinkedIn
+        saves Easy Apply answers and prefills them into the next application,
+        and an uploaded resume becomes the preselected one. A typeahead is
+        answered by naming it with the value to look up: what lands in the
+        field is a suggestion LinkedIn offered for that value, and an answer
+        none of them wears refuses with the suggestions quoted, so the retry is
+        one call away. An uploaded file has to come back named on the form
+        before anything else happens, so a slow upload refuses rather than
+        sending the application with the resume it was meant to replace.
+
+        Args:
+            job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
+            ctx: FastMCP context for progress reporting
+            answers: Field label to answer. Text for a typed or picked control,
+                the option's label for a radio, a list of labels for a checkbox
+                group, true or false for a lone checkbox, and an absolute path
+                for a resume upload
+            follow_company: Leave the follow-the-company checkbox checked.
+                LinkedIn ships it checked and this unchecks it by default
+            confirm_submit: Send the application. Submitting cannot be undone
+
+        Returns:
+            Dict with url, apply: {type} and submitted. Easy Apply postings add
+            form: {steps, complete} as get_easy_apply_form returns it, with the
+            fields as they were left; follow is the state the checkbox ended in
+            and confirmation is what LinkedIn said about a sent application,
+            its own modal or the posting's applied line. It is absent when
+            neither appeared; submitted is what says the application was sent.
+            section_errors reports a form that could not be answered or a draft
+            that could not be discarded.
+        """
+        extractor = await get_ready_extractor(ctx, tool_name="submit_easy_apply")
+        logger.info("Answering Easy Apply form: %s (submit=%s)", job_id, confirm_submit)
+
+        await ctx.report_progress(progress=0, total=100, message="Opening job posting")
+
+        result = await extractor.submit_easy_apply(
+            job_id, answers, follow_company, confirm_submit
+        )
+
+        await ctx.report_progress(progress=100, total=100, message="Complete")
+
+        return result
+
+    @mcp.tool(
+        timeout=tool_timeout,
         title="Search Jobs",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "search"},

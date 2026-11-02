@@ -68,6 +68,7 @@ Every tool that reads LinkedIn returns `{"url": str, "sections": {name: raw_text
 - `apply`: returned by `get_job_apply_url` instead of `sections`. `{type, url?}`, where `type` is `easy_apply`, `external`, `applied`, `closed` or `unknown`.
 - `apply` beside `sections`: added by `get_job_details` when the posting shows it was applied to or has closed. `{type}`, where `type` is `applied` or `closed`.
 - `apply` and `form`: returned by `get_easy_apply_form` instead of `sections`. `form` is present for Easy Apply postings only: `{steps: [{heading?, progress?, fields}], complete}`.
+- `submitted`: returned by `submit_easy_apply` beside `apply` and the form as it was left, with `follow` and `confirmation` where they apply.
 
 ## Adding a section
 

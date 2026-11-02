@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncio
+import copy
+import re
 
 import pytest
+from patchright.async_api import Error as PlaywrightError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    InvalidAnswerError,
+)
 from linkedin_mcp_server.linkedin import job_pages as job_pages_module
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.contracts import (
@@ -21,10 +28,10 @@ from linkedin_mcp_server.linkedin.job_pages import (
     JobPageReader,
     _ScrollCharge,
 )
-from linkedin_mcp_server.linkedin.text import JOB_APPLY_EN_US
 from linkedin_mcp_server.linkedin.link_metadata import Reference
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.session import PageSession
+from linkedin_mcp_server.linkedin.text import JOB_APPLY_EN_US
 from linkedin.support.navigation import navigate
 
 
@@ -1533,3 +1540,1257 @@ class TestReadEasyApplyForm:
                 await reader.read_easy_apply_form(self.URL, "123", JOB_APPLY_EN_US)
 
         assert raised.value.__cause__ is failure
+
+    async def test_a_failed_answering_walk_that_leaves_a_draft_raises_its_type(
+        self, mock_page
+    ):
+        reader = _reader(mock_page)
+        failure = RuntimeError("The Easy Apply dialog closed while it was read")
+        with (
+            patch.object(
+                reader,
+                "_read_apply_type",
+                new_callable=AsyncMock,
+                return_value=("easy_apply", None),
+            ),
+            patch.object(
+                reader,
+                "_walk_easy_apply_answers",
+                new_callable=AsyncMock,
+                side_effect=failure,
+            ),
+            patch.object(
+                reader,
+                "_discard_easy_apply",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            with pytest.raises(EasyApplyDraftLeftError) as raised:
+                await reader.submit_easy_apply(
+                    self.URL, "123", JOB_APPLY_EN_US, {}, confirm_submit=False
+                )
+
+        assert raised.value.__cause__ is failure
+
+
+class TestAnswerEasyApplyStep:
+    """Filling one step of the Easy Apply dialog from label-keyed answers."""
+
+    CONTACT: dict[str, Any] = {
+        "heading": "Contact info",
+        "progress": 0,
+        "fields": [
+            {
+                "label": "First name",
+                "type": "text",
+                "required": True,
+                "value": "Ada",
+                "ids": ["first"],
+            },
+            {
+                "label": "Email address",
+                "type": "select",
+                "required": True,
+                "options": ["Select an option", "me@example.com"],
+                "value": "Select an option",
+                "ids": ["email"],
+            },
+            {
+                "label": "Authorized to work in France?",
+                "type": "radio",
+                "required": True,
+                "options": ["Yes", "No"],
+                "selected": [],
+                "ids": ["yes", "no"],
+            },
+            {
+                "label": "Why Acme?",
+                "type": "textarea",
+                "required": False,
+                "max_length": 20,
+                "ids": ["why"],
+            },
+            {
+                "label": "Upload resume",
+                "type": "file",
+                "required": False,
+                "ids": ["cv"],
+            },
+        ],
+    }
+
+    CITY = {
+        "label": "Location (city)",
+        "type": "typeahead",
+        "required": True,
+        "ids": ["city"],
+    }
+
+    @staticmethod
+    def _dialog(mock_page) -> list[tuple[str, str, str]]:
+        """Route locators to per-control doubles that record what reached them."""
+        done: list[tuple[str, str, str]] = []
+
+        def locator_for(selector: str):
+            match = re.search(r'\[id="(.*?)"\]', selector)
+            assert match is not None
+            control_id = match.group(1)
+            control = MagicMock()
+            control.first = control
+            control.fill = AsyncMock(
+                side_effect=lambda value, **_: done.append((control_id, "fill", value))
+            )
+            control.select_option = AsyncMock(
+                side_effect=lambda label, **_: done.append(
+                    (control_id, "select", label)
+                )
+            )
+            control.check = AsyncMock(
+                side_effect=lambda **_: done.append((control_id, "check", ""))
+            )
+            control.uncheck = AsyncMock(
+                side_effect=lambda **_: done.append((control_id, "uncheck", ""))
+            )
+            control.set_input_files = AsyncMock(
+                side_effect=lambda files, **_: done.append(
+                    (control_id, "upload", files)
+                )
+            )
+            return control
+
+        mock_page.locator.side_effect = locator_for
+        return done
+
+    async def test_every_control_type_is_set_the_way_it_is_answered(
+        self, mock_page, tmp_path
+    ):
+        resume = tmp_path / "resume.pdf"
+        resume.write_bytes(b"%PDF-1.7")
+        done = self._dialog(mock_page)
+
+        used, _ = await _reader(mock_page)._answer_easy_apply_step(
+            self.CONTACT,
+            {
+                "First name": "Noor",
+                "Email address": "me@example.com",
+                "Authorized to work in France?": "Yes",
+                "Why Acme?": "Agents.",
+                "Upload resume": str(resume),
+            },
+        )
+
+        assert done == [
+            ("first", "fill", "Noor"),
+            ("email", "select", "me@example.com"),
+            ("yes", "check", ""),
+            ("why", "fill", "Agents."),
+            ("cv", "upload", str(resume)),
+        ]
+        assert used == {
+            "First name",
+            "Email address",
+            "Authorized to work in France?",
+            "Why Acme?",
+            "Upload resume",
+        }
+
+    async def test_a_field_no_answer_names_is_left_alone(self, mock_page):
+        done = self._dialog(mock_page)
+
+        used, _ = await _reader(mock_page)._answer_easy_apply_step(
+            self.CONTACT, {"First name": "Noor"}
+        )
+
+        assert done == [("first", "fill", "Noor")]
+        assert used == {"First name"}
+
+    async def test_an_answer_the_step_does_not_ask_for_is_left_for_another(
+        self, mock_page
+    ):
+        done = self._dialog(mock_page)
+
+        used, _ = await _reader(mock_page)._answer_easy_apply_step(
+            self.CONTACT, {"Years of Python": "5"}
+        )
+
+        assert done == []
+        assert used == set()
+
+    def test_an_answer_no_step_asked_for_refuses(self):
+        with pytest.raises(InvalidAnswerError, match="'Years of Python'"):
+            job_pages_module.refuse_unused_easy_apply_answers(
+                {"First name": "Noor", "Years of Python": "5"}, {"First name"}
+            )
+
+    async def test_two_fields_sharing_a_label_refuse_rather_than_pick_one(
+        self, mock_page
+    ):
+        twice = dict(
+            self.CONTACT,
+            fields=[
+                dict(self.CONTACT["fields"][0]),
+                dict(self.CONTACT["fields"][0], ids=["second"]),
+            ],
+        )
+        done = self._dialog(mock_page)
+
+        with pytest.raises(InvalidAnswerError, match="both labelled 'First name'"):
+            await _reader(mock_page)._answer_easy_apply_step(twice, {"First name": "S"})
+        assert done == []
+
+    async def test_an_empty_typeahead_no_answer_names_still_refuses(self, mock_page):
+        step = dict(self.CONTACT, fields=[*self.CONTACT["fields"], self.CITY])
+        done = self._dialog(mock_page)
+
+        with pytest.raises(InvalidAnswerError, match="needs an answer naming it"):
+            await _reader(mock_page)._answer_easy_apply_step(
+                step, {"First name": "Noor"}
+            )
+        assert done == []
+
+    def test_a_named_typeahead_is_picked_rather_than_typed(self):
+        step = dict(self.CONTACT, fields=[self.CITY])
+
+        edits, used = job_pages_module.plan_easy_apply_step(
+            step, {"Location (city)": "Paris, \u00cele-de-France, France"}
+        )
+
+        assert edits == [
+            job_pages_module.EasyApplyEdit(
+                "city", "pick", "Paris, \u00cele-de-France, France"
+            )
+        ]
+        assert used == {"Location (city)"}
+
+    def test_a_prefilled_typeahead_no_answer_names_is_kept(self):
+        step = dict(self.CONTACT, fields=[dict(self.CITY, value="Paris, France")])
+
+        assert job_pages_module.plan_easy_apply_step(step, {}) == ([], set())
+
+    def test_a_prefilled_typeahead_an_answer_names_is_replaced(self):
+        step = dict(self.CONTACT, fields=[dict(self.CITY, value="Paris, France")])
+
+        edits, _ = job_pages_module.plan_easy_apply_step(
+            step, {"Location (city)": "Lyon, France"}
+        )
+
+        assert edits == [job_pages_module.EasyApplyEdit("city", "pick", "Lyon, France")]
+
+    def test_a_prefill_that_already_is_the_answer_is_left_where_it_is(self):
+        # Retyping it would throw away LinkedIn's binding of that text to an
+        # entity for the chance of picking the same one back.
+        step = dict(
+            self.CONTACT,
+            fields=[dict(self.CITY, value="Paris, I\u0302le-de-France, France")],
+        )
+
+        edits, used = job_pages_module.plan_easy_apply_step(
+            step, {"Location (city)": "Paris, \u00cele-de-France, France"}
+        )
+
+        assert edits == []
+        assert used == {"Location (city)"}
+
+    def test_a_typeahead_takes_one_value_rather_than_a_list(self):
+        step = dict(self.CONTACT, fields=[self.CITY])
+
+        with pytest.raises(InvalidAnswerError, match="one value, written out"):
+            job_pages_module.plan_easy_apply_step(
+                step, {"Location (city)": ["Paris", "Lyon"]}
+            )
+
+    def test_picks_are_carried_out_before_every_other_edit(self):
+        # A pick only learns whether it matches after its value is typed into
+        # the page, so a failing one must find the rest of the step untouched.
+        step = dict(self.CONTACT, fields=[*self.CONTACT["fields"], self.CITY])
+
+        edits, _ = job_pages_module.plan_easy_apply_step(
+            step,
+            {
+                "First name": "Noor",
+                "Location (city)": "Lyon, France",
+                "Why Acme?": "Agents.",
+            },
+        )
+
+        assert [edit.action for edit in edits] == ["pick", "fill", "fill"]
+
+    def test_a_refusal_names_the_field_and_what_it_takes(self):
+        email = self.CONTACT["fields"][1]
+
+        with pytest.raises(InvalidAnswerError) as refusal:
+            job_pages_module.plan_easy_apply_answer(email, "me@acme.test")
+
+        message = str(refusal.value)
+        assert "No option is labelled 'me@acme.test'" in message
+        assert "Email address (select)" in message
+        assert "'me@example.com'" in message
+
+    def test_an_option_list_the_read_cut_is_checked_against_the_whole_of_it(self):
+        # The 250-entry country list the read caps at 50. Refusing on the
+        # options that survived would refuse every country past the cut, and
+        # leaving it to the browser would refuse a missing one only after the
+        # step's other answers went in.
+        country = {
+            "label": "Phone country code",
+            "type": "select",
+            "required": True,
+            "options": ["Select an option", "Afghanistan (+93)"],
+            "options_total": 250,
+            "all_options": ["Select an option", "Afghanistan (+93)", "France (+33)"],
+            "ids": ["country"],
+        }
+
+        assert job_pages_module.plan_easy_apply_answer(country, "France (+33)") == [
+            job_pages_module.EasyApplyEdit("country", "select", "France (+33)")
+        ]
+        with pytest.raises(InvalidAnswerError, match="No option is labelled"):
+            job_pages_module.plan_easy_apply_answer(country, "Atlantis (+999)")
+
+    async def test_a_missing_option_refuses_before_anything_on_the_step_is_set(
+        self, mock_page
+    ):
+        step = copy.deepcopy(self.CONTACT)
+        step["fields"].append(
+            {
+                "label": "Phone country code",
+                "type": "select",
+                "required": True,
+                "options": ["Select an option"],
+                "options_total": 250,
+                "all_options": ["Select an option", "France (+33)"],
+                "ids": ["country"],
+            }
+        )
+        done = self._dialog(mock_page)
+
+        with pytest.raises(InvalidAnswerError, match="Atlantis"):
+            await _reader(mock_page)._answer_easy_apply_step(
+                step, {"First name": "Noor", "Phone country code": "Atlantis (+999)"}
+            )
+
+        assert done == []
+
+    def test_the_whole_of_a_cut_list_is_not_returned(self):
+        step = {
+            "heading": "Contact info",
+            "progress": 0,
+            "fields": [
+                {
+                    "label": "Phone country code",
+                    "type": "select",
+                    "options": ["Select an option"],
+                    "options_total": 250,
+                    "all_options": ["Select an option", "France (+33)"],
+                    "ids": ["country"],
+                }
+            ],
+        }
+
+        field = job_pages_module._public_step(step)["fields"][0]
+        assert "all_options" not in field and "ids" not in field
+        assert field["options_total"] == 250
+
+    def test_a_choice_list_the_read_cut_refuses(self):
+        field = {
+            "label": "Country of residence",
+            "type": "radio",
+            "required": True,
+            "options": ["Afghanistan", "Albania"],
+            "options_total": 60,
+            "selected": [],
+            "ids": [f"r{index}" for index in range(60)],
+        }
+
+        with pytest.raises(InvalidAnswerError, match="It lists 60 options"):
+            job_pages_module.plan_easy_apply_answer(field, "Albania")
+
+    def test_an_option_no_radio_carries_refuses(self):
+        with pytest.raises(InvalidAnswerError, match="No option is labelled 'Maybe'"):
+            job_pages_module.plan_easy_apply_answer(self.CONTACT["fields"][2], "Maybe")
+
+    def test_a_checkbox_group_is_set_to_exactly_what_the_answer_names(self):
+        field = {
+            "label": "Which apply?",
+            "type": "checkbox",
+            "required": False,
+            "options": ["Python", "Go", "Rust"],
+            "selected": ["Go", "Rust"],
+            "ids": ["py", "go", "rs"],
+        }
+
+        edits = job_pages_module.plan_easy_apply_answer(field, ["Python", "Go"])
+
+        assert edits == [
+            job_pages_module.EasyApplyEdit("py", "check", "Python"),
+            job_pages_module.EasyApplyEdit("rs", "uncheck", "Rust"),
+        ]
+
+    def test_a_lone_checkbox_takes_yes_or_no(self):
+        field = {
+            "label": "I agree",
+            "type": "checkbox",
+            "required": True,
+            "options": ["I agree"],
+            "selected": [],
+            "ids": ["agree"],
+        }
+
+        assert job_pages_module.plan_easy_apply_answer(field, True) == [
+            job_pages_module.EasyApplyEdit("agree", "check", "I agree")
+        ]
+        assert job_pages_module.plan_easy_apply_answer(field, False) == []
+
+    def test_an_answer_longer_than_the_field_holds_refuses(self):
+        with pytest.raises(InvalidAnswerError, match="LinkedIn would cut it"):
+            job_pages_module.plan_easy_apply_answer(self.CONTACT["fields"][3], "x" * 21)
+
+    def test_a_typeahead_answer_longer_than_the_field_holds_refuses(self):
+        city = dict(self.CITY, max_length=10)
+
+        with pytest.raises(InvalidAnswerError, match="LinkedIn would cut it"):
+            job_pages_module.plan_easy_apply_answer(
+                city, "Paris, \u00cele-de-France, France"
+            )
+
+    def test_a_resume_that_is_not_there_refuses(self, tmp_path):
+        missing = str(tmp_path / "nope.pdf")
+
+        with pytest.raises(InvalidAnswerError, match="There is no file at"):
+            job_pages_module.plan_easy_apply_answer(self.CONTACT["fields"][4], missing)
+
+    def test_a_control_linkedin_gave_no_id_refuses(self):
+        field = dict(self.CONTACT["fields"][0], ids=[""])
+
+        with pytest.raises(InvalidAnswerError, match="no id"):
+            job_pages_module.plan_easy_apply_answer(field, "Noor")
+
+    def test_a_control_is_addressed_inside_the_dialog_only(self):
+        selector = job_pages_module.easy_apply_control_selector("first")
+
+        assert selector.count('[id="first"]') == 3
+        assert all(part.startswith('[role="dialog"]') for part in selector.split(", "))
+
+
+class _Dialog:
+    """A scripted Easy Apply dialog, driven the way the walk drives LinkedIn's.
+
+    Holds the steps it is showing and rewrites them as answers arrive, so that
+    a re-read sees what a real dialog would: a checked radio, a filled input,
+    and the new controls an upload re-renders the step around. Every click,
+    keystroke and value that reaches it is recorded on `log`.
+    """
+
+    def __init__(
+        self, page, steps: list[dict[str, Any]], *, follow: bool | None = True
+    ):
+        self.steps = copy.deepcopy(steps)
+        self.index = 0
+        self.open = False
+        self.follow = follow
+        self.confirmation = "Your application was sent to Acme"
+        #: The posting's own applied line, which is what LinkedIn leaves behind
+        #: when it answers a sent application with no dialog at all.
+        self.applied_line = ""
+        self.refuse: dict[int, dict[str, str]] = {}
+        self.stuck: set[int] = set()
+        self.cards: list[str] = []
+        self.pending: str | None = None
+        self.rebuild_in = 0
+        #: How many settled reads the torn-down list survives before the file
+        #: arrives. 0 rebuilds it before the first read back.
+        self.tear_down_reads = 0
+        self.follow_resets = 0
+        #: How LinkedIn renders the follow checkbox. Measured live, the input
+        #: itself takes no click and only its label does.
+        self.follow_id = "follow"
+        self.follow_shown = True
+        self.follow_labelled = True
+        self.log: list[Any] = []
+        page.evaluate = AsyncMock(side_effect=self._evaluate)
+        page.keyboard.press = AsyncMock(side_effect=lambda key: self.log.append(key))
+        page.locator = MagicMock(side_effect=self._locator)
+
+    async def _evaluate(self, script, *args, **kwargs):
+        if script is job_pages_module.EASY_APPLY_STEP_JS:
+            if not self.open:
+                return None
+            if self.pending is not None:
+                if self.rebuild_in <= 0:
+                    self.cards.append(self.pending)
+                    self.pending = None
+                else:
+                    self.rebuild_in -= 1
+            step = copy.deepcopy(self.steps[self.index])
+            step["fields"] += [
+                {
+                    "label": f"Deselect resume {name}",
+                    "type": "radio",
+                    "required": False,
+                    "options": [f"Deselect resume {name}"],
+                    "selected": [f"Deselect resume {name}"],
+                    "ids": [f"card-{name}"],
+                }
+                for name in self.cards
+            ]
+            step["signature"] = repr(
+                [step["heading"], step["progress"]]
+                + [i for field in step["fields"] for i in field.get("ids", [])]
+            )
+            return step
+        if script is job_pages_module.EASY_APPLY_FOLLOW_JS:
+            if self.follow is None:
+                return None
+            return {
+                "id": self.follow_id,
+                "checked": self.follow,
+                "shown": self.follow_shown,
+                "labelled": bool(self.follow_id) and self.follow_labelled,
+            }
+        if script is job_pages_module.EASY_APPLY_CONFIRMATION_JS:
+            return self.confirmation
+        if script is job_pages_module.APPLIED_LINE_JS:
+            return self.applied_line
+        return self.open
+
+    def _locator(self, selector: str):
+        control = MagicMock()
+        control.first = control
+        if "/apply" in selector:
+            # The anchor-shaped Easy Apply, the only one the walk opens.
+            control.count = AsyncMock(return_value=1)
+            control.click = AsyncMock(side_effect=self._open_dialog)
+        elif selector == job_pages_module.EASY_APPLY_NEXT_SELECTOR:
+            control.click = AsyncMock(side_effect=self._next)
+        elif selector == job_pages_module.EASY_APPLY_SUBMIT_SELECTOR:
+            control.click = AsyncMock(side_effect=self._submit)
+        elif selector == job_pages_module.EASY_APPLY_DISCARD_SELECTOR:
+            control.click = AsyncMock(side_effect=self._discard)
+        elif "footer" in selector:
+            control.check = AsyncMock(
+                side_effect=lambda **_: self._set("follow", "check", "")
+            )
+            control.uncheck = AsyncMock(
+                side_effect=lambda **_: self._set("follow", "uncheck", "")
+            )
+        elif selector.startswith(
+            '[role="dialog"]:has([data-easy-apply-next-button]) label'
+        ):
+            label = re.search(r'label\[for="(.*?)"\]', selector)
+            assert label is not None
+            for_id = label.group(1)
+            control.click = AsyncMock(
+                side_effect=lambda **_: self._set(for_id, "label-click", "")
+            )
+        else:
+            match = re.search(r'\[id="(.*?)"\]', selector)
+            assert match is not None
+            control_id = match.group(1)
+            control.fill = AsyncMock(
+                side_effect=lambda value, **_: self._set(control_id, "fill", value)
+            )
+            control.select_option = AsyncMock(
+                side_effect=lambda label, **_: self._set(control_id, "select", label)
+            )
+            control.check = AsyncMock(
+                side_effect=lambda **_: self._set(control_id, "check", "")
+            )
+            control.uncheck = AsyncMock(
+                side_effect=lambda **_: self._set(control_id, "uncheck", "")
+            )
+            control.set_input_files = AsyncMock(
+                side_effect=lambda files, **_: self._set(control_id, "upload", files)
+            )
+        return control
+
+    def _open_dialog(self, **_):
+        self.open = True
+        self.index = 0
+        self.log.append("open")
+
+    def _next(self, **_):
+        self.log.append("next")
+        if self.index in self.stuck:
+            # Standing still and re-rendering: the step's controls change and
+            # the step does not, which is the shape a signature reads as
+            # progress.
+            for field in self.steps[self.index]["fields"]:
+                field["ids"] = [f"{i}-again" for i in field.get("ids", [])]
+            return
+        refused = self.refuse.get(self.index)
+        if refused:
+            for field in self.steps[self.index]["fields"]:
+                if field["label"] in refused:
+                    field["error"] = refused[field["label"]]
+            return
+        self.index += 1
+
+    def _submit(self, **_):
+        self.log.append("submit")
+        self.open = False
+
+    def _discard(self, **_):
+        self.log.append("discard")
+        self.open = False
+
+    def _set(self, control_id: str, action: str, value: str):
+        self.log.append((control_id, action, value))
+        if control_id == "follow":
+            if action == "label-click":
+                self.follow = not self.follow
+            elif not self.follow_shown:
+                raise AssertionError("the follow input takes no click")
+            else:
+                self.follow = action == "check"
+            if self.follow_resets:
+                # A re-render restoring LinkedIn's default under the answer.
+                self.follow_resets -= 1
+                self.follow = True
+            return
+        for field in self.steps[self.index]["fields"]:
+            ids = field.get("ids") or []
+            if control_id not in ids:
+                continue
+            if action in ("fill", "select"):
+                field["value"] = value
+            elif action == "upload":
+                # What the walk has to survive, measured live: LinkedIn tears
+                # the resume list down when the upload starts and rebuilds it
+                # around the new file only once that file has arrived. The
+                # torn-down list holds still in between, so reads agree on a
+                # step with no resume on it at all.
+                field["ids"] = [f"{control_id}-again"]
+                self.cards.clear()
+                self.rebuild_in = self.tear_down_reads
+                self.pending = value.rsplit("/", 1)[-1]
+            else:
+                option = field["options"][ids.index(control_id)]
+                selected = set(field.get("selected") or [])
+                field["selected"] = sorted(
+                    selected | {option} if action == "check" else selected - {option}
+                )
+
+
+class TestSubmitEasyApply:
+    """Walking the dialog from Apply to a submitted application."""
+
+    URL = "https://www.linkedin.com/jobs/view/123/"
+
+    QUESTIONS: list[dict[str, Any]] = [
+        {
+            "heading": "Contact info",
+            "progress": 0,
+            "next": True,
+            "fields": [
+                {
+                    "label": "First name",
+                    "type": "text",
+                    "required": True,
+                    "value": "Ada",
+                    "ids": ["first"],
+                }
+            ],
+        },
+        {
+            "heading": "Additional questions",
+            "progress": 50,
+            "next": True,
+            "fields": [
+                {
+                    "label": "Authorized to work in France?",
+                    "type": "radio",
+                    "required": True,
+                    "options": ["Yes", "No"],
+                    "selected": [],
+                    "ids": ["yes", "no"],
+                }
+            ],
+        },
+        {
+            "heading": "Resume",
+            "progress": 100,
+            "next": False,
+            "fields": [
+                {
+                    "label": "Upload resume",
+                    "type": "file",
+                    "required": False,
+                    "ids": ["cv"],
+                }
+            ],
+        },
+    ]
+
+    ANSWERS: dict[str, Any] = {"Authorized to work in France?": "Yes"}
+
+    @pytest.fixture(autouse=True)
+    def _no_polling(self, monkeypatch):
+        monkeypatch.setattr(job_pages_module, "_APPLY_POLL", 0)
+
+    def _run(self, mock_page, steps=None, **kwargs):
+        """Walk ``steps`` with the apply-type read stubbed, as the facade would."""
+        dialog = _Dialog(mock_page, steps if steps is not None else self.QUESTIONS)
+        reader = _reader(mock_page)
+        answers = kwargs.pop("answers", self.ANSWERS)
+        run = patch.object(
+            reader, "_read_apply_type", new=AsyncMock(return_value=("easy_apply", None))
+        )
+        return dialog, run, reader, answers, kwargs
+
+    async def test_without_the_flag_the_form_is_filled_and_the_draft_discarded(
+        self, mock_page
+    ):
+        dialog, run, reader, answers, _ = self._run(mock_page)
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=False
+            )
+
+        assert result.submitted is False
+        assert result.complete is True
+        assert result.discarded is True
+        assert "submit" not in dialog.log
+        assert ("yes", "check", "") in dialog.log
+        assert dialog.log[-2:] == ["Escape", "discard"]
+        assert [step["heading"] for step in result.steps] == [
+            "Contact info",
+            "Additional questions",
+            "Resume",
+        ]
+        assert result.steps[1]["fields"][0]["selected"] == ["Yes"]
+
+    async def test_the_flag_is_the_only_thing_that_clicks_submit(self, mock_page):
+        dialog, run, reader, answers, _ = self._run(mock_page)
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert result.submitted is True
+        assert result.complete is True
+        assert result.confirmation == "Your application was sent to Acme"
+        assert "submit" in dialog.log and "discard" not in dialog.log
+        assert result.discarded is True
+
+    async def test_the_postings_applied_line_answers_a_submit_no_dialog_follows(
+        self, mock_page
+    ):
+        """A sent application LinkedIn narrates with nothing at all.
+
+        Measured on 2026-09-23: the form closed, no modal rendered, and the
+        posting behind it carried the applied line. The dialog closing already
+        proved the click landed, so what is being read here is the account of
+        it, and the posting is the one surface still giving one.
+        """
+        dialog, run, reader, answers, _ = self._run(mock_page)
+        dialog.confirmation = ""
+        dialog.applied_line = "Application submitted"
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert result.submitted is True
+        assert result.confirmation == "Application submitted"
+
+    async def test_linkedins_own_dialog_is_taken_over_the_postings_line(
+        self, mock_page
+    ):
+        dialog, run, reader, answers, _ = self._run(mock_page)
+        dialog.applied_line = "Application submitted"
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert result.confirmation == "Your application was sent to Acme"
+
+    async def test_neither_surface_speaking_is_empty_and_not_a_failed_submit(
+        self, mock_page, monkeypatch
+    ):
+        monkeypatch.setattr(job_pages_module, "_EASY_APPLY_CONFIRMATION_TIMEOUT", 0)
+        dialog, run, reader, answers, _ = self._run(mock_page)
+        dialog.confirmation = ""
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert result.submitted is True
+        assert result.confirmation == ""
+        assert "submit" in dialog.log
+
+    async def test_a_confirmation_read_that_fails_does_not_unsend_it(self, mock_page):
+        dialog, run, reader, answers, _ = self._run(mock_page)
+        evaluate = mock_page.evaluate.side_effect
+
+        async def fail_after_submit(script, *args, **kwargs):
+            if script is job_pages_module.EASY_APPLY_CONFIRMATION_JS:
+                raise PlaywrightError("Execution context was destroyed")
+            return await evaluate(script, *args, **kwargs)
+
+        mock_page.evaluate.side_effect = fail_after_submit
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert result.submitted is True
+        assert result.complete is True
+        assert result.confirmation == ""
+        assert dialog.log.count("submit") == 1
+
+    async def test_a_required_field_nothing_answers_stops_before_any_click(
+        self, mock_page
+    ):
+        dialog, run, reader, _, _ = self._run(mock_page)
+
+        with run:
+            with pytest.raises(InvalidAnswerError, match="Authorized to work"):
+                await reader.submit_easy_apply(
+                    self.URL, "123", JOB_APPLY_EN_US, {}, confirm_submit=True
+                )
+
+        assert dialog.log.count("next") == 1  # onto the step, never off it
+        assert "submit" not in dialog.log
+        assert "discard" in dialog.log
+
+    @pytest.mark.parametrize(
+        ("field", "answer", "action"),
+        [
+            (
+                {
+                    "label": "Mobile phone number",
+                    "type": "text",
+                    "required": True,
+                    "value": "+33600000000",
+                    "ids": ["phone"],
+                },
+                "",
+                ("phone", "fill", ""),
+            ),
+            (
+                {
+                    "label": "I agree to the terms",
+                    "type": "checkbox",
+                    "required": True,
+                    "options": ["I agree to the terms"],
+                    "selected": ["I agree to the terms"],
+                    "ids": ["terms"],
+                },
+                False,
+                ("terms", "uncheck", ""),
+            ),
+        ],
+    )
+    async def test_a_required_field_an_answer_emptied_stops_before_next(
+        self, mock_page, field, answer, action
+    ):
+        # Answered, and answered with nothing: the field reads back as empty
+        # as one no answer named, and LinkedIn would refuse it the same way.
+        steps = copy.deepcopy(self.QUESTIONS)
+        steps[0]["fields"].append(field)
+        dialog, run, reader, _, _ = self._run(mock_page, steps)
+
+        with run:
+            with pytest.raises(InvalidAnswerError, match=field["label"]):
+                await reader.submit_easy_apply(
+                    self.URL,
+                    "123",
+                    JOB_APPLY_EN_US,
+                    {**self.ANSWERS, field["label"]: answer},
+                    confirm_submit=True,
+                )
+
+        assert action in dialog.log
+        assert "next" not in dialog.log
+        assert "submit" not in dialog.log
+
+    async def test_a_step_linkedin_refuses_ends_the_run_carrying_its_errors(
+        self, mock_page
+    ):
+        dialog, run, reader, answers, _ = self._run(mock_page)
+        dialog.refuse[1] = {"Authorized to work in France?": "Select an answer"}
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert result.submitted is False
+        assert result.complete is False
+        assert result.steps[-1]["fields"][0]["error"] == "Select an answer"
+        assert "submit" not in dialog.log
+        assert result.discarded is True
+
+    async def test_a_hint_on_the_step_next_reaches_is_not_a_refusal(self, mock_page):
+        # `aria-describedby` names hints as well as errors, so the step read
+        # carries this one as `error` from the moment the step renders.
+        steps = copy.deepcopy(self.QUESTIONS)
+        steps[1]["fields"][0]["error"] = "Answer for the country of the role"
+        dialog, run, reader, answers, _ = self._run(mock_page, steps)
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert result.complete is True
+        assert result.submitted is True
+        assert "error" not in result.steps[1]["fields"][0]
+
+    async def test_a_refused_step_carries_the_errors_next_added_and_no_hint(
+        self, mock_page
+    ):
+        steps = copy.deepcopy(self.QUESTIONS)
+        steps[1]["fields"].append(
+            {
+                "label": "Why Acme?",
+                "type": "textarea",
+                "required": False,
+                "error": "Up to 500 characters",
+                "ids": ["why"],
+            }
+        )
+        dialog, run, reader, answers, _ = self._run(mock_page, steps)
+        dialog.refuse[1] = {"Authorized to work in France?": "Select an answer"}
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert result.complete is False
+        fields = result.steps[-1]["fields"]
+        assert fields[0]["error"] == "Select an answer"
+        assert "error" not in fields[1]
+
+    async def test_the_step_an_upload_re_renders_is_not_read_as_a_refusal(
+        self, mock_page, tmp_path
+    ):
+        resume = tmp_path / "resume.pdf"
+        resume.write_bytes(b"%PDF-1.7")
+        steps = copy.deepcopy(self.QUESTIONS)
+        steps[0]["fields"].append(
+            {"label": "Upload resume", "type": "file", "required": True, "ids": ["cv"]}
+        )
+        dialog, run, reader, _, _ = self._run(mock_page, steps)
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL,
+                "123",
+                JOB_APPLY_EN_US,
+                {**self.ANSWERS, "Upload resume": str(resume)},
+                confirm_submit=True,
+            )
+
+        assert ("cv", "upload", str(resume)) in dialog.log
+        assert result.complete is True
+        assert result.submitted is True
+        # Read back after the upload, not before it: the card LinkedIn renders
+        # for the new file only exists in the step as it stands afterwards.
+        assert [field["label"] for field in result.steps[0]["fields"]] == [
+            "First name",
+            "Upload resume",
+            "Deselect resume resume.pdf",
+        ]
+
+    async def test_a_resume_list_still_rebuilding_is_waited_out(
+        self, mock_page, tmp_path
+    ):
+        # The live failure: the upload empties the list, the empty list holds
+        # still, and two reads agreeing on it is not the file having arrived.
+        resume = tmp_path / "resume.pdf"
+        resume.write_bytes(b"%PDF-1.7")
+        steps = copy.deepcopy(self.QUESTIONS)
+        steps[0]["fields"].append(
+            {"label": "Upload resume", "type": "file", "required": False, "ids": ["cv"]}
+        )
+        dialog, run, reader, _, _ = self._run(mock_page, steps)
+        dialog.tear_down_reads = 4
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL,
+                "123",
+                JOB_APPLY_EN_US,
+                {**self.ANSWERS, "Upload resume": str(resume)},
+                confirm_submit=True,
+            )
+
+        assert result.submitted is True
+        assert "Deselect resume resume.pdf" in [
+            field["label"] for field in result.steps[0]["fields"]
+        ]
+
+    async def test_a_file_linkedin_never_shows_back_is_not_submitted(
+        self, mock_page, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(job_pages_module, "_EASY_APPLY_UPLOAD_TIMEOUT", 0)
+        resume = tmp_path / "resume.pdf"
+        resume.write_bytes(b"%PDF-1.7")
+        steps = copy.deepcopy(self.QUESTIONS)
+        steps[0]["fields"].append(
+            {"label": "Upload resume", "type": "file", "required": False, "ids": ["cv"]}
+        )
+        dialog, run, reader, _, _ = self._run(mock_page, steps)
+        dialog.tear_down_reads = 99
+
+        with run:
+            with pytest.raises(InvalidAnswerError, match="did not show 'resume.pdf'"):
+                await reader.submit_easy_apply(
+                    self.URL,
+                    "123",
+                    JOB_APPLY_EN_US,
+                    {**self.ANSWERS, "Upload resume": str(resume)},
+                    confirm_submit=True,
+                )
+
+        assert "submit" not in dialog.log
+        assert "discard" in dialog.log
+
+    async def test_a_card_whose_name_only_contains_the_files_is_not_it(
+        self, mock_page, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(job_pages_module, "_EASY_APPLY_UPLOAD_TIMEOUT", 0)
+        resume = tmp_path / "resume.pdf"
+        resume.write_bytes(b"%PDF-1.7")
+        steps = copy.deepcopy(self.QUESTIONS)
+        steps[0]["fields"] += [
+            {
+                "label": "Upload resume",
+                "type": "file",
+                "required": False,
+                "ids": ["cv"],
+            },
+            {
+                "label": "Deselect resume old-resume.pdf",
+                "type": "radio",
+                "required": False,
+                "options": ["Deselect resume old-resume.pdf"],
+                "selected": ["Deselect resume old-resume.pdf"],
+                "ids": ["card-old"],
+            },
+        ]
+        dialog, run, reader, _, _ = self._run(mock_page, steps)
+        dialog.tear_down_reads = 99
+
+        with run:
+            with pytest.raises(InvalidAnswerError, match="did not show 'resume.pdf'"):
+                await reader.submit_easy_apply(
+                    self.URL,
+                    "123",
+                    JOB_APPLY_EN_US,
+                    {**self.ANSWERS, "Upload resume": str(resume)},
+                    confirm_submit=True,
+                )
+
+        # Refused on the step it was uploaded on, never taken past it.
+        assert "next" not in dialog.log
+        assert "submit" not in dialog.log
+
+    @pytest.mark.parametrize(
+        ("label", "named"),
+        [
+            ("Deselect resume resume.pdf", True),
+            ("resume.pdf", True),
+            ("resume.pdf\nLast used on 1/2/2026", True),
+            ("Deselect resume old-resume.pdf", False),
+            ("Deselect resume my_resume.pdf", False),
+            ("Deselect resume 2resume.pdf", False),
+            ("Deselect resume resume.pdf.bak", False),
+            ("Deselect resume resume.pdfx", False),
+        ],
+    )
+    def test_a_file_is_named_by_its_whole_name(self, label, named):
+        assert job_pages_module._names_file(label, "resume.pdf") is named
+
+    async def test_a_follow_checkbox_a_re_render_resets_is_set_again(self, mock_page):
+        dialog, run, reader, answers, _ = self._run(mock_page)
+        dialog.follow_resets = 1
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        # The box itself first, then the label, which is what a person clicks.
+        assert [entry for entry in dialog.log if entry[0] == "follow"] == [
+            ("follow", "uncheck", ""),
+            ("follow", "label-click", ""),
+        ]
+        assert result.follow is False
+
+    async def test_a_follow_checkbox_with_nothing_to_click_is_set_by_its_label(
+        self, mock_page
+    ):
+        # How LinkedIn renders it, measured live: the input takes no click and
+        # only the label it is styled with does.
+        dialog, run, reader, answers, _ = self._run(mock_page)
+        dialog.follow_shown = False
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert [entry for entry in dialog.log if entry[0] == "follow"] == [
+            ("follow", "label-click", "")
+        ]
+        assert result.follow is False
+
+    async def test_a_follow_checkbox_linkedin_left_anonymous_is_still_reached(
+        self, mock_page
+    ):
+        # No id, so no way to key a selector on one and no label to point at
+        # it. The footer's own checkbox is what is left.
+        dialog, run, reader, answers, _ = self._run(mock_page)
+        dialog.follow_id = ""
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert ("follow", "uncheck", "") in dialog.log
+        assert result.follow is False
+
+    async def test_a_follow_checkbox_that_takes_nothing_is_reported_as_it_is(
+        self, mock_page
+    ):
+        dialog, run, reader, answers, _ = self._run(mock_page)
+        dialog.follow_shown = False
+        dialog.follow_labelled = False
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        # Never worth failing an application over, and never claimed either.
+        assert result.follow is True
+        assert result.submitted is True
+
+    async def test_a_step_that_neither_moves_nor_complains_ends_the_run(
+        self, mock_page
+    ):
+        dialog, run, reader, answers, _ = self._run(mock_page)
+        dialog.stuck.add(1)
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert result.complete is False
+        assert result.submitted is False
+        assert len(result.steps) == 2
+        assert "submit" not in dialog.log
+        assert "discard" in dialog.log
+
+    async def test_the_follow_checkbox_ends_unchecked_unless_it_is_asked_for(
+        self, mock_page
+    ):
+        dialog, run, reader, answers, _ = self._run(mock_page)
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert ("follow", "uncheck", "") in dialog.log
+        assert result.follow is False
+
+    async def test_the_follow_checkbox_is_left_alone_when_it_is_asked_for(
+        self, mock_page
+    ):
+        dialog, run, reader, answers, _ = self._run(mock_page)
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL,
+                "123",
+                JOB_APPLY_EN_US,
+                answers,
+                confirm_submit=True,
+                follow_company=True,
+            )
+
+        assert not [entry for entry in dialog.log if entry[0] == "follow"]
+        assert result.follow is True
+
+    async def test_an_answer_no_step_asked_for_refuses_before_anything_is_sent(
+        self, mock_page
+    ):
+        dialog, run, reader, _, _ = self._run(mock_page)
+
+        with run:
+            with pytest.raises(InvalidAnswerError, match="Years of Rust"):
+                await reader.submit_easy_apply(
+                    self.URL,
+                    "123",
+                    JOB_APPLY_EN_US,
+                    {**self.ANSWERS, "Years of Rust": "5"},
+                    confirm_submit=True,
+                )
+
+        assert "submit" not in dialog.log
+        assert "discard" in dialog.log
+
+    async def test_a_posting_that_is_not_easy_apply_answers_with_its_type_alone(
+        self, mock_page
+    ):
+        dialog, _, reader, answers, _ = self._run(mock_page)
+
+        with patch.object(
+            reader, "_read_apply_type", new=AsyncMock(return_value=("applied", None))
+        ):
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert result == job_pages_module.EasyApplySubmitRead("applied")
+        assert dialog.log == []
+
+    async def test_a_dialog_still_open_after_submit_is_not_reported_as_sent(
+        self, mock_page
+    ):
+        dialog, run, reader, answers, _ = self._run(mock_page)
+
+        def stall(script, **kwargs):
+            if script == job_pages_module.EASY_APPLY_CLOSED_JS:
+                raise PlaywrightTimeoutError("still open")
+
+        mock_page.wait_for_function = AsyncMock(side_effect=stall)
+
+        with run:
+            with pytest.raises(RuntimeError, match="probably not sent"):
+                await reader.submit_easy_apply(
+                    self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+                )
+
+        assert "submit" in dialog.log
+
+    async def test_a_form_longer_than_the_cap_stops_short_of_submitting(
+        self, mock_page, monkeypatch
+    ):
+        monkeypatch.setattr(job_pages_module, "_EASY_APPLY_MAX_STEPS", 2)
+        dialog, run, reader, answers, _ = self._run(mock_page)
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert result.complete is False
+        assert result.submitted is False
+        assert len(result.steps) == 2
+        assert "submit" not in dialog.log
