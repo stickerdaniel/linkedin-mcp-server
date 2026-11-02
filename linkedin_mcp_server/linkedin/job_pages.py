@@ -808,6 +808,16 @@ def _kept_step(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     return _refused_step(before, after)
 
 
+def _names_file(label: str, name: str) -> bool:
+    """Whether ``label`` names the file ``name`` as a whole.
+
+    Not as a substring: a card for `old-resume.pdf` is not one for
+    `resume.pdf`, and taking it for one would carry on before the upload
+    landed, with the card it was meant to replace.
+    """
+    return bool(re.search(rf"(?<![\w.-]){re.escape(name)}(?![\w-]|\.\w)", label))
+
+
 def _unanswered_required(
     step: dict[str, Any], answered: set[str]
 ) -> list[dict[str, Any]]:
@@ -1384,6 +1394,10 @@ class JobPageReader:
         is the only account this side gets of what it is holding. Refusing a
         file it never names costs a run that changed nothing; accepting one
         costs an application sent with the resume it was meant to replace.
+
+        The name is matched whole. A card LinkedIn already held under the same
+        name is the one thing it cannot rule out: nothing measured on the live
+        dialog yet tells a new card from an old one, or says which is selected.
         """
         deadline = self._session.monotonic() + _EASY_APPLY_UPLOAD_TIMEOUT
         while True:
@@ -1391,7 +1405,9 @@ class JobPageReader:
             missing = sorted(
                 name
                 for name in names
-                if not any(name in field["label"] for field in step["fields"])
+                if not any(
+                    _names_file(field["label"], name) for field in step["fields"]
+                )
             )
             if not missing:
                 return step
