@@ -2354,6 +2354,48 @@ class TestSubmitEasyApply:
         assert "submit" not in dialog.log
         assert result.discarded is True
 
+    async def test_a_hint_on_the_step_next_reaches_is_not_a_refusal(self, mock_page):
+        # `aria-describedby` names hints as well as errors, so the step read
+        # carries this one as `error` from the moment the step renders.
+        steps = copy.deepcopy(self.QUESTIONS)
+        steps[1]["fields"][0]["error"] = "Answer for the country of the role"
+        dialog, run, reader, answers, _ = self._run(mock_page, steps)
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert result.complete is True
+        assert result.submitted is True
+        assert "error" not in result.steps[1]["fields"][0]
+
+    async def test_a_refused_step_carries_the_errors_next_added_and_no_hint(
+        self, mock_page
+    ):
+        steps = copy.deepcopy(self.QUESTIONS)
+        steps[1]["fields"].append(
+            {
+                "label": "Why Acme?",
+                "type": "textarea",
+                "required": False,
+                "error": "Up to 500 characters",
+                "ids": ["why"],
+            }
+        )
+        dialog, run, reader, answers, _ = self._run(mock_page, steps)
+        dialog.refuse[1] = {"Authorized to work in France?": "Select an answer"}
+
+        with run:
+            result = await reader.submit_easy_apply(
+                self.URL, "123", JOB_APPLY_EN_US, answers, confirm_submit=True
+            )
+
+        assert result.complete is False
+        fields = result.steps[-1]["fields"]
+        assert fields[0]["error"] == "Select an answer"
+        assert "error" not in fields[1]
+
     async def test_the_step_an_upload_re_renders_is_not_read_as_a_refusal(
         self, mock_page, tmp_path
     ):

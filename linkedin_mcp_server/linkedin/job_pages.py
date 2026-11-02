@@ -795,9 +795,17 @@ def _step_identity(step: dict[str, Any]) -> tuple[str, Any]:
     return step["heading"], step["progress"]
 
 
-def _step_errors(step: dict[str, Any]) -> list[dict[str, Any]]:
-    """The fields LinkedIn is complaining about."""
-    return [field for field in step["fields"] if field.get("error")]
+def _kept_step(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """``after``, the step Next did not move off, with the errors it added.
+
+    The fields of the two reads line up only while the controls do. A step
+    re-rendered around other controls gives nothing to compare against, and
+    its text is kept as read rather than dropped, because one of them may be
+    the reason it was refused.
+    """
+    if len(after["fields"]) != len(before["fields"]):
+        return after
+    return _refused_step(before, after)
 
 
 def _unanswered_required(
@@ -1332,16 +1340,20 @@ class JobPageReader:
             missing = _unanswered_required(step, answered)
             if missing:
                 raise InvalidAnswerError(easy_apply_required_unanswered_error(missing))
-            steps.append(_public_step(step))
+            # No Next has been refused on this step, so what its fields
+            # describe themselves with is hints.
+            steps.append(_public_step(_unrefused_step(step)))
             if not step["next"]:
                 break
             if len(steps) >= _EASY_APPLY_MAX_STEPS:
                 return _WalkOutcome(complete=False)
             await page.locator(EASY_APPLY_NEXT_SELECTOR).click(timeout=5000)
             after = await self._read_easy_apply_step(step)
-            if _step_errors(after) or _step_identity(after) == _step_identity(step):
-                # Refused, or standing still and saying nothing about why.
-                steps[-1] = _public_step(after)
+            if _step_identity(after) == _step_identity(step):
+                # Refused, or standing still and saying nothing about why. A
+                # step that moved is not judged on its text at all: what a new
+                # step describes its fields with is there before any click.
+                steps[-1] = _public_step(_kept_step(step, after))
                 return _WalkOutcome(complete=False)
             step = after
 
