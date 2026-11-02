@@ -78,8 +78,11 @@ SILENT_COMPOSER = COMPOSER.replace('id="send"', 'id="silent-send"')
 # ``sender`` leaves the node unheaded, as a follow-up is. With ``echo`` false
 # the submit is ignored and only the sender's message arrives, carrying the
 # same text. The URN opens with the signed-in member whoever sent the message.
+# The text sits in a <p> inside two <div>s, outside the sender link, as on
+# LinkedIn. ``textLink`` makes the whole text a link to that profile, and
+# ``paragraphs`` above one leaves the body unrecognisable.
 SERVER_ARM_JS = """
-  function serverMessage({sender, echo, urn}) {
+  function serverMessage({sender, echo, urn, textLink, paragraphs}) {
     document.getElementById('silent-send').addEventListener('click', event => {
       event.preventDefault();
       const composer = document.getElementById('composer');
@@ -102,9 +105,23 @@ SERVER_ARM_JS = """
           link.href = `https://www.linkedin.com/in/${sender}/`;
           entry.appendChild(link);
         }
-        const unit = document.createElement('span');
-        unit.textContent = text;
-        entry.appendChild(unit);
+        const outer = document.createElement('div');
+        const inner = document.createElement('div');
+        const body = document.createElement('p');
+        if (textLink) {
+          const link = document.createElement('a');
+          link.href = `https://www.linkedin.com/in/${textLink}/`;
+          link.textContent = text;
+          body.appendChild(link);
+        } else {
+          body.textContent = text;
+        }
+        inner.appendChild(body);
+        for (let extra = 1; extra < paragraphs; extra++) {
+          inner.appendChild(document.createElement('p'));
+        }
+        outer.appendChild(inner);
+        entry.appendChild(outer);
         thread.appendChild(entry);
         placeholder.remove();
       }, 50);
@@ -117,11 +134,19 @@ GROUP_MEMBER = "ACoAAExampleGroupMember0000"
 SERVER_URN = f"urn:li:msg_message:(urn:li:fsd_profile:{SIGNED_IN_MEMBER},2-server-new)"
 
 
-def server_arm_page(*, sender: str, echo: bool, urn: str = SERVER_URN) -> str:
+def server_arm_page(
+    *,
+    sender: str,
+    echo: bool,
+    urn: str = SERVER_URN,
+    text_link: str = "",
+    paragraphs: int = 1,
+) -> str:
     script = (
         f"<script>{SERVER_ARM_JS}"
         f"serverMessage({{sender: '{sender}', echo: {str(echo).lower()}, "
-        f"urn: '{urn}'}});</script>"
+        f"urn: '{urn}', textLink: '{text_link}', paragraphs: {paragraphs}}});"
+        "</script>"
     )
     return thread_page(composer=SILENT_COMPOSER, outside_main=script)
 
@@ -129,8 +154,9 @@ def server_arm_page(*, sender: str, echo: bool, urn: str = SERVER_URN) -> str:
 def headed_by(html: str, sender: str) -> str:
     """Give the thread's existing message a link to ``sender``."""
     return html.replace(
-        "<span>Would you be open",
-        f'<a href="https://www.linkedin.com/in/{sender}/"></a><span>Would you be open',
+        "<div><div><p>Would you be open",
+        f'<a href="https://www.linkedin.com/in/{sender}/"></a>'
+        "<div><div><p>Would you be open",
     )
 
 
@@ -154,7 +180,7 @@ def thread_page(
         </header>
         <div id="thread">
           <div data-view-name="message-list-item" data-event-urn="inmail-id">
-            <span>Would you be open to a chat about a role?</span>
+            <div><div><p>Would you be open to a chat about a role?</p></div></div>
           </div>
         </div>
         {extras}
@@ -342,6 +368,48 @@ class TestReplyToConversationDom:
         html = headed_by(server_arm_page(sender="", echo=False), GROUP_MEMBER)
 
         result = await reply(dom_page, html)
+
+        assert result["status"] == "send_unconfirmed", result
+        assert result["sent"] is False
+
+    async def test_our_reply_linking_someone_in_its_text_is_confirmed(self, dom_page):
+        result = await reply(
+            dom_page,
+            server_arm_page(sender=SIGNED_IN_MEMBER, echo=True, text_link=GROUP_MEMBER),
+        )
+
+        assert result["status"] == "sent", result
+        assert result["sent"] is True
+
+    async def test_a_link_to_us_in_someone_elses_text_is_not_the_sender(self, dom_page):
+        result = await reply(
+            dom_page,
+            server_arm_page(
+                sender=GROUP_MEMBER, echo=False, text_link=SIGNED_IN_MEMBER
+            ),
+        )
+
+        assert result["status"] == "send_unconfirmed", result
+        assert result["sent"] is False
+
+    async def test_a_follow_up_whose_text_links_us_keeps_its_sender(self, dom_page):
+        """Only a text link, so the sender is still the member who headed it."""
+        html = headed_by(
+            server_arm_page(sender="", echo=False, text_link=SIGNED_IN_MEMBER),
+            GROUP_MEMBER,
+        )
+
+        result = await reply(dom_page, html)
+
+        assert result["status"] == "send_unconfirmed", result
+        assert result["sent"] is False
+
+    async def test_a_message_without_a_recognisable_body_confirms_nothing(
+        self, dom_page
+    ):
+        result = await reply(
+            dom_page, server_arm_page(sender=SIGNED_IN_MEMBER, echo=True, paragraphs=2)
+        )
 
         assert result["status"] == "send_unconfirmed", result
         assert result["sent"] is False

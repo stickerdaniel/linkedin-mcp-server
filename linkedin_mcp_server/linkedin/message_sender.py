@@ -759,18 +759,38 @@ _MESSAGE_CONFIRMATION_READY_JS = (
         // profile id whoever sent it, and sender links carry that same id
         // (measured), so ours is the node whose sender is that profile.
         // Only the link path counts, never its text.
+        // A message's own text can link a profile too, so a thread reads the
+        // sender only from links outside the body's <div> pair, where the
+        // sender link sits (measured). An item whose body cannot be found
+        // cannot tell the two apart and confirms nothing; one whose only
+        // links are in its text is a follow-up. Every sender link must name
+        // the signed-in member.
         const signedInMember = node => /^urn:li:msg_message:\(urn:li:fsd_profile:([A-Za-z0-9_-]+),/
             .exec((node.getAttribute('data-event-urn') || '').trim())?.[1] || null;
+        const sentByAnotherInThread = (all, node) => {
+            const member = signedInMember(node);
+            if (!member) return true;
+            for (const item of all.slice(0, all.indexOf(node) + 1).reverse()) {
+                const links = Array.from(item.querySelectorAll('a[href*="/in/"]'));
+                if (links.length === 0) continue;
+                const body = messageBody(item, false);
+                if (!body) return true;
+                const text = body.parentElement.parentElement;
+                const sender = links.filter(anchor => !text.contains(anchor));
+                if (sender.length === 0) continue;
+                return !sender.every(anchor => profileIdentifier(anchor) === member);
+            }
+            return true;
+        };
         const sentByRecipient = (scope, node) => {
             const all = Array.from(scope.querySelectorAll(itemSelector));
+            if (arg.threadKey) return sentByAnotherInThread(all, node);
             const sender = all.slice(0, all.indexOf(node) + 1).reverse().find(
                 item => item.querySelector('a[href*="/in/"]')
             );
             if (!sender) return true;
             const links = Array.from(sender.querySelectorAll('a[href*="/in/"]'));
-            if (!arg.threadKey) return links.some(linksRecipient);
-            const member = signedInMember(node);
-            return !member || !links.some(anchor => profileIdentifier(anchor) === member);
+            return links.some(linksRecipient);
         };
         // LinkedIn acknowledges a send by rendering a node whose event ID is
         // a server message URN. In an open thread it inserts that node and
