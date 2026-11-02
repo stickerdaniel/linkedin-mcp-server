@@ -1867,24 +1867,70 @@ class TestAnswerEasyApplyStep:
         assert "Email address (select)" in message
         assert "'me@example.com'" in message
 
-    def test_an_option_list_the_read_cut_is_left_for_the_browser_to_match(self):
+    def test_an_option_list_the_read_cut_is_checked_against_the_whole_of_it(self):
         # The 250-entry country list the read caps at 50. Refusing on the
-        # options that survived would refuse every country past the cut.
+        # options that survived would refuse every country past the cut, and
+        # leaving it to the browser would refuse a missing one only after the
+        # step's other answers went in.
         country = {
             "label": "Phone country code",
             "type": "select",
             "required": True,
             "options": ["Select an option", "Afghanistan (+93)"],
             "options_total": 250,
+            "all_options": ["Select an option", "Afghanistan (+93)", "France (+33)"],
             "ids": ["country"],
         }
 
         assert job_pages_module.plan_easy_apply_answer(country, "France (+33)") == [
             job_pages_module.EasyApplyEdit("country", "select", "France (+33)")
         ]
-        whole = {key: value for key, value in country.items() if key != "options_total"}
         with pytest.raises(InvalidAnswerError, match="No option is labelled"):
-            job_pages_module.plan_easy_apply_answer(whole, "France (+33)")
+            job_pages_module.plan_easy_apply_answer(country, "Atlantis (+999)")
+
+    async def test_a_missing_option_refuses_before_anything_on_the_step_is_set(
+        self, mock_page
+    ):
+        step = copy.deepcopy(self.CONTACT)
+        step["fields"].append(
+            {
+                "label": "Phone country code",
+                "type": "select",
+                "required": True,
+                "options": ["Select an option"],
+                "options_total": 250,
+                "all_options": ["Select an option", "France (+33)"],
+                "ids": ["country"],
+            }
+        )
+        done = self._dialog(mock_page)
+
+        with pytest.raises(InvalidAnswerError, match="Atlantis"):
+            await _reader(mock_page)._answer_easy_apply_step(
+                step, {"First name": "Noor", "Phone country code": "Atlantis (+999)"}
+            )
+
+        assert done == []
+
+    def test_the_whole_of_a_cut_list_is_not_returned(self):
+        step = {
+            "heading": "Contact info",
+            "progress": 0,
+            "fields": [
+                {
+                    "label": "Phone country code",
+                    "type": "select",
+                    "options": ["Select an option"],
+                    "options_total": 250,
+                    "all_options": ["Select an option", "France (+33)"],
+                    "ids": ["country"],
+                }
+            ],
+        }
+
+        field = job_pages_module._public_step(step)["fields"][0]
+        assert "all_options" not in field and "ids" not in field
+        assert field["options_total"] == 250
 
     def test_a_choice_list_the_read_cut_refuses(self):
         field = {
