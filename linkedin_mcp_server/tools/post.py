@@ -18,6 +18,7 @@ from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.dependencies import get_ready_extractor, tool_errors
 from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode
 from linkedin_mcp_server.linkedin.contracts import FilterValidationError
+from linkedin_mcp_server.linkedin.search_urls import build_content_search_url
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,14 @@ def register_post_tools(
             headline/role, company, body, posted date, and reaction/comment
             counts.
         """
+        try:
+            # Refused before the browser, as in search_people.
+            build_content_search_url(
+                keywords, date_posted=date_posted, content_type=content_type
+            )
+        except FilterValidationError as e:
+            raise CodedToolError(str(e), ErrorCode.INVALID_ARGUMENT) from e
+
         extractor = await get_ready_extractor(ctx, tool_name="search_posts")
         logger.info(
             "Searching posts: keywords='%s', date_posted='%s', content_type='%s', "
