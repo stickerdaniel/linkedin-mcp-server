@@ -272,7 +272,7 @@ def normalize_url(href: str, _depth: int = 0) -> str | None:
         return None
 
     host = parsed.netloc.lower()
-    if _is_linkedin_host(host) and parsed.path == "/redir/redirect/":
+    if _is_linkedin_host(host) and parsed.path.rstrip("/") == "/redir/redirect":
         target = unquote((parse_qs(parsed.query).get("url") or [""])[0]).strip()
         if not target:
             return None
