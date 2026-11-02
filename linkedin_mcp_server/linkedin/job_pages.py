@@ -995,6 +995,9 @@ def plan_easy_apply_answer(
             raise InvalidAnswerError(
                 easy_apply_answer_refused(field, "It takes one value, written out.")
             )
+        # Typed key by key, an overlong answer would be cut by the field and
+        # then refused for matching no suggestion, after it was typed.
+        _refuse_overlong(field, answer)
         # A prefill that already is the answer is left where it is. Retyping it
         # would throw away LinkedIn's own binding of that text to an entity for
         # the chance of picking the same one back.
@@ -1031,6 +1034,12 @@ def plan_easy_apply_answer(
             )
         return [EasyApplyEdit(control_id, "upload", str(path))]
 
+    _refuse_overlong(field, answer)
+    return [EasyApplyEdit(control_id, "fill", answer)]
+
+
+def _refuse_overlong(field: dict[str, Any], answer: str) -> None:
+    """Refuse an answer longer than ``field`` holds, before it is typed."""
     limit = field.get("max_length")
     if limit and len(answer) > limit:
         raise InvalidAnswerError(
@@ -1040,7 +1049,6 @@ def plan_easy_apply_answer(
                 f"{limit}, so LinkedIn would cut it.",
             )
         )
-    return [EasyApplyEdit(control_id, "fill", answer)]
 
 
 def plan_easy_apply_step(

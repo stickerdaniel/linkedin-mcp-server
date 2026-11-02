@@ -1946,6 +1946,14 @@ class TestAnswerEasyApplyStep:
         with pytest.raises(InvalidAnswerError, match="LinkedIn would cut it"):
             job_pages_module.plan_easy_apply_answer(self.CONTACT["fields"][3], "x" * 21)
 
+    def test_a_typeahead_answer_longer_than_the_field_holds_refuses(self):
+        city = dict(self.CITY, max_length=10)
+
+        with pytest.raises(InvalidAnswerError, match="LinkedIn would cut it"):
+            job_pages_module.plan_easy_apply_answer(
+                city, "Paris, \u00cele-de-France, France"
+            )
+
     def test_a_resume_that_is_not_there_refuses(self, tmp_path):
         missing = str(tmp_path / "nope.pdf")
 
