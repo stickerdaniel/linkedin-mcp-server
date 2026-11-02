@@ -81,6 +81,19 @@ QUESTIONS: dict[str, Any] = {
     ),
 }
 
+# The questions step with a hint under one field. LinkedIn names hints through
+# `aria-describedby` as it names errors, so the step read sees it as `error`
+# before anything was clicked on the step.
+HINTED: dict[str, Any] = dict(
+    QUESTIONS,
+    body=QUESTIONS["body"].replace(
+        '<textarea id="why" maxlength="500"></textarea>',
+        '<textarea id="why" maxlength="500" aria-describedby="why-hint"></textarea>'
+        '<div id="why-hint">Up to 500 characters</div>',
+    ),
+)
+assert HINTED["body"] != QUESTIONS["body"]
+
 # What the typeahead is offering to look up, and the entity behind each label.
 # Two of them share a prefix, so an answer that stops at the prefix names none.
 CITIES: dict[str, str] = {
@@ -872,3 +885,14 @@ async def test_a_suggestion_is_matched_by_what_it_shows(dom_page):
     city = {field["label"]: field for field in result.steps[0]["fields"]}
     assert city["Location (city)"]["value"] == PARIS
     assert judged_on(await log(dom_page)) == [CITIES[PARIS]]
+
+
+async def test_a_hint_on_the_step_next_reaches_does_not_stop_the_run(dom_page):
+    result = await answer(dom_page, [CONTACT, HINTED], ALL_ANSWERS)
+
+    assert result.complete is True
+    why = next(
+        field for field in result.steps[1]["fields"] if field["label"] == "Why Acme?"
+    )
+    assert why["value"] == "Because agents."
+    assert "error" not in why
