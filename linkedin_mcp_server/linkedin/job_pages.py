@@ -803,15 +803,19 @@ def _step_errors(step: dict[str, Any]) -> list[dict[str, Any]]:
 def _unanswered_required(
     step: dict[str, Any], answered: set[str]
 ) -> list[dict[str, Any]]:
-    """The required fields of ``step`` holding nothing that nothing answered.
+    """The required fields of ``step`` holding nothing.
 
-    A field answered on this step counts as held whatever it reads back as: a
-    file input never reports the file it was given, and it is the only control
-    LinkedIn lets us set without being able to see the result.
+    Judged on the step as read back, so an answer that cleared a field, an
+    empty text or a lone checkbox answered no, leaves it as missing as one
+    nothing answered. The exception is a file answered on this step: a file
+    input never reports the file it was given, and the upload is waited for
+    until the form names it back instead.
     """
     missing = []
     for field in step["fields"]:
-        if not field.get("required") or field["label"] in answered:
+        if not field.get("required"):
+            continue
+        if field["type"] == "file" and field["label"] in answered:
             continue
         held = (
             field.get("selected")
