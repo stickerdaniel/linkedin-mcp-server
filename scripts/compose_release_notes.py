@@ -3,10 +3,10 @@
 The body is the version's CHANGELOG section without its heading, with its
 categories promoted to H2 and its bug fixes folded when other categories sit
 beside them, then the install instructions, then the new contributors, then
-the compare link. Every pull request link gets its author's login, the
-owner's included, so GitHub's Contributors block lists everyone; authors
-whose first merged pull request is in this release are named once more on
-one line after the install instructions. Runs in the release workflow before
+the compare link. Every pull request link by a human gets its author's
+login, the owner's included, so GitHub's Contributors block lists them all.
+Authors whose first merged pull request is in this release are named once
+more on one line after the install instructions. Runs in the release workflow before
 anything is built or published, so a missing section stops the release while
 nothing exists yet that would have to be withdrawn.
 """
