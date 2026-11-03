@@ -17,6 +17,19 @@ Give your AI agents access to LinkedIn through your own browser session. Read pr
 <details open>
 <summary><strong>LinkedIn MCP Sponsor</strong></summary>
 <br/>
+<a href="https://linkupapi.com/?utm_source=stickerdaniel" target="_blank">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/df9f3784-4db3-4a30-a908-ca9aae32f54c">
+    <img src="https://github.com/user-attachments/assets/e3a019f0-0dbe-4b91-8e41-684d5ea69893" alt="LinkupAPI, the outreach API for your AI agents" width="100%">
+  </picture>
+</a>
+
+> Running LinkedIn agents in production? [**LinkupAPI**](https://linkupapi.com/?utm_source=stickerdaniel) is the hosted outreach API built for scale, across LinkedIn Classic, Sales Navigator, and Recruiter, plus email, WhatsApp, and iMessage.
+
+[Try LinkupAPI free →](https://linkupapi.com/?utm_source=stickerdaniel)
+
+<br/>
+
 <a href="https://cadenza.page/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=oss_sponsor&amp;utm_content=banner" target="_blank">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/e7dc04a7-4b2c-4f8f-bffa-77895f02a9b4">
@@ -24,7 +37,7 @@ Give your AI agents access to LinkedIn through your own browser session. Read pr
   </picture>
 </a>
 
-> Prefer not to run a server? [**Cadenza**](https://cadenza.page/?utm_source=github&utm_medium=readme&utm_campaign=oss_sponsor&utm_content=name) is the hosted LinkedIn MCP server for your agents, on web, desktop, and mobile, with 100+ actions across LinkedIn Classic, Sales Navigator, and Recruiter. Request limits are built in, with per-minute and daily budgets you can fine-tune for each action.
+> [**Cadenza**](https://cadenza.page/?utm_source=github&utm_medium=readme&utm_campaign=oss_sponsor&utm_content=name) is the single hosted MCP server for all your LinkedIn needs. It covers Classic, Sales Navigator, and Recruiter with 100+ actions, each within limits you set. Works on web, desktop, and mobile.
 
 Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https://cadenza.page/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=oss_sponsor&amp;utm_content=cta">Try Cadenza →</a>
 
