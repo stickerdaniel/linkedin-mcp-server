@@ -27,7 +27,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-FONT = json.loads((ROOT / "tests/fixtures/github-readme-font.json").read_text())
+FONT = json.loads(
+    (ROOT / "tests/fixtures/github-readme-font.json").read_text(encoding="utf-8")
+)
 HEADER = "| Tool | Description |"
 ROW = re.compile(r"^\| `(?P<tool>[a-z_]+)` \| (?P<description>.+) \|$")
 LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
@@ -61,7 +63,7 @@ def text_width(markdown: str) -> float:
     return width + sum(FONT["advances"][char] for char in plain)
 
 
-ROWS = tool_rows((ROOT / "README.md").read_text())
+ROWS = tool_rows((ROOT / "README.md").read_text(encoding="utf-8"))
 
 
 def test_the_table_lists_tools():
