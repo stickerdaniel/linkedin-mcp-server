@@ -19,8 +19,8 @@ Give your AI agents access to LinkedIn through your own browser session. Read pr
 <br/>
 <a href="https://linkupapi.com/?utm_source=stickerdaniel" target="_blank">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/c717e389-371a-4a09-b7f2-09bc68d142a7">
-    <img src="https://github.com/user-attachments/assets/655013ac-3464-49ae-b986-968f49ad3007" alt="LinkupAPI, the outreach API for your AI agents" width="100%">
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/105a3258-c5e2-4046-b1db-16fe4cda177b">
+    <img src="https://github.com/user-attachments/assets/f66da0ea-c98f-497b-817b-62090f034947" alt="LinkupAPI, the outreach API for your AI agents" width="100%">
   </picture>
 </a>
 
