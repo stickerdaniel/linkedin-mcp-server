@@ -136,8 +136,11 @@ const render = () => {
 };
 document.querySelector('main a[href*="/apply"]').addEventListener('click', (event) => {
     event.preventDefault();
+    // A held dialog starts rendering only once the test calls window.release().
+    const open = () => setTimeout(render, 100);
+    if (window.held) window.release = open;
+    else open();
     window.log.push('open');
-    setTimeout(render, 100);
 });
 document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || !shadow.querySelector('[role="dialog"]')) return;
@@ -164,7 +167,12 @@ EXTERNAL = (
 
 
 def posting(
-    control: str, steps: list[dict], *, stuck: bool = False, next_delay: int = 100
+    control: str,
+    steps: list[dict],
+    *,
+    stuck: bool = False,
+    held: bool = False,
+    next_delay: int = 100,
 ) -> str:
     return (
         "<main>"
@@ -173,6 +181,7 @@ def posting(
         "</main>"
         f"<script>{DIALOG_SCRIPT % json.dumps(steps)}"
         f"window.stuck = {'true' if stuck else 'false'};"
+        f"window.held = {'true' if held else 'false'};"
         f"window.nextDelay = {next_delay};</script>"
     )
 
@@ -430,12 +439,14 @@ async def test_a_cancelled_read_still_discards_the_draft(dom_page):
 
 
 async def test_a_read_cancelled_while_the_dialog_opens_discards_it(dom_page):
-    # The dialog renders 100ms after the click, so this cancel lands before it.
-    await serve(dom_page, posting(EASY_APPLY, [CONTACT]))
+    # The dialog is held, so the cancel lands before it renders, however long
+    # the read took to get here. It renders 100ms after its release, which
+    # normally leaves the cancelled read waiting for it to open.
+    await serve(dom_page, posting(EASY_APPLY, [CONTACT], held=True))
     task = asyncio.ensure_future(read_served(dom_page))
     await until_logged(dom_page, "open")
-    assert not await dialog_open(dom_page)
     task.cancel()
+    await dom_page.evaluate("() => window.release()", isolated_context=False)
 
     with pytest.raises(asyncio.CancelledError):
         await task
