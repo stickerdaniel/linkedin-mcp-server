@@ -27,7 +27,11 @@ from linkedin_mcp_server.bootstrap import (
     start_background_browser_setup_if_needed,
     stop_background_browser_setup,
 )
-from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
+from linkedin_mcp_server.config.schema import (
+    DEFAULT_TOOL_TIMEOUT_SECONDS,
+    LONG_RUNNING_TOOL_SECONDS,
+    tool_timeout_for,
+)
 from linkedin_mcp_server.drivers.browser import (
     close_browser,
     watch_for_handoff_requests,
@@ -169,6 +173,20 @@ async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
                 await close_browser()
 
 
+def _long_call_budgets(tool_timeout: float) -> dict[str, float]:
+    """The proxy's call budget for each tool registered with a longer timeout.
+
+    Without these, a proxy cuts such a tool off at the shared budget long
+    before the owner's own, longer timeout would have ended it.
+    """
+    from linkedin_mcp_server.daemon.proxy import call_budget
+
+    return {
+        name: call_budget(tool_timeout_for(name, tool_timeout))
+        for name in LONG_RUNNING_TOOL_SECONDS
+    }
+
+
 def create_mcp_server(
     *,
     tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
@@ -282,7 +300,11 @@ def create_mcp_server(
         # built, which loaded that configuration first, and need not for one
         # constructed directly.
         mcp.add_middleware(
-            FrontendCallMiddleware(proxy_backend, budget=call_budget(tool_timeout))
+            FrontendCallMiddleware(
+                proxy_backend,
+                budget=call_budget(tool_timeout),
+                budgets=_long_call_budgets(tool_timeout),
+            )
         )
         # Inside the call's own middleware, which is what makes a repeat behave:
         # every attempt it makes, a retry or the replay after a sign-in, enters
@@ -309,7 +331,11 @@ def create_mcp_server(
         # Each request on the hop gets the call's whole budget, so the owner,
         # whose own tool timeout is shorter, reports a tool that timed out.
         mcp.add_provider(
-            OwnerForwarder(proxy_backend, timeout=call_budget(tool_timeout))
+            OwnerForwarder(
+                proxy_backend,
+                timeout=call_budget(tool_timeout),
+                timeouts=_long_call_budgets(tool_timeout),
+            )
         )
         # Not the default, which is "warn": a failing provider is logged and
         # skipped, and for a server whose *only* provider this is, that turns a

@@ -1309,7 +1309,7 @@
       "properties": {
         "full": {
           "default": false,
-          "description": "False (default) stops once `stop_after_known` consecutive\nconnections are already in the store -- only new connections\nare read. True walks the whole list, e.g. for the first run or\nto refresh headlines.",
+          "description": "False (default) stops once `stop_after_known` consecutive\nconnections are already in the store -- only new connections\nare read -- but only after some earlier walk reached the end of\nthe list; until then every call walks the whole list, so a run\ncut short is finished by the next one. True always walks the\nwhole list, e.g. to refresh headlines.",
           "type": "boolean"
         },
         "stop_after_known": {

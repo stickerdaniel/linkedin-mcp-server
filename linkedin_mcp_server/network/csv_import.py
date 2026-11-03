@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from linkedin_mcp_server.core.exceptions import InvalidReferenceError
 from linkedin_mcp_server.linkedin.identifiers import normalize_person_identifier
 
 _HEADER_FIRST_COLUMN = "First Name"
@@ -50,18 +51,22 @@ def _slug_from_url(url: str) -> str | None:
         return None
     try:
         return normalize_person_identifier(url)
-    except ValueError:
+    except InvalidReferenceError:
+        # A URL that is not a personal profile still leaves a usable row.
         return None
 
 
-def _fallback_slug(first: str, last: str) -> str:
+def _fallback_slug(first: str, last: str, connected_on: str | None) -> str:
     """Key for a row LinkedIn exported without a profile URL.
 
     Members who opt out of profile sharing come through with the URL blank.
-    The prefix keeps these from ever colliding with a real vanity name.
+    The name alone would merge two people who share it, so the connection
+    date goes in too: it never changes between exports, which keeps a
+    re-import of a newer export on the same key. The prefix keeps these from
+    ever colliding with a real vanity name.
     """
     name = "-".join(part for part in (first, last) if part).lower()
-    return f"csv:{name or 'unknown'}"
+    return f"csv:{name or 'unknown'}:{connected_on or 'undated'}"
 
 
 def parse_connections_csv(source: str | Path) -> list[CsvConnection]:
@@ -95,13 +100,22 @@ def parse_connections_csv(source: str | Path) -> list[CsvConnection]:
 
     reader = csv.DictReader(io.StringIO("\n".join(lines[header_at:])))
     rows: list[CsvConnection] = []
+    fallback_uses: dict[str, int] = {}
     for record in reader:
         first = (record.get("First Name") or "").strip()
         last = (record.get("Last Name") or "").strip()
         url = (record.get("URL") or "").strip()
         if not (first or last or url):
             continue
-        slug = _slug_from_url(url) or _fallback_slug(first, last)
+        connected_on = _parse_date(record.get("Connected On") or "")
+        slug = _slug_from_url(url)
+        if slug is None:
+            # Two URL-less rows with the same name and date are still two
+            # people; number the repeats in file order.
+            base = _fallback_slug(first, last, connected_on)
+            fallback_uses[base] = fallback_uses.get(base, 0) + 1
+            n = fallback_uses[base]
+            slug = base if n == 1 else f"{base}:{n}"
         rows.append(
             CsvConnection(
                 slug=slug,
@@ -111,7 +125,7 @@ def parse_connections_csv(source: str | Path) -> list[CsvConnection]:
                 email=(record.get("Email Address") or "").strip() or None,
                 company=(record.get("Company") or "").strip() or None,
                 position=(record.get("Position") or "").strip() or None,
-                connected_on=_parse_date(record.get("Connected On") or ""),
+                connected_on=connected_on,
             )
         )
     return rows

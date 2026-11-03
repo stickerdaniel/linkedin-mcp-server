@@ -16,6 +16,24 @@ from urllib.parse import unquote, urlsplit
 logger = logging.getLogger(__name__)
 
 DEFAULT_TOOL_TIMEOUT_SECONDS: float = 180.0
+#: The longest a connections walk may be asked to run.
+SYNC_MY_CONNECTIONS_MAX_SECONDS = 900
+#: Tools that need longer than the configured tool timeout, with the seconds
+#: each needs at least. One table, because registration and both of the
+#: proxy's limits (the frontend's call budget and the forwarder's read
+#: timeout) must agree: a tool given more time in one place and not the
+#: others is cut short by whichever was left behind.
+LONG_RUNNING_TOOL_SECONDS: dict[str, float] = {
+    # The walk itself plus a page load and the final write.
+    "sync_my_connections": SYNC_MY_CONNECTIONS_MAX_SECONDS + 60.0,
+}
+
+
+def tool_timeout_for(tool_name: str, tool_timeout: float) -> float:
+    """*tool_name*'s timeout: the configured one, or more when it needs it."""
+    return max(tool_timeout, LONG_RUNNING_TOOL_SECONDS.get(tool_name, 0.0))
+
+
 DEFAULT_LOGIN_TIMEOUT_SECONDS: float = 1800.0  # 30 min; 0 = no limit
 DEFAULT_LOGIN_INLINE_WAIT_SECONDS: float = 25.0  # bounded inline wait
 # Clamp ceiling: page reading time stacks on top of the inline wait inside one tool

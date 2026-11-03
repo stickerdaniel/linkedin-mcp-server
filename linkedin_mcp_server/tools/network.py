@@ -14,9 +14,9 @@ from typing import Annotated, Any
 from fastmcp import FastMCP
 from pydantic import Field
 
-from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode
+from linkedin_mcp_server.session_state import get_source_profile_dir
 from linkedin_mcp_server.network import (
     NetworkStore,
     default_store_path,
@@ -27,8 +27,13 @@ logger = logging.getLogger(__name__)
 
 
 def open_store() -> NetworkStore:
-    """The store for the account in the configured browser profile."""
-    return NetworkStore(default_store_path(get_config().browser.user_data_dir))
+    """The store for the account in the configured browser profile.
+
+    Read through `get_source_profile_dir`, which expands and resolves the
+    configured path together, so a symlinked profile and its target share
+    one store.
+    """
+    return NetworkStore(default_store_path(get_source_profile_dir()))
 
 
 IsoDate = Annotated[str, Field(pattern=r"^\d{4}(-\d{2}(-\d{2})?)?$")]

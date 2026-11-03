@@ -67,7 +67,8 @@ async def test_sync_saves_every_batch_and_reports_the_walk(mcp):
             [PageConnection("ada-lovelace", "Ada Lovelace", "Policy lead", None, None)]
         )
         on_batch([PageConnection("alan-turing", "Alan Turing", "Reader", None, None)])
-        assert kwargs["stop_after_known"] == 25  # incremental by default
+        # No walk has reached the end yet, so this one may not stop early.
+        assert kwargs["stop_after_known"] is None
         return WalkResult(seen=2, rounds=3, stop_reason="end_of_list", complete=True)
 
     extractor = MagicMock()
@@ -84,7 +85,7 @@ async def test_sync_saves_every_batch_and_reports_the_walk(mcp):
 
     overview = await call(mcp, "get_network_overview", {})
     assert overview["from_page"] == 2
-    assert overview["last_runs"]["page_incremental"]["complete"] == 1
+    assert overview["last_runs"]["page_full"]["complete"] == 1
 
 
 async def test_full_sync_does_not_stop_at_known_connections(mcp):
@@ -98,3 +99,42 @@ async def test_full_sync_does_not_stop_at_known_connections(mcp):
     awaited = extractor.walk_my_connections.await_args
     assert awaited is not None
     assert awaited.kwargs["stop_after_known"] is None
+
+
+async def test_an_unfinished_walk_is_continued_not_cut_short_by_known_connections(mcp):
+    """The scenario from review: a first walk saves a prefix, then times out."""
+    walks: list[int | None] = []
+
+    def walk_ending(stop_reason: str, complete: bool):
+        async def walk(on_batch, **kwargs):
+            walks.append(kwargs["stop_after_known"])
+            on_batch([PageConnection(f"p{len(walks)}", "P", None, None, None)])
+            return WalkResult(seen=1, stop_reason=stop_reason, complete=complete)
+
+        return walk
+
+    extractor = MagicMock()
+    with patch(
+        "linkedin_mcp_server.tools.person.get_ready_extractor",
+        AsyncMock(return_value=extractor),
+    ):
+        extractor.walk_my_connections = AsyncMock(
+            side_effect=walk_ending("time_budget", False)
+        )
+        first = await call(mcp, "sync_my_connections", {})
+        second = await call(mcp, "sync_my_connections", {})
+        extractor.walk_my_connections = AsyncMock(
+            side_effect=walk_ending("end_of_list", True)
+        )
+        third = await call(mcp, "sync_my_connections", {})
+        fourth = await call(mcp, "sync_my_connections", {})
+
+    # Both walks after the cut-short one keep going past known connections;
+    # only once one reached the end may the next stop at them.
+    assert walks == [None, None, None, 25]
+    assert [r["incremental"] for r in (first, second, third, fourth)] == [
+        False,
+        False,
+        False,
+        True,
+    ]

@@ -79,13 +79,16 @@ def default_store_path(profile_dir: Path | str | None = None) -> Path:
 
     Beside the profile because the store describes the account signed in
     there: a second profile directory is a second account, and gets its own
-    store.
+    store. *profile_dir* must already be canonical (``session_state.
+    canonical``): the parent of an unresolved symlink is a different
+    directory from the parent of its target, so one profile reached two ways
+    would get two stores.
     """
     override = os.environ.get(STORE_PATH_ENV)
     if override:
         return Path(override).expanduser()
     if profile_dir is not None:
-        return Path(profile_dir).expanduser().parent / "network.db"
+        return Path(profile_dir).parent / "network.db"
     return Path.home() / ".linkedin-mcp" / "network.db"
 
 
@@ -260,6 +263,22 @@ class NetworkStore:
                 "SELECT slug FROM connections WHERE from_page = 1"
             )
         }
+
+    def has_complete_walk(self) -> bool:
+        """Whether a page walk has ever reached the end of the list.
+
+        Only then does the store hold everything older than its newest
+        connection, which is what lets an incremental walk stop at the first
+        run of known connections. A walk cut short leaves a gap below what it
+        read, and stopping early there would never fill it.
+        """
+        return (
+            self._conn.execute(
+                "SELECT 1 FROM sync_runs WHERE source LIKE 'page_%' "
+                "AND complete = 1 AND note = 'end_of_list' LIMIT 1"
+            ).fetchone()
+            is not None
+        )
 
     def count(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM connections").fetchone()[0]
