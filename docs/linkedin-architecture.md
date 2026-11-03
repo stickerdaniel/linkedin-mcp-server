@@ -33,6 +33,7 @@ a page-owning collaborator.
 | `jobs` | `JobReader` | `browser-free` |
 | `link_metadata` | `JOB_PATH_RE`, `RawReference`, `Reference`, `ReferenceKind`, `build_references()`, `choose_reference_text()`, `classify_link()`, `clean_heading()`, `clean_label()`, `dedupe_references()`, `derive_context()`, `normalize_reference()`, `normalize_url()` | `browser-free` |
 | `message_sender` | `MessageSender` | `page-owning` |
+| `my_connections` | `CONNECTIONS_URL`, `MyConnectionsReader`, `OnBatch`, `OnProgress`, `PageConnection`, `SCROLL_JITTER`, `SCROLL_PAUSE`, `STALE_ROUNDS`, `WalkResult`, `card_to_connection()`, `parse_connected_on()` | `page-owning` |
 | `navigation` | `PageNavigator`, `WaitUntil` | `page-owning` |
 | `person` | `PersonReader` | `page-owning` |
 | `posts` | `PostSearch` | `browser-free` |
@@ -51,7 +52,7 @@ a page-owning collaborator.
 - `content` -> `session`, `text`
 - `contracts` -> `identifiers`, `link_metadata`
 - `conversations` -> `content`, `identifiers`, `link_metadata`, `navigation`, `profile_page`, `session`, `text`
-- `extractor` -> `capture`, `company`, `connection_actions`, `content`, `contracts`, `conversations`, `feed`, `job_pages`, `job_policy`, `jobs`, `message_sender`, `navigation`, `person`, `posts`, `profile_page`, `session`, `text`
+- `extractor` -> `capture`, `company`, `connection_actions`, `content`, `contracts`, `conversations`, `feed`, `job_pages`, `job_policy`, `jobs`, `message_sender`, `my_connections`, `navigation`, `person`, `posts`, `profile_page`, `session`, `text`
 - `feed` -> `content`, `contracts`, `feed_payload`, `navigation`, `session`, `text`
 - `feed_payload` -> `link_metadata`
 - `fields` -> `capture`
@@ -61,6 +62,7 @@ a page-owning collaborator.
 - `jobs` -> `capture`, `contracts`, `identifiers`, `job_pages`, `job_policy`, `link_metadata`, `navigation`, `search_urls`, `session`, `text`
 - `link_metadata` -> _(none)_
 - `message_sender` -> `contracts`, `identifiers`, `navigation`, `session`
+- `my_connections` -> `navigation`, `session`
 - `navigation` -> `session`
 - `person` -> `capture`, `contracts`, `fields`, `identifiers`, `link_metadata`, `navigation`, `profile_page`, `search_urls`, `session`, `text`
 - `posts` -> `capture`, `contracts`, `link_metadata`, `search_urls`
@@ -96,6 +98,7 @@ a page-owning collaborator.
 - `search_people`
 - `search_posts`
 - `send_message`
+- `walk_my_connections`
 
 ## `LinkedInExtractor` construction-state allowlist
 
@@ -107,6 +110,7 @@ a page-owning collaborator.
 - `_feed`
 - `_jobs`
 - `_message_sender`
+- `_my_connections`
 - `_person`
 - `_posts`
 

@@ -75,6 +75,10 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `get_saved_jobs` | List your saved job postings, with job IDs for looking up their details. |
 | `dismiss_job` | Dismiss a job from job search so later searches no longer show it. Irreversible. |
 | `search_people` | Find people by keyword, location, connection degree, and current company. |
+| `sync_my_connections` | Read your own connections list into a local store, slowly; later runs read only new ones. |
+| `import_connections_csv` | Import LinkedIn's `Connections.csv` data export into the local store (company, email, dates). |
+| `search_my_network` | Search your stored connections by role, sector, company or date. Offline, no LinkedIn calls. |
+| `get_network_overview` | Size, sources, top companies and freshness of the local network store. Offline. |
 | `get_job_details` | Read a job posting's description, requirements, and company details. |
 | `get_job_apply_url` | Check whether a job uses Easy Apply or links to an employer's application. |
 | `get_easy_apply_form` | Read an Easy Apply form: each field's label, type, options and prefilled value. Never types or submits. |

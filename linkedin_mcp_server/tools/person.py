@@ -19,7 +19,9 @@ from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode
 from linkedin_mcp_server.linkedin import parse_person_sections
 from linkedin_mcp_server.linkedin.contracts import FilterValidationError
 from linkedin_mcp_server.linkedin.identifiers import normalize_person_identifier
+from linkedin_mcp_server.linkedin.my_connections import CONNECTIONS_URL
 from linkedin_mcp_server.linkedin.search_urls import build_people_search_url
+from linkedin_mcp_server.tools.network import open_store
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,11 @@ def _coerce_str_list(value: Any) -> Any:
 
 
 StrList = Annotated[list[str], BeforeValidator(_coerce_str_list)]
+
+#: The longest a connections walk may be asked to run, and the slack the tool
+#: timeout keeps above it for the page load and the final write.
+MAX_SYNC_SECONDS = 900
+_SYNC_TIMEOUT_MARGIN = 60
 
 
 def register_person_tools(
@@ -213,6 +220,97 @@ def register_person_tools(
         await ctx.report_progress(progress=100, total=100, message="Complete")
 
         return result
+
+    @mcp.tool(
+        timeout=max(tool_timeout, MAX_SYNC_SECONDS + _SYNC_TIMEOUT_MARGIN),
+        title="Sync My Connections",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"person", "network"},
+    )
+    @tool_errors
+    async def sync_my_connections(
+        ctx: Context,
+        full: bool = False,
+        time_budget_seconds: Annotated[int, Field(ge=30, le=MAX_SYNC_SECONDS)] = 600,
+        stop_after_known: Annotated[int, Field(ge=5, le=500)] = 25,
+    ) -> dict[str, Any]:
+        """
+        Read your own 1st-degree connections list into the local network store.
+
+        Walks linkedin.com/mynetwork/invite-connect/connections/ (newest first),
+        scrolling slowly, and saves each connection's name, headline, profile
+        URL and connection date to a local SQLite file. Afterwards
+        search_my_network and get_network_overview answer from that file
+        without touching LinkedIn. Every batch is saved as it is read, so a run
+        cut short keeps what it read; call again to continue.
+
+        This is the heaviest read the server makes. Run it rarely: a full walk
+        once, then incremental ones. Prefer import_connections_csv for the bulk
+        of the data when the user has LinkedIn's data export.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            full: False (default) stops once `stop_after_known` consecutive
+                connections are already in the store -- only new connections
+                are read. True walks the whole list, e.g. for the first run or
+                to refresh headlines.
+            time_budget_seconds: How long the walk may run (30-900, default 600).
+            stop_after_known: Incremental stop threshold (default 25).
+
+        Returns:
+            Dict with url, seen, added, total_in_store, stop_reason
+            (end_of_list | reached_known_connections | time_budget | max_rounds
+            | throttled), complete, and store path. When complete is false,
+            calling again continues; when stop_reason is throttled, wait hours
+            before retrying.
+        """
+        extractor = await get_ready_extractor(ctx, tool_name="sync_my_connections")
+        store = open_store()
+        try:
+            known = store.known_slugs()
+            run_id = store.start_run("page_full" if full else "page_incremental")
+            added = 0
+
+            def on_batch(batch: list[Any]) -> None:
+                nonlocal added
+                added += store.upsert_page_connections(batch).added
+
+            async def on_progress(message: str, read: int) -> None:
+                await ctx.report_progress(progress=read, total=None, message=message)
+
+            logger.info(
+                "Syncing connections (full=%s, budget=%ss, known=%d)",
+                full,
+                time_budget_seconds,
+                len(known),
+            )
+            result = await extractor.walk_my_connections(
+                on_batch,
+                known=known,
+                stop_after_known=None if full else stop_after_known,
+                time_budget=float(time_budget_seconds),
+                on_progress=on_progress,
+            )
+            store.finish_run(
+                run_id,
+                seen=result.seen,
+                added=added,
+                complete=result.complete,
+                note=result.stop_reason,
+            )
+            return {
+                "url": CONNECTIONS_URL,
+                "seen": result.seen,
+                "added": added,
+                "total_in_store": store.count(),
+                "rounds": result.rounds,
+                "stop_reason": result.stop_reason,
+                "complete": result.complete,
+                "throttled": result.throttled,
+                "store": str(store.path),
+            }
+        finally:
+            store.close()
 
     @mcp.tool(
         timeout=tool_timeout,

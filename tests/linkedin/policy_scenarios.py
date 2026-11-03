@@ -22,6 +22,7 @@ from linkedin_mcp_server.linkedin import company as company_module
 from linkedin_mcp_server.linkedin import feed as feed_module
 from linkedin_mcp_server.linkedin import job_pages as job_pages_module
 from linkedin_mcp_server.linkedin import jobs as jobs_module
+from linkedin_mcp_server.linkedin import my_connections as my_connections_module
 from linkedin_mcp_server.linkedin import navigation as navigation_module
 from linkedin_mcp_server.linkedin import person as person_module
 from linkedin_mcp_server.linkedin import session as session_module
@@ -1087,6 +1088,54 @@ async def _sidebar_scenario() -> dict[str, Any]:
     )
 
 
+async def _my_connections_scenario() -> dict[str, Any]:
+    """Two rounds with cards, then the stale rounds that end the list.
+
+    The jitter is pinned to zero so the recorded sleeps are the base pause.
+    """
+    name = "walk_my_connections__end_of_list"
+    recorder = TraceRecorder(name, _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    card = {
+        "slug": "ada-lovelace",
+        "name": "Ada Lovelace",
+        "lines": ["Ada Lovelace", "Analyst", "Connected on March 5, 2024"],
+    }
+    later = {
+        "slug": "alan-turing",
+        "name": "Alan Turing",
+        "lines": ["Alan Turing", "Reader", "Connected on January 12, 2023"],
+    }
+    rounds = 2 + my_connections_module.STALE_ROUNDS
+    page = (
+        _page(recorder)
+        .script("evaluate:my_connections_cards", [card], [later], *[[]] * (rounds - 2))
+        .script("evaluate:my_connections_advance", *[{"clicked": False}] * (rounds - 1))
+    )
+    extractor = _extractor(page)
+    seen: list[str] = []
+    async with boundaries(recorder, clock):
+        with (
+            patch.object(my_connections_module.random, "uniform", lambda a, b: 0.0),
+            recorder.context("walk_my_connections", "connections"),
+        ):
+            result = await extractor.walk_my_connections(
+                lambda batch: seen.extend(c.slug for c in batch)
+            )
+    page.assert_clean()
+    assert seen == ["ada-lovelace", "alan-turing"]
+    return recorder.trace(
+        {"method": "walk_my_connections", "arguments": {}},
+        {
+            "seen": result.seen,
+            "rounds": result.rounds,
+            "stop_reason": result.stop_reason,
+            "complete": result.complete,
+            "new_slugs": result.new_slugs,
+        },
+    )
+
+
 async def _conversation_scenario(method: str) -> dict[str, Any]:
     name = f"{method}__baseline"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
@@ -1283,6 +1332,7 @@ TOOL_FACADE_METHODS = {
     "search_posts",
     "send_message",
     "reply_to_conversation",
+    "walk_my_connections",
 }
 COMPATIBILITY_METHODS = {"get_page_text", "click_button_by_text"}
 
@@ -1352,6 +1402,7 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         "connect.json": await _connect_scenario(),
         "get-my-profile.json": await _get_my_profile_scenario(),
         "sidebar-profiles.json": await _sidebar_scenario(),
+        "my-connections.json": await _my_connections_scenario(),
         "company-employees.json": await _single_capture_facade_scenario(
             "get_company_employees"
         ),
