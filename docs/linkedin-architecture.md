@@ -33,7 +33,7 @@ a page-owning collaborator.
 | `jobs` | `JobReader` | `browser-free` |
 | `link_metadata` | `JOB_PATH_RE`, `RawReference`, `Reference`, `ReferenceKind`, `build_references()`, `choose_reference_text()`, `classify_link()`, `clean_heading()`, `clean_label()`, `dedupe_references()`, `derive_context()`, `normalize_reference()`, `normalize_url()` | `browser-free` |
 | `message_sender` | `MessageSender` | `page-owning` |
-| `my_connections` | `CONNECTIONS_URL`, `GROW_TIMEOUT_MS`, `MyConnectionsReader`, `OnBatch`, `OnProgress`, `PageConnection`, `SCROLL_JITTER`, `SCROLL_PAUSE`, `STALE_ROUNDS`, `WalkResult`, `card_to_connection()`, `parse_connected_on()` | `page-owning` |
+| `my_connections` | `CONNECTIONS_URL`, `GROW_TIMEOUT_MS`, `KNOWN_PAUSE`, `MyConnectionsReader`, `OnBatch`, `OnProgress`, `PageConnection`, `SCROLL_JITTER`, `SCROLL_PAUSE`, `STALE_ROUNDS`, `WalkResult`, `card_to_connection()`, `parse_connected_on()` | `page-owning` |
 | `navigation` | `PageNavigator`, `WaitUntil` | `page-owning` |
 | `person` | `PersonReader` | `page-owning` |
 | `posts` | `PostSearch` | `browser-free` |

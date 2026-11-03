@@ -149,3 +149,20 @@ async def test_async_batch_callbacks_are_awaited():
 
     await reader(session).walk(on_batch)
     assert got == ["a"]
+
+
+async def test_rounds_of_already_stored_cards_scroll_on_quickly():
+    """A resumed walk crosses what it read before at the short pause."""
+    session = FakeSession([[raw("k1")], [raw("k2")], [raw("new")], [raw("k3")]])
+    pauses: list[float] = []
+
+    async def delay(seconds: float) -> None:
+        pauses.append(seconds)
+
+    setattr(session, "delay", delay)
+    with patch.object(my_connections.random, "uniform", lambda a, b: 0.0):
+        await reader(session).walk(lambda b: None, known={"k1", "k2", "k3"})
+    known_pause = my_connections.KNOWN_PAUSE
+    full_pause = my_connections.SCROLL_PAUSE
+    # One pause per round after the first four: two known, one new, one known.
+    assert pauses[:4] == [known_pause, known_pause, full_pause, known_pause]

@@ -41,6 +41,12 @@ CONNECTIONS_URL = "https://www.linkedin.com/mynetwork/invite-connect/connections
 SCROLL_PAUSE = 2.5
 SCROLL_JITTER = 2.0
 
+# The pause after a round whose cards were all already stored. A walk
+# resuming one that was cut short has to scroll back through what it read
+# before; at the full pause that alone would use up the next call's budget,
+# so a 1,473-connection list could never be read past its first ~500.
+KNOWN_PAUSE = 0.8
+
 # Rounds with nothing new before the list is taken as fully loaded.
 STALE_ROUNDS = 3
 
@@ -305,6 +311,7 @@ class MyConnectionsReader:
             batch = [c for c in (card_to_connection(r) for r in raw or []) if c]
             result.rounds += 1
 
+            all_known = bool(batch) and all(c.slug in known for c in batch)
             if batch:
                 stale = 0
                 returned.extend(c.slug for c in batch)
@@ -354,7 +361,11 @@ class MyConnectionsReader:
                 )
             except Exception:
                 logger.debug("Connections list did not grow after scrolling")
-            await self._session.delay(SCROLL_PAUSE + random.uniform(0, SCROLL_JITTER))
+            await self._session.delay(
+                KNOWN_PAUSE
+                if all_known
+                else SCROLL_PAUSE + random.uniform(0, SCROLL_JITTER)
+            )
             await self._session.check_rate_limit()
 
         return result
