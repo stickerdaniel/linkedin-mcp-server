@@ -409,8 +409,11 @@ def _numeric_tail(segment: str) -> str:
     Only reached for a segment taken out of a URL under the id's own route. A
     bare argument stays strictly numeric, because there the words are not a slug
     LinkedIn wrote, they are a wrong value.
+
+    Any character may sit in front, as in `JOB_PATH_RE` and the browser's job-id
+    extraction: a title such as ".NET Developer" or "Node.js" keeps its period.
     """
-    match = re.fullmatch(r"[\w-]*?-(\d+)", segment)
+    match = re.fullmatch(r"[^/?#]*?-(\d+)", segment)
     return match.group(1) if match else segment
 
 

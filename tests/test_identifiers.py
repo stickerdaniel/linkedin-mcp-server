@@ -25,6 +25,7 @@ from linkedin_mcp_server.linkedin.identifiers import (
     normalize_thread_id,
     person_profile_url,
 )
+from linkedin_mcp_server.linkedin.link_metadata import classify_link
 
 PROFILE_ID = "ACoAADdZSNYBiaacxEw6je-wVIKjGkKp-it0gD8"
 
@@ -527,6 +528,21 @@ class TestSluggedJobUrls:
         slugged = "https://www.linkedin.com/jobs/view/software-engineer-new-grad-at-ixl-learning-1967281839/"
         assert normalize_job_id(slugged) == normalize_job_id("/jobs/view/1967281839/")
         assert normalize_job_id(slugged) == "1967281839"
+
+    @pytest.mark.parametrize(
+        "slug",
+        [
+            "senior-.net-developer-at-acme",
+            "node.js-engineer-at-acme",
+            "c%2B%2B-engineer-at-acme",
+        ],
+    )
+    def test_a_slug_with_punctuation_resolves_like_its_reference(self, slug: str):
+        # link_metadata turns the same link into the reference /jobs/view/<id>/,
+        # so refusing it here refused a job this server itself recognizes.
+        url = f"https://www.linkedin.com/jobs/view/{slug}-4252026496/"
+        assert classify_link(url) == ("job", "/jobs/view/4252026496/")
+        assert normalize_job_id(url) == "4252026496"
 
     def test_a_bare_argument_stays_strictly_numeric(self):
         # Outside a URL the words are not a slug LinkedIn wrote, they are a
