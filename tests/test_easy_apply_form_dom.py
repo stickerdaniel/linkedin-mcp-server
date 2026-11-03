@@ -86,8 +86,10 @@ RESUME: dict[str, Any] = {
 
 # The posting, its Easy Apply anchor, and a dialog that behaves like LinkedIn's:
 # opened by the anchor, rendered in a shadow root, refusing Next while a
-# required field is empty, and asking to save the draft on Escape. Every click
-# and keystroke that reaches it is logged on `window.log`.
+# required field is empty, and asking to save the draft on Escape. The step Next
+# moves to lands later, under that question if it is open, and never once the
+# dialog is gone, so a read cancelled mid-step races nothing. Every click and
+# keystroke that reaches it is logged on `window.log`.
 DIALOG_SCRIPT = """
 const STEPS = %s;
 window.log = [];
@@ -98,6 +100,7 @@ const shadow = outlet.attachShadow({mode: 'open'});
 shadow.addEventListener('input', () => window.log.push('input'), true);
 let index = 0;
 const render = () => {
+    const confirm = shadow.querySelector('[role="alertdialog"]');
     const step = STEPS[index];
     const last = index === STEPS.length - 1;
     shadow.innerHTML = '<div role="dialog" data-test-modal>'
@@ -111,6 +114,7 @@ const render = () => {
             ? '<button type="button" data-live-test-easy-apply-submit-button>Submit application</button>'
             : '<button type="button" data-easy-apply-next-button>Next</button>')
         + '</footer></form></div>';
+    if (confirm) shadow.appendChild(confirm);
     const next = shadow.querySelector('[data-easy-apply-next-button]');
     if (next) next.addEventListener('click', () => {
         window.log.push('next');
@@ -129,7 +133,11 @@ const render = () => {
             el.after(error);
             valid = false;
         }
-        if (valid) setTimeout(() => { index += 1; render(); }, window.nextDelay || 100);
+        if (valid) setTimeout(() => {
+            if (!shadow.querySelector('[role="dialog"]')) return;
+            index += 1;
+            render();
+        }, window.nextDelay || 100);
     });
     const submit = shadow.querySelector('[data-live-test-easy-apply-submit-button]');
     if (submit) submit.addEventListener('click', () => window.log.push('submit'));
