@@ -11,7 +11,7 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 - **Profile Connections**: Send connection requests or accept incoming ones, with optional notes
 - **Sidebar Profiles**: Extract profile URLs from the sidebar recommendation sections on a profile page ("More profiles for you", "Explore premium profiles", "People you may know")
 - **Messaging**: List the inbox, read a conversation by username or thread ID, search messages by keyword, archive a conversation by thread ID, and compose/send a new message or reply inside an existing thread by thread ID, InMail included, both with explicit confirmation (profile-based send may open a separate DM, so replies go through the thread)
-- **Your Network**: Sync your own connections list into a local store, import LinkedIn's `Connections.csv` export, and search it offline
+- **Your Network**: Sync your own connections list into a local store, import LinkedIn's `Connections.csv` export, enrich a shortlist with About and job history, search it offline, and find ranked introduction paths to 2nd-degree people
 - **Company Profiles**: Extract comprehensive company data, including the LinkedIn company URN id (used by LinkedIn's people-search `currentCompany` URL facet)
 - **Company Employees**: List employees at a company with optional keyword filtering
 - **Company Search**: Search for companies by keyword

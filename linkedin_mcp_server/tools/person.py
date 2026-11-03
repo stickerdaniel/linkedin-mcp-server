@@ -5,8 +5,12 @@ Uses innerText extraction for resilient profile data capture
 with configurable section selection.
 """
 
+import asyncio
 import json
+from datetime import date
 import logging
+import random
+import time
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
@@ -15,6 +19,7 @@ from pydantic import BeforeValidator, Field
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import (
     DEFAULT_TOOL_TIMEOUT_SECONDS,
+    ENRICH_MY_NETWORK_MAX_SECONDS,
     SYNC_MY_CONNECTIONS_MAX_SECONDS,
     tool_timeout_for,
 )
@@ -23,7 +28,9 @@ from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode
 from linkedin_mcp_server.linkedin import parse_person_sections
 from linkedin_mcp_server.linkedin.contracts import FilterValidationError
 from linkedin_mcp_server.linkedin.identifiers import normalize_person_identifier
+from linkedin_mcp_server.core.throttle import throttled_count
 from linkedin_mcp_server.linkedin.my_connections import CONNECTIONS_URL
+from linkedin_mcp_server.network.ranking import rank_paths
 from linkedin_mcp_server.linkedin.search_urls import build_people_search_url
 from linkedin_mcp_server.tools.network import open_store
 
@@ -60,6 +67,13 @@ def _coerce_str_list(value: Any) -> Any:
 
 
 StrList = Annotated[list[str], BeforeValidator(_coerce_str_list)]
+
+#: Seconds between two people in an enrichment pass, plus uniform jitter.
+#: Each person is two page loads (profile and experience), which `read_person`
+#: already spaces; this keeps the pass well under the one-profile-a-second
+#: limit live checks hold to, however long it runs.
+ENRICH_PAUSE = 5.0
+ENRICH_JITTER = 3.0
 
 
 def register_person_tools(
@@ -319,6 +333,287 @@ def register_person_tools(
                 "throttled": result.throttled,
                 "store": str(store.path),
             }
+        finally:
+            store.close()
+
+    @mcp.tool(
+        timeout=tool_timeout_for("enrich_my_network", tool_timeout),
+        title="Enrich My Network",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"person", "network"},
+    )
+    @tool_errors
+    async def enrich_my_network(
+        ctx: Context,
+        usernames: StrList | None = None,
+        query: str | None = None,
+        limit: Annotated[int, Field(ge=1, le=30)] = 10,
+        refresh: bool = False,
+        time_budget_seconds: Annotated[
+            int, Field(ge=30, le=ENRICH_MY_NETWORK_MAX_SECONDS)
+        ] = 300,
+    ) -> dict[str, Any]:
+        """
+        Read About and job history for some of your connections into the local store.
+
+        For each person it reads the main profile (headline, About, current
+        role) and the full experience page, and stores both. After that,
+        search_my_network matches words in those texts too (past employers,
+        roles, topics in About), returns the matching passage, and
+        get_network_person returns the stored texts without touching LinkedIn.
+
+        Each person costs two page loads and the pass is paced, so enrich a
+        shortlist, not the whole network: search first, then enrich the
+        candidates whose fit depends on their history.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            usernames: Connections to enrich (LinkedIn usernames or profile
+                URLs, as search_my_network returns them in `slug`).
+            query: Instead of usernames, enrich the top matches of this
+                search_my_network query.
+            limit: Most people to read in this call (1-30, default 10).
+            refresh: Re-read people already enriched (default False skips them).
+            time_budget_seconds: How long the pass may run (30-900, default 300).
+
+        Returns:
+            Dict with enriched (slug, name, sections read, and any errors per
+            person), skipped (already enriched or not in your network),
+            remaining (candidates left for another call), stop_reason
+            (done | limit | time_budget | throttled), and store path.
+        """
+        if not usernames and not query:
+            raise CodedToolError(
+                "Pass usernames or a query to choose who to enrich.",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        store = open_store()
+        try:
+            skipped: list[dict[str, str]] = []
+            if usernames:
+                wanted = [normalize_person_identifier(u) for u in usernames]
+            else:
+                wanted = [
+                    r["slug"]
+                    for r in store.search(query, limit=200)["results"]
+                    if not r["slug"].startswith("csv:")
+                ]
+            candidates = []
+            for slug in dict.fromkeys(wanted):
+                if store.get(slug) is None:
+                    skipped.append({"slug": slug, "reason": "not_in_network"})
+                else:
+                    candidates.append(slug)
+            if not refresh:
+                fresh = store.without_details(candidates)
+                skipped += [
+                    {"slug": s, "reason": "already_enriched"}
+                    for s in candidates
+                    if s not in fresh
+                ]
+                candidates = fresh
+
+            extractor = await get_ready_extractor(ctx, tool_name="enrich_my_network")
+            deadline = time.monotonic() + time_budget_seconds
+            throttle_before = throttled_count()
+            enriched: list[dict[str, Any]] = []
+            stop_reason = "done"
+            for i, slug in enumerate(candidates):
+                if i >= limit:
+                    stop_reason = "limit"
+                    break
+                if time.monotonic() >= deadline:
+                    stop_reason = "time_budget"
+                    break
+                if i:
+                    await asyncio.sleep(ENRICH_PAUSE + random.uniform(0, ENRICH_JITTER))
+                await ctx.report_progress(
+                    progress=i,
+                    total=min(limit, len(candidates)),
+                    message=f"Reading {slug}",
+                )
+                result = await extractor.read_person(slug, {"experience"})
+                sections = result.get("sections", {})
+                errors = result.get("section_errors", {})
+                if sections:
+                    store.save_details(
+                        slug,
+                        profile_text=sections.get("main_profile"),
+                        experience_text=sections.get("experience"),
+                    )
+                person = store.get(slug) or {}
+                entry: dict[str, Any] = {
+                    "slug": slug,
+                    "name": person.get("name"),
+                    "read": sorted(sections),
+                }
+                if errors:
+                    entry["errors"] = errors
+                enriched.append(entry)
+                rate_limited = any(
+                    e.get("error_type") == "rate_limit" for e in errors.values()
+                )
+                if rate_limited or throttled_count() > throttle_before:
+                    stop_reason = "throttled"
+                    break
+            done = {e["slug"] for e in enriched}
+            return {
+                "enriched": enriched,
+                "skipped": skipped,
+                "remaining": [s for s in candidates if s not in done],
+                "stop_reason": stop_reason,
+                "store": str(store.path),
+            }
+        finally:
+            store.close()
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Find Introductions",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"person", "search", "network"},
+    )
+    @tool_errors
+    async def find_introductions(
+        keywords: str,
+        ctx: Context,
+        location: str | None = None,
+        current_company: str | None = None,
+        pages: Annotated[int, Field(ge=1, le=3)] = 1,
+    ) -> dict[str, Any]:
+        """
+        Find 2nd-degree people for a purpose, and which of your connections could introduce you.
+
+        Runs a LinkedIn people search limited to 2nd-degree connections and,
+        for every result, reads the mutual connections LinkedIn links on the
+        card. Each mutual connection is looked up in your local network store,
+        so each introducer comes with the headline, company, email and
+        connection date you have for them. Fill the store first with
+        sync_my_connections or import_connections_csv.
+
+        Search your own network with search_my_network first; use this when
+        nobody there fits. A broad role or topic works best ("AI governance",
+        "program officer horizon europe"). Each page is one search load.
+
+        Args:
+            keywords: What the people you want to reach do or work on.
+            ctx: FastMCP context for progress reporting
+            location: Optional LinkedIn numeric geo URN id (as search_people).
+            current_company: Optional LinkedIn numeric company URN id.
+            pages: Result pages to read, 1-3 (10 results each, default 1).
+
+        Results are ranked by their warmest path, not by LinkedIn's order
+        alone: how well you know the introducer (your mark_connections marks
+        first, then message history from import_messages_csv, then how long
+        you have been connected), whether introducer and target share an
+        organisation, how many of your connections link to the target, and
+        the search rank. Mark the people you are close to, and import your
+        messages, for a much better ranking.
+
+        Returns:
+            Dict with url, results (each: slug, name, score, reasons, best_via,
+            card -- the result's visible lines such as headline, location and
+            current role -- and introducers, your stored connections linked on
+            that card, each with tie and reasons), and by_introducer (your
+            connections ranked by how many results they connect you to).
+            LinkedIn names only the first two or three mutual connections on a
+            card, so a card may show "& 2 other mutual connections" in its
+            lines beyond the introducers listed.
+        """
+        try:
+            base_url = build_people_search_url(
+                keywords,
+                location=location,
+                network=["S"],
+                current_company=current_company,
+            )
+        except FilterValidationError as e:
+            raise CodedToolError(str(e), ErrorCode.INVALID_ARGUMENT) from e
+
+        extractor = await get_ready_extractor(ctx, tool_name="find_introductions")
+        store = open_store()
+        try:
+            first_degree = store.all_slugs()
+            cards = []
+            for page in range(1, pages + 1):
+                if page > 1:
+                    await asyncio.sleep(ENRICH_PAUSE + random.uniform(0, ENRICH_JITTER))
+                url = base_url if page == 1 else f"{base_url}&page={page}"
+                await ctx.report_progress(
+                    progress=page - 1,
+                    total=pages,
+                    message=f"Reading results page {page}",
+                )
+                page_cards = await extractor.read_second_degree(url, first_degree)
+                if not page_cards:
+                    break
+                cards.extend(page_cards)
+
+            seen: set[str] = set()
+            results: list[dict[str, Any]] = []
+            by_introducer: dict[str, list[str]] = {}
+            for card in cards:
+                if card.slug in seen:
+                    continue
+                seen.add(card.slug)
+                introducers = [p for p in (store.get(m) for m in card.mutual) if p]
+                for p in introducers:
+                    by_introducer.setdefault(p["slug"], []).append(card.slug)
+                results.append(
+                    {
+                        "slug": card.slug,
+                        "name": card.name,
+                        "card": card.lines[:10],
+                        "introducers": [
+                            {
+                                k: p[k]
+                                for k in (
+                                    "slug",
+                                    "name",
+                                    "headline",
+                                    "company",
+                                    "position",
+                                    "email",
+                                    "connected_on",
+                                    "has_details",
+                                )
+                                if k in p
+                            }
+                            for p in introducers
+                        ],
+                    }
+                )
+            intro_slugs = list(by_introducer)
+            results = rank_paths(
+                results,
+                store.ties(intro_slugs),
+                {
+                    slug: (store.details(slug) or {}).get("experience_text")
+                    for slug in intro_slugs
+                },
+                date.today(),
+            )
+            ranked = sorted(by_introducer.items(), key=lambda kv: -len(kv[1]))
+            answer: dict[str, Any] = {
+                "url": base_url,
+                "results": results,
+                "by_introducer": [
+                    {
+                        "slug": slug,
+                        "name": (store.get(slug) or {}).get("name"),
+                        "headline": (store.get(slug) or {}).get("headline"),
+                        "connects_you_to": targets,
+                    }
+                    for slug, targets in ranked
+                ],
+            }
+            if not first_degree:
+                answer["note"] = (
+                    "Your network store is empty, so no introducers could be "
+                    "recognised. Run sync_my_connections or import_connections_csv "
+                    "first."
+                )
+            return answer
         finally:
             store.close()
 

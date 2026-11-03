@@ -16,8 +16,9 @@ from urllib.parse import unquote, urlsplit
 logger = logging.getLogger(__name__)
 
 DEFAULT_TOOL_TIMEOUT_SECONDS: float = 180.0
-#: The longest a connections walk may be asked to run.
+#: The longest a connections walk, or an enrichment pass, may be asked to run.
 SYNC_MY_CONNECTIONS_MAX_SECONDS = 900
+ENRICH_MY_NETWORK_MAX_SECONDS = 900
 #: Tools that need longer than the configured tool timeout, with the seconds
 #: each needs at least. One table, because registration and both of the
 #: proxy's limits (the frontend's call budget and the forwarder's read
@@ -26,6 +27,7 @@ SYNC_MY_CONNECTIONS_MAX_SECONDS = 900
 LONG_RUNNING_TOOL_SECONDS: dict[str, float] = {
     # The walk itself plus a page load and the final write.
     "sync_my_connections": SYNC_MY_CONNECTIONS_MAX_SECONDS + 60.0,
+    "enrich_my_network": ENRICH_MY_NETWORK_MAX_SECONDS + 60.0,
 }
 
 

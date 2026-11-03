@@ -138,3 +138,199 @@ async def test_an_unfinished_walk_is_continued_not_cut_short_by_known_connection
         False,
         True,
     ]
+
+
+@pytest.fixture
+def no_pause(monkeypatch):
+    import linkedin_mcp_server.tools.person as person_tools
+
+    pauses: list[float] = []
+
+    async def pause(seconds: float) -> None:
+        pauses.append(seconds)
+
+    monkeypatch.setattr(person_tools.asyncio, "sleep", pause)
+    return pauses
+
+
+async def _store_people(mcp, *slugs: str) -> None:
+    async def walk(on_batch, **kwargs):
+        on_batch([PageConnection(s, s.title(), f"{s} role", None, None) for s in slugs])
+        return WalkResult(seen=len(slugs), stop_reason="end_of_list", complete=True)
+
+    extractor = MagicMock()
+    extractor.walk_my_connections = AsyncMock(side_effect=walk)
+    with patch(
+        "linkedin_mcp_server.tools.person.get_ready_extractor",
+        AsyncMock(return_value=extractor),
+    ):
+        await call(mcp, "sync_my_connections", {})
+
+
+def _reader(errors_for: set[str] | None = None) -> MagicMock:
+    async def read_person(slug, requested):
+        assert requested == {"experience"}
+        if errors_for and slug in errors_for:
+            return {
+                "sections": {"main_profile": f"{slug} profile"},
+                "section_errors": {
+                    "experience": {"error_type": "rate_limit", "error_message": "x"}
+                },
+            }
+        return {
+            "sections": {
+                "main_profile": f"About {slug}: works on fiscal policy",
+                "experience": f"{slug} was Economist at Ministry of Finance",
+            }
+        }
+
+    extractor = MagicMock()
+    extractor.read_person = AsyncMock(side_effect=read_person)
+    return extractor
+
+
+async def test_enrich_reads_paces_and_makes_history_searchable(mcp, no_pause):
+    await _store_people(mcp, "ada", "alan", "grace")
+    extractor = _reader()
+    with patch(
+        "linkedin_mcp_server.tools.person.get_ready_extractor",
+        AsyncMock(return_value=extractor),
+    ):
+        result = await call(
+            mcp,
+            "enrich_my_network",
+            {"usernames": ["ada", "alan", "nobody"], "limit": 5},
+        )
+
+    assert [e["slug"] for e in result["enriched"]] == ["ada", "alan"]
+    assert result["skipped"] == [{"slug": "nobody", "reason": "not_in_network"}]
+    assert result["stop_reason"] == "done"
+    assert len(no_pause) == 1 and no_pause[0] >= 5.0  # a pause between two people
+
+    found = await call(mcp, "search_my_network", {"query": "ministry finance"})
+    assert sorted(r["slug"] for r in found["results"]) == ["ada", "alan"]
+    person = await call(mcp, "get_network_person", {"username": "ada"})
+    assert "Ministry of Finance" in person["details"]["experience_text"]
+
+
+async def test_enrich_skips_people_already_read_unless_refreshing(mcp, no_pause):
+    await _store_people(mcp, "ada", "alan")
+    extractor = _reader()
+    with patch(
+        "linkedin_mcp_server.tools.person.get_ready_extractor",
+        AsyncMock(return_value=extractor),
+    ):
+        await call(mcp, "enrich_my_network", {"usernames": ["ada"]})
+        again = await call(mcp, "enrich_my_network", {"usernames": ["ada", "alan"]})
+        forced = await call(
+            mcp, "enrich_my_network", {"usernames": ["ada"], "refresh": True}
+        )
+    assert [e["slug"] for e in again["enriched"]] == ["alan"]
+    assert again["skipped"] == [{"slug": "ada", "reason": "already_enriched"}]
+    assert [e["slug"] for e in forced["enriched"]] == ["ada"]
+
+
+async def test_enrich_by_query_stops_at_the_limit_and_reports_the_rest(mcp, no_pause):
+    await _store_people(mcp, "ada", "alan", "grace")
+    with patch(
+        "linkedin_mcp_server.tools.person.get_ready_extractor",
+        AsyncMock(return_value=_reader()),
+    ):
+        result = await call(mcp, "enrich_my_network", {"query": "role", "limit": 2})
+    assert len(result["enriched"]) == 2
+    assert result["stop_reason"] == "limit"
+    assert len(result["remaining"]) == 1
+
+
+async def test_enrich_stops_when_a_profile_is_rate_limited(mcp, no_pause):
+    await _store_people(mcp, "ada", "alan", "grace")
+    with patch(
+        "linkedin_mcp_server.tools.person.get_ready_extractor",
+        AsyncMock(return_value=_reader(errors_for={"alan"})),
+    ):
+        result = await call(
+            mcp, "enrich_my_network", {"usernames": ["ada", "alan", "grace"]}
+        )
+    assert [e["slug"] for e in result["enriched"]] == ["ada", "alan"]
+    assert result["stop_reason"] == "throttled"
+    assert result["remaining"] == ["grace"]
+
+
+async def test_enrich_needs_someone_to_read(mcp):
+    with pytest.raises(ToolError, match="usernames or a query"):
+        await mcp.call_tool("enrich_my_network", {})
+
+
+async def test_introductions_rank_by_your_marks_and_name_the_path(mcp, no_pause):
+    from linkedin_mcp_server.linkedin.introductions import SecondDegreeCard
+
+    await _store_people(mcp, "nicky", "matthias", "ayhan")
+    marked = await call(
+        mcp, "mark_connections", {"usernames": ["matthias", "ghost"], "closeness": 3}
+    )
+    assert marked == {"marked": 1, "unknown": ["ghost"]}
+
+    cards = [
+        SecondDegreeCard("koen", "Koen", ["nicky"], ["Koen", "Consultant"]),
+        SecondDegreeCard("raphael", "Raphaël", ["matthias", "ayhan"], ["Raphaël"]),
+        SecondDegreeCard("koen", "Koen", ["nicky"], ["Koen"]),  # repeated on page 2
+    ]
+    extractor = MagicMock()
+    extractor.read_second_degree = AsyncMock(side_effect=[cards[:2], cards[2:], []])
+    with patch(
+        "linkedin_mcp_server.tools.person.get_ready_extractor",
+        AsyncMock(return_value=extractor),
+    ):
+        result = await call(
+            mcp, "find_introductions", {"keywords": "ai governance", "pages": 3}
+        )
+
+    urls = [c.args[0] for c in extractor.read_second_degree.await_args_list]
+    assert "network=%5B%22S%22%5D" in urls[0] and urls[1].endswith("&page=2")
+    first_degree = extractor.read_second_degree.await_args_list[0].args[1]
+    assert first_degree == {"nicky", "matthias", "ayhan"}
+
+    assert [r["slug"] for r in result["results"]] == ["raphael", "koen"]
+    top = result["results"][0]
+    assert top["best_via"] == "matthias"
+    assert "you marked closeness 3/3" in top["reasons"]
+    assert [i["slug"] for i in top["introducers"]] == ["matthias", "ayhan"]
+    assert result["by_introducer"][0]["connects_you_to"] in (["koen"], ["raphael"])
+
+
+async def test_introductions_with_an_empty_store_say_why_nobody_is_named(mcp):
+    from linkedin_mcp_server.linkedin.introductions import SecondDegreeCard
+
+    extractor = MagicMock()
+    extractor.read_second_degree = AsyncMock(
+        return_value=[SecondDegreeCard("koen", "Koen", [], ["Koen"])]
+    )
+    with patch(
+        "linkedin_mcp_server.tools.person.get_ready_extractor",
+        AsyncMock(return_value=extractor),
+    ):
+        result = await call(mcp, "find_introductions", {"keywords": "ai"})
+    assert [r["slug"] for r in result["results"]] == ["koen"]
+    assert "network store is empty" in result["note"]
+
+
+async def test_message_counts_import_without_their_text(mcp, tmp_path):
+    await _store_people(mcp, "ada")
+    csv = tmp_path / "messages.csv"
+    csv.write_text(
+        "CONVERSATION ID,FROM,SENDER PROFILE URL,TO,RECIPIENT PROFILE URLS,DATE,CONTENT\n"
+        "1,Me,https://www.linkedin.com/in/member-x,Ada,https://www.linkedin.com/in/ada,"
+        "2026-10-01 09:00:00 UTC,secret words\n"
+        "2,Me,https://www.linkedin.com/in/member-x,Bo,https://www.linkedin.com/in/bo,"
+        "2026-10-02 09:00:00 UTC,more secrets\n",
+        encoding="utf-8",
+    )
+    imported = await call(mcp, "import_messages_csv", {"path": str(csv)})
+    assert imported["people"] == 2 and imported["in_network"] == 1
+
+    import sqlite3
+
+    db = sqlite3.connect(imported["store"])
+    dump = "\n".join(db.iterdump())
+    db.close()
+    assert "secret" not in dump

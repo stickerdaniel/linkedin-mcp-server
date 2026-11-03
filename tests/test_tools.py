@@ -32,6 +32,7 @@ def _make_mock_extractor(result: dict) -> MagicMock:
     mock = MagicMock()
     mock.read_person = AsyncMock(return_value=result)
     mock.walk_my_connections = AsyncMock(return_value=WalkResult())
+    mock.read_second_degree = AsyncMock(return_value=[])
     mock.connect_with_person = AsyncMock(return_value=result)
     mock.read_company = AsyncMock(return_value=result)
     mock.read_job = AsyncMock(return_value=result)
@@ -244,6 +245,8 @@ _A_VALID_CALL = [
     ("person", "get_sidebar_profiles", {"linkedin_username": "alice"}),
     ("person", "get_my_profile", {}),
     ("person", "sync_my_connections", {}),
+    ("person", "enrich_my_network", {"usernames": ["alice"]}),
+    ("person", "find_introductions", {"keywords": "ai governance"}),
     ("company", "get_company_profile", {"company_name": "anthropic"}),
     ("company", "get_company_posts", {"company_name": "anthropic"}),
     ("company", "search_companies", {"keywords": "fintech"}),

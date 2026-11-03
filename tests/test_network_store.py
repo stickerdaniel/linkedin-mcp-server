@@ -174,3 +174,81 @@ def test_a_symlinked_profile_shares_its_targets_store(tmp_path):
     assert default_store_path(canonical(link / "profile")) == default_store_path(
         canonical(real)
     )
+
+
+def test_enriched_text_is_searched_and_quoted(store):
+    store.upsert_export_connections(parse_connections_csv(EXPORT))
+    store.save_details(
+        "alan-turing",
+        profile_text="About: I build decision-support systems for central banks.",
+        experience_text="Advisor\nEuropean Central Bank\n2019 - 2022",
+    )
+    found = store.search("central bank")
+    assert [r["slug"] for r in found["results"]] == ["alan-turing"]
+    hit = found["results"][0]
+    assert hit["has_details"] is True
+    assert "[Central]" in hit["match"] or "[central]" in hit["match"]
+    # A past employer counts for the company filter once experience is stored.
+    assert [r["slug"] for r in store.search(company="European Central")["results"]] == [
+        "alan-turing"
+    ]
+    assert store.details("alan-turing")["experience_text"].startswith("Advisor")
+    assert store.overview()["with_details"] == 1
+
+
+def test_headline_words_outrank_the_same_word_in_long_profile_text(store):
+    store.upsert_page_connections(
+        [
+            PageConnection("a", "A", "Policy advisor", None, None),
+            PageConnection("b", "B", "Engineer", None, None),
+        ]
+    )
+    store.save_details(
+        "b", profile_text="I once read about policy.", experience_text=None
+    )
+    assert [r["slug"] for r in store.search("policy")["results"]] == ["a", "b"]
+
+
+def test_an_older_store_gets_its_search_index_rebuilt(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        """
+        CREATE TABLE connections (slug TEXT PRIMARY KEY, profile_url TEXT, name TEXT,
+          first_name TEXT, last_name TEXT, headline TEXT, company TEXT, position TEXT,
+          email TEXT, connected_on TEXT, connected_text TEXT,
+          from_page INTEGER NOT NULL DEFAULT 0, from_export INTEGER NOT NULL DEFAULT 0,
+          first_seen TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE VIRTUAL TABLE connections_fts USING fts5(slug UNINDEXED, name, headline,
+          company, position);
+        INSERT INTO connections (slug, name, headline, from_page, first_seen, updated_at)
+          VALUES ('ada', 'Ada', 'Policy lead', 1, 'x', 'x');
+        INSERT INTO connections_fts VALUES ('ada', 'Ada', 'Policy lead', NULL, NULL);
+        """
+    )
+    old.commit()
+    old.close()
+
+    s = NetworkStore(path)
+    try:
+        assert [r["slug"] for r in s.search("policy")["results"]] == ["ada"]
+        s.save_details("ada", profile_text=None, experience_text="Ministry of Finance")
+        assert s.search("ministry")["total"] == 1
+    finally:
+        s.close()
+
+
+def test_mutual_connection_names_match_stored_people(store):
+    store.upsert_export_connections(parse_connections_csv(EXPORT))
+    store.upsert_page_connections(
+        [PageConnection("ada-2", "Ada Lovelace", "Poet", None, None)]
+    )
+    matched = store.match_names(["ada lovelace", "Alan Turing", "Nobody Here"])
+    assert sorted(p["slug"] for p in matched["ada lovelace"]) == [
+        "ada-2",
+        "ada-lovelace",
+    ]
+    assert [p["slug"] for p in matched["Alan Turing"]] == ["alan-turing"]
+    assert matched["Nobody Here"] == []

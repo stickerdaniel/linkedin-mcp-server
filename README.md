@@ -77,8 +77,13 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `search_people` | Find people by keyword, location, connection degree, and current company. |
 | `sync_my_connections` | Read your own connections list into a local store, slowly; later runs read only new ones. |
 | `import_connections_csv` | Import LinkedIn's `Connections.csv` data export into the local store (company, email, dates). |
-| `search_my_network` | Search your stored connections by role, sector, company or date. Offline, no LinkedIn calls. |
+| `search_my_network` | Search your stored connections by role, sector, company, date, and enriched job history. Offline. |
 | `get_network_overview` | Size, sources, top companies and freshness of the local network store. Offline. |
+| `enrich_my_network` | Read About and job history for a shortlist of your connections into the local store, paced. |
+| `get_network_person` | Everything stored about one connection, including enriched About and experience. Offline. |
+| `find_introductions` | Find 2nd-degree people for a purpose and rank who in your network could introduce you, with reasons. |
+| `mark_connections` | Mark how well you know connections (0-3); introductions trust these marks first. Offline. |
+| `import_messages_csv` | Import message counts and last-contact dates per person from LinkedIn's `messages.csv` (no message text kept). |
 | `get_job_details` | Read a job posting's description, requirements, and company details. |
 | `get_job_apply_url` | Check whether a job uses Easy Apply or links to an employer's application. |
 | `get_easy_apply_form` | Read an Easy Apply form: each field's label, type, options and prefilled value. Never types or submits. |

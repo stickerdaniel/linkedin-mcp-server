@@ -717,6 +717,7 @@ def semantic_program_id(program: str) -> str:
         # Before the people-ready marker: both connections programs read
         # profile anchors too, so that broader marker would claim them.
         ("const profileSlugs", "my_connections_cards"),
+        ("resultSlugsIn", "second_degree_cards"),
         ("last.scrollIntoView", "my_connections_advance"),
         ("length > before", "my_connections_grew"),
         ("parseInt(m[1]", "my_connections_listed_total"),

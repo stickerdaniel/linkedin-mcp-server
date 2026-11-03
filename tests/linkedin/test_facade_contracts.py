@@ -69,6 +69,8 @@ TOOL_DELEGATES = {
     "send_message": "send_message",
     "reply_to_conversation": "reply_to_conversation",
     "sync_my_connections": "walk_my_connections",
+    "enrich_my_network": "read_person",
+    "find_introductions": "read_second_degree",
 }
 
 
@@ -103,6 +105,7 @@ async def test_constructor_export_and_dependency_use_the_same_facade(monkeypatch
         "_content",
         "_conversations",
         "_feed",
+        "_introductions",
         "_jobs",
         "_message_sender",
         "_my_connections",
@@ -135,7 +138,10 @@ async def test_registered_tools_match_extractor_delegates():
     session_tools = {"close_session", "get_session_status"}
     store_tools = {
         "get_network_overview",
+        "get_network_person",
         "import_connections_csv",
+        "import_messages_csv",
+        "mark_connections",
         "search_my_network",
     }
     assert tool_names == {*TOOL_DELEGATES, *session_tools, *store_tools}

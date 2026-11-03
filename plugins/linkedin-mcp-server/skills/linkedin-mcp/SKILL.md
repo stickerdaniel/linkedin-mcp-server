@@ -45,9 +45,15 @@ instances, clear profiles, or replace the user's browser session.
 
 - Profiles: `get_my_profile`, `get_person_profile`, `search_people`, and
   `get_sidebar_profiles`.
-- Your network: `get_network_overview`, `search_my_network` (offline, call
-  freely), `import_connections_csv`, and `sync_my_connections`, which walks
-  the connections page and should run rarely.
+- Your network: `get_network_overview`, `search_my_network` and
+  `get_network_person` (offline, call freely), `import_connections_csv`,
+  `sync_my_connections`, which walks the connections page and should run
+  rarely, and `enrich_my_network`, which reads About and job history for a
+  shortlist so later searches can match them.
+- Introductions: when nobody in the user's network fits, `find_introductions`
+  searches 2nd-degree people for the purpose and ranks the paths through the
+  user's connections. Ask the user to `mark_connections` they are close to
+  and to `import_messages_csv`; both make the ranking much better.
 - Companies: `get_company_profile`, `get_company_posts`, `search_companies`,
   and `get_company_employees`.
 - Jobs: `search_jobs`, `get_saved_jobs`, `get_job_details`,

@@ -18,6 +18,10 @@ from linkedin_mcp_server.linkedin.contracts import (
 )
 from linkedin_mcp_server.linkedin.conversations import ConversationReader
 from linkedin_mcp_server.linkedin.feed import FeedReader
+from linkedin_mcp_server.linkedin.introductions import (
+    IntroductionReader,
+    SecondDegreeCard,
+)
 from linkedin_mcp_server.linkedin.job_pages import JobPageReader
 from linkedin_mcp_server.linkedin.job_policy import JobsTrackerStage
 from linkedin_mcp_server.linkedin.jobs import JobReader
@@ -73,6 +77,7 @@ class LinkedInExtractor:
         self._jobs = JobReader(navigator, capture, job_pages)
         self._posts = PostSearch(capture)
         self._my_connections = MyConnectionsReader(session, navigator)
+        self._introductions = IntroductionReader(session, navigator)
         self._conversations = ConversationReader(
             session, navigator, content, profile_page
         )
@@ -160,6 +165,12 @@ class LinkedInExtractor:
     ) -> dict[str, Any]:
         """List employees at a company from the people page."""
         return await self._company.get_company_employees(company_name, keywords)
+
+    async def read_second_degree(
+        self, url: str, first_degree: set[str]
+    ) -> list[SecondDegreeCard]:
+        """Read a people-search page's results with their mutual connections."""
+        return await self._introductions.read_cards(url, first_degree)
 
     async def walk_my_connections(
         self,

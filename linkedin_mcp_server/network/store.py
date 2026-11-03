@@ -55,9 +55,22 @@ CREATE TABLE IF NOT EXISTS connections (
     first_seen TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE VIRTUAL TABLE IF NOT EXISTS connections_fts USING fts5(
-    slug UNINDEXED, name, headline, company, position,
-    tokenize = 'unicode61 remove_diacritics 2'
+CREATE TABLE IF NOT EXISTS profile_details (
+    slug TEXT PRIMARY KEY,
+    profile_text TEXT,
+    experience_text TEXT,
+    fetched_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS closeness (
+    slug TEXT PRIMARY KEY,
+    level INTEGER NOT NULL,
+    note TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS message_stats (
+    slug TEXT PRIMARY KEY,
+    messages INTEGER NOT NULL,
+    last_message TEXT
 );
 CREATE TABLE IF NOT EXISTS sync_runs (
     id INTEGER PRIMARY KEY,
@@ -70,6 +83,17 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     note TEXT
 );
 """
+
+# Searchable columns, in bm25 weight order after the unindexed slug. The
+# profile and experience text come from enrichment; they are long, so they
+# weigh least, and a hit there still ranks below the same word in a headline.
+_FTS_COLUMNS = ("name", "headline", "company", "position", "profile", "experience")
+_FTS_WEIGHTS = "0, 1.0, 3.0, 2.0, 3.0, 0.6, 1.0"
+_FTS_SCHEMA = (
+    "CREATE VIRTUAL TABLE connections_fts USING fts5("
+    f"slug UNINDEXED, {', '.join(_FTS_COLUMNS)}, "
+    "tokenize = 'unicode61 remove_diacritics 2')"
+)
 
 _WORD = re.compile(r"\w+", re.UNICODE)
 
@@ -124,6 +148,22 @@ class NetworkStore:
         self._conn = sqlite3.connect(str(self.path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._ensure_fts()
+
+    def _ensure_fts(self) -> None:
+        """Create the search index, or rebuild one an older schema made.
+
+        The index is derived from the tables, so rebuilding it loses nothing;
+        a store from before enrichment has no profile or experience column.
+        """
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(connections_fts)")]
+        if cols == ["slug", *_FTS_COLUMNS]:
+            return
+        with self._tx() as conn:
+            conn.execute("DROP TABLE IF EXISTS connections_fts")
+            conn.execute(_FTS_SCHEMA)
+            for (slug,) in conn.execute("SELECT slug FROM connections").fetchall():
+                self._index(conn, slug)
 
     def close(self) -> None:
         self._conn.close()
@@ -160,27 +200,102 @@ class NetworkStore:
             "updated_at = excluded.updated_at",
             [values[c] for c in cols] + [now, now],
         )
+        self._index(conn, values["slug"])
+        return not existed
+
+    def _index(self, conn: sqlite3.Connection, slug: str) -> None:
+        """Rewrite *slug*'s search row from the tables."""
         row = conn.execute(
-            "SELECT name, first_name, last_name, headline, company, position "
-            "FROM connections WHERE slug = ?",
-            (values["slug"],),
+            "SELECT c.name, c.first_name, c.last_name, c.headline, c.company, "
+            "c.position, d.profile_text, d.experience_text FROM connections c "
+            "LEFT JOIN profile_details d ON d.slug = c.slug WHERE c.slug = ?",
+            (slug,),
         ).fetchone()
+        conn.execute("DELETE FROM connections_fts WHERE slug = ?", (slug,))
+        if row is None:
+            return
         name = row["name"] or " ".join(
             p for p in (row["first_name"], row["last_name"]) if p
         )
-        conn.execute("DELETE FROM connections_fts WHERE slug = ?", (values["slug"],))
         conn.execute(
-            "INSERT INTO connections_fts (slug, name, headline, company, position) "
-            "VALUES (?, ?, ?, ?, ?)",
+            f"INSERT INTO connections_fts (slug, {', '.join(_FTS_COLUMNS)}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
-                values["slug"],
+                slug,
                 name,
                 row["headline"],
                 row["company"],
                 row["position"],
+                row["profile_text"],
+                row["experience_text"],
             ),
         )
-        return not existed
+
+    def save_details(
+        self, slug: str, *, profile_text: str | None, experience_text: str | None
+    ) -> None:
+        """Store what a profile read returned for one connection."""
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO profile_details (slug, profile_text, experience_text, "
+                "fetched_at) VALUES (?, ?, ?, ?) ON CONFLICT(slug) DO UPDATE SET "
+                "profile_text = COALESCE(excluded.profile_text, profile_text), "
+                "experience_text = COALESCE(excluded.experience_text, experience_text), "
+                "fetched_at = excluded.fetched_at",
+                (slug, profile_text, experience_text, _now()),
+            )
+            self._index(conn, slug)
+
+    def details(self, slug: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT profile_text, experience_text, fetched_at FROM profile_details "
+            "WHERE slug = ?",
+            (slug,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def without_details(self, slugs: Iterable[str]) -> list[str]:
+        """The *slugs* that have never been enriched, in the order given."""
+        wanted = list(dict.fromkeys(slugs))
+        have = (
+            {
+                r[0]
+                for r in self._conn.execute(
+                    f"SELECT slug FROM profile_details WHERE slug IN "
+                    f"({', '.join('?' for _ in wanted)})",
+                    wanted,
+                )
+            }
+            if wanted
+            else set()
+        )
+        return [s for s in wanted if s not in have]
+
+    def get(self, slug: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT *, slug IN (SELECT slug FROM profile_details) AS has_details "
+            "FROM connections WHERE slug = ?",
+            (slug,),
+        ).fetchone()
+        return self._public(row) if row else None
+
+    def match_names(self, names: Iterable[str]) -> dict[str, list[dict[str, Any]]]:
+        """Stored connections whose name equals each of *names*, case-folded.
+
+        For mutual connections, which LinkedIn names but does not link. A
+        name can match several connections; all are returned, and the caller
+        says so rather than picking one.
+        """
+        out: dict[str, list[dict[str, Any]]] = {}
+        for name in dict.fromkeys(n.strip() for n in names if n and n.strip()):
+            rows = self._conn.execute(
+                "SELECT * FROM connections WHERE lower(COALESCE(name, "
+                "trim(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')))) "
+                "= lower(?)",
+                (name,),
+            ).fetchall()
+            out[name] = [self._public(r) for r in rows]
+        return out
 
     def upsert_page_connections(
         self, connections: Iterable[PageConnection]
@@ -280,6 +395,56 @@ class NetworkStore:
             is not None
         )
 
+    def mark(self, slugs: Iterable[str], level: int, note: str | None) -> int:
+        """Record how close the member is to each of *slugs* (0-3)."""
+        now = _now()
+        n = 0
+        with self._tx() as conn:
+            for slug in slugs:
+                conn.execute(
+                    "INSERT INTO closeness (slug, level, note, updated_at) "
+                    "VALUES (?, ?, ?, ?) ON CONFLICT(slug) DO UPDATE SET "
+                    "level = excluded.level, note = COALESCE(excluded.note, note), "
+                    "updated_at = excluded.updated_at",
+                    (slug, level, note, now),
+                )
+                n += 1
+        return n
+
+    def replace_message_stats(self, stats: dict[str, tuple[int, str | None]]) -> None:
+        """Replace the per-person message counts with a fresh export's."""
+        with self._tx() as conn:
+            conn.execute("DELETE FROM message_stats")
+            conn.executemany(
+                "INSERT INTO message_stats (slug, messages, last_message) VALUES (?, ?, ?)",
+                [(slug, n, last) for slug, (n, last) in stats.items()],
+            )
+
+    def ties(self, slugs: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """What the store knows about the member's tie to each of *slugs*."""
+        wanted = list(dict.fromkeys(slugs))
+        if not wanted:
+            return {}
+        marks = ", ".join("?" for _ in wanted)
+        rows = self._conn.execute(
+            "SELECT c.slug, c.connected_on, c.email, k.level, k.note, "
+            "m.messages, m.last_message FROM connections c "
+            "LEFT JOIN closeness k ON k.slug = c.slug "
+            "LEFT JOIN message_stats m ON m.slug = c.slug "
+            f"WHERE c.slug IN ({marks})",
+            wanted,
+        ).fetchall()
+        return {r["slug"]: dict(r) for r in rows}
+
+    def all_slugs(self) -> set[str]:
+        """Every stored connection's vanity name (export rows without one excluded)."""
+        return {
+            r[0]
+            for r in self._conn.execute(
+                "SELECT slug FROM connections WHERE slug NOT LIKE 'csv:%'"
+            )
+        }
+
     def count(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM connections").fetchone()[0]
 
@@ -304,10 +469,14 @@ class NetworkStore:
             where.append("connections_fts MATCH ?")
             params.append(fts)
             # Headline and position carry the role; weight them over the name.
-            order = "bm25(connections_fts, 0, 1.0, 3.0, 2.0, 3.0)"
+            order = f"bm25(connections_fts, {_FTS_WEIGHTS})"
         if company:
-            where.append("(c.company LIKE ? OR c.headline LIKE ?)")
-            params += [f"%{company}%", f"%{company}%"]
+            # Past employers too, for connections whose experience is stored.
+            where.append(
+                "(c.company LIKE ? OR c.headline LIKE ? OR c.slug IN "
+                "(SELECT slug FROM profile_details WHERE experience_text LIKE ?))"
+            )
+            params += [f"%{company}%"] * 3
         if connected_after:
             where.append("c.connected_on >= ?")
             params.append(connected_after)
@@ -323,8 +492,17 @@ class NetworkStore:
         total = self._conn.execute(
             f"SELECT COUNT(*) FROM connections c {join} {clause}", params
         ).fetchone()[0]
+        # The best-matching passage, so a hit in a long experience text says
+        # where it matched. Brackets mark the matched words.
+        snippet = (
+            ", snippet(connections_fts, -1, '[', ']', '…', 16) AS match"
+            if fts
+            else ", NULL AS match"
+        )
         rows = self._conn.execute(
-            f"SELECT c.* FROM connections c {join} {clause} "
+            f"SELECT c.*{snippet}, "
+            "c.slug IN (SELECT slug FROM profile_details) AS has_details "
+            f"FROM connections c {join} {clause} "
             f"ORDER BY {order} LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
@@ -352,6 +530,9 @@ class NetworkStore:
             "from_export": q(
                 "SELECT COUNT(*) FROM connections WHERE from_export = 1"
             ).fetchone()[0],
+            "with_details": q("SELECT COUNT(*) FROM profile_details").fetchone()[0],
+            "marked": q("SELECT COUNT(*) FROM closeness").fetchone()[0],
+            "with_messages": q("SELECT COUNT(*) FROM message_stats").fetchone()[0],
             "with_email": q(
                 "SELECT COUNT(*) FROM connections WHERE email IS NOT NULL"
             ).fetchone()[0],
@@ -379,6 +560,8 @@ class NetworkStore:
         data = {k: row[k] for k in row.keys() if row[k] not in (None, "")}
         for key in ("from_page", "from_export", "first_seen", "updated_at"):
             data.pop(key, None)
+        if "has_details" in row.keys():
+            data["has_details"] = bool(row["has_details"])
         data["sources"] = [
             name
             for name, flag in (

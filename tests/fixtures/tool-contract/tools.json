@@ -144,6 +144,145 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "network",
+          "person"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read About and job history for some of your connections into the local store.\n\nFor each person it reads the main profile (headline, About, current\nrole) and the full experience page, and stores both. After that,\nsearch_my_network matches words in those texts too (past employers,\nroles, topics in About), returns the matching passage, and\nget_network_person returns the stored texts without touching LinkedIn.\n\nEach person costs two page loads and the pass is paced, so enrich a\nshortlist, not the whole network: search first, then enrich the\ncandidates whose fit depends on their history.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "default": 10,
+          "description": "Most people to read in this call (1-30, default 10).",
+          "maximum": 30,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "query": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Instead of usernames, enrich the top matches of this\nsearch_my_network query."
+        },
+        "refresh": {
+          "default": false,
+          "description": "Re-read people already enriched (default False skips them).",
+          "type": "boolean"
+        },
+        "time_budget_seconds": {
+          "default": 300,
+          "description": "How long the pass may run (30-900, default 300).",
+          "maximum": 900,
+          "minimum": 30,
+          "type": "integer"
+        },
+        "usernames": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Connections to enrich (LinkedIn usernames or profile\nURLs, as search_my_network returns them in `slug`)."
+        }
+      },
+      "type": "object"
+    },
+    "name": "enrich_my_network",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Enrich My Network"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "network",
+          "person",
+          "search"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Find 2nd-degree people for a purpose, and which of your connections could introduce you.\n\nRuns a LinkedIn people search limited to 2nd-degree connections and,\nfor every result, reads the mutual connections LinkedIn links on the\ncard. Each mutual connection is looked up in your local network store,\nso each introducer comes with the headline, company, email and\nconnection date you have for them. Fill the store first with\nsync_my_connections or import_connections_csv.\n\nSearch your own network with search_my_network first; use this when\nnobody there fits. A broad role or topic works best (\"AI governance\",\n\"program officer horizon europe\"). Each page is one search load.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "current_company": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional LinkedIn numeric company URN id."
+        },
+        "keywords": {
+          "description": "What the people you want to reach do or work on.",
+          "type": "string"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional LinkedIn numeric geo URN id (as search_people)."
+        },
+        "pages": {
+          "default": 1,
+          "description": "Result pages to read, 1-3 (10 results each, default 1).",
+          "maximum": 3,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "keywords"
+      ],
+      "type": "object"
+    },
+    "name": "find_introductions",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Find Introductions"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "company"
         ]
       }
@@ -580,6 +719,39 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "network"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Everything stored about one of your connections, from the local store.\n\nIncludes the profile and experience text that enrich_my_network read,\nwhen it has, so a fit can be judged from job history and About without\nanother LinkedIn visit. Does not touch LinkedIn.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "username": {
+          "description": "The connection's LinkedIn username or profile URL, as\nsearch_my_network returns it in `slug`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "username"
+      ],
+      "type": "object"
+    },
+    "name": "get_network_person",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Network Person"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "person"
         ]
       }
@@ -769,6 +941,94 @@
       "type": "object"
     },
     "title": "Import Connections CSV"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "network"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Import who you message on LinkedIn, from the messages.csv data export.\n\nKeeps only a message count and the last message date per person; the\nmessage text is never stored. find_introductions uses it to prefer\nintroducers you actually talk to. Re-running replaces the counts with\nthe newer export's. Does not touch LinkedIn.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "Path to messages.csv from LinkedIn > Settings > Data privacy\n> Get a copy of your data (tick \"Messages\"). A ~ prefix is\nexpanded.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "import_messages_csv",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Import Messages CSV"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "network"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Record how well you know some of your connections.\n\nfind_introductions trusts these marks above every other signal when it\nranks introducers. Marks are local and can be changed any time by\nmarking again. Does not touch LinkedIn.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "closeness": {
+          "description": "3 close (would happily introduce you), 2 know well,\n1 acquaintance, 0 do not really know them.",
+          "maximum": 3,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional reminder, e.g. \"PhD co-supervisor\"."
+        },
+        "usernames": {
+          "description": "LinkedIn usernames or profile URLs, as search_my_network\nreturns them in `slug`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "usernames",
+        "closeness"
+      ],
+      "type": "object"
+    },
+    "name": "mark_connections",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Mark Connections"
   },
   {
     "_meta": {

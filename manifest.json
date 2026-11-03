@@ -93,6 +93,26 @@
       "description": "Summarise the local network store: size, sources, top companies, last sync"
     },
     {
+      "name": "enrich_my_network",
+      "description": "Read About and job history for a shortlist of your connections into the local store"
+    },
+    {
+      "name": "get_network_person",
+      "description": "Everything stored about one connection, including enriched About and experience, offline"
+    },
+    {
+      "name": "find_introductions",
+      "description": "Find 2nd-degree people for a purpose and rank who in your network could introduce you"
+    },
+    {
+      "name": "mark_connections",
+      "description": "Mark how well you know connections, so introductions prefer your closest ties"
+    },
+    {
+      "name": "import_messages_csv",
+      "description": "Import per-person message counts and last-contact dates from LinkedIn's messages.csv export"
+    },
+    {
       "name": "get_company_employees",
       "description": "List employees at a company from the LinkedIn /people/ page, with optional keyword filter by name, title, or skill"
     },

@@ -1141,6 +1141,34 @@ async def _my_connections_scenario() -> dict[str, Any]:
     )
 
 
+async def _second_degree_scenario() -> dict[str, Any]:
+    """One results page read with the member's 1st-degree names."""
+    name = "read_second_degree__baseline"
+    recorder = TraceRecorder(name, _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder).script(
+        "evaluate:second_degree_cards",
+        [
+            {
+                "slug": "koen",
+                "name": "Koen",
+                "mutual": ["nicky"],
+                "lines": ["Koen", "AI Governance Consultant"],
+            }
+        ],
+    )
+    extractor = _extractor(page)
+    url = "https://www.linkedin.com/search/results/people/?keywords=ai&network=%5B%22S%22%5D"
+    async with boundaries(recorder, clock):
+        with recorder.context("read_second_degree", "search_results"):
+            cards = await extractor.read_second_degree(url, {"nicky", "ada"})
+    page.assert_clean()
+    return recorder.trace(
+        {"method": "read_second_degree", "arguments": {"url": url}},
+        [{"slug": c.slug, "mutual": c.mutual} for c in cards],
+    )
+
+
 async def _conversation_scenario(method: str) -> dict[str, Any]:
     name = f"{method}__baseline"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
@@ -1338,6 +1366,7 @@ TOOL_FACADE_METHODS = {
     "send_message",
     "reply_to_conversation",
     "walk_my_connections",
+    "read_second_degree",
 }
 COMPATIBILITY_METHODS = {"get_page_text", "click_button_by_text"}
 
@@ -1408,6 +1437,7 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         "get-my-profile.json": await _get_my_profile_scenario(),
         "sidebar-profiles.json": await _sidebar_scenario(),
         "my-connections.json": await _my_connections_scenario(),
+        "second-degree.json": await _second_degree_scenario(),
         "company-employees.json": await _single_capture_facade_scenario(
             "get_company_employees"
         ),
