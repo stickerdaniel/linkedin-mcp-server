@@ -1,5 +1,5 @@
 {
-  "_measured": "github.com repository page README, Chromium, 1440x900 viewport, 2026-11-03; regenerate with the procedure in tests/test_readme_tool_table.py",
+  "_measured": "github.com repository page README, Chromium, 1440x900 viewport, 2026-11-03; regenerate with the procedure in scripts/check_readme_tool_table.py",
   "font": "16px Mona Sans VF",
   "table_width": 838,
   "cell_edges": 27.0,
