@@ -26,6 +26,7 @@ from linkedin_mcp_server.linkedin.identifiers import (
     normalize_person_identifier,
     normalize_profile_urn,
     normalize_thread_id,
+    reply_thread_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -438,7 +439,7 @@ def register_messaging_tools(
         refusal = refuse_an_invalid_reply(thread_id, message)
         if refusal is not None:
             return refusal
-        thread_id = normalize_thread_id(thread_id)
+        thread_id = reply_thread_id(thread_id)
         extractor = await get_ready_extractor(ctx, tool_name="reply_to_conversation")
         logger.info("Replying in thread %s (confirm_send=%s)", thread_id, confirm_send)
 

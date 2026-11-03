@@ -174,6 +174,12 @@ def serve_extractor(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], AsyncMoc
         ),
         (
             "messaging",
+            "reply_to_conversation",
+            {"thread_id": "2+abc", "message": "Hello", "confirm_send": False},
+            "thread_id is not a LinkedIn id",
+        ),
+        (
+            "messaging",
             "get_conversation",
             {"linkedin_username": "/feed/"},
             "not a personal profile",
