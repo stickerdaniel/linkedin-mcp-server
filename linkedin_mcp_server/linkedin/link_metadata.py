@@ -273,7 +273,10 @@ def normalize_url(href: str, _depth: int = 0) -> str | None:
 
     host = parsed.netloc.lower()
     if _is_linkedin_host(host) and parsed.path.rstrip("/") == "/redir/redirect":
-        target = unquote((parse_qs(parsed.query).get("url") or [""])[0]).strip()
+        # parse_qs already decodes the parameter once, which is all the
+        # encoding LinkedIn applies. A second decode would turn an escaped
+        # "?", "#" or "/" in the target into a delimiter.
+        target = (parse_qs(parsed.query).get("url") or [""])[0].strip()
         if not target:
             return None
         return normalize_url(target, _depth + 1)

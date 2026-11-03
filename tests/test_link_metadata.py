@@ -229,6 +229,27 @@ class TestBuildReferences:
 
         assert normalize_url(href) is None
 
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "https://en.wikipedia.org/wiki/What%3F",
+            "https://example.com/notes%23draft",
+            "https://example.com/docs/a%2Fb",
+            "https://example.com/My%20CV.pdf",
+        ],
+    )
+    def test_normalize_url_keeps_the_escapes_of_a_redirect_target(self, target):
+        # The url parameter carries the target encoded once, and reading the
+        # query decodes it once. Decoding again turned an escaped "?" or "#"
+        # into a delimiter and cut the path short.
+        href = (
+            "https://www.linkedin.com/redir/redirect/?url="
+            + quote(target, safe="")
+            + "&urlhash=abc"
+        )
+
+        assert normalize_url(href) == target
+
     def test_prefers_shorter_clean_label_over_merged_visible_text(self):
         references = build_references(
             [
