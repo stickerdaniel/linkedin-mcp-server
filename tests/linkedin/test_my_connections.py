@@ -44,7 +44,9 @@ class FakeSession:
     async def run_on_linkedin(self, script: str, arg: Any = None) -> Any:
         if script is my_connections._ADVANCE_JS:
             self.advances += 1
-            return {"clicked": False}
+            return {"anchors": 0, "scrolled": True}
+        if script is my_connections._LISTED_TOTAL_JS:
+            return 1473
         self.collect_args.append(list(arg))
         return self._batches.pop(0) if self._batches else []
 
@@ -91,6 +93,7 @@ async def test_walk_ends_after_rounds_with_nothing_new():
     assert result.seen == 3
     assert result.stop_reason == "end_of_list"
     assert result.complete
+    assert result.listed_total == 1473
     # Each collect is told what was already returned.
     assert session.collect_args[:3] == [[], ["a", "b"], ["a", "b", "c"]]
 

@@ -1110,7 +1110,11 @@ async def _my_connections_scenario() -> dict[str, Any]:
     page = (
         _page(recorder)
         .script("evaluate:my_connections_cards", [card], [later], *[[]] * (rounds - 2))
-        .script("evaluate:my_connections_advance", *[{"clicked": False}] * (rounds - 1))
+        .script("evaluate:my_connections_listed_total", 2)
+        .script(
+            "evaluate:my_connections_advance",
+            *[{"anchors": 2, "scrolled": True}] * (rounds - 1),
+        )
     )
     extractor = _extractor(page)
     seen: list[str] = []
@@ -1131,6 +1135,7 @@ async def _my_connections_scenario() -> dict[str, Any]:
             "rounds": result.rounds,
             "stop_reason": result.stop_reason,
             "complete": result.complete,
+            "listed_total": result.listed_total,
             "new_slugs": result.new_slugs,
         },
     )

@@ -1,9 +1,9 @@
 """Read the signed-in member's own connections list.
 
 ``/mynetwork/invite-connect/connections/`` lists every 1st-degree connection,
-newest first, and loads more as the page is scrolled (some layouts add a
-"show more" button at the end of the list). Nothing else on LinkedIn lists the
-member's own network, which is why this walk exists.
+newest first, ten at a time, loading more as its scrolling container is
+scrolled. Nothing else on LinkedIn lists the member's own network, which is
+why this walk exists.
 
 The walk is paced and bounded: it reads what has rendered, scrolls once, waits
 a jittered interval, and repeats, handing each new batch to the caller as it
@@ -112,46 +112,61 @@ _COLLECT_CARDS_JS = r"""
 }
 """
 
-# Scrolls to the end and presses a trailing load-more button when one exists.
-# The button is identified by position, not label: a visible, enabled button
-# inside <main>, after the last profile anchor in document order, outside every
-# card, and not a menu or disclosure control.
+# Brings the last profile into view and scrolls the list's own container to
+# its end, which is what makes LinkedIn append the next page of cards.
+# Measured on the live page: the window does not scroll at all, because the
+# list sits in a scrollable <main>; scrolling that element loads ten more
+# cards each time. The container is found as the nearest scrollable ancestor
+# of a profile anchor, not by name, so a layout that scrolls the window again
+# still works. Nothing is clicked: the only buttons after the last card on
+# the live page belong to an ad ("Dismiss", "Submit"), and there is no
+# load-more button to find. Answers the number of profile anchors, which the
+# walk waits on to grow.
 _ADVANCE_JS = r"""
 () => {
-  window.scrollTo(0, document.body.scrollHeight);
   const main = document.querySelector('main');
-  if (!main) return { clicked: false };
+  if (!main) return { anchors: 0, scrolled: false };
   const anchors = main.querySelectorAll('a[href*="/in/"]');
   const last = anchors[anchors.length - 1];
-  if (!last) return { clicked: false };
-  const slugs = (el) => {
-    const out = new Set();
-    for (const a of el.querySelectorAll('a[href*="/in/"]')) {
-      const m = new URL(a.href, location.href).pathname.match(/^\/in\/([^/]+)\/?$/);
-      if (m) { out.add(m[1]); if (out.size > 1) break; }
+  if (!last) return { anchors: 0, scrolled: false };
+  last.scrollIntoView({ block: 'end' });
+  let scrolled = false;
+  for (let el = last.parentElement; el; el = el.parentElement) {
+    const style = getComputedStyle(el);
+    if (/(auto|scroll)/.test(style.overflowY) && el.scrollHeight > el.clientHeight) {
+      el.scrollTop = el.scrollHeight;
+      scrolled = true;
+      break;
     }
-    return out;
-  };
-  // Inside a card when the nearest ancestor holding any profile holds one.
-  const inCard = (b) => {
-    for (let el = b.parentElement; el && el !== document.body; el = el.parentElement) {
-      if (el.querySelector('a[href*="/in/"]')) return slugs(el).size <= 1;
-    }
-    return false;
-  };
-  for (const b of main.querySelectorAll('button')) {
-    if (!(last.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
-    if (inCard(b)) continue;
-    if (b.hasAttribute('aria-haspopup') || b.hasAttribute('aria-expanded')) continue;
-    if (b.disabled || b.getAttribute('aria-disabled') === 'true') continue;
-    const r = b.getBoundingClientRect();
-    if (r.width === 0 || r.height === 0) continue;
-    b.click();
-    return { clicked: true };
   }
-  return { clicked: false };
+  if (!scrolled) window.scrollTo(0, document.body.scrollHeight);
+  return { anchors: anchors.length, scrolled };
 }
 """
+
+# True once the list holds more profile anchors than `arg`.
+_GREW_JS = """(before) => {
+    const main = document.querySelector('main');
+    return !!main && main.querySelectorAll('a[href*="/in/"]').length > before;
+}"""
+
+# The size the page states for the list: the first line of <main> when it
+# starts with a number ("1,473 connections" on the live page). Only the
+# digits are kept, so any locale's thousands separator reads the same; a
+# page without such a line answers null rather than a guess.
+_LISTED_TOTAL_JS = r"""
+() => {
+  const main = document.querySelector('main');
+  if (!main) return null;
+  const first = (main.innerText || '').split('\n').map(s => s.trim()).find(Boolean);
+  const m = first && first.match(/^(\d[\d.,\s\u00a0\u202f]*)\s*\D/);
+  return m ? parseInt(m[1].replace(/\D/g, ''), 10) : null;
+}
+"""
+
+# Seconds to wait for the list to grow after a scroll before counting the
+# round as stale. Live, the next ten cards arrived within two seconds.
+GROW_TIMEOUT_MS = 8000
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +237,7 @@ class WalkResult:
     rounds: int = 0
     stop_reason: str = ""
     complete: bool = False
+    listed_total: int | None = None
     throttled: bool = False
     new_slugs: list[str] = field(default_factory=list)
 
@@ -281,6 +297,8 @@ class MyConnectionsReader:
             )
         except Exception:
             logger.debug("Connections list did not render any profile links")
+        listed = await self._session.run_on_linkedin(_LISTED_TOTAL_JS)
+        result.listed_total = listed if isinstance(listed, int) else None
 
         while True:
             raw = await self._session.run_on_linkedin(_COLLECT_CARDS_JS, returned)
@@ -327,7 +345,15 @@ class MyConnectionsReader:
                 result.stop_reason = "time_budget"
                 break
 
-            await self._session.run_on_linkedin(_ADVANCE_JS)
+            advanced = await self._session.run_on_linkedin(_ADVANCE_JS) or {}
+            try:
+                await self._session.page.wait_for_function(
+                    _GREW_JS,
+                    arg=int(advanced.get("anchors", 0)),
+                    timeout=GROW_TIMEOUT_MS,
+                )
+            except Exception:
+                logger.debug("Connections list did not grow after scrolling")
             await self._session.delay(SCROLL_PAUSE + random.uniform(0, SCROLL_JITTER))
             await self._session.check_rate_limit()
 

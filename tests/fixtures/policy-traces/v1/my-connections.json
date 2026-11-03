@@ -81,6 +81,13 @@
       "timeout_ms": 15000
     },
     {
+      "call": "walk_my_connections",
+      "kind": "evaluate",
+      "operation": "my_connections_listed_total",
+      "program_digest": "57ff5bb91b48",
+      "section": "connections"
+    },
+    {
       "arg": [],
       "call": "walk_my_connections",
       "kind": "evaluate",
@@ -92,8 +99,17 @@
       "call": "walk_my_connections",
       "kind": "evaluate",
       "operation": "my_connections_advance",
-      "program_digest": "9cad6af947f3",
+      "program_digest": "8a2a8cbe7e9b",
       "section": "connections"
+    },
+    {
+      "arg": 2,
+      "call": "walk_my_connections",
+      "kind": "wait_for_function",
+      "operation": "my_connections_grew",
+      "program_digest": "d613379b278d",
+      "section": "connections",
+      "timeout_ms": 8000
     },
     {
       "call": "walk_my_connections",
@@ -121,8 +137,17 @@
       "call": "walk_my_connections",
       "kind": "evaluate",
       "operation": "my_connections_advance",
-      "program_digest": "9cad6af947f3",
+      "program_digest": "8a2a8cbe7e9b",
       "section": "connections"
+    },
+    {
+      "arg": 2,
+      "call": "walk_my_connections",
+      "kind": "wait_for_function",
+      "operation": "my_connections_grew",
+      "program_digest": "d613379b278d",
+      "section": "connections",
+      "timeout_ms": 8000
     },
     {
       "call": "walk_my_connections",
@@ -151,8 +176,17 @@
       "call": "walk_my_connections",
       "kind": "evaluate",
       "operation": "my_connections_advance",
-      "program_digest": "9cad6af947f3",
+      "program_digest": "8a2a8cbe7e9b",
       "section": "connections"
+    },
+    {
+      "arg": 2,
+      "call": "walk_my_connections",
+      "kind": "wait_for_function",
+      "operation": "my_connections_grew",
+      "program_digest": "d613379b278d",
+      "section": "connections",
+      "timeout_ms": 8000
     },
     {
       "call": "walk_my_connections",
@@ -181,8 +215,17 @@
       "call": "walk_my_connections",
       "kind": "evaluate",
       "operation": "my_connections_advance",
-      "program_digest": "9cad6af947f3",
+      "program_digest": "8a2a8cbe7e9b",
       "section": "connections"
+    },
+    {
+      "arg": 2,
+      "call": "walk_my_connections",
+      "kind": "wait_for_function",
+      "operation": "my_connections_grew",
+      "program_digest": "d613379b278d",
+      "section": "connections",
+      "timeout_ms": 8000
     },
     {
       "call": "walk_my_connections",
@@ -210,6 +253,7 @@
   ],
   "result": {
     "complete": true,
+    "listed_total": 2,
     "new_slugs": [
       "ada-lovelace",
       "alan-turing"

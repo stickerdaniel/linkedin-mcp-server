@@ -717,7 +717,9 @@ def semantic_program_id(program: str) -> str:
         # Before the people-ready marker: both connections programs read
         # profile anchors too, so that broader marker would claim them.
         ("const profileSlugs", "my_connections_cards"),
-        ("DOCUMENT_POSITION_FOLLOWING", "my_connections_advance"),
+        ("last.scrollIntoView", "my_connections_advance"),
+        ("length > before", "my_connections_grew"),
+        ("parseInt(m[1]", "my_connections_listed_total"),
         ('a[href*="/in/"]', "company_people_ready"),
         ("text.startsWith('Load more')", "profile_details_ready"),
         ("lines.includes(heading)", "job_description_ready"),

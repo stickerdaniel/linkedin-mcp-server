@@ -261,7 +261,8 @@ def register_person_tools(
             stop_after_known: Incremental stop threshold (default 25).
 
         Returns:
-            Dict with url, seen, added, total_in_store, incremental, stop_reason
+            Dict with url, seen, added, total_in_store, listed_on_linkedin (the
+            count the page states, when it states one), incremental, stop_reason
             (end_of_list | reached_known_connections | time_budget | max_rounds
             | throttled), complete, and store path. When complete is false,
             calling again continues; when stop_reason is throttled, wait hours
@@ -310,6 +311,7 @@ def register_person_tools(
                 "seen": result.seen,
                 "added": added,
                 "total_in_store": store.count(),
+                "listed_on_linkedin": result.listed_total,
                 "rounds": result.rounds,
                 "stop_reason": result.stop_reason,
                 "complete": result.complete,
