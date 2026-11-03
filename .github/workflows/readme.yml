@@ -1,0 +1,32 @@
+name: README
+
+# Runs only when the README tools table or its check can have changed.
+on:
+  pull_request:
+    paths:
+      - README.md
+      - tests/test_readme_tool_table.py
+      - tests/fixtures/github-readme-font.json
+      - .github/workflows/readme.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  tool-table:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+
+      - name: Check that every tool description fits one line on GitHub
+        run: uv run --group dev pytest tests/test_readme_tool_table.py
+
+      - run: uv cache prune --ci
