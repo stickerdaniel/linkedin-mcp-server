@@ -60,10 +60,10 @@ jobs:
       # section for this version stops the release while nothing exists yet
       # that would have to be withdrawn. The previous version is read on its
       # own and an unreadable parent manifest fails the step. The author of
-      # every pull request the section links is looked up for the credit
-      # line, and a failed lookup fails the step too. An author other than the
-      # owner or a bot whose merged pull requests all sit in this section is
-      # searched for and named as a first contribution.
+      # every pull request the section links is looked up for its credit, and
+      # a failed lookup fails the step too. An author other than the owner or
+      # a bot whose merged pull requests all sit in this section is searched
+      # for and named as a new contributor.
       - name: Compose release notes
         if: steps.check.outputs.should-release == 'true'
         env:
