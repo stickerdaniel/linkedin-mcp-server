@@ -734,6 +734,18 @@ class TestLoaders:
         config = load_config(["--no-auto-import"])
         assert config.browser.auto_import_from_browser is False
 
+    def test_slow_mo_zero_overrides_env(self, monkeypatch):
+        monkeypatch.setenv("SLOW_MO", "500")
+        from linkedin_mcp_server.config import load_config
+
+        assert load_config(["--slow-mo", "0"]).browser.slow_mo == 0
+
+    def test_absent_slow_mo_keeps_env(self, monkeypatch):
+        monkeypatch.setenv("SLOW_MO", "500")
+        from linkedin_mcp_server.config import load_config
+
+        assert load_config([]).browser.slow_mo == 500
+
     def test_absent_args_keep_env_false(self, monkeypatch):
         monkeypatch.setenv("AUTO_IMPORT_FROM_BROWSER", "false")
         from linkedin_mcp_server.config import load_config
