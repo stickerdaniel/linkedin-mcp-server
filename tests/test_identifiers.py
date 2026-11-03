@@ -535,6 +535,37 @@ class TestSluggedJobUrls:
             normalize_job_id("software-engineer-1967281839")
 
 
+class TestJobOpenInASearch:
+    """A job clicked in a search opens in the search's detail pane, and the
+    address bar keeps the search with the posting in `currentJobId`. That is
+    the link a browser shows while reading one, and link_metadata already reads
+    the same parameter on the same two routes as a job reference."""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "https://www.linkedin.com/jobs/search/?currentJobId=4252026496&keywords=python",
+            "https://www.linkedin.com/jobs/search-results/?keywords=python&currentJobId=4252026496",
+            "/jobs/search/?currentJobId=4252026496",
+        ],
+    )
+    def test_the_selected_job_is_the_id(self, value: str):
+        assert normalize_job_id(value) == "4252026496"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "https://www.linkedin.com/jobs/search/?keywords=python",
+            "https://www.linkedin.com/jobs/search/?currentJobId=abc",
+            "https://www.linkedin.com/jobs/search/?currentJobId=1&currentJobId=2",
+            "https://www.linkedin.com/feed/?currentJobId=4252026496",
+        ],
+    )
+    def test_a_search_without_one_job_is_still_refused(self, value: str):
+        with pytest.raises(InvalidReferenceError):
+            normalize_job_id(value)
+
+
 class TestNothingTidiesTheReference:
     """Each of these used to be cleaned up into a real target: the decode was
     followed by a strip, the URL parse drops control characters, and empty segments
