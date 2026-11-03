@@ -58,8 +58,8 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 
 <a href="https://zernio.com" target="_blank">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="ZERNIO_DARK">
-    <img src="ZERNIO_LIGHT" alt="Zernio, official APIs for every social channel" width="100%">
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/f8b34875-c2b7-4466-b430-51fda4875720">
+    <img src="https://github.com/user-attachments/assets/ef30cb05-80a7-4b03-a9d4-186c6db2fe43" alt="Zernio, official APIs for every social channel" width="100%">
   </picture>
 </a>
 
