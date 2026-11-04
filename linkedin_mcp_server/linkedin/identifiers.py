@@ -486,6 +486,23 @@ def normalize_thread_id(value: str) -> str:
     return thread_id
 
 
+# The one shape a reply sends to: base64url with its padding kept. A thread id
+# can carry other characters through normalize_thread_id, and a reply refuses
+# them before a browser starts rather than after.
+_REPLY_THREAD_ID_RE = re.compile(r"[A-Za-z0-9_=-]+")
+
+
+def reply_thread_id(value: str) -> str:
+    """The decoded thread id a reply goes to, or InvalidReferenceError."""
+    thread_id = unquote(normalize_thread_id(value))
+    if not _REPLY_THREAD_ID_RE.fullmatch(thread_id):
+        raise InvalidReferenceError(
+            "thread_id is not a LinkedIn id. Pass the id exactly as a previous "
+            "result returned it, with no URL, path or query around it."
+        )
+    return thread_id
+
+
 def normalize_profile_urn(value: str) -> str:
     """A raw profile id or full profile URN, in the caller's original form."""
     value = value.strip()

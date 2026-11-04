@@ -19,7 +19,6 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.destination import raise_if_off_linkedin
 from linkedin_mcp_server.core.exceptions import (
-    InvalidReferenceError,
     LinkedInOperationError,
 )
 import linkedin_mcp_server.linkedin.contracts as contracts
@@ -27,8 +26,8 @@ from linkedin_mcp_server.linkedin.identifiers import (
     messaging_thread_url,
     normalize_person_identifier,
     normalize_profile_urn,
-    normalize_thread_id,
     person_profile_url,
+    reply_thread_id,
 )
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.session import PageSession
@@ -1354,7 +1353,6 @@ _PROFILE_PATH_RE = re.compile(r"^/in/[^/?#]+/$")
 # encoded slash and let one path pose as another. The id identifies nobody on
 # its own, and the recipient is proven by the composer rather than this path.
 _MESSAGE_THREAD_PATH_RE = re.compile(r"^/messaging/thread/[A-Za-z0-9_=-]+/$")
-_THREAD_KEY_RE = re.compile(r"^[A-Za-z0-9_=-]+$")
 _THREAD_ROUTE_RE = re.compile(r"^/messaging/thread/([A-Za-z0-9_=%-]+)/$")
 _PROFILE_URN_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _PROFILE_URN_PREFIX = "urn:li:fsd_profile:"
@@ -1553,13 +1551,7 @@ def _message_page_url_is_safe(value: str, profile_urn: str) -> bool:
 
 def _thread_target(thread_id: str) -> _ThreadMessageTarget:
     """Normalize a caller's thread id into the one route a reply may use."""
-    normalized = normalize_thread_id(thread_id)
-    key = unquote(normalized)
-    if not _THREAD_KEY_RE.fullmatch(key):
-        raise InvalidReferenceError(
-            "thread_id is not a LinkedIn id. Pass the id exactly as a previous "
-            "result returned it, with no URL, path or query around it."
-        )
+    key = reply_thread_id(thread_id)
     return _ThreadMessageTarget(
         thread_id=key, thread_url=messaging_thread_url(key, "/")
     )
