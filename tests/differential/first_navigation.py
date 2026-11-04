@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ctypes
 import functools
 import hashlib
 import json
@@ -74,6 +75,7 @@ import os
 import queue
 import re
 import sqlite3
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterable, Generator, Mapping, Sequence
@@ -841,6 +843,72 @@ def _ends(record: Mapping[str, Any]) -> dict[str, float | None] | None:
 # --- The lifetimes, from the harness process ----------------------------------
 
 
+class _MacDescendants:
+    """This process, listing its descendants as psutil's ``children`` does,
+    from libproc instead of from every process on the host.
+
+    On macOS psutil builds the parent map behind ``children`` from one read
+    per process on the machine: 0.2 to 0.5 s with 1,900 processes on an idle
+    Mac, and more than the second a closing sample gets on a loaded one.
+    libproc lists one parent's children, zombies included, in one call, so
+    this walk costs a call and a read per descendant.
+    """
+
+    def __init__(self, psutil: Any) -> None:
+        self._psutil = psutil
+        self._pid = os.getpid()
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        libproc.proc_listchildpids.argtypes = (
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        )
+        libproc.proc_listchildpids.restype = ctypes.c_int
+        self._list_children = libproc.proc_listchildpids
+
+    def _child_pids(self, pid: int) -> list[int]:
+        capacity = 64
+        while True:
+            buffer = (ctypes.c_int * capacity)()
+            count = self._list_children(pid, buffer, ctypes.sizeof(buffer))
+            if count < 0:
+                error = ctypes.get_errno()
+                raise OSError(error, os.strerror(error))
+            # A full buffer may have cut the list short: ask again with room.
+            if count < capacity:
+                return [child for child in buffer[:count] if child > 0]
+            capacity *= 2
+
+    def children(self, recursive: bool = False) -> list[Any]:
+        psutil = self._psutil
+        # psutil's own guard, against a fresh read of this process: a child
+        # created before it holds a reused pid.
+        began = psutil.Process(self._pid).create_time()
+        found: list[Any] = []
+        seen = {self._pid}
+        parents = [self._pid]
+        while parents:
+            for pid in self._child_pids(parents.pop()):
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                try:
+                    child = psutil.Process(pid)
+                    if child.create_time() < began:
+                        continue
+                except psutil.NoSuchProcess:  # a ZombieProcess is one as well
+                    continue
+                found.append(child)
+                if recursive:
+                    parents.append(pid)
+        return found
+
+
+def _this_process(psutil: Any) -> Any:
+    """This process, as the sampler lists its descendants."""
+    return _MacDescendants(psutil) if sys.platform == "darwin" else psutil.Process()
+
+
 class LifetimeSampler:
     """The browser root on *profile* and its driver, among this process's
     descendants, each as an identity and an interval."""
@@ -913,7 +981,7 @@ class LifetimeSampler:
                 self._persist()
             return
         try:
-            me = psutil.Process()
+            me = _this_process(psutil)
             while True:
                 self._sample(psutil, me)
                 if self._halt.wait(self._interval):

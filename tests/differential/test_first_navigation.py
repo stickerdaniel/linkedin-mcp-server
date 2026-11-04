@@ -33,7 +33,7 @@ from patchright.async_api import Error as PlaywrightError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 from patchright.async_api import async_playwright
 
-from differential import harness
+from differential import first_navigation, harness
 from differential.baseline import REPO_ROOT, BaselineRefused, Runtime
 from differential.events import EventLog, publish
 from differential.first_navigation import (
@@ -772,6 +772,15 @@ async def test_a_frozen_staging_failure_is_recorded_by_the_staging_interpreter(
     assert lifetimes["label"] == "frozen-staging"
 
 
+def _list_descendants(monkeypatch: pytest.MonkeyPatch, listed: list[Any]) -> None:
+    """Make the sampler's walk list *listed*, on every platform."""
+    monkeypatch.setattr(
+        first_navigation,
+        "_this_process",
+        lambda psutil: SimpleNamespace(children=lambda recursive: listed),
+    )
+
+
 class _SlowChild:
     """A descendant whose every read takes *delay*, as on a loaded host."""
 
@@ -795,7 +804,7 @@ def test_a_slow_process_table_cannot_hold_the_stop_past_its_bound(
 ):
     # One full sample here takes six seconds, three times the stop bound.
     slow = [_SlowChild(pid, 0.3) for pid in range(100_000, 100_020)]
-    monkeypatch.setattr(psutil.Process, "children", lambda self, recursive: slow)
+    _list_descendants(monkeypatch, slow)
     label = f"slow-{os.getpid()}"
     lifetimes = LifetimeSampler(
         tmp_path / BROWSER_LIFETIMES_FILE, profile=tmp_path / "profile", label=label
@@ -833,7 +842,7 @@ def test_the_closing_sample_still_reads_after_a_stop_request(tmp_path, monkeypat
         cmdline=lambda: ["chromium", f"--user-data-dir={profile}"],
         parent=lambda: None,
     )
-    monkeypatch.setattr(psutil.Process, "children", lambda self, recursive: [root])
+    _list_descendants(monkeypatch, [root])
     lifetimes = LifetimeSampler(
         tmp_path / BROWSER_LIFETIMES_FILE, profile=profile, label="closing"
     )
@@ -954,9 +963,7 @@ def test_a_stop_does_not_wait_out_a_read_past_its_bound(tmp_path, monkeypatch):
         def cmdline(self) -> list[str]:
             return ["not-chromium"]
 
-    monkeypatch.setattr(
-        psutil.Process, "children", lambda self, recursive: [Blocking()]
-    )
+    _list_descendants(monkeypatch, [Blocking()])
     lifetimes = LifetimeSampler(
         tmp_path / BROWSER_LIFETIMES_FILE, profile=tmp_path / "profile", label="held"
     )
