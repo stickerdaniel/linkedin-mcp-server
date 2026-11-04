@@ -1493,7 +1493,10 @@ class TestTwoStageInstall:
         stood_down: list[str] = []
 
         def readiness() -> bool:
-            clock[0] += 0.01
+            # Past the deadline, not onto it: on a monotonic clock above 2**24 s
+            # the loop's `time() + resolution` rounds back to `time()`, and a
+            # timer due exactly now stays pending.
+            clock[0] += 0.02
             # Turns a deadline that waits for readiness into a failure rather
             # than a hang.
             if not release.wait(5):
@@ -2003,7 +2006,10 @@ class TestTwoStageInstall:
         fell_back = threading.Event()
 
         def slow_owned(profile: Path) -> Path:
-            clock[0] += 0.01
+            # Past the deadline, not onto it: on a monotonic clock above 2**24 s
+            # the loop's `time() + resolution` rounds back to `time()`, and a
+            # timer due exactly now stays pending.
+            clock[0] += 0.02
             # Turns a deadline that waits for ownership into a failure rather
             # than a hang.
             if not release.wait(5):
@@ -2043,7 +2049,10 @@ class TestTwoStageInstall:
         fell_back = threading.Event()
 
         def slow_mkdir(path: Path) -> None:
-            clock[0] += 0.01
+            # Past the deadline, not onto it: on a monotonic clock above 2**24 s
+            # the loop's `time() + resolution` rounds back to `time()`, and a
+            # timer due exactly now stays pending.
+            clock[0] += 0.02
             # Turns a deadline that waits for the filesystem into a failure
             # rather than a hang.
             if not release.wait(5):
