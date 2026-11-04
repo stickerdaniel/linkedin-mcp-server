@@ -413,8 +413,43 @@ _THREAD_POLL = 0.25
 _CONVERSATIONS_GRAPHQL_PATH = "/voyager/api/voyagerMessagingGraphQL/graphql"
 _CONVERSATIONS_QUERY = "messengerConversations."
 _CONVERSATION_TYPE = "com.linkedin.messenger.Conversation"
+_THREAD_URN_PREFIX = "urn:li:messagingThread:"
 _ARCHIVE_CATEGORY = "ARCHIVE"
 _INBOX_CATEGORY = "INBOX"
+
+# The fields a `Conversation` node may carry its read state in, tried in this
+# order; the first one a node carries decides. Measured on 2026-11-04, an
+# inbox load's payload carries `read: true` / `read: false` on every
+# `Conversation` it names; the other shapes are tolerated rather than
+# trusted, because a renamed or widened field must not silently read as
+# "read". Every resolver answers None for a value it cannot read, so a node
+# whose field holds a shape this cannot interpret says nothing rather than
+# a guessed state.
+_READ_STATUS_RESOLVERS: tuple[tuple[str, Any], ...] = (
+    # readStatus: "UNREAD" / "READ" (an enum in the payload). Any other value
+    # is a state this has not measured and answers None, never a guess.
+    (
+        "readStatus",
+        lambda value: (
+            {"UNREAD": True, "READ": False}.get(value.strip().upper())
+            if isinstance(value, str) and value.strip()
+            else None
+        ),
+    ),
+    # read: True when the signed-in member has read the thread.
+    ("read", lambda value: not value if isinstance(value, bool) else None),
+    # unread: the same fact stated positively.
+    ("unread", lambda value: bool(value) if isinstance(value, bool) else None),
+    # unreadCount: how many messages the thread holds unread.
+    (
+        "unreadCount",
+        lambda value: (
+            value > 0
+            if isinstance(value, int) and not isinstance(value, bool)
+            else None
+        ),
+    ),
+)
 
 _ThreadArchiveState = Literal[
     # LinkedIn files it in the inbox and its menu offers Archive, marked for
@@ -460,7 +495,7 @@ def thread_categories(payload: Any, thread_key: str) -> list[str] | None:
     thread. None when the payload holds none, or holds it without a list of
     category strings.
     """
-    urn = f"urn:li:messagingThread:{thread_key}"
+    urn = f"{_THREAD_URN_PREFIX}{thread_key}"
     found: list[str] | None = None
     stack = [payload]
     while stack:
@@ -478,6 +513,57 @@ def thread_categories(payload: Any, thread_key: str) -> list[str] | None:
             and all(isinstance(category, str) for category in categories)
         ):
             found = list(categories)
+        stack.extend(node.values())
+    return found
+
+
+def conversation_read_status(node: Any) -> tuple[bool, str, Any] | None:
+    """(unread, field, value) a conversation node's own read state says.
+
+    None when the node is not a dictionary, carries none of the fields a
+    read state was measured in, or carries one in a shape this cannot
+    interpret. A None answer means unknown, never read or unread.
+    """
+    if not isinstance(node, dict):
+        return None
+    for field, resolve in _READ_STATUS_RESOLVERS:
+        if field not in node:
+            continue
+        value = node[field]
+        unread = resolve(value)
+        if unread is not None:
+            return unread, field, value
+    return None
+
+
+def payload_read_status(payload: Any) -> dict[str, dict[str, Any]]:
+    """Every conversation's read state the payload names, keyed by thread id.
+
+    Reads the same `Conversation` nodes `thread_categories` walks, but keeps
+    every thread the payload names rather than one: an inbox load names the
+    whole listed window. A thread named more than once keeps the entry of
+    its first node in document order (the stack walks lists from their
+    last element, so a later assignment overwrites the earlier traversal),
+    and a thread whose read state this cannot interpret is absent rather
+    than guessed.
+    """
+    found: dict[str, dict[str, Any]] = {}
+    stack = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, list):
+            stack.extend(node)
+            continue
+        if not isinstance(node, dict):
+            continue
+        if node.get("_type") == _CONVERSATION_TYPE:
+            urn = node.get("backendUrn")
+            if isinstance(urn, str) and urn.startswith(_THREAD_URN_PREFIX):
+                key = urn.removeprefix(_THREAD_URN_PREFIX)
+                observed = conversation_read_status(node)
+                if observed is not None:
+                    unread, field, value = observed
+                    found[key] = {"unread": unread, "field": field, "value": value}
         stack.extend(node.values())
     return found
 
@@ -553,6 +639,77 @@ class _ThreadFolderListener:
                         )
             await anyio.lowlevel.checkpoint()
         self._pending = [task for task in pending if not task.done()]
+
+
+class _InboxReadListener(_ThreadFolderListener):
+    """Every conversation's read state, from the payloads an inbox load fetches.
+
+    Installed before the navigation, because the inbox's own queries arrive
+    with the page's first loads: the listing the call reads is the payload
+    that also names each thread's read state. Only the first payload naming
+    a thread counts. The compose-page clicks that follow open threads, and
+    LinkedIn marks an opened thread read, so a later payload would report a
+    state this listing was asked not to disturb. The drain is the folder
+    listener's, unchanged.
+    """
+
+    def __init__(self, page: Any) -> None:
+        self._page = page
+        self._pending: list[asyncio.Task[None]] = []
+        self.read_status: dict[str, dict[str, Any]] = {}
+
+    def _handle_response(self, response: Any) -> None:
+        if not is_conversations_payload_response(response.url):
+            return
+
+        async def _read() -> None:
+            try:
+                body = await response.body()
+                payload = json.loads(body)
+            except Exception:
+                return
+            for key, observed in payload_read_status(payload).items():
+                self.read_status.setdefault(key, observed)
+
+        self._pending.append(asyncio.create_task(_read()))
+
+
+_THREAD_URL_KEY_RE = re.compile(r"^/messaging/thread/([^/?#]+)")
+
+
+def _thread_key_of_reference(ref: Reference) -> str | None:
+    """The thread id a conversation reference names, unquoted.
+
+    The reference's URL is `messaging_thread_url`'s, a single escaped thread
+    id segment; anything else is not a thread reference and answers None.
+    """
+    match = _THREAD_URL_KEY_RE.match(ref.get("url") or "")
+    return unquote(match.group(1)) if match else None
+
+
+def _read_status_entries(
+    read_status: dict[str, dict[str, Any]], references: list[Reference]
+) -> dict[str, dict[str, Any]]:
+    """Read-state entries with the participant's name attached where known.
+
+    The name is the conversation reference's own text — the participant the
+    click-derived or anchor reference named. A thread no reference names
+    keeps its entry without one; a reference whose thread the payloads
+    never named adds nothing, because an unmeasured state stays absent
+    rather than guessed.
+    """
+    names: dict[str, str] = {}
+    for ref in references:
+        if ref.get("kind") != "conversation":
+            continue
+        key = _thread_key_of_reference(ref)
+        text = ref.get("text")
+        if key and text and key not in names:
+            names[key] = text
+    return {
+        key: {**entry, "name": names[key]} if key in names else entry
+        for key, entry in read_status.items()
+    }
 
 
 def _folder_of(categories: list[str] | None) -> Literal["archived", "inbox"] | None:
@@ -1028,17 +1185,26 @@ class ConversationReader:
     async def get_inbox(self, limit: int = 20) -> dict[str, Any]:
         """List recent conversations from the messaging inbox."""
         url = "https://www.linkedin.com/messaging/"
-        await self._navigator._navigate_to_page(url)
-        await self._session.check_rate_limit()
-        await self._wait_for_main_text(log_context="Messaging inbox")
-        await self._session.dismiss_modal()
+        listener = _InboxReadListener(self._session.page)
+        listener.install()
+        try:
+            await self._navigator._navigate_to_page(url)
+            await self._session.check_rate_limit()
+            await self._wait_for_main_text(log_context="Messaging inbox")
+            await self._session.dismiss_modal()
 
-        scrolls = max(1, limit // 10)
-        await self._scroll_main_scrollable_region(
-            position="bottom", attempts=scrolls, pause_time=0.5
-        )
+            scrolls = max(1, limit // 10)
+            await self._scroll_main_scrollable_region(
+                position="bottom", attempts=scrolls, pause_time=0.5
+            )
 
-        raw_result = await self._content._extract_root_content(["main"])
+            raw_result = await self._content._extract_root_content(["main"])
+        finally:
+            # Before the compose page and its clicks: an opened thread is a
+            # read thread on LinkedIn, so the inbox's own measurement is the
+            # one that stands.
+            listener.remove()
+            await listener.drain()
         raw = raw_result["text"]
         cleaned = strip_linkedin_noise(raw) if raw else ""
         references: list[Reference] = (
@@ -1059,12 +1225,16 @@ class ConversationReader:
         if scan.refs:
             references = dedupe_references(scan.refs + references)
 
+        read_status = _read_status_entries(listener.read_status, references)
+
         result = self._single_section_result(
             url,
             "inbox",
             cleaned,
             references=references,
         )
+        if read_status:
+            result["read_status"] = read_status
         section_errors = _listing_section_errors(
             "inbox", scan, report_unavailable_rows=True
         )

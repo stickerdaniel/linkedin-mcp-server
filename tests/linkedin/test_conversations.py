@@ -9,6 +9,7 @@ covered in ``tests/test_conversation_sidebar_dom.py`` instead.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -28,7 +29,11 @@ from linkedin_mcp_server.linkedin.conversations import (
     _StoppedRow,
     _ThreadRefScan,
     _ThreadResolution,
+    _read_status_entries,
+    _thread_key_of_reference,
+    conversation_read_status,
     is_conversations_payload_response,
+    payload_read_status,
     strip_select_conversation_prefix,
     thread_categories,
 )
@@ -1905,3 +1910,207 @@ class TestThreadFolderPayload:
     )
     def test_anything_but_this_threads_conversation_says_nothing(self, conversation):
         assert thread_categories({"data": [conversation]}, "2-abc") is None
+
+
+class TestInboxReadStatus:
+    """The inbox listing's read state, from the conversations query's data."""
+
+    @pytest.mark.parametrize(
+        ("field", "value", "unread"),
+        [
+            ("readStatus", "UNREAD", True),
+            ("readStatus", "unread", True),
+            ("readStatus", "READ", False),
+            ("read", False, True),
+            ("read", True, False),
+            ("unread", True, True),
+            ("unread", False, False),
+            ("unreadCount", 3, True),
+            ("unreadCount", 0, False),
+        ],
+    )
+    def test_the_first_field_a_conversation_carries_decides(self, field, value, unread):
+        node = {**_conversation("2-abc==", ["INBOX"]), field: value}
+        observed = conversation_read_status(node)
+        assert observed == (unread, field, value)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            None,
+            "SEALED",  # an enum value this has not measured
+            "",  # empty is no state, not read
+        ],
+    )
+    def test_a_read_status_this_cannot_interpret_says_nothing(self, value):
+        node = {**_conversation("2-abc==", ["INBOX"]), "readStatus": value}
+        assert conversation_read_status(node) is None
+
+    def test_a_conversation_without_a_known_field_says_nothing(self):
+        assert conversation_read_status(_conversation("2-abc==", ["INBOX"])) is None
+
+    def test_every_conversation_in_the_payload_is_kept_by_its_thread_id(self):
+        payload = {
+            "data": {
+                "messengerConversationsBySyncToken": {
+                    "elements": [
+                        _conversation("2-none==", ["INBOX"]),
+                        {
+                            **_conversation("2-unread==", ["INBOX"]),
+                            "readStatus": "UNREAD",
+                        },
+                        {**_conversation("2-read==", ["INBOX"]), "read": True},
+                        {
+                            **_conversation("2-archived==", ["ARCHIVE"]),
+                            "readStatus": "READ",
+                        },
+                    ]
+                }
+            }
+        }
+
+        assert payload_read_status(payload) == {
+            "2-unread==": {
+                "unread": True,
+                "field": "readStatus",
+                "value": "UNREAD",
+            },
+            "2-read==": {"unread": False, "field": "read", "value": True},
+            "2-archived==": {
+                "unread": False,
+                "field": "readStatus",
+                "value": "READ",
+            },
+        }
+
+    def test_a_thread_named_twice_keeps_its_first_measurement(self):
+        payload = {
+            "data": [
+                {**_conversation("2-abc==", ["INBOX"]), "read": False},
+                {**_conversation("2-abc==", ["INBOX"]), "read": True},
+            ]
+        }
+
+        assert payload_read_status(payload)["2-abc=="]["unread"] is True
+
+    def test_a_reference_names_the_entrys_participant_and_is_unquoted(self):
+        ref = _ref("/messaging/thread/2-abc%3D%3D/", "Deji Alonge", "inbox")
+        assert ref["kind"] == "conversation"
+        assert _thread_key_of_reference(ref) == "2-abc=="
+
+        entries = _read_status_entries(
+            {
+                "2-abc==": {
+                    "unread": True,
+                    "field": "readStatus",
+                    "value": "UNREAD",
+                },
+                "2-other==": {
+                    "unread": False,
+                    "field": "readStatus",
+                    "value": "READ",
+                },
+            },
+            [ref],
+        )
+
+        assert entries["2-abc=="]["name"] == "Deji Alonge"
+        assert "name" not in entries["2-other=="]
+
+    def test_a_reference_without_a_thread_url_says_nothing(self):
+        ref = _ref("/in/someone/", "Someone", "inbox")
+        assert _thread_key_of_reference(ref) is None
+
+    async def test_the_inbox_reports_read_status_measured_before_the_clicks(
+        self, mock_page
+    ):
+        """The payload the inbox load fetches stands; the clicks never re-read.
+
+        The listener is gone by the compose navigation, so a response the
+        clicks would fetch changes nothing. What is asserted below holds only
+        if the state was captured from the first load and never overwritten.
+        """
+        reader = _reader(mock_page)
+        payload = {
+            "data": [
+                {**_conversation("2-abc==", ["INBOX"]), "readStatus": "UNREAD"},
+                {**_conversation("2-read==", ["INBOX"]), "readStatus": "READ"},
+            ]
+        }
+        response = SimpleNamespace(
+            url=f"{_GRAPHQL}?queryId=messengerConversations.0d5e&variables=(x:1)",
+            body=AsyncMock(return_value=json.dumps(payload).encode("utf-8")),
+        )
+
+        async def emit(url):
+            if url == MESSAGING:
+                for callback in mock_page.listeners["response"]:
+                    callback(response)
+
+        nav = AsyncMock(side_effect=emit)
+
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", nav),
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                reader, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                PageContentReader,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=_root("Conversation A"),
+            ),
+            patch.object(
+                reader,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=_scan(
+                    _ref("/messaging/thread/2-abc==/", "Deji Alonge", "inbox")
+                ),
+            ),
+        ):
+            result = await reader.get_inbox(limit=10)
+
+        assert result["read_status"] == {
+            "2-abc==": {
+                "unread": True,
+                "field": "readStatus",
+                "value": "UNREAD",
+                "name": "Deji Alonge",
+            },
+            "2-read==": {
+                "unread": False,
+                "field": "readStatus",
+                "value": "READ",
+            },
+        }
+        # The listener is removed before the compose page, so its response
+        # handler is no longer registered.
+        assert mock_page.listeners["response"] == []
+        assert nav.await_count == 2
+
+    async def test_an_inbox_no_payload_named_has_no_read_status(self, mock_page):
+        reader = _reader(mock_page)
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                reader, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                PageContentReader,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=_root("Conversation A"),
+            ),
+            patch.object(
+                reader,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=_scan(),
+            ),
+        ):
+            result = await reader.get_inbox(limit=10)
+
+        assert "read_status" not in result

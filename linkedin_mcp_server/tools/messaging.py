@@ -60,12 +60,21 @@ def register_messaging_tools(
         independently extracted anchors retain their normal handling. A known
         thread_id can bypass row attribution when calling get_conversation.
 
+        The inbox's own messaging data also names each conversation's read
+        state, measured before the compose-page clicks (an opened thread is a
+        read thread on LinkedIn). Threads it named carry a read_status entry
+        keyed by thread id: unread (bool), the field the state was read from,
+        its raw value, and the participant's name when a reference named the
+        thread. A thread the data never named has no entry rather than a
+        guessed state.
+
         Args:
             ctx: FastMCP context for progress reporting
             limit: Maximum number of conversations to load (1-50, default 20)
 
         Returns:
-            Dict with url, sections (inbox -> raw text), optional references, and
+            Dict with url, sections (inbox -> raw text), optional references,
+            optional read_status (thread id -> unread/field/value/name), and
             optional section_errors (inbox -> why click-derived references are
             incomplete).
         """
