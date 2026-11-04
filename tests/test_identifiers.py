@@ -559,6 +559,11 @@ class TestJobOpenInASearch:
             "https://www.linkedin.com/jobs/search/?currentJobId=abc",
             "https://www.linkedin.com/jobs/search/?currentJobId=1&currentJobId=2",
             "https://www.linkedin.com/feed/?currentJobId=4252026496",
+            # The query value must be the digits themselves, not a reference
+            # that decodes or trims into some other job.
+            "/jobs/search/?currentJobId=%2Fjobs%2Fview%2F4252026496%2F",
+            "/jobs/search/?currentJobId=%204252026496",
+            "/jobs/search/?currentJobId=%25344252026496",
         ],
     )
     def test_a_search_without_one_job_is_still_refused(self, value: str):

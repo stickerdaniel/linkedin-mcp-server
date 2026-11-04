@@ -484,7 +484,7 @@ def _job_open_in_search(value: str) -> str | None:
         return None
     query = value.split("#", 1)[0].partition("?")[2]
     ids = parse_qs(query).get("currentJobId", [])
-    return ids[0] if len(ids) == 1 else None
+    return ids[0] if len(ids) == 1 and _NUMERIC_ID.fullmatch(ids[0]) else None
 
 
 def normalize_job_id(value: str) -> str:
