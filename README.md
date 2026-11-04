@@ -13,6 +13,7 @@ Give your AI agents access to LinkedIn through your own browser session. Read pr
 
 > This is an independent open-source project, not affiliated with LinkedIn or Microsoft. LinkedIn is a trademark of LinkedIn Corporation, used here only to identify the service this software interacts with.
 
+<!-- Sponsors appear in the order they joined. -->
 <br/>
 <details open>
 <summary><strong>LinkedIn MCP Sponsor</strong></summary>
