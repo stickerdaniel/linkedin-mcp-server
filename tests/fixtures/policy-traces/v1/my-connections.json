@@ -1,0 +1,267 @@
+{
+  "call": {
+    "arguments": {},
+    "method": "walk_my_connections"
+  },
+  "events": [
+    {
+      "call": "walk_my_connections",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "connections"
+    },
+    {
+      "call": "walk_my_connections",
+      "extra": {
+        "target_url": "https://www.linkedin.com/mynetwork/invite-connect/connections/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "connections"
+    },
+    {
+      "call": "walk_my_connections",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/mynetwork/invite-connect/connections/",
+      "requested_url": "https://www.linkedin.com/mynetwork/invite-connect/connections/",
+      "section": "connections",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "walk_my_connections",
+      "description": "goto https://www.linkedin.com/mynetwork/invite-connect/connections/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "connections"
+    },
+    {
+      "call": "walk_my_connections",
+      "extra": {
+        "target_url": "https://www.linkedin.com/mynetwork/invite-connect/connections/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "connections"
+    },
+    {
+      "call": "walk_my_connections",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "connections"
+    },
+    {
+      "call": "walk_my_connections",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "connections"
+    },
+    {
+      "call": "walk_my_connections",
+      "kind": "boundary.rate_limit",
+      "section": "connections"
+    },
+    {
+      "call": "walk_my_connections",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "connections"
+    },
+    {
+      "arg": null,
+      "call": "walk_my_connections",
+      "kind": "wait_for_function",
+      "operation": "company_people_ready",
+      "program_digest": "8704fc9f2e56",
+      "section": "connections",
+      "timeout_ms": 15000
+    },
+    {
+      "call": "walk_my_connections",
+      "kind": "evaluate",
+      "operation": "my_connections_listed_total",
+      "program_digest": "57ff5bb91b48",
+      "section": "connections"
+    },
+    {
+      "arg": [],
+      "call": "walk_my_connections",
+      "kind": "evaluate",
+      "operation": "my_connections_cards",
+      "program_digest": "2830c342e6fe",
+      "section": "connections"
+    },
+    {
+      "call": "walk_my_connections",
+      "kind": "evaluate",
+      "operation": "my_connections_advance",
+      "program_digest": "8a2a8cbe7e9b",
+      "section": "connections"
+    },
+    {
+      "arg": 2,
+      "call": "walk_my_connections",
+      "kind": "wait_for_function",
+      "operation": "my_connections_grew",
+      "program_digest": "d613379b278d",
+      "section": "connections",
+      "timeout_ms": 8000
+    },
+    {
+      "call": "walk_my_connections",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 2.5,
+      "section": "connections"
+    },
+    {
+      "call": "walk_my_connections",
+      "kind": "boundary.rate_limit",
+      "section": "connections"
+    },
+    {
+      "arg": [
+        "ada-lovelace"
+      ],
+      "call": "walk_my_connections",
+      "kind": "evaluate",
+      "operation": "my_connections_cards",
+      "program_digest": "2830c342e6fe",
+      "section": "connections"
+    },
+    {
+      "call": "walk_my_connections",
+      "kind": "evaluate",
+      "operation": "my_connections_advance",
+      "program_digest": "8a2a8cbe7e9b",
+      "section": "connections"
+    },
+    {
+      "arg": 2,
+      "call": "walk_my_connections",
+      "kind": "wait_for_function",
+      "operation": "my_connections_grew",
+      "program_digest": "d613379b278d",
+      "section": "connections",
+      "timeout_ms": 8000
+    },
+    {
+      "call": "walk_my_connections",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 2.5,
+      "section": "connections"
+    },
+    {
+      "call": "walk_my_connections",
+      "kind": "boundary.rate_limit",
+      "section": "connections"
+    },
+    {
+      "arg": [
+        "ada-lovelace",
+        "alan-turing"
+      ],
+      "call": "walk_my_connections",
+      "kind": "evaluate",
+      "operation": "my_connections_cards",
+      "program_digest": "2830c342e6fe",
+      "section": "connections"
+    },
+    {
+      "call": "walk_my_connections",
+      "kind": "evaluate",
+      "operation": "my_connections_advance",
+      "program_digest": "8a2a8cbe7e9b",
+      "section": "connections"
+    },
+    {
+      "arg": 2,
+      "call": "walk_my_connections",
+      "kind": "wait_for_function",
+      "operation": "my_connections_grew",
+      "program_digest": "d613379b278d",
+      "section": "connections",
+      "timeout_ms": 8000
+    },
+    {
+      "call": "walk_my_connections",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 2.5,
+      "section": "connections"
+    },
+    {
+      "call": "walk_my_connections",
+      "kind": "boundary.rate_limit",
+      "section": "connections"
+    },
+    {
+      "arg": [
+        "ada-lovelace",
+        "alan-turing"
+      ],
+      "call": "walk_my_connections",
+      "kind": "evaluate",
+      "operation": "my_connections_cards",
+      "program_digest": "2830c342e6fe",
+      "section": "connections"
+    },
+    {
+      "call": "walk_my_connections",
+      "kind": "evaluate",
+      "operation": "my_connections_advance",
+      "program_digest": "8a2a8cbe7e9b",
+      "section": "connections"
+    },
+    {
+      "arg": 2,
+      "call": "walk_my_connections",
+      "kind": "wait_for_function",
+      "operation": "my_connections_grew",
+      "program_digest": "d613379b278d",
+      "section": "connections",
+      "timeout_ms": 8000
+    },
+    {
+      "call": "walk_my_connections",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 2.5,
+      "section": "connections"
+    },
+    {
+      "call": "walk_my_connections",
+      "kind": "boundary.rate_limit",
+      "section": "connections"
+    },
+    {
+      "arg": [
+        "ada-lovelace",
+        "alan-turing"
+      ],
+      "call": "walk_my_connections",
+      "kind": "evaluate",
+      "operation": "my_connections_cards",
+      "program_digest": "2830c342e6fe",
+      "section": "connections"
+    }
+  ],
+  "result": {
+    "complete": true,
+    "listed_total": 2,
+    "new_slugs": [
+      "ada-lovelace",
+      "alan-turing"
+    ],
+    "rounds": 5,
+    "seen": 2,
+    "stop_reason": "end_of_list"
+  },
+  "scenario": "walk_my_connections__end_of_list",
+  "schema_version": 1
+}

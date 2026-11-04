@@ -68,6 +68,9 @@ TOOL_DELEGATES = {
     "search_posts": "search_posts",
     "send_message": "send_message",
     "reply_to_conversation": "reply_to_conversation",
+    "sync_my_connections": "walk_my_connections",
+    "enrich_my_network": "read_person",
+    "find_introductions": "read_second_degree",
 }
 
 
@@ -102,8 +105,10 @@ async def test_constructor_export_and_dependency_use_the_same_facade(monkeypatch
         "_content",
         "_conversations",
         "_feed",
+        "_introductions",
         "_jobs",
         "_message_sender",
+        "_my_connections",
         "_person",
         "_posts",
     }
@@ -128,9 +133,18 @@ async def test_registered_tools_match_extractor_delegates():
     tools = await create_mcp_server().list_tools()
     tool_names = {tool.name for tool in tools}
 
-    # The two session tools read no LinkedIn page, so neither has a delegate.
+    # The two session tools read no LinkedIn page, so neither has a delegate,
+    # and nor do the network tools, which read only the local store.
     session_tools = {"close_session", "get_session_status"}
-    assert tool_names == {*TOOL_DELEGATES, *session_tools}
+    store_tools = {
+        "get_network_overview",
+        "get_network_person",
+        "import_connections_csv",
+        "import_messages_csv",
+        "mark_connections",
+        "search_my_network",
+    }
+    assert tool_names == {*TOOL_DELEGATES, *session_tools, *store_tools}
     assert set(TOOL_DELEGATES.values()) == TOOL_FACADE_METHODS
     assert not session_tools & set(TOOL_DELEGATES)
 
