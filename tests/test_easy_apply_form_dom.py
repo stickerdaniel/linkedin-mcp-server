@@ -464,15 +464,21 @@ async def test_a_read_cancelled_while_the_dialog_opens_discards_it(dom_page):
 
 
 async def test_a_read_past_the_tool_deadline_still_discards_the_draft(dom_page):
-    # A tool timeout is an AnyIO scope, which cancels the task again on every
-    # pass of the loop: an unshielded discard ends at its first await. Three
-    # steps take well over a second to read.
+    # A tool timeout is an AnyIO deadline. It expires once Next was clicked,
+    # however long the read took to get there, and the cancelled read must
+    # still close the dialog and discard the draft. The two steps after Next
+    # take well over a second to read.
     await serve(dom_page, posting(EASY_APPLY, [CONTACT, QUESTIONS, RESUME]))
 
+    async def expire_after_next(scope: anyio.CancelScope) -> None:
+        await until_logged(dom_page, "next")
+        scope.deadline = anyio.current_time()
+
     with pytest.raises(TimeoutError):
-        with anyio.fail_after(0.4):
-            await read_served(dom_page)
+        with anyio.fail_after(None) as deadline:
+            async with anyio.create_task_group() as tasks:
+                tasks.start_soon(expire_after_next, deadline)
+                await read_served(dom_page)
 
     assert not await dialog_open(dom_page)
-    assert "open" in await log(dom_page)
     assert (await log(dom_page))[-2:] == ["escape", "discard"]
