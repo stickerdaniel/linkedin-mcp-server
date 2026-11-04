@@ -111,6 +111,10 @@
       "send_message": {
         "coroutine": true,
         "signature": "(self, linkedin_username: 'str', message: 'str', *, confirm_send: 'bool', profile_urn: 'str | None' = None) -> 'dict[str, Any]'"
+      },
+      "walk_my_connections": {
+        "coroutine": true,
+        "signature": "(self, on_batch: 'OnBatch', *, known: 'set[str] | None' = None, stop_after_known: 'int | None' = None, time_budget: 'float' = 600.0, max_rounds: 'int' = 400, on_progress: 'OnProgress | None' = None) -> 'WalkResult'"
       }
     },
     "tool_methods": [
@@ -136,7 +140,8 @@
       "search_jobs",
       "search_people",
       "search_posts",
-      "send_message"
+      "send_message",
+      "walk_my_connections"
     ],
     "tool_schemas": {
       "archive_conversation": {
@@ -489,6 +494,17 @@
           "type": "object"
         }
       },
+      "get_network_overview": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "get_person_profile": {
         "input": {
           "additionalProperties": false,
@@ -586,6 +602,25 @@
           },
           "required": [
             "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "import_connections_csv": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "description": "Path to Connections.csv (a ~ prefix is expanded).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
           ],
           "type": "object"
         },
@@ -771,6 +806,81 @@
           "type": "object"
         }
       },
+      "search_my_network": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "company": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Substring matched against company and headline."
+            },
+            "connected_after": {
+              "anyOf": [
+                {
+                  "pattern": "^\\d{4}(-\\d{2}(-\\d{2})?)?$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "ISO date (YYYY, YYYY-MM or YYYY-MM-DD), inclusive."
+            },
+            "connected_before": {
+              "anyOf": [
+                {
+                  "pattern": "^\\d{4}(-\\d{2}(-\\d{2})?)?$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "ISO date, inclusive."
+            },
+            "limit": {
+              "default": 25,
+              "description": "Results per page (1-200, default 25).",
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "offset": {
+              "default": 0,
+              "description": "Results to skip, for paging.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Free text matched (word-prefix, any order) against name,\nheadline, company and position. Role words rank highest.\nOmit to list connections newest first."
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "search_people": {
         "input": {
           "additionalProperties": false,
@@ -913,6 +1023,37 @@
             "message",
             "confirm_send"
           ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "sync_my_connections": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "full": {
+              "default": false,
+              "description": "False (default) stops once `stop_after_known` consecutive\nconnections are already in the store -- only new connections\nare read -- but only after some earlier walk reached the end of\nthe list; until then every call walks the whole list, so a run\ncut short is finished by the next one. True always walks the\nwhole list, e.g. to refresh headlines.",
+              "type": "boolean"
+            },
+            "stop_after_known": {
+              "default": 25,
+              "description": "Incremental stop threshold (default 25).",
+              "maximum": 500,
+              "minimum": 5,
+              "type": "integer"
+            },
+            "time_budget_seconds": {
+              "default": 600,
+              "description": "How long the walk may run (30-900, default 600).",
+              "maximum": 900,
+              "minimum": 30,
+              "type": "integer"
+            }
+          },
           "type": "object"
         },
         "output": {

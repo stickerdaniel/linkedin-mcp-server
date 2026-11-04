@@ -14,6 +14,7 @@ from linkedin_mcp_server.linkedin.contracts import (
     SEND_INTERRUPTED_WARNING,
 )
 from linkedin_mcp_server.linkedin.contracts import ExtractedSection
+from linkedin_mcp_server.linkedin.my_connections import WalkResult
 
 
 async def get_tool_fn(
@@ -30,6 +31,7 @@ def _make_mock_extractor(result: dict) -> MagicMock:
     """Create a mock LinkedInExtractor that returns the given result."""
     mock = MagicMock()
     mock.read_person = AsyncMock(return_value=result)
+    mock.walk_my_connections = AsyncMock(return_value=WalkResult())
     mock.connect_with_person = AsyncMock(return_value=result)
     mock.read_company = AsyncMock(return_value=result)
     mock.read_job = AsyncMock(return_value=result)
@@ -241,6 +243,7 @@ _A_VALID_CALL = [
     ("person", "connect_with_person", {"linkedin_username": "alice"}),
     ("person", "get_sidebar_profiles", {"linkedin_username": "alice"}),
     ("person", "get_my_profile", {}),
+    ("person", "sync_my_connections", {}),
     ("company", "get_company_profile", {"company_name": "anthropic"}),
     ("company", "get_company_posts", {"company_name": "anthropic"}),
     ("company", "search_companies", {"keywords": "fintech"}),

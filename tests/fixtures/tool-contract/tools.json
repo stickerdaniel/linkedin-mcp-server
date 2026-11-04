@@ -555,6 +555,31 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "network"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Summarise the local network store: size, sources, top companies,\nconnections per year, and when each source was last synced.\n\nCall this first to see whether the store is filled and how fresh it\nis. Does not touch LinkedIn.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_network_overview",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Network Overview"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "person"
         ]
       }
@@ -711,6 +736,39 @@
       "type": "object"
     },
     "title": "Get Sidebar Profiles"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "network"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Import LinkedIn's Connections.csv export into the local network store.\n\nThe file comes from LinkedIn > Settings > Data privacy > Get a copy of\nyour data (tick \"Connections\"). It adds company, position, email (where\nthe connection allows it) and exact connection dates, and merges with\nanything sync_my_connections already read. Safe to re-run with a newer\nexport. Does not touch LinkedIn.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "Path to Connections.csv (a ~ prefix is expanded).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "import_connections_csv",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Import Connections CSV"
   },
   {
     "_meta": {
@@ -952,6 +1010,96 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "network",
+          "search"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Search your own 1st-degree connections in the local network store.\n\nAnswers from the local file only, so it is instant and can be called as\nmany times as an analysis needs. Fill the store first with\nimport_connections_csv and/or sync_my_connections.\n\nTo find who to contact for a purpose, run several searches with the\nroles, sectors and organisations that purpose implies (e.g. for a grant\non AI policy: \"policy\", \"regulation\", \"ministry\", \"EU commission\",\n\"program officer\"), then rank the union. Use get_person_profile only on\nthe shortlist.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "company": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Substring matched against company and headline."
+        },
+        "connected_after": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{4}(-\\d{2}(-\\d{2})?)?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "ISO date (YYYY, YYYY-MM or YYYY-MM-DD), inclusive."
+        },
+        "connected_before": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{4}(-\\d{2}(-\\d{2})?)?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "ISO date, inclusive."
+        },
+        "limit": {
+          "default": 25,
+          "description": "Results per page (1-200, default 25).",
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "description": "Results to skip, for paging.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "query": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Free text matched (word-prefix, any order) against name,\nheadline, company and position. Role words rank highest.\nOmit to list connections newest first."
+        }
+      },
+      "type": "object"
+    },
+    "name": "search_my_network",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Search My Network"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "person",
           "search"
         ]
@@ -1141,5 +1289,51 @@
       "type": "object"
     },
     "title": "Send Message"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "network",
+          "person"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read your own 1st-degree connections list into the local network store.\n\nWalks linkedin.com/mynetwork/invite-connect/connections/ (newest first),\nscrolling slowly, and saves each connection's name, headline, profile\nURL and connection date to a local SQLite file. Afterwards\nsearch_my_network and get_network_overview answer from that file\nwithout touching LinkedIn. Every batch is saved as it is read, so a run\ncut short keeps what it read; call again to continue.\n\nThis is the heaviest read the server makes. Run it rarely: a full walk\nonce, then incremental ones. Prefer import_connections_csv for the bulk\nof the data when the user has LinkedIn's data export.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "full": {
+          "default": false,
+          "description": "False (default) stops once `stop_after_known` consecutive\nconnections are already in the store -- only new connections\nare read -- but only after some earlier walk reached the end of\nthe list; until then every call walks the whole list, so a run\ncut short is finished by the next one. True always walks the\nwhole list, e.g. to refresh headlines.",
+          "type": "boolean"
+        },
+        "stop_after_known": {
+          "default": 25,
+          "description": "Incremental stop threshold (default 25).",
+          "maximum": 500,
+          "minimum": 5,
+          "type": "integer"
+        },
+        "time_budget_seconds": {
+          "default": 600,
+          "description": "How long the walk may run (30-900, default 600).",
+          "maximum": 900,
+          "minimum": 30,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "name": "sync_my_connections",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Sync My Connections"
   }
 ]
