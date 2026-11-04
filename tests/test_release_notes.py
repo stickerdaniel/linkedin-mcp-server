@@ -148,20 +148,18 @@ def test_section_between_two_others_composes_the_exact_body(tmp_path: Path) -> N
     assert output.read_text(encoding="utf-8") == (
         "## Breaking Changes\n"
         "\n"
-        f"- Removed a setting. ({_link(2)})\n"
+        f"- Removed a setting. ({_link(2)} by @stickerdaniel)\n"
         "\n"
         "<details>\n"
         "<summary><b>Bug Fixes (1)</b></summary>\n"
         "\n"
-        f"- Fixed a crash. ({_link(1)})\n"
+        f"- Fixed a crash. ({_link(1)} by @stickerdaniel)\n"
         "\n"
         "</details>\n"
         "\n"
         "## Install or update\n"
         "\n"
         "Get v4.26.0 from 4.26.0.\n"
-        "\n"
-        "**Contributors:** @stickerdaniel\n"
         "\n"
         f"{_COMPARE}/v4.25.0...v4.26.0\n"
     )
@@ -233,7 +231,7 @@ def test_highlights_features_and_folded_fixes_compose_the_exact_body(
         previous="4.27.0",
         authors=_HIGHLIGHTS_AUTHORS,
         # Matched without regard to case, like the owner.
-        first=["ymx1zq"],
+        first=["ymx1zq", "ConnorMoss02"],
     )
 
     assert result.returncode == 0, result.stdout
@@ -245,7 +243,7 @@ def test_highlights_features_and_folded_fixes_compose_the_exact_body(
         "## Features\n"
         "\n"
         f"- Added search. ({_link(12)} by @ConnorMoss02)\n"
-        f"- Added export. ({_link(13)})\n"
+        f"- Added export. ({_link(13)} by @stickerdaniel)\n"
         "\n"
         "<details>\n"
         "<summary><b>Bug Fixes (4)</b></summary>\n"
@@ -254,7 +252,8 @@ def test_highlights_features_and_folded_fixes_compose_the_exact_body(
         "- Fixed a hang that\n"
         f"  spanned two lines. ({_link(15)} by @ConnorMoss02)\n"
         f"- Raised a dependency floor. ({_link(16)})\n"
-        f"- Kept the order, see [#17](https://example.test/pull/17). ({_link(13)})\n"
+        "- Kept the order, see [#17](https://example.test/pull/17). "
+        f"({_link(13)} by @stickerdaniel)\n"
         "\n"
         "</details>\n"
         "\n"
@@ -262,9 +261,8 @@ def test_highlights_features_and_folded_fixes_compose_the_exact_body(
         "\n"
         "Get v4.28.0 from 4.28.0.\n"
         "\n"
-        # The owner comes last, after everyone in order of first appearance.
-        "**Contributors:** @ConnorMoss02, @Ymx1ZQ (first contribution 🎉), "
-        "@stickerdaniel\n"
+        # In order of first appearance, spelled as the section spells them.
+        "**New contributors 🎉** @ConnorMoss02, @Ymx1ZQ\n"
         "\n"
         f"{_COMPARE}/v4.27.0...v4.28.0\n"
     )
@@ -339,8 +337,6 @@ def test_fixes_only_section_stays_open(tmp_path: Path) -> None:
         "## Install or update\n"
         "\n"
         "Get v4.25.1 from 4.25.1.\n"
-        "\n"
-        "**Contributors:** @Ymx1ZQ\n"
         "\n"
         f"{_COMPARE}/v4.25.0...v4.25.1\n"
     )
@@ -449,7 +445,13 @@ def test_template_without_install_heading_is_rejected(tmp_path: Path) -> None:
 def test_repository_template_composes(tmp_path: Path) -> None:
     template = _TEMPLATE.read_text(encoding="utf-8")
 
-    result, output = _compose(tmp_path, "4.26.0", template=template)
+    result, output = _compose(
+        tmp_path,
+        "4.26.0",
+        template=template,
+        authors={**_OWNER_AUTHORS, "1": "Ymx1ZQ"},
+        first=["Ymx1ZQ"],
+    )
 
     assert result.returncode == 0, result.stdout
     body = output.read_text(encoding="utf-8")
@@ -469,7 +471,9 @@ def test_repository_template_composes(tmp_path: Path) -> None:
     assert body.index("<summary><b>Bug Fixes (1)</b></summary>") < body.index(
         "## Install or update"
     )
-    assert body.index("## Install or update") < body.index("**Contributors:** ")
+    assert body.index("## Install or update") < body.index(
+        "\n\n**New contributors 🎉** @Ymx1ZQ\n\n"
+    )
     assert body.rstrip("\n").splitlines()[-1].startswith("**Full Changelog**: ")
 
 
@@ -769,27 +773,15 @@ def _run_compose_step(
 
 
 @pytest.mark.parametrize(
-    ("searches", "contributors"),
+    ("searches", "newcomers"),
     [
-        (
-            _RELEASED_SEARCHES,
-            "@Ymx1ZQ (first contribution 🎉), @ConnorMoss02, @stickerdaniel",
-        ),
+        (_RELEASED_SEARCHES, "**New contributors 🎉** @Ymx1ZQ\n\n"),
         # More merged pull requests than one page shows cannot all be here.
-        (
-            {**_RELEASED_SEARCHES, "Ymx1ZQ": (101, [4])},
-            "@Ymx1ZQ, @ConnorMoss02, @stickerdaniel",
-        ),
+        ({**_RELEASED_SEARCHES, "Ymx1ZQ": (101, [4])}, ""),
         # A search that timed out may have missed an older pull request.
-        (
-            {**_RELEASED_SEARCHES, "Ymx1ZQ": (1, [4], True)},
-            "@Ymx1ZQ, @ConnorMoss02, @stickerdaniel",
-        ),
+        ({**_RELEASED_SEARCHES, "Ymx1ZQ": (1, [4], True)}, ""),
         # A search that found nothing proves nothing.
-        (
-            {**_RELEASED_SEARCHES, "Ymx1ZQ": (0, [])},
-            "@Ymx1ZQ, @ConnorMoss02, @stickerdaniel",
-        ),
+        ({**_RELEASED_SEARCHES, "Ymx1ZQ": (0, [])}, ""),
     ],
     ids=[
         "first-contribution",
@@ -799,7 +791,7 @@ def _run_compose_step(
     ],
 )
 def test_compose_step_writes_the_new_versions_notes(
-    tmp_path: Path, searches: dict[str, tuple[Any, ...]], contributors: str
+    tmp_path: Path, searches: dict[str, tuple[Any, ...]], newcomers: str
 ) -> None:
     result, output = _run_compose_step(tmp_path, tag_on_origin=True, searches=searches)
 
@@ -809,7 +801,7 @@ def test_compose_step_writes_the_new_versions_notes(
     assert output.read_text(encoding="utf-8") == (
         "## Features\n"
         "\n"
-        f"- Newer feature. ({_link(2)})\n"
+        f"- Newer feature. ({_link(2)} by @stickerdaniel)\n"
         f"- Another feature. ({_link(4)} by @Ymx1ZQ)\n"
         "\n"
         "<details>\n"
@@ -822,8 +814,7 @@ def test_compose_step_writes_the_new_versions_notes(
         "\n"
         f"{install.strip()}\n"
         "\n"
-        f"**Contributors:** {contributors}\n"
-        "\n"
+        f"{newcomers}"
         f"{_COMPARE}/v4.25.0...v4.26.0\n"
     )
 
