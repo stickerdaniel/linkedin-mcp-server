@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -33,7 +35,7 @@ from patchright.async_api import Error as PlaywrightError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 from patchright.async_api import async_playwright
 
-from differential import harness
+from differential import first_navigation, harness
 from differential.baseline import REPO_ROOT, BaselineRefused, Runtime
 from differential.events import EventLog, publish
 from differential.first_navigation import (
@@ -772,6 +774,76 @@ async def test_a_frozen_staging_failure_is_recorded_by_the_staging_interpreter(
     assert lifetimes["label"] == "frozen-staging"
 
 
+def _list_descendants(monkeypatch: pytest.MonkeyPatch, listed: list[Any]) -> None:
+    """Make the sampler's walk list *listed*, on every platform."""
+    monkeypatch.setattr(
+        first_navigation,
+        "_this_process",
+        lambda psutil: SimpleNamespace(children=lambda recursive: listed),
+    )
+
+
+def _walk_over(
+    monkeypatch: pytest.MonkeyPatch,
+    tree: dict[int, list[int]],
+    *,
+    gone: frozenset[int] = frozenset(),
+    error: int | None = None,
+) -> Any:
+    """The macOS walk on any platform: libproc answers from *tree*, parent
+    pid to child pids, and psutil finds every pid in *gone* already gone."""
+
+    def list_children(pid: int, buffer: Any, size: int) -> int:
+        if error is not None:
+            ctypes.set_errno(error)
+            return -1
+        children = tree.get(pid, [])
+        count = min(len(children), size // ctypes.sizeof(ctypes.c_int))
+        for index in range(count):
+            buffer[index] = children[index]
+        return count
+
+    class Process:
+        def __init__(self, pid: int) -> None:
+            if pid in gone:
+                raise psutil.NoSuchProcess(pid)
+            self.pid = pid
+
+        def create_time(self) -> float:
+            return 1.0
+
+    library = SimpleNamespace(proc_listchildpids=list_children)
+    monkeypatch.setattr(
+        first_navigation.ctypes, "CDLL", lambda path, use_errno: library
+    )
+    fake = SimpleNamespace(Process=Process, NoSuchProcess=psutil.NoSuchProcess)
+    return first_navigation._MacDescendants(fake)
+
+
+def test_the_macos_walk_lists_more_children_than_one_buffer_holds(monkeypatch):
+    # Above the walk's own pid, which is the runner's, so none of them is it.
+    me = os.getpid()
+    children = [me + offset for offset in range(1, 101)]
+    grandchild = me + 1_000
+    walk = _walk_over(monkeypatch, {me: children, children[-1]: [grandchild]})
+    listed = sorted(process.pid for process in walk.children(recursive=True))
+    assert listed == [*children, grandchild]
+
+
+def test_the_macos_walk_skips_a_child_gone_before_it_was_read(monkeypatch):
+    me = os.getpid()
+    walk = _walk_over(monkeypatch, {me: [me + 1, me + 2]}, gone=frozenset({me + 1}))
+    assert [process.pid for process in walk.children(recursive=True)] == [me + 2]
+
+
+def test_a_failed_macos_listing_is_an_error_and_not_an_empty_tree(monkeypatch):
+    # An empty listing would mark every tracked process gone.
+    walk = _walk_over(monkeypatch, {}, error=errno.ESRCH)
+    with pytest.raises(OSError) as raised:
+        walk.children(recursive=True)
+    assert raised.value.errno == errno.ESRCH
+
+
 class _SlowChild:
     """A descendant whose every read takes *delay*, as on a loaded host."""
 
@@ -795,7 +867,7 @@ def test_a_slow_process_table_cannot_hold_the_stop_past_its_bound(
 ):
     # One full sample here takes six seconds, three times the stop bound.
     slow = [_SlowChild(pid, 0.3) for pid in range(100_000, 100_020)]
-    monkeypatch.setattr(psutil.Process, "children", lambda self, recursive: slow)
+    _list_descendants(monkeypatch, slow)
     label = f"slow-{os.getpid()}"
     lifetimes = LifetimeSampler(
         tmp_path / BROWSER_LIFETIMES_FILE, profile=tmp_path / "profile", label=label
@@ -833,7 +905,7 @@ def test_the_closing_sample_still_reads_after_a_stop_request(tmp_path, monkeypat
         cmdline=lambda: ["chromium", f"--user-data-dir={profile}"],
         parent=lambda: None,
     )
-    monkeypatch.setattr(psutil.Process, "children", lambda self, recursive: [root])
+    _list_descendants(monkeypatch, [root])
     lifetimes = LifetimeSampler(
         tmp_path / BROWSER_LIFETIMES_FILE, profile=profile, label="closing"
     )
@@ -954,9 +1026,7 @@ def test_a_stop_does_not_wait_out_a_read_past_its_bound(tmp_path, monkeypatch):
         def cmdline(self) -> list[str]:
             return ["not-chromium"]
 
-    monkeypatch.setattr(
-        psutil.Process, "children", lambda self, recursive: [Blocking()]
-    )
+    _list_descendants(monkeypatch, [Blocking()])
     lifetimes = LifetimeSampler(
         tmp_path / BROWSER_LIFETIMES_FILE, profile=tmp_path / "profile", label="held"
     )
