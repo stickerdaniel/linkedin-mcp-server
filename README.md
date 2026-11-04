@@ -53,6 +53,19 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 > This MCP server is supported by [**Unipile**](https://golink.onl/unipile-link). Unipile is the fully managed cloud option for developers: a hosted LinkedIn API for Classic, Sales Navigator, and Recruiter that handles auth, sessions, and infrastructure for you.
 
 [Try Unipile free for 7 days →](https://golink.onl/unipile-free-trial)
+
+<br/>
+
+<a href="https://zernio.link/daniel-sticker" target="_blank">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/f8b34875-c2b7-4466-b430-51fda4875720">
+    <img src="https://github.com/user-attachments/assets/ef30cb05-80a7-4b03-a9d4-186c6db2fe43" alt="Zernio, official APIs for every social channel" width="100%">
+  </picture>
+</a>
+
+> [**Zernio**](https://zernio.link/daniel-sticker) gives your agents official APIs for every social channel. Post, reply, and run ads on Instagram, TikTok, X, YouTube, Threads, and more, through one API or MCP server.
+
+[Try Zernio free →](https://zernio.link/daniel-sticker)
 </details>
 
 ---
