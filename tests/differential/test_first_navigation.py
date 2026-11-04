@@ -821,17 +821,19 @@ def _walk_over(
 
 
 def test_the_macos_walk_lists_more_children_than_one_buffer_holds(monkeypatch):
+    # Above the walk's own pid, which is the runner's, so none of them is it.
     me = os.getpid()
-    children = list(range(10_000, 10_100))
-    walk = _walk_over(monkeypatch, {me: children, children[-1]: [20_000]})
+    children = [me + offset for offset in range(1, 101)]
+    grandchild = me + 1_000
+    walk = _walk_over(monkeypatch, {me: children, children[-1]: [grandchild]})
     listed = sorted(process.pid for process in walk.children(recursive=True))
-    assert listed == [*children, 20_000]
+    assert listed == [*children, grandchild]
 
 
 def test_the_macos_walk_skips_a_child_gone_before_it_was_read(monkeypatch):
     me = os.getpid()
-    walk = _walk_over(monkeypatch, {me: [300, 301]}, gone=frozenset({300}))
-    assert [process.pid for process in walk.children(recursive=True)] == [301]
+    walk = _walk_over(monkeypatch, {me: [me + 1, me + 2]}, gone=frozenset({me + 1}))
+    assert [process.pid for process in walk.children(recursive=True)] == [me + 2]
 
 
 def test_a_failed_macos_listing_is_an_error_and_not_an_empty_tree(monkeypatch):
