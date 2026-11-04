@@ -40,8 +40,10 @@ jobs:
           persist-credentials: false
 
       # Read from the API rather than the event payload, so a rerun sees the
-      # description as it is now.
-      - name: Fetch current pull request and changed files
+      # description as it is now. GitHub's own Markdown renderer decides what
+      # counts as an image, so code spans, unclosed fences and HTML comments
+      # show nothing, as on the PR page. jq passes the body as data.
+      - name: Fetch current pull request, changed files and rendered description
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -53,9 +55,15 @@ jobs:
           gh api --method GET --paginate --slurp \
             "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
             > "$RUNNER_TEMP/pull-request-files.json"
+          jq --arg repo "$GITHUB_REPOSITORY" \
+            '{text: (.body // ""), mode: "gfm", context: $repo}' \
+            "$RUNNER_TEMP/pull-request.json" \
+            | gh api --method POST markdown --input - \
+            > "$RUNNER_TEMP/pull-request-body.html"
 
       - name: Require before and after screenshots
         run: |
           python3 scripts/check_readme_media.py \
             --pr-json "$RUNNER_TEMP/pull-request.json" \
-            --files-json "$RUNNER_TEMP/pull-request-files.json"
+            --files-json "$RUNNER_TEMP/pull-request-files.json" \
+            --body-html "$RUNNER_TEMP/pull-request-body.html"
