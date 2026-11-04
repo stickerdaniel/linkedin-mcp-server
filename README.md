@@ -976,3 +976,5 @@ This project is licensed under the Apache 2.0 license.
 Building on this project is welcome! See the [license](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/LICENSE) for terms and the [`NOTICE`](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/NOTICE) for attribution.
 
 <br>
+
+<!-- readme media check demo -->
