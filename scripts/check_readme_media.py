@@ -49,8 +49,8 @@ class _Rendered(HTMLParser):
     """Collect the images and the text of GitHub's rendered HTML.
 
     GitHub's renderer has already dropped HTML comments, escaped code and
-    resolved reference images, so every ``<img>`` left is one a reader sees.
-    Alt text counts as text: a dropped file named before.png labels itself.
+    resolved reference images. Alt text counts as text: a dropped file named
+    before.png labels itself.
     """
 
     def __init__(self) -> None:
@@ -59,9 +59,15 @@ class _Rendered(HTMLParser):
         self.text: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag == "img":
-            self.images += 1
-            self.text.extend(value or "" for name, value in attrs if name == "alt")
+        if tag != "img":
+            return
+        found = dict(attrs)
+        # An image without a source shows nothing, and GitHub renders custom
+        # emoji such as :shipit: as <img class="emoji">.
+        if not found.get("src") or "emoji" in (found.get("class") or "").split():
+            return
+        self.images += 1
+        self.text.append(found.get("alt") or "")
 
     def handle_data(self, data: str) -> None:
         self.text.append(data)

@@ -94,6 +94,8 @@ def test_other_image_forms_count(tmp_path: Path, body: str) -> None:
         "in-comment",
         "inline-code",
         "unclosed-fence",
+        "no-src",
+        "emoji",
     ],
 )
 def test_body_without_a_visible_comparison_fails(tmp_path: Path, body: str) -> None:
