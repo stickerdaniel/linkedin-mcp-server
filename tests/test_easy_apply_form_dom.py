@@ -87,8 +87,9 @@ RESUME: dict[str, Any] = {
 # The posting, its Easy Apply anchor, and a dialog that behaves like LinkedIn's:
 # opened by the anchor, rendered in a shadow root, refusing Next while a
 # required field is empty, and asking to save the draft on Escape. The step Next
-# moves to lands later, under that question if it is open, and never once the
-# dialog is gone, so a read cancelled mid-step races nothing. Every click and
+# moves to lands later, keeps that question if it is open, and does nothing once
+# the dialog is gone, so a pending step neither removes the question nor reopens
+# a discarded dialog. Every click and
 # keystroke that reaches it is logged on `window.log`.
 DIALOG_SCRIPT = """
 const STEPS = %s;
