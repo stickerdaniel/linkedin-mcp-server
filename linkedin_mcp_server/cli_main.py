@@ -55,7 +55,9 @@ from linkedin_mcp_server.session_state import (
     runtime_storage_state_path,
     source_state_path,
 )
+from linkedin_mcp_server import remote_tools
 from linkedin_mcp_server.server import ServerRole, create_mcp_server
+from linkedin_mcp_server.server_role import process_role
 from linkedin_mcp_server.setup import run_profile_creation
 
 if TYPE_CHECKING:
@@ -928,6 +930,12 @@ def main(argv: Sequence[str] | None = None) -> None:
                     role=ServerRole.PROXY,
                     proxy_backend=shared,
                 )
+
+            # Direct only: a proxy serves the owner's tools, and the owner has
+            # no client of its own. Before `run`, which reads the tool list and
+            # the instructions once per client.
+            if process_role() is ServerRole.DIRECT:
+                remote_tools.install(mcp)
 
             if transport == "streamable-http":
                 # Validate Host and Origin. Without this a website the user
