@@ -1,0 +1,61 @@
+name: README media
+
+# A change to a rendered README needs a before and after screenshot in the PR
+# description, so a reviewer sees the page without building it. The paths are
+# the files scripts/check_readme_media.py treats as rendered: every README.md
+# on GitHub and PyPI, the Docker Hub description, and the manifest's
+# long_description.
+#
+# pull_request_target runs the checker from the base branch, so a pull request
+# cannot edit the check it is judged by. The job never checks out or runs the
+# pull request's code: its body and file list are read as API data. It reruns
+# when the description or the labels change, so adding the images turns it
+# green without a push.
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize, labeled, unlabeled]
+    paths:
+      - "**/README.md"
+      - docs/docker-hub.md
+      - manifest.json
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: readme-media-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: README media
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout the trusted workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      # Read from the API rather than the event payload, so a rerun sees the
+      # description as it is now.
+      - name: Fetch current pull request and changed files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+            > "$RUNNER_TEMP/pull-request.json"
+          gh api --method GET --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
+            > "$RUNNER_TEMP/pull-request-files.json"
+
+      - name: Require before and after screenshots
+        run: |
+          python3 scripts/check_readme_media.py \
+            --pr-json "$RUNNER_TEMP/pull-request.json" \
+            --files-json "$RUNNER_TEMP/pull-request-files.json"
