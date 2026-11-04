@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -779,6 +781,65 @@ def _list_descendants(monkeypatch: pytest.MonkeyPatch, listed: list[Any]) -> Non
         "_this_process",
         lambda psutil: SimpleNamespace(children=lambda recursive: listed),
     )
+
+
+def _walk_over(
+    monkeypatch: pytest.MonkeyPatch,
+    tree: dict[int, list[int]],
+    *,
+    gone: frozenset[int] = frozenset(),
+    error: int | None = None,
+) -> Any:
+    """The macOS walk on any platform: libproc answers from *tree*, parent
+    pid to child pids, and psutil finds every pid in *gone* already gone."""
+
+    def list_children(pid: int, buffer: Any, size: int) -> int:
+        if error is not None:
+            ctypes.set_errno(error)
+            return -1
+        children = tree.get(pid, [])
+        count = min(len(children), size // ctypes.sizeof(ctypes.c_int))
+        for index in range(count):
+            buffer[index] = children[index]
+        return count
+
+    class Process:
+        def __init__(self, pid: int) -> None:
+            if pid in gone:
+                raise psutil.NoSuchProcess(pid)
+            self.pid = pid
+
+        def create_time(self) -> float:
+            return 1.0
+
+    library = SimpleNamespace(proc_listchildpids=list_children)
+    monkeypatch.setattr(
+        first_navigation.ctypes, "CDLL", lambda path, use_errno: library
+    )
+    fake = SimpleNamespace(Process=Process, NoSuchProcess=psutil.NoSuchProcess)
+    return first_navigation._MacDescendants(fake)
+
+
+def test_the_macos_walk_lists_more_children_than_one_buffer_holds(monkeypatch):
+    me = os.getpid()
+    children = list(range(10_000, 10_100))
+    walk = _walk_over(monkeypatch, {me: children, children[-1]: [20_000]})
+    listed = sorted(process.pid for process in walk.children(recursive=True))
+    assert listed == [*children, 20_000]
+
+
+def test_the_macos_walk_skips_a_child_gone_before_it_was_read(monkeypatch):
+    me = os.getpid()
+    walk = _walk_over(monkeypatch, {me: [300, 301]}, gone=frozenset({300}))
+    assert [process.pid for process in walk.children(recursive=True)] == [301]
+
+
+def test_a_failed_macos_listing_is_an_error_and_not_an_empty_tree(monkeypatch):
+    # An empty listing would mark every tracked process gone.
+    walk = _walk_over(monkeypatch, {}, error=errno.ESRCH)
+    with pytest.raises(OSError) as raised:
+        walk.children(recursive=True)
+    assert raised.value.errno == errno.ESRCH
 
 
 class _SlowChild:
