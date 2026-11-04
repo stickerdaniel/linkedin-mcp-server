@@ -153,7 +153,14 @@ def check(
             "Markdown, not the JSON source."
         )
     message += (
-        " Drop the images into the description editor, not into a comment. "
+        " Upload the images as GitHub attachments of the description: drag "
+        "them into the description editor in the browser, or, with write "
+        "access to this repository, run gh pr edit <PR> --attach before.png "
+        "--attach after.png. Attachments stay visible after the branch is "
+        "deleted. Without a browser or write access, ask the person you work "
+        "for to drag the images in. The check passes once the rendered "
+        "description shows two images and the words Before and After; editing "
+        "the description reruns it. "
         f"A maintainer adds the {EXEMPT_LABEL} label when the rendered page "
         "does not change."
     )
