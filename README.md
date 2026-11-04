@@ -91,7 +91,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `get_conversation` | Read a conversation's messages using a LinkedIn username or thread ID. |
 | `search_conversations` | Search messages by keyword and return links to matching conversation threads. |
 | `archive_conversation` | Archive a conversation by thread ID; a repeat call reports it already archived. |
-| `send_message` | Send after confirmation; profile targets may open a new DM ([#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483)). |
+| `send_message` | Message a profile after confirmation. Threads use `reply_to_conversation`. |
 | `reply_to_conversation` | Reply inside an existing thread or InMail by thread ID. Sends after confirmation. |
 | `get_company_profile` | Read company information, with optional sections for posts and open jobs. |
 | `get_company_posts` | Read recent posts from a company's feed, with links to the original posts. |
