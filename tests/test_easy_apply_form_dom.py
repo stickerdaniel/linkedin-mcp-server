@@ -464,10 +464,10 @@ async def test_a_read_cancelled_while_the_dialog_opens_discards_it(dom_page):
 
 
 async def test_a_read_past_the_tool_deadline_still_discards_the_draft(dom_page):
-    # A tool timeout is an AnyIO scope, which cancels the task again on every
-    # pass of the loop: an unshielded discard ends at its first await. The
-    # deadline expires once Next was clicked, however long the read took to
-    # get there; the two steps after it take well over a second to read.
+    # A tool timeout is an AnyIO deadline. It expires once Next was clicked,
+    # however long the read took to get there, and the cancelled read must
+    # still close the dialog and discard the draft. The two steps after Next
+    # take well over a second to read.
     await serve(dom_page, posting(EASY_APPLY, [CONTACT, QUESTIONS, RESUME]))
 
     async def expire_after_next(scope: anyio.CancelScope) -> None:
