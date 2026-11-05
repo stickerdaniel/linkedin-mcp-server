@@ -128,6 +128,10 @@ connection, after a trusted click, and after disconnect:
 | Chromium active | yes | yes |
 | Trusted click reached page | yes | yes |
 
+Kiosk mode for the viewer's browser was measured and not adopted: it fills
+the display, and raised CreepJS's like-headless score. See
+[Docker policy and kiosk comparison — 2026-10-25](#docker-policy-and-kiosk-comparison--2026-10-25).
+
 The client scales the fixed framebuffer locally. x11vnc remote resize remains
 disabled, so connecting cannot change Chromium's reported screen. The package
 closure adds 107.2 MiB to Docker's image-inspect content size on amd64 and
@@ -351,3 +355,52 @@ fingerprints, the startup-flash timing, and the cookie-across-restart check.
 - **A patched Chromium fork.** Would genuinely fix the service-worker case, at
   the cost of a per-platform build, signing, notarisation and a rebase every
   two weeks. Xvfb reaches the same place without a fork.
+
+
+## Docker policy and kiosk comparison — 2026-10-25
+
+Runtime: upstream 4.28.0 image at
+`sha256:22f0c7a426b98a9d8a9165f99e24bfb58d615ca4f704dd0c45a153b19f5b0fed`,
+with identical dependency locks and source overlays for each arm. A common image
+adds NSS tooling solely to trust the temporary local CA. Xvfb is 1920×1080×24;
+each cell uses two CPUs, 2 GiB memory, 512 MiB shared memory and a fresh home;
+every cold launch has a fresh browser profile.
+The native llvmpipe renderer here reports LLVM 15.0.6, **256 bits**; this does not
+replace the older dated renderer measurements above.
+
+Pinned detector sources:
+
+- [CreepJS](https://github.com/abrahamjuliot/creepjs/tree/10aa6724cd33a1015db1574211890518cd04f0cc)
+- [fpscanner 1.0.8](https://github.com/antoinevastel/fpscanner/tree/4255cfd8a23fef5ea714147518d8c6ae1e5426d3), built from its npm lock
+- [rebrowser-bot-detector](https://github.com/rebrowser/rebrowser-bot-detector/tree/55fa59b9da0610563d896aa956f145ef00431a6b)
+- [Fingerproxy 1.2.3](https://github.com/wi1dcard/fingerproxy/releases/tag/v1.2.3), official echo-server binary with release SHA-256 checked
+
+Measured 2026-10-25 on native Linux amd64 with Patchright 1.63.0 / Chrome for Testing 153.0.8010.12. Twelve cold launches compared `7a40310` against `fb53d9e`: three each of upstream, policy only, kiosk only and policy+kiosk. Fresh synthetic profiles, the actual Docker Xvfb/Openbox/BrowserManager/viewer services, and pinned local copies of CreepJS, fpscanner, rebrowser-bot-detector and Fingerproxy were used; no LinkedIn/login or account data was involved.
+
+| Configuration | Outer window / screen | CreepJS headless / like-headless / stealth | Lies |
+| --- | --- | --- | --- |
+| Upstream | 945×1060 / 1920×1080 | 0% / 44% / 0% | 0 |
+| Policy only | 945×1060 / 1920×1080 | 0% / 44% / 0% | 0 |
+| Kiosk only | 1920×1080 / 1920×1080 | 0% / 50% / 0% | 0 |
+| Policy + kiosk | 1920×1080 / 1920×1080 | 0% / 50% / 0% | 0 |
+
+All three runs per configuration agreed. Kiosk changes CreepJS's `hasVvpScreenRes` fullscreen heuristic and raises its like-headless score by six points; this is reported rather than hidden. All 21 fpscanner outcomes and all 20 rebrowser ratings remain unchanged. Existing warnings remain: fpscanner's UTC timezone flag; rebrowser's Chrome-for-Testing identity and disabled third-party storage partitioning flags, plus a page/worker language-list difference. The checked UA/request-UA, document client-hint, native-accessor and window/screen relations pass in all twelve runs. Worker requests are checked for UA agreement; client hints are compared where Chromium supplies them. All browser closes were confirmed; all final containers exited successfully without an OOM kill.
+
+TLS 1.3 / h2, sorted non-GREASE cipher/extension lists, non-GREASE signature algorithms and the JA4 `t13d1517h2_8daaf6152771` prefix match across all 36 captures. The raw JA4 suffix varies because Fingerproxy 1.2.3 includes a GREASE signature algorithm; it is not claimed equal. Filtering that value separately per the [JA4 specification](https://github.com/FoxIO-LLC/ja4/blob/c6469a7b0dbf8fe963810162429fbfd9d1acc4d5/technical_details/JA4.md) yields `t13d1517h2_8daaf6152771_cb7bf5808d99` in every capture. HTTP/2 settings, connection window and pseudo-header order (`m,a,s,p`) match, as do full H2 fingerprints at each request ordinal; priority stream entries accumulate normally between requests.
+
+The policy image contains only the exact root-owned mode-644 policy file as measured (`fb53d9e`'s `scripts/chromium-policy.json`) above the common runtime. A separate synthetic-file control succeeds without it and is blocked with it. Measurements use a temporary locally trusted CA, without certificate bypass settings. They cover native amd64 only, with external egress disabled: no arm64, proxy/STUN, behavior, VNC-client interaction or invisibility claim. Rebrowser's CSP verdict is offline-inconclusive because network failure can trigger the same callback. Detector payload completeness is not a claim that every detector is clean; unavailable WebGPU signals and the existing warnings above remain recorded.
+
+The image adopted neither kiosk mode nor the measured policy's file-dialog,
+download and URL-blocklist rules. Kiosk raised the like-headless score, and the
+policy applies to every launch in the image, the server's own browser too. The
+image's policy keeps only the measured policy's password-manager and autofill
+settings; that subset was not measured on its own.
+
+Main-world values were exported by page scripts, rather than inferred from
+Patchright's isolated `evaluate()` world. The source/import and policy hashes were
+verified in every arm. The frozen runner SHA-256 was
+`ae0f977f491d66fea47913e7eef426dce6ffc37b5569682f6312cfac035ed8ef`.
+An initial qualification screenshot failed because the harness requested an
+unbounded full-page bitmap; viewport-only capture fixed that instrumentation
+error before all twelve counted runs. No browser or detector source was changed
+to obtain the results.
