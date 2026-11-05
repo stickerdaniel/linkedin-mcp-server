@@ -217,6 +217,15 @@ class V20EncryptedError(CookieDecryptionError):
     """Cookie uses Chrome 127+ app-bound encryption (v20); needs OS elevation."""
 
 
+class InvalidCookieInputError(LinkedInMCPError):
+    """LINKEDIN_COOKIES / LINKEDIN_COOKIES_FILE could not be turned into a session.
+
+    Raised for input the user can fix: unparseable text, no ``li_at`` cookie, an
+    expired ``li_at``, or an unreadable cookie file. The message never contains
+    a cookie value.
+    """
+
+
 class NoLinkedInSessionFoundError(LinkedInMCPError):
     """No discoverable local browser profile has a decryptable LinkedIn (li_at) session."""
 
