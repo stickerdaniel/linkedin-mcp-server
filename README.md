@@ -80,8 +80,23 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `get_easy_apply_form` | Read an Easy Apply form: each field's label, type, options and prefilled value. Never types or submits. |
 | `get_feed` | Read recent posts from your home feed, with links to the original posts. |
 | `search_posts` | Search posts by keyword, optionally filtered by recency or content type. |
+| `prepare_post` | Prepare a personal text-post preview with its author, audience, and a ten-minute approval window. |
+| `publish_post` | Experimental publishing from an approved preview; uncertain outcomes must not be retried. |
 | `get_session_status` | Check your saved login and browser state without opening a browser. |
 | `close_session` | Close the shared browser session without deleting your saved login. |
+
+### Publishing posts (experimental)
+
+To publish, call `prepare_post` and show the user the exact text, personal author,
+and Anyone audience. After approval, call `publish_post` with the returned
+`draft_id`, unchanged `approved_text`, and `confirmed=true`. A preview expires
+after ten minutes and is tied to the current browser page. This experimental
+publishing path is limited to plain-text personal posts with the Anyone audience.
+Its English/French composer checks refuse unrecognized variants; compatibility
+with the live composer and actual publication have not been validated. Images,
+videos, polls, and company posts are not supported. An uncertain result must be
+inspected before taking any further action. See the [publishing notes](docs/post-publishing.md)
+for the source adaptation and live observation.
 
 <br/>
 <br/>

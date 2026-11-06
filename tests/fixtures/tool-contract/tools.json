@@ -716,6 +716,80 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "post"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Prepare a 10-minute plain-text personal post preview; does not publish.\n\nPresent the exact text, author and Anyone audience to the user. Only\ncall publish_post after the user explicitly approves that preview.\nImages, videos, polls, company posts and other audiences are unsupported.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    },
+    "name": "prepare_post",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Prepare Post"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "post"
+        ]
+      }
+    },
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Publish once ONLY after explicit human approval of the exact preview.\n\nconfirmed defaults to false. Changed/expired/attempted previews are\nrefused. Never retry an outcome_unknown; inspect LinkedIn manually.\nOnly observed post-permalink navigation confirms publication. Composer\nvariants not supported by this version fail closed. No private API used.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "approved_text": {
+          "type": "string"
+        },
+        "confirmed": {
+          "default": false,
+          "type": "boolean"
+        },
+        "draft_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "draft_id",
+        "approved_text"
+      ],
+      "type": "object"
+    },
+    "name": "publish_post",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Publish Post"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "actions",
           "messaging"
         ]
