@@ -87,7 +87,8 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `get_my_profile` | Read your own profile, with the same section selection as other profiles. |
 | `connect_with_person` | Send a connection request with an optional note, or accept an incoming one. |
 | `get_sidebar_profiles` | Find recommended profile links, including people you may know. |
-| `get_inbox` | List recent inbox conversations, with links to open individual threads. |
+| `get_inbox` | List recent inbox conversations, with links to open individual threads and their read state. |
+| `get_unread_conversations` | Every unread conversation from the unread-filtered inbox, with unread counts and names, clicking nothing. |
 | `get_conversation` | Read a conversation's messages using a LinkedIn username or thread ID. |
 | `search_conversations` | Search messages by keyword and return links to matching conversation threads. |
 | `archive_conversation` | Archive a conversation by thread ID; a repeat call reports it already archived. |

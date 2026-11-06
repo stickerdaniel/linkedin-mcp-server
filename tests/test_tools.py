@@ -41,6 +41,7 @@ def _make_mock_extractor(result: dict) -> MagicMock:
     mock.search_people = AsyncMock(return_value=result)
     mock.get_sidebar_profiles = AsyncMock(return_value=result)
     mock.get_inbox = AsyncMock(return_value=result)
+    mock.get_unread_conversations = AsyncMock(return_value=result)
     mock.get_conversation = AsyncMock(return_value=result)
     mock.search_conversations = AsyncMock(return_value=result)
     mock.archive_conversation = AsyncMock(return_value=result)
@@ -252,6 +253,7 @@ _A_VALID_CALL = [
     ("job", "dismiss_job", {"job_id": "4252026496"}),
     ("job", "get_easy_apply_form", {"job_id": "4252026496"}),
     ("messaging", "get_inbox", {}),
+    ("messaging", "get_unread_conversations", {}),
     ("messaging", "get_conversation", {"linkedin_username": "alice"}),
     ("messaging", "search_conversations", {"keywords": "hello"}),
     ("messaging", "archive_conversation", {"thread_id": "2-abc123"}),

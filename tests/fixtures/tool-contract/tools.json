@@ -412,7 +412,7 @@
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "List recent conversations from the LinkedIn messaging inbox.\n\nThe returned inbox text and result URL come from the ordinary messaging\ninbox. Click-derived conversation references are collected separately\nafter requesting the compose page, which avoided inbox auto-opening on\nthe measured variant. A row contributes a click-derived reference only\nafter its click is followed by an observed different thread path. The\nscan stops at its first unverifiable click. section_errors.inbox\nreports that stop or unavailable scan rows; captured inbox text and\nindependently extracted anchors retain their normal handling. A known\nthread_id can bypass row attribution when calling get_conversation.",
+    "description": "List recent conversations from the LinkedIn messaging inbox.\n\nThe returned inbox text and result URL come from the ordinary messaging\ninbox. Click-derived conversation references are collected separately\nafter requesting the compose page, which avoided inbox auto-opening on\nthe measured variant. A row contributes a click-derived reference only\nafter its click is followed by an observed different thread path. The\nscan stops at its first unverifiable click. section_errors.inbox\nreports that stop or unavailable scan rows; captured inbox text and\nindependently extracted anchors retain their normal handling. A known\nthread_id can bypass row attribution when calling get_conversation.\n\nThe inbox's own messaging data also names each conversation's read\nstate, measured before the compose-page clicks (an opened thread is a\nread thread on LinkedIn). Threads it named carry a read_status entry\nkeyed by thread id: unread (bool), unread_count (int or null when the\npayload carried none), the field the state was read from, its raw\nvalue, and the conversation's participants. A thread the data never\nnamed has no entry rather than a guessed state.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -711,6 +711,39 @@
       "type": "object"
     },
     "title": "Get Sidebar Profiles"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "messaging"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read every unread conversation from the unread-filtered inbox.\n\nThe filtered listing shows only unread threads, so scrolling it to\nits end names every one of them, no matter how far down the inbox\nthey sit. Each batch the listing fetches is the same messaging data\nget_inbox reads: every thread named carries a read_status entry\nkeyed by thread id — unread (always true here), unread_count (the\nnumber of unread messages when the payload carried it), the field\nthe state was read from, its raw value, and the conversation's\nparticipants.\n\nNothing is clicked: an opened thread is a read thread, so this\nlisting never marks what it reports, and no row scan runs. The\nresult's read_status holds only unread threads, with\ntotal_unread_conversations and total_unread_messages summarising\nthem (a thread whose count the payload never carried adds to\nneither total's message count, and its entry says so with\nunread_count: null).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "default": 200,
+          "description": "Bounds the listing's scroll depth (1-1000, default 200);\neach scroll batch names roughly twenty conversations.",
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "name": "get_unread_conversations",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Unread Conversations"
   },
   {
     "_meta": {
