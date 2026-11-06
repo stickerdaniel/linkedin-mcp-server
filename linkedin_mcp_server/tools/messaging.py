@@ -63,10 +63,10 @@ def register_messaging_tools(
         The inbox's own messaging data also names each conversation's read
         state, measured before the compose-page clicks (an opened thread is a
         read thread on LinkedIn). Threads it named carry a read_status entry
-        keyed by thread id: unread (bool), the field the state was read from,
-        its raw value, and the participant's name when a reference named the
-        thread. A thread the data never named has no entry rather than a
-        guessed state.
+        keyed by thread id: unread (bool), unread_count (int or null when the
+        payload carried none), the field the state was read from, its raw
+        value, and the conversation's participants. A thread the data never
+        named has no entry rather than a guessed state.
 
         Args:
             ctx: FastMCP context for progress reporting
@@ -74,9 +74,9 @@ def register_messaging_tools(
 
         Returns:
             Dict with url, sections (inbox -> raw text), optional references,
-            optional read_status (thread id -> unread/field/value/name), and
-            optional section_errors (inbox -> why click-derived references are
-            incomplete).
+            optional read_status (thread id -> unread/unread_count/field/
+            value/participants), and optional section_errors (inbox -> why
+            click-derived references are incomplete).
         """
         extractor = await get_ready_extractor(ctx, tool_name="get_inbox")
         logger.info("Fetching inbox (limit=%d)", limit)
@@ -86,6 +86,60 @@ def register_messaging_tools(
         )
 
         result = await extractor.get_inbox(limit=limit)
+
+        await ctx.report_progress(progress=100, total=100, message="Complete")
+
+        return result
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get Unread Conversations",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"messaging"},
+    )
+    @tool_errors
+    async def get_unread_conversations(
+        ctx: Context,
+        limit: Annotated[int, Field(ge=1, le=1000)] = 200,
+    ) -> dict[str, Any]:
+        """Read every unread conversation from the unread-filtered inbox.
+
+        The filtered listing shows only unread threads, so scrolling it to
+        its end names every one of them, no matter how far down the inbox
+        they sit. Each batch the listing fetches is the same messaging data
+        get_inbox reads: every thread named carries a read_status entry
+        keyed by thread id — unread (always true here), unread_count (the
+        number of unread messages when the payload carried it), the field
+        the state was read from, its raw value, and the conversation's
+        participants.
+
+        Nothing is clicked: an opened thread is a read thread, so this
+        listing never marks what it reports, and no row scan runs. The
+        result's read_status holds only unread threads, with
+        total_unread_conversations and total_unread_messages summarising
+        them (a thread whose count the payload never carried adds to
+        neither total's message count, and its entry says so with
+        unread_count: null).
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            limit: Bounds the listing's scroll depth (1-1000, default 200);
+                each scroll batch names roughly twenty conversations.
+
+        Returns:
+            Dict with url, sections (unread_conversations -> raw text of
+            the filtered listing), read_status (thread id -> entry),
+            optional total_unread_conversations and optional
+            total_unread_messages.
+        """
+        extractor = await get_ready_extractor(ctx, tool_name="get_unread_conversations")
+        logger.info("Fetching unread conversations (limit=%d)", limit)
+
+        await ctx.report_progress(
+            progress=0, total=100, message="Loading unread-filtered inbox"
+        )
+
+        result = await extractor.get_unread_conversations(limit=limit)
 
         await ctx.report_progress(progress=100, total=100, message="Complete")
 

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import time
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
@@ -536,6 +539,38 @@ def conversation_read_status(node: Any) -> tuple[bool, str, Any] | None:
     return None
 
 
+def conversation_participant_names(node: Any) -> list[str]:
+    """The participant display names a conversation node carries, in order.
+
+    Each `conversationParticipants` entry's `participantType.member` holds
+    the first and last name as `AttributedText`. A name this cannot read is
+    skipped rather than guessed; a participant without any readable name
+    contributes nothing. The signed-in member is a participant too, listed
+    among the rest, because the payload never marks which one it is.
+    """
+    if not isinstance(node, dict):
+        return []
+    names: list[str] = []
+    for participant in node.get("conversationParticipants") or []:
+        if not isinstance(participant, dict):
+            continue
+        participant_type = participant.get("participantType")
+        if not isinstance(participant_type, dict):
+            continue
+        member = participant_type.get("member")
+        if not isinstance(member, dict):
+            continue
+        parts: list[str] = []
+        for key in ("firstName", "lastName"):
+            text = member.get(key)
+            if isinstance(text, dict) and isinstance(text.get("text"), str):
+                parts.append(text["text"])
+        name = " ".join(parts).strip()
+        if name:
+            names.append(name)
+    return names
+
+
 def payload_read_status(payload: Any) -> dict[str, dict[str, Any]]:
     """Every conversation's read state the payload names, keyed by thread id.
 
@@ -563,7 +598,20 @@ def payload_read_status(payload: Any) -> dict[str, dict[str, Any]]:
                 observed = conversation_read_status(node)
                 if observed is not None:
                     unread, field, value = observed
-                    found[key] = {"unread": unread, "field": field, "value": value}
+                    count = node.get("unreadCount")
+                    found[key] = {
+                        "unread": unread,
+                        "field": field,
+                        "value": value,
+                        # Measured on 2026-11-06: every conversation carries
+                        # its count of unread messages. An absent count is
+                        # None, never a guessed 0: a sum over guessed zeros
+                        # would understate what a listing reports.
+                        "unread_count": count
+                        if isinstance(count, int) and not isinstance(count, bool)
+                        else None,
+                        "participants": conversation_participant_names(node),
+                    }
         stack.extend(node.values())
     return found
 
@@ -641,6 +689,28 @@ class _ThreadFolderListener:
         self._pending = [task for task in pending if not task.done()]
 
 
+def _debug_dump_conversations_payload(payload: Any) -> None:
+    """Write one conversations payload aside when LINKEDIN_DEBUG_CONVERSATIONS_DIR is set.
+
+    Measurement support for this module's payload reads: the fields the
+    payload really carries (participant names, unread counts, folder
+    filters) decide what a tool can report without clicking rows, and a
+    dump is the evidence. Local development aid, not a tool contract.
+    """
+    directory = os.getenv("LINKEDIN_DEBUG_CONVERSATIONS_DIR", "").strip()
+    if not directory:
+        return
+    try:
+        root = Path(directory)
+        root.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%H%M%S") + f"-{time.time_ns() % 1_000_000:06d}"
+        (root / f"conversations-{stamp}.json").write_text(
+            json.dumps(payload, indent=1, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:
+        logger.debug("Failed to dump conversations payload", exc_info=True)
+
+
 class _InboxReadListener(_ThreadFolderListener):
     """Every conversation's read state, from the payloads an inbox load fetches.
 
@@ -668,48 +738,11 @@ class _InboxReadListener(_ThreadFolderListener):
                 payload = json.loads(body)
             except Exception:
                 return
+            _debug_dump_conversations_payload(payload)
             for key, observed in payload_read_status(payload).items():
                 self.read_status.setdefault(key, observed)
 
         self._pending.append(asyncio.create_task(_read()))
-
-
-_THREAD_URL_KEY_RE = re.compile(r"^/messaging/thread/([^/?#]+)")
-
-
-def _thread_key_of_reference(ref: Reference) -> str | None:
-    """The thread id a conversation reference names, unquoted.
-
-    The reference's URL is `messaging_thread_url`'s, a single escaped thread
-    id segment; anything else is not a thread reference and answers None.
-    """
-    match = _THREAD_URL_KEY_RE.match(ref.get("url") or "")
-    return unquote(match.group(1)) if match else None
-
-
-def _read_status_entries(
-    read_status: dict[str, dict[str, Any]], references: list[Reference]
-) -> dict[str, dict[str, Any]]:
-    """Read-state entries with the participant's name attached where known.
-
-    The name is the conversation reference's own text — the participant the
-    click-derived or anchor reference named. A thread no reference names
-    keeps its entry without one; a reference whose thread the payloads
-    never named adds nothing, because an unmeasured state stays absent
-    rather than guessed.
-    """
-    names: dict[str, str] = {}
-    for ref in references:
-        if ref.get("kind") != "conversation":
-            continue
-        key = _thread_key_of_reference(ref)
-        text = ref.get("text")
-        if key and text and key not in names:
-            names[key] = text
-    return {
-        key: {**entry, "name": names[key]} if key in names else entry
-        for key, entry in read_status.items()
-    }
 
 
 def _folder_of(categories: list[str] | None) -> Literal["archived", "inbox"] | None:
@@ -1225,21 +1258,73 @@ class ConversationReader:
         if scan.refs:
             references = dedupe_references(scan.refs + references)
 
-        read_status = _read_status_entries(listener.read_status, references)
-
         result = self._single_section_result(
             url,
             "inbox",
             cleaned,
             references=references,
         )
-        if read_status:
-            result["read_status"] = read_status
+        # Payload-measured, never click-derived: a thread the payloads
+        # named beyond the listed window keeps its entry, named by its own
+        # participants.
+        if listener.read_status:
+            result["read_status"] = listener.read_status
         section_errors = _listing_section_errors(
             "inbox", scan, report_unavailable_rows=True
         )
         if section_errors:
             result["section_errors"] = section_errors
+        return result
+
+    async def get_unread_conversations(self, limit: int = 200) -> dict[str, Any]:
+        """Every unread conversation, read from the unread-filtered inbox.
+
+        The filtered listing shows only unread threads, so scrolling it to
+        its end names every one of them: each batch arrives as the same
+        conversations payload the inbox listing fetches, and the listener
+        records each thread's read state, unread count and participants.
+        Nothing is clicked — an opened thread is a read thread — so the
+        listing never marks what it reports, and no reference scan runs.
+        """
+        url = "https://www.linkedin.com/messaging/?filter=unread"
+        listener = _InboxReadListener(self._session.page)
+        listener.install()
+        try:
+            await self._navigator._navigate_to_page(url)
+            await self._session.check_rate_limit()
+            await self._wait_for_main_text(log_context="Unread-filtered inbox")
+            await self._session.dismiss_modal()
+
+            scrolls = max(1, limit // 20)
+            await self._scroll_main_scrollable_region(
+                position="bottom", attempts=scrolls, pause_time=0.5
+            )
+
+            raw_result = await self._content._extract_root_content(["main"])
+        finally:
+            listener.remove()
+            await listener.drain()
+        raw = raw_result["text"]
+        cleaned = strip_linkedin_noise(raw) if raw else ""
+
+        unread = {
+            key: entry for key, entry in listener.read_status.items() if entry["unread"]
+        }
+        # None (an unmeasured count) sums as nothing: a guessed zero would
+        # understate the listing, and the honest answer names the threads
+        # whose count the payload never carried.
+        total_messages = sum(
+            entry["unread_count"]
+            for entry in unread.values()
+            if isinstance(entry.get("unread_count"), int)
+        )
+
+        result = self._single_section_result(url, "unread_conversations", cleaned)
+        if unread:
+            result["read_status"] = unread
+            result["total_unread_conversations"] = len(unread)
+        if total_messages:
+            result["total_unread_messages"] = total_messages
         return result
 
     async def get_conversation(

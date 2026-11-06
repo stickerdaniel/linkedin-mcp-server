@@ -29,8 +29,7 @@ from linkedin_mcp_server.linkedin.conversations import (
     _StoppedRow,
     _ThreadRefScan,
     _ThreadResolution,
-    _read_status_entries,
-    _thread_key_of_reference,
+    conversation_participant_names,
     conversation_read_status,
     is_conversations_payload_response,
     payload_read_status,
@@ -1912,6 +1911,63 @@ class TestThreadFolderPayload:
         assert thread_categories({"data": [conversation]}, "2-abc") is None
 
 
+def _member_participant(first: str, last: str) -> dict[str, Any]:
+    """A participant the way the payload carries a member's name."""
+    return {
+        "_type": "com.linkedin.messenger.MessagingParticipant",
+        "participantType": {
+            "member": {
+                "firstName": {"text": first},
+                "lastName": {"text": last},
+            }
+        },
+    }
+
+
+class TestConversationParticipants:
+    """The names a conversation node carries, read without any click."""
+
+    def test_first_and_last_name_are_joined_in_order(self):
+        node = {
+            **_conversation("2-abc==", ["INBOX"]),
+            "conversationParticipants": [
+                _member_participant("Sascha", "Koch"),
+                _member_participant("Deji", "Alonge"),
+            ],
+        }
+
+        assert conversation_participant_names(node) == [
+            "Sascha Koch",
+            "Deji Alonge",
+        ]
+
+    @pytest.mark.parametrize(
+        "participant",
+        [
+            "not a dictionary",
+            {},
+            {"participantType": "not a dictionary"},
+            {"participantType": {}},
+            # The member without any readable name contributes nothing.
+            {"participantType": {"member": {}}},
+            # A name shape this cannot read is skipped, never guessed.
+            {"participantType": {"member": {"firstName": {"text": None}}}},
+            {"participantType": {"member": {"firstName": "Deji"}}},
+        ],
+    )
+    def test_a_participant_this_cannot_read_contributes_nothing(self, participant):
+        node = {
+            **_conversation("2-abc==", ["INBOX"]),
+            "conversationParticipants": [participant],
+        }
+
+        assert conversation_participant_names(node) == []
+
+    def test_a_node_without_participants_or_not_a_dict_says_nothing(self):
+        assert conversation_participant_names(_conversation("2-abc==", ["INBOX"])) == []
+        assert conversation_participant_names("not a dictionary") == []
+
+
 class TestInboxReadStatus:
     """The inbox listing's read state, from the conversations query's data."""
 
@@ -1974,14 +2030,64 @@ class TestInboxReadStatus:
                 "unread": True,
                 "field": "readStatus",
                 "value": "UNREAD",
+                "unread_count": None,
+                "participants": [],
             },
-            "2-read==": {"unread": False, "field": "read", "value": True},
+            "2-read==": {
+                "unread": False,
+                "field": "read",
+                "value": True,
+                "unread_count": None,
+                "participants": [],
+            },
             "2-archived==": {
                 "unread": False,
                 "field": "readStatus",
                 "value": "READ",
+                "unread_count": None,
+                "participants": [],
             },
         }
+
+    def test_unread_count_and_participants_travel_with_the_state(self):
+        payload = {
+            "data": [
+                {
+                    **_conversation("2-abc==", ["INBOX"]),
+                    "read": False,
+                    "unreadCount": 3,
+                    "conversationParticipants": [
+                        _member_participant("Sascha", "Koch"),
+                        _member_participant("Kuba", "Smolorz"),
+                    ],
+                }
+            ]
+        }
+
+        assert payload_read_status(payload) == {
+            "2-abc==": {
+                "unread": True,
+                "field": "read",
+                "value": False,
+                "unread_count": 3,
+                "participants": ["Sascha Koch", "Kuba Smolorz"],
+            }
+        }
+
+    def test_an_unread_count_this_cannot_read_is_null_never_a_guessed_zero(self):
+        payload = {
+            "data": [
+                {
+                    **_conversation("2-abc==", ["INBOX"]),
+                    "read": False,
+                    "unreadCount": "many",
+                }
+            ]
+        }
+
+        entry = payload_read_status(payload)["2-abc=="]
+        assert entry["unread"] is True
+        assert entry["unread_count"] is None
 
     def test_a_thread_named_twice_keeps_its_first_measurement(self):
         payload = {
@@ -1992,34 +2098,6 @@ class TestInboxReadStatus:
         }
 
         assert payload_read_status(payload)["2-abc=="]["unread"] is True
-
-    def test_a_reference_names_the_entrys_participant_and_is_unquoted(self):
-        ref = _ref("/messaging/thread/2-abc%3D%3D/", "Deji Alonge", "inbox")
-        assert ref["kind"] == "conversation"
-        assert _thread_key_of_reference(ref) == "2-abc=="
-
-        entries = _read_status_entries(
-            {
-                "2-abc==": {
-                    "unread": True,
-                    "field": "readStatus",
-                    "value": "UNREAD",
-                },
-                "2-other==": {
-                    "unread": False,
-                    "field": "readStatus",
-                    "value": "READ",
-                },
-            },
-            [ref],
-        )
-
-        assert entries["2-abc=="]["name"] == "Deji Alonge"
-        assert "name" not in entries["2-other=="]
-
-    def test_a_reference_without_a_thread_url_says_nothing(self):
-        ref = _ref("/in/someone/", "Someone", "inbox")
-        assert _thread_key_of_reference(ref) is None
 
     async def test_the_inbox_reports_read_status_measured_before_the_clicks(
         self, mock_page
@@ -2033,7 +2111,15 @@ class TestInboxReadStatus:
         reader = _reader(mock_page)
         payload = {
             "data": [
-                {**_conversation("2-abc==", ["INBOX"]), "readStatus": "UNREAD"},
+                {
+                    **_conversation("2-abc==", ["INBOX"]),
+                    "readStatus": "UNREAD",
+                    "unreadCount": 2,
+                    "conversationParticipants": [
+                        _member_participant("Sascha", "Koch"),
+                        _member_participant("Deji", "Alonge"),
+                    ],
+                },
                 {**_conversation("2-read==", ["INBOX"]), "readStatus": "READ"},
             ]
         }
@@ -2077,12 +2163,15 @@ class TestInboxReadStatus:
                 "unread": True,
                 "field": "readStatus",
                 "value": "UNREAD",
-                "name": "Deji Alonge",
+                "unread_count": 2,
+                "participants": ["Sascha Koch", "Deji Alonge"],
             },
             "2-read==": {
                 "unread": False,
                 "field": "readStatus",
                 "value": "READ",
+                "unread_count": None,
+                "participants": [],
             },
         }
         # The listener is removed before the compose page, so its response
@@ -2114,3 +2203,125 @@ class TestInboxReadStatus:
             result = await reader.get_inbox(limit=10)
 
         assert "read_status" not in result
+
+
+class TestGetUnreadConversations:
+    """The unread-filtered listing, read without one click."""
+
+    URL = "https://www.linkedin.com/messaging/?filter=unread"
+
+    async def test_the_filtered_listing_never_clicks_a_row(self, mock_page):
+        """One navigation, no compose page, no scan.
+
+        An opened thread is a read thread, so the row scan the inbox runs
+        must never start here: the tool that reports unread state is the
+        one tool that must not disturb it.
+        """
+        reader = _reader(mock_page)
+        order: list[Any] = []
+
+        async def scroll(**kwargs: Any) -> None:
+            order.append(("scroll", kwargs["attempts"]))
+
+        with (
+            patch.object(
+                PageNavigator, "_navigate_to_page", new_callable=AsyncMock
+            ) as nav,
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(reader, "_scroll_main_scrollable_region", scroll),
+            patch.object(
+                PageContentReader,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=_root("Unread conversation A"),
+            ),
+            patch.object(
+                reader,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+            ) as scan,
+        ):
+            result = await reader.get_unread_conversations(limit=200)
+
+        nav.assert_awaited_once_with(self.URL)
+        scan.assert_not_awaited()
+        assert order == [("scroll", 10)]
+        assert result["url"] == self.URL
+        assert result["sections"] == {"unread_conversations": "Unread conversation A"}
+        assert "references" not in result
+
+    async def test_only_unread_threads_are_kept_and_summarised(self, mock_page):
+        reader = _reader(mock_page)
+        payload = {
+            "data": [
+                {
+                    **_conversation("2-one==", ["INBOX"]),
+                    "read": False,
+                    "unreadCount": 3,
+                    "conversationParticipants": [
+                        _member_participant("Sascha", "Koch"),
+                        _member_participant("Kuba", "Smolorz"),
+                    ],
+                },
+                {
+                    **_conversation("2-two==", ["INBOX"]),
+                    "read": False,
+                    "unreadCount": "many",
+                },
+                {**_conversation("2-read==", ["INBOX"]), "read": True},
+            ]
+        }
+        response = SimpleNamespace(
+            url=f"{_GRAPHQL}?queryId=messengerConversations.0d5e&variables=(x:1)",
+            body=AsyncMock(return_value=json.dumps(payload).encode("utf-8")),
+        )
+
+        async def emit(url):
+            if url == self.URL:
+                for callback in mock_page.listeners["response"]:
+                    callback(response)
+
+        with (
+            patch.object(
+                PageNavigator, "_navigate_to_page", AsyncMock(side_effect=emit)
+            ),
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                reader, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                PageContentReader,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=_root("Unread conversation A"),
+            ),
+        ):
+            result = await reader.get_unread_conversations(limit=200)
+
+        assert set(result["read_status"]) == {"2-one==", "2-two=="}
+        # A count this cannot read (unread_count None) sums as nothing:
+        # a guessed zero would understate the listing.
+        assert result["total_unread_conversations"] == 2
+        assert result["total_unread_messages"] == 3
+
+    async def test_a_listing_no_payload_named_answers_with_no_totals(self, mock_page):
+        reader = _reader(mock_page)
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                reader, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                PageContentReader,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=_root(""),
+            ),
+        ):
+            result = await reader.get_unread_conversations(limit=200)
+
+        assert result["sections"] == {}
+        assert "read_status" not in result
+        assert "total_unread_conversations" not in result
+        assert "total_unread_messages" not in result
