@@ -55,6 +55,7 @@ __all__ = [
     "normalize_job_id",
     "normalize_opaque_id",
     "normalize_person_identifier",
+    "normalize_post_url",
     "normalize_profile_urn",
     "normalize_thread_id",
     "person_profile_url",
@@ -144,6 +145,11 @@ _NUMERIC_ID = re.compile(r"^[0-9]+$")
 
 _PROFILE_URN_PREFIX = "urn:li:fsd_profile:"
 _PROFILE_URN_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+
+_POST_URN = re.compile(r"urn:li:(?:activity|share|ugcPost):[0-9]+")
+_POST_SLUG = re.compile(
+    r"[A-Za-z0-9_-]+-(?:activity|share|ugcPost)-[0-9]+-[A-Za-z0-9_-]+"
+)
 
 
 def _decoded(value: str) -> str | None:
@@ -361,6 +367,37 @@ def normalize_person_identifier(value: str, *, allow_self_alias: bool = False) -
             "user, or pass someone's own /in/ public identifier."
         )
     return reference
+
+
+def normalize_post_url(value: str) -> str:
+    """Return a post permalink from a LinkedIn URL or a typed post URN.
+
+    A bare numeric id is ambiguous: activity, share and ugcPost have different
+    URN types. Preserve the type the caller supplies, and preserve a /posts/
+    slug as a slug rather than guessing which entity it resolves to.
+
+    Raises:
+        InvalidReferenceError: When the reference does not name one post.
+    """
+    value = value.strip()
+    if _POST_URN.fullmatch(value):
+        return f"https://www.linkedin.com/feed/update/{value}/"
+
+    segments = _linkedin_segments(value, want="post permalink")
+    if segments:
+        if segments[:2] == ["feed", "update"] and len(segments) == 3:
+            urn = _usable(segments[2])
+            if urn is not None and _POST_URN.fullmatch(urn):
+                return f"https://www.linkedin.com/feed/update/{urn}/"
+        elif segments[0] == "posts" and len(segments) == 2:
+            slug = _usable(segments[1])
+            if slug is not None and _POST_SLUG.fullmatch(slug):
+                return f"https://www.linkedin.com/posts/{slug}/"
+
+    raise InvalidReferenceError(
+        "Pass a LinkedIn post permalink (/feed/update/urn:li:activity:.../ "
+        "or /posts/...) or a complete activity, share or ugcPost URN."
+    )
 
 
 def normalize_company_identifier(value: str) -> str:

@@ -80,8 +80,31 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `get_easy_apply_form` | Read an Easy Apply form: each field's label, type, options and prefilled value. Never types or submits. |
 | `get_feed` | Read recent posts from your home feed, with links to the original posts. |
 | `search_posts` | Search posts by keyword, optionally filtered by recency or content type. |
+| `get_my_posts` | Read your recent posts and the engagement text LinkedIn shows beside them. |
+| `get_post` | Open a post by permalink or activity URN and read its text, visible comments, and engagement counters. |
+| `get_post_analytics` | Read the private analytics page for one of your own posts. |
+| `get_scheduled_posts` | Read your scheduled-post queue through LinkedIn's English scheduling dialog. |
 | `get_session_status` | Check your saved login and browser state without opening a browser. |
 | `close_session` | Close the shared browser session without deleting your saved login. |
+
+### Working with posts
+
+Start with `get_my_posts` to find a post, then pass its permalink or activity URN
+to `get_post`. The own-posts lookup also returns the `main_profile` section,
+alongside `posts`. Reads return the page's text and references. Scrolling is bounded:
+`max_scrolls` defaults to 5 for your posts and 3 for an individual post. Collapsed
+comments and replies are not expanded, so the returned discussion can be partial.
+
+Use `get_post_analytics` with an activity URN or a permalink identifying that
+activity for a post's private performance details. It reads what LinkedIn makes
+available to your account; it does not calculate a score or rank posts. Keep
+impressions, members reached, likes, total reactions, comments, and reposts
+distinct. A missing metric means it was not shown or captured, not zero.
+
+`get_scheduled_posts` reads the queue without creating, editing, or deleting a
+scheduled post. It currently recognizes the English dialog and defaults to 3
+scrolls. Dates, times, and any time zone are returned as LinkedIn displays them;
+the server does not infer a missing zone.
 
 <br/>
 <br/>

@@ -1,0 +1,216 @@
+{
+  "call": {
+    "arguments": {
+      "max_scrolls": 4
+    },
+    "method": "get_my_posts"
+  },
+  "events": [
+    {
+      "call": "get_my_posts",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "get_my_posts",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/me/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "get_my_posts",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/in/ada-lovelace/",
+      "requested_url": "https://www.linkedin.com/in/me/",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_my_posts",
+      "description": "goto https://www.linkedin.com/in/me/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "get_my_posts",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/me/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "get_my_posts",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "get_my_posts",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "get_my_posts",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "get_my_posts",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "get_my_posts",
+      "dismissed": false,
+      "kind": "boundary.modal"
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "get_my_posts",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 4,
+      "pause_time": 0.5
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "get_my_posts",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e6b2be4ebddd"
+    },
+    {
+      "arg": null,
+      "call": "get_my_posts",
+      "kind": "wait_for_function",
+      "operation": "profile_message_target_ready",
+      "program_digest": "d156e406f6bb",
+      "timeout_ms": 1000
+    },
+    {
+      "call": "get_my_posts",
+      "kind": "evaluate",
+      "operation": "profile_message_target",
+      "program_digest": "c7804bf22e53"
+    },
+    {
+      "call": "get_my_posts",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 2.0
+    },
+    {
+      "call": "get_my_posts",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "get_my_posts",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "get_my_posts",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
+      "requested_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_my_posts",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "get_my_posts",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "get_my_posts",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "get_my_posts",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "get_my_posts",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "get_my_posts",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "get_my_posts",
+      "dismissed": false,
+      "kind": "boundary.modal"
+    },
+    {
+      "arg": null,
+      "call": "get_my_posts",
+      "kind": "wait_for_function",
+      "operation": "main_text_200",
+      "program_digest": "24943facf9de",
+      "timeout_ms": 10000
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "get_my_posts",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 4,
+      "pause_time": 1.0
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "get_my_posts",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e6b2be4ebddd"
+    }
+  ],
+  "result": {
+    "profile_urn": "ACoAA-self",
+    "sections": {
+      "main_profile": "Own profile",
+      "posts": "Published post content"
+    },
+    "url": "https://www.linkedin.com/in/ada-lovelace/"
+  },
+  "scenario": "get_my_posts__baseline",
+  "schema_version": 1
+}

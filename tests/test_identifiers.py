@@ -21,12 +21,91 @@ from linkedin_mcp_server.linkedin.identifiers import (
     normalize_job_id,
     normalize_opaque_id,
     normalize_person_identifier,
+    normalize_post_url,
     normalize_profile_urn,
     normalize_thread_id,
     person_profile_url,
 )
 
 PROFILE_ID = "ACoAADdZSNYBiaacxEw6je-wVIKjGkKp-it0gD8"
+
+
+class TestNormalizePostUrl:
+    @pytest.mark.parametrize("kind", ["activity", "share", "ugcPost"])
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "urn:li:{kind}:1234567890123",
+            "/feed/update/urn:li:{kind}:1234567890123/",
+            "https://www.linkedin.com/feed/update/urn:li:{kind}:1234567890123/",
+            "http://linkedin.com/feed/update/urn:li:{kind}:1234567890123?trk=share",
+            "https://de.linkedin.com/feed/update/urn%3Ali%3A{kind}%3A1234567890123/#x",
+            "www.linkedin.com/feed/update/urn:li:{kind}:1234567890123/",
+            "//www.linkedin.com/feed/update/urn:li:{kind}:1234567890123/",
+        ],
+    )
+    def test_accepts_post_urns_and_permalink_forms(self, kind, template):
+        assert normalize_post_url(template.format(kind=kind)) == (
+            f"https://www.linkedin.com/feed/update/urn:li:{kind}:1234567890123/"
+        )
+
+    def test_preserves_a_slug_permalink_without_guessing_its_entity_kind(self):
+        assert normalize_post_url(
+            "https://uk.linkedin.com/posts/synthetic-post-activity-1234567890123-AbC/"
+            "?utm_source=share#discussion"
+        ) == (
+            "https://www.linkedin.com/posts/synthetic-post-activity-1234567890123-AbC/"
+        )
+
+    def test_accepts_the_relative_slug_references_emitted_by_this_server(self):
+        assert normalize_post_url(
+            "/posts/synthetic-post-ugcPost-1234567890123-AbC"
+        ) == (
+            "https://www.linkedin.com/posts/synthetic-post-ugcPost-1234567890123-AbC/"
+        )
+
+    def test_is_idempotent(self):
+        url = normalize_post_url("urn:li:activity:1234567890123")
+        assert normalize_post_url(url) == url
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "",
+            "1234567890123",
+            "urn:li:fsd_profile:1234567890123",
+            "urn:li:activity:１２３",
+            "urn:li:activity:123/../../feed",
+            "urn:li:activity:123?other=456",
+            "https://example.com/feed/update/urn:li:activity:123/",
+            "https://linkedin.com.example/feed/update/urn:li:activity:123/",
+            "https://www.linkedin.com:444/feed/update/urn:li:activity:123/",
+            "https://www.linkedin.com/feed/",
+            "https://www.linkedin.com/in/synthetic/",
+            "https://www.linkedin.com/feed/update/urn:li:activity:123/extra/",
+            "https://www.linkedin.com/feed//update/urn:li:activity:123/",
+            "https://www.linkedin.com/feed/update/urn:li:activity:123/../../feed/",
+            "https://www.linkedin.com/feed/update/urn:li:activity:123/%2e%2e/",
+            "https://www.linkedin.com/feed/update/urn%253Ali%253Aactivity%253A123/",
+            "https://www.linkedin.com/feed/update/urn:li:activity:12%0a3/",
+            "https://www.linkedin.com/feed/update/urn:li:activity:123\\other/",
+            "https://www.linkedin.com/posts/..",
+            "https://www.linkedin.com/posts/%2e%2e",
+            "https://www.linkedin.com/posts/a%2Fb",
+            "https://www.linkedin.com/posts/a%FF",
+            "https://www.linkedin.com/posts/synthetic/extra",
+            "https://www.linkedin.com/posts/not-a-post",
+            "https://www.linkedin.com/posts/synthetic-activity-１２３-AbC/",
+            "https://www.linkedin.com/feed/update/urn:li:activity:12\n3/",
+        ],
+    )
+    def test_refuses_ambiguous_destinations(self, value):
+        with pytest.raises(InvalidReferenceError):
+            normalize_post_url(value)
+
+    def test_a_short_link_explains_how_to_supply_the_actual_permalink(self):
+        with pytest.raises(InvalidReferenceError, match="shortened LinkedIn link"):
+            normalize_post_url("https://lnkd.in/synthetic")
 
 
 class TestNormalizePersonIdentifier:

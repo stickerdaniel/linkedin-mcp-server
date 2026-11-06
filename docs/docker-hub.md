@@ -24,6 +24,9 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 - **Company Posts**: Get recent posts from a company's LinkedIn feed
 - **Home Feed**: Get recent posts from the authenticated user's LinkedIn home feed
 - **Post Search**: Search posts/content globally by keyword (the "Posts" tab) with optional recency and content-type filters, such as uploaded documents
+- **Post Reading**: Read your own recent posts or open a post permalink, including the engagement counters and comments currently rendered; bounded reads may return only part of a discussion
+- **Post Analytics**: Read a post's private analytics page where your account has access; metrics remain as LinkedIn displays them, with missing values left unknown
+- **Scheduled Posts**: Read the scheduled-post queue through the English scheduling dialog, with dates, times, and any time zone as displayed
 - **Compact References**: Return typed per-section links alongside readable text without shipping full-page markdown
 - **Session Status**: Diagnose saved-session files and the serving process's browser state without opening a browser or contacting LinkedIn
 

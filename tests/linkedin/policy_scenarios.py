@@ -24,6 +24,7 @@ from linkedin_mcp_server.linkedin import job_pages as job_pages_module
 from linkedin_mcp_server.linkedin import jobs as jobs_module
 from linkedin_mcp_server.linkedin import navigation as navigation_module
 from linkedin_mcp_server.linkedin import person as person_module
+from linkedin_mcp_server.linkedin import post_management as post_management_module
 from linkedin_mcp_server.linkedin import session as session_module
 from linkedin_mcp_server.linkedin import LinkedInExtractor
 from linkedin_mcp_server.linkedin.fields import COMPANY_SECTIONS, PERSON_SECTIONS
@@ -71,6 +72,7 @@ _COMMON_ALLOWED = {
     "locator.create",
     "locator.derive",
     "locator.is_visible",
+    "locator.get_attribute",
     "locator.scroll_into_view",
     "locator.wait_for",
     "mouse.move",
@@ -166,8 +168,9 @@ async def boundaries(
     async def scroll_body(*args: Any, **kwargs: Any) -> None:
         values = bind_effective(real_scroll_body, *args, **kwargs)
         values.pop("page")
-        recorder.record("boundary.scroll_body", **values, actual_scrolls=2)
-        clock.advance(values["pause_time"] * 2)
+        actual_scrolls = min(2, values["max_scrolls"])
+        recorder.record("boundary.scroll_body", **values, actual_scrolls=actual_scrolls)
+        clock.advance(values["pause_time"] * actual_scrolls)
 
     async def scroll_sidebar(*args: Any, **kwargs: Any) -> bool:
         values = bind_effective(real_scroll_sidebar, *args, **kwargs)
@@ -941,6 +944,15 @@ async def _single_capture_facade_scenario(method: str) -> dict[str, Any]:
             elif method == "search_posts":
                 arguments = {"keywords": "mathematics", "max_pages": 2}
                 result = await extractor.search_posts(**arguments)
+            elif method == "get_post":
+                arguments = {
+                    "post_url": "urn:li:activity:1234567890123",
+                    "max_scrolls": 4,
+                }
+                result = await extractor.get_post(**arguments)
+            elif method == "get_post_analytics":
+                arguments = {"post_url": "urn:li:activity:1234567890123"}
+                result = await extractor.get_post_analytics(**arguments)
             else:
                 raise AssertionError(method)
     page.assert_clean()
@@ -1037,6 +1049,83 @@ async def _get_my_profile_scenario() -> dict[str, Any]:
     return recorder.trace(
         {"method": "get_my_profile", "arguments": {}},
         result,
+    )
+
+
+async def _my_posts_scenario() -> dict[str, Any]:
+    recorder = TraceRecorder("get_my_posts__baseline", _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    page.goto_landings.append("https://www.linkedin.com/in/ada-lovelace/")
+    page.script(
+        "evaluate:root_content", _root("Own profile"), _root("Published post content")
+    )
+    _script_profile_target(page, profile_urn="ACoAA-self")
+    extractor = _extractor(page)
+    arguments = {"max_scrolls": 4}
+    async with boundaries(recorder, clock):
+        with recorder.context("get_my_posts"):
+            result = await extractor.get_my_posts(**arguments)
+    page.assert_clean()
+    return recorder.trace({"method": "get_my_posts", "arguments": arguments}, result)
+
+
+async def _scheduled_posts_scenario(*, operator_dialog: bool = False) -> dict[str, Any]:
+    name = (
+        "get_scheduled_posts__operator_dialog"
+        if operator_dialog
+        else "get_scheduled_posts__baseline"
+    )
+    recorder = TraceRecorder(name, _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder, url="https://www.linkedin.com/feed/")
+    preflight = (
+        {"ok": False, "reason": "existing_dialog"} if operator_dialog else {"ok": True}
+    )
+    page.script("evaluate:post_schedule_preflight", preflight)
+    if not operator_dialog:
+        page.declare_locator("html", "document_language")
+        page.script("document_language.get_attribute", "en-US")
+        page.declare_locator(
+            'dialog[open]:visible, [role="dialog"]:visible', "schedule_dialog"
+        )
+        page.script("schedule_dialog.wait_for", None)
+        loaded = {
+            "ok": True,
+            "ready": True,
+            "empty": False,
+            "entries": 1,
+            "expected": 1,
+            "at_end": True,
+            "text": "Scheduled (1)\nPosting Monday at 9:15 AM\nSynthetic scheduled post.",
+        }
+        page.script(
+            "evaluate:post_schedule_ui",
+            {"ok": True},
+            {"ok": True},
+            loaded,
+            loaded,
+            loaded,
+        )
+        page.script("evaluate:post_schedule_cleanup", True)
+    extractor = _extractor(page)
+    arguments = {"max_scrolls": 3}
+    with patch.object(
+        post_management_module.secrets,
+        "token_urlsafe",
+        return_value="synthetic-schedule-read",
+    ):
+        async with boundaries(recorder, clock):
+            with recorder.context("get_scheduled_posts", "scheduled_posts"):
+                try:
+                    result = await extractor.get_scheduled_posts(**arguments)
+                except ValueError as exc:
+                    if not operator_dialog:
+                        raise
+                    result = {"raised": type(exc).__name__, "message": str(exc)}
+    page.assert_clean()
+    return recorder.trace(
+        {"method": "get_scheduled_posts", "arguments": arguments}, result
     )
 
 
@@ -1260,6 +1349,10 @@ async def _facade_contract_trace() -> dict[str, Any]:
 
 
 TOOL_FACADE_METHODS = {
+    "get_post",
+    "get_my_posts",
+    "get_post_analytics",
+    "get_scheduled_posts",
     "connect_with_person",
     "dismiss_job",
     "extract_feed",
@@ -1365,6 +1458,15 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
             "search_companies"
         ),
         "search-posts.json": await _single_capture_facade_scenario("search_posts"),
+        "get-post.json": await _single_capture_facade_scenario("get_post"),
+        "post-analytics.json": await _single_capture_facade_scenario(
+            "get_post_analytics"
+        ),
+        "my-posts.json": await _my_posts_scenario(),
+        "scheduled-posts.json": await _scheduled_posts_scenario(),
+        "scheduled-posts-operator-dialog.json": await _scheduled_posts_scenario(
+            operator_dialog=True
+        ),
         "inbox.json": await _conversation_scenario("get_inbox"),
         "conversation.json": await _conversation_scenario("get_conversation"),
         "search-conversations.json": await _conversation_scenario(

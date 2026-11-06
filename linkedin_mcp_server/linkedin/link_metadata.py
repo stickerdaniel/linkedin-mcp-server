@@ -75,6 +75,9 @@ _CONTEXT_LABELS = {
 }
 
 _SECTION_CONTEXTS = {
+    "post": "post",
+    "post_analytics": "post_analytics",
+    "scheduled_posts": "scheduled_posts",
     "experience": "experience",
     "education": "education",
     "interests": "interests",
@@ -97,6 +100,9 @@ _SECTION_CONTEXTS = {
 _DEFAULT_REFERENCE_CAP = 12
 _SEARCH_RESULTS_REFERENCE_CAP = 15
 _REFERENCE_CAPS = {
+    "post": 12,
+    "post_analytics": 12,
+    "scheduled_posts": 12,
     "main_profile": 12,
     "about": 12,
     "experience": 12,
@@ -154,6 +160,9 @@ JOB_PATH_RE = re.compile(r"^/jobs/view/(?:[^/?#]*-)?([0-9]+)(?=[/?#]|$)")
 _NEWSLETTER_PATH_RE = re.compile(r"^/newsletters/([^/?#]+)")
 _PULSE_PATH_RE = re.compile(r"^/pulse/([^/?#]+)")
 _FEED_PATH_RE = re.compile(r"^/feed/update/([^/?#]+)")
+_POST_ANALYTICS_PATH_RE = re.compile(
+    r"^/analytics/post-summary/(urn:li:activity:[0-9]+)/?$"
+)
 _MESSAGING_THREAD_PATH_RE = re.compile(r"^/messaging/thread/([^/?#]+)")
 _MAX_REDIRECT_UNWRAP_DEPTH = 5
 
@@ -294,6 +303,12 @@ def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
         return "external", urlunparse(
             (parsed.scheme, parsed.netloc, parsed.path or "/", "", "", "")
         )
+
+    # An own-post card may expose its activity identity only through its
+    # analytics link. Keep that explicit identity as a usable post reference;
+    # unknown analytics routes do not establish a post destination.
+    if match := _POST_ANALYTICS_PATH_RE.fullmatch(path):
+        return "feed_post", f"/feed/update/{match.group(1)}/"
 
     # The "See all employees on LinkedIn" canned-search anchor carries the
     # company URN id, which is the only value LinkedIn's currentCompany

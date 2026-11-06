@@ -1,0 +1,303 @@
+{
+  "call": {
+    "arguments": {
+      "max_scrolls": 3
+    },
+    "method": "get_scheduled_posts"
+  },
+  "events": [
+    {
+      "call": "get_scheduled_posts",
+      "kind": "evaluate",
+      "operation": "post_schedule_preflight",
+      "program_digest": "1e929ec7a6bf",
+      "section": "scheduled_posts"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "scheduled_posts"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "extra": {
+        "target_url": "https://www.linkedin.com/feed/?shareActive=true",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "scheduled_posts"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/feed/?shareActive=true",
+      "requested_url": "https://www.linkedin.com/feed/?shareActive=true",
+      "section": "scheduled_posts",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "description": "goto https://www.linkedin.com/feed/?shareActive=true",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "scheduled_posts"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "extra": {
+        "target_url": "https://www.linkedin.com/feed/?shareActive=true",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "scheduled_posts"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "scheduled_posts"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "scheduled_posts"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "kind": "boundary.rate_limit",
+      "section": "scheduled_posts"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "kind": "locator.create",
+      "locator": "document_language",
+      "parent": null,
+      "section": "scheduled_posts",
+      "selector": "html"
+    },
+    {
+      "attribute": "lang",
+      "call": "get_scheduled_posts",
+      "kind": "locator.get_attribute",
+      "locator": "document_language",
+      "section": "scheduled_posts"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "kind": "locator.create",
+      "locator": "schedule_dialog",
+      "parent": null,
+      "section": "scheduled_posts",
+      "selector": "dialog[open]:visible, [role=\"dialog\"]:visible"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "kind": "locator.wait_for",
+      "locator": "schedule_dialog",
+      "section": "scheduled_posts",
+      "state": "visible",
+      "timeout_ms": 10000
+    },
+    {
+      "arg": {
+        "action": "open_clock",
+        "labels": {
+          "dismiss": "Dismiss",
+          "empty": [
+            "You have no scheduled posts",
+            "No scheduled posts",
+            "When you schedule a post, it automatically posts at the date and time you chose"
+          ],
+          "heading": "Scheduled posts",
+          "posting_pattern": "^Posting\\b",
+          "schedule_heading": "Schedule post",
+          "scheduled_pattern": "^Scheduled \\(([0-9]+)\\)$",
+          "view_all": "View all scheduled posts"
+        },
+        "token": "synthetic-schedule-read"
+      },
+      "call": "get_scheduled_posts",
+      "kind": "evaluate",
+      "operation": "post_schedule_ui",
+      "program_digest": "966638bf6228",
+      "section": "scheduled_posts"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.3,
+      "section": "scheduled_posts"
+    },
+    {
+      "arg": {
+        "action": "open_list",
+        "labels": {
+          "dismiss": "Dismiss",
+          "empty": [
+            "You have no scheduled posts",
+            "No scheduled posts",
+            "When you schedule a post, it automatically posts at the date and time you chose"
+          ],
+          "heading": "Scheduled posts",
+          "posting_pattern": "^Posting\\b",
+          "schedule_heading": "Schedule post",
+          "scheduled_pattern": "^Scheduled \\(([0-9]+)\\)$",
+          "view_all": "View all scheduled posts"
+        },
+        "token": "synthetic-schedule-read"
+      },
+      "call": "get_scheduled_posts",
+      "kind": "evaluate",
+      "operation": "post_schedule_ui",
+      "program_digest": "966638bf6228",
+      "section": "scheduled_posts"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.5,
+      "section": "scheduled_posts"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "kind": "boundary.rate_limit",
+      "section": "scheduled_posts"
+    },
+    {
+      "arg": {
+        "action": "read",
+        "labels": {
+          "dismiss": "Dismiss",
+          "empty": [
+            "You have no scheduled posts",
+            "No scheduled posts",
+            "When you schedule a post, it automatically posts at the date and time you chose"
+          ],
+          "heading": "Scheduled posts",
+          "posting_pattern": "^Posting\\b",
+          "schedule_heading": "Schedule post",
+          "scheduled_pattern": "^Scheduled \\(([0-9]+)\\)$",
+          "view_all": "View all scheduled posts"
+        },
+        "token": "synthetic-schedule-read"
+      },
+      "call": "get_scheduled_posts",
+      "kind": "evaluate",
+      "operation": "post_schedule_ui",
+      "program_digest": "966638bf6228",
+      "section": "scheduled_posts"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.5,
+      "section": "scheduled_posts"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "kind": "boundary.rate_limit",
+      "section": "scheduled_posts"
+    },
+    {
+      "arg": {
+        "action": "read",
+        "labels": {
+          "dismiss": "Dismiss",
+          "empty": [
+            "You have no scheduled posts",
+            "No scheduled posts",
+            "When you schedule a post, it automatically posts at the date and time you chose"
+          ],
+          "heading": "Scheduled posts",
+          "posting_pattern": "^Posting\\b",
+          "schedule_heading": "Schedule post",
+          "scheduled_pattern": "^Scheduled \\(([0-9]+)\\)$",
+          "view_all": "View all scheduled posts"
+        },
+        "token": "synthetic-schedule-read"
+      },
+      "call": "get_scheduled_posts",
+      "kind": "evaluate",
+      "operation": "post_schedule_ui",
+      "program_digest": "966638bf6228",
+      "section": "scheduled_posts"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.5,
+      "section": "scheduled_posts"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "kind": "boundary.rate_limit",
+      "section": "scheduled_posts"
+    },
+    {
+      "arg": {
+        "action": "read",
+        "labels": {
+          "dismiss": "Dismiss",
+          "empty": [
+            "You have no scheduled posts",
+            "No scheduled posts",
+            "When you schedule a post, it automatically posts at the date and time you chose"
+          ],
+          "heading": "Scheduled posts",
+          "posting_pattern": "^Posting\\b",
+          "schedule_heading": "Schedule post",
+          "scheduled_pattern": "^Scheduled \\(([0-9]+)\\)$",
+          "view_all": "View all scheduled posts"
+        },
+        "token": "synthetic-schedule-read"
+      },
+      "call": "get_scheduled_posts",
+      "kind": "evaluate",
+      "operation": "post_schedule_ui",
+      "program_digest": "966638bf6228",
+      "section": "scheduled_posts"
+    },
+    {
+      "arg": {
+        "labels": {
+          "dismiss": "Dismiss",
+          "empty": [
+            "You have no scheduled posts",
+            "No scheduled posts",
+            "When you schedule a post, it automatically posts at the date and time you chose"
+          ],
+          "heading": "Scheduled posts",
+          "posting_pattern": "^Posting\\b",
+          "schedule_heading": "Schedule post",
+          "scheduled_pattern": "^Scheduled \\(([0-9]+)\\)$",
+          "view_all": "View all scheduled posts"
+        },
+        "token": "synthetic-schedule-read"
+      },
+      "call": "get_scheduled_posts",
+      "kind": "evaluate",
+      "operation": "post_schedule_cleanup",
+      "program_digest": "0bc64561f506",
+      "section": "scheduled_posts"
+    }
+  ],
+  "result": {
+    "sections": {
+      "scheduled_posts": "Scheduled (1)\nPosting Monday at 9:15 AM\nSynthetic scheduled post."
+    },
+    "url": "https://www.linkedin.com/feed/?shareActive=true"
+  },
+  "scenario": "get_scheduled_posts__baseline",
+  "schema_version": 1
+}

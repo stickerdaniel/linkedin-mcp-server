@@ -24,6 +24,8 @@ from linkedin_mcp_server.linkedin.jobs import JobReader
 from linkedin_mcp_server.linkedin.message_sender import MessageSender
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.person import PersonReader
+from linkedin_mcp_server.linkedin.post_management import PostManagement
+from linkedin_mcp_server.linkedin.post_reader import PostReader
 from linkedin_mcp_server.linkedin.posts import PostSearch
 from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
 from linkedin_mcp_server.linkedin.session import PageSession
@@ -66,6 +68,10 @@ class LinkedInExtractor:
         job_pages = JobPageReader(session, navigator, content)
         self._jobs = JobReader(navigator, capture, job_pages)
         self._posts = PostSearch(capture)
+        self._post_reader = PostReader(capture)
+        self._post_management = PostManagement(
+            session, navigator, capture, person.get_my_profile
+        )
         self._conversations = ConversationReader(
             session, navigator, content, profile_page
         )
@@ -236,6 +242,22 @@ class LinkedInExtractor:
             max_pages=max_pages,
             content_type=content_type,
         )
+
+    async def get_post(self, post_url: str, max_scrolls: int = 3) -> dict[str, Any]:
+        """Read a post permalink and its currently visible discussion/counters."""
+        return await self._post_reader.get_post(post_url, max_scrolls=max_scrolls)
+
+    async def get_my_posts(self, max_scrolls: int = 5) -> dict[str, Any]:
+        """Read the authenticated user's published-post activity page."""
+        return await self._post_management.get_my_posts(max_scrolls=max_scrolls)
+
+    async def get_post_analytics(self, post_url: str) -> dict[str, Any]:
+        """Read the analytics page available to the authenticated post owner."""
+        return await self._post_management.get_post_analytics(post_url)
+
+    async def get_scheduled_posts(self, max_scrolls: int = 3) -> dict[str, Any]:
+        """Read the authenticated user's scheduled posts without changing them."""
+        return await self._post_management.get_scheduled_posts(max_scrolls=max_scrolls)
 
     async def get_inbox(self, limit: int = 20) -> dict[str, Any]:
         """List recent conversations from the messaging inbox."""
