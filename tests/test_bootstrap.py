@@ -1482,18 +1482,34 @@ class TestTwoStageInstall:
         from linkedin_mcp_server.exceptions import BrowserSetupFailedError
         from linkedin_mcp_server.server_role import ServerRole
 
-        blocked = threading.Event()
+        # The deadline passes on the loop's clock, and only while readiness is
+        # blocked in its thread. In real time a loaded host spent it before
+        # the thread began, which says nothing about the thread.
+        loop = asyncio.get_running_loop()
+        clock = [loop.time()]
+        monkeypatch.setattr(loop, "time", lambda: clock[0])
         release = threading.Event()
+        fell_back = threading.Event()
         stood_down: list[str] = []
 
         def readiness() -> bool:
-            blocked.set()
-            release.wait()
+            # Past the deadline, not onto it: on a monotonic clock above 2**24 s
+            # the loop's `time() + resolution` rounds back to `time()`, and a
+            # timer due exactly now stays pending.
+            clock[0] += 0.02
+            # Turns a deadline that waits for readiness into a failure rather
+            # than a hang.
+            if not release.wait(5):
+                fell_back.set()
             return False
+
+        async def setup_must_not_start(**_kwargs: object) -> None:
+            pytest.fail("the deadline must expire during readiness")
 
         config = SimpleNamespace(browser=SimpleNamespace(chrome_path=None))
         monkeypatch.setattr(bootstrap, "get_config", lambda: config)
         monkeypatch.setattr(bootstrap, "_browser_setup_ready", readiness)
+        monkeypatch.setattr(bootstrap, "_run_browser_setup", setup_must_not_start)
         monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.01)
         monkeypatch.setattr(bootstrap, "process_role", lambda: ServerRole.OWNER)
         monkeypatch.setattr(
@@ -1503,15 +1519,13 @@ class TestTwoStageInstall:
         )
 
         initialize_bootstrap("managed")
-        started = asyncio.get_running_loop().time()
         try:
             with pytest.raises(BrowserSetupFailedError, match="background deadline"):
                 await start_background_browser_setup_if_needed()
         finally:
             release.set()
 
-        assert blocked.is_set()
-        assert asyncio.get_running_loop().time() - started < 0.1
+        assert not fell_back.is_set(), "the deadline waited for readiness to return"
         assert stood_down == ["managed browser setup exceeded its background deadline"]
         assert get_bootstrap_state().setup_state is SetupState.IDLE
 
@@ -1759,13 +1773,20 @@ class TestTwoStageInstall:
         from linkedin_mcp_server.exceptions import BrowserSetupFailedError
 
         rounds = 0
+        # Time passes on the loop's clock, and only while the installer runs.
+        # In real time a loaded host spent a lifetime short enough for a test
+        # on the readiness check, before the installer began.
+        loop = asyncio.get_running_loop()
+        clock = [loop.time()]
+        monkeypatch.setattr(loop, "time", lambda: clock[0])
 
         async def never_stops_moving(
             *, activity_callback: Callable[[], None], **_kwargs: object
         ) -> None:
             nonlocal rounds
             while True:
-                await asyncio.sleep(0.001)
+                await asyncio.sleep(0)
+                clock[0] += 0.001
                 activity_callback()
                 rounds += 1
 
@@ -1774,6 +1795,8 @@ class TestTwoStageInstall:
         monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 30.0)
         monkeypatch.setattr(bootstrap, "_BROWSER_SETUP_LIFETIME_SECONDS", 0.05)
 
+        # On the same clock, so a lifetime that never expires fails after
+        # 5,000 rounds instead of hanging.
         with pytest.raises(BrowserSetupFailedError, match="absolute lifetime"):
             await asyncio.wait_for(bootstrap._run_background_browser_setup(), 5)
 
@@ -1788,11 +1811,19 @@ class TestTwoStageInstall:
         from linkedin_mcp_server.exceptions import BrowserSetupFailedError
         from linkedin_mcp_server.server_role import ServerRole
 
+        # Time passes on the loop's clock, and only while the installer runs,
+        # so the readiness check cannot spend the lifetime on a loaded host.
+        # The wait for the task below runs on it too.
+        loop = asyncio.get_running_loop()
+        clock = [loop.time()]
+        monkeypatch.setattr(loop, "time", lambda: clock[0])
+
         async def never_stops_moving(
             *, activity_callback: Callable[[], None], **_kwargs: object
         ) -> None:
             while True:
-                await asyncio.sleep(0.001)
+                await asyncio.sleep(0)
+                clock[0] += 0.001
                 activity_callback()
 
         liveness = MagicMock()
@@ -1965,12 +1996,24 @@ class TestTwoStageInstall:
         from linkedin_mcp_server import bootstrap
         from linkedin_mcp_server.exceptions import BrowserSetupFailedError
 
-        blocked = threading.Event()
+        # The deadline passes on the loop's clock, and only while ownership is
+        # blocked in its thread. In real time a loaded host spent it before
+        # the thread began, which says nothing about the thread.
+        loop = asyncio.get_running_loop()
+        clock = [loop.time()]
+        monkeypatch.setattr(loop, "time", lambda: clock[0])
         release = threading.Event()
+        fell_back = threading.Event()
 
         def slow_owned(profile: Path) -> Path:
-            blocked.set()
-            release.wait()
+            # Past the deadline, not onto it: on a monotonic clock above 2**24 s
+            # the loop's `time() + resolution` rounds back to `time()`, and a
+            # timer due exactly now stays pending.
+            clock[0] += 0.02
+            # Turns a deadline that waits for ownership into a failure rather
+            # than a hang.
+            if not release.wait(5):
+                fell_back.set()
             return profile
 
         async def setup_must_not_start(**_kwargs: object) -> None:
@@ -1982,18 +2025,13 @@ class TestTwoStageInstall:
         monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
         monkeypatch.setattr(bootstrap, "_run_browser_setup", setup_must_not_start)
         monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.01)
-        fallback = threading.Timer(0.2, release.set)
-        fallback.start()
-        started = asyncio.get_running_loop().time()
         try:
             with pytest.raises(BrowserSetupFailedError, match="background deadline"):
                 await bootstrap.start_background_browser_setup_if_needed()
         finally:
             release.set()
-            fallback.cancel()
 
-        assert blocked.is_set()
-        assert asyncio.get_running_loop().time() - started < 0.1
+        assert not fell_back.is_set(), "the deadline waited for ownership to return"
 
     async def test_slow_cache_filesystem_cannot_block_the_deadline(
         self, isolate_profile_dir, monkeypatch
@@ -2001,46 +2039,41 @@ class TestTwoStageInstall:
         from linkedin_mcp_server import bootstrap
         from linkedin_mcp_server.exceptions import BrowserSetupFailedError
 
-        blocked = threading.Event()
-        release = threading.Event()
-        fallback_fired = threading.Event()
+        # The deadline passes on the loop's clock, and only while cache
+        # preparation is blocked in its thread. A fallback timed from before
+        # the thread began ran out on a loaded host first.
         loop = asyncio.get_running_loop()
         clock = [loop.time()]
+        monkeypatch.setattr(loop, "time", lambda: clock[0])
+        release = threading.Event()
+        fell_back = threading.Event()
 
         def slow_mkdir(path: Path) -> None:
-            blocked.set()
-            release.wait()
-
-        def release_fallback() -> None:
-            fallback_fired.set()
-            release.set()
+            # Past the deadline, not onto it: on a monotonic clock above 2**24 s
+            # the loop's `time() + resolution` rounds back to `time()`, and a
+            # timer due exactly now stays pending.
+            clock[0] += 0.02
+            # Turns a deadline that waits for the filesystem into a failure
+            # rather than a hang.
+            if not release.wait(5):
+                fell_back.set()
 
         async def install_must_not_start(*args: object, **kwargs: object) -> None:
             pytest.fail("the deadline should expire during cache preparation")
 
-        monkeypatch.setattr(loop, "time", lambda: clock[0])
         monkeypatch.setattr(bootstrap, "secure_mkdir", slow_mkdir)
         monkeypatch.setattr(
             bootstrap, "_run_patchright_install", install_must_not_start
         )
         monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.01)
 
-        setup = asyncio.create_task(bootstrap._run_background_browser_setup())
-        fallback = threading.Timer(1.0, release_fallback)
-        fallback.start()
         try:
-            assert await asyncio.to_thread(blocked.wait, 5), (
-                "cache preparation did not enter its worker thread"
-            )
-            clock[0] += 0.01
             with pytest.raises(BrowserSetupFailedError, match="background deadline"):
-                await setup
-            assert not fallback_fired.is_set(), (
-                "the hang fallback released cache preparation before the deadline"
-            )
+                await bootstrap._run_background_browser_setup()
         finally:
             release.set()
-            fallback.cancel()
+
+        assert not fell_back.is_set(), "the deadline waited for cache preparation"
 
     async def test_setup_filesystem_work_uses_a_daemon_thread(self, monkeypatch):
         from linkedin_mcp_server import bootstrap

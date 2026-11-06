@@ -2,10 +2,11 @@
 
 The body is the version's CHANGELOG section without its heading, with its
 categories promoted to H2 and its bug fixes folded when other categories sit
-beside them, then the install instructions, then the contributors, then the
-compare link. Every pull request link gets its author's login, so GitHub
-shows its Contributors block, and an author whose first merged pull request
-is in this release is named as such. Runs in the release workflow before
+beside them, then the install instructions, then the new contributors, then
+the compare link. Every pull request link by a human gets its author's
+login, the owner's included, so GitHub's Contributors block lists them all.
+Authors whose first merged pull request is in this release are named once
+more on one line after the install instructions. Runs in the release workflow before
 anything is built or published, so a missing section stops the release while
 nothing exists yet that would have to be withdrawn.
 """
@@ -27,7 +28,7 @@ _FIX_TYPE = "fix"
 _LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(\[bot\])?")
 _PR_NUMBER = re.compile(r"[0-9]+")
 _BOT_SUFFIX = "[bot]"
-_FIRST_CONTRIBUTION = " (first contribution 🎉)"
+_NEW_CONTRIBUTORS = "**New contributors 🎉** "
 
 
 class ReleaseNotesError(Exception):
@@ -149,7 +150,7 @@ def _marked(first: list[str], contributors: list[str], owner: str) -> set[str]:
 def _credit(
     section: str, repository: str, authors: dict[str, str]
 ) -> tuple[str, list[str]]:
-    """Name each external author after their link; return every non-bot author."""
+    """Name each human author after their link; return them in order of appearance."""
     missing = [
         number
         for number in _pull_requests(section, repository)
@@ -160,7 +161,6 @@ def _credit(
             "The pull request authors have no entry for "
             f"{', '.join(f'#{number}' for number in missing)}."
         )
-    owner = _owner(repository)
     contributors: list[str] = []
 
     def credit(link: re.Match[str]) -> str:
@@ -169,8 +169,6 @@ def _credit(
             return link[0]
         if login not in contributors:
             contributors.append(login)
-        if login.casefold() == owner:
-            return link[0]
         return f"{link[0]} by @{login}"
 
     return _pr_link(repository).sub(credit, section), contributors
@@ -241,21 +239,13 @@ def compose(
             "fold them into the CHANGELOG section for "
             f"{version} and delete them."
         )
-    owner = _owner(repository)
     section, contributors = _credit(_section(changelog, version), repository, authors)
-    marked = _marked(first_contributors, contributors, owner)
-    # The owner comes last; a stable sort keeps everyone else in order.
-    contributors.sort(key=lambda login: login.casefold() == owner)
+    marked = _marked(first_contributors, contributors, _owner(repository))
     parts = [_layout(section, _fix_heading(pyproject)), _install(template, version)]
-    if contributors:
-        parts.append(
-            "**Contributors:** "
-            + ", ".join(
-                f"@{login}"
-                + (_FIRST_CONTRIBUTION if login.casefold() in marked else "")
-                for login in contributors
-            )
-        )
+    # Named as the section spells them, in order of first appearance.
+    newcomers = [login for login in contributors if login.casefold() in marked]
+    if newcomers:
+        parts.append(_NEW_CONTRIBUTORS + ", ".join(f"@{login}" for login in newcomers))
     parts.append(
         f"**Full Changelog**: https://github.com/{repository}/compare/"
         f"v{previous_version}...v{version}"
