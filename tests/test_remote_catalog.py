@@ -232,54 +232,14 @@ class TestParserParity:
         assert remote_catalog.launch_serves(argv) == _parser_serves(argv)
 
 
-class TestDevelopmentInstalls:
-    """``CI`` and a development checkout skip the default URL, never the override."""
+def test_a_checkout_in_ci_asks_the_default_url(
+    stub: CatalogStub, monkeypatch: pytest.MonkeyPatch
+):
+    # The suite itself runs from a source checkout, so this covers both.
+    monkeypatch.setattr(remote_catalog, "CATALOG_URL", stub.url)
+    os.environ["CI"] = "true"
 
-    @pytest.fixture
-    def default_url(self, stub: CatalogStub, monkeypatch: pytest.MonkeyPatch) -> str:
-        monkeypatch.setattr(remote_catalog, "CATALOG_URL", stub.url)
-        return stub.url
-
-    def test_this_checkout_is_a_development_checkout(self):
-        # The suite runs from a clone, with its git-ignored egg-info on the
-        # path; that must not make it look installed.
-        assert remote_catalog.is_development_checkout()
-
-    @pytest.mark.parametrize("packages", ["site-packages", "dist-packages"])
-    def test_an_installed_copy_is_no_development_checkout(
-        self, monkeypatch: pytest.MonkeyPatch, packages: str
-    ):
-        installed = (
-            f"/usr/lib/python3.13/{packages}/linkedin_mcp_server/remote_catalog.py"
-        )
-        monkeypatch.setattr(remote_catalog, "__file__", installed)
-
-        assert not remote_catalog.is_development_checkout()
-
-    def test_a_development_checkout_sends_nothing(
-        self, stub: CatalogStub, default_url: str
-    ):
-        assert _requests_after_start(stub) == 0
-
-    @pytest.mark.parametrize("kind", ["docker", "mcpb"])
-    def test_docker_and_the_bundle_are_no_development_checkout(
-        self, stub: CatalogStub, default_url: str, kind: str
-    ):
-        os.environ["LINKEDIN_MCP_RUNTIME"] = kind
-
-        assert _requests_after_start(stub) == 1
-
-    def test_ci_sends_nothing(self, stub: CatalogStub, default_url: str):
-        os.environ["LINKEDIN_MCP_RUNTIME"] = "docker"
-        os.environ["CI"] = "true"
-
-        assert _requests_after_start(stub) == 0
-
-    def test_the_override_bypasses_ci_and_the_checkout(self, stub: CatalogStub):
-        os.environ[_URL] = stub.url
-        os.environ["CI"] = "true"
-
-        assert _requests_after_start(stub) == 1
+    assert _requests_after_start(stub) == 1
 
 
 class TestNeverRaises:

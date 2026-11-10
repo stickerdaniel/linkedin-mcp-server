@@ -10,8 +10,8 @@ before ``cli_main`` is imported: that import is most of the start time, and
 the GET runs in parallel with it. Usage:
 
 * ``__main__.main`` calls :func:`prefetch` with ``sys.argv[1:]`` first.
-* ``remote_tools.install`` calls :func:`admitted` once the server exists; it
-  waits at most until the start deadline.
+* ``remote_tools.install`` calls :func:`awaited_body` once the server exists,
+  which waits at most until the start deadline, and then :func:`admit`.
 * ``remote_tools.RemoteTool.run`` calls :func:`call` in a daemon thread.
 
 Set ``LINKEDIN_MCP_REMOTE_TOOLS=off`` to turn all of it off.
@@ -307,21 +307,6 @@ def launch_serves(argv: Sequence[str], environ: Mapping[str, str] = os.environ) 
     return not daemon
 
 
-def is_development_checkout() -> bool:
-    """True when this package runs from a source tree, not from an installed copy.
-
-    An index install, the Docker image and a non-editable install put the
-    package under ``site-packages`` or ``dist-packages``; an editable install
-    and ``python -m`` from a clone run it from the clone. Package metadata is
-    not asked: a clone carries a git-ignored ``mcp_server_linkedin.egg-info``,
-    and whenever the clone is the working directory it shadows the editable
-    install's ``direct_url.json``. The bundle runs from its own source tree
-    too, which is why the gate below also asks for the ``managed`` kind.
-    """
-    parts = os.path.normpath(os.path.abspath(__file__)).split(os.sep)
-    return not ({"site-packages", "dist-packages"} & set(parts))
-
-
 # --------------------------------------------------------------------------
 # The catalog request
 # --------------------------------------------------------------------------
@@ -353,9 +338,9 @@ def prefetch(argv: Sequence[str]) -> None:
 
     Gates, in order: the ``.env`` file is loaded first so an opt-out there
     counts; an opt-out ends it; so does a command that never serves or a
-    daemon-configured launch; and without ``LINKEDIN_MCP_REMOTE_TOOLS_URL``,
-    so do ``CI`` and a development checkout. The thread never logs and never
-    writes to stdout, which belongs to the protocol.
+    daemon-configured launch. Every install asks alike: a source checkout
+    and CI too. The thread never logs and never writes to stdout, which
+    belongs to the protocol.
 
     Never raises: it runs before the server is even imported, so an
     exception here would stop the built-in tools too. Any failure leaves no
@@ -380,11 +365,6 @@ def _prefetch(argv: Sequence[str]) -> None:
     environ = os.environ
     if opted_out(environ) or not launch_serves(argv, environ):
         return
-    if not environ.get(URL_ENV, "").strip():
-        if environ.get("CI"):
-            return
-        if install_kind(environ) == "managed" and is_development_checkout():
-            return
     url = configured_url(environ)
     # An override such as ``http://[`` raises here; `prefetch` absorbs it.
     if urlsplit(url).scheme not in ("http", "https"):

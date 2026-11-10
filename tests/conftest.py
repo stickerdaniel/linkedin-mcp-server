@@ -151,6 +151,10 @@ def ignore_the_developers_environment(monkeypatch):
     ours = [key for key in os.environ if key.startswith("LINKEDIN")]
     for key in (*from_the_table, *ours):
         monkeypatch.delenv(key, raising=False)
+    # A server any test starts, in-process or spawned, would otherwise ask the
+    # live catalog and list whatever it serves today. The catalog tests clear
+    # this and point the URL at a local stub instead.
+    monkeypatch.setenv("LINKEDIN_MCP_REMOTE_TOOLS", "off")
 
 
 @pytest.fixture(autouse=True)
