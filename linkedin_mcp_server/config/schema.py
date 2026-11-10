@@ -180,6 +180,16 @@ class BrowserConfig:
     # Temporary directory parent used during browser installation bootstrap.
     # Defaults to system tempdir (tempfile.gettempdir()) when None.
     installer_temp_dir: str | None = None
+    # Attach to a browser that is already running and already signed in, as
+    # http://127.0.0.1:9222, instead of launching one on ``user_data_dir``.
+    #
+    # This is the one mode where the profile is somebody else's: the session
+    # lives in the browser the user signed in to, so nothing here may move,
+    # harden or delete a directory, and the profile lease, the downgrade guard
+    # and the process-marker drain all belong to a launch that never happened.
+    # Everything that only reads pages still works unchanged, through the
+    # context Playwright attaches to.
+    cdp_url: str | None = None
 
     def validate(self) -> None:
         """Validate browser configuration values."""
@@ -271,6 +281,47 @@ class BrowserConfig:
                     f"chrome_path '{self.chrome_path}' is not a file"
                 )
         self._normalize_proxy()
+        self._validate_cdp_url()
+
+    def _validate_cdp_url(self) -> None:
+        """Check the attach endpoint, and refuse what cannot apply to it.
+
+        A browser that already runs keeps its own executable, its own proxy and
+        its own profile, so the settings that describe those cannot be honoured
+        here. Refused rather than ignored: silently dropping a proxy a user set
+        would send LinkedIn's requests out from an address the user believes is
+        concealed.
+        """
+        if self.cdp_url is None:
+            return
+        raw = self.cdp_url.strip()
+        if not raw:
+            self.cdp_url = None
+            return
+        parts = urlsplit(raw)
+        if parts.scheme not in {"http", "https"} or not parts.hostname:
+            raise ConfigurationError(
+                "cdp_url must be an http:// or https:// address of a browser's "
+                "DevTools endpoint, such as http://127.0.0.1:9222"
+            )
+        if parts.port is None:
+            raise ConfigurationError(
+                "cdp_url must name a port, such as http://127.0.0.1:9222"
+            )
+        if self.proxy_server:
+            raise ConfigurationError(
+                "cdp_url and proxy_server cannot be combined: an attached "
+                "browser keeps the network settings it was started with. "
+                "Start that browser through the proxy instead."
+            )
+        if self.chrome_path:
+            raise ConfigurationError(
+                "cdp_url and chrome_path cannot be combined: an attached "
+                "browser is already running, so no executable is chosen here."
+            )
+        # Stored without the trailing slash, because the fingerprint compares
+        # this value between two processes and both spellings name one endpoint.
+        self.cdp_url = raw.rstrip("/")
 
     def _normalize_proxy(self) -> None:
         """Split, check and canonicalize the proxy settings.
@@ -474,10 +525,43 @@ class AppConfig:
         """Validate all configuration values. Call after modifying config."""
         self.browser.validate()
         self.server.validate()
+        self._validate_attach_modes()
         if self.server.transport == "streamable-http":
             self._validate_transport_config()
             self._validate_path_format()
         self._validate_port_range()
+
+    def _validate_attach_modes(self) -> None:
+        """Refuse the modes that would need a profile this process does not own.
+
+        An attached browser already holds the session, so there is nothing
+        here to sign in to, nothing to fold into a portable cookie file and
+        nothing to import into. Each of these would otherwise start, do
+        something to *this* machine's profile directory that the attached
+        browser never sees, and exit 0: a login window that cannot sign the
+        browser in, or a logout that reports a session gone while the
+        attached browser stays signed in.
+        """
+        if not self.browser.cdp_url:
+            return
+        incompatible = [
+            flag
+            for flag, set_ in (
+                ("--login", self.server.login),
+                ("--login-viewer", self.server.login_viewer),
+                ("--logout", self.server.logout),
+                ("--import-from-browser", self.server.import_from_browser),
+            )
+            if set_
+        ]
+        if incompatible:
+            raise ConfigurationError(
+                "--cdp-url cannot be combined with "
+                + ", ".join(incompatible)
+                + ": the attached browser already holds the session, so "
+                "this process has no profile of its own to sign in to. "
+                "Sign in inside that browser, and drop these options."
+            )
 
     def _validate_transport_config(self) -> None:
         """Validate transport configuration is consistent."""

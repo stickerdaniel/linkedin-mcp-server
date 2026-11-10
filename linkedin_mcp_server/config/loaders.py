@@ -129,6 +129,7 @@ class EnvironmentKeys:
     SLOW_MO = "SLOW_MO"
     VIEWPORT = "VIEWPORT"
     CHROME_PATH = "CHROME_PATH"
+    CDP_URL = "CDP_URL"
     PROXY_SERVER = "PROXY_SERVER"
     PROXY_USERNAME = "PROXY_USERNAME"
     PROXY_PASSWORD = "PROXY_PASSWORD"
@@ -171,6 +172,7 @@ _MCPB_PLACEHOLDERS = {
     EnvironmentKeys.PROXY_USERNAME: "${user_config.proxy_username}",
     EnvironmentKeys.PROXY_PASSWORD: "${user_config.proxy_password}",
     EnvironmentKeys.PROXY_BYPASS: "${user_config.proxy_bypass}",
+    EnvironmentKeys.CDP_URL: "${user_config.cdp_url}",
 }
 
 
@@ -369,6 +371,15 @@ def load_from_env(config: AppConfig) -> AppConfig:
     # Custom Chrome/Chromium executable path
     if chrome_path_env := _env(EnvironmentKeys.CHROME_PATH):
         config.browser.chrome_path = chrome_path_env
+
+    # Attach to a browser that is already running and already signed in,
+    # instead of launching one on USER_DATA_DIR. Read through _env() like
+    # the other mapped variables, so an unsubstituted placeholder is not
+    # taken for an endpoint. The pairings this setting forbids are refused
+    # rather than ignored: see BrowserConfig.validate() and
+    # AppConfig.validate().
+    if cdp_url_env := _env(EnvironmentKeys.CDP_URL):
+        config.browser.cdp_url = cdp_url_env
 
     # Browser proxy (validated and split in BrowserConfig.validate()). Unlike
     # the CLI flag, PROXY_SERVER may carry the credentials a provider hands out:
@@ -577,6 +588,19 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
         default=None,
         metavar="PATH",
         help="Path to Chrome/Chromium executable (for custom browser installations)",
+    )
+
+    parser.add_argument(
+        "--cdp-url",
+        type=str,
+        default=None,
+        metavar="URL",
+        help=(
+            "Attach to a browser that is already running and already "
+            "signed in, through its DevTools endpoint such as "
+            "http://127.0.0.1:9222, instead of launching one on "
+            "USER_DATA_DIR. No --login and no --logout in this mode"
+        ),
     )
 
     parser.add_argument(
@@ -795,6 +819,9 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
 
     if args.chrome_path:
         config.browser.chrome_path = args.chrome_path
+
+    if args.cdp_url:
+        config.browser.cdp_url = args.cdp_url
 
     # Proxy (validated and normalized in BrowserConfig.validate())
     if args.proxy_server:

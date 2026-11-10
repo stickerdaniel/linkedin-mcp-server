@@ -190,6 +190,7 @@ AI agent? Get a quick confirmation from the user before enabling automatic updat
 - `--no-headless` - Show the browser window (useful for debugging)
 - `--chrome-path PATH` - Path to a Chrome/Chromium executable
 - `--proxy-server URL` - Route browser traffic through a proxy, as `scheme://host:port`. Set it up **before** `--login`; see [Using a proxy](#using-a-proxy).
+- `--cdp-url URL` - Attach to an already running browser instead of launching one, as the `http://host:port` address of its DevTools endpoint. The session stays that browser's own; see [Attaching to a running browser](#attaching-to-a-running-browser).
 
 **Other:**
 
@@ -593,6 +594,7 @@ username.
 
 - `--chrome-path PATH` - Path to a Chrome/Chromium executable (rarely needed in Docker)
 - `--proxy-server URL` - Route browser traffic through a proxy, as `scheme://host:port`. Set it up **before** `--login`; see [Using a proxy](#using-a-proxy).
+- `--cdp-url URL` - Attach to an already running browser instead of launching one, as the `http://host:port` address of its DevTools endpoint. The session stays that browser's own; see [Attaching to a running browser](#attaching-to-a-running-browser).
 
 **Other:**
 
@@ -764,6 +766,56 @@ With a paid provider, use a sticky residential session that holds one address (n
 <br/>
 <br/>
 
+## Attaching to a running browser
+
+The launched browsers each own a profile directory. When the session you want is
+already signed in somewhere else -- a Chrome you logged into by hand, a browser
+on a machine with a screen -- no window this server opens can be that browser.
+`--cdp-url` attaches to it over the Chrome DevTools Protocol instead.
+
+### Setup Help
+
+<details>
+<summary><b>🔧 Configuration</b></summary>
+
+- Start that browser with a debugging endpoint, for example
+  `google-chrome --remote-debugging-port=9222`, then pass
+  `--cdp-url http://127.0.0.1:9222` or set `CDP_URL`. The address needs a port;
+  a trailing slash is dropped, since the value takes part in the daemon config
+  fingerprint.
+- The profile, the cookies and the browser process belong to that browser. This
+  server never creates, hardens, leases, restores or closes them: shutdown
+  disconnects and stops our own driver, leaving your tabs open. Cookies are not
+  exported either -- there is no portable session file to write.
+- Sign in inside that browser. `--login`, `--login-viewer`, `--logout` and
+  `--import-from-browser` are refused together with `--cdp-url`: each would
+  change a profile directory the attached browser never reads, and exit 0.
+- `CHROME_PATH` and `PROXY_SERVER` are refused too. An attached browser keeps
+  its own binary and reaches the network its own way, so accepting these
+  settings would mean ignoring them -- and a dropped proxy is traffic leaving
+  from the address you thought you had hidden. Configure them in that browser.
+- The endpoint is usually loopback. If it is reachable from elsewhere, whoever
+  can reach it controls a signed-in browser.
+
+</details>
+
+<details>
+<summary><b>❗ Troubleshooting</b></summary>
+
+- `Cannot connect to the browser at <url>` means nothing answered at that
+  address: check the port, and that the browser still runs. Chrome ignores
+  `--remote-debugging*` when it is already up on that profile, so start it with
+  the flag.
+- `The browser at <url> does not appear to be signed in` means the attach
+  worked and LinkedIn is not: sign in in that window and retry.
+- An attach deliberately gets no browser guardian and no profile lease, so
+  keeping that browser running is up to whatever manages it.
+
+</details>
+
+<br/>
+<br/>
+
 ## Setup from Source (Develop & Contribute)
 
 Contributions are welcome. See [CONTRIBUTING.md](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/.github/CONTRIBUTING.md) for architecture guidelines and checklists. Search existing issues first, then use the [issue forms](https://github.com/stickerdaniel/linkedin-mcp-server/issues/new/choose) for anything new. AI agents follow the [issue-packet skill](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/.agents/skills/issue-packet/SKILL.md).
@@ -837,6 +889,7 @@ uv run -m linkedin_mcp_server
 - `--chrome-path PATH` - Path to a Chrome/Chromium executable
 - `--installer-temp-dir PATH` - Existing directory for browser installation temporary files (environment: `INSTALLER_TEMP_DIR`).
 - `--proxy-server URL` - Route browser traffic through a proxy, as `scheme://host:port`. Set it up **before** `--login`; see [Using a proxy](#using-a-proxy).
+- `--cdp-url URL` - Attach to an already running browser instead of launching one, as the `http://host:port` address of its DevTools endpoint. The session stays that browser's own; see [Attaching to a running browser](#attaching-to-a-running-browser).
 
 **Other:**
 
