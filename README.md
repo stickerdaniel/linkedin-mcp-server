@@ -107,7 +107,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `get_feed` | Read recent posts from your home feed, with links to the original posts. |
 | `search_posts` | Search posts by keyword, optionally filtered by recency or content type. |
 | `get_my_posts` | Read your recent posts and the engagement text LinkedIn shows beside them. |
-| `get_post` | Open a post by permalink or activity URN and read its text, visible comments, and engagement counters. |
+| `get_post` | Read a post's text, visible comments, and engagement counters. |
 | `get_post_analytics` | Read the private analytics page for one of your own posts. |
 | `get_scheduled_posts` | Read your scheduled-post queue through LinkedIn's English scheduling dialog. |
 | `get_session_status` | Check your saved login and browser state without opening a browser. |
