@@ -108,12 +108,18 @@ def _dismiss(arguments: Mapping[str, Any]) -> str:
     return f"Dismiss LinkedIn job {job} from job search? LinkedIn offers no undo."
 
 
+def _save(arguments: Mapping[str, Any]) -> str:
+    job = _named(arguments.get("job_id"), normalize_job_id)
+    return f"Save LinkedIn job {job} to your saved jobs?"
+
+
 PROMPTS: dict[str, Callable[[Mapping[str, Any]], str | None]] = {
     "connect_with_person": _connect,
     "send_message": _send,
     "reply_to_conversation": _reply,
     "archive_conversation": _archive,
     "dismiss_job": _dismiss,
+    "save_job": _save,
 }
 
 

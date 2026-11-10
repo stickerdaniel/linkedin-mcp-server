@@ -29,11 +29,12 @@ _WRITES = [
     ),
     ("archive_conversation", {"thread_id": "2-abc"}),
     ("dismiss_job", {"job_id": "4252026496"}),
+    ("save_job", {"job_id": "4252026496"}),
 ]
 
 
 def _server(ran: list[tuple[str, dict[str, Any]]]) -> FastMCP:
-    """The five write tools as stand-ins that record each run, behind the gate."""
+    """The write tools as stand-ins that record each run, behind the gate."""
     mcp = FastMCP("writes")
     mcp.add_middleware(ErrorCodeMiddleware())
     mcp.add_middleware(WriteConfirmationMiddleware())
@@ -90,6 +91,11 @@ def _server(ran: list[tuple[str, dict[str, Any]]]) -> FastMCP:
     @mcp.tool
     async def dismiss_job(job_id: str) -> dict[str, bool]:
         ran.append(("dismiss_job", {"job_id": job_id}))
+        return {"done": True}
+
+    @mcp.tool
+    async def save_job(job_id: str) -> dict[str, bool]:
+        ran.append(("save_job", {"job_id": job_id}))
         return {"done": True}
 
     @mcp.tool
@@ -312,6 +318,7 @@ async def test_a_client_that_cannot_be_asked_back_gets_no_write():
         ("reply_to_conversation", 'LinkedIn conversation "2-abc"'),
         ("archive_conversation", 'LinkedIn conversation "2-abc"'),
         ("dismiss_job", 'LinkedIn job "4252026496"'),
+        ("save_job", 'LinkedIn job "4252026496"'),
     ],
 )
 async def test_the_prompt_names_what_the_write_acts_on_without_a_url(
