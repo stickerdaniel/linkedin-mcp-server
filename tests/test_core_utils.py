@@ -1,5 +1,6 @@
 """Tests for core utility functions (rate-limit detection, scrolling, modals)."""
 
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -239,7 +240,7 @@ class TestScrollToBottom:
         page = _LazyListPage(batches=3, delay=0.12)
 
         await scroll_to_bottom(
-            page,
+            cast(Any, page),
             pause_time=0.02,
             max_scrolls=10,
             settle_timeout=0.5,
@@ -257,7 +258,7 @@ class TestScrollToBottom:
 
         started = time.monotonic()
         await scroll_to_bottom(
-            page,
+            cast(Any, page),
             pause_time=0.01,
             max_scrolls=10,
             settle_timeout=0.1,
@@ -272,7 +273,11 @@ class TestScrollToBottom:
         page = _LazyListPage(batches=1000, delay=0.0)
 
         await scroll_to_bottom(
-            page, pause_time=0.0, max_scrolls=4, settle_timeout=0.05, poll_interval=0.01
+            cast(Any, page),
+            pause_time=0.0,
+            max_scrolls=4,
+            settle_timeout=0.05,
+            poll_interval=0.01,
         )
 
         assert page.scrolls == 4
