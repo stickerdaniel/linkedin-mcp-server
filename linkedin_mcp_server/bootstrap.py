@@ -557,6 +557,16 @@ def _uses_custom_chrome() -> bool:
     return bool(get_config().browser.chrome_path)
 
 
+def _attaches_to_a_browser() -> bool:
+    """Return whether this process reads through somebody else's browser.
+
+    The same consequence as a custom executable, for a stronger reason: the
+    browser is already running, so there is nothing to install, and its
+    profile is not ours to inspect for a session or to write one into.
+    """
+    return bool(get_config().browser.cdp_url)
+
+
 def _revision_dir_prefix(name: str) -> str | None:
     """Return the browser prefix of a revision directory, or ``None``.
 
@@ -4006,6 +4016,13 @@ async def ensure_tool_ready_or_raise(
         # background install is irrelevant; jump straight to the auth gate.
         _state.setup_state = SetupState.READY
         _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
+        if _attaches_to_a_browser():
+            # Ahead of ``_auth_ready()``, which would be answering about a
+            # directory this mode never opens. Whether the attached browser
+            # has a session is only knowable by reading a page with it, and
+            # that is what the first tool call does.
+            _state.auth_state = AuthState.READY
+            return
         if _auth_ready():
             _state.auth_state = AuthState.READY
             return
@@ -4030,6 +4047,13 @@ async def ensure_tool_ready_or_raise(
             "for the same lock and slows it down. Just wait and call this tool "
             "again in a minute or two."
         )
+
+    if _attaches_to_a_browser():
+        # Same reason as the custom-executable branch above: no file on this
+        # machine describes the attached browser's session, and there is no
+        # profile here a login window could fill.
+        _state.auth_state = AuthState.READY
+        return
 
     if _auth_ready():
         _state.auth_state = AuthState.READY
@@ -4729,6 +4753,18 @@ async def _run_login_flow() -> None:
     being held is the whole window that matters.
     """
     _state.auth_state = AuthState.IN_PROGRESS
+    if _attaches_to_a_browser():
+        # Unreachable through ``ensure_tool_ready_or_raise``, which never asks
+        # for a login in this mode. Here anyway, because the cost of being
+        # wrong is a login window on *this* machine whose session the
+        # attached browser will never see: it would look successful and
+        # change nothing.
+        raise AuthenticationBootstrapFailedError(
+            "The browser at "
+            f"{get_config().browser.cdp_url} is not signed in to LinkedIn, "
+            "and it cannot be signed in from here. Sign in in that browser, "
+            "then retry this tool."
+        )
     # An idempotent backstop rather than a staging step: background setup now
     # installs the same browser this launch uses, so by the time anyone reaches
     # a login there is normally nothing to do. Kept because a login can be

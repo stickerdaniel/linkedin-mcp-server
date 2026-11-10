@@ -115,6 +115,7 @@ SHARED_CONFIG_FIELDS = (
     "viewport_height",
     "default_timeout",
     "chrome_path",
+    "cdp_url",
     "proxy_server",
     "proxy_username",
     "proxy_password",
