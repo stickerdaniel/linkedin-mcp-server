@@ -796,6 +796,9 @@ on a machine with a screen -- no window this server opens can be that browser.
   from the address you thought you had hidden. Configure them in that browser.
 - The endpoint is usually loopback. If it is reachable from elsewhere, whoever
   can reach it controls a signed-in browser.
+- `get_session_status` reports what that browser shows (the attach reached
+  it and LinkedIn is signed in), not a cookie file of ours: there is none to
+  read. `close_session` disconnects from it; the browser keeps running.
 
 </details>
 
