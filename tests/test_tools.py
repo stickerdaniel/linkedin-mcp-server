@@ -34,6 +34,7 @@ def _make_mock_extractor(result: dict) -> MagicMock:
     mock.read_company = AsyncMock(return_value=result)
     mock.read_job = AsyncMock(return_value=result)
     mock.search_jobs = AsyncMock(return_value=result)
+    mock.save_job = AsyncMock(return_value=result)
     mock.get_saved_jobs = AsyncMock(return_value=result)
     mock.get_job_apply_url = AsyncMock(return_value=result)
     mock.dismiss_job = AsyncMock(return_value=result)
@@ -249,6 +250,7 @@ _A_VALID_CALL = [
     ("job", "get_job_apply_url", {"job_id": "4252026496"}),
     ("job", "search_jobs", {"keywords": "python"}),
     ("job", "get_saved_jobs", {}),
+    ("job", "save_job", {"job_id": "4252026496"}),
     ("job", "dismiss_job", {"job_id": "4252026496"}),
     ("job", "get_easy_apply_form", {"job_id": "4252026496"}),
     ("messaging", "get_inbox", {}),
@@ -1590,6 +1592,34 @@ class TestJobTools:
         assert tool is not None and tool.annotations is not None
         assert tool.annotations.read_only_hint is False
         assert tool.annotations.destructive_hint is True
+
+    async def test_save_job(self, mock_context, serve_extractor):
+        expected = {
+            "url": "https://www.linkedin.com/jobs/view/12345/",
+            "job_id": "12345",
+            "saved": True,
+            "already_saved": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        tool = await mcp.get_tool("save_job")
+        assert tool is not None
+        assert tool.tags == {"job"}
+        assert tool.annotations is not None
+        assert tool.annotations.read_only_hint is False
+        assert tool.annotations.idempotent_hint is True
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "save_job")
+        result = await tool_fn("12345", mock_context)
+
+        assert result == expected
+        mock_extractor.save_job.assert_awaited_once_with("12345")
 
 
 class TestGetSidebarProfilesTool:

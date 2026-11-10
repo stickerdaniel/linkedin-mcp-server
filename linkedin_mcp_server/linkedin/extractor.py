@@ -158,6 +158,10 @@ class LinkedInExtractor:
         """Read a single job posting."""
         return await self._jobs.read_job(job_id)
 
+    async def save_job(self, job_id: str) -> dict[str, Any]:
+        """Save a job posting to the authenticated user's saved jobs list."""
+        return await self._jobs.save_job(job_id)
+
     async def get_job_apply_url(self, job_id: str) -> dict[str, Any]:
         """Read how a job posting takes applications and the employer's link."""
         return await self._jobs.get_job_apply_url(job_id)
