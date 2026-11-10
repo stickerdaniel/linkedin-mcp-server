@@ -99,7 +99,9 @@
       "kind": "boundary.scroll_body",
       "max_scrolls": 10,
       "pause_time": 1.0,
-      "section": "section"
+      "poll_interval": 0.25,
+      "section": "section",
+      "settle_timeout": 2.0
     },
     {
       "arg": {
