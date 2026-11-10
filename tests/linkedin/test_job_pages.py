@@ -5,7 +5,9 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import asyncio
+import time
 
+import anyio
 import pytest
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -1533,3 +1535,41 @@ class TestReadEasyApplyForm:
                 await reader.read_easy_apply_form(self.URL, "123", JOB_APPLY_EN_US)
 
         assert raised.value.__cause__ is failure
+
+    async def test_a_tool_deadline_waits_for_the_discard_without_spinning(
+        self, mock_page
+    ):
+        """A tool timeout is an AnyIO deadline, re-delivered on every pass of
+        the event loop. The read still waits for the discard, and while it
+        waits the process stays idle: an unshielded wait re-entered after each
+        delivery spends the whole discard spinning on the CPU."""
+        reader = _reader(mock_page)
+        discarded = asyncio.Event()
+
+        async def walk(*_: object) -> bool:
+            await asyncio.sleep(10)
+            return True
+
+        async def discard(_grace: float) -> bool:
+            await asyncio.sleep(0.5)
+            discarded.set()
+            return True
+
+        with (
+            patch.object(
+                reader,
+                "_read_apply_type",
+                new_callable=AsyncMock,
+                return_value=("easy_apply", None),
+            ),
+            patch.object(reader, "_walk_easy_apply", side_effect=walk),
+            patch.object(reader, "_discard_easy_apply", side_effect=discard),
+        ):
+            started = time.process_time()
+            with pytest.raises(TimeoutError):
+                with anyio.fail_after(0.05):
+                    await reader.read_easy_apply_form(self.URL, "123", JOB_APPLY_EN_US)
+            spent = time.process_time() - started
+
+        assert discarded.is_set()
+        assert spent < 0.05

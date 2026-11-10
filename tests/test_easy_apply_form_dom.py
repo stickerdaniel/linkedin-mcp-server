@@ -86,8 +86,11 @@ RESUME: dict[str, Any] = {
 
 # The posting, its Easy Apply anchor, and a dialog that behaves like LinkedIn's:
 # opened by the anchor, rendered in a shadow root, refusing Next while a
-# required field is empty, and asking to save the draft on Escape. Every click
-# and keystroke that reaches it is logged on `window.log`.
+# required field is empty, and asking to save the draft on Escape. The step Next
+# moves to lands later, keeps that question if it is open, and does nothing once
+# the dialog is gone, so a pending step neither removes the question nor reopens
+# a discarded dialog. Every click and
+# keystroke that reaches it is logged on `window.log`.
 DIALOG_SCRIPT = """
 const STEPS = %s;
 window.log = [];
@@ -98,6 +101,7 @@ const shadow = outlet.attachShadow({mode: 'open'});
 shadow.addEventListener('input', () => window.log.push('input'), true);
 let index = 0;
 const render = () => {
+    const confirm = shadow.querySelector('[role="alertdialog"]');
     const step = STEPS[index];
     const last = index === STEPS.length - 1;
     shadow.innerHTML = '<div role="dialog" data-test-modal>'
@@ -111,6 +115,7 @@ const render = () => {
             ? '<button type="button" data-live-test-easy-apply-submit-button>Submit application</button>'
             : '<button type="button" data-easy-apply-next-button>Next</button>')
         + '</footer></form></div>';
+    if (confirm) shadow.appendChild(confirm);
     const next = shadow.querySelector('[data-easy-apply-next-button]');
     if (next) next.addEventListener('click', () => {
         window.log.push('next');
@@ -129,15 +134,22 @@ const render = () => {
             el.after(error);
             valid = false;
         }
-        if (valid) setTimeout(() => { index += 1; render(); }, window.nextDelay || 100);
+        if (valid) setTimeout(() => {
+            if (!shadow.querySelector('[role="dialog"]')) return;
+            index += 1;
+            render();
+        }, window.nextDelay || 100);
     });
     const submit = shadow.querySelector('[data-live-test-easy-apply-submit-button]');
     if (submit) submit.addEventListener('click', () => window.log.push('submit'));
 };
 document.querySelector('main a[href*="/apply"]').addEventListener('click', (event) => {
     event.preventDefault();
+    // A held dialog starts rendering only once the test calls window.release().
+    const open = () => setTimeout(render, 100);
+    if (window.held) window.release = open;
+    else open();
     window.log.push('open');
-    setTimeout(render, 100);
 });
 document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || !shadow.querySelector('[role="dialog"]')) return;
@@ -164,7 +176,12 @@ EXTERNAL = (
 
 
 def posting(
-    control: str, steps: list[dict], *, stuck: bool = False, next_delay: int = 100
+    control: str,
+    steps: list[dict],
+    *,
+    stuck: bool = False,
+    held: bool = False,
+    next_delay: int = 100,
 ) -> str:
     return (
         "<main>"
@@ -173,6 +190,7 @@ def posting(
         "</main>"
         f"<script>{DIALOG_SCRIPT % json.dumps(steps)}"
         f"window.stuck = {'true' if stuck else 'false'};"
+        f"window.held = {'true' if held else 'false'};"
         f"window.nextDelay = {next_delay};</script>"
     )
 
@@ -430,12 +448,14 @@ async def test_a_cancelled_read_still_discards_the_draft(dom_page):
 
 
 async def test_a_read_cancelled_while_the_dialog_opens_discards_it(dom_page):
-    # The dialog renders 100ms after the click, so this cancel lands before it.
-    await serve(dom_page, posting(EASY_APPLY, [CONTACT]))
+    # The dialog is held, so the cancel lands before it renders, however long
+    # the read took to get here. It renders 100ms after its release, which
+    # normally leaves the cancelled read waiting for it to open.
+    await serve(dom_page, posting(EASY_APPLY, [CONTACT], held=True))
     task = asyncio.ensure_future(read_served(dom_page))
     await until_logged(dom_page, "open")
-    assert not await dialog_open(dom_page)
     task.cancel()
+    await dom_page.evaluate("() => window.release()", isolated_context=False)
 
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -444,15 +464,21 @@ async def test_a_read_cancelled_while_the_dialog_opens_discards_it(dom_page):
 
 
 async def test_a_read_past_the_tool_deadline_still_discards_the_draft(dom_page):
-    # A tool timeout is an AnyIO scope, which cancels the task again on every
-    # pass of the loop: an unshielded discard ends at its first await. Three
-    # steps take well over a second to read.
+    # A tool timeout is an AnyIO deadline. It expires once Next was clicked,
+    # however long the read took to get there, and the cancelled read must
+    # still close the dialog and discard the draft. The two steps after Next
+    # take well over a second to read.
     await serve(dom_page, posting(EASY_APPLY, [CONTACT, QUESTIONS, RESUME]))
 
+    async def expire_after_next(scope: anyio.CancelScope) -> None:
+        await until_logged(dom_page, "next")
+        scope.deadline = anyio.current_time()
+
     with pytest.raises(TimeoutError):
-        with anyio.fail_after(0.4):
-            await read_served(dom_page)
+        with anyio.fail_after(None) as deadline:
+            async with anyio.create_task_group() as tasks:
+                tasks.start_soon(expire_after_next, deadline)
+                await read_served(dom_page)
 
     assert not await dialog_open(dom_page)
-    assert "open" in await log(dom_page)
     assert (await log(dom_page))[-2:] == ["escape", "discard"]

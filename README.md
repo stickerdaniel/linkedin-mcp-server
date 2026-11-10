@@ -11,12 +11,25 @@
 
 Give your AI agents access to LinkedIn through your own browser session. Read profiles, research companies, find jobs, and manage conversations and connection requests.
 
-> This is an independent open-source project, not affiliated with LinkedIn or Microsoft. LinkedIn is a trademark of LinkedIn Corporation, used here only to identify the service this software interacts with.
+> Independent open-source project. Not affiliated with LinkedIn or Microsoft. LinkedIn is a trademark of LinkedIn Corporation.
 
 <br/>
 <details open>
 <summary><strong>LinkedIn MCP Sponsor</strong></summary>
 <br/>
+<a href="https://linkupapi.com/?utm_source=stickerdaniel" target="_blank">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/df9f3784-4db3-4a30-a908-ca9aae32f54c">
+    <img src="https://github.com/user-attachments/assets/e3a019f0-0dbe-4b91-8e41-684d5ea69893" alt="LinkupAPI, the outreach API for your AI agents" width="100%">
+  </picture>
+</a>
+
+> Running LinkedIn agents in production? [**LinkupAPI**](https://linkupapi.com/?utm_source=stickerdaniel) is the hosted outreach API built for scale, across LinkedIn Classic, Sales Navigator, and Recruiter, plus email, WhatsApp, and iMessage.
+
+[Try LinkupAPI free →](https://linkupapi.com/?utm_source=stickerdaniel)
+
+<br/>
+
 <a href="https://cadenza.page/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=oss_sponsor&amp;utm_content=banner" target="_blank">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/e7dc04a7-4b2c-4f8f-bffa-77895f02a9b4">
@@ -24,7 +37,7 @@ Give your AI agents access to LinkedIn through your own browser session. Read pr
   </picture>
 </a>
 
-> Prefer not to run a server? [**Cadenza**](https://cadenza.page/?utm_source=github&utm_medium=readme&utm_campaign=oss_sponsor&utm_content=name) is the hosted LinkedIn MCP server for your agents, on web, desktop, and mobile, with 100+ actions across LinkedIn Classic, Sales Navigator, and Recruiter. Request limits are built in, with per-minute and daily budgets you can fine-tune for each action.
+> [**Cadenza**](https://cadenza.page/?utm_source=github&utm_medium=readme&utm_campaign=oss_sponsor&utm_content=name) is the single hosted MCP server for all your LinkedIn needs. It covers Classic, Sales Navigator, and Recruiter with 100+ actions, each within limits you set. Works on web, desktop, and mobile.
 
 Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https://cadenza.page/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=oss_sponsor&amp;utm_content=cta">Try Cadenza →</a>
 
@@ -40,6 +53,19 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 > This MCP server is supported by [**Unipile**](https://golink.onl/unipile-link). Unipile is the fully managed cloud option for developers: a hosted LinkedIn API for Classic, Sales Navigator, and Recruiter that handles auth, sessions, and infrastructure for you.
 
 [Try Unipile free for 7 days →](https://golink.onl/unipile-free-trial)
+
+<br/>
+
+<a href="https://zernio.link/daniel-sticker" target="_blank">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/f8b34875-c2b7-4466-b430-51fda4875720">
+    <img src="https://github.com/user-attachments/assets/ef30cb05-80a7-4b03-a9d4-186c6db2fe43" alt="Zernio, official APIs for every social channel" width="100%">
+  </picture>
+</a>
+
+> [**Zernio**](https://zernio.link/daniel-sticker) gives your agents official APIs for every social channel. Post, reply, and run ads on Instagram, TikTok, X, YouTube, Threads, and more, through one API or MCP server.
+
+[Try Zernio free →](https://zernio.link/daniel-sticker)
 </details>
 
 ---
@@ -57,7 +83,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 
 | Tool | Description |
 |------|-------------|
-| `get_person_profile` | Read profile sections such as experience, education, skills, projects, volunteering, and posts. |
+| `get_person_profile` | Read profile sections: experience, education, skills, projects, volunteering, posts. |
 | `get_my_profile` | Read your own profile, with the same section selection as other profiles. |
 | `connect_with_person` | Send a connection request with an optional note, or accept an incoming one. |
 | `get_sidebar_profiles` | Find recommended profile links, including people you may know. |
@@ -65,8 +91,8 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `get_conversation` | Read a conversation's messages using a LinkedIn username or thread ID. |
 | `search_conversations` | Search messages by keyword and return links to matching conversation threads. |
 | `archive_conversation` | Archive a conversation by thread ID; a repeat call reports it already archived. |
-| `send_message` | Send after confirmation; profile targets may open a new DM ([#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483)). |
-| `reply_to_conversation` | Reply inside an existing thread by thread ID, InMail included. Sends after confirmation. |
+| `send_message` | Message a profile after confirmation. Threads use `reply_to_conversation`. |
+| `reply_to_conversation` | Reply inside an existing thread or InMail by thread ID. Sends after confirmation. |
 | `get_company_profile` | Read company information, with optional sections for posts and open jobs. |
 | `get_company_posts` | Read recent posts from a company's feed, with links to the original posts. |
 | `search_companies` | Find companies by keyword and return links to their LinkedIn profiles. |
@@ -77,7 +103,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `search_people` | Find people by keyword, location, connection degree, and current company. |
 | `get_job_details` | Read a job posting's description, requirements, and company details. |
 | `get_job_apply_url` | Check whether a job uses Easy Apply or links to an employer's application. |
-| `get_easy_apply_form` | Read an Easy Apply form: each field's label, type, options and prefilled value. Never types or submits. |
+| `get_easy_apply_form` | Read an Easy Apply form's fields, options and prefilled values. Never submits. |
 | `get_feed` | Read recent posts from your home feed, with links to the original posts. |
 | `search_posts` | Search posts by keyword, optionally filtered by recency or content type. |
 | `get_my_posts` | Read your recent posts and the engagement text LinkedIn shows beside them. |

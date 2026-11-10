@@ -774,11 +774,12 @@ class JobPageReader:
     async def _close_easy_apply(self, *, opening: bool = False) -> bool:
         """Discard the dialog however the walk ended; True once it is gone.
 
-        Shielded from AnyIO as well as from asyncio, for the reason
-        `_let_the_scroll_land` is: a tool timeout cancels the task again on
-        every pass of the event loop, and would end the discard at its first
-        await with the dialog still open on the shared page and a draft that
-        LinkedIn resumes the next time Easy Apply is opened. Bounded by
+        The discard runs as a task of its own, so a cancel cannot end it with
+        the dialog still open on the shared page and a draft that LinkedIn
+        resumes the next time Easy Apply is opened. This call waits for it. A
+        tool timeout is an AnyIO deadline, which cancels the task again on
+        every pass of the event loop; the AnyIO shield keeps that from turning
+        the wait into a busy loop for as long as the discard takes. Bounded by
         `_EASY_APPLY_CLOSE_GRACE`, so a page that never answers cannot hold
         the page lock. A cancel that arrives meanwhile is raised once the
         discard has ended.

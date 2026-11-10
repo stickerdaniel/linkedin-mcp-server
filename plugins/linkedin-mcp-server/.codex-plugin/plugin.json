@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "LinkedIn MCP",
     "shortDescription": "Research profiles, companies, jobs, posts, and messages.",
-    "longDescription": "Use your own LinkedIn browser session to research profiles, companies, jobs, posts, and messages in Codex. Write actions require an explicit request. This is an independent open-source integration and is not affiliated with LinkedIn.",
+    "longDescription": "Use your own LinkedIn browser session to research profiles, companies, jobs, posts, and messages in Codex. Write actions require an explicit request. Independent open-source project. Not affiliated with LinkedIn or Microsoft. LinkedIn is a trademark of LinkedIn Corporation.",
     "developerName": "Daniel Sticker",
     "category": "Business & Operations",
     "capabilities": [
