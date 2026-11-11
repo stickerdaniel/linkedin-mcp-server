@@ -14,6 +14,13 @@ count = 1
 reason = "Login marker for the older global nav; new_selectors covers the current nav by href and is checked alongside it."
 
 [[exception]]
+file = "linkedin_mcp_server/core/auth.py"
+symbol = "is_logged_in"
+text = ':has-text("Home")'
+count = 1
+reason = "English label fallback beside the href-based nav selectors, which hold in every locale."
+
+[[exception]]
 file = "linkedin_mcp_server/core/utils.py"
 symbol = "handle_modal_close"
 text = ".artdeco-modal__dismiss"

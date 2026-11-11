@@ -1,4 +1,4 @@
-"""The selector policy check refuses class and label-value selectors.
+"""The selector policy check refuses class, label-value and text selectors.
 
 Snippets pin each rule; planted faults run the real check against a copy of
 the package, so a change to a registered dependency fails it.
@@ -55,12 +55,68 @@ def _found(source: str) -> list[tuple[str, str]]:
             ("class-selector", ".feed-row"),
         ),
         ('X = "el.closest(`.row`)"', ("class-selector", ".row")),
+        ("page.locator(selector='.toast')", ("class-selector", ".toast")),
+        ("page.wait_for_selector(selector='.toast')", ("class-selector", ".toast")),
+        ("page.query_selector(selector='.toast')", ("class-selector", ".toast")),
+        ("page.query_selector_all(selector='.toast')", ("class-selector", ".toast")),
+        (
+            "row.locator(selector_or_locator='.toast')",
+            ("class-selector", ".toast"),
+        ),
+        (
+            "X = \"document.querySelector('.toast',)\"",
+            ("class-selector", ".toast"),
+        ),
+        (
+            "X = \"document.querySelector(/* selector */ '.toast')\"",
+            ("class-selector", ".toast"),
+        ),
+        (
+            "X = \"document.querySelector('.toast' /* selector */)\"",
+            ("class-selector", ".toast"),
+        ),
+        (
+            "X = \"document.querySelector(// selector\\n  '.toast',\\n)\"",
+            ("class-selector", ".toast"),
+        ),
+        (
+            'JS = r\'document.querySelector("[title=\\"a]b\\"]")\'',
+            ("label-value", '[title=\\"a]b\\"]'),
+        ),
+        ("page.locator('id=main >> div.toast')", ("class-selector", ".toast")),
+        ("page.locator('xpath=//main >> css=.toast')", ("class-selector", ".toast")),
     ],
 )
 def test_a_class_or_label_value_selector_is_refused(
     source: str, expected: tuple[str, str]
 ) -> None:
     assert _found(source) == [expected]
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("X = 'nav button:has-text(\"Home\")'", ':has-text("Home")'),
+        ("X = \"li:text('Save')\"", ":text('Save')"),
+        ("X = 'a:text-is(\"Jobs\")'", ':text-is("Jobs")'),
+        ("page.locator('text=Sign in')", "text=Sign in"),
+        (
+            "page.locator('text=Continue on LinkedIn.com')",
+            "text=Continue on LinkedIn.com",
+        ),
+        ("page.locator('main >> \"Sign in\"')", '"Sign in"'),
+        ("page.get_by_text('Sign in')", "get_by_text('Sign in')"),
+        ("page.get_by_text(text='Sign in', exact=True)", "get_by_text('Sign in')"),
+        (
+            "page.get_by_role('button', name='Sign in')",
+            "get_by_role(name='Sign in')",
+        ),
+    ],
+)
+def test_a_text_selector_with_a_written_value_is_refused(
+    source: str, expected: str
+) -> None:
+    assert _found(source) == [("text-selector", expected)]
 
 
 @pytest.mark.parametrize(
@@ -73,10 +129,44 @@ def test_a_class_or_label_value_selector_is_refused(
         "page.locator('a[href$=\".pdf\"]')",
         "X = \"document.querySelectorAll('main li label[aria-label]')\"",
         'def f():\n    """Reads .artdeco-modal__content and [class*=x]."""\n',
+        'JS = r\'document.querySelector("a[href$=\\".pdf\\"]")\'',
+        "page.locator('id=foo.bar')",
+        "page.locator(r'#foo\\.bar')",
+        "page.locator('button /* .toast */')",
     ],
 )
 def test_presence_href_and_docstrings_are_allowed(source: str) -> None:
     assert _found(source) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'URL = "https://example.com/search?text=Sign+in"',
+        "subprocess.run(['grep', 'text=Sign in'])",
+        "page.get_by_text(label)",
+        "page.get_by_role('button')",
+        "page.get_by_role('button', name=label)",
+        "page.locator('button').filter(has_text='Save')",
+        "page.locator('button', has_text='Save')",
+    ],
+)
+def test_text_outside_a_selector_or_from_a_variable_is_allowed(source: str) -> None:
+    assert _found(source) == []
+
+
+def test_an_exception_pins_a_value_quoted_inside_a_js_string() -> None:
+    def scan(value: str) -> list:
+        return _CHECK.scan_source(
+            f'JS = r\'document.querySelector("[title=\\"{value}\\"]")\'',
+            "snippet.py",
+        )
+
+    registered = [
+        _CHECK.Registered(m.path, m.symbol, m.text, 1, "test") for m in scan("a]b")
+    ]
+    assert _CHECK.problems(scan("a]b"), registered) == []
+    assert _CHECK.problems(scan("a]c"), registered) != []
 
 
 def test_the_owner_is_the_innermost_symbol() -> None:
@@ -172,6 +262,20 @@ def test_a_substituted_label_value_fails(
     assert '[aria-label="Dismiss"] in handle_modal_close: registered 1, found 0' in (
         report
     )
+
+
+def test_a_substituted_text_selector_value_fails(
+    tree: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _plant(
+        tree,
+        "linkedin_mcp_server/core/auth.py",
+        'nav button:has-text("Home")',
+        'nav button:has-text("Start")',
+    )
+    report = _report(tree, capsys)
+    assert 'text-selector: :has-text("Start")' in report
+    assert ':has-text("Home") in is_logged_in: registered 1, found 0' in report
 
 
 def test_a_removed_occurrence_fails_as_a_stale_count(

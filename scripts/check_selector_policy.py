@@ -2,7 +2,7 @@
 """Refuse selectors that depend on LinkedIn's class names or English labels.
 
 Scans every string constant under ``linkedin_mcp_server/`` except docstrings
-and reports four kinds of match:
+and reports five kinds of match:
 
 1. ``bem-class``: a BEM class token such as ``.artdeco-modal__dismiss``,
    LinkedIn's class naming, anywhere in a string.
@@ -13,22 +13,37 @@ and reports four kinds of match:
    or unquoted. Presence alone (``[aria-label]``) is allowed.
 4. ``class-selector``: any ``.class`` token in a literal selector passed
    directly to ``locator``, ``wait_for_selector``, ``query_selector`` or
-   ``query_selector_all``, or in a JS ``querySelector``, ``querySelectorAll``,
-   ``closest`` or ``matches`` call with a literal argument inside a string.
+   ``query_selector_all``, positionally or by keyword, or in a JS
+   ``querySelector``, ``querySelectorAll``, ``closest`` or ``matches`` call
+   whose one argument is a literal inside a string. Only CSS counts: a
+   Playwright selector is split at ``>>``, its ``id=``, ``text=``, ``xpath=``
+   and other engine parts are skipped, and so are CSS comments, escapes
+   (``#foo\\.bar``) and quoted values. A JS literal is read after its own
+   escapes, so ``a[href$=\\".pdf\\"]`` there is not a class.
+5. ``text-selector``: a Playwright text selector with a written value: the
+   ``:has-text(...)``, ``:text(...)`` and ``:text-is(...)`` pseudo-classes
+   anywhere in a string, a ``text=`` or quoted part of a literal selector
+   passed to the methods in rule 4, and ``get_by_text`` or
+   ``get_by_role(..., name=...)`` with a literal. ``has_text`` filters, as in
+   ``.filter(has_text=...)`` or ``locator(..., has_text=...)``, are outside
+   this rule.
 
-Rules 1 to 3 judge a value where it is written, so a selector defined in one
-module and used in another, or handed from Python to page JS, is checked at
-its definition. Rules 2 and 3 report the complete attribute clause, value
-included, so an exception names the exact value it allows.
+Rules 1 to 3 and the pseudo-classes of rule 5 judge a value where it is
+written, so a selector defined in one module and used in another, or handed
+from Python to page JS, is checked at its definition. Rules 2, 3 and 5 report
+the complete clause, value included, so an exception names the exact value
+it allows. A value quoted from inside a JS string, such as
+``[title=\\"a]b\\"]``, keeps its escaped quotes and every ``]`` between them.
 
 A dependency that is unavoidable is registered in
 ``scripts/selector_policy_exceptions.toml`` by file, owning symbol, exact text
 and count. Any unregistered match, and any registered count that differs
 from the tree in either direction, fails the check.
 
-Limits: a non-BEM class token that reaches a selector through a variable,
-concatenation or template is not caught; rule 4 sees literal arguments only.
-Parsing page text (for example "Page 2 of 5") is outside this policy.
+Limits: a non-BEM class token or a text engine part that reaches a selector
+through a variable, concatenation or template is not caught; rules 4 and 5
+see literal arguments only. Parsing page text (for example "Page 2 of 5") is
+outside this policy.
 """
 
 from __future__ import annotations
@@ -47,34 +62,75 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = "linkedin_mcp_server"
 EXCEPTIONS = Path("scripts/selector_policy_exceptions.toml")
 
-Rule = Literal["bem-class", "class-attribute", "label-value", "class-selector"]
+Rule = Literal[
+    "bem-class", "class-attribute", "label-value", "class-selector", "text-selector"
+]
 
 _BEM = re.compile(r"\.[A-Za-z][\w-]*__[\w-]+")
 _CLASS_ATTRIBUTE = re.compile(r"\[\s*class\s*[*^$|~]?=", re.IGNORECASE)
 _LABEL_VALUE = re.compile(r"\[\s*(?:aria-label|title)\s*[*^$|~]?=", re.IGNORECASE)
+_TEXT_PSEUDO = re.compile(r":(?:has-text|text-is|text)\(")
+# A quoted CSS string, plain or as written inside a JS string literal, where
+# \"a]b\" is the CSS string "a]b" and a doubled backslash is a CSS escape.
+_QUOTED = (
+    r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'"""
+    r"""|\\"(?:\\\\(?:\\.|[^\\])|\\[^"\\]|[^"\\])*\\\""""
+    r"""|\\'(?:\\\\(?:\\.|[^\\])|\\[^'\\]|[^'\\])*\\')"""
+)
 # The rest of an attribute clause after its operator: a quoted or bare value,
 # an optional case flag, and the closing bracket.
-_CLAUSE_TAIL = re.compile(
-    r"""\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s\]"']+)\s*(?:[iIsS]\s*)?\]"""
-)
+_CLAUSE_TAIL = re.compile(rf"""\s*(?:{_QUOTED}|[^\s\]"']+)\s*(?:[iIsS]\s*)?\]""")
+# The rest of a text pseudo-class after its parenthesis.
+_PSEUDO_TAIL = re.compile(rf"""\s*(?:{_QUOTED}|[^)"']*)\s*\)""")
 
 _PYTHON_SINKS = frozenset(
     {"locator", "wait_for_selector", "query_selector", "query_selector_all"}
 )
-# A JS selector call whose single argument is a string literal. A template
-# literal counts only without `${`, which would make it an expression.
+# `Locator.locator` names its selector parameter differently from the others.
+_SELECTOR_KEYWORDS = frozenset({"selector", "selector_or_locator"})
+# Whitespace and comments around a JS call argument.
+_JS_TRIVIA = r"(?:\s|/\*.*?\*/|//[^\n]*\n)*"
+# A JS selector call whose one argument is a string literal, with an optional
+# trailing comma. A template literal counts only without `${`, which would
+# make it an expression.
 _JS_SINK = re.compile(
-    r"""\b(?:querySelector(?:All)?|closest|matches)\s*\(\s*"""
-    r"""(?P<q>['"`])(?P<body>(?:\\.|(?!(?P=q)).)*?)(?P=q)\s*\)""",
+    rf"""\b(?:querySelector(?:All)?|closest|matches)\s*\({_JS_TRIVIA}"""
+    r"""(?P<q>['"`])(?P<body>(?:\\.|(?!(?P=q)).)*?)(?P=q)"""
+    rf"""{_JS_TRIVIA}(?:,{_JS_TRIVIA})?\)""",
     re.DOTALL,
 )
-_CLASS_TOKEN = re.compile(r"\.-?[A-Za-z_][\w-]*")
-# Attribute clauses and quoted strings inside a selector, blanked before
-# looking for class tokens so `a[href$=".pdf"]` is not read as a class.
-_SELECTOR_NOISE = re.compile(
-    r"""\[(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\]"'])*\]"""
-    r"""|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'"""
+_JS_ESCAPE = re.compile(
+    r"\\(?:u\{(?P<braced>[0-9A-Fa-f]{1,6})\}|u(?P<u>[0-9A-Fa-f]{4})"
+    r"|x(?P<x>[0-9A-Fa-f]{2})|(?P<char>\r\n|[\s\S]))"
 )
+_JS_SIMPLE_ESCAPES = {
+    "n": "\n",
+    "t": "\t",
+    "r": "\r",
+    "b": "\b",
+    "f": "\f",
+    "v": "\v",
+    "0": "\0",
+    # A backslash before a line break continues the line.
+    "\n": "",
+    "\r": "",
+    "\r\n": "",
+    "\u2028": "",
+    "\u2029": "",
+}
+_CSS_ESCAPE = r"\\(?:[0-9A-Fa-f]{1,6}\s?|[^\n0-9A-Fa-f])"
+_CSS_IDENT = rf"-?(?:[A-Za-z_]|{_CSS_ESCAPE})(?:[\w-]|{_CSS_ESCAPE})*"
+# Read left to right: comments, quoted strings, attribute clauses, IDs and
+# escapes are consumed whole, so a dot inside one of them is never a class.
+_CSS_TOKEN = re.compile(
+    r"""/\*.*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'"""
+    r"""|\[(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\]"'])*\]"""
+    rf"""|#{_CSS_IDENT}|{_CSS_ESCAPE}|(?P<cls>\.{_CSS_IDENT})""",
+    re.DOTALL,
+)
+# What Playwright reads as an engine name before the first `=` of a part.
+_ENGINE_NAME = re.compile(r"[A-Za-z_0-9+:*-]+")
+_XPATH = re.compile(r"\(*//|\.\.")
 
 _FIX_HINT = (
     "Prefer URL navigation, innerText, or attribute presence such as "
@@ -102,35 +158,110 @@ class Registered:
     reason: str
 
 
-def _attribute_clause(value: str, start: int, prefix_end: int) -> str:
-    """Return the attribute clause opened at ``start``, value included.
+def _clause(value: str, start: int, prefix_end: int, tail: re.Pattern[str]) -> str:
+    """Return the clause opened at ``start``, value included.
 
-    A clause cut short by the end of the constant (an f-string or a
-    concatenation) is returned up to that end, so it is still reported.
+    ``tail`` matches the value and the closing bracket or parenthesis. A
+    clause cut short by the end of the constant (an f-string or a
+    concatenation) is returned up to the first closing character or that end,
+    so it is still reported.
     """
-    tail = _CLAUSE_TAIL.match(value, prefix_end)
-    if tail:
-        return value[start : tail.end()]
-    close = value.find("]", prefix_end)
+    found = tail.match(value, prefix_end)
+    if found:
+        return value[start : found.end()]
+    close = value.find("]" if value[start] == "[" else ")", prefix_end)
     return value[start : close + 1 if close != -1 else len(value)]
 
 
-def _class_tokens(selector: str) -> Iterator[tuple[int, str]]:
-    blanked = _SELECTOR_NOISE.sub(lambda m: " " * len(m.group(0)), selector)
-    for match in _CLASS_TOKEN.finditer(blanked):
-        yield match.start(), selector[match.start() : match.end()]
+def _css_class_tokens(css: str) -> Iterator[tuple[int, str]]:
+    for token in _CSS_TOKEN.finditer(css):
+        if token.group("cls"):
+            yield token.start(), token.group("cls")
+
+
+def _selector_parts(selector: str) -> Iterator[tuple[int, str]]:
+    """Yield each part of a Playwright selector chain with its offset.
+
+    Splits at ``>>`` outside quotes, as Playwright's ``parseSelectorString``
+    does.
+    """
+    start = index = 0
+    quote = ""
+    while index < len(selector):
+        char = selector[index]
+        if char == "\\":
+            index += 1
+        elif char == quote:
+            quote = ""
+        elif not quote and char in "\"'`":
+            quote = char
+        elif not quote and selector.startswith(">>", index):
+            yield start, selector[start:index]
+            start = index + 2
+            index += 1
+        index += 1
+    yield start, selector[start:]
+
+
+def _selector_matches(selector: str) -> Iterator[tuple[int, Rule, str]]:
+    """Rule 4 and the text engine of rule 5 in a Playwright selector.
+
+    Each part is classified as Playwright does: ``name=body`` when the text
+    before the first ``=`` is an engine name, a quoted part as ``text``, a
+    leading ``//`` or ``..`` as ``xpath``, and anything else as CSS.
+    """
+    for start, raw in _selector_parts(selector):
+        part = raw.strip()
+        offset = start + len(raw) - len(raw.lstrip())
+        name, equals, body = part.partition("=")
+        if equals and _ENGINE_NAME.fullmatch(name.strip()):
+            engine = name.strip().lstrip("*")
+            body_offset = offset + len(name) + 1
+        elif len(part) > 1 and part[0] in "\"'" and part[-1] == part[0]:
+            engine, body, body_offset = "text", part, offset
+        elif _XPATH.match(part):
+            engine, body, body_offset = "xpath", part, offset
+        else:
+            engine, body, body_offset = "css", part, offset
+        if engine == "text":
+            yield offset, "text-selector", part
+        elif engine == "css":
+            for token_offset, token in _css_class_tokens(body):
+                yield body_offset + token_offset, "class-selector", token
 
 
 def _content_matches(value: str) -> Iterator[tuple[int, Rule, str]]:
     for match in _BEM.finditer(value):
         yield match.start(), "bem-class", match.group(0)
-    for rule, pattern in (
-        ("class-attribute", _CLASS_ATTRIBUTE),
-        ("label-value", _LABEL_VALUE),
+    for rule, pattern, tail in (
+        ("class-attribute", _CLASS_ATTRIBUTE, _CLAUSE_TAIL),
+        ("label-value", _LABEL_VALUE, _CLAUSE_TAIL),
+        ("text-selector", _TEXT_PSEUDO, _PSEUDO_TAIL),
     ):
         for match in pattern.finditer(value):
-            clause = _attribute_clause(value, match.start(), match.end())
+            clause = _clause(value, match.start(), match.end(), tail)
             yield match.start(), rule, clause
+
+
+def _js_string(body: str) -> tuple[str, list[int]]:
+    """Decode a JS string literal's body, with each character's offset in it."""
+    text: list[str] = []
+    offsets: list[int] = []
+    position = 0
+    for escape in _JS_ESCAPE.finditer(body):
+        text += body[position : escape.start()]
+        offsets += range(position, escape.start())
+        code = escape["braced"] or escape["u"] or escape["x"]
+        if code:
+            decoded = chr(min(int(code, 16), sys.maxunicode))
+        else:
+            decoded = _JS_SIMPLE_ESCAPES.get(escape["char"], escape["char"])
+        text += decoded
+        offsets += [escape.start()] * len(decoded)
+        position = escape.end()
+    text += body[position:]
+    offsets += range(position, len(body))
+    return "".join(text), offsets
 
 
 def _js_sink_matches(value: str) -> Iterator[tuple[int, str]]:
@@ -138,8 +269,9 @@ def _js_sink_matches(value: str) -> Iterator[tuple[int, str]]:
         body = call.group("body")
         if call.group("q") == "`" and "${" in body:
             continue
-        for offset, token in _class_tokens(body):
-            yield call.start("body") + offset, token
+        css, offsets = _js_string(body)
+        for offset, token in _css_class_tokens(css):
+            yield call.start("body") + offsets[offset], token
 
 
 def _docstrings(tree: ast.Module) -> set[int]:
@@ -174,16 +306,44 @@ def _assigned_name(node: ast.Assign | ast.AnnAssign) -> str:
     return names[0] if names else "<module>"
 
 
+def _literal(node: ast.expr | None) -> ast.Constant | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node
+    return None
+
+
+def _literal_argument(call: ast.Call, keywords: frozenset[str]) -> ast.Constant | None:
+    """Return the literal first argument, passed positionally or by keyword."""
+    if call.args:
+        return _literal(call.args[0])
+    return _literal(next((k.value for k in call.keywords if k.arg in keywords), None))
+
+
 def _literal_selector(node: ast.AST) -> ast.Constant | None:
-    """Return the literal first argument of a Playwright selector call."""
+    """Return the literal selector of a Playwright selector call."""
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr in _PYTHON_SINKS
-        and node.args
-        and isinstance(node.args[0], ast.Constant)
     ):
-        return node.args[0]
+        return _literal_argument(node, _SELECTOR_KEYWORDS)
+    return None
+
+
+def _literal_text_locator(node: ast.AST) -> tuple[ast.Constant, str] | None:
+    """Return the literal of ``get_by_text`` or ``get_by_role(name=)``.
+
+    The text reported is the call reduced to that literal, such as
+    ``get_by_role(name='Home')``.
+    """
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+        return None
+    if node.func.attr == "get_by_text":
+        text = _literal_argument(node, frozenset({"text"}))
+        return (text, f"get_by_text({text.value!r})") if text else None
+    if node.func.attr == "get_by_role":
+        name = _literal(next((k.value for k in node.keywords if k.arg == "name"), None))
+        return (name, f"get_by_role(name={name.value!r})") if name else None
     return None
 
 
@@ -214,13 +374,15 @@ def scan_source(source: str, path: str) -> list[Match]:
     matches: list[Match] = []
     for owner, node in _owned_nodes(tree):
         argument = _literal_selector(node)
-        if argument is not None and isinstance(argument.value, str):
-            selector = argument.value
+        if argument is not None and isinstance(selector := argument.value, str):
             covered = {offset for offset, *_ in _content_matches(selector)}
-            for offset, token in _class_tokens(selector):
+            for offset, rule, text in _selector_matches(selector):
                 if offset not in covered:
                     line = _line(argument, selector, offset)
-                    matches.append(Match(path, line, owner, "class-selector", token))
+                    matches.append(Match(path, line, owner, rule, text))
+        if located := _literal_text_locator(node):
+            literal, text = located
+            matches.append(Match(path, literal.lineno, owner, "text-selector", text))
         if not (
             isinstance(node, ast.Constant)
             and isinstance(node.value, str)
