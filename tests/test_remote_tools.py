@@ -428,6 +428,24 @@ _BASE64URL = string.ascii_uppercase + string.ascii_lowercase + string.digits + "
 _NON_CANONICAL = _SIGNATURE[:-1] + _BASE64URL[_BASE64URL.index(_SIGNATURE[-1]) | 1]
 
 
+def _in_the_standard_alphabet() -> tuple[bytes, str]:
+    """A body and its valid signature spelled with ``+`` and ``/`` instead.
+
+    The key is new each run, so trailing whitespace, which JSON ignores, varies
+    the body until the signature holds a character the two alphabets spell
+    differently.
+    """
+    for pad in range(64):
+        body = _BODY + b" " * pad
+        value = signature(body)
+        if "-" in value or "_" in value:
+            return body, value.replace("-", "+").replace("_", "/")
+    raise AssertionError("no signature with - or _ in 64 tries")
+
+
+_STANDARD = _in_the_standard_alphabet()
+
+
 def _with_signature(*values: str, body: bytes = _BODY) -> Answer:
     return CatalogStub.raw(
         200, body, [(SIGNATURE_HEADER, value) for value in values], signed=False
@@ -443,7 +461,7 @@ _FORGED = {
     ),
     "signed without the prefix": _with_signature(signature(_BODY, prefix=b"")),
     "padded": _with_signature(_SIGNATURE + "=="),
-    "standard base64": _with_signature(_SIGNATURE[:-2] + "+/"),
+    "standard base64": _with_signature(_STANDARD[1], body=_STANDARD[0]),
     "one character short": _with_signature(_SIGNATURE[:-1]),
     "one character long": _with_signature(_SIGNATURE + "A"),
     "non-canonical last character": _with_signature(_NON_CANONICAL),
