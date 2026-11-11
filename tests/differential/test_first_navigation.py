@@ -512,18 +512,22 @@ async def test_a_killed_staging_process_leaves_what_it_had_observed(tmp_path):
             deadline = time.monotonic() + 30
             while not requested():
                 if child.poll() is not None:
-                    pytest.skip(f"the staging process ended first: {child.stderr}")
+                    _, stderr = child.communicate()
+                    pytest.skip(f"the staging process ended first: {stderr.decode()}")
                 if time.monotonic() > deadline:
                     pytest.fail("the staging process never sent its request")
                 await asyncio.sleep(0.05)
         finally:
-            tree = [psutil.Process(child.pid)]
-            with contextlib.suppress(psutil.Error):
-                tree += tree[0].children(recursive=True)
-            for process in tree:
+            # poll() reaps a child that has ended, which frees its pid for
+            # reuse: only a child not yet reaped is walked and killed.
+            if child.poll() is None:
+                tree = [psutil.Process(child.pid)]
                 with contextlib.suppress(psutil.Error):
-                    process.kill()
-            psutil.wait_procs(tree, timeout=10)
+                    tree += tree[0].children(recursive=True)
+                for process in tree:
+                    with contextlib.suppress(psutil.Error):
+                        process.kill()
+                psutil.wait_procs(tree, timeout=10)
             child.wait(10)
     record = _record(path)
     assert record["label"] == "killed-staging"
