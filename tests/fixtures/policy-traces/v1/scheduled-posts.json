@@ -15,6 +15,21 @@
     },
     {
       "call": "get_scheduled_posts",
+      "kind": "locator.create",
+      "locator": "document_language",
+      "parent": null,
+      "section": "scheduled_posts",
+      "selector": "html"
+    },
+    {
+      "attribute": "lang",
+      "call": "get_scheduled_posts",
+      "kind": "locator.get_attribute",
+      "locator": "document_language",
+      "section": "scheduled_posts"
+    },
+    {
+      "call": "get_scheduled_posts",
       "callback_id": "callback-1",
       "event": "framenavigated",
       "kind": "listener.add",
@@ -71,26 +86,6 @@
     },
     {
       "call": "get_scheduled_posts",
-      "kind": "boundary.rate_limit",
-      "section": "scheduled_posts"
-    },
-    {
-      "call": "get_scheduled_posts",
-      "kind": "locator.create",
-      "locator": "document_language",
-      "parent": null,
-      "section": "scheduled_posts",
-      "selector": "html"
-    },
-    {
-      "attribute": "lang",
-      "call": "get_scheduled_posts",
-      "kind": "locator.get_attribute",
-      "locator": "document_language",
-      "section": "scheduled_posts"
-    },
-    {
-      "call": "get_scheduled_posts",
       "kind": "locator.create",
       "locator": "schedule_dialog",
       "parent": null,
@@ -104,6 +99,35 @@
       "section": "scheduled_posts",
       "state": "visible",
       "timeout_ms": 10000
+    },
+    {
+      "arg": {
+        "action": "claim",
+        "labels": {
+          "dismiss": "Dismiss",
+          "empty": [
+            "You have no scheduled posts",
+            "No scheduled posts",
+            "When you schedule a post, it automatically posts at the date and time you chose"
+          ],
+          "heading": "Scheduled posts",
+          "posting_pattern": "^Posting\\b",
+          "schedule_heading": "Schedule post",
+          "scheduled_pattern": "^Scheduled \\(([0-9]+)\\)$",
+          "view_all": "View all scheduled posts"
+        },
+        "token": "synthetic-schedule-read"
+      },
+      "call": "get_scheduled_posts",
+      "kind": "evaluate",
+      "operation": "post_schedule_ui",
+      "program_digest": "fa345d5f3e96",
+      "section": "scheduled_posts"
+    },
+    {
+      "call": "get_scheduled_posts",
+      "kind": "boundary.rate_limit",
+      "section": "scheduled_posts"
     },
     {
       "arg": {
@@ -126,7 +150,7 @@
       "call": "get_scheduled_posts",
       "kind": "evaluate",
       "operation": "post_schedule_ui",
-      "program_digest": "966638bf6228",
+      "program_digest": "fa345d5f3e96",
       "section": "scheduled_posts"
     },
     {
@@ -157,7 +181,7 @@
       "call": "get_scheduled_posts",
       "kind": "evaluate",
       "operation": "post_schedule_ui",
-      "program_digest": "966638bf6228",
+      "program_digest": "fa345d5f3e96",
       "section": "scheduled_posts"
     },
     {
@@ -193,7 +217,7 @@
       "call": "get_scheduled_posts",
       "kind": "evaluate",
       "operation": "post_schedule_ui",
-      "program_digest": "966638bf6228",
+      "program_digest": "fa345d5f3e96",
       "section": "scheduled_posts"
     },
     {
@@ -229,7 +253,7 @@
       "call": "get_scheduled_posts",
       "kind": "evaluate",
       "operation": "post_schedule_ui",
-      "program_digest": "966638bf6228",
+      "program_digest": "fa345d5f3e96",
       "section": "scheduled_posts"
     },
     {
@@ -265,7 +289,7 @@
       "call": "get_scheduled_posts",
       "kind": "evaluate",
       "operation": "post_schedule_ui",
-      "program_digest": "966638bf6228",
+      "program_digest": "fa345d5f3e96",
       "section": "scheduled_posts"
     },
     {

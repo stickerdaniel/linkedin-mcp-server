@@ -1103,6 +1103,7 @@ async def _scheduled_posts_scenario(*, operator_dialog: bool = False) -> dict[st
             "evaluate:post_schedule_ui",
             {"ok": True},
             {"ok": True},
+            {"ok": True},
             loaded,
             loaded,
             loaded,

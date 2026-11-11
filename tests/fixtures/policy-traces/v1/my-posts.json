@@ -119,7 +119,7 @@
     {
       "call": "get_my_posts",
       "extra": {
-        "target_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
+        "target_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/posts/",
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",
@@ -128,21 +128,21 @@
     {
       "call": "get_my_posts",
       "kind": "navigate",
-      "landed_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
-      "requested_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
+      "landed_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/posts/",
+      "requested_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/posts/",
       "timeout_ms": 30000,
       "wait_until": "domcontentloaded"
     },
     {
       "call": "get_my_posts",
-      "description": "goto https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
+      "description": "goto https://www.linkedin.com/in/ada-lovelace/recent-activity/posts/",
       "kind": "boundary.stabilize",
       "result": null
     },
     {
       "call": "get_my_posts",
       "extra": {
-        "target_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/all/",
+        "target_url": "https://www.linkedin.com/in/ada-lovelace/recent-activity/posts/",
         "wait_until": "domcontentloaded"
       },
       "kind": "boundary.trace",

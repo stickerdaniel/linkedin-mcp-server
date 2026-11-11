@@ -12,14 +12,22 @@ from urllib.parse import urlsplit
 import anyio
 
 from linkedin_mcp_server.core.exceptions import InvalidReferenceError
-from linkedin_mcp_server.linkedin.capture import CapturePlan, SectionCapture
+from linkedin_mcp_server.linkedin.capture import (
+    CaptureMode,
+    CapturePlan,
+    SectionCapture,
+)
 from linkedin_mcp_server.linkedin.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     rate_limited_section_error,
 )
-from linkedin_mcp_server.linkedin.identifiers import normalize_post_url
+from linkedin_mcp_server.linkedin.identifiers import (
+    normalize_person_identifier,
+    normalize_post_url,
+    person_profile_url,
+)
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
-from linkedin_mcp_server.linkedin.session import PageSession
+from linkedin_mcp_server.linkedin.session import NAV_DELAY, PageSession
 
 
 COMPOSER_URL = "https://www.linkedin.com/feed/?shareActive=true"
@@ -95,7 +103,7 @@ SCHEDULE_UI_JS = r"""({action, labels, token}) => {
     const dialogs = [...document.querySelectorAll('dialog[open],[role="dialog"]')].filter(visible);
     if (dialogs.length !== 1) return {ok: false, reason: 'ambiguous_dialog'};
     const dialog = dialogs[0];
-    if (action !== 'open_clock' && dialog.__linkedinMcpScheduleRead !== token)
+    if (action !== 'claim' && dialog.__linkedinMcpScheduleRead !== token)
         return {ok: false, reason: 'dialog_replaced'};
     const editors = [...dialog.querySelectorAll('[contenteditable="true"]')];
     const attachments = () => dialog.querySelector('video,audio,iframe,object,embed,canvas,fieldset,[role="radiogroup"],[role="radio"],a[download]')
@@ -115,13 +123,19 @@ SCHEDULE_UI_JS = r"""({action, labels, token}) => {
         target.click();
         return {ok: true};
     };
-    if (action === 'open_clock') {
+    if (action === 'claim' || action === 'open_clock') {
         if (editors.length === 0) return {ok: false, reason: 'not_ready'};
         if (editors.length !== 1) return {ok: false, reason: 'ambiguous_editor'};
-        dialog.__linkedinMcpScheduleRead = token;
-        return clickOne(controls.filter(e => e.querySelector(
+        const clocks = controls.filter(e => e.querySelector(
             'svg[id="clock-outline-medium"],svg[data-test-icon="clock-medium"],li-icon[type="clock"]'
-        )));
+        ));
+        if (action === 'claim') {
+            if (clocks.length === 0) return {ok: false, reason: 'not_ready'};
+            if (clocks.length !== 1) return {ok: false, reason: 'ambiguous_action'};
+            dialog.__linkedinMcpScheduleRead = token;
+            return {ok: true};
+        }
+        return clickOne(clocks);
     }
     if (action === 'open_list') {
         return clickOne(controls.filter(e =>
@@ -224,16 +238,33 @@ class PostManagement:
         self._read_profile = read_profile
 
     async def get_my_posts(self, max_scrolls: int = 5) -> dict[str, Any]:
-        """Read the member's activity through the existing own-profile resolver."""
-        return await self._read_profile({"posts"}, max_scrolls=max_scrolls)
+        """Resolve the member, then read their posts-only activity page."""
+        result = await self._read_profile({"main_profile"}, max_scrolls=max_scrolls)
+        profile_error = result.get("section_errors", {}).get("main_profile", {})
+        if profile_error.get("error_type") == "rate_limit":
+            return result
+        identifier = normalize_person_identifier(result["url"])
+        await self._session.delay(NAV_DELAY)
+        posts = await self._capture_section(
+            person_profile_url(identifier, "/recent-activity/posts/"),
+            "posts",
+            CapturePlan(CaptureMode.ACTIVITY, max_scrolls=max_scrolls),
+        )
+        for key in ("sections", "references", "section_errors"):
+            if key in posts:
+                result.setdefault(key, {}).update(posts[key])
+        return result
 
     async def get_post_analytics(self, post_url: str) -> dict[str, Any]:
         """Return LinkedIn's visible analytics, preserving missing/suppressed values."""
-        url = post_analytics_url(post_url)
-        section = "post_analytics"
-        extracted = await self._capture.capture(
-            url, section, CapturePlan(max_scrolls=1)
+        return await self._capture_section(
+            post_analytics_url(post_url), "post_analytics", CapturePlan(max_scrolls=1)
         )
+
+    async def _capture_section(
+        self, url: str, section: str, plan: CapturePlan
+    ) -> dict[str, Any]:
+        extracted = await self._capture.capture(url, section, plan)
         result: dict[str, Any] = {"url": url, "sections": {}}
         error = extracted.error
         if extracted.text == RATE_LIMITED_SECTION_TEXT:
@@ -245,7 +276,7 @@ class PostManagement:
         elif not error:
             error = {
                 "error_type": "empty_content",
-                "error_message": "No post analytics were rendered; availability and access could not be verified.",
+                "error_message": "No content was rendered; availability and access could not be verified.",
             }
         if error:
             result["section_errors"] = {section: error}
@@ -256,20 +287,23 @@ class PostManagement:
         preflight = await self._session.run_on_linkedin(PREFLIGHT_JS)
         if not preflight["ok"]:
             raise PostQueueReadRefused(preflight["reason"])
+        locale = (
+            await self._session.page.locator("html").get_attribute("lang") or ""
+        ).split("-")[0]
+        if locale != "en":
+            raise PostQueueReadRefused("unsupported_locale")
         await self._navigator._navigate_to_page(COMPOSER_URL)
         opened = False
         token = secrets.token_urlsafe(18)
         try:
             opened = True
-            await self._session.check_rate_limit()
-            locale = (
-                await self._session.page.locator("html").get_attribute("lang") or ""
-            ).split("-")[0]
-            if locale != "en":
-                raise PostQueueReadRefused("unsupported_locale")
             await self._session.page.locator(
                 'dialog[open]:visible, [role="dialog"]:visible'
             ).wait_for(state="visible", timeout=10000)
+            # Claim the verified empty composer before any later operation can
+            # fail, so cleanup can identify our dialog without touching a draft.
+            await self._step("claim", token)
+            await self._session.check_rate_limit()
             await self._step("open_clock", token)
             await self._session.delay(0.3)
             await self._step("open_list", token)

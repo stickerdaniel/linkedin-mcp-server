@@ -72,7 +72,7 @@ DOCUMENT = """<!DOCTYPE html>
   window.showSchedule = button => {
     document.body.dataset.stage = 'schedule';
     document.body.dataset.clockClicks = String(Number(document.body.dataset.clockClicks || 0) + 1);
-    const count = document.body.dataset.variant.startsWith('empty-queue') || document.body.dataset.variant === 'empty' ? 0 : ['partial','empty-text-post','posting-in-body'].includes(document.body.dataset.variant) ? 2 : 1;
+    const count = document.body.dataset.variant === 'scroll-batches' ? 3 : document.body.dataset.variant.startsWith('empty-queue') || document.body.dataset.variant === 'empty' ? 0 : ['partial','empty-text-post','posting-in-body'].includes(document.body.dataset.variant) ? 2 : 1;
     button.closest('[role="dialog"]').innerHTML = dismiss + `
       <h2>Schedule post</h2>
       <button onclick="showQueue(this)">Scheduled (${count})</button>
@@ -84,6 +84,17 @@ DOCUMENT = """<!DOCTYPE html>
     document.body.dataset.stage = 'queue';
     document.body.dataset.listClicks = String(Number(document.body.dataset.listClicks || 0) + 1);
     const dialog = button.closest('[role="dialog"]');
+    if (document.body.dataset.variant === 'scroll-batches') {
+      dialog.innerHTML = dismiss + '<h2>Scheduled posts</h2><button>Scheduled (3)</button><div id="queue-scroll" style="height:120px;overflow-y:auto"></div>';
+      window.appendQueueBatch = () => {
+        const index = Number(document.body.dataset.queueBatches || 0) + 1;
+        document.body.dataset.queueBatches = String(index);
+        document.getElementById('queue-scroll').insertAdjacentHTML('beforeend',
+          '<a href="/sharing/compose" style="display:block;height:160px"><p>Posting Monday at ' + index + ' PM</p><p>Synthetic batch ' + index + '.</p></a>');
+      };
+      window.appendQueueBatch();
+      return;
+    }
     if (document.body.dataset.variant === 'heading-only') {
       dialog.innerHTML = dismiss + '<h2>Scheduled posts</h2>';
       return;
@@ -108,6 +119,15 @@ DOCUMENT = """<!DOCTYPE html>
     if (document.body.dataset.variant === 'posting-in-body') dialog.querySelector('a').insertAdjacentHTML('beforeend', '<p>Posting is part of the post body.</p>');
   };
   window.onReadDelay = () => {
+    if (document.body.dataset.variant === 'scroll-batches' && document.body.dataset.stage === 'queue') {
+      const viewport = document.getElementById('queue-scroll');
+      const previous = Number(document.body.dataset.queueLastScroll || 0);
+      if (viewport.scrollTop > previous) {
+        document.body.dataset.queueScrolls = String(Number(document.body.dataset.queueScrolls || 0) + 1);
+        document.body.dataset.queueLastScroll = String(viewport.scrollTop);
+        if (Number(document.body.dataset.queueBatches) < 3) window.appendQueueBatch();
+      }
+    }
     if (document.body.dataset.variant === 'preview-hydrates' && document.body.dataset.stage === 'queue') {
       document.body.dataset.readTicks = String(Number(document.body.dataset.readTicks || 0) + 1);
       if (document.body.dataset.readTicks === '2') document.querySelector('#owned-composer a').insertAdjacentHTML('beforeend', '<p>Late link preview.</p>');
@@ -316,6 +336,40 @@ async def test_two_advertised_posts_with_one_loaded_entry_is_a_partial_result(
     assert await dom_page.locator('[role="dialog"]').count() == 0
 
 
+@pytest.mark.parametrize(
+    "budget, batches, scrolls, complete",
+    [(0, 1, 0, False), (1, 2, 1, False), (3, 3, 3, True)],
+)
+async def test_queue_scrolls_load_one_batch_per_round_and_obey_the_budget(
+    dom_page, workflow, budget, batches, scrolls, complete
+):
+    await dom_page.evaluate("document.body.dataset.variant = 'scroll-batches'")
+
+    result = await workflow.reader.get_scheduled_posts(max_scrolls=budget)
+
+    text = result["sections"]["scheduled_posts"]
+    for index in range(1, batches + 1):
+        assert text.count(f"Synthetic batch {index}.") == 1
+    for index in range(batches + 1, 4):
+        assert f"Synthetic batch {index}." not in text
+    assert (
+        await dom_page.evaluate("Number(document.body.dataset.queueScrolls || 0)")
+        == scrolls
+    )
+    assert (
+        await dom_page.evaluate("Number(document.body.dataset.queueBatches)") == batches
+    )
+    if complete:
+        assert "section_errors" not in result
+    else:
+        assert (
+            result["section_errors"]["scheduled_posts"]["error_type"]
+            == "partial_result"
+        )
+    assert await dom_page.locator('[role="dialog"]').count() == 0
+    assert await dom_page.evaluate("document.body.dataset.forbiddenAction") is None
+
+
 @pytest.mark.parametrize("variant", ["empty", "empty-queue-current"])
 async def test_an_explicit_empty_queue_is_returned_as_visible_page_text(
     dom_page, workflow, variant
@@ -347,7 +401,30 @@ async def test_an_unsupported_locale_never_operates_the_schedule_controls(
     assert await dom_page.evaluate("document.body.dataset.clockClicks") is None
     assert await dom_page.evaluate("document.body.dataset.listClicks") is None
     assert await dom_page.evaluate("document.body.dataset.forbiddenAction") is None
-    assert await dom_page.locator('[contenteditable="true"]').inner_text() == ""
+    workflow.navigator._navigate_to_page.assert_not_awaited()
+    assert await dom_page.locator('[role="dialog"]').count() == 0
+
+    await dom_page.evaluate("document.documentElement.lang = 'en-US'")
+    result = await workflow.reader.get_scheduled_posts()
+    assert POST_TEXT in result["sections"]["scheduled_posts"]
+    assert await dom_page.locator('[role="dialog"]').count() == 0
+
+
+async def test_failure_before_clock_action_closes_only_the_claimed_empty_composer(
+    dom_page, workflow, monkeypatch
+):
+    async def fail_on_composer(_session):
+        if await dom_page.locator("#owned-composer").count():
+            raise RuntimeError("Synthetic failure before the clock action")
+
+    monkeypatch.setattr(PageSession, "check_rate_limit", fail_on_composer)
+
+    with pytest.raises(RuntimeError, match="Synthetic failure"):
+        await workflow.reader.get_scheduled_posts()
+
+    assert await dom_page.locator('[role="dialog"]').count() == 0
+    assert await dom_page.evaluate("document.body.dataset.clockClicks") is None
+    assert await dom_page.evaluate("document.body.dataset.dismissals") == "1"
 
 
 async def test_unlinked_header_avatar_does_not_block_reading_the_queue(
