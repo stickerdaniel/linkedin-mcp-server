@@ -5,12 +5,10 @@ from __future__ import annotations
 import base64
 import json
 import re
-import tomllib
 from pathlib import Path
 from urllib.parse import unquote
-from packaging.version import Version
 
-from test_codex_plugin import _assert_mcp_contract, _load_json, _released_version
+from test_codex_plugin import _assert_mcp_contract, _load_json, _project_version
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PLUGIN_ROOT = _REPO_ROOT / "plugins" / "linkedin-mcp-server"
@@ -18,19 +16,13 @@ _CURSOR_MANIFEST = _PLUGIN_ROOT / ".cursor-plugin" / "plugin.json"
 _CURSOR_MARKETPLACE = _REPO_ROOT / ".cursor-plugin" / "marketplace.json"
 _PLUGIN_MCP = _PLUGIN_ROOT / ".mcp.json"
 _README = _REPO_ROOT / "README.md"
-_RELEASE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
 _DEEPLINK_PREFIX = "https://cursor.com/en/install-mcp?name=linkedin&config="
 
 
 def test_cursor_manifest_matches_the_repository_release() -> None:
     manifest = _load_json(_CURSOR_MANIFEST)
     assert manifest["name"] == _PLUGIN_ROOT.name
-    assert manifest["version"] == _released_version()
-    assert Version(manifest["version"]) <= Version(
-        tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
-            "project"
-        ]["version"]
-    )
+    assert manifest["version"] == _project_version()
     assert manifest["mcpServers"] == "./.mcp.json"
     assert manifest["skills"] == "./skills/"
     assert manifest["logo"] == "assets/icon.svg"
@@ -61,11 +53,3 @@ def test_readme_cursor_deeplink_matches_the_plugin_mcp_config() -> None:
     assert match is not None, "README is missing the Cursor MCP install deeplink"
     decoded = json.loads(base64.b64decode(unquote(match.group(1))))
     assert decoded == _load_json(_PLUGIN_MCP)["mcpServers"]["linkedin"]
-
-
-def test_release_workflow_updates_and_commits_cursor_manifest() -> None:
-    workflow = _RELEASE_WORKFLOW.read_text(encoding="utf-8")
-    cursor_manifest = "plugins/linkedin-mcp-server/.cursor-plugin/plugin.json"
-    assert workflow.count(cursor_manifest) >= 3
-    assert '"Cursor plugin": [cursor_plugin["version"]]' in workflow
-    assert "Update plugin versions" in workflow

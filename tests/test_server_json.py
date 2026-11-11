@@ -44,14 +44,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from packaging.version import Version
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SERVER_JSON = _REPO_ROOT / ".github" / "mcp" / "server.json"
 _README = _REPO_ROOT / "README.md"
-_RELEASE_WORKFLOW = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
-    encoding="utf-8"
-)
 _DOCKERFILE = _REPO_ROOT / "Dockerfile"
 
 # The GitHub namespace the registry grants after a GitHub login. It is derived
@@ -198,62 +194,43 @@ def test_versions_agree_inside_the_file(server: dict[str, Any]) -> None:
     """The three version sites move together or the sync missed one.
 
     ``server.json`` spells the version three times, once inside an image
-    reference. The release job rewrites all three; a hand edit reaches whichever
-    one the author was looking at.
+    reference. ``scripts/prepare_release.py`` rewrites all three; a hand edit
+    reaches whichever one the author was looking at.
     """
     version = server["version"]
     assert _package(server, "pypi")["version"] == version
     assert _package(server, "oci")["identifier"].endswith(f":{version}")
 
 
-def test_the_file_never_runs_ahead_of_the_project(
+def test_the_file_carries_the_project_version(
     server: dict[str, Any], pyproject: dict[str, Any]
 ) -> None:
-    """Behind is the normal state between a bump and its release commit.
+    """The bump pull request carries this file at the new version.
 
-    ``uv version --bump`` changes ``pyproject.toml`` and ``uv.lock`` and nothing
-    else, and ``server.json`` catches up in the ``prepare-release`` job after
-    that PR merges. Requiring equality against ``pyproject.toml`` here therefore
-    fails the bump PR, which blocks the merge, which stops the job that would
-    have made it equal.
-
-    Ahead is the state that cannot be reached honestly, because nothing writes
-    this file except that job and a person.
+    ``uv version --bump`` changes ``pyproject.toml`` and ``uv.lock``, and
+    ``scripts/prepare_release.py`` writes the version here in the same pull
+    request. The release publishes the merged commit as it is, so a file
+    behind ``pyproject.toml`` would ship a registry entry naming the previous
+    release.
     """
-    assert Version(server["version"]) <= Version(pyproject["project"]["version"])
+    assert server["version"] == pyproject["project"]["version"]
 
 
-def test_the_file_moves_with_the_bundle(
-    server: dict[str, Any], manifest: dict[str, Any]
-) -> None:
-    """An upper bound alone lets a missed sync sit here forever.
-
-    Behind ``pyproject.toml`` is legitimate only until the release job runs, and
-    nothing above says when that was. ``manifest.json`` does: the same job, the
-    same commit, and it is equally behind during the bump PR. So the two are
-    equal in every honest state, and a release that skipped this file alone
-    breaks that equality instead of passing quietly for the rest of the
-    project's life.
-    """
-    assert server["version"] == manifest["version"]
-
-
-def test_only_package_types_the_release_job_versions_are_declared(
+def test_only_package_types_the_sync_versions_are_declared(
     server: dict[str, Any],
 ) -> None:
-    """A third package type would stop the release after PyPI has published.
+    """A third package type needs a rule for where its version sits.
 
-    ``prepare-release`` runs after ``publish-pypi``, so a type the rewrite has
-    no branch for ends the workflow with the distribution already immutable on
-    PyPI and with no tag, image, bundle or release beside it. Adding a package
-    here is the moment to notice, and the two the job knows are named below
-    rather than grepped out of it: searching the step for the string proves
-    only that the string is there, and a branch emptied to `pass` passed.
+    ``scripts/prepare_release.py`` versions a PyPI package by its ``version``
+    and an OCI image by the tag in its identifier, and refuses any other type.
+    Adding a package here is the moment to teach it, and the two it knows are
+    named below rather than read out of it: searching the script for the string
+    proves only that the string is there.
     """
     declared = {package["registryType"] for package in server["packages"]}
     assert declared == {"pypi", "oci"}, (
-        f"{sorted(declared - {'pypi', 'oci'})} would reach a release job that "
-        "cannot version them; teach the `Update server.json version` step first"
+        f"{sorted(declared - {'pypi', 'oci'})} has no version rule; teach "
+        "scripts/prepare_release.py first"
     )
 
 
@@ -347,13 +324,13 @@ def test_proxy_settings_match_the_bundle(
         )
 
 
-def test_file_is_in_the_form_the_release_job_writes(server: dict[str, Any]) -> None:
+def test_file_is_in_the_form_the_sync_writes(server: dict[str, Any]) -> None:
     """Hand edits keep the format the version sync produces.
 
-    That job reparses the file and writes it back with ``json.dumps(indent=2)``.
-    If the checked-in file is formatted any other way, the release commit
-    carries a whole-file reformat on top of the version change, and the diff
-    that should be three lines stops being reviewable.
+    ``scripts/prepare_release.py`` reparses the file and writes it back with
+    ``json.dumps(indent=2)``. If the checked-in file is formatted any other way,
+    the bump pull request carries a whole-file reformat on top of the version
+    change, and the diff that should be three lines stops being reviewable.
     """
     canonical = json.dumps(server, indent=2, ensure_ascii=False) + "\n"
     assert _SERVER_JSON.read_text(encoding="utf-8") == canonical

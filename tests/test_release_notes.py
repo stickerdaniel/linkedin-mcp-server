@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -857,95 +855,46 @@ def test_compose_step_needs_the_previous_tag_on_origin(tmp_path: Path) -> None:
     assert not output.exists()
 
 
-_PROTECTION_POLICY = {
-    "required_status_checks": {
-        "strict": False,
-        "checks": [
-            {"context": "lint-and-check", "app_id": 15368},
-            {"context": "test", "app_id": 15368},
-            {"context": "PR Title", "app_id": 15368},
-        ],
-    },
-    "enforce_admins": True,
-    "required_pull_request_reviews": {
-        "dismiss_stale_reviews": False,
-        "require_code_owner_reviews": False,
-        "required_approving_review_count": 0,
-    },
-    "restrictions": None,
-}
-
-_PROTECTION_FAKE_GH = """\
-import json, os, subprocess, sys
-from pathlib import Path
-
-args = sys.argv[1:]
-method = args[args.index("--method") + 1] if "--method" in args else "GET"
-body = sys.stdin.read() if "--input" in args else ""
-with open(os.environ["API_LOG"], "a", encoding="utf-8") as log:
-    log.write(json.dumps({"method": method, "body": body}) + "\\n")
-if not os.environ.get("GH_TOKEN"):
-    sys.exit("gh: no GH_TOKEN")
-if args[:2] != ["api", "repos/" + os.environ["GITHUB_REPOSITORY"] + "/branches/main/protection"]:
-    sys.exit("unexpected API endpoint")
-state_path = Path(os.environ["API_STATE"])
-policy = json.loads(state_path.read_text())
-if os.environ.get("FAIL_BEFORE") == "1" and os.environ.get("FAIL_METHOD") == method:
-    sys.exit("gh: HTTP 403: Forbidden")
-if method == "GET":
-    if policy is None or os.environ.get("FAIL_METHOD") == method:
-        sys.exit("gh: HTTP 404: Not Found")
-    result = subprocess.run(
-        ["jq", "-r", args[args.index("--jq") + 1]],
-        input=json.dumps(policy), capture_output=True, text=True,
-    )
-    sys.stdout.write(result.stdout)
-    sys.stderr.write(result.stderr)
-    sys.exit(result.returncode)
-elif method == "DELETE":
-    state_path.write_text("null")
-elif method == "PUT":
-    state_path.write_text(json.dumps(json.loads(body)))
-else:
-    sys.exit("unexpected method")
-# A failed response can follow a successful server-side mutation.
-if os.environ.get("FAIL_METHOD") == method:
-    sys.exit("gh: HTTP 500: response lost")
-"""
+def _rev_parse(repo: Path, ref: str) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", ref],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
 
 
-def _run_protection_steps(
+@pytest.mark.parametrize(
+    ("existing", "returncode", "message", "tagged"),
+    [
+        (None, 0, "Created and pushed tag v4.26.1 at {released}", "released"),
+        ("lightweight", 0, "Tag v4.26.1 already points at {released}", "released"),
+        ("annotated", 0, "Tag v4.26.1 already points at {released}", "released"),
+        (
+            "elsewhere",
+            1,
+            "::error::Tag v4.26.1 points at {other}, not {released}",
+            "other",
+        ),
+    ],
+    ids=["new", "lightweight", "annotated", "elsewhere"],
+)
+def test_tag_step_tags_only_the_released_commit(
     tmp_path: Path,
-    policy: dict[str, Any] | None,
-    *,
-    fail_method: str = "",
-    fail_before: bool = False,
-    reject_push: bool = False,
-    unwritable_output: bool = False,
-    restore_overrides: dict[str, str] | None = None,
-) -> tuple[
-    dict[str, subprocess.CompletedProcess[str]], list[dict[str, Any]], Any, Path
-]:
-    """Run the real protection/sync/tag scripts, in YAML order, against local fakes."""
-    assert shutil.which("jq"), "the fake gh evaluates the workflow's real --jq"
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    (bin_dir / "fake_gh.py").write_text(_PROTECTION_FAKE_GH, encoding="utf-8")
-    for name, command in {
-        "gh": f'"{sys.executable}" "{bin_dir / "fake_gh.py"}"',
-        "python3": f'"{sys.executable}"',
-    }.items():
-        shim = bin_dir / name
-        shim.write_text(f'#!/bin/sh\nexec {command} "$@"\n', encoding="utf-8")
-        shim.chmod(0o755)
-    state = tmp_path / "policy.json"
-    state.write_text(json.dumps(policy), encoding="utf-8")
-    api_log = tmp_path / "api.jsonl"
-    output = tmp_path / "github-output"
-    if unwritable_output:
-        output.mkdir()
+    existing: str | None,
+    returncode: int,
+    message: str,
+    tagged: str,
+) -> None:
+    """Run the workflow's own tag step against a local origin."""
+    job = _workflow()["jobs"]["tag"]
+    assert job["env"]["VERSION"] == (
+        "${{ needs.check-version-bump.outputs.new-version }}"
+    )
+    step = _step(job, "Create release tag")
     env = {
-        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "PATH": os.environ["PATH"],
         "HOME": str(tmp_path),
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -956,14 +905,6 @@ def _run_protection_steps(
         "GIT_AUTHOR_EMAIL": "release-test@example.test",
         "GIT_COMMITTER_NAME": "Release Test",
         "GIT_COMMITTER_EMAIL": "release-test@example.test",
-        "GITHUB_REPOSITORY": _REPOSITORY,
-        "GITHUB_OUTPUT": str(output),
-        "API_LOG": str(api_log),
-        "API_STATE": str(state),
-        "FAIL_METHOD": fail_method,
-        "FAIL_BEFORE": "1" if fail_before else "0",
-        "VERSION": "4.26.1",
-        "LC_ALL": "C",
     }
     origin = tmp_path / "origin.git"
     _git(tmp_path, "init", "--bare", "--quiet", str(origin), env=env)
@@ -971,233 +912,30 @@ def _run_protection_steps(
     repo.mkdir()
     _git(repo, "init", "--quiet", "--initial-branch=main", env=env)
     _git(repo, "remote", "add", "origin", str(origin), env=env)
-    files = (
-        "manifest.json",
-        "docker-compose.yml",
-        ".github/mcp/server.json",
-        "plugins/linkedin-mcp-server/.codex-plugin/plugin.json",
-        "plugins/linkedin-mcp-server/.claude-plugin/plugin.json",
-        "plugins/linkedin-mcp-server/.cursor-plugin/plugin.json",
-    )
-    for name in files:
-        path = repo / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("before\n", encoding="utf-8")
-    _git(repo, "add", ".", env=env)
-    _git(repo, "commit", "--quiet", "-m", "Initial release", env=env)
+    _git(repo, "commit", "--quiet", "--allow-empty", "-m", "Earlier", env=env)
+    _git(repo, "commit", "--quiet", "--allow-empty", "-m", "Release", env=env)
     _git(repo, "push", "--quiet", "origin", "main", env=env)
-    if reject_push:
-        (repo / "peer.txt").write_text("Peer commit\n", encoding="utf-8")
-        _git(repo, "add", "peer.txt", env=env)
-        _git(repo, "commit", "--quiet", "-m", "Peer update", env=env)
-        _git(repo, "push", "--quiet", "origin", "main", env=env)
-        _git(repo, "reset", "--hard", "HEAD~1", env=env)
-    for name in files:
-        (repo / name).write_text("after\n", encoding="utf-8")
+    shas = {"released": _rev_parse(repo, "HEAD"), "other": _rev_parse(repo, "HEAD~1")}
+    if existing is not None:
+        target = shas["other" if existing == "elsewhere" else "released"]
+        annotation = ["-a", "-m", "v4.26.1"] if existing == "annotated" else []
+        _git(repo, "tag", *annotation, "v4.26.1", target, env=env)
+        _git(repo, "push", "--quiet", "origin", "refs/tags/v4.26.1", env=env)
+        # A fresh checkout holds no tags.
+        _git(repo, "tag", "-d", "v4.26.1", env=env)
 
-    outputs: dict[str, dict[str, str]] = {}
-
-    def resolve(value: str) -> str:
-        def replace(match: re.Match[str]) -> str:
-            expression = match[1].strip()
-            if expression == "github.repository":
-                return _REPOSITORY
-            if expression.startswith("secrets."):
-                return "test-token"
-            parts = expression.split(".")
-            if len(parts) == 4 and parts[0] == "steps" and parts[2] == "outputs":
-                return outputs.get(parts[1], {}).get(parts[3], "")
-            raise AssertionError(f"Unsupported expression: {expression}")
-
-        return re.sub(r"\$\{\{(.*?)\}\}", replace, value)
-
-    names = {
-        "Read branch protection",
-        "Remove branch protection (temporary)",
-        "Commit version updates",
-        "Restore branch protection",
-        "Create release tag",
-    }
-    results: dict[str, subprocess.CompletedProcess[str]] = {}
-    failed = False
-    for step in _workflow()["jobs"]["prepare-release"]["steps"]:
-        name = step.get("name")
-        if name not in names:
-            continue
-        condition = step.get("if", "success()")
-        if condition not in {"success()", "always()"}:
-            raise AssertionError(f"Unsupported condition: {condition}")
-        if failed and condition != "always()":
-            continue
-        step_env = {key: resolve(value) for key, value in step.get("env", {}).items()}
-        if name == "Restore branch protection":
-            step_env.update(restore_overrides or {})
-        result = subprocess.run(
-            ["bash", "-e"],
-            input=resolve(step["run"]),
-            cwd=repo,
-            env={**env, **step_env},
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        results[name] = result
-        failed |= result.returncode != 0
-        if result.returncode == 0 and "id" in step and output.is_file():
-            outputs[step["id"]] = dict(
-                line.split("=", 1) for line in output.read_text().splitlines()
-            )
-    calls = [json.loads(line) for line in api_log.read_text().splitlines()]
-    return results, calls, json.loads(state.read_text()), repo
-
-
-def _published_test_tag(repo: Path) -> bool:
     result = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repo.parent / "origin.git"),
-            "show-ref",
-            "--verify",
-            "--quiet",
-            "refs/tags/v4.26.1",
-        ],
+        # What Actions runs for a step without an explicit shell.
+        ["bash", "-e"],
+        input=step["run"],
+        cwd=repo,
+        env={**env, "VERSION": "4.26.1", "GITHUB_SHA": shas["released"]},
         capture_output=True,
         text=True,
+        timeout=15,
         check=False,
     )
-    assert result.returncode in {0, 1}, result.stderr
-    return result.returncode == 0
 
-
-@pytest.mark.parametrize("strict", [False, True])
-def test_release_restores_the_existing_strict_policy(
-    tmp_path: Path, strict: bool
-) -> None:
-    policy = json.loads(json.dumps(_PROTECTION_POLICY))
-    policy["required_status_checks"]["strict"] = strict
-
-    results, calls, restored, repo = _run_protection_steps(tmp_path, policy)
-
-    assert [call["method"] for call in calls] == ["GET", "DELETE", "PUT"]
-    assert all(result.returncode == 0 for result in results.values()), results
-    assert restored == policy
-    assert restored["required_status_checks"]["strict"] is strict
-    assert json.loads(calls[-1]["body"]) == policy
-    assert _published_test_tag(repo)
-
-
-@pytest.mark.parametrize(
-    "policy",
-    [
-        None,
-        {},
-        *(
-            {"required_status_checks": {"strict": value}}
-            for value in (
-                None,
-                "false",
-                "true",
-                "yes",
-                "",
-                0,
-                1,
-                [],
-                {},
-            )
-        ),
-    ],
-)
-def test_release_leaves_unreadable_strict_policy_untouched(
-    tmp_path: Path, policy: dict[str, Any] | None
-) -> None:
-    results, calls, restored, repo = _run_protection_steps(tmp_path, policy)
-
-    assert any(result.returncode != 0 for result in results.values())
-    assert [call["method"] for call in calls] == ["GET"]
-    assert restored == policy
-    assert results["Restore branch protection"].returncode == 0
-    assert not _published_test_tag(repo)
-
-
-def test_release_does_not_delete_protection_without_saving_capture(
-    tmp_path: Path,
-) -> None:
-    results, calls, restored, repo = _run_protection_steps(
-        tmp_path, _PROTECTION_POLICY, unwritable_output=True
-    )
-
-    assert any(result.returncode != 0 for result in results.values())
-    assert [call["method"] for call in calls] == ["GET"]
-    assert restored == _PROTECTION_POLICY
-    assert results["Restore branch protection"].returncode == 0
-    assert not _published_test_tag(repo)
-
-
-@pytest.mark.parametrize("failure", ["GET", "DELETE", "PUT", "sync"])
-def test_release_protection_failures_stop_tagging(tmp_path: Path, failure: str) -> None:
-    results, calls, restored, repo = _run_protection_steps(
-        tmp_path,
-        _PROTECTION_POLICY,
-        fail_method=failure,
-        reject_push=failure == "sync",
-    )
-
-    assert any(result.returncode != 0 for result in results.values())
-    assert restored == _PROTECTION_POLICY
-    assert not _published_test_tag(repo)
-    assert [call["method"] for call in calls] == (
-        ["GET"] if failure == "GET" else ["GET", "DELETE", "PUT"]
-    )
-    if failure == "sync":
-        assert "[rejected]" in results["Commit version updates"].stderr
-        assert results["Restore branch protection"].returncode == 0
-    if failure == "PUT":
-        assert results["Restore branch protection"].returncode != 0
-
-
-def test_failed_restore_can_leave_protection_missing(tmp_path: Path) -> None:
-    results, calls, restored, repo = _run_protection_steps(
-        tmp_path, _PROTECTION_POLICY, fail_method="PUT", fail_before=True
-    )
-
-    assert results["Restore branch protection"].returncode != 0
-    assert "HTTP 403" in results["Restore branch protection"].stderr
-    assert [call["method"] for call in calls] == ["GET", "DELETE", "PUT"]
-    assert restored is None
-    assert not _published_test_tag(repo)
-
-
-@pytest.mark.parametrize("override", [{"STRICT": "maybe"}, {"PAYLOAD": "not json"}])
-def test_release_rejects_invalid_restore_input_before_put(
-    tmp_path: Path, override: dict[str, str]
-) -> None:
-    results, calls, _, repo = _run_protection_steps(
-        tmp_path, _PROTECTION_POLICY, restore_overrides=override
-    )
-
-    assert results["Restore branch protection"].returncode != 0
-    assert [call["method"] for call in calls] == ["GET", "DELETE"]
-    assert not _published_test_tag(repo)
-
-
-# The prepare-release job holds the admin token. Intentional strict-policy
-# preservation and file moves update its reviewed digest alongside behavioral coverage.
-_PREPARE_RELEASE_SHA256 = (
-    "b16372cdf0938e1c12ef61f62b2a6d62559a0e3fe01387690b5bf7731cf61069"
-)
-
-
-def test_prepare_release_job_is_unchanged() -> None:
-    lines = _WORKFLOW.read_text(encoding="utf-8").splitlines(keepends=True)
-    start = lines.index("  prepare-release:\n")
-    end = next(
-        index
-        for index in range(start + 1, len(lines))
-        if re.match(r"  \S", lines[index])
-    )
-    block = "".join(lines[start:end])
-
-    assert hashlib.sha256(block.encode("utf-8")).hexdigest() == (
-        _PREPARE_RELEASE_SHA256
-    )
+    assert result.returncode == returncode, result.stdout + result.stderr
+    assert message.format(**shas) in result.stdout
+    assert _rev_parse(origin, "refs/tags/v4.26.1^{commit}") == shas[tagged]
