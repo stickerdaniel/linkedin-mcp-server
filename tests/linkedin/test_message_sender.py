@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import asyncio
 import gc
 import logging
-import time
 
 import anyio
 from patchright.async_api import Error as PatchrightError
@@ -1356,7 +1355,7 @@ class TestSendMessageDeadline:
                 gc.enable()
 
     @staticmethod
-    async def _call(sender, monkeypatch):
+    async def _call(sender, monkeypatch, tool_timeout=_TOOL_TIMEOUT):
         from fastmcp import Client, FastMCP
 
         from linkedin_mcp_server.tools.messaging import register_messaging_tools
@@ -1366,9 +1365,7 @@ class TestSendMessageDeadline:
             AsyncMock(return_value=SimpleNamespace(send_message=sender.send_message)),
         )
         mcp = FastMCP("test")
-        register_messaging_tools(
-            mcp, tool_timeout=TestSendMessageDeadline._TOOL_TIMEOUT
-        )
+        register_messaging_tools(mcp, tool_timeout=tool_timeout)
         async with Client(mcp) as client:
             return await client.call_tool(
                 "send_message",
@@ -1573,18 +1570,33 @@ class TestSendMessageDeadline:
         is in flight, as a collector pause or a starved CPU does. The send
         was confirmed before the budget ended, so its cancellation must not
         take the answer back on the way out.
+
+        Both moments are set on the loop's clock, which runs in real time
+        plus the time skipped here. The work after the stall then has the
+        whole reply reserve of a long tool deadline in real time, where a
+        short one left a loaded host about 80 ms for it.
         """
+        loop = asyncio.get_running_loop()
+        real_time = loop.time
+        skipped = 0.0
+        monkeypatch.setattr(loop, "time", lambda: real_time() + skipped)
+
+        def skip_to(moment: float) -> None:
+            nonlocal skipped
+            skipped += max(0.0, moment - loop.time())
+
         budget_end = 0.0
 
         async def late_snapshot():
             nonlocal budget_end
             budget_end = anyio.current_effective_deadline()
-            await anyio.sleep(max(0.0, budget_end - anyio.current_time() - 0.02))
+            skip_to(budget_end - 0.02)
             return {"path": path}
 
         async def overrunning_dispose():
-            # Blocks the loop itself, the way a collector pause does.
-            time.sleep(max(0.0, budget_end - anyio.current_time()) + 0.001)
+            # Time passes without the loop running, the way a collector
+            # pause stops it.
+            skip_to(budget_end + 0.001)
             await anyio.sleep_forever()
 
         handle = MagicMock()
@@ -1599,7 +1611,7 @@ class TestSendMessageDeadline:
         with ExitStack() as stack:
             mocks = self._composer(stack, sender, mock_page)
             mocks.confirmed.side_effect = confirmed
-            result = await self._call(sender, monkeypatch)
+            result = await self._call(sender, monkeypatch, tool_timeout=60.0)
 
         assert result.is_error is False, result.content
         body = result.structured_content
