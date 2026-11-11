@@ -62,6 +62,9 @@ COPY --chmod=644 scripts/login-viewer.html /usr/share/novnc/login.html
 # X server to collide with.
 ENV DISPLAY=:99
 ENV HEADLESS=false
+# Names the install kind for the optional-tools request, which leaves before
+# any container detection could run.
+ENV LINKEDIN_MCP_RUNTIME=docker
 
 USER pwuser
 

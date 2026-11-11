@@ -36,6 +36,7 @@ def reset_singletons():
     from linkedin_mcp_server.logging_config import teardown_trace_logging
     from linkedin_mcp_server.drivers.browser import reset_browser_for_testing
     from linkedin_mcp_server.profile_lease import reset_leases_for_testing
+    from linkedin_mcp_server import remote_catalog, remote_tools
     from linkedin_mcp_server.server_role import reset_process_role_for_testing
 
     reset_bootstrap_for_testing()
@@ -57,6 +58,10 @@ def reset_singletons():
     # from process state. Left standing, one OWNER would refuse logins in every
     # test after it, in a suite where most never mention a role.
     reset_process_role_for_testing()
+    # A catalog request one test started, and the tools it installed, are
+    # process state: left standing, the next server installs nothing.
+    remote_catalog.reset_for_testing()
+    remote_tools.reset_for_testing()
     # The trace directory is derived from the profile root and cached, so a
     # test pointing USER_DATA_DIR at its tmp_path otherwise leaves every later
     # test on this worker writing into a directory pytest has removed. The log
@@ -77,6 +82,8 @@ def reset_singletons():
     reset_throttle_record()
     reset_process_role_for_testing()
     reset_liveness_for_testing()
+    remote_catalog.reset_for_testing()
+    remote_tools.reset_for_testing()
     teardown_trace_logging(keep_traces=True)
     reset_trace_state_for_testing()
 
@@ -144,6 +151,10 @@ def ignore_the_developers_environment(monkeypatch):
     ours = [key for key in os.environ if key.startswith("LINKEDIN")]
     for key in (*from_the_table, *ours):
         monkeypatch.delenv(key, raising=False)
+    # A server any test starts, in-process or spawned, would otherwise ask the
+    # live catalog and list whatever it serves today. The catalog tests clear
+    # this and point the URL at a local stub instead.
+    monkeypatch.setenv("LINKEDIN_MCP_REMOTE_TOOLS", "off")
 
 
 @pytest.fixture(autouse=True)

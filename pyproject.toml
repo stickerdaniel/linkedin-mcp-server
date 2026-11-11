@@ -64,7 +64,7 @@ Issues = "https://github.com/stickerdaniel/linkedin-mcp-server/issues"
 Changelog = "https://github.com/stickerdaniel/linkedin-mcp-server/releases"
 
 [project.scripts]
-mcp-server-linkedin = "linkedin_mcp_server.cli_main:main"
+mcp-server-linkedin = "linkedin_mcp_server.__main__:main"
 
 [build-system]
 requires = ["setuptools>=77.0.3"]

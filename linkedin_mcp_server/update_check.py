@@ -30,6 +30,7 @@ from fastmcp.tools import ToolResult
 from packaging.version import InvalidVersion, Version
 
 from linkedin_mcp_server import __version__
+from linkedin_mcp_server.remote_tools import is_remote
 
 logger = logging.getLogger(__name__)
 
@@ -249,9 +250,11 @@ class UpdateNoticeMiddleware(Middleware):
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
-        # The status tool reads local state only; leave both the update check
-        # and its notice for a browser tool.
-        if context.message.name == "get_session_status":
+        # The status tool reads local state only, and a remote catalog tool
+        # never touches LinkedIn; leave both the update check and its notice
+        # for a browser tool.
+        name = context.message.name
+        if name == "get_session_status" or is_remote(name):
             return await call_next(context)
         if not self._kicked:
             self._kicked = True

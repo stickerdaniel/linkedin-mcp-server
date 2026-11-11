@@ -430,8 +430,13 @@ def load_from_env(config: AppConfig) -> AppConfig:
     return config
 
 
-def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
-    """Load configuration from command line arguments."""
+def build_parser() -> argparse.ArgumentParser:
+    """The command-line parser.
+
+    Every long option added here also belongs in
+    ``remote_catalog.LONG_OPTIONS``, which resolves abbreviations before this
+    parser is imported; a test compares the two.
+    """
     parser = argparse.ArgumentParser(
         description="LinkedIn MCP Server - A Model Context Protocol server for LinkedIn integration"
     )
@@ -731,8 +736,12 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
         default=None,
         help="Give every stdio client its own browser (default; overrides DAEMON_ENABLED=true).",
     )
+    return parser
 
-    args = parser.parse_args(argv)
+
+def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
+    """Load configuration from command line arguments."""
+    args = build_parser().parse_args(argv)
 
     # Update configuration with parsed arguments
     if args.no_headless:
