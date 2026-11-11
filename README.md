@@ -100,7 +100,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `search_jobs` | Find job postings by keyword and location, with job IDs for reading details. |
 | `get_saved_jobs` | List your saved job postings, with job IDs for looking up their details. |
 | `dismiss_job` | Dismiss a job from job search so later searches no longer show it. Irreversible. |
-| `search_people` | Find people by keyword, location, connection degree, current company, and connections of a member (mutual connections). |
+| `search_people` | Find people by keyword, location, degree, company, and mutual connections. |
 | `get_job_details` | Read a job posting's description, requirements, and company details. |
 | `get_job_apply_url` | Check whether a job uses Easy Apply or links to an employer's application. |
 | `get_easy_apply_form` | Read an Easy Apply form's fields, options and prefilled values. Never submits. |
