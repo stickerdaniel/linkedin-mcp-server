@@ -420,6 +420,27 @@ class TestLoaders:
         with pytest.raises(ConfigurationError, match="Invalid LOG_LEVEL"):
             load_from_env(AppConfig())
 
+    @pytest.mark.parametrize(
+        "key", ["HEADLESS", "AUTO_IMPORT_FROM_BROWSER", "DAEMON_ENABLED"]
+    )
+    def test_load_from_env_refuses_an_unreadable_flag(self, monkeypatch, key):
+        monkeypatch.setenv(key, "flase")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        with pytest.raises(ConfigurationError, match=f"Invalid {key}: 'flase'"):
+            load_from_env(AppConfig())
+
+    @pytest.mark.parametrize(
+        "key", ["HEADLESS", "AUTO_IMPORT_FROM_BROWSER", "DAEMON_ENABLED"]
+    )
+    def test_load_from_env_reads_a_blank_flag_as_unset(self, monkeypatch, key):
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        monkeypatch.delenv(key, raising=False)
+        unset = load_from_env(AppConfig())
+        monkeypatch.setenv(key, "  ")
+        assert load_from_env(AppConfig()) == unset
+
     def test_load_from_env_defaults(self, monkeypatch):
         # Clear env vars
         for var in ["HEADLESS", "LOG_LEVEL"]:
