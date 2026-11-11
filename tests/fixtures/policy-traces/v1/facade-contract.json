@@ -84,6 +84,10 @@
         "coroutine": true,
         "signature": "(self, username: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None, max_scrolls: 'int | None' = None, *, main_profile_already_loaded: 'bool' = False, allow_self_alias: 'bool' = False) -> 'dict[str, Any]'"
       },
+      "read_second_degree": {
+        "coroutine": true,
+        "signature": "(self, url: 'str', first_degree: 'set[str]') -> 'list[SecondDegreeCard]'"
+      },
       "reply_to_conversation": {
         "coroutine": true,
         "signature": "(self, thread_id: 'str', message: 'str', *, confirm_send: 'bool') -> 'dict[str, Any]'"
@@ -111,6 +115,10 @@
       "send_message": {
         "coroutine": true,
         "signature": "(self, linkedin_username: 'str', message: 'str', *, confirm_send: 'bool', profile_urn: 'str | None' = None) -> 'dict[str, Any]'"
+      },
+      "walk_my_connections": {
+        "coroutine": true,
+        "signature": "(self, on_batch: 'OnBatch', *, known: 'set[str] | None' = None, stop_after_known: 'int | None' = None, time_budget: 'float' = 600.0, max_rounds: 'int' = 400, on_progress: 'OnProgress | None' = None) -> 'WalkResult'"
       }
     },
     "tool_methods": [
@@ -130,13 +138,15 @@
       "read_company",
       "read_job",
       "read_person",
+      "read_second_degree",
       "reply_to_conversation",
       "search_companies",
       "search_conversations",
       "search_jobs",
       "search_people",
       "search_posts",
-      "send_message"
+      "send_message",
+      "walk_my_connections"
     ],
     "tool_schemas": {
       "archive_conversation": {
@@ -211,6 +221,114 @@
           },
           "required": [
             "job_id"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "enrich_my_network": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "default": 10,
+              "description": "Most people to read in this call (1-30, default 10).",
+              "maximum": 30,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Instead of usernames, enrich the top matches of this\nsearch_my_network query."
+            },
+            "refresh": {
+              "default": false,
+              "description": "Re-read people already enriched (default False skips them).",
+              "type": "boolean"
+            },
+            "time_budget_seconds": {
+              "default": 300,
+              "description": "How long the pass may run (30-900, default 300).",
+              "maximum": 900,
+              "minimum": 30,
+              "type": "integer"
+            },
+            "usernames": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Connections to enrich (LinkedIn usernames or profile\nURLs, as search_my_network returns them in `slug`)."
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "find_introductions": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "current_company": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional LinkedIn numeric company URN id."
+            },
+            "keywords": {
+              "description": "What the people you want to reach do or work on.",
+              "type": "string"
+            },
+            "location": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional LinkedIn numeric geo URN id (as search_people)."
+            },
+            "pages": {
+              "default": 1,
+              "description": "Result pages to read, 1-3 (10 results each, default 1).",
+              "maximum": 3,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "keywords"
           ],
           "type": "object"
         },
@@ -489,6 +607,36 @@
           "type": "object"
         }
       },
+      "get_network_overview": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_network_person": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "username": {
+              "description": "The connection's LinkedIn username or profile URL, as\nsearch_my_network returns it in `slug`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "get_person_profile": {
         "input": {
           "additionalProperties": false,
@@ -586,6 +734,85 @@
           },
           "required": [
             "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "import_connections_csv": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "description": "Path to Connections.csv (a ~ prefix is expanded).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "import_messages_csv": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "description": "Path to messages.csv from LinkedIn > Settings > Data privacy\n> Get a copy of your data (tick \"Messages\"). A ~ prefix is\nexpanded.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "mark_connections": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "closeness": {
+              "description": "3 close (would happily introduce you), 2 know well,\n1 acquaintance, 0 do not really know them.",
+              "maximum": 3,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional reminder, e.g. \"PhD co-supervisor\"."
+            },
+            "usernames": {
+              "description": "LinkedIn usernames or profile URLs, as search_my_network\nreturns them in `slug`.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "usernames",
+            "closeness"
           ],
           "type": "object"
         },
@@ -771,6 +998,81 @@
           "type": "object"
         }
       },
+      "search_my_network": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "company": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Substring matched against company and headline."
+            },
+            "connected_after": {
+              "anyOf": [
+                {
+                  "pattern": "^\\d{4}(-\\d{2}(-\\d{2})?)?$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "ISO date (YYYY, YYYY-MM or YYYY-MM-DD), inclusive."
+            },
+            "connected_before": {
+              "anyOf": [
+                {
+                  "pattern": "^\\d{4}(-\\d{2}(-\\d{2})?)?$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "ISO date, inclusive."
+            },
+            "limit": {
+              "default": 25,
+              "description": "Results per page (1-200, default 25).",
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "offset": {
+              "default": 0,
+              "description": "Results to skip, for paging.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Free text matched (word-prefix, any order) against name,\nheadline, company and position. Role words rank highest.\nOmit to list connections newest first."
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "search_people": {
         "input": {
           "additionalProperties": false,
@@ -913,6 +1215,37 @@
             "message",
             "confirm_send"
           ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "sync_my_connections": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "full": {
+              "default": false,
+              "description": "False (default) stops once `stop_after_known` consecutive\nconnections are already in the store -- only new connections\nare read -- but only after some earlier walk reached the end of\nthe list; until then every call walks the whole list, so a run\ncut short is finished by the next one. True always walks the\nwhole list, e.g. to refresh headlines.",
+              "type": "boolean"
+            },
+            "stop_after_known": {
+              "default": 25,
+              "description": "Incremental stop threshold (default 25).",
+              "maximum": 500,
+              "minimum": 5,
+              "type": "integer"
+            },
+            "time_budget_seconds": {
+              "default": 600,
+              "description": "How long the walk may run (30-900, default 600).",
+              "maximum": 900,
+              "minimum": 30,
+              "type": "integer"
+            }
+          },
           "type": "object"
         },
         "output": {

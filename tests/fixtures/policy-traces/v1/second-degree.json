@@ -1,0 +1,107 @@
+{
+  "call": {
+    "arguments": {
+      "url": "https://www.linkedin.com/search/results/people/?keywords=ai&network=%5B%22S%22%5D"
+    },
+    "method": "read_second_degree"
+  },
+  "events": [
+    {
+      "call": "read_second_degree",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "search_results"
+    },
+    {
+      "call": "read_second_degree",
+      "extra": {
+        "target_url": "https://www.linkedin.com/search/results/people/?keywords=ai&network=%5B%22S%22%5D",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "search_results"
+    },
+    {
+      "call": "read_second_degree",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/search/results/people/?keywords=ai&network=%5B%22S%22%5D",
+      "requested_url": "https://www.linkedin.com/search/results/people/?keywords=ai&network=%5B%22S%22%5D",
+      "section": "search_results",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "read_second_degree",
+      "description": "goto https://www.linkedin.com/search/results/people/?keywords=ai&network=%5B%22S%22%5D",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "search_results"
+    },
+    {
+      "call": "read_second_degree",
+      "extra": {
+        "target_url": "https://www.linkedin.com/search/results/people/?keywords=ai&network=%5B%22S%22%5D",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "search_results"
+    },
+    {
+      "call": "read_second_degree",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "search_results"
+    },
+    {
+      "call": "read_second_degree",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "search_results"
+    },
+    {
+      "call": "read_second_degree",
+      "kind": "boundary.rate_limit",
+      "section": "search_results"
+    },
+    {
+      "call": "read_second_degree",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "search_results"
+    },
+    {
+      "arg": null,
+      "call": "read_second_degree",
+      "kind": "wait_for_function",
+      "operation": "main_text_100",
+      "program_digest": "1e55b31a45f1",
+      "section": "search_results",
+      "timeout_ms": 10000
+    },
+    {
+      "arg": [
+        "ada",
+        "nicky"
+      ],
+      "call": "read_second_degree",
+      "kind": "evaluate",
+      "operation": "second_degree_cards",
+      "program_digest": "97da381c75cf",
+      "section": "search_results"
+    }
+  ],
+  "result": [
+    {
+      "mutual": [
+        "nicky"
+      ],
+      "slug": "koen"
+    }
+  ],
+  "scenario": "read_second_degree__baseline",
+  "schema_version": 1
+}

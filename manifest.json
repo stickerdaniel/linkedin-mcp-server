@@ -77,6 +77,42 @@
       "description": "Search for companies on LinkedIn by keywords"
     },
     {
+      "name": "sync_my_connections",
+      "description": "Read your own 1st-degree connections list into a local SQLite store; incremental by default"
+    },
+    {
+      "name": "import_connections_csv",
+      "description": "Import LinkedIn's Connections.csv data export into the local network store"
+    },
+    {
+      "name": "search_my_network",
+      "description": "Search your stored connections by role, sector, company or connection date, offline"
+    },
+    {
+      "name": "get_network_overview",
+      "description": "Summarise the local network store: size, sources, top companies, last sync"
+    },
+    {
+      "name": "enrich_my_network",
+      "description": "Read About and job history for a shortlist of your connections into the local store"
+    },
+    {
+      "name": "get_network_person",
+      "description": "Everything stored about one connection, including enriched About and experience, offline"
+    },
+    {
+      "name": "find_introductions",
+      "description": "Find 2nd-degree people for a purpose and rank who in your network could introduce you"
+    },
+    {
+      "name": "mark_connections",
+      "description": "Mark how well you know connections, so introductions prefer your closest ties"
+    },
+    {
+      "name": "import_messages_csv",
+      "description": "Import per-person message counts and last-contact dates from LinkedIn's messages.csv export"
+    },
+    {
       "name": "get_company_employees",
       "description": "List employees at a company from the LinkedIn /people/ page, with optional keyword filter by name, title, or skill"
     },
