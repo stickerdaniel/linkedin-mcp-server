@@ -24,13 +24,12 @@ from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
 import mcp.types as mt
-from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
 from linkedin_mcp_server.daemon.core import owner as lifecycle
 from linkedin_mcp_server.daemon.descriptor import PROTOCOL_VERSION
-from linkedin_mcp_server.error_handler import ErrorCode, error_result
+from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode, error_result
 
 logger = logging.getLogger(__name__)
 
@@ -390,9 +389,13 @@ def browser_work_begins() -> None:
         _liveness.body_began(call_id)
 
 
-def abandoned_call_error() -> ToolError:
+def abandoned_call_error() -> CodedToolError:
     """What a call stopped for its absent client reports."""
-    return ToolError(_ABANDONED)
+    # `internal` on purpose, as before codes existed, for both callers: the
+    # serializing middleware before browser work begins, and the owner's
+    # middleware below when an admitted call expires. A code of its own would
+    # change what clients branch on, so it is a contract decision of its own.
+    return CodedToolError(_ABANDONED, ErrorCode.INTERNAL)
 
 
 def _refusal(kind: str, message: str) -> ToolResult:
