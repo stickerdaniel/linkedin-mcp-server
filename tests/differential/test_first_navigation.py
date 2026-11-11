@@ -249,6 +249,14 @@ def _started_samplers(monkeypatch: pytest.MonkeyPatch) -> list[LifetimeSampler]:
     return started
 
 
+def _dead(process: psutil.Process) -> bool:
+    """Whether *process* has ended: a zombie on POSIX, gone on Windows."""
+    try:
+        return process.status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
 def _roots(document: dict[str, Any]) -> list[dict[str, Any]]:
     """The browser roots a lifetimes document holds, in identification order."""
     found = [p for p in document.get("processes", []) if p["role"] == "browser-root"]
@@ -446,12 +454,8 @@ async def test_a_relaunch_keeps_the_first_launch_and_reads_its_own_ends(
                 reaper.suspend()
                 try:
                     root.kill()
-                    # The kernel's part first: the reads count from a zombie.
-                    await _until(
-                        lambda: root.status() == psutil.STATUS_ZOMBIE,
-                        15,
-                        "the killed root did not become a zombie",
-                    )
+                    # The kernel's part first: the reads count from a dead root.
+                    await _until(lambda: _dead(root), 15, "the killed root did not end")
                     await _sampled(
                         sampler,
                         lambda document: _roots(document)[1]["gone_ms"] is not None,
