@@ -2,8 +2,8 @@
 
 A pull request that changes a rendered page shows a before and an after screenshot of every changed section in its description. Rendered pages are any `README.md` (GitHub and PyPI), `docs/docker-hub.md` (Docker Hub) and the `long_description` in `manifest.json` (Claude Desktop). The README media check enforces this.
 
-1. **Capture.** Take the before shot from the file's GitHub page on the base branch and the after shot from the same page on your branch: same section, same width. Any browser or screenshot tool works. For `manifest.json`, show the `long_description` rendered as Markdown, not the JSON source.
-2. **Look.** Open each image. The changed text is readable in the after shot.
+1. **Capture.** Take the before shot from the file's GitHub page on the base branch and the after shot from the same page on your branch: same section, same width. Scroll to the changed section first, or open its heading anchor. Take one pair per changed section. Any browser or screenshot tool works. For `manifest.json`, show the `long_description` rendered as Markdown, not the JSON source.
+2. **Look.** Open each image. The changed text is readable in the after shot, and the before shot shows the same place without it. Two identical images mean the shot missed the change.
 3. **Place.** Put a table above the attribution line of the description:
 
    ```markdown

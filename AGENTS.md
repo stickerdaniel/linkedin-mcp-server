@@ -298,12 +298,13 @@ Always read [`CONTRIBUTING.md`](.github/CONTRIBUTING.md) before filing an issue 
   Repeat `<job> with <model> (<effort>)` joined by `and` for each model that did a job.
   Example: `Implemented with Claude Opus 5.5 (xhigh) and reviewed with GPT-6 Pro (max) in Claude Code via T3 Code.`
   Effort is the run's reasoning setting, or `effort unknown` if nothing states it. Humans are `Human`. Ask for other unknown values.
+  Write each name the way its maker writes it, such as `Claude Opus 5.5`, `Codex CLI` or `T3 Code`. The host is the app that ran the tool, or the terminal app for a tool run in a terminal; an operating system is not a host.
   Keep attribution in that line: before pushing, amend agent `Co-authored-by` trailers out of your commits.
 - When implementing a new feature/fix:
   1. Packet: before filing or commenting on a GitHub issue, read [.agents/skills/issue-packet/SKILL.md](.agents/skills/issue-packet/SKILL.md).
   2. Branch from `main`: `feature/issue-number-short-description`
   3. Implement and test
-  4. Update README.md and docs/docker-hub.md if relevant
+  4. Update README.md and docs/docker-hub.md if relevant. A PR that changes a rendered page carries a Before and an After screenshot of each changed section itself, per [docs/pr-media.md](docs/pr-media.md)
   5. Create a draft PR; only convert to regular PR when ready to merge. A `feat`, `fix` or breaking (`type!:`) PR then adds `changelog.d/<PR>.<type>.md`; see CONTRIBUTING
   6. Review with AI agents first, then manual review. PRs are squash-merged into `main` (one commit per PR), so keep the PR title as the conventional-commit subject; commits within a PR are for review only. The squash commit title is `<PR title> (#N)`, which an API or CLI merge sets explicitly.
 
