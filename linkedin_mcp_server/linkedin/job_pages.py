@@ -204,9 +204,13 @@ ORGANIC_BEFORE_NOTICE_JS = (
 )
 
 # Save state is exposed only through the control's visible text, so the labels
-# are the detection signal; the browser context is forced to en-US
-# (core/browser.py), so they are fixed constants rather than read per call.
-_JOB_SAVE_LABELS = {"saved": "Saved", "unsaved": "Save"}
+# are the detection signal, kept in a per-locale table (AGENTS.md, LinkedIn
+# Page Rules). The browser context is forced to en-US (core/browser.py), so that
+# entry is the operative one; other locales are not covered.
+_JOB_SAVE_LABELS_BY_LOCALE: dict[str, dict[str, str]] = {
+    "en-US": {"saved": "Saved", "unsaved": "Save"},
+}
+_JOB_SAVE_LABELS = _JOB_SAVE_LABELS_BY_LOCALE["en-US"]
 
 _JOB_SAVE_CONTROL_WAIT_MS = 10_000
 
