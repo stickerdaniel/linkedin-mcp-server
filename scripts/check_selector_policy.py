@@ -97,7 +97,7 @@ _JS_TRIVIA = r"(?:\s|/\*.*?\*/|//[^\n]*\n)*"
 # trailing comma. A template literal counts only without `${`, which would
 # make it an expression.
 _JS_SINK = re.compile(
-    rf"""\b(?:querySelector(?:All)?|closest|matches)\s*\({_JS_TRIVIA}"""
+    rf"""\b(?:querySelector(?:All)?|closest|matches){_JS_TRIVIA}\({_JS_TRIVIA}"""
     r"""(?P<q>['"`])(?P<body>(?:\\.|(?!(?P=q)).)*?)(?P=q)"""
     rf"""{_JS_TRIVIA}(?:,{_JS_TRIVIA})?\)""",
     re.DOTALL,
@@ -122,7 +122,11 @@ _JS_SIMPLE_ESCAPES = {
     "\u2029": "",
 }
 _CSS_ESCAPE = r"\\(?:[0-9A-Fa-f]{1,6}\s?|[^\n0-9A-Fa-f])"
-_CSS_IDENT = rf"-?(?:[A-Za-z_]|{_CSS_ESCAPE})(?:[\w-]|{_CSS_ESCAPE})*"
+# CSS Syntax 4 ident-token: `--` or an optional `-` before a name-start
+# character (letter, `_`, any non-ASCII character or an escape).
+_CSS_NAME_START = rf"(?:[A-Za-z_]|[^\x00-\x7f]|{_CSS_ESCAPE})"
+_CSS_NAME_CHAR = rf"(?:[\w-]|[^\x00-\x7f]|{_CSS_ESCAPE})"
+_CSS_IDENT = rf"(?:--|-?{_CSS_NAME_START}){_CSS_NAME_CHAR}*"
 # Read left to right: comments, quoted strings, attribute clauses, IDs and
 # escapes are consumed whole, so a dot inside one of them is never a class.
 _CSS_TOKEN = re.compile(

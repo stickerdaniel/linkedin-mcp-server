@@ -94,6 +94,16 @@ def _found(source: str) -> list[tuple[str, str]]:
         ("page.locator('id=main >> div.toast')", ("class-selector", ".toast")),
         ("page.locator('xpath=//main >> css=.toast')", ("class-selector", ".toast")),
         ("page.locator('css:light=.toast')", ("class-selector", ".toast")),
+        ("page.locator('.--toast')", ("class-selector", ".--toast")),
+        ("page.locator('.équipe')", ("class-selector", ".équipe")),
+        (
+            "X = \"document.querySelector('.--toast')\"",
+            ("class-selector", ".--toast"),
+        ),
+        (
+            "X = \"document.querySelector /* note */ ('.toast')\"",
+            ("class-selector", ".toast"),
+        ),
         ("page.locator('id=main >> css:light=.toast')", ("class-selector", ".toast")),
     ],
 )
