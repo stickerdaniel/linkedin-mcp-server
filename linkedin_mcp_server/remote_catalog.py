@@ -907,9 +907,11 @@ class Unavailable(Exception):
 class CallResult:
     texts: tuple[str, ...]
     is_error: bool
+    #: 200 or 400. A 400 is the remote end rejecting the arguments.
+    status: int
 
 
-def _call_result(body: bytes) -> CallResult:
+def _call_result(body: bytes, status: int) -> CallResult:
     """The text items and error flag of a call answer; :class:`Unavailable` if invalid.
 
     A text item that is not valid Unicode makes the whole answer invalid,
@@ -935,7 +937,7 @@ def _call_result(body: bytes) -> CallResult:
     )
     if not all(_is_text(text) for text in texts):
         raise Unavailable("answer text is not valid Unicode")
-    return CallResult(texts=texts, is_error=is_error)
+    return CallResult(texts=texts, is_error=is_error, status=status)
 
 
 def call(
@@ -980,7 +982,7 @@ def call(
         raise Unavailable(type(exc).__name__) from exc
     if status not in (200, 400):
         raise Unavailable(f"status {status}")
-    return _call_result(body)
+    return _call_result(body, status)
 
 
 def reset_for_testing() -> None:

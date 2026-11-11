@@ -613,6 +613,11 @@ def _texts(result: mt.CallToolResult) -> list[dict[str, Any]]:
     return [part.model_dump(mode="json", exclude_none=True) for part in result.content]
 
 
+def _code(result: mt.CallToolResult) -> str | None:
+    """The error code a client reads from the result, if it carries one."""
+    return ((result.meta or {}).get("linkedin.dev/error") or {}).get("code")
+
+
 _UNAVAILABLE = [{"type": "text", "text": "This tool is unavailable right now."}]
 
 
@@ -652,6 +657,34 @@ class TestCalls:
             result = await client.call_tool(_NAME, {"network": 3}, raise_on_error=False)
 
         assert (_texts(result), result.is_error) == (answer["content"], True)
+        assert _code(result) == "invalid_argument"
+
+    async def test_a_failure_the_remote_reports_reads_as_internal(
+        self, stub: CatalogStub, lifespan: None
+    ):
+        stub.call_answer = stub.json(
+            200,
+            {
+                "content": [
+                    {"type": "text", "text": "first"},
+                    {"type": "text", "text": "second"},
+                ],
+                "isError": True,
+                "_meta": {"linkedin.dev/error": {"v": 1, "code": "auth_required"}},
+            },
+        )
+        mcp = await _started()
+
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                _NAME, {"network": "one"}, raise_on_error=False
+            )
+
+        assert (_texts(result), result.is_error) == (
+            [{"type": "text", "text": "first\n\nsecond"}],
+            True,
+        )
+        assert _code(result) == "internal"
 
     async def test_only_the_text_items_reach_the_client(
         self, stub: CatalogStub, lifespan: None
@@ -710,6 +743,7 @@ class TestCalls:
             )
 
         assert (_texts(result), result.is_error) == (_UNAVAILABLE, True)
+        assert _code(result) == "network"
 
     async def test_a_long_text_within_the_answer_limit_reaches_the_client(
         self, stub: CatalogStub, lifespan: None

@@ -30,6 +30,7 @@ from fastmcp.tools import Tool, ToolResult
 from pydantic import Field
 
 from linkedin_mcp_server import remote_catalog
+from linkedin_mcp_server.error_handler import ErrorCode, error_result
 
 logger = logging.getLogger(__name__)
 
@@ -51,10 +52,17 @@ def is_remote(name: str) -> bool:
 
 
 def _unavailable() -> ToolResult:
-    return ToolResult(
-        content=[mt.TextContent(type="text", text=remote_catalog.UNAVAILABLE_TEXT)],
-        is_error=True,
-    )
+    return error_result(remote_catalog.UNAVAILABLE_TEXT, ErrorCode.NETWORK)
+
+
+def _remote_error(result: remote_catalog.CallResult) -> ToolResult:
+    """A failed remote call with a local code; nothing of the remote's metadata.
+
+    A 400 is the remote end rejecting the arguments, any other failure is its
+    own. Its text items arrive joined into one, separated by a blank line.
+    """
+    code = ErrorCode.INVALID_ARGUMENT if result.status == 400 else ErrorCode.INTERNAL
+    return error_result("\n\n".join(result.texts), code)
 
 
 def _client_header() -> str | None:
@@ -158,9 +166,10 @@ class RemoteTool(Tool):
             return _unavailable()
         if result is None:
             return _unavailable()
+        if result.is_error:
+            return _remote_error(result)
         return ToolResult(
             content=[mt.TextContent(type="text", text=text) for text in result.texts],
-            is_error=result.is_error,
         )
 
 
