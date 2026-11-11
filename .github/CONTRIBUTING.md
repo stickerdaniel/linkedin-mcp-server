@@ -15,6 +15,14 @@ uv run pytest --cov
 
 The [README](../README.md#setup-from-source-develop--contribute) covers running the server locally and logging in.
 
+A server you start by hand uses your real profile under `~/.linkedin-mcp`. Without a valid session there, it imports one from a logged-in browser and moves the old state aside. For a run that needs no LinkedIn session, give it a directory of its own:
+
+```bash
+USER_DATA_DIR="$(mktemp -d)/profile" uv run -m linkedin_mcp_server --no-auto-import
+```
+
+That directory gets its own Chromium download, about 380 MB. A tool that reads LinkedIn still opens a login window there.
+
 ## How the server reads LinkedIn
 
 ### Read the rendered page
