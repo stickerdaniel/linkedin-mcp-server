@@ -1,0 +1,70 @@
+# Selector dependencies scripts/check_selector_policy.py accepts.
+#
+# Each entry allows `count` occurrences of the exact `text` inside `symbol`
+# (the innermost enclosing function or class, the module-level assignment, or
+# <module>) of `file`. A changed value, an added occurrence and a removed one
+# all fail the check, so edit the entry together with the code.
+# `reason` says why text, URL or attribute presence was not enough.
+
+[[exception]]
+file = "linkedin_mcp_server/core/auth.py"
+symbol = "is_logged_in"
+text = ".global-nav__primary-link"
+count = 1
+reason = "Login marker for the older global nav; new_selectors covers the current nav by href and is checked alongside it."
+
+[[exception]]
+file = "linkedin_mcp_server/core/utils.py"
+symbol = "handle_modal_close"
+text = ".artdeco-modal__dismiss"
+count = 1
+reason = "Closes whatever modal blocks the page; the design-system class is the close button's only locale-independent mark."
+
+[[exception]]
+file = "linkedin_mcp_server/core/utils.py"
+symbol = "handle_modal_close"
+text = '[aria-label="Dismiss"]'
+count = 1
+reason = "English close-button label, matched beside the class selector; other locales fall through to the class."
+
+[[exception]]
+file = "linkedin_mcp_server/core/utils.py"
+symbol = "handle_modal_close"
+text = '[aria-label="Close"]'
+count = 1
+reason = "English close-button label, matched beside the class selector; other locales fall through to the class."
+
+[[exception]]
+file = "linkedin_mcp_server/linkedin/capture.py"
+symbol = "_extract_overlay_content"
+text = ".artdeco-modal__content"
+count = 3
+reason = "Contact-info overlay root beside dialog[open]: the wait, the root list, and the error message naming both."
+
+[[exception]]
+file = "linkedin_mcp_server/linkedin/conversations.py"
+symbol = "_extract_conversation_thread_refs"
+text = '[class*="listitem__link"]'
+count = 1
+reason = "No role/aria attributes exist on the clickable element, so class-name selectors are unavoidable here."
+
+[[exception]]
+file = "linkedin_mcp_server/linkedin/job_pages.py"
+symbol = "_get_total_search_pages"
+text = ".jobs-search-pagination__page-state"
+count = 1
+reason = "The element has display: none (screen-reader only), so the text never appears in innerText."
+
+[[exception]]
+file = "linkedin_mcp_server/linkedin/job_pages.py"
+symbol = "_get_total_list_pages"
+text = ".artdeco-pagination__pages"
+count = 1
+reason = "The my-items pager exposes no page count in innerText and no stable attribute to count."
+
+[[exception]]
+file = "linkedin_mcp_server/linkedin/message_sender.py"
+symbol = "_MESSAGE_COMPOSER_INSPECT_JS"
+text = ".msg-form__send-toggle"
+count = 1
+reason = "enterToSend uses the send-toggle class only when the verified composer has no Send button (#1107)."

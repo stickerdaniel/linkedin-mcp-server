@@ -33,6 +33,12 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+    -   id: selector-policy
+        name: selector policy
+        entry: uv run python scripts/check_selector_policy.py
+        language: system
+        pass_filenames: false
+        always_run: true
     -   id: ty
         name: ty
         entry: uv run ty check
