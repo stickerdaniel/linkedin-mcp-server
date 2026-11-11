@@ -101,6 +101,29 @@ async def test_prepare_post_binds_author_without_opening_a_composer():
     page.locator.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("First\r\nSecond", "First\nSecond"),
+        ("First\rSecond", "First\nSecond"),
+        ("First\r\n\r\nSecond\nThird", "First\n\nSecond\nThird"),
+        ("x" * 2998 + "\r\ny", "x" * 2998 + "\ny"),
+    ],
+)
+async def test_preview_uses_publishable_line_breaks_before_approval(raw, expected):
+    _, page, session, navigator, *_ = fixture()
+    writer = PostWriter(
+        session, navigator, resolve_author=AsyncMock(return_value=AUTHOR)
+    )
+
+    preview = await writer.prepare_post(raw)
+
+    assert preview["text"] == expected
+    with pytest.raises(ValueError, match="differs from the exact preview"):
+        await writer.publish(preview["draft_id"], raw, confirmed=True)
+    navigator._navigate_to_page.assert_not_awaited()
+
+
 async def test_prepare_post_refuses_invalid_text_before_resolving_author():
     _, _, session, navigator, *_ = fixture()
     resolve_author = AsyncMock(return_value=AUTHOR)

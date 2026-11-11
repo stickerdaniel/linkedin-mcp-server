@@ -176,8 +176,15 @@ def profile_url(value: str) -> str:
     return "https://www.linkedin.com" + parsed.path.rstrip("/") + "/"
 
 
+def _normalize_line_breaks(text: str) -> str:
+    # The editor exposes LF line endings. Normalize before the preview is
+    # approved so insertion never has to change already-approved text.
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def validate_post_text(text: str) -> None:
     """Refuse text the plain-text composer cannot insert without changing."""
+    text = _normalize_line_breaks(text)
     try:
         units = len(text.encode("utf-16-le")) // 2
     except UnicodeEncodeError as exc:
@@ -230,6 +237,7 @@ class PostWriter:
 
     def prepare(self, text: str, author_url: str) -> dict[str, Any]:
         # LinkedIn counts UTF-16 units, not Python code points, for text limits.
+        text = _normalize_line_breaks(text)
         validate_post_text(text)
         author_url = profile_url(author_url)
         now = time.monotonic()

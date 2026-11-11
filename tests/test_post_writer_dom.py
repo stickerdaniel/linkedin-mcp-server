@@ -99,6 +99,36 @@ async def test_real_composer_pinned_actions_and_verified_post(
     assert (await page.locator("main").inner_text()).endswith(text)
 
 
+@pytest.mark.parametrize("raw", ["First\r\nSecond", "First\rSecond"])
+async def test_cr_line_breaks_publish_the_exact_returned_preview(dom_page, raw):
+    page = dom_page
+    author = "https://www.linkedin.com/in/test-author/"
+    expected = "First\nSecond"
+
+    async def route(request):
+        if "/feed/update/" in request.request.url:
+            html = f'<main><article><header><a href="{author}">Author</a></header><p style="white-space:pre-wrap">{expected}</p></article></main>'
+        else:
+            html = f'''<html lang="en"><dialog open><a href="{author}">Author</a>
+                <button>Anyone</button><div role="textbox" contenteditable="true"></div>
+                <button onclick="location.href='/feed/update/urn:li:activity:123/'">Post</button>
+                </dialog></html>'''
+        await request.fulfill(body=html, content_type="text/html")
+
+    await page.route("**/*", route)
+    nav = MagicMock()
+    nav._navigate_to_page = page.goto
+    writer = PostWriter(PageSession(page), nav)
+    preview = writer.prepare(raw, author)
+    assert preview["text"] == expected
+
+    result = await writer.publish(preview["draft_id"], preview["text"], confirmed=True)
+
+    assert result["status"] == "published"
+    assert await page.locator("[contenteditable]").count() == 0
+    assert (await page.locator("main").inner_text()).endswith(expected)
+
+
 @pytest.mark.browser_dom
 async def test_off_domain_at_mutation_seam_cannot_receive_post(dom_page, monkeypatch):
     page = dom_page
