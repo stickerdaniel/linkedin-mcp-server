@@ -54,32 +54,40 @@ def _absolute(node: ast.ImportFrom, module: str, is_package: bool) -> str:
 
 
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+type _Scope = ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
 
 
-def _own_nodes(scope: ast.AST) -> Iterator[ast.AST]:
-    """Every node evaluated in *scope*, without entering nested scopes.
+def _evaluated(node: ast.AST) -> Iterator[ast.AST]:
+    """*node* and what its own scope evaluates of it, in source order.
 
     A nested function or class is yielded itself, and its decorators,
-    defaults and bases with it, since those run in *scope*; its body is not.
+    defaults, bases and keywords with it, since those run where it is
+    defined; its body is not.
     """
-    stack = list(ast.iter_child_nodes(scope))
-    while stack:
-        node = stack.pop()
-        yield node
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            stack += [*node.decorator_list, *node.args.defaults]
-            stack += [d for d in node.args.kw_defaults if d is not None]
-        elif isinstance(node, ast.ClassDef):
-            stack += [*node.decorator_list, *node.bases, *node.keywords]
-        else:
-            stack += ast.iter_child_nodes(node)
+    yield node
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+        defaults = [*node.args.defaults, *node.args.kw_defaults]
+        children = [*node.decorator_list, *(d for d in defaults if d is not None)]
+    elif isinstance(node, ast.ClassDef):
+        children = [*node.decorator_list, *node.bases, *node.keywords]
+    else:
+        children = list(ast.iter_child_nodes(node))
+    for child in children:
+        yield from _evaluated(child)
 
 
-def _bindings(scope: ast.AST, module: str, is_package: bool) -> dict[str, str]:
+def _own_nodes(scope: _Scope) -> Iterator[ast.AST]:
+    """Every node *scope*'s body evaluates, in source order."""
+    for statement in scope.body:
+        yield from _evaluated(statement)
+
+
+def _bindings(scope: _Scope, module: str, is_package: bool) -> dict[str, str]:
     """Map every name an import in *scope*, or a top-level class, binds.
 
     An import anywhere in a function binds for the whole function, so a local
-    import cannot hide a construction that precedes it.
+    import cannot hide a construction that precedes it. Of two imports of one
+    name, the later one wins, as it does once the scope has run.
     """
     names = (
         {
@@ -133,7 +141,7 @@ def violations(source: str, module: str, path: str, is_package: bool = False):
     """Every uncoded construction in *source*, as ``path:line: what to do``."""
     found: list[str] = []
 
-    def visit(scope: ast.AST, outer: ChainMap[str, str]) -> None:
+    def visit(scope: _Scope, outer: ChainMap[str, str]) -> None:
         names = outer.new_child(_bindings(scope, module, is_package))
         # A class body's names are not visible inside its methods.
         inner = outer if isinstance(scope, ast.ClassDef) else names
@@ -301,6 +309,27 @@ _TOOLS = "linkedin_mcp_server.tools.example"
             "    raise CodedToolError(message, *args)\n",
             id="coded with forwarded arguments",
         ),
+        pytest.param(
+            _TOOLS,
+            "from fastmcp.exceptions import ToolError\n"
+            "def f(error=ToolError('x')): return error\n",
+            id="a default, reported once",
+        ),
+        pytest.param(
+            _TOOLS,
+            "from builtins import ValueError as Failure\n"
+            "from fastmcp.exceptions import ToolError as Failure\n"
+            "raise Failure('x')\n",
+            id="the later of two module imports",
+        ),
+        pytest.param(
+            _TOOLS,
+            "def f():\n"
+            "    from builtins import ValueError as Failure\n"
+            "    from fastmcp.exceptions import ToolError as Failure\n"
+            "    raise Failure('x')\n",
+            id="the later of two function imports",
+        ),
     ],
 )
 def test_an_uncoded_construction_is_refused_with_its_line(module, source):
@@ -361,6 +390,41 @@ def test_an_uncoded_construction_is_refused_with_its_line(module, source):
             "    except ToolError:\n"
             "        return None\n",
             id="a ValueError beside a sibling that only catches ToolError",
+        ),
+        pytest.param(
+            _TOOLS,
+            "from builtins import ValueError as Failure\n"
+            "def f(error=Failure('x'), *, other=Failure('y')):\n"
+            "    from fastmcp.exceptions import ToolError as Failure\n"
+            "    return error\n",
+            id="defaults, beside a body that imports another class",
+        ),
+        pytest.param(
+            _TOOLS,
+            "from builtins import ValueError as Failure\n"
+            "@register(Failure('x'))\n"
+            "def f():\n"
+            "    from fastmcp.exceptions import ToolError as Failure\n"
+            "@register(Failure('x'))\n"
+            "class Holder(make(Failure('x')), metaclass=pick(Failure('x'))):\n"
+            "    from fastmcp.exceptions import ToolError as Failure\n",
+            id="decorators, bases and metaclass, beside a body that imports "
+            "another class",
+        ),
+        pytest.param(
+            _TOOLS,
+            "from fastmcp.exceptions import ToolError as Failure\n"
+            "from builtins import ValueError as Failure\n"
+            "raise Failure('x')\n",
+            id="a ValueError imported after ToolError in the module",
+        ),
+        pytest.param(
+            _TOOLS,
+            "def f():\n"
+            "    from fastmcp.exceptions import ToolError as Failure\n"
+            "    from builtins import ValueError as Failure\n"
+            "    raise Failure('x')\n",
+            id="a ValueError imported after ToolError in a function",
         ),
     ],
 )
