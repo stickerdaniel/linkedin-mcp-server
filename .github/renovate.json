@@ -25,7 +25,7 @@
   },
   "packageRules": [
     {
-      "description": "Managed by release workflow, not Renovate",
+      "description": "Managed by scripts/prepare_release.py, not Renovate",
       "matchPackageNames": ["stickerdaniel/linkedin-mcp-server"],
       "matchManagers": ["docker-compose"],
       "enabled": false

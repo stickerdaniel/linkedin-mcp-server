@@ -26,6 +26,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      # The release publishes and tags the merged commit as it is, so a version
+      # bump has to carry every file that repeats the version. Runs before
+      # `uv sync`, which would relock a stale uv.lock and hide it.
+      - name: Check the versioned files agree
+        run: python3 scripts/prepare_release.py --check
+
       - name: Set up uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:

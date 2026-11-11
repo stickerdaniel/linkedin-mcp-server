@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 import pytest
-from packaging.version import Version
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PLUGIN_ROOT = _REPO_ROOT / "plugins" / "linkedin-mcp-server"
@@ -18,7 +17,6 @@ _PLUGIN_MCP = _PLUGIN_ROOT / ".mcp.json"
 _MARKETPLACE = _REPO_ROOT / ".agents" / "plugins" / "marketplace.json"
 _CLAUDE_MANIFEST = _PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
 _CLAUDE_MARKETPLACE = _REPO_ROOT / ".claude-plugin" / "marketplace.json"
-_RELEASE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -28,10 +26,6 @@ def _load_json(path: Path) -> dict[str, Any]:
 def _project_version() -> str:
     project = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     return project["project"]["version"]
-
-
-def _released_version() -> str:
-    return _load_json(_REPO_ROOT / "manifest.json")["version"]
 
 
 # Every host runs the newest release, so no release rewrites this file. The
@@ -67,8 +61,7 @@ def test_marketplace_is_opt_in_and_resolves_the_plugin() -> None:
 def test_manifest_matches_the_repository_release() -> None:
     manifest = _load_json(_PLUGIN_MANIFEST)
     assert manifest["name"] == _PLUGIN_ROOT.name
-    assert manifest["version"] == _released_version()
-    assert Version(manifest["version"]) <= Version(_project_version())
+    assert manifest["version"] == _project_version()
     assert manifest["mcpServers"] == "./.mcp.json"
     assert manifest["skills"] == "./skills/"
     assert "hooks" not in manifest
@@ -77,19 +70,6 @@ def test_manifest_matches_the_repository_release() -> None:
 
 def test_mcp_command_runs_the_latest_release() -> None:
     _assert_mcp_contract(_load_json(_PLUGIN_MCP))
-
-
-def test_release_workflow_updates_and_commits_every_plugin_file() -> None:
-    workflow = _RELEASE_WORKFLOW.read_text(encoding="utf-8")
-    for path in (
-        "plugins/linkedin-mcp-server/.codex-plugin/plugin.json",
-        "plugins/linkedin-mcp-server/.claude-plugin/plugin.json",
-        "plugins/linkedin-mcp-server/.cursor-plugin/plugin.json",
-    ):
-        assert workflow.count(path) >= 3
-    assert '"Codex plugin": [plugin["version"]]' in workflow
-    assert '"Claude Code plugin": [claude_plugin["version"]]' in workflow
-    assert '"Cursor plugin": [cursor_plugin["version"]]' in workflow
 
 
 def test_claude_code_marketplace_resolves_the_plugin() -> None:
@@ -105,7 +85,7 @@ def test_claude_code_manifest_matches_the_codex_manifest() -> None:
     claude = _load_json(_CLAUDE_MANIFEST)
     codex = _load_json(_PLUGIN_MANIFEST)
     assert claude["name"] == codex["name"]
-    assert claude["version"] == _released_version()
+    assert claude["version"] == _project_version()
 
 
 def test_plugin_icon_is_the_release_icon() -> None:

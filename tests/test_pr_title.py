@@ -36,7 +36,6 @@ validate_style = cast(Callable[[str], str | None], _VALIDATOR.validate_style)
 
 _CHECK_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "check-pr-title.yml"
 _LABEL_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "label-pr.yml"
-_RELEASE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
 # A full commit SHA, so a moved tag cannot swap the code these workflows run.
 _CHECKOUT = re.compile(r"uses: actions/checkout@[0-9a-f]{40} ")
 _DERIVED_LABELS = {
@@ -724,9 +723,3 @@ def test_label_workflow_removes_only_attached_stale_labels() -> None:
     assert "|| true" not in workflow
     assert "2>/dev/null" not in workflow
     assert "Labels outside this fixed derived set are untouched." in workflow
-
-
-def test_release_restores_pr_title_required_check() -> None:
-    workflow = _RELEASE_WORKFLOW.read_text(encoding="utf-8")
-
-    assert '{"context": "PR Title", "app_id": 15368}' in workflow
