@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import asyncio
 import gc
 import logging
+import math
 
 import anyio
 from patchright.async_api import Error as PatchrightError
@@ -1361,13 +1362,22 @@ class TestSendMessageDeadline:
     """
 
     _TOOL_TIMEOUT = 0.5
-    # For tests that stall on a skipped clock. Its reply reserve is the
-    # 5-second cap, far more than any host needs for the work after a stall,
-    # where 0.5 s left that work about 80 ms of real time.
+    # For tests that stall on a skipped clock. With the `clock` fixture its
+    # reply reserve is 10 s, of which a stalled disposal takes half: far more
+    # than any host needs for the work after a stall, where 0.5 s left that
+    # work about 80 ms of real time.
     _SKIPPED_TOOL_TIMEOUT = 60.0
 
     @pytest.fixture
     async def clock(self, monkeypatch) -> _SkippedClock:
+        """A skipped clock, with the reserve a sixth of the tool deadline.
+
+        The 5-second cap on the reserve would leave a stalled disposal's
+        half of it, 2.5 s, to a host that can stall longer.
+        """
+        monkeypatch.setattr(
+            message_sender_module, "_SEND_REPLY_RESERVE_SECONDS", math.inf
+        )
         loop = asyncio.get_running_loop()
         clock = _SkippedClock(loop)
         monkeypatch.setattr(loop, "time", clock.time)
@@ -1450,26 +1460,36 @@ class TestSendMessageDeadline:
 
     @pytest.mark.parametrize("stage", ["cleanup", "notification"])
     async def test_a_stalled_ending_keeps_the_answer(
-        self, mock_page, monkeypatch, stage
+        self, mock_page, monkeypatch, clock, stage
     ):
+        """Work after a confirmed send ends in time for the answer to leave.
+
+        The cleanup cap is raised above the time left, so only the tool
+        deadline can end a stalled cleanup in time.
+        """
         from fastmcp import Context
 
         async def report_progress(self, progress, total=None, message=None):
             if progress == 100:
-                await anyio.sleep_forever()
+                await clock.stall()
 
+        monkeypatch.setattr(
+            message_sender_module, "_MESSAGE_CLEANUP_TIMEOUT_SECONDS", 3600.0
+        )
         sender = _sender(mock_page)
         with ExitStack() as stack:
             mocks = self._composer(stack, sender, mock_page)
             if stage == "cleanup":
                 mock_page.evaluate_handle.return_value.dispose = AsyncMock(
-                    side_effect=_stall
+                    side_effect=clock.stall
                 )
             else:
                 stack.enter_context(
                     patch.object(Context, "report_progress", report_progress)
                 )
-            result = await self._call(sender, monkeypatch)
+            result = await self._call(
+                sender, monkeypatch, tool_timeout=self._SKIPPED_TOOL_TIMEOUT
+            )
 
         assert result.is_error is False, result.content
         assert result.structured_content is not None
@@ -1659,14 +1679,14 @@ class TestSendMessageDeadline:
         assert mocks.submit.call_count == 1
 
     async def test_a_stalled_snapshot_disposal_keeps_the_thread(
-        self, mock_page, monkeypatch
+        self, mock_page, monkeypatch, clock
     ):
         """Disposal runs out of time after the path is known, so the send stands."""
         handle = MagicMock()
         handle.json_value = AsyncMock(
             return_value={"path": "/messaging/thread/2-abc==/"}
         )
-        handle.dispose = AsyncMock(side_effect=_stall)
+        handle.dispose = AsyncMock(side_effect=clock.stall)
         mock_page.wait_for_function = AsyncMock(return_value=handle)
         sender = _sender(mock_page)
 
@@ -1676,7 +1696,9 @@ class TestSendMessageDeadline:
         with ExitStack() as stack:
             mocks = self._composer(stack, sender, mock_page)
             mocks.confirmed.side_effect = confirmed
-            result = await self._call(sender, monkeypatch)
+            result = await self._call(
+                sender, monkeypatch, tool_timeout=self._SKIPPED_TOOL_TIMEOUT
+            )
 
         assert result.is_error is False, result.content
         body = result.structured_content
