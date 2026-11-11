@@ -491,7 +491,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--slow-mo",
         type=int,
-        default=0,
+        default=None,
         metavar="MS",
         help="Slow down browser actions by N milliseconds (debugging)",
     )
@@ -770,7 +770,7 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
         config.server.path = args.path
 
     # Browser configuration
-    if args.slow_mo:
+    if args.slow_mo is not None:
         config.browser.slow_mo = args.slow_mo
 
     if args.user_agent:
