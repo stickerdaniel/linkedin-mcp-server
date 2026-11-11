@@ -2071,11 +2071,14 @@ def _placeholder_keys_read(source: str) -> bool:
 
     Every environment read inside it, in any spelling the detector above
     knows, has to be the ``.environ`` of an ``<os>.environ.get(key)`` call
-    whose ``key`` iterates ``_MCPB_PLACEHOLDERS``.
+    whose ``key`` iterates ``_MCPB_PLACEHOLDERS``. The reads come from the
+    whole module, so an alias imported at module level is resolved inside
+    the function too.
     """
+    tree = ast.parse(source)
     (function,) = [
         node
-        for node in ast.walk(ast.parse(source))
+        for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef) and node.name == "_warn_about_placeholders"
     ]
     keys = {
@@ -2086,7 +2089,8 @@ def _placeholder_keys_read(source: str) -> bool:
         and isinstance(generator.target, ast.Tuple)
         and isinstance(generator.target.elts[0], ast.Name)
     }
-    reads = {id(node) for node, _ in _raw_read_nodes(function)}
+    inside = {id(node) for node in ast.walk(function)}
+    reads = {id(node) for node, _ in _raw_read_nodes(tree)} & inside
     allowed = {
         id(node.func.value)
         for node in ast.walk(function)
@@ -2124,10 +2128,17 @@ class TestTheEnvironmentIsReadInOnePlace:
         source = self._source()
         assert _placeholder_keys_read(source)
 
-        for extra in ("os.environ.get('HOST')", "os.getenv('HOST')"):
-            widened = source.replace(
-                "if os.environ.get(key) == literal",
-                f"if os.environ.get(key) == literal or {extra}",
+        for extra, imported in (
+            ("os.environ.get('HOST')", ""),
+            ("os.getenv('HOST')", ""),
+            ("environment.getenv('HOST')", "\nimport os as environment\n"),
+        ):
+            widened = (
+                source.replace(
+                    "if os.environ.get(key) == literal",
+                    f"if os.environ.get(key) == literal or {extra}",
+                )
+                + imported
             )
             assert widened != source
             assert not _placeholder_keys_read(widened), extra
