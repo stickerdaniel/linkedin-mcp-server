@@ -1,0 +1,868 @@
+{
+  "directories": [
+    "profiles",
+    "bin",
+    "installer"
+  ],
+  "files": [
+    "bin/chrome",
+    "bin/env-chrome",
+    "bin/cli-chrome"
+  ],
+  "cases": [
+    {
+      "name": "defaults",
+      "env": {
+        "USER_DATA_DIR": "{root}/profiles/default"
+      },
+      "argv": [],
+      "fields": {
+        "browser": {
+          "headless": true,
+          "slow_mo": 0,
+          "viewport_width": 1280,
+          "viewport_height": 720,
+          "default_timeout": 5000,
+          "chrome_path": null,
+          "user_data_dir": "{root}/profiles/default",
+          "proxy_server": null,
+          "proxy_username": null,
+          "proxy_password": null,
+          "proxy_bypass": null,
+          "login_timeout_seconds": 1800.0,
+          "login_inline_wait_seconds": 25.0,
+          "browser_wait_seconds": 25.0,
+          "browser_min_hold_seconds": 20.0,
+          "browser_idle_timeout_seconds": 600.0,
+          "auto_import_from_browser": null,
+          "installer_temp_dir": null
+        },
+        "server": {
+          "transport": "stdio",
+          "transport_explicitly_set": false,
+          "log_level": "WARNING",
+          "login": false,
+          "login_viewer": false,
+          "status": false,
+          "logout": false,
+          "claim_profile_root": false,
+          "import_from_browser": null,
+          "host": "127.0.0.1",
+          "port": 8000,
+          "path": "/mcp",
+          "tool_timeout_seconds": 180.0,
+          "daemon_enabled": false
+        }
+      },
+      "encoded": {
+        "browser": {
+          "headless": true,
+          "slow_mo": 0,
+          "viewport_width": 1280,
+          "viewport_height": 720,
+          "default_timeout": 5000,
+          "chrome_path": null,
+          "user_data_dir": "{root}/profiles/default",
+          "proxy_server": null,
+          "proxy_username": null,
+          "proxy_password": null,
+          "proxy_bypass": null,
+          "login_timeout_seconds": 1800.0,
+          "login_inline_wait_seconds": 25.0,
+          "browser_wait_seconds": 25.0,
+          "browser_min_hold_seconds": 20.0,
+          "browser_idle_timeout_seconds": 600.0,
+          "auto_import_from_browser": null,
+          "installer_temp_dir": null
+        },
+        "server": {
+          "tool_timeout_seconds": 180.0,
+          "log_level": "WARNING"
+        }
+      }
+    },
+    {
+      "name": "environment_only",
+      "env": {
+        "USER_DATA_DIR": "{root}/profiles/env",
+        "HEADLESS": " Off ",
+        "LOG_LEVEL": " info ",
+        "SLOW_MO": "250",
+        "VIEWPORT": "1920X1080",
+        "TIMEOUT": "8000",
+        "TOOL_TIMEOUT": "90.5",
+        "LOGIN_TIMEOUT": "0",
+        "LOGIN_INLINE_WAIT": "99",
+        "BROWSER_WAIT": "60",
+        "BROWSER_MIN_HOLD": "50",
+        "BROWSER_IDLE_TIMEOUT": "0",
+        "CHROME_PATH": "{root}/bin/chrome",
+        "PROXY_SERVER": "http://envuser:envpass@gate.example:7000",
+        "PROXY_BYPASS": ".b.example, .a.example",
+        "INSTALLER_TEMP_DIR": "{root}/installer/env",
+        "AUTO_IMPORT_FROM_BROWSER": "no",
+        "DAEMON_ENABLED": "1"
+      },
+      "argv": [],
+      "fields": {
+        "browser": {
+          "headless": false,
+          "slow_mo": 250,
+          "viewport_width": 1920,
+          "viewport_height": 1080,
+          "default_timeout": 8000,
+          "chrome_path": "{root}/bin/chrome",
+          "user_data_dir": "{root}/profiles/env",
+          "proxy_server": "http://gate.example:7000",
+          "proxy_username": "envuser",
+          "proxy_password": "envpass",
+          "proxy_bypass": ".b.example, .a.example",
+          "login_timeout_seconds": 0.0,
+          "login_inline_wait_seconds": 45.0,
+          "browser_wait_seconds": 45.0,
+          "browser_min_hold_seconds": 42.0,
+          "browser_idle_timeout_seconds": 0.0,
+          "auto_import_from_browser": false,
+          "installer_temp_dir": "{root}/installer/env"
+        },
+        "server": {
+          "transport": "stdio",
+          "transport_explicitly_set": false,
+          "log_level": "INFO",
+          "login": false,
+          "login_viewer": false,
+          "status": false,
+          "logout": false,
+          "claim_profile_root": false,
+          "import_from_browser": null,
+          "host": "127.0.0.1",
+          "port": 8000,
+          "path": "/mcp",
+          "tool_timeout_seconds": 90.5,
+          "daemon_enabled": true
+        }
+      },
+      "encoded": {
+        "browser": {
+          "headless": false,
+          "slow_mo": 250,
+          "viewport_width": 1920,
+          "viewport_height": 1080,
+          "default_timeout": 8000,
+          "chrome_path": "{root}/bin/chrome",
+          "user_data_dir": "{root}/profiles/env",
+          "proxy_server": "http://gate.example:7000",
+          "proxy_username": "envuser",
+          "proxy_password": "envpass",
+          "proxy_bypass": ".b.example, .a.example",
+          "login_timeout_seconds": 0.0,
+          "login_inline_wait_seconds": 45.0,
+          "browser_wait_seconds": 45.0,
+          "browser_min_hold_seconds": 42.0,
+          "browser_idle_timeout_seconds": 0.0,
+          "auto_import_from_browser": false,
+          "installer_temp_dir": "{root}/installer/env"
+        },
+        "server": {
+          "tool_timeout_seconds": 90.5,
+          "log_level": "INFO"
+        }
+      }
+    },
+    {
+      "name": "command_line_overrides_environment",
+      "env": {
+        "USER_DATA_DIR": "{root}/profiles/env",
+        "HEADLESS": "true",
+        "SLOW_MO": "500",
+        "TIMEOUT": "0",
+        "PORT": "0",
+        "LOG_LEVEL": "DEBUG",
+        "TOOL_TIMEOUT": "90",
+        "LOGIN_TIMEOUT": "600",
+        "LOGIN_INLINE_WAIT": "10",
+        "BROWSER_WAIT": "30",
+        "BROWSER_MIN_HOLD": "5",
+        "BROWSER_IDLE_TIMEOUT": "120",
+        "AUTO_IMPORT_FROM_BROWSER": "true",
+        "DAEMON_ENABLED": "true",
+        "VIEWPORT": "1024x768",
+        "CHROME_PATH": "{root}/bin/env-chrome",
+        "PROXY_SERVER": "http://env.example:7000",
+        "PROXY_USERNAME": "envuser",
+        "PROXY_PASSWORD": "  padded  ",
+        "PROXY_BYPASS": ".env.example",
+        "INSTALLER_TEMP_DIR": "{root}/installer/env"
+      },
+      "argv": [
+        "--no-headless",
+        "--slow-mo",
+        "0",
+        "--timeout",
+        "10",
+        "--port",
+        "8123",
+        "--log-level",
+        "ERROR",
+        "--tool-timeout",
+        "30",
+        "--login-timeout",
+        "0",
+        "--login-inline-wait",
+        "0",
+        "--browser-wait",
+        "0",
+        "--browser-min-hold",
+        "0",
+        "--browser-idle-timeout",
+        "0",
+        "--no-auto-import",
+        "--no-daemon",
+        "--viewport",
+        "800x600",
+        "--chrome-path",
+        "{root}/bin/cli-chrome",
+        "--user-data-dir",
+        "{root}/profiles/cli",
+        "--proxy-server",
+        "http://cli.example:3128",
+        "--proxy-username",
+        "cliuser",
+        "--proxy-bypass",
+        ".cli.example",
+        "--installer-temp-dir",
+        "{root}/installer/cli"
+      ],
+      "fields": {
+        "browser": {
+          "headless": false,
+          "slow_mo": 0,
+          "viewport_width": 800,
+          "viewport_height": 600,
+          "default_timeout": 10,
+          "chrome_path": "{root}/bin/cli-chrome",
+          "user_data_dir": "{root}/profiles/cli",
+          "proxy_server": "http://cli.example:3128",
+          "proxy_username": "cliuser",
+          "proxy_password": "  padded  ",
+          "proxy_bypass": ".cli.example",
+          "login_timeout_seconds": 0.0,
+          "login_inline_wait_seconds": 0.0,
+          "browser_wait_seconds": 0.0,
+          "browser_min_hold_seconds": 0.0,
+          "browser_idle_timeout_seconds": 0.0,
+          "auto_import_from_browser": false,
+          "installer_temp_dir": "{root}/installer/cli"
+        },
+        "server": {
+          "transport": "stdio",
+          "transport_explicitly_set": false,
+          "log_level": "ERROR",
+          "login": false,
+          "login_viewer": false,
+          "status": false,
+          "logout": false,
+          "claim_profile_root": false,
+          "import_from_browser": null,
+          "host": "127.0.0.1",
+          "port": 8123,
+          "path": "/mcp",
+          "tool_timeout_seconds": 30.0,
+          "daemon_enabled": false
+        }
+      },
+      "encoded": {
+        "browser": {
+          "headless": false,
+          "slow_mo": 0,
+          "viewport_width": 800,
+          "viewport_height": 600,
+          "default_timeout": 10,
+          "chrome_path": "{root}/bin/cli-chrome",
+          "user_data_dir": "{root}/profiles/cli",
+          "proxy_server": "http://cli.example:3128",
+          "proxy_username": "cliuser",
+          "proxy_password": "  padded  ",
+          "proxy_bypass": ".cli.example",
+          "login_timeout_seconds": 0.0,
+          "login_inline_wait_seconds": 0.0,
+          "browser_wait_seconds": 0.0,
+          "browser_min_hold_seconds": 0.0,
+          "browser_idle_timeout_seconds": 0.0,
+          "auto_import_from_browser": false,
+          "installer_temp_dir": "{root}/installer/cli"
+        },
+        "server": {
+          "tool_timeout_seconds": 30.0,
+          "log_level": "ERROR"
+        }
+      }
+    },
+    {
+      "name": "empty_command_line_values_keep_environment",
+      "env": {
+        "USER_DATA_DIR": "{root}/profiles/keep",
+        "TRANSPORT": "streamable-http",
+        "HOST": "localhost",
+        "HTTP_PATH": "/retained",
+        "VIEWPORT": "1600x900",
+        "CHROME_PATH": "{root}/bin/chrome",
+        "PROXY_SERVER": "http://synthetic.example:7000",
+        "PROXY_USERNAME": "envuser",
+        "PROXY_BYPASS": ".env.example",
+        "INSTALLER_TEMP_DIR": "{root}/installer/env"
+      },
+      "argv": [
+        "--host",
+        "",
+        "--path",
+        "",
+        "--chrome-path",
+        "",
+        "--proxy-server",
+        "",
+        "--proxy-username",
+        "",
+        "--proxy-bypass",
+        "",
+        "--user-data-dir",
+        "",
+        "--installer-temp-dir",
+        "",
+        "--viewport",
+        "",
+        "--user-agent",
+        ""
+      ],
+      "fields": {
+        "browser": {
+          "headless": true,
+          "slow_mo": 0,
+          "viewport_width": 1600,
+          "viewport_height": 900,
+          "default_timeout": 5000,
+          "chrome_path": "{root}/bin/chrome",
+          "user_data_dir": "{root}/profiles/keep",
+          "proxy_server": "http://synthetic.example:7000",
+          "proxy_username": "envuser",
+          "proxy_password": null,
+          "proxy_bypass": ".env.example",
+          "login_timeout_seconds": 1800.0,
+          "login_inline_wait_seconds": 25.0,
+          "browser_wait_seconds": 25.0,
+          "browser_min_hold_seconds": 20.0,
+          "browser_idle_timeout_seconds": 600.0,
+          "auto_import_from_browser": null,
+          "installer_temp_dir": "{root}/installer/env"
+        },
+        "server": {
+          "transport": "streamable-http",
+          "transport_explicitly_set": true,
+          "log_level": "WARNING",
+          "login": false,
+          "login_viewer": false,
+          "status": false,
+          "logout": false,
+          "claim_profile_root": false,
+          "import_from_browser": null,
+          "host": "localhost",
+          "port": 8000,
+          "path": "/retained",
+          "tool_timeout_seconds": 180.0,
+          "daemon_enabled": false
+        }
+      },
+      "encoded": {
+        "browser": {
+          "headless": true,
+          "slow_mo": 0,
+          "viewport_width": 1600,
+          "viewport_height": 900,
+          "default_timeout": 5000,
+          "chrome_path": "{root}/bin/chrome",
+          "user_data_dir": "{root}/profiles/keep",
+          "proxy_server": "http://synthetic.example:7000",
+          "proxy_username": "envuser",
+          "proxy_password": null,
+          "proxy_bypass": ".env.example",
+          "login_timeout_seconds": 1800.0,
+          "login_inline_wait_seconds": 25.0,
+          "browser_wait_seconds": 25.0,
+          "browser_min_hold_seconds": 20.0,
+          "browser_idle_timeout_seconds": 600.0,
+          "auto_import_from_browser": null,
+          "installer_temp_dir": "{root}/installer/env"
+        },
+        "server": {
+          "tool_timeout_seconds": 180.0,
+          "log_level": "WARNING"
+        }
+      }
+    },
+    {
+      "name": "http_transport",
+      "env": {
+        "USER_DATA_DIR": "{root}/profiles/http",
+        "TRANSPORT": " StReAmAbLe-HtTp ",
+        "HOST": "0.0.0.0",
+        "PORT": "9000",
+        "HTTP_PATH": "/linkedin"
+      },
+      "argv": [
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "9100",
+        "--path",
+        "/cli"
+      ],
+      "fields": {
+        "browser": {
+          "headless": true,
+          "slow_mo": 0,
+          "viewport_width": 1280,
+          "viewport_height": 720,
+          "default_timeout": 5000,
+          "chrome_path": null,
+          "user_data_dir": "{root}/profiles/http",
+          "proxy_server": null,
+          "proxy_username": null,
+          "proxy_password": null,
+          "proxy_bypass": null,
+          "login_timeout_seconds": 1800.0,
+          "login_inline_wait_seconds": 25.0,
+          "browser_wait_seconds": 25.0,
+          "browser_min_hold_seconds": 20.0,
+          "browser_idle_timeout_seconds": 600.0,
+          "auto_import_from_browser": null,
+          "installer_temp_dir": null
+        },
+        "server": {
+          "transport": "streamable-http",
+          "transport_explicitly_set": true,
+          "log_level": "WARNING",
+          "login": false,
+          "login_viewer": false,
+          "status": false,
+          "logout": false,
+          "claim_profile_root": false,
+          "import_from_browser": null,
+          "host": "127.0.0.1",
+          "port": 9100,
+          "path": "/cli",
+          "tool_timeout_seconds": 180.0,
+          "daemon_enabled": false
+        }
+      },
+      "encoded": {
+        "browser": {
+          "headless": true,
+          "slow_mo": 0,
+          "viewport_width": 1280,
+          "viewport_height": 720,
+          "default_timeout": 5000,
+          "chrome_path": null,
+          "user_data_dir": "{root}/profiles/http",
+          "proxy_server": null,
+          "proxy_username": null,
+          "proxy_password": null,
+          "proxy_bypass": null,
+          "login_timeout_seconds": 1800.0,
+          "login_inline_wait_seconds": 25.0,
+          "browser_wait_seconds": 25.0,
+          "browser_min_hold_seconds": 20.0,
+          "browser_idle_timeout_seconds": 600.0,
+          "auto_import_from_browser": null,
+          "installer_temp_dir": null
+        },
+        "server": {
+          "tool_timeout_seconds": 180.0,
+          "log_level": "WARNING"
+        }
+      }
+    },
+    {
+      "name": "placeholders_are_unset",
+      "env": {
+        "USER_DATA_DIR": "{root}/profiles/bundle",
+        "CHROME_PATH": "${user_config.chrome_path}",
+        "PROXY_SERVER": "${user_config.proxy_server}",
+        "PROXY_USERNAME": "${user_config.proxy_username}",
+        "PROXY_PASSWORD": "${user_config.proxy_password}",
+        "PROXY_BYPASS": "${user_config.proxy_bypass}"
+      },
+      "argv": [],
+      "fields": {
+        "browser": {
+          "headless": true,
+          "slow_mo": 0,
+          "viewport_width": 1280,
+          "viewport_height": 720,
+          "default_timeout": 5000,
+          "chrome_path": null,
+          "user_data_dir": "{root}/profiles/bundle",
+          "proxy_server": null,
+          "proxy_username": null,
+          "proxy_password": null,
+          "proxy_bypass": null,
+          "login_timeout_seconds": 1800.0,
+          "login_inline_wait_seconds": 25.0,
+          "browser_wait_seconds": 25.0,
+          "browser_min_hold_seconds": 20.0,
+          "browser_idle_timeout_seconds": 600.0,
+          "auto_import_from_browser": null,
+          "installer_temp_dir": null
+        },
+        "server": {
+          "transport": "stdio",
+          "transport_explicitly_set": false,
+          "log_level": "WARNING",
+          "login": false,
+          "login_viewer": false,
+          "status": false,
+          "logout": false,
+          "claim_profile_root": false,
+          "import_from_browser": null,
+          "host": "127.0.0.1",
+          "port": 8000,
+          "path": "/mcp",
+          "tool_timeout_seconds": 180.0,
+          "daemon_enabled": false
+        }
+      },
+      "encoded": {
+        "browser": {
+          "headless": true,
+          "slow_mo": 0,
+          "viewport_width": 1280,
+          "viewport_height": 720,
+          "default_timeout": 5000,
+          "chrome_path": null,
+          "user_data_dir": "{root}/profiles/bundle",
+          "proxy_server": null,
+          "proxy_username": null,
+          "proxy_password": null,
+          "proxy_bypass": null,
+          "login_timeout_seconds": 1800.0,
+          "login_inline_wait_seconds": 25.0,
+          "browser_wait_seconds": 25.0,
+          "browser_min_hold_seconds": 20.0,
+          "browser_idle_timeout_seconds": 600.0,
+          "auto_import_from_browser": null,
+          "installer_temp_dir": null
+        },
+        "server": {
+          "tool_timeout_seconds": 180.0,
+          "log_level": "WARNING"
+        }
+      }
+    },
+    {
+      "name": "blank_values_are_unset",
+      "env": {
+        "USER_DATA_DIR": "{root}/profiles/blank",
+        "HEADLESS": "  ",
+        "AUTO_IMPORT_FROM_BROWSER": " ",
+        "DAEMON_ENABLED": "\t",
+        "LOG_LEVEL": "",
+        "TRANSPORT": "",
+        "TIMEOUT": "",
+        "SLOW_MO": "",
+        "PORT": "",
+        "USER_AGENT": "",
+        "IMPORT_FROM_BROWSER": "",
+        "PROXY_SERVER": "",
+        "PROXY_PASSWORD": ""
+      },
+      "argv": [],
+      "fields": {
+        "browser": {
+          "headless": true,
+          "slow_mo": 0,
+          "viewport_width": 1280,
+          "viewport_height": 720,
+          "default_timeout": 5000,
+          "chrome_path": null,
+          "user_data_dir": "{root}/profiles/blank",
+          "proxy_server": null,
+          "proxy_username": null,
+          "proxy_password": null,
+          "proxy_bypass": null,
+          "login_timeout_seconds": 1800.0,
+          "login_inline_wait_seconds": 25.0,
+          "browser_wait_seconds": 25.0,
+          "browser_min_hold_seconds": 20.0,
+          "browser_idle_timeout_seconds": 600.0,
+          "auto_import_from_browser": null,
+          "installer_temp_dir": null
+        },
+        "server": {
+          "transport": "stdio",
+          "transport_explicitly_set": false,
+          "log_level": "WARNING",
+          "login": false,
+          "login_viewer": false,
+          "status": false,
+          "logout": false,
+          "claim_profile_root": false,
+          "import_from_browser": null,
+          "host": "127.0.0.1",
+          "port": 8000,
+          "path": "/mcp",
+          "tool_timeout_seconds": 180.0,
+          "daemon_enabled": false
+        }
+      },
+      "encoded": {
+        "browser": {
+          "headless": true,
+          "slow_mo": 0,
+          "viewport_width": 1280,
+          "viewport_height": 720,
+          "default_timeout": 5000,
+          "chrome_path": null,
+          "user_data_dir": "{root}/profiles/blank",
+          "proxy_server": null,
+          "proxy_username": null,
+          "proxy_password": null,
+          "proxy_bypass": null,
+          "login_timeout_seconds": 1800.0,
+          "login_inline_wait_seconds": 25.0,
+          "browser_wait_seconds": 25.0,
+          "browser_min_hold_seconds": 20.0,
+          "browser_idle_timeout_seconds": 600.0,
+          "auto_import_from_browser": null,
+          "installer_temp_dir": null
+        },
+        "server": {
+          "tool_timeout_seconds": 180.0,
+          "log_level": "WARNING"
+        }
+      }
+    },
+    {
+      "name": "import_whitespace_in_environment_is_auto",
+      "env": {
+        "USER_DATA_DIR": "{root}/profiles/import",
+        "IMPORT_FROM_BROWSER": " "
+      },
+      "argv": [],
+      "fields": {
+        "browser": {
+          "headless": true,
+          "slow_mo": 0,
+          "viewport_width": 1280,
+          "viewport_height": 720,
+          "default_timeout": 5000,
+          "chrome_path": null,
+          "user_data_dir": "{root}/profiles/import",
+          "proxy_server": null,
+          "proxy_username": null,
+          "proxy_password": null,
+          "proxy_bypass": null,
+          "login_timeout_seconds": 1800.0,
+          "login_inline_wait_seconds": 25.0,
+          "browser_wait_seconds": 25.0,
+          "browser_min_hold_seconds": 20.0,
+          "browser_idle_timeout_seconds": 600.0,
+          "auto_import_from_browser": null,
+          "installer_temp_dir": null
+        },
+        "server": {
+          "transport": "stdio",
+          "transport_explicitly_set": false,
+          "log_level": "WARNING",
+          "login": false,
+          "login_viewer": false,
+          "status": false,
+          "logout": false,
+          "claim_profile_root": false,
+          "import_from_browser": "auto",
+          "host": "127.0.0.1",
+          "port": 8000,
+          "path": "/mcp",
+          "tool_timeout_seconds": 180.0,
+          "daemon_enabled": false
+        }
+      },
+      "encoded": {
+        "browser": {
+          "headless": true,
+          "slow_mo": 0,
+          "viewport_width": 1280,
+          "viewport_height": 720,
+          "default_timeout": 5000,
+          "chrome_path": null,
+          "user_data_dir": "{root}/profiles/import",
+          "proxy_server": null,
+          "proxy_username": null,
+          "proxy_password": null,
+          "proxy_bypass": null,
+          "login_timeout_seconds": 1800.0,
+          "login_inline_wait_seconds": 25.0,
+          "browser_wait_seconds": 25.0,
+          "browser_min_hold_seconds": 20.0,
+          "browser_idle_timeout_seconds": 600.0,
+          "auto_import_from_browser": null,
+          "installer_temp_dir": null
+        },
+        "server": {
+          "tool_timeout_seconds": 180.0,
+          "log_level": "WARNING"
+        }
+      }
+    },
+    {
+      "name": "import_from_command_line_overrides_environment",
+      "env": {
+        "USER_DATA_DIR": "{root}/profiles/import",
+        "IMPORT_FROM_BROWSER": "chrome"
+      },
+      "argv": [
+        "--import-from-browser",
+        " Brave "
+      ],
+      "fields": {
+        "browser": {
+          "headless": true,
+          "slow_mo": 0,
+          "viewport_width": 1280,
+          "viewport_height": 720,
+          "default_timeout": 5000,
+          "chrome_path": null,
+          "user_data_dir": "{root}/profiles/import",
+          "proxy_server": null,
+          "proxy_username": null,
+          "proxy_password": null,
+          "proxy_bypass": null,
+          "login_timeout_seconds": 1800.0,
+          "login_inline_wait_seconds": 25.0,
+          "browser_wait_seconds": 25.0,
+          "browser_min_hold_seconds": 20.0,
+          "browser_idle_timeout_seconds": 600.0,
+          "auto_import_from_browser": null,
+          "installer_temp_dir": null
+        },
+        "server": {
+          "transport": "stdio",
+          "transport_explicitly_set": false,
+          "log_level": "WARNING",
+          "login": false,
+          "login_viewer": false,
+          "status": false,
+          "logout": false,
+          "claim_profile_root": false,
+          "import_from_browser": "brave",
+          "host": "127.0.0.1",
+          "port": 8000,
+          "path": "/mcp",
+          "tool_timeout_seconds": 180.0,
+          "daemon_enabled": false
+        }
+      },
+      "encoded": {
+        "browser": {
+          "headless": true,
+          "slow_mo": 0,
+          "viewport_width": 1280,
+          "viewport_height": 720,
+          "default_timeout": 5000,
+          "chrome_path": null,
+          "user_data_dir": "{root}/profiles/import",
+          "proxy_server": null,
+          "proxy_username": null,
+          "proxy_password": null,
+          "proxy_bypass": null,
+          "login_timeout_seconds": 1800.0,
+          "login_inline_wait_seconds": 25.0,
+          "browser_wait_seconds": 25.0,
+          "browser_min_hold_seconds": 20.0,
+          "browser_idle_timeout_seconds": 600.0,
+          "auto_import_from_browser": null,
+          "installer_temp_dir": null
+        },
+        "server": {
+          "tool_timeout_seconds": 180.0,
+          "log_level": "WARNING"
+        }
+      }
+    },
+    {
+      "name": "session_commands",
+      "env": {
+        "USER_DATA_DIR": "{root}/profiles/session"
+      },
+      "argv": [
+        "--login",
+        "--claim-profile-root",
+        "--auto-import",
+        "--daemon",
+        "--eager-full-chromium"
+      ],
+      "fields": {
+        "browser": {
+          "headless": true,
+          "slow_mo": 0,
+          "viewport_width": 1280,
+          "viewport_height": 720,
+          "default_timeout": 5000,
+          "chrome_path": null,
+          "user_data_dir": "{root}/profiles/session",
+          "proxy_server": null,
+          "proxy_username": null,
+          "proxy_password": null,
+          "proxy_bypass": null,
+          "login_timeout_seconds": 1800.0,
+          "login_inline_wait_seconds": 25.0,
+          "browser_wait_seconds": 25.0,
+          "browser_min_hold_seconds": 20.0,
+          "browser_idle_timeout_seconds": 600.0,
+          "auto_import_from_browser": true,
+          "installer_temp_dir": null
+        },
+        "server": {
+          "transport": "stdio",
+          "transport_explicitly_set": false,
+          "log_level": "WARNING",
+          "login": true,
+          "login_viewer": false,
+          "status": false,
+          "logout": false,
+          "claim_profile_root": true,
+          "import_from_browser": null,
+          "host": "127.0.0.1",
+          "port": 8000,
+          "path": "/mcp",
+          "tool_timeout_seconds": 180.0,
+          "daemon_enabled": true
+        }
+      },
+      "encoded": {
+        "browser": {
+          "headless": true,
+          "slow_mo": 0,
+          "viewport_width": 1280,
+          "viewport_height": 720,
+          "default_timeout": 5000,
+          "chrome_path": null,
+          "user_data_dir": "{root}/profiles/session",
+          "proxy_server": null,
+          "proxy_username": null,
+          "proxy_password": null,
+          "proxy_bypass": null,
+          "login_timeout_seconds": 1800.0,
+          "login_inline_wait_seconds": 25.0,
+          "browser_wait_seconds": 25.0,
+          "browser_min_hold_seconds": 20.0,
+          "browser_idle_timeout_seconds": 600.0,
+          "auto_import_from_browser": true,
+          "installer_temp_dir": null
+        },
+        "server": {
+          "tool_timeout_seconds": 180.0,
+          "log_level": "WARNING"
+        }
+      }
+    }
+  ]
+}
