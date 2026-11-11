@@ -564,7 +564,7 @@ def _attaches_to_a_browser() -> bool:
     browser is already running, so there is nothing to install, and its
     profile is not ours to inspect for a session or to write one into.
     """
-    return bool(get_config().browser.cdp_url)
+    return bool(getattr(get_config().browser, "cdp_url", None))
 
 
 def _revision_dir_prefix(name: str) -> str | None:
@@ -4007,6 +4007,21 @@ async def ensure_tool_ready_or_raise(
     # whether the files exist rather than whether they work.
     _raise_if_auth_quiescent()
 
+    if _attaches_to_a_browser():
+        # First, ahead of Docker and of the managed-browser setup, because
+        # neither answers a question this mode asks. There is nothing to
+        # download (the browser is already running), and no profile of ours to
+        # look for a session in (``_auth_ready`` would be reading a directory
+        # this mode never opens). In Docker the attach is the *only* way to get
+        # a session at all, since a container cannot open a login window, so
+        # asking it for ``--login`` would refuse the one configuration that
+        # works. Whether the attached browser is signed in is only knowable by
+        # reading a page with it, which is what the first tool call does.
+        _state.setup_state = SetupState.READY
+        _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
+        _state.auth_state = AuthState.READY
+        return
+
     if get_runtime_policy() == RuntimePolicy.DOCKER:
         _raise_if_docker_auth_missing()
         return
@@ -4016,13 +4031,6 @@ async def ensure_tool_ready_or_raise(
         # background install is irrelevant; jump straight to the auth gate.
         _state.setup_state = SetupState.READY
         _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
-        if _attaches_to_a_browser():
-            # Ahead of ``_auth_ready()``, which would be answering about a
-            # directory this mode never opens. Whether the attached browser
-            # has a session is only knowable by reading a page with it, and
-            # that is what the first tool call does.
-            _state.auth_state = AuthState.READY
-            return
         if _auth_ready():
             _state.auth_state = AuthState.READY
             return
@@ -4047,13 +4055,6 @@ async def ensure_tool_ready_or_raise(
             "for the same lock and slows it down. Just wait and call this tool "
             "again in a minute or two."
         )
-
-    if _attaches_to_a_browser():
-        # Same reason as the custom-executable branch above: no file on this
-        # machine describes the attached browser's session, and there is no
-        # profile here a login window could fill.
-        _state.auth_state = AuthState.READY
-        return
 
     if _auth_ready():
         _state.auth_state = AuthState.READY

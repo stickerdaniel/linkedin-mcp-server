@@ -78,6 +78,7 @@ def _patch_inline_wait(monkeypatch, seconds: float, *, auto_import=False) -> Non
             login_inline_wait_seconds=seconds,
             auto_import_from_browser=auto_import,
             chrome_path=None,
+            cdp_url=None,
             headless=True,
         ),
         server=SimpleNamespace(transport="stdio", host="127.0.0.1"),
@@ -1341,6 +1342,7 @@ class TestChromePathShortCircuit:
             browser=SimpleNamespace(
                 headless=headless,
                 chrome_path=chrome_path,
+                cdp_url=None,
                 login_inline_wait_seconds=0,
                 auto_import_from_browser=False,
             ),

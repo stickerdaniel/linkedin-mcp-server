@@ -41,6 +41,7 @@ from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.exceptions import (
+    AttachedBrowserSignedOutError,
     BrowserBusyError,
     BrowserDowngradeError,
     BrowserShutdownUnconfirmedError,
@@ -816,7 +817,13 @@ async def _create_attached_browser() -> BrowserManager:
     try:
         await browser.start()
         if not await _feed_auth_succeeds(browser):
-            raise AuthenticationError(
+            # Not an ``AuthenticationError``: that one is caught by
+            # ``handle_auth_error``, which moves this machine's profile to
+            # ``invalid-state-*`` and opens a login window. Neither is about the
+            # attached browser, and the profile it would move is an unrelated
+            # local one this mode never opened. The repair here is a person
+            # signing in, in that window.
+            raise AttachedBrowserSignedOutError(
                 "The browser at "
                 f"{get_config().browser.cdp_url} is not signed in to "
                 "LinkedIn. Sign in in that browser, then retry."

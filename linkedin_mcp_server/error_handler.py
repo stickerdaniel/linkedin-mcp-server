@@ -34,6 +34,7 @@ from linkedin_mcp_server.core.exceptions import (
 )
 
 from linkedin_mcp_server.exceptions import (
+    AttachedBrowserSignedOutError,
     AuthenticationBootstrapFailedError,
     AuthenticationInProgressError,
     AuthenticationStartedError,
@@ -355,6 +356,12 @@ def _shape_tool_error(exception: Exception, context: str = "") -> NoReturn:
     elif isinstance(exception, BrowserBusyError):
         logger.info("Shared browser busy%s: %s", ctx, exception)
         raise CodedToolError(str(exception), ErrorCode.BROWSER_BUSY) from exception
+
+    elif isinstance(exception, AttachedBrowserSignedOutError):
+        # AUTH_REQUIRED, and diagnostics-free like its neighbours: the repair is
+        # a person signing in in a browser that is already open, not a bug.
+        logger.warning("Attached browser signed out%s: %s", ctx, exception)
+        raise CodedToolError(str(exception), ErrorCode.AUTH_REQUIRED) from exception
 
     elif isinstance(exception, DockerHostLoginRequiredError):
         logger.warning("Docker host login required%s: %s", ctx, exception)

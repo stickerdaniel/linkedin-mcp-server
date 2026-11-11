@@ -103,6 +103,38 @@ class SequentialToolExecutionMiddleware(Middleware):
             )
             return await self._run_owning_the_profile(context, call_next, tool_name)
 
+    async def _run_attached(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        """Run the tool without taking the local profile lease.
+
+        Everything the lease protects -- one Chromium per profile directory,
+        cookies written by one process at a time -- is about a browser this
+        process launched. The attached browser is not on our profile, and this
+        process may not move, close or hand over anything of its own to reach
+        it. What still holds is that two calls must not drive one connection at
+        once, and that is the lock already taken by the caller.
+        """
+        from linkedin_mcp_server.drivers.browser import (
+            note_activity,
+            note_call_started,
+        )
+
+        from linkedin_mcp_server.core.throttle import browser_call_record
+
+        if abandoned_before_browser_work():
+            logger.info("An attached call was abandoned before it began")
+            raise abandoned_call_error()
+        browser_work_begins()
+        note_call_started()
+        try:
+            with browser_call_record():
+                return await call_next(context)
+        finally:
+            note_activity()
+
     def _busy_because(self) -> str | None:
         """The busy text for a silent owner, or ``None`` for the default.
 
@@ -134,6 +166,17 @@ class SequentialToolExecutionMiddleware(Middleware):
             note_call_started,
             release_profile_if_idle_or_requested,
         )
+
+        if get_config().browser.cdp_url:
+            # Attach mode: the profile this lease names is not the browser's.
+            # The lease is a kernel lock on a directory of ours, taken so two
+            # processes cannot drive one Chromium at once; here the browser
+            # belongs to somebody else, and a local browser of ours still
+            # finishing its close would make every attach wait, or fail, for a
+            # profile the attach never reads. The in-process lock above still
+            # serializes the calls, which is the part that does apply: one
+            # connection, one page, one call at a time.
+            return await self._run_attached(context, call_next)
 
         lease = get_profile_lease()
         acquired = lease.try_acquire()

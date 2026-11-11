@@ -8,7 +8,7 @@ tests are grouped by which decision that fact changes.
 """
 
 import asyncio
-import contextlib
+import os
 from unittest import mock
 
 import pytest
@@ -55,9 +55,15 @@ class TestWhatTheSettingRefuses:
             config.validate()
 
     def test_an_executable_is_refused(self):
-        config = BrowserConfig(
-            cdp_url="http://127.0.0.1:9222", chrome_path="/usr/bin/chrome"
-        )
+        # A path that exists, and that is checked: with a path that does not,
+        # ``validate`` raises for the missing file and the combination would go
+        # untested. Measured: ``/usr/bin/chrome`` is absent on the runners this
+        # was written on, so the old form passed without ever reaching the CDP
+        # check.
+        executable = "/usr/bin/env" if os.access("/usr/bin/env", os.X_OK) else None
+        if executable is None:
+            pytest.skip("no executable to name")
+        config = BrowserConfig(cdp_url="http://127.0.0.1:9222", chrome_path=executable)
         with pytest.raises(ConfigurationError, match="chrome_path"):
             config.validate()
 
@@ -69,6 +75,34 @@ class TestWhatTheSettingRefuses:
         config = BrowserConfig(cdp_url=endpoint)
         with pytest.raises(ConfigurationError):
             config.validate()
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "http://127.0.0.1:bad",
+            "http://127.0.0.1:65536",
+            "http://127.0.0.1:0",
+            "http://user:secret@127.0.0.1:9222",
+            "http://user@127.0.0.1:9222",
+        ],
+    )
+    def test_a_port_that_is_not_a_port_is_a_configuration_error(self, endpoint):
+        """``:bad`` and ``:65536`` raise out of urlsplit; ``:0`` reads as valid.
+
+        A bare ValueError reaches the CLI as a traceback instead of a sentence,
+        and ``:0`` is an endpoint nothing can be attached to: it asks the
+        browser to choose a port. Credentials have no meaning here and the
+        address is copied into messages and the daemon fingerprint.
+        """
+        config = BrowserConfig(cdp_url=endpoint)
+        with pytest.raises(ConfigurationError, match="cdp_url"):
+            config.validate()
+
+    def test_a_credentialled_address_never_reaches_the_message(self):
+        config = BrowserConfig(cdp_url="http://user:s3cret@127.0.0.1:9222")
+        with pytest.raises(ConfigurationError) as raised:
+            config.validate()
+        assert "s3cret" not in str(raised.value)
 
     def test_a_trailing_slash_is_not_a_different_browser(self):
         """The value reaches the daemon fingerprint, where spelling counts."""
@@ -154,9 +188,13 @@ class TestTheStartPath:
             def __init__(self):
                 self.url = "https://www.linkedin.com/feed/"
                 self.listeners = []
+                self.closed = False
 
             def on(self, event, handler):
                 self.listeners.append((event, handler))
+
+            async def close(self):
+                self.closed = True
 
         class _Context:
             def __init__(self, with_page=True):
@@ -223,11 +261,39 @@ class TestTheStartPath:
         assert _no_marker == []
 
     async def test_it_does_not_touch_the_profile_directory(self, tmp_path, _no_marker):
+        """Nothing may create, harden or downgrade-check the local profile.
+
+        The connection has to *succeed* here: a ``start()`` that threw before
+        reaching the attach skipped every step anyway, so a failure would prove
+        nothing about the mode. Measured: the earlier form suppressed the
+        exception and passed even when the attach never happened.
+        """
         touched = []
+        opened = []
+
+        class _Page:
+            def on(self, event, handler):
+                return None
+
+            async def close(self):
+                return None
+
+        class _Context:
+            pages = []
+
+            async def new_page(self):
+                opened.append(True)
+                return _Page()
+
+        class _Browser:
+            contexts = [_Context()]
+
+            async def close(self):
+                return None
 
         class _Chromium:
             async def connect_over_cdp(self, endpoint):
-                return mock.MagicMock(contexts=[])
+                return _Browser()
 
         class _Playwright:
             chromium = _Chromium()
@@ -262,9 +328,10 @@ class TestTheStartPath:
             playwright.return_value.start = lambda: asyncio.sleep(
                 0, result=_Playwright()
             )
-            with contextlib.suppress(Exception):
-                await manager.start()
+            await manager.start()
 
+        # Reached the attach, and opened a page of its own to read with.
+        assert opened == [True]
         assert touched == []
 
     async def test_a_dead_endpoint_says_where_it_looked(self, tmp_path, _no_marker):
@@ -289,7 +356,118 @@ class TestTheStartPath:
             with pytest.raises(NetworkError, match="127.0.0.1:9222"):
                 await manager.start()
 
+    async def test_the_users_own_tab_is_never_navigated(self, tmp_path, _no_marker):
+        """``pages[0]`` is the tab in front of them; the sign-in check moves it."""
+
+        class _Tab:
+            """Records what is done to it, so a navigation cannot go unseen."""
+
+            def __init__(self, url):
+                self.url = url
+                self.closed = False
+                self.closed_awaited = 0
+
+            def on(self, event, handler):
+                return None
+
+            async def goto(self, url, **kwargs):
+                self.url = url
+
+            async def close(self):
+                self.closed = True
+                self.closed_awaited += 1
+
+        theirs = _Tab("https://www.linkedin.com/messaging/")
+
+        class _Context:
+            pages = [theirs]
+
+            async def new_page(self):
+                page = _Tab("about:blank")
+                self.pages.append(page)
+                return page
+
+        class _Browser:
+            contexts = [_Context()]
+
+            async def close(self):
+                return None
+
+        class _Chromium:
+            async def connect_over_cdp(self, endpoint):
+                return _Browser()
+
+        class _Playwright:
+            chromium = _Chromium()
+
+            async def stop(self):
+                return None
+
+        manager = self._manager(tmp_path)
+        with mock.patch(
+            "linkedin_mcp_server.core.browser.async_playwright"
+        ) as playwright:
+            playwright.return_value.start = lambda: asyncio.sleep(
+                0, result=_Playwright()
+            )
+            await manager.start()
+            page = manager.page
+            await manager.close()
+
+        assert page is not theirs
+        # The tab they were working in keeps its address, and stays open. Ours
+        # was opened for reading and closed on detach.
+        assert theirs.url == "https://www.linkedin.com/messaging/"
+        assert theirs.closed is False
+        assert page.closed is True
+
     def test_a_launch_still_mints_its_marker(self, tmp_path, _no_marker):
         """The other branch of the same constructor, so the guard is narrow."""
         BrowserManager(user_data_dir=tmp_path / "p")
         assert _no_marker == ["minted"]
+
+
+class TestTheGatesTheModeSkips:
+    async def test_a_signed_out_browser_is_not_an_auth_error(self):
+        """``AuthenticationError`` is routed to a repair that cannot reach it.
+
+        ``handle_auth_error`` moves *this machine's* profile to
+        ``invalid-state-*`` and opens a login window. Neither touches the
+        attached browser, so an ``AuthenticationError`` here would report a
+        repaired session and change nothing.
+        """
+        from linkedin_mcp_server.core.exceptions import AuthenticationError
+        from linkedin_mcp_server.exceptions import AttachedBrowserSignedOutError
+
+        assert not issubclass(AttachedBrowserSignedOutError, AuthenticationError)
+        # Not a driver-side error either: ``handle_auth_error`` is reached
+        # through ``tool_errors`` for both classes.
+        from linkedin_mcp_server.core.exceptions import LinkedInOperationError
+
+        assert not issubclass(AttachedBrowserSignedOutError, LinkedInOperationError)
+
+    async def test_auth_reports_the_endpoint_instead_of_a_cookie_file(self):
+        """The only honest answer: the session lives in a browser, not on disk."""
+        from linkedin_mcp_server.config.schema import AppConfig
+        from linkedin_mcp_server.session_status import session_status
+
+        config = AppConfig()
+        config.browser.cdp_url = "http://127.0.0.1:9222"
+        with mock.patch(
+            "linkedin_mcp_server.session_status.get_config", return_value=config
+        ):
+            status = session_status()
+
+        assert status["browser"]["attached_to"] == "http://127.0.0.1:9222"
+
+    async def test_a_launch_reports_no_endpoint(self):
+        from linkedin_mcp_server.config.schema import AppConfig
+        from linkedin_mcp_server.session_status import session_status
+
+        config = AppConfig()
+        with mock.patch(
+            "linkedin_mcp_server.session_status.get_config", return_value=config
+        ):
+            status = session_status()
+
+        assert status["browser"]["attached_to"] is None

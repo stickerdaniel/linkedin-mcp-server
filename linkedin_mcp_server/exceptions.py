@@ -118,6 +118,18 @@ class DockerHostLoginRequiredError(LinkedInMCPError):
     """Docker runtime requires host-side login creation."""
 
 
+class AttachedBrowserSignedOutError(LinkedInMCPError):
+    """The attached browser lost its LinkedIn session, and only a person can fix it.
+
+    Deliberately not an ``AuthenticationError``: that class is routed into
+    ``handle_auth_error``, which retires *this machine's* profile and starts a
+    login window. In attach mode there is no profile of ours to retire, and a
+    window opened here is one the attached browser never reads, so the repair
+    would report success and change nothing. What is left to say is where to
+    sign in.
+    """
+
+
 class LinuxBrowserDependencyError(LinkedInMCPError):
     """Linux host dependencies required for Chromium are missing."""
 

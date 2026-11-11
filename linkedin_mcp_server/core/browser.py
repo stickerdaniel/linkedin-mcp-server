@@ -306,15 +306,22 @@ class BrowserManager:
         else:
             self._context = await attached.new_context()
 
+        # A page of our own, never ``context.pages[0]``. That one is whatever
+        # tab the person has in front of them, and the sign-in check navigates
+        # the page it is handed to ``/feed/``: read on their tab, the check
+        # moves them off whatever they were doing, and every later tool reads
+        # through a page they may close at any moment. Ours is created here and
+        # closed again on detach.
         context = self._context
-        self._page = context.pages[0] if context.pages else await context.new_page()
+        self._page = await context.new_page()
         self._page_crashed = False
         self._page.on("crash", self._note_page_crash)
         watch_responses(self._page)
         logger.info(
-            "Attached to the browser at %s; %d page(s) in its context",
+            "Attached to the browser at %s; opened a reading page beside %d "
+            "existing one(s)",
             self.cdp_url,
-            len(context.pages),
+            len(context.pages) - 1,
         )
 
     async def _start_contained_driver(self) -> Playwright:
@@ -760,6 +767,7 @@ class BrowserManager:
         context = self._context
         playwright = self._playwright
         attached = self._attached_browser
+        page = self._page
         self._context = None
         self._page = None
         self._playwright = None
@@ -793,6 +801,28 @@ class BrowserManager:
             except Exception as exc:
                 confirmed = False
                 logger.error("Error disconnecting from the browser: %s", exc)
+            if page is not None:
+                # Our own page, so a failure here leaves a stray tab beside the
+                # person's work and is worth a warning -- but it says nothing
+                # about whether this process's driver stopped, which is what the
+                # verdict is about. Only a failure to disconnect or to stop the
+                # driver may keep the shutdown unconfirmed.
+                try:
+                    await asyncio.wait_for(
+                        page.close(), timeout=_CLEANUP_TIMEOUT_SECONDS
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        "Timed out closing our reading page after %ss; it stays "
+                        "open in the attached browser",
+                        _CLEANUP_TIMEOUT_SECONDS,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Could not close our reading page, so it stays open in "
+                        "the attached browser: %s",
+                        exc,
+                    )
             if playwright is not None:
                 try:
                     await asyncio.wait_for(
@@ -807,6 +837,22 @@ class BrowserManager:
                 except Exception as exc:
                     confirmed = False
                     logger.error("Error stopping playwright: %s", exc)
+            if self._containment is not None:
+                # Windows only, and the one thing here that is ours: the Job
+                # holds the Node driver this process started, never the
+                # attached browser, which this process did not spawn. Only
+                # entered when there is a Job, so the POSIX path still looks
+                # for nothing -- there is no marker to look for, and the
+                # browser was never in a group of ours.
+                dropped = await asyncio.to_thread(
+                    drain_browser_process_marker,
+                    self._process_marker,
+                    containment=self._containment,
+                )
+                self._containment = None
+                if not dropped:
+                    confirmed = False
+                    logger.error("The driver's Windows Job did not drain after detach")
             logger.info("Disconnected from the attached browser")
             if confirmed:
                 self._close_proven = True

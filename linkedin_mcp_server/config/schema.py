@@ -304,9 +304,32 @@ class BrowserConfig:
                 "cdp_url must be an http:// or https:// address of a browser's "
                 "DevTools endpoint, such as http://127.0.0.1:9222"
             )
-        if parts.port is None:
+        if parts.username is not None or parts.password is not None:
+            # Refused rather than stripped: a DevTools endpoint takes no
+            # credentials, so one in the address is a reader's mistake, and the
+            # address is copied into error messages and the daemon fingerprint.
+            raise ConfigurationError(
+                "cdp_url must not carry credentials: the address is logged and "
+                "passed to the browser driver, which has no use for them"
+            )
+        try:
+            port = parts.port
+        except ValueError:
+            # `:bad` and `:65536` raise here, out of urlsplit, instead of reading
+            # as a configuration error. Measured: unguarded, both reached the
+            # CLI as a bare ValueError traceback.
+            raise ConfigurationError(
+                "cdp_url must name a port between 1 and 65535, such as "
+                "http://127.0.0.1:9222"
+            ) from None
+        if port is None:
             raise ConfigurationError(
                 "cdp_url must name a port, such as http://127.0.0.1:9222"
+            )
+        if port == 0:
+            raise ConfigurationError(
+                "cdp_url port 0 asks the browser to pick one, so nobody can "
+                "attach to it; name the port it was started with"
             )
         if self.proxy_server:
             raise ConfigurationError(

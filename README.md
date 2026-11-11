@@ -779,8 +779,11 @@ on a machine with a screen -- no window this server opens can be that browser.
 <summary><b>🔧 Configuration</b></summary>
 
 - Start that browser with a debugging endpoint, for example
-  `google-chrome --remote-debugging-port=9222`, then pass
-  `--cdp-url http://127.0.0.1:9222` or set `CDP_URL`. The address needs a port;
+  `google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-cdp`,
+  then pass `--cdp-url http://127.0.0.1:9222` or set `CDP_URL`. Chrome 136 and
+  later ignore `--remote-debugging-port` when it is given on the *default*
+  profile, so both flags are needed: without `--user-data-dir` the browser
+  starts and no endpoint answers. The address needs a port;
   a trailing slash is dropped, since the value takes part in the daemon config
   fingerprint.
 - The profile, the cookies and the browser process belong to that browser. This
@@ -796,9 +799,13 @@ on a machine with a screen -- no window this server opens can be that browser.
   from the address you thought you had hidden. Configure them in that browser.
 - The endpoint is usually loopback. If it is reachable from elsewhere, whoever
   can reach it controls a signed-in browser.
-- `get_session_status` reports what that browser shows (the attach reached
-  it and LinkedIn is signed in), not a cookie file of ours: there is none to
-  read. `close_session` disconnects from it; the browser keeps running.
+- `get_session_status` does **not** reach that browser: it reads local files
+  only, like everywhere else, and in this mode there are none of ours to read.
+  It reports `browser.attached_to` as the endpoint, and whatever `session.*`
+  says is about a local profile this mode never opens. Whether LinkedIn is
+  signed in is answered by the first real tool call, not by this one.
+  `close_session` disconnects from the browser and stops our own driver; the
+  browser keeps running with its tabs.
 
 </details>
 
@@ -813,6 +820,8 @@ on a machine with a screen -- no window this server opens can be that browser.
   worked and LinkedIn is not: sign in in that window and retry.
 - An attach deliberately gets no browser guardian and no profile lease, so
   keeping that browser running is up to whatever manages it.
+- Tool calls read through a page this server opens beside your tabs and closes
+  when it disconnects. Your own tab is never navigated, and never closed.
 
 </details>
 
