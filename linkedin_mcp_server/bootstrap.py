@@ -557,6 +557,16 @@ def _uses_custom_chrome() -> bool:
     return bool(get_config().browser.chrome_path)
 
 
+def _attaches_to_a_browser() -> bool:
+    """Return whether this process reads through somebody else's browser.
+
+    The same consequence as a custom executable, for a stronger reason: the
+    browser is already running, so there is nothing to install, and its
+    profile is not ours to inspect for a session or to write one into.
+    """
+    return bool(getattr(get_config().browser, "cdp_url", None))
+
+
 def _revision_dir_prefix(name: str) -> str | None:
     """Return the browser prefix of a revision directory, or ``None``.
 
@@ -951,6 +961,14 @@ async def start_background_browser_setup_if_needed() -> None:
     """Start shared background browser setup for managed runtimes if needed."""
     initialize_bootstrap()
     if get_runtime_policy() != RuntimePolicy.MANAGED:
+        return
+    if _attaches_to_a_browser():
+        # Attach mode: the browser is already running and it is not ours, so
+        # there is nothing to download and no profile a setup step would fill.
+        # Checked here as well as in the readiness gate because this one starts
+        # the install eagerly, at startup, before any call reaches that gate.
+        _state.setup_state = SetupState.READY
+        _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
         return
     if _uses_custom_chrome():
         # A custom executable skips the managed binary; nothing to install.
@@ -3997,6 +4015,21 @@ async def ensure_tool_ready_or_raise(
     # whether the files exist rather than whether they work.
     _raise_if_auth_quiescent()
 
+    if _attaches_to_a_browser():
+        # First, ahead of Docker and of the managed-browser setup, because
+        # neither answers a question this mode asks. There is nothing to
+        # download (the browser is already running), and no profile of ours to
+        # look for a session in (``_auth_ready`` would be reading a directory
+        # this mode never opens). In Docker the attach is the *only* way to get
+        # a session at all, since a container cannot open a login window, so
+        # asking it for ``--login`` would refuse the one configuration that
+        # works. Whether the attached browser is signed in is only knowable by
+        # reading a page with it, which is what the first tool call does.
+        _state.setup_state = SetupState.READY
+        _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
+        _state.auth_state = AuthState.READY
+        return
+
     if get_runtime_policy() == RuntimePolicy.DOCKER:
         _raise_if_docker_auth_missing()
         return
@@ -4729,6 +4762,18 @@ async def _run_login_flow() -> None:
     being held is the whole window that matters.
     """
     _state.auth_state = AuthState.IN_PROGRESS
+    if _attaches_to_a_browser():
+        # Unreachable through ``ensure_tool_ready_or_raise``, which never asks
+        # for a login in this mode. Here anyway, because the cost of being
+        # wrong is a login window on *this* machine whose session the
+        # attached browser will never see: it would look successful and
+        # change nothing.
+        raise AuthenticationBootstrapFailedError(
+            "The browser at "
+            f"{get_config().browser.cdp_url} is not signed in to LinkedIn, "
+            "and it cannot be signed in from here. Sign in in that browser, "
+            "then retry this tool."
+        )
     # An idempotent backstop rather than a staging step: background setup now
     # installs the same browser this launch uses, so by the time anyone reaches
     # a login there is normally nothing to do. Kept because a login can be

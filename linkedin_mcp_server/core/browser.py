@@ -93,6 +93,7 @@ class BrowserManager:
         headless: bool = True,
         slow_mo: int = 0,
         viewport: dict[str, int] | None = None,
+        cdp_url: str | None = None,
         **launch_options: Any,
     ):
         # ``launch_options`` is spread straight into the context options, so a
@@ -121,6 +122,11 @@ class BrowserManager:
                 "and a headless one needs an explicit viewport."
             )
 
+        # Attached rather than launched: the browser and the signed-in session
+        # belong to somebody else. ``user_data_dir`` keeps its value and is
+        # used for nothing on this path -- no directory is created, hardened,
+        # downgrade-checked or deleted -- which is the point of the mode.
+        self.cdp_url = cdp_url
         self.user_data_dir = str(Path(user_data_dir).expanduser())
         self.headless = headless
         self.slow_mo = slow_mo
@@ -131,7 +137,17 @@ class BrowserManager:
         # screen the same browser reported as 720 tall.
         self.viewport = viewport
         self.launch_options = launch_options
-        self._process_marker, self._process_environment = new_browser_process_marker()
+        # An attached browser was launched by somebody else, so it carries
+        # this launch's marker never: minting one would register a guardian
+        # and a drain for a process tree we did not create, and the drain
+        # would then refuse to confirm a shutdown that is not ours to confirm.
+        if cdp_url:
+            self._process_marker = ""
+            self._process_environment = {}
+        else:
+            self._process_marker, self._process_environment = (
+                new_browser_process_marker()
+            )
 
         self._playwright: Playwright | None = None
         #: This launch's Windows containment, or None on POSIX and before the
@@ -140,6 +156,10 @@ class BrowserManager:
         #: cannot prove anything and says so. See ``contain_browser_launch``.
         self._containment: WindowsJob | None = None
         self._context: BrowserContext | None = None
+        #: The ``Browser`` this manager connected to over CDP, or None for a
+        #: launch of our own. Kept so ``close()`` can disconnect instead of
+        #: closing somebody else's browser.
+        self._attached_browser: Any = None
         self._page: Page | None = None
         self._page_crashed = False
         self._is_authenticated = False
@@ -258,6 +278,52 @@ class BrowserManager:
         # and it says so with the path.
         return str(registry_path) if registry_path else None
 
+    async def _attach_over_cdp(self, driver: Playwright) -> None:
+        """Connect to the browser at :attr:`cdp_url` and take its context.
+
+        The first context is the one a person has been using: the tabs they
+        signed in on, in the order their browser reports them. A browser with
+        no context at all is one nobody has used yet, and gets a fresh one
+        rather than a refusal, because the session it will carry is created
+        by the person in that same window.
+
+        Raises NetworkError when the endpoint does not answer: a stale port
+        or a browser that was closed is the ordinary way this fails, and the
+        message has to say where it looked.
+        """
+        endpoint = self.cdp_url or ""
+        try:
+            attached = await driver.chromium.connect_over_cdp(endpoint)
+        except Exception as exc:
+            raise NetworkError(
+                f"Could not attach to the browser at {endpoint}: "
+                f"{type(exc).__name__}. Start that browser with remote "
+                "debugging enabled, or drop --cdp-url to launch one here."
+            ) from exc
+        self._attached_browser = attached
+        if attached.contexts:
+            self._context = attached.contexts[0]
+        else:
+            self._context = await attached.new_context()
+
+        # A page of our own, never ``context.pages[0]``. That one is whatever
+        # tab the person has in front of them, and the sign-in check navigates
+        # the page it is handed to ``/feed/``: read on their tab, the check
+        # moves them off whatever they were doing, and every later tool reads
+        # through a page they may close at any moment. Ours is created here and
+        # closed again on detach.
+        context = self._context
+        self._page = await context.new_page()
+        self._page_crashed = False
+        self._page.on("crash", self._note_page_crash)
+        watch_responses(self._page)
+        logger.info(
+            "Attached to the browser at %s; opened a reading page beside %d "
+            "existing one(s)",
+            self.cdp_url,
+            len(context.pages) - 1,
+        )
+
     async def _start_contained_driver(self) -> Playwright:
         """Start one Patchright driver and contain what it is about to spawn.
 
@@ -361,9 +427,16 @@ class BrowserManager:
         # this raise, and a manager that keeps its proved-closed state is a
         # better thing to leave behind than one that has half-entered a launch
         # it never made.
-        marker, environment = new_browser_process_marker()
-        self._process_marker = marker
-        self._process_environment = environment
+        if self.cdp_url:
+            # A second launch after a proved close has nothing to mark: the
+            # marker names a Chromium this process spawned, and in this mode
+            # it spawns none.
+            self._process_marker = ""
+            self._process_environment = {}
+        else:
+            marker, environment = new_browser_process_marker()
+            self._process_marker = marker
+            self._process_environment = environment
         self._close_proven = False
         self._close_confirmed = False
         self._is_authenticated = False
@@ -379,6 +452,15 @@ class BrowserManager:
         self._begin_a_launch()
         try:
             driver = await self._start_contained_driver()
+
+            if self.cdp_url:
+                # Nothing below may run: the profile directory belongs to
+                # whoever started that browser, and every step between here
+                # and the launch is about a directory this process would
+                # then be creating, hardening or refusing. Attaching reads
+                # pages through a context that browser already owns.
+                await self._attach_over_cdp(driver)
+                return
 
             # Before the profile directory is so much as created, and long
             # before it is opened. The driver had to start first, because only
@@ -684,14 +766,97 @@ class BrowserManager:
 
         context = self._context
         playwright = self._playwright
+        attached = self._attached_browser
+        page = self._page
         self._context = None
         self._page = None
         self._playwright = None
+        self._attached_browser = None
         # Set before the first await below and cleared only by a proved drain,
         # so a cancel escaping any of them leaves the interruption recorded.
         resuming = self._close_interrupted
         self._close_interrupted = True
         confirmed = True
+
+        if page is not None:
+            # Before the disconnect, not after: closing the connection first
+            # leaves no channel for the close request, so an order written here
+            # as cleanup-after would leave one more tab open on every detach.
+            # A failure is a warning and not a verdict -- a stray tab says
+            # nothing about whether this process's driver stopped, which is
+            # what ``confirmed`` is about.
+            try:
+                await asyncio.wait_for(page.close(), timeout=_CLEANUP_TIMEOUT_SECONDS)
+            except TimeoutError:
+                logger.warning(
+                    "Timed out closing our reading page after %ss; it stays "
+                    "open in the attached browser",
+                    _CLEANUP_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not close our reading page, so it stays open in "
+                    "the attached browser: %s",
+                    exc,
+                )
+        if attached is not None:
+            # Disconnect, and only disconnect. On a browser reached over CDP
+            # ``close()`` ends the connection rather than the browser -- measured
+            # against Chrome 155: the process kept running and both its tabs
+            # survived -- and ``context.close()`` is a no-op there for the same
+            # reason, which is the behaviour this mode needs. Either way the
+            # Chromium belongs to somebody else, so what this manager may stop is
+            # the Node driver it started itself. The drain that follows a launch
+            # has nothing of ours to find, and must not look, because this launch
+            # minted no marker.
+            try:
+                await asyncio.wait_for(
+                    attached.close(), timeout=_CLEANUP_TIMEOUT_SECONDS
+                )
+            except TimeoutError:
+                confirmed = False
+                logger.error(
+                    "Timed out disconnecting from the attached browser after %ss",
+                    _CLEANUP_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                confirmed = False
+                logger.error("Error disconnecting from the browser: %s", exc)
+            if playwright is not None:
+                try:
+                    await asyncio.wait_for(
+                        playwright.stop(), timeout=_CLEANUP_TIMEOUT_SECONDS
+                    )
+                except TimeoutError:
+                    confirmed = False
+                    logger.error(
+                        "Timed out stopping playwright after %ss",
+                        _CLEANUP_TIMEOUT_SECONDS,
+                    )
+                except Exception as exc:
+                    confirmed = False
+                    logger.error("Error stopping playwright: %s", exc)
+            if self._containment is not None:
+                # Windows only, and the one thing here that is ours: the Job
+                # holds the Node driver this process started, never the
+                # attached browser, which this process did not spawn. Only
+                # entered when there is a Job, so the POSIX path still looks
+                # for nothing -- there is no marker to look for, and the
+                # browser was never in a group of ours.
+                dropped = await asyncio.to_thread(
+                    drain_browser_process_marker,
+                    self._process_marker,
+                    containment=self._containment,
+                )
+                self._containment = None
+                if not dropped:
+                    confirmed = False
+                    logger.error("The driver's Windows Job did not drain after detach")
+            logger.info("Disconnected from the attached browser")
+            if confirmed:
+                self._close_proven = True
+                self._close_interrupted = False
+            return confirmed
 
         if (
             context is None
@@ -708,7 +873,8 @@ class BrowserManager:
             # object that could have disproved it.
             self._close_proven = True
             self._close_interrupted = False
-            forget_browser_process_marker(self._process_marker)
+            if self._process_marker:
+                forget_browser_process_marker(self._process_marker)
             return True
 
         # Bound each cleanup step. A wedged Chromium (stale SingletonLock,
@@ -781,7 +947,8 @@ class BrowserManager:
         if confirmed:
             self._close_proven = True
             self._close_interrupted = False
-            forget_browser_process_marker(self._process_marker)
+            if self._process_marker:
+                forget_browser_process_marker(self._process_marker)
         return confirmed
 
     @property

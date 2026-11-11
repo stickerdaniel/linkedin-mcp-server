@@ -17,6 +17,7 @@ from linkedin_mcp_server.bootstrap import (
     invalidate_auth_and_trigger_relogin,
     invalidate_browser_setup,
 )
+from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.core import BrowserManager
 from linkedin_mcp_server.core.exceptions import AuthenticationError, NetworkError
 from linkedin_mcp_server.drivers.browser import (
@@ -27,6 +28,7 @@ from linkedin_mcp_server.drivers.browser import (
 )
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.exceptions import (
+    AttachedBrowserSignedOutError,
     AuthStaleOnOwnerError,
     BrowserBinaryMissingError,
     BrowserShutdownUnconfirmedError,
@@ -86,6 +88,19 @@ async def handle_auth_error(
     and connection requests. A new caller is non-replayable until someone says
     otherwise, which is the safe direction for a default to point.
     """
+    if get_config().browser.cdp_url:
+        # Every step below is about a profile this process launched: the local
+        # profile is rotated, a login window is opened to fill it, and a peer is
+        # asked to take over. In attach mode there is no such profile, and the
+        # rotation would retire an unrelated local session while the attached
+        # browser stayed signed out. So the failure is reported as itself, with
+        # the one repair that exists: sign in, in that window.
+        raise AttachedBrowserSignedOutError(
+            "The browser at "
+            f"{get_config().browser.cdp_url} is no longer signed in to "
+            "LinkedIn. Sign in in that browser, then retry this tool."
+        ) from error
+
     if get_runtime_policy() == RuntimePolicy.DOCKER:
         raise DockerHostLoginRequiredError(
             "No valid LinkedIn session is available in Docker. Create one with "

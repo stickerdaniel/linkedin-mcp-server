@@ -40,6 +40,7 @@
       "env": {
         "LINKEDIN_MCP_RUNTIME": "mcpb",
         "CHROME_PATH": "${user_config.chrome_path}",
+        "CDP_URL": "${user_config.cdp_url}",
         "PROXY_SERVER": "${user_config.proxy_server}",
         "PROXY_USERNAME": "${user_config.proxy_username}",
         "PROXY_PASSWORD": "${user_config.proxy_password}",
@@ -185,6 +186,13 @@
       "type": "string",
       "title": "Proxy bypass list",
       "description": "Optional. Comma-separated hosts to reach directly instead of through the proxy.",
+      "required": false,
+      "default": ""
+    },
+    "cdp_url": {
+      "type": "string",
+      "title": "Attach to a running browser (CDP)",
+      "description": "Optional. Attach to an already running Chrome instead of launching one, as http://host:port of its remote debugging endpoint. The session and the profile stay that browser's: sign in there, not here. Cannot be combined with a proxy or a Chrome executable, since an attached browser keeps its own network settings and binary.",
       "required": false,
       "default": ""
     }

@@ -799,6 +799,25 @@ def _preflight_login_viewer(config: AppConfig) -> None:
         raise ConfigurationError(str(exc)) from exc
 
 
+def _claim_the_local_profile(config: AppConfig) -> None:
+    """Establish that this process may move and delete what USER_DATA_DIR names.
+
+    Not in attach mode. The claim exists so that six operations may move or
+    delete the auth root; this mode reaches none of them, and every tool call
+    reads through somebody else's browser. Claiming anyway would refuse startup
+    over a directory that takes no part in it -- an inherited USER_DATA_DIR
+    pointing into somebody's home is the ordinary case -- which is why the
+    decision is a function here rather than a branch inside ``main``.
+    """
+    if config.browser.cdp_url:
+        logger.info("Attach mode: the local profile is not claimed")
+        return
+    ensure_profile_claim(
+        Path(config.browser.user_data_dir),
+        claim_anyway=config.server.claim_profile_root,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     """Main application entry point."""
     try:
@@ -841,10 +860,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         #
         # Read off the validated config already in hand rather than reaching
         # through `get_source_profile_dir()` to process-global state.
-        ensure_profile_claim(
-            Path(config.browser.user_data_dir),
-            claim_anyway=config.server.claim_profile_root,
-        )
+        _claim_the_local_profile(config)
 
         # Set headless mode from config
         set_headless(config.browser.headless)

@@ -2,7 +2,10 @@
 
 Read from the auth root's files and this process's own state, and nothing else:
 no Chromium, no setup, no login, no request. So the answer says what is stored,
-never whether LinkedIn still accepts it.
+never whether LinkedIn still accepts it. In attach mode that distinction is the
+whole answer: the session is somebody else's browser's, so ``session.stored``
+describes a profile this process does not use, and ``browser.attached_to`` is
+where the session actually is.
 """
 
 from typing import Any
@@ -39,6 +42,12 @@ def session_status() -> dict[str, Any]:
         "runtime": get_runtime_id(),
         "browser": {
             **browser_activity(),
+            # The endpoint this process reads through instead of launching,
+            # or None. Reported here because it changes what ``session``
+            # means: with an endpoint, nothing under ``session`` is the browser
+            # being used. Never a probe of that endpoint -- this function still
+            # contacts nobody.
+            "attached_to": get_config().browser.cdp_url,
             "idle_timeout_seconds": get_config().browser.browser_idle_timeout_seconds,
         },
         **bootstrap_observation(),

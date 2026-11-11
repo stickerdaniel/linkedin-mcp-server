@@ -41,6 +41,7 @@ from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.exceptions import (
+    AttachedBrowserSignedOutError,
     BrowserBusyError,
     BrowserDowngradeError,
     BrowserShutdownUnconfirmedError,
@@ -332,6 +333,7 @@ def _make_browser(
     return BrowserManager(
         user_data_dir=profile_dir,
         headless=_headless,
+        cdp_url=config.browser.cdp_url,
         slow_mo=config.browser.slow_mo,
         viewport=viewport,
         **launch_options,
@@ -701,6 +703,24 @@ async def _create_browser() -> BrowserManager:
     """Create and initialize the singleton (caller holds _browser_create_lock)."""
     global _browser, _browser_cookie_export_path, _browser_lease
 
+    if get_config().browser.cdp_url:
+        # Nothing here is about a profile this process owns. The lease is a
+        # kernel lock on somebody else's directory, the marker flags a
+        # Chromium we spawned, and the guardian is the process that ends it
+        # when we crash. Taking any of the three would make a later close,
+        # or a peer's handoff, act on a browser this process never started,
+        # so the attach path skips them all and settles nothing on the way
+        # out.
+        if _browser_lease is not None:
+            raise BrowserBusyError(
+                "A previous browser of this process did not shut down "
+                "cleanly. Restart the server to recover."
+            )
+        browser = await _create_attached_browser()
+        _browser = browser
+        _browser_cookie_export_path = None
+        return _browser
+
     lease = get_profile_lease()
 
     # A previous close could not confirm Chromium had exited, so it may still be
@@ -772,6 +792,50 @@ async def _create_browser() -> BrowserManager:
     # get one from our own lease.
     lease.mark_browser_open()
     return browser
+
+
+async def _create_attached_browser() -> BrowserManager:
+    """Build the singleton on the endpoint in ``cdp_url``.
+
+    A short version of :func:`_create_browser_locked` on purpose: every
+    branch there decides *which* of our own directories to open, and this
+    mode opens none. The one thing that still applies is the login check,
+    because a browser without a LinkedIn session answers every later tool
+    call with an auth barrier and no hint about where the session should
+    have come from.
+
+    The cookie export path is left unset rather than pointed at a
+    directory we do not own: writing a portable copy of somebody else's
+    session on close is exactly the kind of write this mode refuses.
+    """
+    launch_options, viewport = _launch_options()
+    browser = _make_browser(
+        get_profile_dir(),
+        launch_options=launch_options,
+        viewport=viewport,
+    )
+    try:
+        await browser.start()
+        if not await _feed_auth_succeeds(browser):
+            # Not an ``AuthenticationError``: that one is caught by
+            # ``handle_auth_error``, which moves this machine's profile to
+            # ``invalid-state-*`` and opens a login window. Neither is about the
+            # attached browser, and the profile it would move is an unrelated
+            # local one this mode never opened. The repair here is a person
+            # signing in, in that window.
+            raise AttachedBrowserSignedOutError(
+                "The browser at "
+                f"{get_config().browser.cdp_url} is not signed in to "
+                "LinkedIn. Sign in in that browser, then retry."
+            )
+        browser.is_authenticated = True
+        _apply_browser_settings(browser)
+        return browser
+    except BaseException:
+        # No profile of ours to settle, so the verdict is only logged: a
+        # driver left running here holds nothing of ours either.
+        await _close_holding_back_cancels(browser)
+        raise
 
 
 async def _create_browser_locked() -> BrowserManager:
