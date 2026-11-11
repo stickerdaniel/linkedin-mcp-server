@@ -1,7 +1,7 @@
 # -- Stage 1: Build virtual environment --
 FROM python:3.13.13-slim-bookworm@sha256:355bfa66770995d7e9a0da4b3473b44d0cb451f6b56f5615ad9c39e3c4eca03f AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:latest@sha256:af22a52f5eafef3d78e551599d405c02df61919d18028f0cea8eda93bc9986d0 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:latest@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 /uv /uvx /bin/
 
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
@@ -62,6 +62,9 @@ COPY --chmod=644 scripts/login-viewer.html /usr/share/novnc/login.html
 # X server to collide with.
 ENV DISPLAY=:99
 ENV HEADLESS=false
+# Names the install kind for the optional-tools request, which leaves before
+# any container detection could run.
+ENV LINKEDIN_MCP_RUNTIME=docker
 
 USER pwuser
 

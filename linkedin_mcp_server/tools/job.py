@@ -145,6 +145,7 @@ def register_job_tools(
             on that step carry its error. section_errors reports a form that
             could not be read or a draft that could not be discarded.
         """
+        job_id = normalize_job_id(job_id)
         extractor = await get_ready_extractor(ctx, tool_name="get_easy_apply_form")
         logger.info("Reading Easy Apply form: %s", job_id)
 
@@ -324,6 +325,7 @@ def register_job_tools(
             and company), dismissed (true) and already_dismissed, true when
             the card was already dismissed.
         """
+        job_id = normalize_job_id(job_id)
         extractor = await get_ready_extractor(ctx, tool_name="dismiss_job")
         logger.info("Dismissing job %s", job_id)
 

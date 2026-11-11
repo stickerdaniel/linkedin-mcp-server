@@ -227,14 +227,15 @@ section LinkedIn rate-limits, `send_message` takes three, and
 ```bash
 git checkout main && git pull
 uv version --bump minor          # or: major, patch — updates pyproject.toml AND uv.lock
+uv run scripts/prepare_release.py  # writes the version into the six derived files below
 uv run towncrier build --version "$(uv version --short)" --yes
 # optional: under the new version heading in docs/CHANGELOG.md, above the categories, add a `### Highlights` list of up to three `**Lead-in.** sentence ([#N](link))` bullets
-git add pyproject.toml uv.lock docs/CHANGELOG.md  # docs/CHANGELOG.md again, for the Highlights edit
+git add pyproject.toml uv.lock manifest.json docker-compose.yml .github/mcp/server.json plugins/linkedin-mcp-server/.codex-plugin/plugin.json plugins/linkedin-mcp-server/.claude-plugin/plugin.json plugins/linkedin-mcp-server/.cursor-plugin/plugin.json docs/CHANGELOG.md  # docs/CHANGELOG.md again, for the Highlights edit
 gt create -m "chore(release): Bump version to X.Y.Z"
 gt submit                        # merge PR to trigger release workflow
 ```
 
-The CI release workflow automatically updates `manifest.json`, `docker-compose.yml`, `.github/mcp/server.json` and the Codex, Claude Code, and Cursor plugin manifests under `plugins/linkedin-mcp-server/`. Do not update them manually.
+`scripts/prepare_release.py` writes the version from `pyproject.toml` into `manifest.json`, `docker-compose.yml`, `.github/mcp/server.json` and the Codex, Claude Code, and Cursor plugin manifests under `plugins/linkedin-mcp-server/`. The bump pull request carries those files, and the release publishes and tags the merged commit without committing anything. `prepare_release.py --check` runs in `lint-and-check` and again in the release workflow before anything is published, and fails on any of those files or `uv.lock` that disagrees with `pyproject.toml`.
 
 After the workflow completes, file a PR against
 [`docker/mcp-registry`](https://github.com/docker/mcp-registry) updating
@@ -298,12 +299,13 @@ Always read [`CONTRIBUTING.md`](.github/CONTRIBUTING.md) before filing an issue 
   Repeat `<job> with <model> (<effort>)` joined by `and` for each model that did a job.
   Example: `Implemented with Claude Opus 5.5 (xhigh) and reviewed with GPT-6 Pro (max) in Claude Code via T3 Code.`
   Effort is the run's reasoning setting, or `effort unknown` if nothing states it. Humans are `Human`. Ask for other unknown values.
+  Write names as their makers do; an operating system is not a host.
   Keep attribution in that line: before pushing, amend agent `Co-authored-by` trailers out of your commits.
 - When implementing a new feature/fix:
   1. Packet: before filing or commenting on a GitHub issue, read [.agents/skills/issue-packet/SKILL.md](.agents/skills/issue-packet/SKILL.md).
   2. Branch from `main`: `feature/issue-number-short-description`
   3. Implement and test
-  4. Update README.md and docs/docker-hub.md if relevant
+  4. Update README.md and docs/docker-hub.md if relevant, with Before and After shots of each changed section ([docs/pr-media.md](docs/pr-media.md))
   5. Create a draft PR; only convert to regular PR when ready to merge. A `feat`, `fix` or breaking (`type!:`) PR then adds `changelog.d/<PR>.<type>.md`; see CONTRIBUTING
   6. Review with AI agents first, then manual review. PRs are squash-merged into `main` (one commit per PR), so keep the PR title as the conventional-commit subject; commits within a PR are for review only. The squash commit title is `<PR title> (#N)`, which an API or CLI merge sets explicitly.
 

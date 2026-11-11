@@ -204,6 +204,12 @@ class TestConnectWithPerson:
                 new_callable=AsyncMock,
                 return_value=True,
             ),
+            patch.object(
+                actions,
+                "_invitation_is_pending",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
             patch(
                 "linkedin_mcp_server.linkedin.connection_actions.asyncio.sleep",
                 new_callable=AsyncMock,
@@ -284,15 +290,105 @@ class TestConnectWithPerson:
         text = "Collin\n\n· 1st\n\nEngineer\n\nMessage\nMore\nAbout\n"
         actions = _actions(mock_page, _reads(text))
 
-        with patch.object(
-            actions,
-            "_read_action_signals",
-            new_callable=AsyncMock,
-            return_value=_signals(compose=True),
+        with (
+            patch.object(
+                actions,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=_signals(compose=True),
+            ),
+            patch.object(
+                actions,
+                "_invitation_is_pending",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
         ):
             result = await actions.connect_with_person("testuser")
 
         assert result["status"] == "already_connected"
+
+    async def test_reports_pending_when_sent_list_holds_the_invite(self, mock_page):
+        """Message-only top card + invitation on the sent page → pending, not 1st."""
+        text = "Sohrab\n\n· 2nd\n\nTalent\n\nMessage\nView in Recruiter\nMore\n"
+        actions = _actions(mock_page, _reads(text))
+
+        with (
+            patch.object(
+                actions,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=_signals(compose=True),
+            ),
+            patch.object(
+                actions,
+                "_invitation_is_pending",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            result = await actions.connect_with_person("testuser")
+
+        assert result["status"] == "pending"
+
+    async def test_send_message_names_pending_when_sent_list_confirms(self, mock_page):
+        """After a send, a Message-only top card is settled by the sent page."""
+        text = "Sohrab\n\n· 2nd\n\nTalent\n\nMessage\nView in Recruiter\nMore\n"
+        actions = _actions(mock_page, _reads(text))
+
+        with (
+            patch.object(
+                actions,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[_signals(invite=True), _signals(compose=True)],
+            ),
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                actions, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
+                actions,
+                "_click_dialog_primary_button",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                actions,
+                "_invitation_is_pending",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            result = await actions.connect_with_person("testuser")
+
+        assert result["status"] == "connected"
+        assert "State after send: pending" in result["message"]
+
+    async def test_invitation_is_pending_reads_the_sent_page(self, mock_page):
+        """The helper navigates to the sent page and asks the page for the anchor."""
+        actions = _actions(mock_page)
+
+        with (
+            patch.object(
+                PageNavigator, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_nav,
+            patch.object(
+                PageSession,
+                "run_on_linkedin",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_run,
+        ):
+            mock_page.wait_for_selector = AsyncMock()
+            assert await actions._invitation_is_pending("testuser") is True
+
+        nav_args = mock_nav.await_args
+        run_args = mock_run.await_args
+        assert nav_args is not None
+        assert run_args is not None
+        assert "invitation-manager/sent" in nav_args.args[0]
+        assert run_args.args[1] == "testuser"
 
     async def test_returns_self_profile_via_edit_intro_anchor(self, mock_page):
         """Editing-your-own-profile anchor blocks connect attempts."""

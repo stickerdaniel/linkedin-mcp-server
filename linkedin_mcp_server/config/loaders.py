@@ -218,11 +218,17 @@ def is_interactive_environment() -> bool:
 def load_from_env(config: AppConfig) -> AppConfig:
     """Load configuration from environment variables."""
 
-    # Log level
+    # Log level. Refused rather than ignored, as TRANSPORT below is: a value
+    # outside this set is a typo, and ignoring it let the server report the
+    # default level while reading as though the setting had applied.
     if log_level_env := os.environ.get(EnvironmentKeys.LOG_LEVEL):
         log_level_upper = log_level_env.strip().upper()
-        if log_level_upper in ("DEBUG", "INFO", "WARNING", "ERROR"):
-            config.server.log_level = log_level_upper
+        if log_level_upper not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            raise ConfigurationError(
+                f"Invalid LOG_LEVEL: '{log_level_env}'. Must be one of "
+                "'DEBUG', 'INFO', 'WARNING' or 'ERROR'."
+            )
+        config.server.log_level = log_level_upper
 
     # Headless mode
     if headless_env := os.environ.get(EnvironmentKeys.HEADLESS):
@@ -430,8 +436,13 @@ def load_from_env(config: AppConfig) -> AppConfig:
     return config
 
 
-def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
-    """Load configuration from command line arguments."""
+def build_parser() -> argparse.ArgumentParser:
+    """The command-line parser.
+
+    Every long option added here also belongs in
+    ``remote_catalog.LONG_OPTIONS``, which resolves abbreviations before this
+    parser is imported; a test compares the two.
+    """
     parser = argparse.ArgumentParser(
         description="LinkedIn MCP Server - A Model Context Protocol server for LinkedIn integration"
     )
@@ -480,7 +491,7 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
     parser.add_argument(
         "--slow-mo",
         type=int,
-        default=0,
+        default=None,
         metavar="MS",
         help="Slow down browser actions by N milliseconds (debugging)",
     )
@@ -731,8 +742,12 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
         default=None,
         help="Give every stdio client its own browser (default; overrides DAEMON_ENABLED=true).",
     )
+    return parser
 
-    args = parser.parse_args(argv)
+
+def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
+    """Load configuration from command line arguments."""
+    args = build_parser().parse_args(argv)
 
     # Update configuration with parsed arguments
     if args.no_headless:
@@ -748,14 +763,14 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
     if args.host:
         config.server.host = args.host
 
-    if args.port:
+    if args.port is not None:
         config.server.port = args.port
 
     if args.path:
         config.server.path = args.path
 
     # Browser configuration
-    if args.slow_mo:
+    if args.slow_mo is not None:
         config.browser.slow_mo = args.slow_mo
 
     if args.user_agent:

@@ -309,6 +309,24 @@ def _connection_result(
 ReadMainProfile = Callable[[str], Awaitable[dict[str, Any]]]
 
 
+# LinkedIn can hide the Pending control inside the profile's More menu: when
+# the top card carries Message plus a recruiter action, there is no labeled
+# Pending anchor in the action root, and the structural signals read as
+# ``already_connected`` for a 2nd-degree profile with an invitation
+# outstanding. The sent-invitations page lists every outstanding invitation
+# with an anchor to the invitee's ``/in/{username}/`` profile, which is a URL
+# pattern and so locale-independent. It shows the most recent invitations, so
+# an older outstanding one can be missed; a miss keeps the prior state.
+SENT_INVITATIONS_URL = "https://www.linkedin.com/mynetwork/invitation-manager/sent/"
+_SENT_INVITATION_ANCHOR_SELECTOR = 'main a[href*="/in/"]'
+INVITATION_PENDING_JS = r"""
+((username) => {
+  const safe = CSS.escape(username);
+  return !!document.querySelector(`main a[href*="/in/${safe}/"]`);
+})
+"""
+
+
 class ConnectionActions:
     """Send, accept and probe invitations for one LinkedIn member."""
 
@@ -511,6 +529,32 @@ class ConnectionActions:
             raise
         except Exception:
             logger.debug("Incoming accept click via JS failed", exc_info=True)
+            return False
+
+    async def _invitation_is_pending(self, username: str) -> bool:
+        """Report whether the sent-invitations page lists an invitation to
+        ``username``.
+
+        Used only to settle ``already_connected``, whose structural signals
+        cannot tell a 1st-degree connection from a pending invitation whose
+        Pending control sits in the More menu. Any failure to read the page
+        reports False so the caller keeps its structural answer.
+        """
+        try:
+            await self._navigator._navigate_to_page(SENT_INVITATIONS_URL)
+            try:
+                await self._session.page.wait_for_selector(
+                    _SENT_INVITATION_ANCHOR_SELECTOR, timeout=5000
+                )
+            except PlaywrightTimeoutError:
+                return False
+            return bool(
+                await self._session.run_on_linkedin(INVITATION_PENDING_JS, username)
+            )
+        except OffLinkedInLandingError:
+            raise
+        except Exception:
+            logger.debug("Sent-invitations check failed", exc_info=True)
             return False
 
     async def _read_action_signals(self, username: str) -> ActionSignals:
@@ -820,6 +864,8 @@ class ConnectionActions:
                 "Cannot send a connection request to your own profile.",
                 profile=page_text,
             )
+        if state == "already_connected" and await self._invitation_is_pending(username):
+            state = "pending"
         if state == "already_connected":
             return _connection_result(
                 url,
@@ -974,6 +1020,12 @@ class ConnectionActions:
                 verified, verified_signals = retry, retry_signals
         verified_text = verified.get("sections", {}).get("main_profile", "")
         verified_state = connection.detect_connection_state(verified_signals)
+        if (
+            verified_state == "already_connected"
+            and not verified_signals.has_invite_anchor
+            and await self._invitation_is_pending(username)
+        ):
+            verified_state = "pending"
 
         if verified_signals.has_invite_anchor:
             return _connection_result(
