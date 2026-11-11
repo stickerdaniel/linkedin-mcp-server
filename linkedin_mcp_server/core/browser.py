@@ -778,6 +778,27 @@ class BrowserManager:
         self._close_interrupted = True
         confirmed = True
 
+        if page is not None:
+            # Before the disconnect, not after: closing the connection first
+            # leaves no channel for the close request, so an order written here
+            # as cleanup-after would leave one more tab open on every detach.
+            # A failure is a warning and not a verdict -- a stray tab says
+            # nothing about whether this process's driver stopped, which is
+            # what ``confirmed`` is about.
+            try:
+                await asyncio.wait_for(page.close(), timeout=_CLEANUP_TIMEOUT_SECONDS)
+            except TimeoutError:
+                logger.warning(
+                    "Timed out closing our reading page after %ss; it stays "
+                    "open in the attached browser",
+                    _CLEANUP_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not close our reading page, so it stays open in "
+                    "the attached browser: %s",
+                    exc,
+                )
         if attached is not None:
             # Disconnect, and only disconnect. On a browser reached over CDP
             # ``close()`` ends the connection rather than the browser -- measured
@@ -801,28 +822,6 @@ class BrowserManager:
             except Exception as exc:
                 confirmed = False
                 logger.error("Error disconnecting from the browser: %s", exc)
-            if page is not None:
-                # Our own page, so a failure here leaves a stray tab beside the
-                # person's work and is worth a warning -- but it says nothing
-                # about whether this process's driver stopped, which is what the
-                # verdict is about. Only a failure to disconnect or to stop the
-                # driver may keep the shutdown unconfirmed.
-                try:
-                    await asyncio.wait_for(
-                        page.close(), timeout=_CLEANUP_TIMEOUT_SECONDS
-                    )
-                except TimeoutError:
-                    logger.warning(
-                        "Timed out closing our reading page after %ss; it stays "
-                        "open in the attached browser",
-                        _CLEANUP_TIMEOUT_SECONDS,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Could not close our reading page, so it stays open in "
-                        "the attached browser: %s",
-                        exc,
-                    )
             if playwright is not None:
                 try:
                     await asyncio.wait_for(

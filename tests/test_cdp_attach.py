@@ -403,7 +403,9 @@ class TestTheStartPath:
             async def stop(self):
                 return None
 
-        manager = self._manager(tmp_path)
+        manager = BrowserManager(
+            user_data_dir=tmp_path / "profile", cdp_url="http://127.0.0.1:9222"
+        )
         with mock.patch(
             "linkedin_mcp_server.core.browser.async_playwright"
         ) as playwright:
@@ -425,6 +427,121 @@ class TestTheStartPath:
         """The other branch of the same constructor, so the guard is narrow."""
         BrowserManager(user_data_dir=tmp_path / "p")
         assert _no_marker == ["minted"]
+
+
+class TestTheLocalProfileStaysOutOfIt:
+    """Ways a local directory of ours could refuse to start attach mode."""
+
+    def test_no_claim_is_taken_on_the_local_profile(self, monkeypatch):
+        """A claim is permission to move an auth root; this mode has none."""
+        from linkedin_mcp_server import cli_main
+
+        claimed = []
+        monkeypatch.setattr(
+            cli_main, "ensure_profile_claim", lambda *a, **k: claimed.append(a)
+        )
+        config = AppConfig()
+        config.browser.cdp_url = "http://127.0.0.1:9222"
+        config.browser.user_data_dir = "/home/somebody/Downloads/not-ours"
+        cli_main._claim_the_local_profile(config)
+        assert claimed == []
+
+    def test_a_launch_still_claims_it(self, monkeypatch, tmp_path):
+        """The other branch of the same decision, so the skip is narrow."""
+        from linkedin_mcp_server import cli_main
+
+        claimed = []
+        monkeypatch.setattr(
+            cli_main, "ensure_profile_claim", lambda *a, **k: claimed.append(a)
+        )
+        config = AppConfig()
+        config.browser.user_data_dir = str(tmp_path)
+        cli_main._claim_the_local_profile(config)
+        assert len(claimed) == 1
+
+    async def test_no_browser_is_installed_for_it(self, monkeypatch):
+        """Eager managed setup runs before any call reaches the readiness gate."""
+        from linkedin_mcp_server import bootstrap
+
+        started = []
+        monkeypatch.setattr(bootstrap, "initialize_bootstrap", lambda *a, **k: None)
+        monkeypatch.setattr(
+            bootstrap, "get_runtime_policy", lambda: bootstrap.RuntimePolicy.MANAGED
+        )
+        monkeypatch.setattr(
+            bootstrap,
+            "_start_browser_setup_task_locked",
+            lambda *a: started.append(a),
+        )
+        monkeypatch.setattr(bootstrap, "_uses_custom_chrome", lambda: False)
+        monkeypatch.setattr(bootstrap, "_attaches_to_a_browser", lambda: True)
+
+        await bootstrap.start_background_browser_setup_if_needed()
+
+        assert started == []
+        assert bootstrap._state.setup_state is bootstrap.SetupState.READY
+
+    async def test_the_reading_page_is_closed_before_the_connection(
+        self, tmp_path, _no_marker
+    ):
+        """A close sent after the disconnect has no channel to travel on."""
+        order = []
+
+        class _Tab:
+            def __init__(self, url):
+                self.url = url
+
+            def on(self, event, handler):
+                return None
+
+            async def close(self):
+                order.append("page.close")
+
+        class _Context:
+            def __init__(self):
+                self.pages = []
+
+            async def new_page(self):
+                page = _Tab("about:blank")
+                self.pages.append(page)
+                return page
+
+        class _Browser:
+            def __init__(self):
+                self.contexts = [_Context()]
+
+            async def close(self):
+                order.append("browser.close")
+
+        class _Chromium:
+            async def connect_over_cdp(self, endpoint):
+                return _Browser()
+
+        class _Playwright:
+            chromium = _Chromium()
+
+            async def stop(self):
+                order.append("playwright.stop")
+
+        manager = BrowserManager(
+            user_data_dir=tmp_path / "profile", cdp_url="http://127.0.0.1:9222"
+        )
+        with mock.patch(
+            "linkedin_mcp_server.core.browser.async_playwright"
+        ) as playwright:
+            playwright.return_value.start = lambda: asyncio.sleep(
+                0, result=_Playwright()
+            )
+            await manager.start()
+            await manager.close()
+
+        assert order == ["page.close", "browser.close", "playwright.stop"]
+
+    def test_an_ipv6_bracket_that_never_closes_is_a_configuration_error(self):
+        """``urlsplit`` raises ValueError here, which main() does not catch."""
+        config = BrowserConfig(cdp_url="http://[::1:9222")
+        with pytest.raises(ConfigurationError, match="cdp_url"):
+            config.validate()
 
 
 class TestTheGatesTheModeSkips:

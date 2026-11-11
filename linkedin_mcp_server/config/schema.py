@@ -298,8 +298,20 @@ class BrowserConfig:
         if not raw:
             self.cdp_url = None
             return
-        parts = urlsplit(raw)
-        if parts.scheme not in {"http", "https"} or not parts.hostname:
+        try:
+            parts = urlsplit(raw)
+            scheme = parts.scheme
+            hostname = parts.hostname
+        except ValueError:
+            # An unmatched IPv6 bracket raises here, out of urlsplit, the same
+            # way a bad port does when it is read. Measured: unguarded, both
+            # reached the CLI as a bare ValueError traceback, since main()
+            # catches ConfigurationError and nothing else.
+            raise ConfigurationError(
+                "cdp_url is not a valid address: expected an http:// or "
+                "https:// DevTools endpoint, such as http://127.0.0.1:9222"
+            ) from None
+        if scheme not in {"http", "https"} or not hostname:
             raise ConfigurationError(
                 "cdp_url must be an http:// or https:// address of a browser's "
                 "DevTools endpoint, such as http://127.0.0.1:9222"

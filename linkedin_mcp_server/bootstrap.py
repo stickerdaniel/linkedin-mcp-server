@@ -962,6 +962,14 @@ async def start_background_browser_setup_if_needed() -> None:
     initialize_bootstrap()
     if get_runtime_policy() != RuntimePolicy.MANAGED:
         return
+    if _attaches_to_a_browser():
+        # Attach mode: the browser is already running and it is not ours, so
+        # there is nothing to download and no profile a setup step would fill.
+        # Checked here as well as in the readiness gate because this one starts
+        # the install eagerly, at startup, before any call reaches that gate.
+        _state.setup_state = SetupState.READY
+        _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
+        return
     if _uses_custom_chrome():
         # A custom executable skips the managed binary; nothing to install.
         _state.setup_state = SetupState.READY
