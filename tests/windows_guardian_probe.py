@@ -2563,7 +2563,11 @@ def retain_stable_browser_inventory[T](
     wait_for_retry: Callable[[], None],
     monotonic: Callable[[], float] = time.monotonic,
 ) -> tuple[dict[int, str], dict[int, T]]:
-    """Retain one quiescent two-sided census under a single deadline."""
+    """Retain one quiescent two-sided census under a single deadline.
+
+    A member gone before ``OpenProcess``, or one ``validate_handle`` reports
+    as ``CensusMemberExitedError``, restarts the census from fresh inventories.
+    """
     while True:
         provisional: dict[int, T] = {}
         first_error: BaseException | None = None
@@ -2580,15 +2584,23 @@ def retain_stable_browser_inventory[T](
                     vanished = exc
                     break
                 provisional[pid] = handle
-                validate_handle(pid, handle)
+                try:
+                    validate_handle(pid, handle)
+                except CensusMemberExitedError as exc:
+                    vanished = exc
+                    break
             if vanished is None:
                 cdp_b = normalize_cdp_processes(sample_cdp())
                 job_b = sample_job_pids()
                 if cdp_a == cdp_b and job_a == job_b == set(provisional):
                     require_browser_inventory(cdp_b, set(provisional), driver_pid)
-                    for pid, handle in provisional.items():
-                        validate_handle(pid, handle)
-                    return cdp_b, provisional
+                    try:
+                        for pid, handle in provisional.items():
+                            validate_handle(pid, handle)
+                    except CensusMemberExitedError as exc:
+                        vanished = exc
+                    else:
+                        return cdp_b, provisional
         except BaseException as exc:
             first_error = exc
         if first_error is not None:
@@ -2630,6 +2642,44 @@ def _member_exited_before_open(exc: BaseException, pid: int) -> bool:
         and getattr(exc, "funcname", None) == "OpenProcess"
         and getattr(exc, "winerror", None) == _ERROR_INVALID_PARAMETER
     )
+
+
+class CensusMemberExitedError(Exception):
+    """A Job member exited while the census held its handle: churn."""
+
+
+_ERROR_ACCESS_DENIED = 5
+_EXITING_MEMBER_SECONDS = 5.0
+
+
+def require_census_image_path(
+    pid: int,
+    query: Callable[[], str],
+    *,
+    wait_exited: Callable[[float], bool],
+    deadline: float,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> str:
+    """Read a member's image path, or prove the member exited instead.
+
+    ``QueryFullProcessImageNameW`` answered ERROR_ACCESS_DENIED in CI for a
+    member whose handle had just tested unsignalled, the state of a process
+    whose exit has begun. Only a member that then signals within a bounded
+    wait counts as churn; one that stays live keeps the refusal fatal.
+    """
+    try:
+        return query()
+    except OSError as exc:
+        if getattr(exc, "winerror", None) != _ERROR_ACCESS_DENIED:
+            raise
+        bound = min(_EXITING_MEMBER_SECONDS, deadline - monotonic())
+        if bound > 0 and wait_exited(bound):
+            raise CensusMemberExitedError(
+                f"Job member {pid} exited during census"
+            ) from exc
+        raise RuntimeError(
+            f"image path of live Job member {pid} was refused: {exc}"
+        ) from exc
 
 
 def wait_handles_to_deadline[T](
@@ -4418,7 +4468,7 @@ async def _browser_launch_owner(root: Path, controls: dict[str, str]) -> int:
 def _browser_launch_guardian(root: Path, controls: dict[str, str]) -> int:
     from linkedin_mcp_server.profile_lease import ProfileLease
 
-    win32api, win32con, _win32event, win32job = _windows_modules()
+    win32api, win32con, win32event, win32job = _windows_modules()
     win32process = importlib.import_module("win32process")
 
     deadline = time.monotonic() + _BROWSER_DEADLINE_SECONDS
@@ -4490,12 +4540,22 @@ def _browser_launch_guardian(root: Path, controls: dict[str, str]) -> int:
             if int(win32process.GetProcessId(handle)) != pid:
                 raise RuntimeError("retained handle PID changed")
             if not _is_active(handle):
-                raise RuntimeError("retained Job member exited during census")
+                raise CensusMemberExitedError(
+                    "retained Job member exited during census"
+                )
             if not win32job.IsProcessInJob(
                 handle, inner
             ) or not win32job.IsProcessInJob(handle, outer):
                 raise RuntimeError("retained process left a required Job")
-            path = _full_process_image_path(handle)
+            path = require_census_image_path(
+                pid,
+                lambda: _full_process_image_path(handle),
+                wait_exited=lambda seconds: (
+                    win32event.WaitForSingleObject(handle, int(seconds * 1000))
+                    == _WAIT_OBJECT_0
+                ),
+                deadline=deadline,
+            )
             created = win32process.GetProcessTimes(handle)["CreationTime"]
             if not path or created is None:
                 raise RuntimeError("retained process identity is incomplete")
