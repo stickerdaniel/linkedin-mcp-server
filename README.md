@@ -107,7 +107,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `get_feed` | Read recent posts from your home feed, with links to the original posts. |
 | `search_posts` | Search posts by keyword, optionally filtered by recency or content type. |
 | `prepare_post` | Preview a personal text post, its author and audience; expires in ten minutes. |
-| `publish_post` | Publish an approved preview once (experimental). Do not retry uncertain outcomes. |
+| `publish_post` | Publish an approved preview (experimental); do not retry unknown outcomes. |
 | `get_session_status` | Check your saved login and browser state without opening a browser. |
 | `close_session` | Close the shared browser session without deleting your saved login. |
 
