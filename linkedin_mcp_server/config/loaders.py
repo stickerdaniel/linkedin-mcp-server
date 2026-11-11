@@ -202,6 +202,26 @@ def _env(key: str) -> str | None:
     return value
 
 
+def _env_flag(key: str) -> bool | None:
+    """Read an on/off environment variable, or None when it is unset or blank.
+
+    Refused rather than ignored, as LOG_LEVEL and TRANSPORT are: a value outside
+    TRUTHY_VALUES and FALSY_VALUES is a typo, and ignoring it kept the default
+    while reading as though the setting had applied.
+    """
+    raw = os.environ.get(key)
+    if raw is None or not (value := _normalize_env(raw)):
+        return None
+    if value in TRUTHY_VALUES:
+        return True
+    if value in FALSY_VALUES:
+        return False
+    raise ConfigurationError(
+        f"Invalid {key}: '{raw}'. Must be one of "
+        f"{', '.join(TRUTHY_VALUES + FALSY_VALUES)}."
+    )
+
+
 def is_interactive_environment() -> bool:
     """
     Detect if running in an interactive environment (TTY).
@@ -231,12 +251,8 @@ def load_from_env(config: AppConfig) -> AppConfig:
         config.server.log_level = log_level_upper
 
     # Headless mode
-    if headless_env := os.environ.get(EnvironmentKeys.HEADLESS):
-        headless_value = _normalize_env(headless_env)
-        if headless_value in FALSY_VALUES:
-            config.browser.headless = False
-        elif headless_value in TRUTHY_VALUES:
-            config.browser.headless = True
+    if (headless := _env_flag(EnvironmentKeys.HEADLESS)) is not None:
+        config.browser.headless = headless
 
     # Transport mode
     if transport_env := os.environ.get(EnvironmentKeys.TRANSPORT):
@@ -418,20 +434,12 @@ def load_from_env(config: AppConfig) -> AppConfig:
     # Auto-import a session from a logged-in browser on first no-session tool
     # call. Unset = on by default (interactive and non-interactive desktop);
     # false disables it. No effect under Docker or a non-loopback HTTP bind.
-    if auto_import_env := os.environ.get(EnvironmentKeys.AUTO_IMPORT_FROM_BROWSER):
-        auto_import_value = _normalize_env(auto_import_env)
-        if auto_import_value in FALSY_VALUES:
-            config.browser.auto_import_from_browser = False
-        elif auto_import_value in TRUTHY_VALUES:
-            config.browser.auto_import_from_browser = True
+    if (auto_import := _env_flag(EnvironmentKeys.AUTO_IMPORT_FROM_BROWSER)) is not None:
+        config.browser.auto_import_from_browser = auto_import
 
     # Share one browser-owning process across stdio clients.
-    if daemon_env := os.environ.get(EnvironmentKeys.DAEMON_ENABLED):
-        daemon_value = _normalize_env(daemon_env)
-        if daemon_value in FALSY_VALUES:
-            config.server.daemon_enabled = False
-        elif daemon_value in TRUTHY_VALUES:
-            config.server.daemon_enabled = True
+    if (daemon := _env_flag(EnvironmentKeys.DAEMON_ENABLED)) is not None:
+        config.server.daemon_enabled = daemon
 
     return config
 
