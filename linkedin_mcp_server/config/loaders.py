@@ -757,7 +757,7 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
     if args.host:
         config.server.host = args.host
 
-    if args.port:
+    if args.port is not None:
         config.server.port = args.port
 
     if args.path:
