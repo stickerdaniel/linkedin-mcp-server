@@ -512,7 +512,12 @@ async def test_a_killed_staging_process_leaves_what_it_had_observed(tmp_path):
             deadline = time.monotonic() + 30
             while not requested():
                 if child.poll() is not None:
-                    _, stderr = child.communicate()
+                    # A surviving driver can hold stderr open past the
+                    # child's exit, so the read is bounded.
+                    try:
+                        _, stderr = child.communicate(timeout=5)
+                    except subprocess.TimeoutExpired as exc:
+                        stderr = exc.stderr or b""
                     pytest.skip(
                         f"the staging process ended first: {stderr.decode(errors='replace')}"
                     )
