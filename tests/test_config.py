@@ -412,6 +412,14 @@ class TestLoaders:
         config = load_from_env(AppConfig())
         assert config.server.log_level == "DEBUG"
 
+    @pytest.mark.parametrize("bad_value", ["chatty", "CRITICAL", "NOTSET"])
+    def test_load_from_env_invalid_log_level(self, monkeypatch, bad_value):
+        monkeypatch.setenv("LOG_LEVEL", bad_value)
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        with pytest.raises(ConfigurationError, match="Invalid LOG_LEVEL"):
+            load_from_env(AppConfig())
+
     def test_load_from_env_defaults(self, monkeypatch):
         # Clear env vars
         for var in ["HEADLESS", "LOG_LEVEL"]:

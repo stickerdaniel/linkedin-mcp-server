@@ -218,11 +218,17 @@ def is_interactive_environment() -> bool:
 def load_from_env(config: AppConfig) -> AppConfig:
     """Load configuration from environment variables."""
 
-    # Log level
+    # Log level. Refused rather than ignored, as TRANSPORT below is: a value
+    # outside this set is a typo, and ignoring it let the server report the
+    # default level while reading as though the setting had applied.
     if log_level_env := os.environ.get(EnvironmentKeys.LOG_LEVEL):
         log_level_upper = log_level_env.strip().upper()
-        if log_level_upper in ("DEBUG", "INFO", "WARNING", "ERROR"):
-            config.server.log_level = log_level_upper
+        if log_level_upper not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            raise ConfigurationError(
+                f"Invalid LOG_LEVEL: '{log_level_env}'. Must be one of "
+                "'DEBUG', 'INFO', 'WARNING' or 'ERROR'."
+            )
+        config.server.log_level = log_level_upper
 
     # Headless mode
     if headless_env := os.environ.get(EnvironmentKeys.HEADLESS):
