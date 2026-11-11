@@ -126,6 +126,7 @@ class EnvironmentKeys:
     HOST = "HOST"
     PORT = "PORT"
     HTTP_PATH = "HTTP_PATH"
+    AUTH_TOKEN = "MCP_AUTH_TOKEN"
     SLOW_MO = "SLOW_MO"
     VIEWPORT = "VIEWPORT"
     CHROME_PATH = "CHROME_PATH"
@@ -334,6 +335,11 @@ def load_from_env(config: AppConfig) -> AppConfig:
     # HTTP server host
     if host_env := os.environ.get(EnvironmentKeys.HOST):
         config.server.host = host_env
+
+    # Shared key for the HTTP transport. Empty counts as unset, so a blank
+    # variable in a deploy file cannot read as "authentication on, key empty".
+    if auth_token_env := os.environ.get(EnvironmentKeys.AUTH_TOKEN, "").strip():
+        config.server.auth_token = auth_token_env
 
     # HTTP server port (validated in AppConfig.validate())
     if port_env := os.environ.get(EnvironmentKeys.PORT):

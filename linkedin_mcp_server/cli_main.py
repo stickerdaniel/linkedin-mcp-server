@@ -7,7 +7,7 @@ from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NoReturn
+from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 import inquirer
 
@@ -916,7 +916,16 @@ def main(argv: Sequence[str] | None = None) -> None:
             from linkedin_mcp_server.daemon.discovery import Unanswered
 
             if shared is None:
-                mcp = create_mcp_server(tool_timeout=config.server.tool_timeout_seconds)
+                direct_kwargs: dict[str, Any] = {}
+                # Only an HTTP server has a port to protect; on stdio the key is
+                # ignored rather than refused, since a deploy file may set it
+                # for every mode.
+                if transport == "streamable-http" and config.server.auth_token:
+                    direct_kwargs["auth_token"] = config.server.auth_token
+                mcp = create_mcp_server(
+                    tool_timeout=config.server.tool_timeout_seconds,
+                    **direct_kwargs,
+                )
             elif isinstance(shared, Unanswered):
                 mcp = create_mcp_server(
                     tool_timeout=config.server.tool_timeout_seconds,

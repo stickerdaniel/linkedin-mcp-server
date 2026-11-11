@@ -880,11 +880,10 @@ class TestOwnerAuthentication:
         # A proxy is the case worth spelling out, because it is the one role that
         # legitimately handles a token — the owner's, outbound. Accepting one
         # here would be a caller confusing the credential it *presents* with the
-        # one an owner *demands*, and narrowing this guard to DIRECT alone would
-        # let that through.
-        for role in (ServerRole.DIRECT, ServerRole.PROXY):
-            with pytest.raises(ValueError, match="daemon owner"):
-                create_mcp_server(role=role, auth_token="a-token")
+        # one an owner *demands*. A direct server may demand one: that is the
+        # shared key of an HTTP deployment (`MCP_AUTH_TOKEN`).
+        with pytest.raises(ValueError, match="daemon owner"):
+            create_mcp_server(role=ServerRole.PROXY, auth_token="a-token")
 
     async def test_the_wrong_token_is_refused_and_the_right_one_accepted(self):
         owner = create_mcp_server(role=ServerRole.OWNER, auth_token="the-token")

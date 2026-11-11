@@ -196,13 +196,13 @@ def create_mcp_server(
     *silent_owner* is the shared owner a Direct server fell back from because
     it did not answer the election, named when the profile stays busy.
     """
-    if auth_token is not None and role is not ServerRole.OWNER:
-        # A token on a stdio server protects nothing — there is no port to
-        # protect — and passing one is a caller that believes it built the
-        # owner. Refused rather than ignored, because the mistake it describes
-        # is an endpoint that was meant to be authenticated.
+    if auth_token is not None and role not in (ServerRole.OWNER, ServerRole.DIRECT):
+        # A proxy forwards to an owner and has nothing of its own to protect.
+        # Refused rather than ignored, because the mistake it describes is an
+        # endpoint that was meant to be authenticated.
         raise ValueError(
-            f"Only a daemon owner authenticates requests, not {role.value}"
+            f"Only a daemon owner or a direct server authenticates requests, "
+            f"not {role.value}"
         )
     if role is ServerRole.PROXY and proxy_backend is None:
         # A proxy registers no tools of its own, so without an owner it would
@@ -300,6 +300,17 @@ def create_mcp_server(
     # attach over the owner's life.
     if role.faces_a_client:
         mcp.add_middleware(UpdateNoticeMiddleware())
+
+    if role is ServerRole.DIRECT:
+        # Liveness for a hosting platform's probe. Answers nothing about
+        # LinkedIn or the session, so it is safe without the shared key.
+        from starlette.requests import Request
+        from starlette.responses import JSONResponse
+
+        @mcp.custom_route("/health", methods=["GET"])
+        async def _health(request: Request) -> JSONResponse:
+            del request
+            return JSONResponse({"status": "ok"})
 
     if proxy_backend is not None:
         from linkedin_mcp_server.daemon.forwarder import OwnerForwarder

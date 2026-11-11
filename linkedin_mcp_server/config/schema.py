@@ -419,6 +419,10 @@ class ServerConfig:
     port: int = 8000
     path: str = "/mcp"
     tool_timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS
+    # Shared key a streamable-http server demands as `Authorization: Bearer`.
+    # repr=False because the whole config is logged at DEBUG and those logs end
+    # up pasted into issue reports.
+    auth_token: str | None = field(default=None, repr=False)
     # Serve every stdio client from one browser-owning process instead of
     # giving each its own. Off while the supervision and liveness work is
     # unfinished: an owner that outlives its client must be provably unable to

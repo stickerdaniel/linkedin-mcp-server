@@ -1,0 +1,29 @@
+# Render Blueprint. The shared key is never stored here: Render asks for it the
+# first time the Blueprint is applied (sync: false), and it is changed from the
+# dashboard afterwards.
+services:
+  - type: web
+    name: linkedin-mcp-server
+    runtime: docker
+    plan: starter # a persistent disk needs a paid plan
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: TRANSPORT
+        value: streamable-http
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: "8000"
+      - key: MCP_AUTH_TOKEN
+        sync: false
+      # The public name Render gives the service, which the Host check would
+      # otherwise answer with 421. Replace with the real hostname, as a JSON list.
+      - key: FASTMCP_HTTP_ALLOWED_HOSTS
+        value: '["linkedin-mcp-server.onrender.com"]'
+      - key: USER_DATA_DIR
+        value: /home/pwuser/.linkedin-mcp
+    disk:
+      name: linkedin-profile
+      mountPath: /home/pwuser/.linkedin-mcp
+      sizeGB: 1
