@@ -43,7 +43,7 @@ Three rules earn their place by being easy to get wrong:
 from __future__ import annotations
 
 import re
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from linkedin_mcp_server.core.exceptions import InvalidReferenceError
 
@@ -135,6 +135,10 @@ _ORGANIZATION_ROUTES = {"company"}
 # through them, so a reference handed straight back is a caller following the
 # instructions. Refusing it would refuse this server's own output.
 _JOB_ROUTE = ("jobs", "view")
+# A job clicked in a search opens in the search's detail pane, and the address
+# bar keeps the search with the posting in `currentJobId`. link_metadata reads
+# the same parameter on the same two routes as a job reference.
+_JOB_SEARCH_ROUTES = (["jobs", "search"], ["jobs", "search-results"])
 _THREAD_ROUTE = ("messaging", "thread")
 
 # A LinkedIn job id is the number in /jobs/view/<id>. Everything that produces
@@ -470,8 +474,22 @@ def messaging_thread_url(thread_id: str, suffix: str = "") -> str:
     )
 
 
+def _job_open_in_search(value: str) -> str | None:
+    """The ``currentJobId`` of a job search address, or ``None``.
+
+    Exactly one: a search naming two jobs does not say which one was meant.
+    """
+    segments = _linkedin_segments(value, want="job_id")
+    if segments is None or [s.lower() for s in segments] not in _JOB_SEARCH_ROUTES:
+        return None
+    query = value.split("#", 1)[0].partition("?")[2]
+    ids = parse_qs(query).get("currentJobId", [])
+    return ids[0] if len(ids) == 1 and _NUMERIC_ID.fullmatch(ids[0]) else None
+
+
 def normalize_job_id(value: str) -> str:
     """The numeric id for a job posting, from the id or from a reference to it."""
+    value = _job_open_in_search(value.strip()) or value
     return normalize_opaque_id(value, field="job_id", route=_JOB_ROUTE, numeric=True)
 
 
