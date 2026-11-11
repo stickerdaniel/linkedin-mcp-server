@@ -140,6 +140,7 @@ def register_person_tools(
         location: str | None = None,
         network: StrList | None = None,
         current_company: str | None = None,
+        connection_of: str | None = None,
     ) -> dict[str, Any]:
         """
         Search for people on LinkedIn.
@@ -166,6 +167,15 @@ def register_person_tools(
                 exposed under references["about"]. For company-wide employee
                 demographics (location/education/function breakdown) plus a
                 slug-based lookup, use get_company_employees instead.
+            connection_of: Optional profile id (e.g. "ACoAAB...") limiting
+                results to that member's connections. Combine with
+                network=["F"] to list the mutual connections you share with
+                them; keywords may be "". Take the id from get_person_profile's
+                "profile_urn"; a vanity name is refused, because LinkedIn
+                ignores it and returns unfiltered results. LinkedIn also
+                drops the filter, without saying so, when the member is
+                3rd-degree or beyond (you share no connections): the result
+                is then your unfiltered network, not an empty list.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
@@ -180,17 +190,20 @@ def register_person_tools(
                 location=location,
                 network=network,
                 current_company=current_company,
+                connection_of=connection_of,
             )
         except FilterValidationError as e:
             raise CodedToolError(str(e), ErrorCode.INVALID_ARGUMENT) from e
 
         extractor = await get_ready_extractor(ctx, tool_name="search_people")
         logger.info(
-            "Searching people: keywords='%s', location='%s', network=%s, current_company='%s'",
+            "Searching people: keywords='%s', location='%s', network=%s, "
+            "current_company='%s', connection_of='%s'",
             keywords,
             location,
             network,
             current_company,
+            connection_of,
         )
 
         await ctx.report_progress(
@@ -203,6 +216,7 @@ def register_person_tools(
                 location,
                 network=network,
                 current_company=current_company,
+                connection_of=connection_of,
             )
         except FilterValidationError as e:
             # Validation messages carry actionable detail; surface
