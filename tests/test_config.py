@@ -1,7 +1,24 @@
+import ast
 import logging
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Literal
 
 import pytest
 
+from linkedin_mcp_server.config.loaders import (
+    IGNORED_OPTIONS,
+    SETTINGS,
+    EnvironmentKeys,
+    Option,
+    Setting,
+    Switch,
+    SwitchPair,
+    build_parser,
+    load_from_args,
+    load_from_env,
+)
 from linkedin_mcp_server.config.schema import (
     AppConfig,
     BROWSER_HANDOFF_MARGIN_SECONDS,
@@ -1335,3 +1352,810 @@ class TestProxyEncodedUserinfo:
         config = BrowserConfig(proxy_server="http://gate.example:7000")
         config.validate()
         assert config.proxy_server == "http://gate.example:7000"
+
+
+# ---------------------------------------------------------------------------
+# The settings table, case by case.
+#
+# Every setting in ``loaders.SETTINGS`` needs an entry in ``_CASES``, written
+# by hand: the expected fields are literals, never computed through a parser.
+# A setting added without one fails the mandatory-cases test, and once it has
+# one, every generic test below runs on it.
+
+
+_UNTOUCHED = "<untouched>"
+
+
+class _Keep:
+    """Expected: the fields still hold what they held before this source."""
+
+    def __repr__(self) -> str:
+        return "KEEP"
+
+
+KEEP = _Keep()
+
+
+@dataclass(frozen=True)
+class _Refused:
+    error: type[BaseException]
+    label: str
+
+    def __repr__(self) -> str:
+        return self.label
+
+
+#: A bad environment value, or a CLI value refused after parsing.
+REFUSED = _Refused(ConfigurationError, "REFUSED")
+#: argparse refuses it and exits with status 2.
+EXIT_2 = _Refused(SystemExit, "EXIT_2")
+
+
+@dataclass(frozen=True)
+class _Cases:
+    """The cases for one setting.
+
+    *kind* decides which case classes are mandatory: ``text`` takes any value
+    at load time, ``number`` has 0 as its falsy value, ``flag`` has False,
+    ``switch`` is a CLI-only flag without a value, and ``other`` refuses
+    nonsense without a falsy value of its own. A tuple expectation lists the
+    *fields* in order; a scalar stands for the one field.
+    """
+
+    kind: Literal["text", "number", "flag", "choice", "switch", "other"]
+    fields: tuple[str, ...]
+    env: dict[str | None, object] | None = None
+    cli: dict[tuple[str, ...], object] | None = None
+
+
+_CASES: dict[str, _Cases] = {
+    "HEADLESS": _Cases(
+        "flag",
+        ("browser.headless",),
+        env={
+            None: KEEP,
+            "": KEEP,
+            "  ": KEEP,
+            "true": True,
+            " FaLsE ": False,
+            "0": False,
+            "on": True,
+            "flase": REFUSED,
+        },
+        # Only the negative direction exists on the command line.
+        cli={(): KEEP, ("--no-headless",): False},
+    ),
+    "LOG_LEVEL": _Cases(
+        "choice",
+        ("server.log_level",),
+        env={
+            None: KEEP,
+            "": KEEP,
+            " ": REFUSED,
+            "  dEbUg ": "DEBUG",
+            "ERROR": "ERROR",
+            "CRITICAL": REFUSED,
+        },
+        cli={
+            (): KEEP,
+            ("--log-level", "DEBUG"): "DEBUG",
+            ("--log-level", ""): EXIT_2,
+            # Case-sensitive on the command line, unlike the variable.
+            ("--log-level", "debug"): EXIT_2,
+        },
+    ),
+    "TRANSPORT": _Cases(
+        "choice",
+        ("server.transport", "server.transport_explicitly_set"),
+        env={
+            None: KEEP,
+            "": KEEP,
+            " ": REFUSED,
+            " StDiO ": ("stdio", True),
+            "streamable-http": ("streamable-http", True),
+            "http": REFUSED,
+        },
+        cli={
+            (): KEEP,
+            ("--transport", "stdio"): ("stdio", True),
+            ("--transport", "streamable-http"): ("streamable-http", True),
+            ("--transport", ""): EXIT_2,
+            ("--transport", "STDIO"): EXIT_2,
+        },
+    ),
+    "HOST": _Cases(
+        "text",
+        ("server.host",),
+        env={None: KEEP, "": KEEP, " ": " ", "localhost": "localhost"},
+        cli={(): KEEP, ("--host", ""): KEEP, ("--host", "0.0.0.0"): "0.0.0.0"},
+    ),
+    "PORT": _Cases(
+        "number",
+        ("server.port",),
+        # 0 reaches AppConfig.validate(), which refuses it for both sources.
+        env={None: KEEP, "": KEEP, "0": 0, "9000": 9000, "80.5": REFUSED},
+        cli={
+            (): KEEP,
+            ("--port", "0"): 0,
+            ("--port", "9100"): 9100,
+            ("--port", ""): EXIT_2,
+            ("--port", "http"): EXIT_2,
+        },
+    ),
+    "HTTP_PATH": _Cases(
+        "text",
+        ("server.path",),
+        env={None: KEEP, "": KEEP, "/env": "/env"},
+        cli={(): KEEP, ("--path", ""): KEEP, ("--path", "/cli"): "/cli"},
+    ),
+    "SLOW_MO": _Cases(
+        "number",
+        ("browser.slow_mo",),
+        env={None: KEEP, "": KEEP, "0": 0, "250": 250, "fast": REFUSED},
+        cli={
+            (): KEEP,
+            ("--slow-mo", "0"): 0,
+            ("--slow-mo", "100"): 100,
+            ("--slow-mo", ""): EXIT_2,
+            ("--slow-mo", "1.5"): EXIT_2,
+        },
+    ),
+    "USER_AGENT": _Cases(
+        "other",
+        (),
+        env={None: KEEP, "": KEEP, " ": REFUSED, "CustomAgent/1.0": REFUSED},
+        cli={
+            (): KEEP,
+            ("--user-agent", ""): KEEP,
+            ("--user-agent", "CustomAgent/1.0"): REFUSED,
+        },
+    ),
+    "VIEWPORT": _Cases(
+        "other",
+        ("browser.viewport_width", "browser.viewport_height"),
+        # 0x0 reaches BrowserConfig.validate(), which refuses it.
+        env={
+            None: KEEP,
+            "": KEEP,
+            "1920X1080": (1920, 1080),
+            "0x0": (0, 0),
+            "wide": REFUSED,
+            "1x2x3": REFUSED,
+        },
+        cli={
+            (): KEEP,
+            ("--viewport", ""): KEEP,
+            ("--viewport", "800x600"): (800, 600),
+            ("--viewport", "0x0"): (0, 0),
+            ("--viewport", "wide"): REFUSED,
+        },
+    ),
+    "TIMEOUT": _Cases(
+        "number",
+        ("browser.default_timeout",),
+        # The variable converts only, so TIMEOUT=0 can be repaired by
+        # --timeout; the flag refuses 0 itself.
+        env={None: KEEP, "": KEEP, "0": 0, "8000": 8000, "slow": REFUSED},
+        cli={
+            (): KEEP,
+            ("--timeout", "10"): 10,
+            ("--timeout", "0"): EXIT_2,
+            ("--timeout", ""): EXIT_2,
+        },
+    ),
+    "TOOL_TIMEOUT": _Cases(
+        "number",
+        ("server.tool_timeout_seconds",),
+        env={
+            None: KEEP,
+            "": KEEP,
+            "0": REFUSED,
+            "90.5": 90.5,
+            "inf": REFUSED,
+            "abc": REFUSED,
+        },
+        cli={
+            (): KEEP,
+            ("--tool-timeout", "7.5"): 7.5,
+            ("--tool-timeout", "0"): EXIT_2,
+            ("--tool-timeout", ""): EXIT_2,
+        },
+    ),
+    **{
+        key: _Cases(
+            "number",
+            (field,),
+            env={
+                None: KEEP,
+                "": KEEP,
+                "0": 0.0,
+                "99": 99.0,  # clamped in validate(), not here
+                "-5": REFUSED,
+                "nan": REFUSED,
+            },
+            cli={
+                (): KEEP,
+                (flag, "0"): 0.0,
+                (flag, "12.5"): 12.5,
+                (flag, ""): EXIT_2,
+                (flag, "-1"): EXIT_2,
+            },
+        )
+        for key, flag, field in (
+            ("LOGIN_TIMEOUT", "--login-timeout", "browser.login_timeout_seconds"),
+            (
+                "LOGIN_INLINE_WAIT",
+                "--login-inline-wait",
+                "browser.login_inline_wait_seconds",
+            ),
+            ("BROWSER_WAIT", "--browser-wait", "browser.browser_wait_seconds"),
+            (
+                "BROWSER_MIN_HOLD",
+                "--browser-min-hold",
+                "browser.browser_min_hold_seconds",
+            ),
+            (
+                "BROWSER_IDLE_TIMEOUT",
+                "--browser-idle-timeout",
+                "browser.browser_idle_timeout_seconds",
+            ),
+        )
+    },
+    "CHROME_PATH": _Cases(
+        "text",
+        ("browser.chrome_path",),
+        env={
+            None: KEEP,
+            "": KEEP,
+            "${user_config.chrome_path}": KEEP,
+            "/usr/bin/chrome": "/usr/bin/chrome",
+        },
+        cli={
+            (): KEEP,
+            ("--chrome-path", ""): KEEP,
+            ("--chrome-path", "/opt/chrome"): "/opt/chrome",
+        },
+    ),
+    "PROXY_SERVER": _Cases(
+        "text",
+        ("browser.proxy_server",),
+        # The variable may carry credentials; the flag refuses them.
+        env={
+            None: KEEP,
+            "": KEEP,
+            "${user_config.proxy_server}": KEEP,
+            "http://u:p@gate:7000": "http://u:p@gate:7000",
+        },
+        cli={
+            (): KEEP,
+            ("--proxy-server", ""): KEEP,
+            ("--proxy-server", "http://cli:3128"): "http://cli:3128",
+            ("--proxy-server", "http://u:p@gate:7000"): EXIT_2,
+        },
+    ),
+    "PROXY_USERNAME": _Cases(
+        "text",
+        ("browser.proxy_username",),
+        env={
+            None: KEEP,
+            "": KEEP,
+            "${user_config.proxy_username}": KEEP,
+            " envuser ": " envuser ",
+        },
+        cli={
+            (): KEEP,
+            ("--proxy-username", ""): KEEP,
+            ("--proxy-username", "cliuser"): "cliuser",
+        },
+    ),
+    "PROXY_BYPASS": _Cases(
+        "text",
+        ("browser.proxy_bypass",),
+        env={
+            None: KEEP,
+            "": KEEP,
+            "${user_config.proxy_bypass}": KEEP,
+            ".internal": ".internal",
+        },
+        cli={
+            (): KEEP,
+            ("--proxy-bypass", ""): KEEP,
+            ("--proxy-bypass", ".cli"): ".cli",
+        },
+    ),
+    # Environment only, and never stripped.
+    "PROXY_PASSWORD": _Cases(
+        "text",
+        ("browser.proxy_password",),
+        env={
+            None: KEEP,
+            "": KEEP,
+            "${user_config.proxy_password}": KEEP,
+            "  padded  ": "  padded  ",
+            "${user_config.token}": "${user_config.token}",
+        },
+    ),
+    **{
+        flag: _Cases("switch", (field,), cli={(): KEEP, (flag,): True})
+        for flag, field in (
+            ("--login", "server.login"),
+            ("--login-viewer", "server.login_viewer"),
+            ("--status", "server.status"),
+            ("--logout", "server.logout"),
+            ("--claim-profile-root", "server.claim_profile_root"),
+        )
+    },
+    "USER_DATA_DIR": _Cases(
+        "text",
+        ("browser.user_data_dir",),
+        env={None: KEEP, "": KEEP, "/env/profile": "/env/profile"},
+        cli={
+            (): KEEP,
+            ("--user-data-dir", ""): KEEP,
+            ("--user-data-dir", "/cli/profile"): "/cli/profile",
+        },
+    ),
+    "INSTALLER_TEMP_DIR": _Cases(
+        "text",
+        ("browser.installer_temp_dir",),
+        env={None: KEEP, "": KEEP, "/env/temp": "/env/temp"},
+        cli={
+            (): KEEP,
+            ("--installer-temp-dir", ""): KEEP,
+            ("--installer-temp-dir", "/cli/temp"): "/cli/temp",
+        },
+    ),
+    "IMPORT_FROM_BROWSER": _Cases(
+        "text",
+        ("server.import_from_browser",),
+        # An empty variable is unset; an explicit empty flag means auto.
+        # Unknown browsers are refused by ServerConfig.validate().
+        env={
+            None: KEEP,
+            "": KEEP,
+            " ": "auto",
+            " Brave ": "brave",
+            "firefox": "firefox",
+        },
+        cli={
+            (): KEEP,
+            ("--import-from-browser",): "auto",
+            ("--import-from-browser=",): "auto",
+            ("--import-from-browser", ""): "auto",
+            ("--import-from-browser", " Chrome "): "chrome",
+        },
+    ),
+    **{
+        key: _Cases(
+            "flag",
+            (field,),
+            env={
+                None: KEEP,
+                "": KEEP,
+                " ": KEEP,
+                "false": False,
+                "1": True,
+                "flase": REFUSED,
+            },
+            cli={
+                (): KEEP,
+                (on,): True,
+                (off,): False,
+                (on, off): EXIT_2,
+            },
+        )
+        for key, on, off, field in (
+            (
+                "AUTO_IMPORT_FROM_BROWSER",
+                "--auto-import",
+                "--no-auto-import",
+                "browser.auto_import_from_browser",
+            ),
+            ("DAEMON_ENABLED", "--daemon", "--no-daemon", "server.daemon_enabled"),
+        )
+    },
+}
+
+
+def _name(setting: Setting) -> str:
+    """The environment variable, or the flag of a command-line-only setting."""
+    if setting.env is not None:
+        return setting.env.key
+    assert isinstance(setting.cli, Switch)
+    return setting.cli.flag
+
+
+def _field(config: AppConfig, path: str) -> object:
+    section, name = path.split(".")
+    return getattr(getattr(config, section), name)
+
+
+def _with(fields: tuple[str, ...], values: tuple[object, ...]) -> AppConfig:
+    config = AppConfig()
+    for path, value in zip(fields, values, strict=True):
+        section, name = path.split(".")
+        setattr(getattr(config, section), name, value)
+    return config
+
+
+def _values(expected: object) -> tuple[object, ...]:
+    return expected if isinstance(expected, tuple) else (expected,)
+
+
+def _untouched(cases: _Cases) -> AppConfig:
+    """A configuration whose fields for *cases* hold a marker no source writes.
+
+    So dropping a value cannot pass by coinciding with the default.
+    """
+    return _with(cases.fields, (_UNTOUCHED,) * len(cases.fields))
+
+
+def _channels(source: str) -> list[tuple[str, object, object]]:
+    return [
+        (name, given, expected)
+        for name, cases in _CASES.items()
+        for given, expected in ((getattr(cases, source) or {}).items())
+    ]
+
+
+def _set_env(monkeypatch: pytest.MonkeyPatch, values: dict[str, str | None]) -> None:
+    for name, key in vars(EnvironmentKeys).items():
+        if not name.startswith("_"):
+            monkeypatch.delenv(key, raising=False)
+    for key, value in values.items():
+        if value is not None:
+            monkeypatch.setenv(key, value)
+
+
+def _id(value: object) -> str:
+    return value if isinstance(value, str) else repr(value)
+
+
+def _assert_result(
+    load: Callable[[], AppConfig],
+    fields: tuple[str, ...],
+    expected: object,
+    *,
+    before: tuple[object, ...],
+    source: str,
+) -> None:
+    """Load, and compare the whole configuration, so a stray write shows too.
+
+    A refusal has to name *source*, or exit with status 2 from argparse.
+    """
+    if isinstance(expected, _Refused):
+        with pytest.raises(expected.error) as excinfo:
+            load()
+        if isinstance(excinfo.value, SystemExit):
+            assert excinfo.value.code == 2
+        else:
+            assert source in str(excinfo.value)
+        return
+    values = before if expected is KEEP else _values(expected)
+    assert asdict(load()) == asdict(_with(fields, values))
+
+
+class TestSettingsTable:
+    """Every setting, through every channel it has, against written cases."""
+
+    def test_every_environment_key_belongs_to_a_setting(self):
+        keys = {
+            value
+            for name, value in vars(EnvironmentKeys).items()
+            if not name.startswith("_") and isinstance(value, str)
+        }
+        assert keys == {setting.env.key for setting in SETTINGS if setting.env}
+
+    def test_every_option_belongs_to_a_setting_or_is_ignored(self):
+        flags = set(IGNORED_OPTIONS)
+        for setting in SETTINGS:
+            match setting.cli:
+                case SwitchPair(on=on, off=off):
+                    flags |= {on, off}
+                case Option(flag=flag) | Switch(flag=flag):
+                    flags.add(flag)
+        parsed = {
+            option
+            for option in build_parser()._option_string_actions
+            if option.startswith("--")
+        }
+        assert parsed == flags
+
+    @pytest.mark.parametrize("setting", SETTINGS, ids=_name)
+    def test_every_setting_has_the_mandatory_cases(self, setting: Setting):
+        cases = _CASES.get(_name(setting))
+        assert cases is not None, f"{_name(setting)} has no entry in _CASES"
+        assert (cases.env is not None) == (setting.env is not None)
+        assert (cases.cli is not None) == (setting.cli is not None)
+
+        default = tuple(_field(AppConfig(), path) for path in cases.fields)
+
+        def values(table: dict) -> list[tuple[object, ...]]:
+            return [
+                _values(expected)
+                for expected in table.values()
+                if expected is not KEEP and not isinstance(expected, _Refused)
+            ]
+
+        def refuses(table: dict) -> bool:
+            return any(isinstance(e, _Refused) for e in table.values())
+
+        if cases.env is not None:
+            assert {None, ""} <= set(cases.env), "absence and the empty value"
+            if cases.fields:
+                assert any(v != default for v in values(cases.env)), "a value"
+            if cases.kind == "number":
+                assert "0" in cases.env
+            if cases.kind == "flag":
+                assert (False,) in values(cases.env)
+            if cases.kind != "text":
+                assert refuses(cases.env)
+        if cases.cli is not None:
+            assert () in cases.cli, "absence"
+            if cases.fields:
+                assert any(v != default for v in values(cases.cli)), "a value"
+            if isinstance(setting.cli, Option):
+                flag = setting.cli.flag
+                assert (flag, "") in cases.cli, "the explicit empty value"
+                if cases.kind == "number":
+                    assert (flag, "0") in cases.cli
+                if cases.kind != "text":
+                    assert refuses(cases.cli)
+            if isinstance(setting.cli, SwitchPair):
+                assert (False,) in values(cases.cli)
+
+    @pytest.mark.parametrize(
+        ("name", "raw", "expected"),
+        _channels("env"),
+        ids=_id,
+    )
+    def test_environment(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        name: str,
+        raw: str | None,
+        expected: object,
+    ):
+        cases = _CASES[name]
+        _set_env(monkeypatch, {name: raw})
+        _assert_result(
+            lambda: load_from_env(_untouched(cases)),
+            cases.fields,
+            expected,
+            before=(_UNTOUCHED,) * len(cases.fields),
+            source=name,
+        )
+
+    @pytest.mark.parametrize(
+        ("name", "argv", "expected"),
+        _channels("cli"),
+        ids=_id,
+    )
+    def test_command_line(self, name: str, argv: tuple[str, ...], expected: object):
+        cases = _CASES[name]
+        _assert_result(
+            lambda: load_from_args(_untouched(cases), list(argv)),
+            cases.fields,
+            expected,
+            before=(_UNTOUCHED,) * len(cases.fields),
+            source=argv[0] if argv else name,
+        )
+
+    @pytest.mark.parametrize(
+        ("name", "argv", "expected"),
+        [
+            (name, argv, expected)
+            for name, argv, expected in _channels("cli")
+            if _CASES[name].env is not None
+            and _CASES[name].fields
+            and not isinstance(expected, _Refused)
+        ],
+        ids=_id,
+    )
+    def test_the_command_line_wins_over_the_environment(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        name: str,
+        argv: tuple[str, ...],
+        expected: object,
+    ):
+        """A given value overrides the variable; absence and ignored empties do not.
+
+        Paired with an environment value that differs from what the flag sets,
+        so a flag that was given but dropped (0, False) cannot pass.
+        """
+        cases = _CASES[name]
+        assert cases.env is not None
+        flag_values = None if expected is KEEP else _values(expected)
+        raw, from_env = next(
+            (raw, _values(result))
+            for raw, result in cases.env.items()
+            if result is not KEEP
+            and not isinstance(result, _Refused)
+            and _values(result) != flag_values
+        )
+        _set_env(monkeypatch, {name: raw})
+        _assert_result(
+            lambda: load_from_args(load_from_env(_untouched(cases)), list(argv)),
+            cases.fields,
+            expected,
+            before=from_env,
+            source=name,
+        )
+
+    @pytest.mark.parametrize(
+        "setting",
+        [s for s in SETTINGS if s.env and _CASES[_name(s)].kind != "text"],
+        ids=_name,
+    )
+    def test_the_environment_refuses_nonsense(
+        self, monkeypatch: pytest.MonkeyPatch, setting: Setting
+    ):
+        assert setting.env is not None
+        _set_env(monkeypatch, {setting.env.key: "nonsense"})
+        with pytest.raises(ConfigurationError, match=setting.env.key):
+            load_from_env(AppConfig())
+
+    @pytest.mark.parametrize(
+        "setting",
+        [
+            s
+            for s in SETTINGS
+            if isinstance(s.cli, Option) and _CASES[_name(s)].kind != "text"
+        ],
+        ids=_name,
+    )
+    def test_the_command_line_refuses_nonsense_in_its_declared_phase(
+        self, setting: Setting
+    ):
+        """In the phase the cases name: argparse's exit 2, or ConfigurationError."""
+        assert isinstance(setting.cli, Option)
+        cli = _CASES[_name(setting)].cli
+        assert cli is not None
+        (phase,) = {e.error for e in cli.values() if isinstance(e, _Refused)}
+        with pytest.raises(phase):
+            load_from_args(AppConfig(), [setting.cli.flag, "nonsense"])
+
+
+_ENVIRONMENT_NAMES = {"environ", "getenv", "environb", "getenvb"}
+
+
+def _raw_read_nodes(tree: ast.AST) -> list[tuple[ast.AST, str]]:
+    """Every node in *tree* that reaches the process environment, with its owner.
+
+    Import-aware, so ``import os as x`` then ``x.getenv(...)`` and ``from os
+    import environ as e`` count as much as ``os.environ``. The owner is the
+    enclosing function, or ``<module>`` for a read outside any function.
+    """
+    modules = {"os"}
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules |= {a.asname or a.name for a in node.names if a.name == "os"}
+        elif isinstance(node, ast.ImportFrom) and node.module == "os":
+            names |= {
+                a.asname or a.name for a in node.names if a.name in _ENVIRONMENT_NAMES
+            }
+    found: list[tuple[ast.AST, str]] = []
+
+    def visit(node: ast.AST, owner: str) -> None:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            owner = node.name
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr in _ENVIRONMENT_NAMES
+            and isinstance(node.value, ast.Name)
+            and node.value.id in modules
+        ):
+            found.append((node, owner))
+        elif isinstance(node, ast.Name) and node.id in names:
+            found.append((node, owner))
+        elif isinstance(node, ast.ImportFrom) and node.module == "os":
+            if {a.name for a in node.names} & _ENVIRONMENT_NAMES:
+                found.append((node, owner))
+        for child in ast.iter_child_nodes(node):
+            visit(child, owner)
+
+    visit(tree, "<module>")
+    return found
+
+
+def _raw_reads(source: str) -> set[str]:
+    """Functions in *source* that touch the process environment."""
+    return {owner for _, owner in _raw_read_nodes(ast.parse(source))}
+
+
+def _placeholder_keys_read(source: str) -> bool:
+    """Whether ``_warn_about_placeholders`` asks the environment only for
+    the keys of ``_MCPB_PLACEHOLDERS``.
+
+    Every environment read inside it, in any spelling the detector above
+    knows, has to be the ``.environ`` of an ``<os>.environ.get(key)`` call
+    whose ``key`` iterates ``_MCPB_PLACEHOLDERS``. The reads come from the
+    whole module, so an alias imported at module level is resolved inside
+    the function too.
+    """
+    tree = ast.parse(source)
+    (function,) = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_warn_about_placeholders"
+    ]
+    keys = {
+        generator.target.elts[0].id
+        for generator in ast.walk(function)
+        if isinstance(generator, ast.comprehension)
+        and ast.unparse(generator.iter) == "_MCPB_PLACEHOLDERS.items()"
+        and isinstance(generator.target, ast.Tuple)
+        and isinstance(generator.target.elts[0], ast.Name)
+    }
+    inside = {id(node) for node in ast.walk(function)}
+    reads = {id(node) for node, _ in _raw_read_nodes(tree)} & inside
+    allowed = {
+        id(node.func.value)
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "environ"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id in keys
+    }
+    return bool(reads) and reads == allowed
+
+
+class TestTheEnvironmentIsReadInOnePlace:
+    """``_env`` is the one raw read, so every setting gets its placeholder rule.
+
+    The placeholder warning is the one other reader, and it may ask only for
+    the keys of ``_MCPB_PLACEHOLDERS``.
+    """
+
+    ALLOWED = {"_env", "_warn_about_placeholders"}
+
+    @staticmethod
+    def _source() -> str:
+        from linkedin_mcp_server.config import loaders
+
+        return Path(loaders.__file__).read_text(encoding="utf-8")
+
+    def test_the_loader_reads_the_environment_only_through_env(self):
+        assert _raw_reads(self._source()) == self.ALLOWED
+
+    def test_the_placeholder_warning_reads_only_placeholder_keys(self):
+        source = self._source()
+        assert _placeholder_keys_read(source)
+
+        for extra, imported in (
+            ("os.environ.get('HOST')", ""),
+            ("os.getenv('HOST')", ""),
+            ("environment.getenv('HOST')", "\nimport os as environment\n"),
+        ):
+            widened = (
+                source.replace(
+                    "if os.environ.get(key) == literal",
+                    f"if os.environ.get(key) == literal or {extra}",
+                )
+                + imported
+            )
+            assert widened != source
+            assert not _placeholder_keys_read(widened), extra
+
+    @pytest.mark.parametrize(
+        "added",
+        [
+            "def _extra():\n    return os.environ.get('HOST')\n",
+            "def _extra():\n    return os.environ['HOST']\n",
+            "def _extra():\n    return os.getenv('HOST')\n",
+            "def _extra():\n    from os import environ\n    return environ\n",
+            "VALUE = os.environ.copy()\n",
+            "import os as environment\n\ndef _extra():\n"
+            "    return environment.getenv('PROXY_SERVER')\n",
+            "def _extra():\n    from os import getenv as read\n"
+            "    return read('HOST')\n",
+        ],
+    )
+    def test_a_second_raw_read_is_caught(self, added: str):
+        assert _raw_reads(self._source() + "\n" + added) - self.ALLOWED

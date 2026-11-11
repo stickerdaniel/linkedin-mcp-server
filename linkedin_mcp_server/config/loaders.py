@@ -9,7 +9,9 @@ import logging
 import math
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import Literal, Never, NoReturn
 from urllib.parse import unquote, urlsplit
 
 from dotenv import load_dotenv
@@ -202,24 +204,669 @@ def _env(key: str) -> str | None:
     return value
 
 
-def _env_flag(key: str) -> bool | None:
-    """Read an on/off environment variable, or None when it is unset or blank.
+class SettingError(ValueError):
+    """A value a setting cannot take, raised by the parsers below.
+
+    Reported as ``Invalid <name>: '<raw>'. <reason>``, where the name is the
+    environment variable or the option the value came through.
+    """
+
+    def describe(self, name: str, raw: str) -> str:
+        return f"Invalid {name}: '{raw}'. {self}"
+
+
+class SettingRemoved(SettingError):
+    """A setting refused whatever its value, with an explanation of its own.
+
+    The message is a template with a ``{setting}`` slot and never quotes the
+    value.
+    """
+
+    def describe(self, name: str, raw: str) -> str:
+        return str(self).format(setting=name)
+
+
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+TRANSPORTS = ("stdio", "streamable-http")
+
+
+def _text(raw: str) -> str:
+    return raw
+
+
+def _flag(raw: str) -> bool:
+    """An on/off value.
 
     Refused rather than ignored, as LOG_LEVEL and TRANSPORT are: a value outside
     TRUTHY_VALUES and FALSY_VALUES is a typo, and ignoring it kept the default
     while reading as though the setting had applied.
     """
-    raw = os.environ.get(key)
-    if raw is None or not (value := _normalize_env(raw)):
-        return None
+    value = _normalize_env(raw)
     if value in TRUTHY_VALUES:
         return True
     if value in FALSY_VALUES:
         return False
-    raise ConfigurationError(
-        f"Invalid {key}: '{raw}'. Must be one of "
-        f"{', '.join(TRUTHY_VALUES + FALSY_VALUES)}."
-    )
+    raise SettingError(f"Must be one of {', '.join(TRUTHY_VALUES + FALSY_VALUES)}.")
+
+
+def _log_level(raw: str) -> str:
+    """A log level in any case.
+
+    Refused rather than ignored, as TRANSPORT is: a value outside this set is a
+    typo, and ignoring it let the server report the default level while reading
+    as though the setting had applied.
+    """
+    value = raw.strip().upper()
+    if value not in LOG_LEVELS:
+        raise SettingError("Must be one of 'DEBUG', 'INFO', 'WARNING' or 'ERROR'.")
+    return value
+
+
+def _transport(raw: str) -> str:
+    value = _normalize_env(raw)
+    if value not in TRANSPORTS:
+        raise SettingError("Must be 'stdio' or 'streamable-http'.")
+    return value
+
+
+def _integer(raw: str) -> int:
+    try:
+        return int(raw)
+    except ValueError:
+        raise SettingError("Must be an integer.")
+
+
+def _finite(*, positive: bool, note: str = "") -> Callable[[str], float]:
+    """A parser for finite numbers above zero, or from zero when not *positive*.
+
+    *note* follows the bound in the refusal, to say what zero means.
+    """
+    bound = "positive" if positive else "non-negative"
+
+    def parse(raw: str) -> float:
+        try:
+            value = float(raw)
+        except ValueError:
+            raise SettingError("Must be a number.")
+        if not (math.isfinite(value) and (value > 0 if positive else value >= 0)):
+            raise SettingError(f"Must be a {bound} finite number{note}.")
+        return value
+
+    return parse
+
+
+def _viewport(raw: str) -> tuple[int, int]:
+    try:
+        width, height = raw.lower().split("x")
+        return int(width), int(height)
+    except ValueError:
+        raise SettingError("Must be in format WxH (e.g., 1280x720).")
+
+
+def _browser_to_import(raw: str) -> str:
+    """A browser key, where a blank value means "auto"."""
+    return _normalize_env(raw) or "auto"
+
+
+def _user_agent(raw: str) -> NoReturn:
+    raise SettingRemoved(_USER_AGENT_REMOVED)
+
+
+def _browser[T](name: str) -> Callable[[AppConfig, T], None]:
+    """Store a setting's value in the browser field *name*."""
+    return lambda config, value: setattr(config.browser, name, value)
+
+
+def _server[T](name: str) -> Callable[[AppConfig, T], None]:
+    """Store a setting's value in the server field *name*."""
+    return lambda config, value: setattr(config.server, name, value)
+
+
+def _set_transport(config: AppConfig, transport: str) -> None:
+    _server("transport")(config, transport)
+    config.server.transport_explicitly_set = True
+
+
+def _set_viewport(config: AppConfig, size: tuple[int, int]) -> None:
+    config.browser.viewport_width, config.browser.viewport_height = size
+
+
+def _never_applied(config: AppConfig, value: Never) -> None:
+    """For a setting whose parser refuses every value."""
+
+
+def _dest(flag: str) -> str:
+    return flag.removeprefix("--").replace("-", "_")
+
+
+@dataclass(frozen=True)
+class Env[T]:
+    """How a setting is read from the environment variable *key*.
+
+    The raw read is ``_env()``, so an empty value or an MCPB placeholder is
+    unset before *parse* sees it. *blank* says what a value of only whitespace
+    means: ``unset``, or ``parse``, which hands it to *parse* like any other.
+    """
+
+    key: str
+    parse: Callable[[str], T]
+    blank: Literal["unset", "parse"] = "parse"
+
+
+@dataclass(frozen=True, kw_only=True)
+class Option[T]:
+    """A value option, ``--flag VALUE``.
+
+    *parse* runs in the phase *phase* names. As the argparse ``type``, a bad
+    value exits with status 2 before anything is loaded; at ``load``, it raises
+    ConfigurationError the way a bad environment value does. *cli_empty* says
+    what an explicit ``--flag ""`` means: ``ignore`` leaves the value from the
+    environment alone, ``auto`` stands for *const*, and ``parse`` hands it to
+    *parse*, which refuses it. A *const* also makes the value optional, so the
+    bare flag means *const*.
+    """
+
+    flag: str
+    parse: Callable[[str], T]
+    phase: Literal["argparse", "load"] = "argparse"
+    cli_empty: Literal["ignore", "auto", "parse"]
+    choices: tuple[str, ...] | None = None
+    const: str | None = None
+    metavar: str | None = None
+    help: str
+
+    def add_to(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            self.flag,
+            dest=_dest(self.flag),
+            type=self.parse if self.phase == "argparse" else str,
+            choices=self.choices,
+            nargs=None if self.const is None else "?",
+            const=self.const,
+            default=None,
+            metavar=self.metavar,
+            help=self.help,
+        )
+
+    def given(self, args: argparse.Namespace) -> T | None:
+        raw = getattr(args, _dest(self.flag))
+        if raw is None or (raw == "" and self.cli_empty == "ignore"):
+            return None
+        if self.phase == "argparse":
+            # Already converted: argparse ran parse as the option's type.
+            return raw
+        if raw == "" and self.cli_empty == "auto" and self.const is not None:
+            raw = self.const
+        try:
+            return self.parse(raw)
+        except SettingError as error:
+            raise ConfigurationError(error.describe(self.flag, raw))
+
+
+@dataclass(frozen=True, kw_only=True)
+class Switch[T]:
+    """A flag without a value, which sets *value* when given."""
+
+    flag: str
+    value: T
+    help: str
+
+    def add_to(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            self.flag, dest=_dest(self.flag), action="store_true", help=self.help
+        )
+
+    def given(self, args: argparse.Namespace) -> T | None:
+        return self.value if getattr(args, _dest(self.flag)) else None
+
+
+@dataclass(frozen=True, kw_only=True)
+class SwitchPair:
+    """``--on`` and ``--off``, mutually exclusive; given neither, nothing changes."""
+
+    on: str
+    off: str
+    dest: str
+    help_on: str
+    help_off: str
+
+    def add_to(self, parser: argparse.ArgumentParser) -> None:
+        group = parser.add_mutually_exclusive_group()
+        group.add_argument(
+            self.on,
+            dest=self.dest,
+            action="store_true",
+            default=None,
+            help=self.help_on,
+        )
+        group.add_argument(
+            self.off,
+            dest=self.dest,
+            action="store_false",
+            default=None,
+            help=self.help_off,
+        )
+
+    def given(self, args: argparse.Namespace) -> bool | None:
+        return getattr(args, self.dest)
+
+
+@dataclass(frozen=True, kw_only=True)
+class Setting[T]:
+    """One setting: every way it can be given, and where its value lands.
+
+    Both loaders iterate ``SETTINGS``, and ``build_parser()`` generates the
+    command line from it, so a setting is declared once. The environment phase
+    converts only; range checks stay in ``AppConfig.validate()``, which runs
+    after both, so ``TIMEOUT=0`` can still be repaired by ``--timeout 10``.
+    """
+
+    apply: Callable[[AppConfig, T], None]
+    env: Env[T] | None = None
+    cli: Option[T] | Switch[T] | SwitchPair | None = None
+
+
+# In the order ``--help`` lists them.
+SETTINGS: tuple[Setting, ...] = (
+    Setting(
+        env=Env(EnvironmentKeys.HEADLESS, _flag, blank="unset"),
+        # Only the negative direction exists on the command line.
+        cli=Switch(
+            flag="--no-headless",
+            value=False,
+            help="Run browser with a visible window (useful for login and debugging)",
+        ),
+        apply=_browser("headless"),
+    ),
+    Setting(
+        env=Env(EnvironmentKeys.LOG_LEVEL, _log_level),
+        cli=Option(
+            flag="--log-level",
+            parse=str,
+            cli_empty="parse",
+            choices=LOG_LEVELS,
+            help="Set logging level (default: WARNING)",
+        ),
+        apply=_server("log_level"),
+    ),
+    Setting(
+        env=Env(EnvironmentKeys.TRANSPORT, _transport),
+        cli=Option(
+            flag="--transport",
+            parse=str,
+            cli_empty="parse",
+            choices=TRANSPORTS,
+            help="Specify the transport mode (stdio or streamable-http)",
+        ),
+        apply=_set_transport,
+    ),
+    Setting(
+        env=Env(EnvironmentKeys.HOST, _text),
+        cli=Option(
+            flag="--host",
+            parse=str,
+            cli_empty="ignore",
+            help="HTTP server host (default: 127.0.0.1)",
+        ),
+        apply=_server("host"),
+    ),
+    Setting(
+        # Range checked in AppConfig.validate(), so --port 0 is refused there.
+        env=Env(EnvironmentKeys.PORT, _integer),
+        cli=Option(
+            flag="--port",
+            parse=int,
+            cli_empty="parse",
+            help="HTTP server port (default: 8000)",
+        ),
+        apply=_server("port"),
+    ),
+    Setting(
+        env=Env(EnvironmentKeys.HTTP_PATH, _text),
+        cli=Option(
+            flag="--path",
+            parse=str,
+            cli_empty="ignore",
+            help="HTTP server path (default: /mcp)",
+        ),
+        apply=_server("path"),
+    ),
+    Setting(
+        env=Env(EnvironmentKeys.SLOW_MO, _integer),
+        cli=Option(
+            flag="--slow-mo",
+            parse=int,
+            cli_empty="parse",
+            metavar="MS",
+            help="Slow down browser actions by N milliseconds (debugging)",
+        ),
+        apply=_browser("slow_mo"),
+    ),
+    Setting(
+        env=Env(EnvironmentKeys.USER_AGENT, _user_agent),
+        # Still accepted by the parser so using it produces the explanation
+        # above rather than argparse's bare "unrecognized arguments".
+        cli=Option(
+            flag="--user-agent",
+            parse=_user_agent,
+            phase="load",
+            cli_empty="ignore",
+            help=argparse.SUPPRESS,
+        ),
+        apply=_never_applied,
+    ),
+    Setting(
+        env=Env(EnvironmentKeys.VIEWPORT, _viewport),
+        cli=Option(
+            flag="--viewport",
+            parse=_viewport,
+            phase="load",
+            cli_empty="ignore",
+            metavar="WxH",
+            help=(
+                "Browser viewport size (default: 1280x720). Applies to the normal "
+                "windowless mode only; a headed launch uses the real window size."
+            ),
+        ),
+        apply=_set_viewport,
+    ),
+    Setting(
+        env=Env(EnvironmentKeys.TIMEOUT, _integer),
+        cli=Option(
+            flag="--timeout",
+            parse=positive_int,
+            cli_empty="parse",
+            metavar="MS",
+            help="Browser timeout for page operations in milliseconds (default: 5000)",
+        ),
+        apply=_browser("default_timeout"),
+    ),
+    Setting(
+        env=Env(EnvironmentKeys.TOOL_TIMEOUT, _finite(positive=True)),
+        cli=Option(
+            flag="--tool-timeout",
+            parse=positive_float,
+            cli_empty="parse",
+            metavar="SECONDS",
+            help="Per-tool MCP execution timeout in seconds (default: 180.0)",
+        ),
+        apply=_server("tool_timeout_seconds"),
+    ),
+    Setting(
+        env=Env(
+            EnvironmentKeys.LOGIN_TIMEOUT,
+            _finite(positive=False, note=" (0 = no limit)"),
+        ),
+        cli=Option(
+            flag="--login-timeout",
+            parse=non_negative_float,
+            cli_empty="parse",
+            metavar="SECONDS",
+            help="Manual login wait timeout in seconds (default: 1800; 0 = no limit)",
+        ),
+        apply=_browser("login_timeout_seconds"),
+    ),
+    Setting(
+        # Clamped in BrowserConfig.validate(), as the three below are.
+        env=Env(
+            EnvironmentKeys.LOGIN_INLINE_WAIT,
+            _finite(positive=False, note=" (0 = no inline wait)"),
+        ),
+        cli=Option(
+            flag="--login-inline-wait",
+            parse=non_negative_float,
+            cli_empty="parse",
+            metavar="SECONDS",
+            help=(
+                "Bounded inline wait for a tool call to resume after login completes, "
+                "in seconds (default: 25, max 45; 0 = return immediately)"
+            ),
+        ),
+        apply=_browser("login_inline_wait_seconds"),
+    ),
+    Setting(
+        env=Env(EnvironmentKeys.BROWSER_WAIT, _finite(positive=False)),
+        cli=Option(
+            flag="--browser-wait",
+            parse=non_negative_float,
+            cli_empty="parse",
+            metavar="SECONDS",
+            help=(
+                "How long to wait for another server process to hand over the shared "
+                "browser, in seconds (default: 25, max 45; 0 = report busy at once)"
+            ),
+        ),
+        apply=_browser("browser_wait_seconds"),
+    ),
+    Setting(
+        env=Env(EnvironmentKeys.BROWSER_MIN_HOLD, _finite(positive=False)),
+        cli=Option(
+            flag="--browser-min-hold",
+            parse=non_negative_float,
+            cli_empty="parse",
+            metavar="SECONDS",
+            help=(
+                "Shortest time this process keeps the shared browser before honouring "
+                "a handoff request, in seconds (default: 20, clamped below "
+                "--browser-wait; 0 = hand over after every tool call)"
+            ),
+        ),
+        apply=_browser("browser_min_hold_seconds"),
+    ),
+    Setting(
+        env=Env(EnvironmentKeys.BROWSER_IDLE_TIMEOUT, _finite(positive=False)),
+        cli=Option(
+            flag="--browser-idle-timeout",
+            parse=non_negative_float,
+            cli_empty="parse",
+            metavar="SECONDS",
+            help=(
+                "Close an idle browser and release the shared profile after this many "
+                "seconds without a tool call (default: 600; 0 = keep it open)"
+            ),
+        ),
+        apply=_browser("browser_idle_timeout_seconds"),
+    ),
+    Setting(
+        env=Env(EnvironmentKeys.CHROME_PATH, _text),
+        cli=Option(
+            flag="--chrome-path",
+            parse=str,
+            cli_empty="ignore",
+            metavar="PATH",
+            help="Path to Chrome/Chromium executable (for custom browser installations)",
+        ),
+        apply=_browser("chrome_path"),
+    ),
+    Setting(
+        # Validated and split in BrowserConfig.validate(). Unlike the CLI flag,
+        # PROXY_SERVER may carry the credentials a provider hands out: the
+        # environment is not world-readable the way a process argument list is.
+        env=Env(EnvironmentKeys.PROXY_SERVER, _text),
+        cli=Option(
+            flag="--proxy-server",
+            parse=credential_free_url,
+            cli_empty="ignore",
+            metavar="URL",
+            help=(
+                "Route the browser through a proxy, as scheme://host:port "
+                "(http, https, socks4 or socks5). Chromium cannot authenticate to "
+                "a SOCKS proxy, so credentials require an http(s) endpoint"
+            ),
+        ),
+        apply=_browser("proxy_server"),
+    ),
+    Setting(
+        env=Env(EnvironmentKeys.PROXY_USERNAME, _text),
+        cli=Option(
+            flag="--proxy-username",
+            parse=str,
+            cli_empty="ignore",
+            metavar="USER",
+            help=(
+                "Username for the proxy. Visible in the process list like any "
+                "argument, which is acceptable because it grants nothing without "
+                "the password; that one has no flag on purpose, set PROXY_PASSWORD"
+            ),
+        ),
+        apply=_browser("proxy_username"),
+    ),
+    Setting(
+        env=Env(EnvironmentKeys.PROXY_BYPASS, _text),
+        cli=Option(
+            flag="--proxy-bypass",
+            parse=str,
+            cli_empty="ignore",
+            metavar="HOSTS",
+            help="Comma-separated hosts to reach directly instead of via the proxy",
+        ),
+        apply=_browser("proxy_bypass"),
+    ),
+    # Environment only, never stripped: credential_free_url() says why there is
+    # no flag, and _env() why a space at either end stays.
+    Setting(
+        env=Env(EnvironmentKeys.PROXY_PASSWORD, _text),
+        apply=_browser("proxy_password"),
+    ),
+    Setting(
+        cli=Switch(
+            flag="--login",
+            value=True,
+            help="Login interactively via browser and save persistent profile",
+        ),
+        apply=_server("login"),
+    ),
+    Setting(
+        cli=Switch(
+            flag="--login-viewer",
+            value=True,
+            help=(
+                "Expose the --login browser at an authenticated noVNC URL in Docker "
+                "(requires --login and -p 127.0.0.1:6080:6080)"
+            ),
+        ),
+        apply=_server("login_viewer"),
+    ),
+    Setting(
+        cli=Switch(
+            flag="--status",
+            value=True,
+            help="Check if current session is valid and exit",
+        ),
+        apply=_server("status"),
+    ),
+    Setting(
+        cli=Switch(
+            flag="--logout",
+            value=True,
+            help="Clear stored LinkedIn browser profile",
+        ),
+        apply=_server("logout"),
+    ),
+    Setting(
+        env=Env(EnvironmentKeys.USER_DATA_DIR, _text),
+        cli=Option(
+            flag="--user-data-dir",
+            parse=str,
+            cli_empty="ignore",
+            metavar="PATH",
+            help="Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)",
+        ),
+        apply=_browser("user_data_dir"),
+    ),
+    Setting(
+        env=Env(EnvironmentKeys.INSTALLER_TEMP_DIR, _text),
+        cli=Option(
+            flag="--installer-temp-dir",
+            parse=str,
+            cli_empty="ignore",
+            metavar="PATH",
+            help="Path to temporary parent directory for browser installation bootstrap",
+        ),
+        apply=_browser("installer_temp_dir"),
+    ),
+    Setting(
+        cli=Switch(
+            flag="--claim-profile-root",
+            value=True,
+            help=(
+                "Take over a non-default profile directory that this server will "
+                "not claim on its own: one whose parent already holds other files, "
+                "or one carrying an ownership marker written for a different path. "
+                "Needed once; this server moves and deletes that whole parent when "
+                "it rotates or clears a session"
+            ),
+        ),
+        apply=_server("claim_profile_root"),
+    ),
+    Setting(
+        # Validated in ServerConfig.validate(). Blank means "auto" in both
+        # places it can be blank: whitespace in the variable (an empty variable
+        # is unset) and an explicit --import-from-browser="".
+        env=Env(EnvironmentKeys.IMPORT_FROM_BROWSER, _browser_to_import),
+        cli=Option(
+            flag="--import-from-browser",
+            parse=_browser_to_import,
+            phase="load",
+            cli_empty="auto",
+            const="auto",
+            metavar="BROWSER",
+            help=(
+                "Import a LinkedIn session from a locally logged-in Chromium browser "
+                "(chrome, chromium, brave, edge, arc, vivaldi, helium, yandex, whale, "
+                "coccoc, opera, opera_gx, or auto). Bare flag = auto (most recently "
+                "used live session). On macOS the OS keychain may prompt for access "
+                "to the browser's Safe Storage."
+            ),
+        ),
+        apply=_server("import_from_browser"),
+    ),
+    Setting(
+        # Auto-import a session from a logged-in browser on first no-session
+        # tool call. Unset = on by default (interactive and non-interactive
+        # desktop); false disables it. No effect under Docker or a non-loopback
+        # HTTP bind.
+        env=Env(EnvironmentKeys.AUTO_IMPORT_FROM_BROWSER, _flag, blank="unset"),
+        cli=SwitchPair(
+            on="--auto-import",
+            off="--no-auto-import",
+            dest="auto_import",
+            help_on=(
+                "Auto-import a session from a locally logged-in browser on first "
+                "use (the default). Provided for explicitness; it cannot override "
+                "the Docker or non-loopback-HTTP gates."
+            ),
+            help_off=(
+                "Disable auto-import of a session from a browser on first use; "
+                "require --login or --import-from-browser instead."
+            ),
+        ),
+        apply=_browser("auto_import_from_browser"),
+    ),
+    Setting(
+        # Share one browser-owning process across stdio clients.
+        env=Env(EnvironmentKeys.DAEMON_ENABLED, _flag, blank="unset"),
+        cli=SwitchPair(
+            on="--daemon",
+            off="--no-daemon",
+            dest="daemon_enabled",
+            help_on=(
+                "Serve every stdio client from one browser-owning process instead "
+                "of giving each its own (experimental)."
+            ),
+            help_off="Give every stdio client its own browser (default; overrides DAEMON_ENABLED=true).",
+        ),
+        apply=_server("daemon_enabled"),
+    ),
+)
+
+# Accepted and ignored. They once chose when full Chromium was installed;
+# there is one browser now, and the README documented them, so an existing
+# command line keeps working. Hidden from help so nobody adopts them.
+_RETIRED_OPTIONS = ("--eager-full-chromium", "--no-eager-full-chromium")
+
+#: The parser's options that belong to no setting.
+IGNORED_OPTIONS = ("--help", *_RETIRED_OPTIONS)
 
 
 def is_interactive_environment() -> bool:
@@ -235,172 +882,14 @@ def is_interactive_environment() -> bool:
         return False
 
 
-def load_from_env(config: AppConfig) -> AppConfig:
-    """Load configuration from environment variables."""
+def _warn_about_placeholders() -> None:
+    """Name the variables ``_env()`` drops as unsubstituted placeholders.
 
-    # Log level. Refused rather than ignored, as TRANSPORT below is: a value
-    # outside this set is a typo, and ignoring it let the server report the
-    # default level while reading as though the setting had applied.
-    if log_level_env := os.environ.get(EnvironmentKeys.LOG_LEVEL):
-        log_level_upper = log_level_env.strip().upper()
-        if log_level_upper not in ("DEBUG", "INFO", "WARNING", "ERROR"):
-            raise ConfigurationError(
-                f"Invalid LOG_LEVEL: '{log_level_env}'. Must be one of "
-                "'DEBUG', 'INFO', 'WARNING' or 'ERROR'."
-            )
-        config.server.log_level = log_level_upper
-
-    # Headless mode
-    if (headless := _env_flag(EnvironmentKeys.HEADLESS)) is not None:
-        config.browser.headless = headless
-
-    # Transport mode
-    if transport_env := os.environ.get(EnvironmentKeys.TRANSPORT):
-        config.server.transport_explicitly_set = True
-        transport_value = _normalize_env(transport_env)
-        if transport_value == "stdio":
-            config.server.transport = "stdio"
-        elif transport_value == "streamable-http":
-            config.server.transport = "streamable-http"
-        else:
-            raise ConfigurationError(
-                f"Invalid TRANSPORT: '{transport_env}'. Must be 'stdio' or 'streamable-http'."
-            )
-
-    # Persistent browser profile directory
-    if user_data_dir := os.environ.get(EnvironmentKeys.USER_DATA_DIR):
-        config.browser.user_data_dir = user_data_dir
-
-    # Temporary directory parent used during browser installation bootstrap
-    if installer_temp_dir := os.environ.get(EnvironmentKeys.INSTALLER_TEMP_DIR):
-        config.browser.installer_temp_dir = installer_temp_dir
-
-    # Timeout for page operations (validated in BrowserConfig.validate())
-    if timeout_env := os.environ.get(EnvironmentKeys.TIMEOUT):
-        try:
-            config.browser.default_timeout = int(timeout_env)
-        except ValueError:
-            raise ConfigurationError(
-                f"Invalid TIMEOUT: '{timeout_env}'. Must be an integer."
-            )
-
-    # Per-tool MCP execution timeout in seconds (also validated in ServerConfig.validate())
-    if tool_timeout_env := os.environ.get(EnvironmentKeys.TOOL_TIMEOUT):
-        try:
-            tool_timeout_value = float(tool_timeout_env)
-        except ValueError:
-            raise ConfigurationError(
-                f"Invalid TOOL_TIMEOUT: '{tool_timeout_env}'. Must be a number."
-            )
-        if not (math.isfinite(tool_timeout_value) and tool_timeout_value > 0):
-            raise ConfigurationError(
-                f"Invalid TOOL_TIMEOUT: '{tool_timeout_env}'. Must be a positive finite number."
-            )
-        config.server.tool_timeout_seconds = tool_timeout_value
-
-    # Manual-login wait timeout in seconds; 0 = no limit (validated in
-    # BrowserConfig.validate())
-    if login_timeout_env := os.environ.get(EnvironmentKeys.LOGIN_TIMEOUT):
-        try:
-            login_timeout_value = float(login_timeout_env)
-        except ValueError:
-            raise ConfigurationError(
-                f"Invalid LOGIN_TIMEOUT: '{login_timeout_env}'. Must be a number."
-            )
-        if not (math.isfinite(login_timeout_value) and login_timeout_value >= 0):
-            raise ConfigurationError(
-                f"Invalid LOGIN_TIMEOUT: '{login_timeout_env}'. Must be a non-negative finite number (0 = no limit)."
-            )
-        config.browser.login_timeout_seconds = login_timeout_value
-
-    # Bounded inline wait before the pending signal; 0 = immediate return
-    # (validated and clamped in BrowserConfig.validate())
-    if login_inline_wait_env := os.environ.get(EnvironmentKeys.LOGIN_INLINE_WAIT):
-        try:
-            login_inline_wait_value = float(login_inline_wait_env)
-        except ValueError:
-            raise ConfigurationError(
-                f"Invalid LOGIN_INLINE_WAIT: '{login_inline_wait_env}'. Must be a number."
-            )
-        if not (
-            math.isfinite(login_inline_wait_value) and login_inline_wait_value >= 0
-        ):
-            raise ConfigurationError(
-                f"Invalid LOGIN_INLINE_WAIT: '{login_inline_wait_env}'. Must be a non-negative finite number (0 = no inline wait)."
-            )
-        config.browser.login_inline_wait_seconds = login_inline_wait_value
-
-    # Shared-browser coordination between concurrent server processes
-    # (validated and clamped in BrowserConfig.validate())
-    for env_key, attribute in (
-        (EnvironmentKeys.BROWSER_WAIT, "browser_wait_seconds"),
-        (EnvironmentKeys.BROWSER_MIN_HOLD, "browser_min_hold_seconds"),
-        (EnvironmentKeys.BROWSER_IDLE_TIMEOUT, "browser_idle_timeout_seconds"),
-    ):
-        raw = os.environ.get(env_key)
-        if not raw:
-            continue
-        try:
-            value = float(raw)
-        except ValueError:
-            raise ConfigurationError(f"Invalid {env_key}: '{raw}'. Must be a number.")
-        if not (math.isfinite(value) and value >= 0):
-            raise ConfigurationError(
-                f"Invalid {env_key}: '{raw}'. Must be a non-negative finite number."
-            )
-        setattr(config.browser, attribute, value)
-
-    if os.environ.get(EnvironmentKeys.USER_AGENT):
-        raise ConfigurationError(_USER_AGENT_REMOVED.format(setting="USER_AGENT"))
-
-    # HTTP server host
-    if host_env := os.environ.get(EnvironmentKeys.HOST):
-        config.server.host = host_env
-
-    # HTTP server port (validated in AppConfig.validate())
-    if port_env := os.environ.get(EnvironmentKeys.PORT):
-        try:
-            config.server.port = int(port_env)
-        except ValueError:
-            raise ConfigurationError(f"Invalid PORT: '{port_env}'. Must be an integer.")
-
-    # HTTP server path
-    if path_env := os.environ.get(EnvironmentKeys.HTTP_PATH):
-        config.server.path = path_env
-
-    # Slow motion delay for debugging (validated in BrowserConfig.validate())
-    if slow_mo_env := os.environ.get(EnvironmentKeys.SLOW_MO):
-        try:
-            config.browser.slow_mo = int(slow_mo_env)
-        except ValueError:
-            raise ConfigurationError(
-                f"Invalid SLOW_MO: '{slow_mo_env}'. Must be an integer."
-            )
-
-    # Browser viewport (validated in BrowserConfig.validate())
-    if viewport_env := os.environ.get(EnvironmentKeys.VIEWPORT):
-        try:
-            width, height = viewport_env.lower().split("x")
-            config.browser.viewport_width = int(width)
-            config.browser.viewport_height = int(height)
-        except ValueError:
-            raise ConfigurationError(
-                f"Invalid VIEWPORT: '{viewport_env}'. Must be in format WxH (e.g., 1280x720)."
-            )
-
-    # Custom Chrome/Chromium executable path
-    if chrome_path_env := _env(EnvironmentKeys.CHROME_PATH):
-        config.browser.chrome_path = chrome_path_env
-
-    # Browser proxy (validated and split in BrowserConfig.validate()). Unlike
-    # the CLI flag, PROXY_SERVER may carry the credentials a provider hands out:
-    # the environment is not world-readable the way a process argument list is.
-    #
-    # Read through _env(), which drops a placeholder the host left behind.
-    # That is a fail-open path and it says so: a host that fails to substitute
-    # a field the user *did* fill in skips the proxy, and the browser then goes
-    # out on the real address. So the variables are named in the log once. They
-    # hold placeholders, so naming them leaks nothing.
+    That is a fail-open path and this says so: a host that fails to substitute
+    a field the user *did* fill in skips the proxy, and the browser then goes
+    out on the real address. So the variables are named in the log once. They
+    hold placeholders, so naming them leaks nothing.
+    """
     if unsubstituted := [
         key
         for key, literal in _MCPB_PLACEHOLDERS.items()
@@ -414,38 +903,25 @@ def load_from_env(config: AppConfig) -> AppConfig:
             ", ".join(unsubstituted),
         )
 
-    if proxy_server_env := _env(EnvironmentKeys.PROXY_SERVER):
-        config.browser.proxy_server = proxy_server_env
 
-    if proxy_username_env := _env(EnvironmentKeys.PROXY_USERNAME):
-        config.browser.proxy_username = proxy_username_env
-
-    if proxy_password_env := _env(EnvironmentKeys.PROXY_PASSWORD):
-        config.browser.proxy_password = proxy_password_env
-
-    if proxy_bypass_env := _env(EnvironmentKeys.PROXY_BYPASS):
-        config.browser.proxy_bypass = proxy_bypass_env
-
-    # Import a LinkedIn session from a locally logged-in browser (validated in
-    # ServerConfig.validate())
-    if import_browser_env := os.environ.get(EnvironmentKeys.IMPORT_FROM_BROWSER):
-        config.server.import_from_browser = _normalize_env(import_browser_env) or "auto"
-
-    # Auto-import a session from a logged-in browser on first no-session tool
-    # call. Unset = on by default (interactive and non-interactive desktop);
-    # false disables it. No effect under Docker or a non-loopback HTTP bind.
-    if (auto_import := _env_flag(EnvironmentKeys.AUTO_IMPORT_FROM_BROWSER)) is not None:
-        config.browser.auto_import_from_browser = auto_import
-
-    # Share one browser-owning process across stdio clients.
-    if (daemon := _env_flag(EnvironmentKeys.DAEMON_ENABLED)) is not None:
-        config.server.daemon_enabled = daemon
-
+def load_from_env(config: AppConfig) -> AppConfig:
+    """Load configuration from environment variables."""
+    _warn_about_placeholders()
+    for setting in SETTINGS:
+        if setting.env is None or (raw := _env(setting.env.key)) is None:
+            continue
+        if setting.env.blank == "unset" and not raw.strip():
+            continue
+        try:
+            value = setting.env.parse(raw)
+        except SettingError as error:
+            raise ConfigurationError(error.describe(setting.env.key, raw))
+        setting.apply(config, value)
     return config
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """The command-line parser.
+    """The command-line parser, generated from ``SETTINGS``.
 
     Every long option added here also belongs in
     ``remote_catalog.LONG_OPTIONS``, which resolves abbreviations before this
@@ -454,413 +930,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="LinkedIn MCP Server - A Model Context Protocol server for LinkedIn integration"
     )
-
-    parser.add_argument(
-        "--no-headless",
-        action="store_true",
-        help="Run browser with a visible window (useful for login and debugging)",
-    )
-
-    parser.add_argument(
-        "--log-level",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Set logging level (default: WARNING)",
-    )
-
-    parser.add_argument(
-        "--transport",
-        choices=["stdio", "streamable-http"],
-        default=None,
-        help="Specify the transport mode (stdio or streamable-http)",
-    )
-
-    parser.add_argument(
-        "--host",
-        type=str,
-        default=None,
-        help="HTTP server host (default: 127.0.0.1)",
-    )
-
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        help="HTTP server port (default: 8000)",
-    )
-
-    parser.add_argument(
-        "--path",
-        type=str,
-        default=None,
-        help="HTTP server path (default: /mcp)",
-    )
-
-    # Browser configuration
-    parser.add_argument(
-        "--slow-mo",
-        type=int,
-        default=None,
-        metavar="MS",
-        help="Slow down browser actions by N milliseconds (debugging)",
-    )
-
-    # Still accepted by the parser so using it produces the explanation above
-    # rather than argparse's bare "unrecognized arguments".
-    parser.add_argument(
-        "--user-agent",
-        type=str,
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-
-    parser.add_argument(
-        "--viewport",
-        type=str,
-        default=None,
-        metavar="WxH",
-        help=(
-            "Browser viewport size (default: 1280x720). Applies to the normal "
-            "windowless mode only; a headed launch uses the real window size."
-        ),
-    )
-
-    parser.add_argument(
-        "--timeout",
-        type=positive_int,
-        default=None,
-        metavar="MS",
-        help="Browser timeout for page operations in milliseconds (default: 5000)",
-    )
-
-    parser.add_argument(
-        "--tool-timeout",
-        type=positive_float,
-        default=None,
-        metavar="SECONDS",
-        help="Per-tool MCP execution timeout in seconds (default: 180.0)",
-    )
-
-    parser.add_argument(
-        "--login-timeout",
-        type=non_negative_float,
-        default=None,
-        metavar="SECONDS",
-        help="Manual login wait timeout in seconds (default: 1800; 0 = no limit)",
-    )
-
-    parser.add_argument(
-        "--login-inline-wait",
-        type=non_negative_float,
-        default=None,
-        metavar="SECONDS",
-        help=(
-            "Bounded inline wait for a tool call to resume after login completes, "
-            "in seconds (default: 25, max 45; 0 = return immediately)"
-        ),
-    )
-    parser.add_argument(
-        "--browser-wait",
-        type=non_negative_float,
-        default=None,
-        metavar="SECONDS",
-        help=(
-            "How long to wait for another server process to hand over the shared "
-            "browser, in seconds (default: 25, max 45; 0 = report busy at once)"
-        ),
-    )
-    parser.add_argument(
-        "--browser-min-hold",
-        type=non_negative_float,
-        default=None,
-        metavar="SECONDS",
-        help=(
-            "Shortest time this process keeps the shared browser before honouring "
-            "a handoff request, in seconds (default: 20, clamped below "
-            "--browser-wait; 0 = hand over after every tool call)"
-        ),
-    )
-    parser.add_argument(
-        "--browser-idle-timeout",
-        type=non_negative_float,
-        default=None,
-        metavar="SECONDS",
-        help=(
-            "Close an idle browser and release the shared profile after this many "
-            "seconds without a tool call (default: 600; 0 = keep it open)"
-        ),
-    )
-
-    parser.add_argument(
-        "--chrome-path",
-        type=str,
-        default=None,
-        metavar="PATH",
-        help="Path to Chrome/Chromium executable (for custom browser installations)",
-    )
-
-    parser.add_argument(
-        "--proxy-server",
-        type=credential_free_url,
-        default=None,
-        metavar="URL",
-        help=(
-            "Route the browser through a proxy, as scheme://host:port "
-            "(http, https, socks4 or socks5). Chromium cannot authenticate to "
-            "a SOCKS proxy, so credentials require an http(s) endpoint"
-        ),
-    )
-
-    parser.add_argument(
-        "--proxy-username",
-        type=str,
-        default=None,
-        metavar="USER",
-        help=(
-            "Username for the proxy. Visible in the process list like any "
-            "argument, which is acceptable because it grants nothing without "
-            "the password; that one has no flag on purpose, set PROXY_PASSWORD"
-        ),
-    )
-
-    parser.add_argument(
-        "--proxy-bypass",
-        type=str,
-        default=None,
-        metavar="HOSTS",
-        help="Comma-separated hosts to reach directly instead of via the proxy",
-    )
-
-    # Session management
-    parser.add_argument(
-        "--login",
-        action="store_true",
-        help="Login interactively via browser and save persistent profile",
-    )
-
-    parser.add_argument(
-        "--login-viewer",
-        action="store_true",
-        help=(
-            "Expose the --login browser at an authenticated noVNC URL in Docker "
-            "(requires --login and -p 127.0.0.1:6080:6080)"
-        ),
-    )
-
-    parser.add_argument(
-        "--status",
-        action="store_true",
-        help="Check if current session is valid and exit",
-    )
-
-    parser.add_argument(
-        "--logout",
-        action="store_true",
-        help="Clear stored LinkedIn browser profile",
-    )
-
-    parser.add_argument(
-        "--user-data-dir",
-        type=str,
-        default=None,
-        metavar="PATH",
-        help="Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)",
-    )
-
-    parser.add_argument(
-        "--installer-temp-dir",
-        type=str,
-        default=None,
-        metavar="PATH",
-        help="Path to temporary parent directory for browser installation bootstrap",
-    )
-
-    parser.add_argument(
-        "--claim-profile-root",
-        action="store_true",
-        help=(
-            "Take over a non-default profile directory that this server will "
-            "not claim on its own: one whose parent already holds other files, "
-            "or one carrying an ownership marker written for a different path. "
-            "Needed once; this server moves and deletes that whole parent when "
-            "it rotates or clears a session"
-        ),
-    )
-
-    parser.add_argument(
-        "--import-from-browser",
-        nargs="?",
-        const="auto",
-        default=None,
-        metavar="BROWSER",
-        help=(
-            "Import a LinkedIn session from a locally logged-in Chromium browser "
-            "(chrome, chromium, brave, edge, arc, vivaldi, helium, yandex, whale, "
-            "coccoc, opera, opera_gx, or auto). Bare flag = auto (most recently "
-            "used live session). On macOS the OS keychain may prompt for access "
-            "to the browser's Safe Storage."
-        ),
-    )
-
-    auto_import_group = parser.add_mutually_exclusive_group()
-    auto_import_group.add_argument(
-        "--auto-import",
-        dest="auto_import",
-        action="store_true",
-        default=None,
-        help=(
-            "Auto-import a session from a locally logged-in browser on first "
-            "use (the default). Provided for explicitness; it cannot override "
-            "the Docker or non-loopback-HTTP gates."
-        ),
-    )
-    auto_import_group.add_argument(
-        "--no-auto-import",
-        dest="auto_import",
-        action="store_false",
-        default=None,
-        help=(
-            "Disable auto-import of a session from a browser on first use; "
-            "require --login or --import-from-browser instead."
-        ),
-    )
-
-    # Accepted and ignored. They once chose when full Chromium was installed;
-    # there is one browser now, and the README documented them, so an existing
-    # command line keeps working. Hidden from help so nobody adopts them.
-    for retired in ("--eager-full-chromium", "--no-eager-full-chromium"):
+    for setting in SETTINGS:
+        if setting.cli is not None:
+            setting.cli.add_to(parser)
+    for retired in _RETIRED_OPTIONS:
         parser.add_argument(
             retired, action="store_true", dest="_retired", help=argparse.SUPPRESS
         )
-
-    daemon_group = parser.add_mutually_exclusive_group()
-    daemon_group.add_argument(
-        "--daemon",
-        dest="daemon_enabled",
-        action="store_true",
-        default=None,
-        help=(
-            "Serve every stdio client from one browser-owning process instead "
-            "of giving each its own (experimental)."
-        ),
-    )
-    daemon_group.add_argument(
-        "--no-daemon",
-        dest="daemon_enabled",
-        action="store_false",
-        default=None,
-        help="Give every stdio client its own browser (default; overrides DAEMON_ENABLED=true).",
-    )
     return parser
 
 
 def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
-    """Load configuration from command line arguments."""
+    """Load configuration from command line arguments.
+
+    An option applies whenever it was given, including as 0 or as a ``--no-``
+    switch. What an explicit empty value means is the option's ``cli_empty``.
+    """
     args = build_parser().parse_args(argv)
-
-    # Update configuration with parsed arguments
-    if args.no_headless:
-        config.browser.headless = False
-
-    if args.log_level:
-        config.server.log_level = args.log_level
-
-    if args.transport:
-        config.server.transport = args.transport
-        config.server.transport_explicitly_set = True
-
-    if args.host:
-        config.server.host = args.host
-
-    if args.port is not None:
-        config.server.port = args.port
-
-    if args.path:
-        config.server.path = args.path
-
-    # Browser configuration
-    if args.slow_mo is not None:
-        config.browser.slow_mo = args.slow_mo
-
-    if args.user_agent:
-        raise ConfigurationError(_USER_AGENT_REMOVED.format(setting="--user-agent"))
-
-    # Viewport (validated in BrowserConfig.validate())
-    if args.viewport:
-        try:
-            width, height = args.viewport.lower().split("x")
-            config.browser.viewport_width = int(width)
-            config.browser.viewport_height = int(height)
-        except ValueError:
-            raise ConfigurationError(
-                f"Invalid --viewport: '{args.viewport}'. Must be in format WxH (e.g., 1280x720)."
-            )
-
-    if args.timeout is not None:
-        config.browser.default_timeout = args.timeout
-
-    if args.tool_timeout is not None:
-        config.server.tool_timeout_seconds = args.tool_timeout
-
-    if args.login_timeout is not None:
-        config.browser.login_timeout_seconds = args.login_timeout
-
-    if args.login_inline_wait is not None:
-        config.browser.login_inline_wait_seconds = args.login_inline_wait
-
-    if args.browser_wait is not None:
-        config.browser.browser_wait_seconds = args.browser_wait
-
-    if args.browser_min_hold is not None:
-        config.browser.browser_min_hold_seconds = args.browser_min_hold
-
-    if args.browser_idle_timeout is not None:
-        config.browser.browser_idle_timeout_seconds = args.browser_idle_timeout
-
-    if args.chrome_path:
-        config.browser.chrome_path = args.chrome_path
-
-    # Proxy (validated and normalized in BrowserConfig.validate())
-    if args.proxy_server:
-        config.browser.proxy_server = args.proxy_server
-
-    if args.proxy_username:
-        config.browser.proxy_username = args.proxy_username
-
-    if args.proxy_bypass:
-        config.browser.proxy_bypass = args.proxy_bypass
-
-    # Session management
-    if args.login:
-        config.server.login = True
-
-    if args.login_viewer:
-        config.server.login_viewer = True
-
-    if args.status:
-        config.server.status = True
-
-    if args.logout:
-        config.server.logout = True
-
-    if args.user_data_dir:
-        config.browser.user_data_dir = args.user_data_dir
-
-    if args.installer_temp_dir:
-        config.browser.installer_temp_dir = args.installer_temp_dir
-
-    if args.claim_profile_root:
-        config.server.claim_profile_root = True
-
-    if args.import_from_browser is not None:
-        value = args.import_from_browser.strip().lower()
-        config.server.import_from_browser = value or "auto"
-
-    if args.auto_import is not None:
-        config.browser.auto_import_from_browser = args.auto_import
-
-    if args.daemon_enabled is not None:
-        config.server.daemon_enabled = args.daemon_enabled
-
+    for setting in SETTINGS:
+        if setting.cli is not None and (value := setting.cli.given(args)) is not None:
+            setting.apply(config, value)
     return config
 
 

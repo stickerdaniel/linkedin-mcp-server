@@ -9,10 +9,11 @@ to use it, because the fingerprint it compares covers exactly these fields.
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from collections.abc import Iterator
-from dataclasses import fields
+from dataclasses import asdict, fields
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -25,6 +26,11 @@ from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon.descriptor import config_fingerprint
 
 _NONCE = "0123456789abcdef" * 4
+_ORACLE = json.loads(
+    (Path(__file__).parent / "fixtures" / "daemon-config" / "oracle.json").read_text(
+        encoding="utf-8"
+    )
+)
 
 
 class _Frontend:
@@ -971,3 +977,58 @@ class TestRefusing:
 
         with pytest.raises(ValueError, match="no browser section"):
             daemon_config.decode({"server": {}})
+
+
+def _rooted(value: Any, root: str) -> Any:
+    """*value* with every ``{root}`` in its strings replaced by *root*."""
+    if isinstance(value, str):
+        return value.replace("{root}", root)
+    if isinstance(value, list):
+        return [_rooted(item, root) for item in value]
+    if isinstance(value, dict):
+        return {key: _rooted(item, root) for key, item in value.items()}
+    return value
+
+
+class TestRecordedLoaderContract:
+    """What the loader hands an owner, recorded before the loader was rebuilt.
+
+    ``fixtures/daemon-config/oracle.json`` holds, for each synthetic environment
+    and command line, the configuration the loader produced and the encoding a
+    frontend sends, with every path written relative to a test-owned root. A
+    loader change that moves any of them changes which browser an owner opens.
+
+    No digest is stored. The fingerprint keys the profile by its parent's inode,
+    which differs on every machine and every run, so it is compared within one
+    run: the frontend's loaded configuration against the one an owner decodes
+    from the recorded encoding.
+    """
+
+    @pytest.mark.parametrize(
+        "case", _ORACLE["cases"], ids=[case["name"] for case in _ORACLE["cases"]]
+    )
+    def test_the_loader_still_produces_the_recorded_configuration(
+        self, case: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server.config.loaders import load_config
+
+        root = str(tmp_path / "root")
+        for directory in _ORACLE["directories"]:
+            Path(root, directory).mkdir(parents=True)
+        for file in _ORACLE["files"]:
+            Path(root, file).touch()
+        for name, value in _rooted(case["env"], root).items():
+            monkeypatch.setenv(name, value)
+
+        loaded = load_config(_rooted(case["argv"], root))
+
+        assert {
+            "browser": asdict(loaded.browser),
+            "server": asdict(loaded.server),
+        } == _rooted(case["fields"], root)
+        encoded = _rooted(case["encoded"], root)
+        assert daemon_config.encode(loaded) == encoded
+        owner = daemon_config.decode(encoded)
+        assert config_fingerprint(loaded, key="oracle") == config_fingerprint(
+            owner, key="oracle"
+        )
