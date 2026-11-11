@@ -513,7 +513,9 @@ async def test_a_killed_staging_process_leaves_what_it_had_observed(tmp_path):
             while not requested():
                 if child.poll() is not None:
                     _, stderr = child.communicate()
-                    pytest.skip(f"the staging process ended first: {stderr.decode()}")
+                    pytest.skip(
+                        f"the staging process ended first: {stderr.decode(errors='replace')}"
+                    )
                 if time.monotonic() > deadline:
                     pytest.fail("the staging process never sent its request")
                 await asyncio.sleep(0.05)
