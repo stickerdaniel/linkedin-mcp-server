@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import asyncio
 import gc
 import logging
-import time
+import math
 
 import anyio
 from patchright.async_api import Error as PatchrightError
@@ -1329,6 +1329,30 @@ async def _stall(*_args, **_kwargs):
     await anyio.sleep_forever()
 
 
+class _SkippedClock:
+    """The running loop's clock, moved forward without the loop running.
+
+    The loop reads real time plus every skip, so a deadline passes at once
+    and its timer fires on the next iteration, while the work after it still
+    has its share of the tool deadline in real time.
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._real_time = loop.time
+        self._skipped = 0.0
+
+    def time(self) -> float:
+        return self._real_time() + self._skipped
+
+    def skip_to(self, moment: float) -> None:
+        self._skipped += max(0.0, moment - self.time())
+
+    async def stall(self, *_args: object, **_kwargs: object) -> None:
+        """Stall past the innermost deadline without waiting for it."""
+        self.skip_to(anyio.current_effective_deadline() + 0.001)
+        await anyio.sleep_forever()
+
+
 class TestSendMessageDeadline:
     """The tool's own deadline never takes the answer of a started send (#889).
 
@@ -1338,6 +1362,26 @@ class TestSendMessageDeadline:
     """
 
     _TOOL_TIMEOUT = 0.5
+    # For tests that stall on a skipped clock. With the `clock` fixture its
+    # reply reserve is 10 s, of which a stalled disposal takes half: far more
+    # than any host needs for the work after a stall, where 0.5 s left that
+    # work about 80 ms of real time.
+    _SKIPPED_TOOL_TIMEOUT = 60.0
+
+    @pytest.fixture
+    async def clock(self, monkeypatch) -> _SkippedClock:
+        """A skipped clock, with the reserve a sixth of the tool deadline.
+
+        The 5-second cap on the reserve would leave a stalled disposal's
+        half of it, 2.5 s, to a host that can stall longer.
+        """
+        monkeypatch.setattr(
+            message_sender_module, "_SEND_REPLY_RESERVE_SECONDS", math.inf
+        )
+        loop = asyncio.get_running_loop()
+        clock = _SkippedClock(loop)
+        monkeypatch.setattr(loop, "time", clock.time)
+        return clock
 
     @pytest.fixture(autouse=True)
     def _without_collector_pauses(self):
@@ -1356,7 +1400,7 @@ class TestSendMessageDeadline:
                 gc.enable()
 
     @staticmethod
-    async def _call(sender, monkeypatch):
+    async def _call(sender, monkeypatch, tool_timeout=_TOOL_TIMEOUT):
         from fastmcp import Client, FastMCP
 
         from linkedin_mcp_server.tools.messaging import register_messaging_tools
@@ -1366,9 +1410,7 @@ class TestSendMessageDeadline:
             AsyncMock(return_value=SimpleNamespace(send_message=sender.send_message)),
         )
         mcp = FastMCP("test")
-        register_messaging_tools(
-            mcp, tool_timeout=TestSendMessageDeadline._TOOL_TIMEOUT
-        )
+        register_messaging_tools(mcp, tool_timeout=tool_timeout)
         async with Client(mcp) as client:
             return await client.call_tool(
                 "send_message",
@@ -1396,16 +1438,18 @@ class TestSendMessageDeadline:
 
     @pytest.mark.parametrize("stage", ["dispatch", "confirmation"])
     async def test_a_stalled_send_answers_unconfirmed(
-        self, mock_page, monkeypatch, stage
+        self, mock_page, monkeypatch, clock, stage
     ):
         sender = _sender(mock_page)
         with ExitStack() as stack:
             mocks = self._composer(stack, sender, mock_page)
             if stage == "dispatch":
-                mocks.submit.side_effect = _stall
+                mocks.submit.side_effect = clock.stall
             else:
-                mocks.confirmed.side_effect = _stall
-            result = await self._call(sender, monkeypatch)
+                mocks.confirmed.side_effect = clock.stall
+            result = await self._call(
+                sender, monkeypatch, tool_timeout=self._SKIPPED_TOOL_TIMEOUT
+            )
 
         assert result.is_error is False, result.content
         assert result.structured_content is not None
@@ -1416,26 +1460,36 @@ class TestSendMessageDeadline:
 
     @pytest.mark.parametrize("stage", ["cleanup", "notification"])
     async def test_a_stalled_ending_keeps_the_answer(
-        self, mock_page, monkeypatch, stage
+        self, mock_page, monkeypatch, clock, stage
     ):
+        """Work after a confirmed send ends in time for the answer to leave.
+
+        The cleanup cap is raised above the time left, so only the tool
+        deadline can end a stalled cleanup in time.
+        """
         from fastmcp import Context
 
         async def report_progress(self, progress, total=None, message=None):
             if progress == 100:
-                await anyio.sleep_forever()
+                await clock.stall()
 
+        monkeypatch.setattr(
+            message_sender_module, "_MESSAGE_CLEANUP_TIMEOUT_SECONDS", 3600.0
+        )
         sender = _sender(mock_page)
         with ExitStack() as stack:
             mocks = self._composer(stack, sender, mock_page)
             if stage == "cleanup":
                 mock_page.evaluate_handle.return_value.dispose = AsyncMock(
-                    side_effect=_stall
+                    side_effect=clock.stall
                 )
             else:
                 stack.enter_context(
                     patch.object(Context, "report_progress", report_progress)
                 )
-            result = await self._call(sender, monkeypatch)
+            result = await self._call(
+                sender, monkeypatch, tool_timeout=self._SKIPPED_TOOL_TIMEOUT
+            )
 
         assert result.is_error is False, result.content
         assert result.structured_content is not None
@@ -1504,10 +1558,12 @@ class TestSendMessageDeadline:
         warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
         assert any("retry may deliver the message twice" in w for w in warnings)
 
-    async def test_a_stalled_snapshot_read_is_unconfirmed(self, mock_page, monkeypatch):
+    async def test_a_stalled_snapshot_read_is_unconfirmed(
+        self, mock_page, monkeypatch, clock
+    ):
         """The path is read after the click, so a stall there is unconfirmed."""
         handle = MagicMock()
-        handle.json_value = AsyncMock(side_effect=_stall)
+        handle.json_value = AsyncMock(side_effect=clock.stall)
         handle.dispose = AsyncMock()
         mock_page.wait_for_function = AsyncMock(return_value=handle)
         sender = _sender(mock_page)
@@ -1518,7 +1574,9 @@ class TestSendMessageDeadline:
         with ExitStack() as stack:
             mocks = self._composer(stack, sender, mock_page)
             mocks.confirmed.side_effect = confirmed
-            result = await self._call(sender, monkeypatch)
+            result = await self._call(
+                sender, monkeypatch, tool_timeout=self._SKIPPED_TOOL_TIMEOUT
+            )
 
         assert result.is_error is False, result.content
         assert result.structured_content is not None
@@ -1530,17 +1588,23 @@ class TestSendMessageDeadline:
         handle.dispose.assert_awaited()
 
     async def test_a_stalled_read_and_disposal_stays_unconfirmed(
-        self, mock_page, monkeypatch
+        self, mock_page, monkeypatch, clock
     ):
         """Disposal of a stalled read stays inside the tool deadline.
 
         The read is cancelled by the send budget, and disposal then runs in
         that cancelled scope. A bound taken there would outlast the deadline,
         and the client would get a bare timeout instead of this answer.
+
+        The cleanup cap is raised above the reply reserve, as it is against
+        the 0.5 s deadline, so only the tool deadline can end disposal in time.
         """
+        monkeypatch.setattr(
+            message_sender_module, "_MESSAGE_CLEANUP_TIMEOUT_SECONDS", 3600.0
+        )
         handle = MagicMock()
-        handle.json_value = AsyncMock(side_effect=_stall)
-        handle.dispose = AsyncMock(side_effect=_stall)
+        handle.json_value = AsyncMock(side_effect=clock.stall)
+        handle.dispose = AsyncMock(side_effect=clock.stall)
         mock_page.wait_for_function = AsyncMock(return_value=handle)
         sender = _sender(mock_page)
 
@@ -1550,7 +1614,9 @@ class TestSendMessageDeadline:
         with ExitStack() as stack:
             mocks = self._composer(stack, sender, mock_page)
             mocks.confirmed.side_effect = confirmed
-            result = await self._call(sender, monkeypatch)
+            result = await self._call(
+                sender, monkeypatch, tool_timeout=self._SKIPPED_TOOL_TIMEOUT
+            )
 
         assert result.is_error is False, result.content
         assert result.structured_content is not None
@@ -1564,7 +1630,7 @@ class TestSendMessageDeadline:
         [("/messaging/thread/2-abc==/", "2-abc=="), ("/messaging/compose/", None)],
     )
     async def test_a_late_snapshot_keeps_the_thread_when_disposal_overruns(
-        self, mock_page, monkeypatch, path, thread_id
+        self, mock_page, monkeypatch, clock, path, thread_id
     ):
         """A snapshot accepted before the work deadline survives that deadline.
 
@@ -1579,12 +1645,13 @@ class TestSendMessageDeadline:
         async def late_snapshot():
             nonlocal budget_end
             budget_end = anyio.current_effective_deadline()
-            await anyio.sleep(max(0.0, budget_end - anyio.current_time() - 0.02))
+            clock.skip_to(budget_end - 0.02)
             return {"path": path}
 
         async def overrunning_dispose():
-            # Blocks the loop itself, the way a collector pause does.
-            time.sleep(max(0.0, budget_end - anyio.current_time()) + 0.001)
+            # Time passes without the loop running, the way a collector
+            # pause stops it.
+            clock.skip_to(budget_end + 0.001)
             await anyio.sleep_forever()
 
         handle = MagicMock()
@@ -1599,7 +1666,9 @@ class TestSendMessageDeadline:
         with ExitStack() as stack:
             mocks = self._composer(stack, sender, mock_page)
             mocks.confirmed.side_effect = confirmed
-            result = await self._call(sender, monkeypatch)
+            result = await self._call(
+                sender, monkeypatch, tool_timeout=self._SKIPPED_TOOL_TIMEOUT
+            )
 
         assert result.is_error is False, result.content
         body = result.structured_content
@@ -1610,14 +1679,14 @@ class TestSendMessageDeadline:
         assert mocks.submit.call_count == 1
 
     async def test_a_stalled_snapshot_disposal_keeps_the_thread(
-        self, mock_page, monkeypatch
+        self, mock_page, monkeypatch, clock
     ):
         """Disposal runs out of time after the path is known, so the send stands."""
         handle = MagicMock()
         handle.json_value = AsyncMock(
             return_value={"path": "/messaging/thread/2-abc==/"}
         )
-        handle.dispose = AsyncMock(side_effect=_stall)
+        handle.dispose = AsyncMock(side_effect=clock.stall)
         mock_page.wait_for_function = AsyncMock(return_value=handle)
         sender = _sender(mock_page)
 
@@ -1627,7 +1696,9 @@ class TestSendMessageDeadline:
         with ExitStack() as stack:
             mocks = self._composer(stack, sender, mock_page)
             mocks.confirmed.side_effect = confirmed
-            result = await self._call(sender, monkeypatch)
+            result = await self._call(
+                sender, monkeypatch, tool_timeout=self._SKIPPED_TOOL_TIMEOUT
+            )
 
         assert result.is_error is False, result.content
         body = result.structured_content
