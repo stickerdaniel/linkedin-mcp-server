@@ -2017,37 +2017,62 @@ class TestSettingsTable:
             load_from_args(AppConfig(), [setting.cli.flag, "nonsense"])
 
 
-def _raw_reads(source: str) -> set[str]:
-    """Functions in *source* that touch ``os.environ`` or ``os.getenv``.
+_ENVIRONMENT_NAMES = {"environ", "getenv", "environb", "getenvb"}
 
-    ``<module>`` stands for a read outside any function, and any import of
-    either name from ``os`` counts wherever it is.
+
+def _raw_read_nodes(tree: ast.AST) -> list[tuple[ast.AST, str]]:
+    """Every node in *tree* that reaches the process environment, with its owner.
+
+    Import-aware, so ``import os as x`` then ``x.getenv(...)`` and ``from os
+    import environ as e`` count as much as ``os.environ``. The owner is the
+    enclosing function, or ``<module>`` for a read outside any function.
     """
-    found: set[str] = set()
+    modules = {"os"}
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules |= {a.asname or a.name for a in node.names if a.name == "os"}
+        elif isinstance(node, ast.ImportFrom) and node.module == "os":
+            names |= {
+                a.asname or a.name for a in node.names if a.name in _ENVIRONMENT_NAMES
+            }
+    found: list[tuple[ast.AST, str]] = []
 
     def visit(node: ast.AST, owner: str) -> None:
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             owner = node.name
-        if isinstance(node, ast.Attribute) and ast.unparse(node) in (
-            "os.environ",
-            "os.getenv",
-            "os.environb",
-            "os.getenvb",
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr in _ENVIRONMENT_NAMES
+            and isinstance(node.value, ast.Name)
+            and node.value.id in modules
         ):
-            found.add(owner)
-        if isinstance(node, ast.ImportFrom) and node.module == "os":
-            if {alias.name for alias in node.names} & {"environ", "getenv"}:
-                found.add(owner)
+            found.append((node, owner))
+        elif isinstance(node, ast.Name) and node.id in names:
+            found.append((node, owner))
+        elif isinstance(node, ast.ImportFrom) and node.module == "os":
+            if {a.name for a in node.names} & _ENVIRONMENT_NAMES:
+                found.append((node, owner))
         for child in ast.iter_child_nodes(node):
             visit(child, owner)
 
-    visit(ast.parse(source), "<module>")
+    visit(tree, "<module>")
     return found
+
+
+def _raw_reads(source: str) -> set[str]:
+    """Functions in *source* that touch the process environment."""
+    return {owner for _, owner in _raw_read_nodes(ast.parse(source))}
 
 
 def _placeholder_keys_read(source: str) -> bool:
     """Whether ``_warn_about_placeholders`` asks the environment only for
-    the keys of ``_MCPB_PLACEHOLDERS``."""
+    the keys of ``_MCPB_PLACEHOLDERS``.
+
+    Every environment read inside it, in any spelling the detector above
+    knows, has to be the ``.environ`` of an ``<os>.environ.get(key)`` call
+    whose ``key`` iterates ``_MCPB_PLACEHOLDERS``.
+    """
     (function,) = [
         node
         for node in ast.walk(ast.parse(source))
@@ -2061,21 +2086,20 @@ def _placeholder_keys_read(source: str) -> bool:
         and isinstance(generator.target, ast.Tuple)
         and isinstance(generator.target.elts[0], ast.Name)
     }
-    reads = [
-        node
-        for node in ast.walk(function)
-        if isinstance(node, ast.Attribute) and ast.unparse(node) == "os.environ"
-    ]
-    calls = [
-        node
+    reads = {id(node) for node, _ in _raw_read_nodes(function)}
+    allowed = {
+        id(node.func.value)
         for node in ast.walk(function)
         if isinstance(node, ast.Call)
-        and ast.unparse(node.func) == "os.environ.get"
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "environ"
         and len(node.args) == 1
         and isinstance(node.args[0], ast.Name)
         and node.args[0].id in keys
-    ]
-    return len(reads) == len(calls) > 0
+    }
+    return bool(reads) and reads == allowed
 
 
 class TestTheEnvironmentIsReadInOnePlace:
@@ -2100,12 +2124,13 @@ class TestTheEnvironmentIsReadInOnePlace:
         source = self._source()
         assert _placeholder_keys_read(source)
 
-        widened = source.replace(
-            "if os.environ.get(key) == literal",
-            "if os.environ.get(key) == literal or os.environ.get('HOST')",
-        )
-        assert widened != source
-        assert not _placeholder_keys_read(widened)
+        for extra in ("os.environ.get('HOST')", "os.getenv('HOST')"):
+            widened = source.replace(
+                "if os.environ.get(key) == literal",
+                f"if os.environ.get(key) == literal or {extra}",
+            )
+            assert widened != source
+            assert not _placeholder_keys_read(widened), extra
 
     @pytest.mark.parametrize(
         "added",
@@ -2115,6 +2140,10 @@ class TestTheEnvironmentIsReadInOnePlace:
             "def _extra():\n    return os.getenv('HOST')\n",
             "def _extra():\n    from os import environ\n    return environ\n",
             "VALUE = os.environ.copy()\n",
+            "import os as environment\n\ndef _extra():\n"
+            "    return environment.getenv('PROXY_SERVER')\n",
+            "def _extra():\n    from os import getenv as read\n"
+            "    return read('HOST')\n",
         ],
     )
     def test_a_second_raw_read_is_caught(self, added: str):
