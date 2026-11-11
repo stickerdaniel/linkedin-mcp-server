@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
@@ -503,15 +503,24 @@ class FrontendCallMiddleware(Middleware):
     here.
     """
 
-    def __init__(self, backend: DaemonProxyBackend, *, budget: float) -> None:
+    def __init__(
+        self,
+        backend: DaemonProxyBackend,
+        *,
+        budget: float,
+        budgets: Mapping[str, float] | None = None,
+    ) -> None:
         """*budget* is the seconds a call may take from its arrival here.
 
         An argument rather than the configuration singleton, which a directly
         built server may never have installed, so its default would disagree
-        with the tool timeout ``create_mcp_server`` was given.
+        with the tool timeout ``create_mcp_server`` was given. *budgets*
+        overrides it per tool name, for a tool registered with a longer
+        timeout than the rest.
         """
         self._proxy_backend = backend
         self._call_budget = budget
+        self._call_budgets = dict(budgets or {})
 
     async def _repeat_the_listing(
         self, context: MiddlewareContext[Any], call_next: CallNext[Any, Any]
@@ -549,6 +558,12 @@ class FrontendCallMiddleware(Middleware):
     ) -> Any:
         return await self._repeat_the_listing(context, call_next)
 
+    def _budget_for(
+        self, context: MiddlewareContext[mt.CallToolRequestParams]
+    ) -> float:
+        """The called tool's own budget, else the one every tool shares."""
+        return self._call_budgets.get(context.message.name, self._call_budget)
+
     async def on_call_tool(
         self,
         context: MiddlewareContext[mt.CallToolRequestParams],
@@ -557,7 +572,7 @@ class FrontendCallMiddleware(Middleware):
         loop = asyncio.get_running_loop()
         call, effects = call_core.arrive(
             now=loop.time(),
-            budget=self._call_budget,
+            budget=self._budget_for(context),
             sign_in_share=AUTH_REPAIR_LOGIN_WAIT_FRACTION,
         )
         heard = _LastHeard()
@@ -729,7 +744,7 @@ class FrontendCallMiddleware(Middleware):
                     )
                     reason = (
                         f"it did not answer within this call's "
-                        f"{self._call_budget:g}-second limit"
+                        f"{self._budget_for(context):g}-second limit"
                     )
                 else:
                     logger.info(

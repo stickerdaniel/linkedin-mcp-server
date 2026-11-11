@@ -27,7 +27,14 @@ import enum
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Generator,
+    Mapping,
+    Sequence,
+)
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any, NoReturn, TypeVar, cast
@@ -623,10 +630,19 @@ class OwnerForwarder(Provider):
     registers none, so no listing or lookup of either reaches it.
     """
 
-    def __init__(self, backend: DaemonProxyBackend, *, timeout: float) -> None:
+    def __init__(
+        self,
+        backend: DaemonProxyBackend,
+        *,
+        timeout: float,
+        timeouts: Mapping[str, float] | None = None,
+    ) -> None:
         super().__init__()
         self.backend = backend
         self.timeout = timeout
+        # Per tool name, for a tool registered with a longer timeout than the
+        # rest; the hop has to outlast that tool's timeout, not the shared one.
+        self.timeouts = dict(timeouts or {})
 
     async def _list_tools(self) -> Sequence[Tool]:
         async def every_page(session: ClientSession) -> list[mt.Tool]:
@@ -678,7 +694,8 @@ class OwnerForwarder(Provider):
         progress = context.report_progress if context is not None else None
         logged = _relay_logs(context) if context is not None else None
         result = await self._exchange(
-            lambda session: session.call_tool(
+            timeout=self.timeouts.get(name, self.timeout),
+            operation=lambda session: session.call_tool(
                 name,
                 arguments,
                 progress_callback=progress,
@@ -701,6 +718,7 @@ class OwnerForwarder(Provider):
         operation: Callable[[ClientSession], Awaitable[Any]],
         *,
         logging_callback: LoggingFnT | None = None,
+        timeout: float | None = None,
     ) -> Any:
         """Run *operation* on a fresh session with the owner, and judge the end.
 
@@ -725,7 +743,13 @@ class OwnerForwarder(Provider):
         # Read together, never separately: the URL and the token are one
         # credential pair for one owner.
         headers["Authorization"] = f"Bearer {attachment.token}"
-        return await self._hop(hop, headers, operation, logging_callback)
+        return await self._hop(
+            hop,
+            headers,
+            operation,
+            logging_callback,
+            self.timeout if timeout is None else timeout,
+        )
 
     async def _hop(
         self,
@@ -733,6 +757,7 @@ class OwnerForwarder(Provider):
         headers: dict[str, str],
         operation: Callable[[ClientSession], Awaitable[Any]],
         logging_callback: LoggingFnT | None,
+        timeout: float,
     ) -> Any:
         attachment = hop.attachment
         decided: _Decided | None = None
@@ -743,7 +768,7 @@ class OwnerForwarder(Provider):
             async with (
                 daemon_owner.direct_async_http_client(
                     headers=headers,
-                    timeout=httpx2.Timeout(30.0, read=self.timeout),
+                    timeout=httpx2.Timeout(30.0, read=timeout),
                     transport=_WatchedTransport(owner_transport(), hop.wire),
                 ) as http,
                 streamable_http_client(attachment.descriptor.url, http_client=http) as (
@@ -753,7 +778,7 @@ class OwnerForwarder(Provider):
                 _HopSession(
                     read,
                     write,
-                    read_timeout_seconds=self.timeout,
+                    read_timeout_seconds=timeout,
                     logging_callback=logging_callback,
                     client_info=_CLIENT_INFO,
                     # This era sends a request's log messages only when the

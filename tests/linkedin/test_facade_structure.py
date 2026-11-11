@@ -55,6 +55,7 @@ PUBLIC_SIGNATURES = {
     "search_posts": "(self, keywords: 'str', date_posted: 'str | None' = None, max_pages: 'int' = 3, content_type: 'str | None' = None) -> 'dict[str, Any]'",
     "send_message": "(self, linkedin_username: 'str', message: 'str', *, confirm_send: 'bool', profile_urn: 'str | None' = None) -> 'dict[str, Any]'",
     "reply_to_conversation": "(self, thread_id: 'str', message: 'str', *, confirm_send: 'bool') -> 'dict[str, Any]'",
+    "walk_my_connections": "(self, on_batch: 'OnBatch', *, known: 'set[str] | None' = None, stop_after_known: 'int | None' = None, time_budget: 'float' = 600.0, max_rounds: 'int' = 400, on_progress: 'OnProgress | None' = None) -> 'WalkResult'",
 }
 
 DELEGATES = {
@@ -83,6 +84,7 @@ DELEGATES = {
     "search_posts": ("_posts", "search_posts"),
     "send_message": ("_message_sender", "send_message"),
     "reply_to_conversation": ("_message_sender", "reply_to_conversation"),
+    "walk_my_connections": ("_my_connections", "walk"),
 }
 
 DELEGATE_CALLS = {
@@ -111,6 +113,7 @@ DELEGATE_CALLS = {
     "search_posts": "self._posts.search_posts(keywords, date_posted=date_posted, max_pages=max_pages, content_type=content_type)",
     "send_message": "self._message_sender.send_message(linkedin_username, message, confirm_send=confirm_send, profile_urn=profile_urn)",
     "reply_to_conversation": "self._message_sender.reply_to_conversation(thread_id, message, confirm_send=confirm_send)",
+    "walk_my_connections": "self._my_connections.walk(on_batch, known=known, stop_after_known=stop_after_known, time_budget=time_budget, max_rounds=max_rounds, on_progress=on_progress)",
 }
 
 FACADE_STATE = {
@@ -122,6 +125,7 @@ FACADE_STATE = {
     "_feed",
     "_jobs",
     "_message_sender",
+    "_my_connections",
     "_person",
     "_posts",
 }

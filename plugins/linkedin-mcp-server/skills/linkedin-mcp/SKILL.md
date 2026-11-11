@@ -45,6 +45,9 @@ instances, clear profiles, or replace the user's browser session.
 
 - Profiles: `get_my_profile`, `get_person_profile`, `search_people`, and
   `get_sidebar_profiles`.
+- Your network: `get_network_overview`, `search_my_network` (offline, call
+  freely), `import_connections_csv`, and `sync_my_connections`, which walks
+  the connections page and should run rarely.
 - Companies: `get_company_profile`, `get_company_posts`, `search_companies`,
   and `get_company_employees`.
 - Jobs: `search_jobs`, `get_saved_jobs`, `get_job_details`,

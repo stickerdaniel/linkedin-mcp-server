@@ -13,13 +13,19 @@ from fastmcp import Context, FastMCP
 from pydantic import BeforeValidator, Field
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
-from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
+from linkedin_mcp_server.config.schema import (
+    DEFAULT_TOOL_TIMEOUT_SECONDS,
+    SYNC_MY_CONNECTIONS_MAX_SECONDS,
+    tool_timeout_for,
+)
 from linkedin_mcp_server.dependencies import get_ready_extractor, tool_errors
 from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode
 from linkedin_mcp_server.linkedin import parse_person_sections
 from linkedin_mcp_server.linkedin.contracts import FilterValidationError
 from linkedin_mcp_server.linkedin.identifiers import normalize_person_identifier
+from linkedin_mcp_server.linkedin.my_connections import CONNECTIONS_URL
 from linkedin_mcp_server.linkedin.search_urls import build_people_search_url
+from linkedin_mcp_server.tools.network import open_store
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +219,108 @@ def register_person_tools(
         await ctx.report_progress(progress=100, total=100, message="Complete")
 
         return result
+
+    @mcp.tool(
+        timeout=tool_timeout_for("sync_my_connections", tool_timeout),
+        title="Sync My Connections",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"person", "network"},
+    )
+    @tool_errors
+    async def sync_my_connections(
+        ctx: Context,
+        full: bool = False,
+        time_budget_seconds: Annotated[
+            int, Field(ge=30, le=SYNC_MY_CONNECTIONS_MAX_SECONDS)
+        ] = 600,
+        stop_after_known: Annotated[int, Field(ge=5, le=500)] = 25,
+    ) -> dict[str, Any]:
+        """
+        Read your own 1st-degree connections list into the local network store.
+
+        Walks linkedin.com/mynetwork/invite-connect/connections/ (newest first),
+        scrolling slowly, and saves each connection's name, headline, profile
+        URL and connection date to a local SQLite file. Afterwards
+        search_my_network and get_network_overview answer from that file
+        without touching LinkedIn. Every batch is saved as it is read, so a run
+        cut short keeps what it read; call again to continue.
+
+        This is the heaviest read the server makes. Run it rarely: a full walk
+        once, then incremental ones. Prefer import_connections_csv for the bulk
+        of the data when the user has LinkedIn's data export.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            full: False (default) stops once `stop_after_known` consecutive
+                connections are already in the store -- only new connections
+                are read -- but only after some earlier walk reached the end of
+                the list; until then every call walks the whole list, so a run
+                cut short is finished by the next one. True always walks the
+                whole list, e.g. to refresh headlines.
+            time_budget_seconds: How long the walk may run (30-900, default 600).
+            stop_after_known: Incremental stop threshold (default 25).
+
+        Returns:
+            Dict with url, seen, added, total_in_store, listed_on_linkedin (the
+            count the page states, when it states one), incremental, stop_reason
+            (end_of_list | reached_known_connections | time_budget | max_rounds
+            | throttled), complete, and store path. When complete is false,
+            calling again continues; when stop_reason is throttled, wait hours
+            before retrying.
+        """
+        extractor = await get_ready_extractor(ctx, tool_name="sync_my_connections")
+        store = open_store()
+        try:
+            known = store.known_slugs()
+            # Until one walk has reached the end of the list, the store may
+            # hold a newest-first prefix with a gap below it, so an early stop
+            # at known connections would leave that gap unread.
+            incremental = not full and store.has_complete_walk()
+            run_id = store.start_run("page_incremental" if incremental else "page_full")
+            added = 0
+
+            def on_batch(batch: list[Any]) -> None:
+                nonlocal added
+                added += store.upsert_page_connections(batch).added
+
+            async def on_progress(message: str, read: int) -> None:
+                await ctx.report_progress(progress=read, total=None, message=message)
+
+            logger.info(
+                "Syncing connections (full=%s, budget=%ss, known=%d)",
+                full,
+                time_budget_seconds,
+                len(known),
+            )
+            result = await extractor.walk_my_connections(
+                on_batch,
+                known=known,
+                stop_after_known=stop_after_known if incremental else None,
+                time_budget=float(time_budget_seconds),
+                on_progress=on_progress,
+            )
+            store.finish_run(
+                run_id,
+                seen=result.seen,
+                added=added,
+                complete=result.complete,
+                note=result.stop_reason,
+            )
+            return {
+                "url": CONNECTIONS_URL,
+                "seen": result.seen,
+                "added": added,
+                "total_in_store": store.count(),
+                "listed_on_linkedin": result.listed_total,
+                "rounds": result.rounds,
+                "stop_reason": result.stop_reason,
+                "complete": result.complete,
+                "incremental": incremental,
+                "throttled": result.throttled,
+                "store": str(store.path),
+            }
+        finally:
+            store.close()
 
     @mcp.tool(
         timeout=tool_timeout,
