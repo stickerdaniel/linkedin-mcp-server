@@ -186,6 +186,83 @@ async def _until(condition: Callable[[], Any], seconds: float, what: str) -> Any
     pytest.fail(f"{what} within {seconds}s")
 
 
+#: Whole reads of the process tree a sampler wait allows. One shows what was
+#: there when it began; the rest cover a process read that failed and is
+#: asked again on the next one.
+SAMPLER_READS = 3
+
+#: How long a sampler wait tolerates a sampler that makes no read at all.
+#: Measured under ``-n 4`` with every browser case running: one read took at
+#: most 8 ms and reads began at most 123 ms apart. A stall this long is the
+#: host's, and the failure says so instead of blaming the sampler.
+SAMPLER_STALL_SECONDS = 60.0
+
+
+async def _sampled(
+    sampler: LifetimeSampler,
+    condition: Callable[[dict[str, Any]], Any],
+    what: str,
+) -> Any:
+    """*condition* of the sampler's document, bounded by the sampler's reads.
+
+    For a process that exists before the wait begins. The wait fails once
+    ``SAMPLER_READS`` whole reads, each begun after the wait, have not shown
+    *condition*. A host that holds the sampler only delays the answer: a
+    clock bound read such a stall as a running browser left unidentified.
+    """
+    document = sampler.document
+    # The read under way may have listed the tree before this wait began, so
+    # the reads that count start with the one after it. Read k is whole once
+    # read k + 1 has begun.
+    enough = document["samples"] + 2 + SAMPLER_READS
+    seen, moved = document["samples"], time.monotonic()
+    while True:
+        # Counted before the condition is read, so a read that ends between
+        # the two cannot fail a wait it has just satisfied.
+        samples = document["samples"]
+        value = condition(document)
+        if value:
+            return value
+        if document["sampler"] != "running":
+            pytest.fail(f"{what}: the sampler is {document['sampler']}")
+        if samples >= enough:
+            pytest.fail(f"{what} in {SAMPLER_READS} reads of the process tree")
+        if samples != seen:
+            seen, moved = samples, time.monotonic()
+        elif time.monotonic() - moved > SAMPLER_STALL_SECONDS:
+            pytest.fail(
+                f"{what}: the sampler made no read for {SAMPLER_STALL_SECONDS:g}s"
+            )
+        await asyncio.sleep(0.05)
+
+
+def _started_samplers(monkeypatch: pytest.MonkeyPatch) -> list[LifetimeSampler]:
+    """Every sampler started from here on, ``observing``'s own included."""
+    started: list[LifetimeSampler] = []
+    start = LifetimeSampler.start
+
+    def recorded(self: LifetimeSampler) -> LifetimeSampler:
+        started.append(self)
+        return start(self)
+
+    monkeypatch.setattr(LifetimeSampler, "start", recorded)
+    return started
+
+
+def _dead(process: psutil.Process) -> bool:
+    """Whether *process* has ended: a zombie on POSIX, gone on Windows."""
+    try:
+        return process.status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
+def _roots(document: dict[str, Any]) -> list[dict[str, Any]]:
+    """The browser roots a lifetimes document holds, in identification order."""
+    found = [p for p in document.get("processes", []) if p["role"] == "browser-root"]
+    return sorted(found, key=lambda p: p["identified_ms"])
+
+
 # --- Which phase a stalled first navigation reached ----------------------------
 
 
@@ -298,20 +375,8 @@ async def test_a_browser_killed_under_a_living_driver_is_an_unexpected_end(tmp_p
             with observe_navigation(path, label="killed") as recorder:
                 async with _browser(profile) as context:
                     page = context.pages[0]
-
-                    def root() -> dict[str, Any] | None:
-                        document = read_document(lifetimes_path) or {}
-                        return next(
-                            (
-                                p
-                                for p in document.get("processes", [])
-                                if p["role"] == "browser-root"
-                            ),
-                            None,
-                        )
-
-                    found = await _until(
-                        root, 15, "the browser root was not identified"
+                    (found,) = await _sampled(
+                        lifetimes, _roots, "the browser root was not identified"
                     )
                     process = psutil.Process(found["pid"])
                     assert process.create_time() == pytest.approx(
@@ -351,35 +416,34 @@ async def test_a_browser_killed_under_a_living_driver_is_an_unexpected_end(tmp_p
 
 
 @_browser_case
-async def test_a_relaunch_keeps_the_first_launch_and_reads_its_own_ends(tmp_path):
+async def test_a_relaunch_keeps_the_first_launch_and_reads_its_own_ends(
+    tmp_path, monkeypatch
+):
     """Staging's relaunch after a stall: two browsers on one profile, observed
     by the harness's own ``observing``. The first launch keeps the top level
     and its stalled navigation; the second is appended, and its browser lost
     before its own close reads as unexpected, not as ended by the first's."""
     evidence = tmp_path / "evidence"
     profile = tmp_path / "profile"
-
-    def roots() -> list[dict[str, Any]]:
-        document = read_document(evidence / BROWSER_LIFETIMES_FILE) or {}
-        found = [
-            p for p in document.get("processes", []) if p["role"] == "browser-root"
-        ]
-        return sorted(found, key=lambda p: p["identified_ms"])
+    started = _started_samplers(monkeypatch)
 
     with _Origin() as origin:
         with observing(evidence, profile=profile, label="relaunch") as path:
+            (sampler,) = started
             async with _browser(profile) as context:
                 with pytest.raises(PlaywrightTimeoutError):
                     await context.pages[0].goto(
                         origin.url("/black-hole"), timeout=1_000
                     )
-                await _until(roots, 15, "the first browser root was not identified")
+                await _sampled(
+                    sampler, _roots, "the first browser root was not identified"
+                )
             async with _browser(profile) as context:
                 page = context.pages[0]
                 await page.goto(origin.url("/"))
-                second = await _until(
-                    lambda: len(roots()) == 2 and roots()[1],
-                    15,
+                second = await _sampled(
+                    sampler,
+                    lambda document: len(_roots(document)) == 2 and _roots(document)[1],
                     "the second browser root was not identified",
                 )
                 root = psutil.Process(second["pid"])
@@ -390,9 +454,11 @@ async def test_a_relaunch_keeps_the_first_launch_and_reads_its_own_ends(tmp_path
                 reaper.suspend()
                 try:
                     root.kill()
-                    await _until(
-                        lambda: roots()[1]["gone_ms"] is not None,
-                        15,
+                    # The kernel's part first: the reads count from a dead root.
+                    await _until(lambda: _dead(root), 15, "the killed root did not end")
+                    await _sampled(
+                        sampler,
+                        lambda document: _roots(document)[1]["gone_ms"] is not None,
                         "the second browser root was not seen gone",
                     )
                 finally:
@@ -407,7 +473,9 @@ async def test_a_relaunch_keeps_the_first_launch_and_reads_its_own_ends(tmp_path
     assert record["close_requested_ms"] < relaunch["launch"]["started_ms"]
     assert relaunch["close_requested_ms"] > relaunch["launch"]["started_ms"]
     assert record["driver"]["pid"] != relaunch["driver"]["pid"]
-    first, second = (root["ended"] for root in roots())
+    first, second = (
+        root["ended"] for root in _roots(_record(evidence / BROWSER_LIFETIMES_FILE))
+    )
     assert first in ("after-close-request", "ambiguous")
     assert second == "unexpected"
 
