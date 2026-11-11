@@ -57,7 +57,7 @@ if TYPE_CHECKING:
 
     from _typeshed import WriteableBuffer
 
-CATALOG_URL = "https://api.cadenza.page/oss/tools"
+CATALOG_URL = "https://mcp.daniel.sticker.name/oss/tools"
 URL_ENV = "LINKEDIN_MCP_REMOTE_TOOLS_URL"
 
 #: Raw 32-byte Ed25519 public keys. A catalog passes when any of them verifies,
