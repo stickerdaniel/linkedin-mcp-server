@@ -16,10 +16,10 @@ and reports five kinds of match:
    ``query_selector_all``, positionally or by keyword, or in a JS
    ``querySelector``, ``querySelectorAll``, ``closest`` or ``matches`` call
    whose one argument is a literal inside a string. Only CSS counts: a
-   Playwright selector is split at ``>>``, its ``id=``, ``text=``, ``xpath=``
-   and other engine parts are skipped, and so are CSS comments, escapes
-   (``#foo\\.bar``) and quoted values. A JS literal is read after its own
-   escapes, so ``a[href$=\\".pdf\\"]`` there is not a class.
+   Playwright selector is split at ``>>``, its ``css=`` and ``css:light=``
+   parts and parts without an engine are read, its ``id=``, ``text=``,
+   ``xpath=`` and other engine parts are skipped, and so are CSS comments,
+   escapes (``#foo\\.bar``) and quoted values.
 5. ``text-selector``: a Playwright text selector with a written value: the
    ``:has-text(...)``, ``:text(...)`` and ``:text-is(...)`` pseudo-classes
    anywhere in a string, a ``text=`` or quoted part of a literal selector
@@ -32,8 +32,11 @@ Rules 1 to 3 and the pseudo-classes of rule 5 judge a value where it is
 written, so a selector defined in one module and used in another, or handed
 from Python to page JS, is checked at its definition. Rules 2, 3 and 5 report
 the complete clause, value included, so an exception names the exact value
-it allows. A value quoted from inside a JS string, such as
-``[title=\\"a]b\\"]``, keeps its escaped quotes and every ``]`` between them.
+it allows. Inside a literal JS selector call every rule reads the argument
+after its JS escapes, so ``[title=\\"a]b\\"]`` there is reported as the
+``[title="a]b"]`` the page receives and ``a[href$=\\".pdf\\"]`` holds no
+class. Elsewhere a value quoted from inside a JS string keeps its escaped
+quotes and every ``]`` between them.
 
 A dependency that is unavoidable is registered in
 ``scripts/selector_policy_exceptions.toml`` by file, owning symbol, exact text
@@ -225,7 +228,7 @@ def _selector_matches(selector: str) -> Iterator[tuple[int, Rule, str]]:
             engine, body, body_offset = "css", part, offset
         if engine == "text":
             yield offset, "text-selector", part
-        elif engine == "css":
+        elif engine in ("css", "css:light"):
             for token_offset, token in _css_class_tokens(body):
                 yield body_offset + token_offset, "class-selector", token
 
@@ -264,14 +267,33 @@ def _js_string(body: str) -> tuple[str, list[int]]:
     return "".join(text), offsets
 
 
-def _js_sink_matches(value: str) -> Iterator[tuple[int, str]]:
+def _string_matches(value: str) -> Iterator[tuple[int, Rule, str]]:
+    """Every match in a string constant, with its offset in ``value``.
+
+    The constant is read as written, except the literal argument of a JS
+    selector call, which is read once decoded: every match there names the
+    selector the page receives, and its offset only places it on a line. A
+    class token that a content match already reports, same offset and same
+    text, is not reported twice.
+    """
+    decoded: list[tuple[int, int, str, list[int]]] = []
     for call in _JS_SINK.finditer(value):
         body = call.group("body")
         if call.group("q") == "`" and "${" in body:
             continue
         css, offsets = _js_string(body)
+        decoded.append((call.start("body"), call.end("body"), css, offsets))
+    for offset, rule, text in _content_matches(value):
+        if not any(start <= offset < end for start, end, *_ in decoded):
+            yield offset, rule, text
+    for start, _, css, offsets in decoded:
+        content = list(_content_matches(css))
+        covered = {(offset, text) for offset, _, text in content}
+        for offset, rule, text in content:
+            yield start + offsets[offset], rule, text
         for offset, token in _css_class_tokens(css):
-            yield call.start("body") + offsets[offset], token
+            if (offset, token) not in covered:
+                yield start + offsets[offset], "class-selector", token
 
 
 def _docstrings(tree: ast.Module) -> set[int]:
@@ -375,9 +397,9 @@ def scan_source(source: str, path: str) -> list[Match]:
     for owner, node in _owned_nodes(tree):
         argument = _literal_selector(node)
         if argument is not None and isinstance(selector := argument.value, str):
-            covered = {offset for offset, *_ in _content_matches(selector)}
+            covered = {(offset, text) for offset, _, text in _content_matches(selector)}
             for offset, rule, text in _selector_matches(selector):
-                if offset not in covered:
+                if (offset, text) not in covered:
                     line = _line(argument, selector, offset)
                     matches.append(Match(path, line, owner, rule, text))
         if located := _literal_text_locator(node):
@@ -390,14 +412,8 @@ def scan_source(source: str, path: str) -> list[Match]:
         ):
             continue
         value = node.value
-        seen: set[int] = set()
-        for offset, rule, text in _content_matches(value):
-            seen.add(offset)
+        for offset, rule, text in _string_matches(value):
             matches.append(Match(path, _line(node, value, offset), owner, rule, text))
-        for offset, token in _js_sink_matches(value):
-            if offset not in seen:
-                line = _line(node, value, offset)
-                matches.append(Match(path, line, owner, "class-selector", token))
     return sorted(matches, key=lambda m: (m.line, m.rule, m.text))
 
 

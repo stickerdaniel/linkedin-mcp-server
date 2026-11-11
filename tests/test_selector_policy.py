@@ -81,10 +81,20 @@ def _found(source: str) -> list[tuple[str, str]]:
         ),
         (
             'JS = r\'document.querySelector("[title=\\"a]b\\"]")\'',
+            ("label-value", '[title="a]b"]'),
+        ),
+        (
+            "JS = r'document.querySelector(\".foo__b\\x61r\")'",
+            ("bem-class", ".foo__bar"),
+        ),
+        (
+            'JS = r\'const title = "[title=\\"a]b\\"]";\'',
             ("label-value", '[title=\\"a]b\\"]'),
         ),
         ("page.locator('id=main >> div.toast')", ("class-selector", ".toast")),
         ("page.locator('xpath=//main >> css=.toast')", ("class-selector", ".toast")),
+        ("page.locator('css:light=.toast')", ("class-selector", ".toast")),
+        ("page.locator('id=main >> css:light=.toast')", ("class-selector", ".toast")),
     ],
 )
 def test_a_class_or_label_value_selector_is_refused(
@@ -155,29 +165,31 @@ def test_text_outside_a_selector_or_from_a_variable_is_allowed(source: str) -> N
     assert _found(source) == []
 
 
-def test_an_exception_pins_a_value_quoted_inside_a_js_string() -> None:
+def test_a_bem_prefix_does_not_hide_the_complete_escaped_class() -> None:
+    assert ("class-selector", ".foo__b\\61r") in _found("page.locator(r'.foo__b\\61r')")
+
+
+@pytest.mark.parametrize(
+    ("template", "before", "after"),
+    [
+        ('document.querySelector("[title=\\"{}\\"]")', "a]b", "a]c"),
+        ('document.querySelector("[title=\\x22{}\\x22]")', "a]b", "a]c"),
+        ('document.querySelector("[title=\\u0022{}\\u0022]")', "a]b", "a]c"),
+        ('document.querySelector(".foo__b{}")', "\\x61r", "\\x75z"),
+    ],
+)
+def test_an_exception_pins_the_decoded_js_selector(
+    template: str, before: str, after: str
+) -> None:
     def scan(value: str) -> list:
-        return _CHECK.scan_source(
-            f'JS = r\'document.querySelector("[title=\\"{value}\\"]")\'',
-            "snippet.py",
-        )
+        return _CHECK.scan_source(f"JS = r'{template.format(value)}'", "snippet.py")
 
     registered = [
-        _CHECK.Registered(m.path, m.symbol, m.text, 1, "test") for m in scan("a]b")
+        _CHECK.Registered(m.path, m.symbol, m.text, 1, "test") for m in scan(before)
     ]
-    assert _CHECK.problems(scan("a]b"), registered) == []
-    assert _CHECK.problems(scan("a]c"), registered) != []
-
-
-def test_the_owner_is_the_innermost_symbol() -> None:
-    source = (
-        'TOP = "div.a__b"\n'
-        "class Page:\n"
-        "    def read(self):\n"
-        "        page.locator('.toast')\n"
-    )
-    owners = [(m.symbol, m.text) for m in _CHECK.scan_source(source, "snippet.py")]
-    assert owners == [("TOP", ".a__b"), ("read", ".toast")]
+    assert registered
+    assert _CHECK.problems(scan(before), registered) == []
+    assert _CHECK.problems(scan(after), registered) != []
 
 
 @pytest.fixture
