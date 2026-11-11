@@ -7,6 +7,9 @@ build the production server in process and use a real FastMCP client.
 
 Whatever goes wrong with the catalog, a client must see exactly the built-in
 tools (`fixtures/tool-contract/tools.json`) and the built-in instructions.
+
+The stub signs with a test key. In process, the ``stub`` fixture admits that
+key; a started process gets it from a ``sitecustomize`` on its ``PYTHONPATH``.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ import asyncio
 import json
 import os
 import socket
+import string
 import subprocess
 import sys
 import textwrap
@@ -29,7 +33,15 @@ from urllib.parse import urlsplit
 import anyio
 import mcp.types as mt
 import pytest
-from catalog_stub import CatalogStub, gate_environment
+from catalog_stub import (
+    PUBLIC_KEY,
+    SIGNATURE_HEADER,
+    Answer,
+    CatalogStub,
+    gate_environment,
+    signature,
+)
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StdioTransport
 from test_profile_lease_integration import _hold_profile
@@ -106,6 +118,7 @@ def _schema(**changes: Any) -> dict[str, Any]:
 
 @pytest.fixture
 def stub(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[CatalogStub]:
+    monkeypatch.setattr(remote_catalog, "CATALOG_KEYS", (PUBLIC_KEY,))
     with gate_environment(monkeypatch, tmp_path / ".env"), CatalogStub() as server:
         os.environ[_URL] = server.url
         server.answer = server.json(200, _CATALOG)
@@ -142,16 +155,33 @@ async def _surface(
 _CONSOLE_SCRIPT = Path(sys.executable).with_name("mcp-server-linkedin")
 
 
+def _test_key_site(tmp_path: Path) -> Path:
+    """A directory whose ``sitecustomize`` admits the stub's key at interpreter start."""
+    site = tmp_path / "site"
+    site.mkdir(exist_ok=True)
+    (site / "sitecustomize.py").write_text(
+        "from linkedin_mcp_server import remote_catalog\n"
+        f"remote_catalog.CATALOG_KEYS = (bytes.fromhex({PUBLIC_KEY.hex()!r}),)\n",
+        encoding="utf-8",
+    )
+    return site
+
+
 def _process_env(tmp_path: Path, **settings: str) -> dict[str, str]:
     """The environment a client gives the server, with a private profile.
 
     ``CHROME_PATH`` names an existing file so no browser is installed at start.
+    ``PYTHONPATH`` leads with the test key's ``sitecustomize``.
     """
     env = {key: value for key, value in os.environ.items() if key not in _GATE_KEYS}
+    python_path = [str(_test_key_site(tmp_path))]
+    if env.get("PYTHONPATH"):
+        python_path.append(env["PYTHONPATH"])
     env.update(
         HOME=str(tmp_path / "home"),
         USER_DATA_DIR=str(tmp_path / "auth" / "profile"),
         CHROME_PATH=sys.executable,
+        PYTHONPATH=os.pathsep.join(python_path),
         **settings,
     )
     return env
@@ -209,6 +239,19 @@ class TestStartedProcess:
 
         assert tools == _with_remote()
         assert instructions == _JOINED
+
+    async def test_an_unsigned_catalog_leaves_the_built_in_surface(
+        self, stub: CatalogStub, tmp_path: Path
+    ):
+        stub.answer = stub.raw(200, json.dumps(_CATALOG).encode(), signed=False)
+
+        _, tools, instructions = await _start_process(
+            [str(_CONSOLE_SCRIPT)], _process_env(tmp_path, **{_URL: stub.url}), tmp_path
+        )
+
+        assert len(stub.requests) == 1
+        assert tools == _builtin_contract()
+        assert instructions == _THE_OPERATING_RULES
 
     async def test_a_hanging_catalog_costs_at_most_the_budget(
         self, stub: CatalogStub, tmp_path: Path
@@ -375,6 +418,63 @@ _BROKEN = {
         .encode(),
     ),
 }
+
+
+_BODY = json.dumps(_CATALOG).encode()
+_SIGNATURE = signature(_BODY)
+_BASE64URL = string.ascii_uppercase + string.ascii_lowercase + string.digits + "-_"
+#: The last of 86 characters holds four unused bits, zero when canonical. This
+#: sets one: it decodes to the same 64 bytes.
+_NON_CANONICAL = _SIGNATURE[:-1] + _BASE64URL[_BASE64URL.index(_SIGNATURE[-1]) | 1]
+
+
+def _with_signature(*values: str, body: bytes = _BODY) -> Answer:
+    return CatalogStub.raw(
+        200, body, [(SIGNATURE_HEADER, value) for value in values], signed=False
+    )
+
+
+#: Catalogs that pass every content check and fail only on their signature.
+_FORGED = {
+    "unsigned": CatalogStub.raw(200, _BODY, signed=False),
+    "another key": _with_signature(signature(_BODY, key=Ed25519PrivateKey.generate())),
+    "body altered after signing": _with_signature(
+        _SIGNATURE, body=_BODY.replace(b"fixed text", b"other text")
+    ),
+    "signed without the prefix": _with_signature(signature(_BODY, prefix=b"")),
+    "padded": _with_signature(_SIGNATURE + "=="),
+    "standard base64": _with_signature(_SIGNATURE[:-2] + "+/"),
+    "one character short": _with_signature(_SIGNATURE[:-1]),
+    "one character long": _with_signature(_SIGNATURE + "A"),
+    "non-canonical last character": _with_signature(_NON_CANONICAL),
+    "comma-joined": _with_signature(f"{_SIGNATURE}, {_SIGNATURE}"),
+    "duplicate header": _with_signature(_SIGNATURE, _SIGNATURE),
+}
+
+
+class TestSignature:
+    @pytest.mark.parametrize("case", list(_FORGED))
+    async def test_a_catalog_without_a_valid_signature_leaves_the_built_in_surface(
+        self, stub: CatalogStub, lifespan: None, case: str
+    ):
+        stub.answer = _FORGED[case]
+
+        tools, instructions = await _surface(await _started())
+
+        assert len(stub.requests) == 1
+        assert tools == _builtin_contract()
+        assert instructions == _THE_OPERATING_RULES
+
+    async def test_any_listed_key_admits_the_catalog(
+        self, stub: CatalogStub, lifespan: None, monkeypatch: pytest.MonkeyPatch
+    ):
+        other = Ed25519PrivateKey.generate().public_key().public_bytes_raw()
+        monkeypatch.setattr(remote_catalog, "CATALOG_KEYS", (other, PUBLIC_KEY))
+
+        tools, instructions = await _surface(await _started())
+
+        assert tools == _with_remote()
+        assert instructions == _JOINED
 
 
 class TestInstall:

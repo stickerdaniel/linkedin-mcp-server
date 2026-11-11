@@ -3,7 +3,7 @@
 ``cli_main`` calls :func:`install` once, on a Direct server, after the server
 is built and before it runs. It waits for the catalog that
 ``remote_catalog.prefetch`` started at most until the start deadline, checks
-it, and only then adds every tool and the instructions line at once. Any
+its signature and contents, and only then adds every tool and the instructions line at once. Any
 failure leaves the server exactly as it was built.
 
 The middlewares ask :func:`is_remote` so that a remote tool is treated like
@@ -184,11 +184,12 @@ def install(mcp: FastMCP) -> None:
         return
     _attempted = True
     try:
-        body = remote_catalog.awaited_body()
-        if body is None:
+        response = remote_catalog.awaited_response()
+        if response is None:
             if remote_catalog.requested():
                 logger.debug("Optional tools were not loaded: no catalog in time")
             return
+        body = remote_catalog.verified_body(response)
         builtin = frozenset(
             tool.name for tool in asyncio.run(mcp.list_tools(run_middleware=False))
         )

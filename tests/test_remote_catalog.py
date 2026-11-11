@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+import sys
+import textwrap
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -44,7 +47,7 @@ def stub(dotenv_file: Path) -> Iterator[CatalogStub]:
 def _requests_after_start(stub: CatalogStub, argv: list[str] | None = None) -> int:
     """Start as ``main()`` does and wait out the start budget; count arrivals."""
     remote_catalog.prefetch(argv or [])
-    remote_catalog.awaited_body()
+    remote_catalog.awaited_response()
     return len(stub.requests)
 
 
@@ -265,6 +268,34 @@ class TestNeverRaises:
         assert not remote_catalog.requested()
 
 
+def test_the_request_path_loads_no_cryptography(stub: CatalogStub, tmp_path: Path):
+    # `prefetch` runs before `cli_main` is imported, so whatever it loads
+    # delays the start; the signature check imports `cryptography` later.
+    child = textwrap.dedent(
+        """
+        import sys
+        from linkedin_mcp_server import remote_catalog
+
+        remote_catalog.prefetch([])
+        assert remote_catalog.awaited_response() is not None
+        print("cryptography" in sys.modules)
+        """
+    )
+    env = dict(os.environ, **{_URL: stub.url})
+
+    result = subprocess.run(
+        [sys.executable, "-c", child],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert (result.stdout, result.returncode) == ("False\n", 0), result.stderr
+    assert len(stub.requests) == 1
+
+
 class TestRedirects:
     def test_a_redirect_is_not_followed(self, stub: CatalogStub):
         with CatalogStub() as elsewhere:
@@ -273,7 +304,7 @@ class TestRedirects:
 
             remote_catalog.prefetch([])
 
-            assert remote_catalog.awaited_body() is None
+            assert remote_catalog.awaited_response() is None
             assert len(stub.requests) == 1
             assert elsewhere.requests == []
 

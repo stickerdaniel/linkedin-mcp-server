@@ -9,17 +9,20 @@ the stub records is what left the process. Usage::
         stub.requests  # every request seen, in order
 
 ``answer`` handles every request; ``call_answer``, when set, handles the
-POSTs to ``<url>/call`` instead.
+POSTs to ``<url>/call`` instead. Every answer carries a signature by
+:data:`SIGNING_KEY` unless it says otherwise; a test admits that key by
+putting :data:`PUBLIC_KEY` into ``remote_catalog.CATALOG_KEYS``.
 """
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import json
 import os
 import threading
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterable
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -27,6 +30,7 @@ from typing import Self
 
 import dotenv.main
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 #: Every variable that decides whether, where and how the catalog is asked.
 GATE_KEYS = (
@@ -66,6 +70,25 @@ def gate_environment(
 
 
 type Answer = Callable[[BaseHTTPRequestHandler], None]
+
+#: The catalog wire format, written out rather than imported so that a change
+#: on one side alone fails here.
+SIGNATURE_HEADER = "X-Catalog-Signature"
+SIGNED_PREFIX = b"linkedin-mcp-server catalog v1\n"
+
+SIGNING_KEY = Ed25519PrivateKey.generate()
+PUBLIC_KEY = SIGNING_KEY.public_key().public_bytes_raw()
+
+
+def signature(
+    body: bytes,
+    *,
+    key: Ed25519PrivateKey = SIGNING_KEY,
+    prefix: bytes = SIGNED_PREFIX,
+) -> str:
+    """The header value the remote end sends for *body*: unpadded base64url."""
+    raw = key.sign(prefix + body)
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
 
 @dataclass(frozen=True)
@@ -136,10 +159,21 @@ class CatalogStub:
     # Answers --------------------------------------------------------------
 
     @staticmethod
-    def raw(status: int, body: bytes, headers: dict[str, str] | None = None) -> Answer:
+    def raw(
+        status: int,
+        body: bytes,
+        headers: Iterable[tuple[str, str]] = (),
+        *,
+        signed: bool = True,
+    ) -> Answer:
+        """*body* as sent, after *headers* in order and, if *signed*, its signature."""
+        sent = [*headers]
+        if signed:
+            sent.append((SIGNATURE_HEADER, signature(body)))
+
         def answer(handler: BaseHTTPRequestHandler) -> None:
             handler.send_response(status)
-            for key, value in (headers or {}).items():
+            for key, value in sent:
                 handler.send_header(key, value)
             handler.send_header("Content-Type", "application/json")
             handler.send_header("Content-Length", str(len(body)))
@@ -154,7 +188,7 @@ class CatalogStub:
 
     @classmethod
     def redirect(cls, location: str) -> Answer:
-        return cls.raw(302, b"", {"Location": location})
+        return cls.raw(302, b"", [("Location", location)])
 
     def drip(
         self,
@@ -187,6 +221,7 @@ class CatalogStub:
             else:
                 stream = json.dumps(document).encode()
                 handler.send_response(status)
+                handler.send_header(SIGNATURE_HEADER, signature(stream))
                 handler.send_header("Content-Type", "application/json")
                 handler.send_header("Content-Length", str(len(stream)))
                 handler.end_headers()

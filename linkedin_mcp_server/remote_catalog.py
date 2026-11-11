@@ -10,15 +10,29 @@ before ``cli_main`` is imported: that import is most of the start time, and
 the GET runs in parallel with it. Usage:
 
 * ``__main__.main`` calls :func:`prefetch` with ``sys.argv[1:]`` first.
-* ``remote_tools.install`` calls :func:`awaited_body` once the server exists,
-  which waits at most until the start deadline, and then :func:`admit`.
+* ``remote_tools.install`` calls :func:`awaited_response` once the server
+  exists, which waits at most until the start deadline, then
+  :func:`verified_body` and :func:`admit`.
 * ``remote_tools.RemoteTool.run`` calls :func:`call` in a daemon thread.
 
 Set ``LINKEDIN_MCP_REMOTE_TOOLS=off`` to turn all of it off.
+
+The catalog is admitted only with a valid Ed25519 signature from a key in
+:data:`CATALOG_KEYS`. The ``X-Catalog-Signature`` header carries it, unpadded
+base64url, over :data:`SIGNED_PREFIX` plus the exact body bytes. The URL
+override is verified the same way. Accepted limits:
+
+* Call results are unsigned. A compromised remote end can change what a call
+  returns, but not which tools are listed or the instructions line.
+* An older signed catalog can be served again; nothing expires.
+* A new key reaches users only with a release, and a server that is never
+  updated keeps only the keys it shipped with.
+* Switching the catalog off at the remote end affects new starts only.
 """
 
 from __future__ import annotations
 
+import base64
 import http.client
 import io
 import json
@@ -45,6 +59,17 @@ if TYPE_CHECKING:
 
 CATALOG_URL = "https://api.cadenza.page/oss/tools"
 URL_ENV = "LINKEDIN_MCP_REMOTE_TOOLS_URL"
+
+#: Raw 32-byte Ed25519 public keys. A catalog passes when any of them verifies,
+#: so a rotation ships the new key next to the old one first.
+CATALOG_KEYS: tuple[bytes, ...] = (
+    base64.b64decode("yOI4vQDNwJLFLoDbiYmnLK0FHhmJ5TYrS2NJqNHjMHE="),
+)
+SIGNATURE_HEADER = "X-Catalog-Signature"
+#: Signed ahead of the body, so the signature cannot be used for anything else.
+SIGNED_PREFIX = b"linkedin-mcp-server catalog v1\n"
+#: 64 signature bytes as unpadded base64url.
+_SIGNATURE = re.compile(r"[A-Za-z0-9_-]{86}")
 
 #: How long a start waits for the catalog, from the first line of ``main()``.
 BUDGET_SECONDS = 2.0
@@ -319,7 +344,17 @@ class _Fetch:
     deadline: float
     done: threading.Event = field(default_factory=threading.Event)
     body: bytes | None = None
+    #: The signature header, or ``None`` when it was absent or sent twice.
+    signature: str | None = None
     completed_at: float | None = None
+
+
+@dataclass(frozen=True)
+class CatalogResponse:
+    """A catalog body as it arrived, with its unchecked signature header."""
+
+    body: bytes
+    signature: str | None
 
 
 _pending: _Fetch | None = None
@@ -384,10 +419,12 @@ def _prefetch(argv: Sequence[str]) -> None:
 
 def _fetch_catalog(url: str, headers: dict[str, str], fetch: _Fetch) -> None:
     try:
-        status, body = _request(
+        status, received, body = _request(
             url, headers=headers, timeout=BUDGET_SECONDS, limit=_CATALOG_MAX_BYTES
         )
         if status == 200:
+            values = received.get_all(SIGNATURE_HEADER) or []
+            fetch.signature = values[0] if len(values) == 1 else None
             fetch.completed_at = time.monotonic()
             fetch.body = body
     except BaseException:  # noqa: BLE001 - a daemon thread with nobody to tell
@@ -401,8 +438,8 @@ def requested() -> bool:
     return _pending is not None
 
 
-def awaited_body() -> bytes | None:
-    """The catalog body, if it arrived complete before the start deadline.
+def awaited_response() -> CatalogResponse | None:
+    """The catalog response, if it arrived complete before the start deadline.
 
     Waits until the deadline at most. ``None`` when no request was sent, it
     failed, or it finished too late.
@@ -412,9 +449,37 @@ def awaited_body() -> bytes | None:
         return None
     fetch.done.wait(max(0.0, fetch.deadline - time.monotonic()))
     completed_at = fetch.completed_at
-    if completed_at is None or completed_at > fetch.deadline:
+    if completed_at is None or completed_at > fetch.deadline or fetch.body is None:
         return None
-    return fetch.body
+    return CatalogResponse(body=fetch.body, signature=fetch.signature)
+
+
+def verified_body(response: CatalogResponse) -> bytes:
+    """The body of *response* if a key in :data:`CATALOG_KEYS` signed it.
+
+    Raises :class:`RejectedCatalog` for a missing, malformed or wrong
+    signature. Reads :data:`CATALOG_KEYS` at call time. ``cryptography`` is
+    imported here, not at module level, because :func:`prefetch` runs before
+    anything but the standard library should load.
+    """
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    value = (response.signature or "").strip(" \t")
+    if _SIGNATURE.fullmatch(value) is None:
+        raise RejectedCatalog("signature header")
+    signature = base64.urlsafe_b64decode(value + "==")
+    # The last character carries four unused bits; only zeros are canonical.
+    if base64.urlsafe_b64encode(signature).rstrip(b"=").decode() != value:
+        raise RejectedCatalog("signature header")
+    message = SIGNED_PREFIX + response.body
+    for key in CATALOG_KEYS:
+        try:
+            Ed25519PublicKey.from_public_bytes(key).verify(signature, message)
+        except InvalidSignature:
+            continue
+        return response.body
+    raise RejectedCatalog("signature")
 
 
 # --------------------------------------------------------------------------
@@ -550,8 +615,8 @@ def _request(
     timeout: float,
     data: bytes | None = None,
     deadline: float | None = None,
-) -> tuple[int, bytes]:
-    """Send one request and read at most *limit* bytes of the answer.
+) -> tuple[int, http.client.HTTPMessage, bytes]:
+    """Send one request; its status, headers and at most *limit* body bytes.
 
     *timeout* bounds the connect and every socket operation; with a
     *deadline*, nothing is sent once it has passed, each later operation gets
@@ -563,6 +628,7 @@ def _request(
     request = urllib.request.Request(url, data=data, headers=dict(headers))
     with _opener(deadline).open(request, timeout=timeout) as response:
         status: int = response.status
+        received: http.client.HTTPMessage = response.headers
         chunks: list[bytes] = []
         size = 0
         while True:
@@ -575,7 +641,7 @@ def _request(
             if size > limit:
                 raise ValueError("response is larger than allowed")
             chunks.append(chunk)
-    return status, b"".join(chunks)
+    return status, received, b"".join(chunks)
 
 
 # --------------------------------------------------------------------------
@@ -902,7 +968,7 @@ def call(
     if remaining <= 0:
         raise Unavailable("no time left")
     try:
-        status, body = _request(
+        status, _, body = _request(
             url or call_url(),
             headers=headers,
             data=data,
