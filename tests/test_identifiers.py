@@ -238,6 +238,19 @@ class TestNormalizeCompanyIdentifier:
     @pytest.mark.parametrize(
         "value",
         [
+            "johnson-&-johnson",
+            "https://www.linkedin.com/company/johnson-&-johnson/",
+            "https://www.linkedin.com/company/johnson-%26-johnson/jobs/",
+        ],
+    )
+    def test_keeps_the_ampersand_of_a_company_slug(self, value: str):
+        # LinkedIn writes some slugs with a literal "&", Johnson & Johnson's
+        # among them, and search_companies hands that path back as a reference.
+        assert normalize_company_identifier(value) == "johnson-&-johnson"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
             "https://www.linkedin.com/school/rwth-aachen-university/",
             "https://www.linkedin.com/showcase/microsoft",
         ],
@@ -324,6 +337,12 @@ class TestUrlBuilders:
             == "https://www.linkedin.com/company/microsoft/people/"
         )
 
+    def test_writes_an_ampersand_slug_the_way_linkedin_links_it(self):
+        assert (
+            company_page_url("johnson-&-johnson", "/")
+            == "https://www.linkedin.com/company/johnson-&-johnson/"
+        )
+
 
 class TestReferencesThisServerEmits:
     """link_metadata renders every reference as a site-relative path, and the
@@ -348,6 +367,14 @@ class TestReferencesThisServerEmits:
     )
     def test_company_reference_yields_the_slug(self, reference, expected):
         assert normalize_company_identifier(reference) == expected
+
+    def test_an_ampersand_company_link_survives_the_round_trip(self):
+        link = "https://www.linkedin.com/company/johnson-&-johnson/"
+        assert classify_link(link) == ("company", "/company/johnson-&-johnson/")
+        assert (
+            normalize_company_identifier("/company/johnson-&-johnson/")
+            == "johnson-&-johnson"
+        )
 
     def test_thread_reference_yields_the_id(self):
         assert normalize_thread_id("/messaging/thread/2-abc123/") == "2-abc123"
@@ -611,7 +638,7 @@ class TestNothingTidiesTheReference:
 
 class TestIdentifierAllowlist:
     """A public identifier is letters, digits, hyphen and underscore, and a
-    company slug also takes a period. The old rule listed forbidden syntax
+    company slug also takes a period and an ampersand. The old rule listed forbidden syntax
     instead, so a value carrying none of it passed and spent a page load on a
     404."""
 
@@ -625,6 +652,11 @@ class TestIdentifierAllowlist:
         ["foo.bar", "/in/foo.bar/", "https://www.linkedin.com/in/foo.bar"],
     )
     def test_a_person_identifier_takes_no_period(self, value: str):
+        with pytest.raises(InvalidReferenceError):
+            normalize_person_identifier(value)
+
+    @pytest.mark.parametrize("value", ["foo&bar", "/in/foo&bar/"])
+    def test_a_person_identifier_takes_no_ampersand(self, value: str):
         with pytest.raises(InvalidReferenceError):
             normalize_person_identifier(value)
 
