@@ -209,6 +209,16 @@ class TestBuildReferences:
 
         assert normalize_url(nested) == target
 
+    def test_normalize_url_unwraps_redirect_without_trailing_slash(self):
+        # LinkedIn writes this form too: uBlock Origin's linkedin.com rule
+        # matches `a[href^="https://www.linkedin.com/redir/redirect?url=http"]`.
+        href = (
+            "https://www.linkedin.com/redir/redirect"
+            "?url=https%3A%2F%2Fgatesnot.es%2Ftgn&urlhash=abc"
+        )
+
+        assert normalize_url(href) == "https://gatesnot.es/tgn"
+
     def test_normalize_url_drops_redirect_chain_beyond_cap(self):
         target = "https://example.com/report"
         href = target
