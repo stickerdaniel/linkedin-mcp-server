@@ -1754,6 +1754,33 @@ _CASES: dict[str, _Cases] = {
             ("DAEMON_ENABLED", "--daemon", "--no-daemon", "server.daemon_enabled"),
         )
     },
+    # Checked at startup only; the module that uses each reads it at runtime.
+    "LINKEDIN_TRACE_MODE": _Cases(
+        "other",
+        (),
+        env={
+            None: KEEP,
+            "": KEEP,
+            "  ": KEEP,
+            "on_error": KEEP,
+            " Always ": KEEP,
+            "off": KEEP,
+            "false": KEEP,
+            "alwyas": REFUSED,
+        },
+    ),
+    "LINKEDIN_MCP_CHECK_FOR_UPDATES": _Cases(
+        "other",
+        (),
+        env={
+            None: KEEP,
+            "": KEEP,
+            " ": KEEP,
+            "off": KEEP,
+            "1": KEEP,
+            "disabled": REFUSED,
+        },
+    ),
 }
 
 

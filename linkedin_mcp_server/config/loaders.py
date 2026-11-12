@@ -146,6 +146,8 @@ class EnvironmentKeys:
     AUTO_IMPORT_FROM_BROWSER = "AUTO_IMPORT_FROM_BROWSER"
     DAEMON_ENABLED = "DAEMON_ENABLED"
     INSTALLER_TEMP_DIR = "INSTALLER_TEMP_DIR"
+    LINKEDIN_TRACE_MODE = "LINKEDIN_TRACE_MODE"
+    LINKEDIN_MCP_CHECK_FOR_UPDATES = "LINKEDIN_MCP_CHECK_FOR_UPDATES"
 
 
 # What ``manifest.json`` fills from ``user_config``, and the exact string each
@@ -269,6 +271,32 @@ def _transport(raw: str) -> str:
     return value
 
 
+TraceMode = Literal["off", "on_error", "always"]
+
+#: Every spelling LINKEDIN_TRACE_MODE accepts. The on/off spellings keep the
+#: meaning they had before an unknown value was refused: off, or the default.
+TRACE_MODES: dict[str, TraceMode] = {
+    "on_error": "on_error",
+    "always": "always",
+    "keep": "always",
+    "persist": "always",
+    **{value: "on_error" for value in TRUTHY_VALUES},
+    **{value: "off" for value in FALSY_VALUES},
+}
+
+
+def _trace_mode(raw: str) -> TraceMode:
+    """A trace retention mode.
+
+    Refused rather than ignored, as the on/off settings are: an unknown value
+    fell back to ``on_error`` while reading as though it had applied.
+    """
+    try:
+        return TRACE_MODES[_normalize_env(raw)]
+    except KeyError:
+        raise SettingError("Must be 'on_error', 'always' or 'off'.")
+
+
 def _integer(raw: str) -> int:
     try:
         return int(raw)
@@ -333,6 +361,10 @@ def _set_viewport(config: AppConfig, size: tuple[int, int]) -> None:
 
 def _never_applied(config: AppConfig, value: Never) -> None:
     """For a setting whose parser refuses every value."""
+
+
+def _read_where_used(config: AppConfig, value: object) -> None:
+    """For a setting checked at startup and read by the module that uses it."""
 
 
 def _dest(flag: str) -> str:
@@ -857,6 +889,16 @@ SETTINGS: tuple[Setting, ...] = (
             help_off="Give every stdio client its own browser (default; overrides DAEMON_ENABLED=true).",
         ),
         apply=_server("daemon_enabled"),
+    ),
+    Setting(
+        # debug_trace reads it from the environment for each run.
+        env=Env(EnvironmentKeys.LINKEDIN_TRACE_MODE, _trace_mode, blank="unset"),
+        apply=_read_where_used,
+    ),
+    Setting(
+        # update_check reads it from the environment before asking PyPI.
+        env=Env(EnvironmentKeys.LINKEDIN_MCP_CHECK_FOR_UPDATES, _flag, blank="unset"),
+        apply=_read_where_used,
     ),
 )
 
