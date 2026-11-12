@@ -1208,8 +1208,9 @@ class EgressProxy(ThreadingHTTPServer):
 
     daemon_threads = True
 
-    def __init__(self, routes: dict[str, int]) -> None:
-        super().__init__(("127.0.0.1", 0), _ProxyHandler)
+    def __init__(self, routes: dict[str, int], *, port: int = 0) -> None:
+        """*port* 0 takes a free one; a run by hand names one its hosts know."""
+        super().__init__(("127.0.0.1", port), _ProxyHandler)
         self._lock = threading.Lock()
         self._routes = {host.lower(): port for host, port in routes.items()}
         self.decisions: list[ProxyDecision] = []
