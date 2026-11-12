@@ -9,13 +9,12 @@ from pathlib import Path
 import shutil
 import tempfile
 import time
-from typing import Any, Literal
+from typing import Any
 
 from linkedin_mcp_server.common_utils import secure_mkdir, slugify_fragment
+from linkedin_mcp_server.config.loaders import TRACE_MODES, TraceMode
 from linkedin_mcp_server.profile_lease import ProfileLeaseUnavailableError, try_lock
 from linkedin_mcp_server.session_state import auth_root_dir, get_source_profile_dir
-
-TraceMode = Literal["off", "on_error", "always"]
 
 _TRACE_COUNTER = itertools.count(1)
 _TRACE_DIR: Path | None = None
@@ -35,12 +34,9 @@ _RETAIN_SECONDS = 14 * 24 * 60 * 60
 
 
 def _trace_mode() -> TraceMode:
+    """The mode LINKEDIN_TRACE_MODE names; ``load_config`` refuses an unknown one."""
     raw = os.getenv("LINKEDIN_TRACE_MODE", "").strip().lower()
-    if raw in {"off", "false", "0", "no"}:
-        return "off"
-    if raw in {"always", "keep", "persist"}:
-        return "always"
-    return "on_error"
+    return TRACE_MODES.get(raw, "on_error")
 
 
 def _trace_root(source_profile: Path) -> Path:

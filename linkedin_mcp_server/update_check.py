@@ -30,6 +30,7 @@ from fastmcp.tools import ToolResult
 from packaging.version import InvalidVersion, Version
 
 from linkedin_mcp_server import __version__
+from linkedin_mcp_server.config.loaders import FALSY_VALUES
 from linkedin_mcp_server.remote_tools import is_remote
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,6 @@ _LATEST_RELEASE_URL = (
 _CACHE_PATH = Path.home() / ".linkedin-mcp" / "update-check.json"
 _CACHE_TTL_SECONDS = 24 * 60 * 60
 _REQUEST_TIMEOUT_SECONDS = 2.0
-_DISABLED_VALUES = {"0", "false", "off", "no"}
 
 # Latest version learned this process. None until the check resolves.
 _latest_known: str | None = None
@@ -68,7 +68,7 @@ def _is_source_install() -> bool:
 def _check_disabled() -> bool:
     """Whether the network check should be skipped entirely."""
     value = os.environ.get("LINKEDIN_MCP_CHECK_FOR_UPDATES", "").strip().lower()
-    if value in _DISABLED_VALUES:
+    if value in FALSY_VALUES:
         return True
     if os.environ.get("CI"):
         return True

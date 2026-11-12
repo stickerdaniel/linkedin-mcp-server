@@ -17,6 +17,8 @@ from linkedin_mcp_server.debug_trace import (
     mark_trace_for_retention,
     record_page_trace,
     reset_trace_state_for_testing,
+    should_keep_traces,
+    trace_enabled,
 )
 
 
@@ -69,6 +71,27 @@ def test_explicit_trace_dir_is_preserved(monkeypatch, tmp_path):
     cleanup_trace_dir()
 
     assert trace_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("value", "enabled", "kept"),
+    [
+        ("", True, False),
+        ("on_error", True, False),
+        ("true", True, False),
+        (" Always ", True, True),
+        ("keep", True, True),
+        ("persist", True, True),
+        ("off", False, False),
+        ("0", False, False),
+    ],
+)
+def test_trace_mode_spellings_keep_their_meaning(monkeypatch, value, enabled, kept):
+    # Whether a run is traced, and whether a successful run's trace is kept.
+    monkeypatch.delenv("LINKEDIN_DEBUG_TRACE_DIR", raising=False)
+    monkeypatch.setenv("LINKEDIN_TRACE_MODE", value)
+
+    assert (trace_enabled(), should_keep_traces()) == (enabled, kept)
 
 
 def test_trace_mode_off_disables_trace_dir(monkeypatch, tmp_path):
