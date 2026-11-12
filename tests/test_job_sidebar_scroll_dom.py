@@ -194,6 +194,28 @@ async def cards(page) -> int:
 
 
 @pytest.fixture
+async def skip_loop_time(monkeypatch) -> Callable[[float], None]:
+    """Move the running loop's clock forward by the seconds given.
+
+    AnyIO deadlines and loop timers read ``loop.time()``, so a skip makes the
+    ones it passes fall due on the loop's next pass. ``time.monotonic()`` and
+    Chromium's clock keep real time. A test sizes its deadline for the browser
+    round trips before the moment it is about, however slow the host, and
+    crosses it with a skip at that moment.
+    """
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    skipped = 0.0
+
+    def skip(seconds: float) -> None:
+        nonlocal skipped
+        skipped += seconds
+
+    monkeypatch.setattr(loop, "time", lambda: real_time() + skipped)
+    return skip
+
+
+@pytest.fixture
 async def dom_page():
     async with async_playwright() as playwright:
         try:
@@ -928,15 +950,27 @@ class TestCancelledScroll:
         assert await rail_cards(dom_page) == 10
         await self.assert_nothing_scrolls_after(dom_page, scrolls_at_cancel)
 
-    async def test_a_tool_timeout_stops_the_scroll(self, dom_page):
+    async def test_a_tool_timeout_stops_the_scroll(self, dom_page, skip_loop_time):
         """FastMCP bounds a tool with `anyio.fail_after`, not `Task.cancel`."""
         await dom_page.set_content(self.PAGE)
         await watch_rail(dom_page)
+        # Covers the round trips before the first scroll on any host. The
+        # skip below crosses it once the second scroll has fired: after the
+        # fast first round, while the slow batch is in flight.
+        timeout = 30.0
 
-        # Long after the fast first round, well before the slow batch lands.
+        async def cross_the_deadline_in_the_second_round() -> None:
+            async def second_round() -> bool:
+                return await rail_scrolls(dom_page) >= 2
+
+            await wait_until(second_round, timeout=10.0)
+            skip_loop_time(timeout)
+
+        crossing = asyncio.create_task(cross_the_deadline_in_the_second_round())
         with pytest.raises(TimeoutError):
-            with anyio.fail_after(0.8):
+            with anyio.fail_after(timeout):
                 await scroll_job_sidebar(dom_page)
+        await crossing
         scrolls_at_cancel = await rail_scrolls(dom_page)
 
         assert scrolls_at_cancel == 2
@@ -948,16 +982,14 @@ class BusyRendererPage:
     """The real page, except that the first scroll step queues behind a task.
 
     A renderer busy with a long task holds every message sent to it, and a
-    cancel does not take one back out. The step is sent while a task of
-    ``busy_for()`` seconds is running, sized at that moment so that it can
-    outlast whatever cancels the call, and ``queued`` is set only once the
-    step has gone out, so a cancel after that lands on a step the page has
-    not run yet.
+    cancel does not take one back out. The step is sent while a 1.5s task is
+    running, and ``queued`` is set only once the step has gone out, so a
+    cancel that follows ``queued`` within about a second lands on a step the
+    page has not run yet.
     """
 
-    def __init__(self, page, busy_for: Callable[[], float] = lambda: 1.5) -> None:
+    def __init__(self, page) -> None:
         self._page = page
-        self._busy_for = busy_for
         self.queued = asyncio.Event()
 
     def __getattr__(self, name):
@@ -971,7 +1003,7 @@ class BusyRendererPage:
                 const end = performance.now() + ms;
                 while (performance.now() < end) {}
             }, 0)""",
-            self._busy_for() * 1000,
+            1500,
         )
         await asyncio.sleep(0.05)
         step = asyncio.ensure_future(self._page.evaluate(expression, arg))
@@ -1053,25 +1085,23 @@ class TestAScrollAlreadySent:
 
         assert await last_scroll_at(dom_page) <= returned_at
 
-    async def test_the_next_tool_gets_a_page_that_has_stopped(self, dom_page):
+    async def test_the_next_tool_gets_a_page_that_has_stopped(
+        self, dom_page, skip_loop_time
+    ):
         """Through the middleware, with FastMCP's own tool timeout."""
         await dom_page.set_content(self.PAGE)
         await record_scrolls(dom_page)
-        timeout = 2.0
-        times_out_at: list[float] = []
-        # The busy task runs a second past the tool timeout however long the
-        # browser took to reach the scroll, so the timeout always lands while
-        # the step is queued and no fixed window has to fit the round trips.
-        page = BusyRendererPage(
-            dom_page, busy_for=lambda: times_out_at[0] - time.monotonic() + 1.0
-        )
+        # Covers the round trips before the scroll on any host. The skip
+        # below crosses it once the step is queued, so the timeout lands on
+        # the loop's next pass while the renderer still holds the step.
+        timeout = 30.0
+        page = BusyRendererPage(dom_page)
         mcp = FastMCP("test")
         mcp.add_middleware(SequentialToolExecutionMiddleware())
         handed_over_at: list[float] = []
 
         @mcp.tool(timeout=timeout)
         async def search_jobs() -> dict[str, bool]:
-            times_out_at.append(time.monotonic() + timeout)
             await scroll_job_sidebar(cast(Page, page))
             return {"done": True}
 
@@ -1082,13 +1112,16 @@ class TestAScrollAlreadySent:
 
         search = asyncio.create_task(mcp.call_tool("search_jobs", {}))
         await until_queued(page, search)
+        timed_out_at = time.time() * 1000
+        skip_loop_time(timeout)
         # Queued on the lock behind the search, which still holds it.
         following = asyncio.create_task(mcp.call_tool("next_tool", {}))
         with pytest.raises(Exception, match="timed out"):
             await search
         await following
 
-        assert await last_scroll_at(dom_page) <= handed_over_at[0]
+        # The scroll ran after the timeout, so the timeout found it queued.
+        assert timed_out_at < await last_scroll_at(dom_page) <= handed_over_at[0]
 
 
 class TestRedesignedCards:
