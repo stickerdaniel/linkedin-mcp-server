@@ -967,10 +967,16 @@ class TestCancelledScroll:
             skip_loop_time(timeout)
 
         crossing = asyncio.create_task(cross_the_deadline_in_the_second_round())
-        with pytest.raises(TimeoutError):
-            with anyio.fail_after(timeout):
-                await scroll_job_sidebar(dom_page)
-        await crossing
+        try:
+            with pytest.raises(TimeoutError):
+                with anyio.fail_after(timeout):
+                    await scroll_job_sidebar(dom_page)
+            await crossing
+        finally:
+            # A call that ends any other way leaves the poll running; stop it
+            # before the page closes under it.
+            crossing.cancel()
+            await asyncio.gather(crossing, return_exceptions=True)
         scrolls_at_cancel = await rail_scrolls(dom_page)
 
         assert scrolls_at_cancel == 2
