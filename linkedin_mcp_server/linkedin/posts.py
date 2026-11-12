@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
+
+import json
 
 from linkedin_mcp_server.linkedin.capture import (
     CaptureMode,
@@ -11,7 +14,11 @@ from linkedin_mcp_server.linkedin.capture import (
 )
 from linkedin_mcp_server.linkedin.contracts import RATE_LIMITED_SECTION_TEXT
 from linkedin_mcp_server.linkedin.link_metadata import Reference
-from linkedin_mcp_server.linkedin.search_urls import build_content_search_url
+from linkedin_mcp_server.linkedin.search_urls import (
+    CONTENT_SORT_BY_MAP,
+    build_content_search_url,
+)
+from linkedin_mcp_server.linkedin.session import PageSession
 
 # Content search is an infinite scroll with no ``&start=`` pagination, so
 # ``max_pages`` caps scroll depth instead of fetching discrete pages. One
@@ -19,15 +26,25 @@ from linkedin_mcp_server.linkedin.search_urls import build_content_search_url
 _CONTENT_SCROLLS_PER_REQUESTED_PAGE = 5
 
 
+def _retains_sort(landed_url: str, token: str) -> bool:
+    try:
+        values = parse_qs(urlsplit(landed_url).query, keep_blank_values=True).get(
+            "sortBy", []
+        )
+        return len(values) == 1 and json.loads(values[0]) == [token]
+    except ValueError:
+        return False
+
+
 class PostSearch:
     """Own the one workflow whose subject is LinkedIn post content.
 
-    The search is a single capture, so the section reader is the only
-    collaborator it takes: there is no walk to pace and no page to navigate
-    itself.
+    The section reader owns navigation and capture; the session supplies the
+    settled URL so an ignored sort cannot look as though it was retained.
     """
 
-    def __init__(self, capture: SectionCapture):
+    def __init__(self, session: PageSession, capture: SectionCapture):
+        self._session = session
         self._capture = capture
 
     async def search_posts(
@@ -36,6 +53,7 @@ class PostSearch:
         date_posted: str | None = None,
         max_pages: int = 3,
         content_type: str | None = None,
+        sort_by: str | None = None,
     ) -> dict[str, Any]:
         """Search LinkedIn posts/content and extract the results page.
 
@@ -54,6 +72,9 @@ class PostSearch:
                 ``search_urls.CONTENT_TYPE_MAP`` (e.g. "documents" for the
                 PDFs and slide decks people upload). Refused when unknown,
                 like ``date_posted``.
+            sort_by: Optional ``date`` / ``date_posted`` for Latest or
+                ``relevance`` for Top match. Unknown values are refused;
+                omission or a blank value keeps LinkedIn's default ordering.
             max_pages: Scroll depth, expressed in result "pages" of roughly
                 ``_CONTENT_SCROLLS_PER_REQUESTED_PAGE`` scrolls each (default
                 3). Content search is an infinite scroll with no per-page URL,
@@ -70,11 +91,21 @@ class PostSearch:
             ``/posts/<slug>`` form (both valid). The LLM should parse the raw
             text to extract each post's author, headline, body, date, and
             reaction counts.
+            If the settled URL drops or changes an explicit sort, results are
+            retained with a ``filters_dropped`` section error.
         """
         # Builds before it navigates, so a recency filter LinkedIn would
         # ignore is refused rather than answered with unfiltered results.
         url = build_content_search_url(
-            keywords, date_posted=date_posted, content_type=content_type
+            keywords,
+            date_posted=date_posted,
+            content_type=content_type,
+            sort_by=sort_by,
+        )
+        sort_token = (
+            CONTENT_SORT_BY_MAP[sort_by.strip()]
+            if sort_by and sort_by.strip()
+            else None
         )
         max_scrolls = max(1, max_pages) * _CONTENT_SCROLLS_PER_REQUESTED_PAGE
         extracted = await self._capture.capture(
@@ -100,6 +131,18 @@ class PostSearch:
             }
         elif extracted.error:
             section_errors["search_results"] = extracted.error
+
+        if sort_token is not None and extracted.text != RATE_LIMITED_SECTION_TEXT:
+            if extracted.error:
+                section_errors["search_results"] = extracted.error
+            elif not _retains_sort(self._session.page.url, sort_token):
+                section_errors["search_results"] = {
+                    "error_type": "filters_dropped",
+                    "error_message": (
+                        f"LinkedIn did not keep sortBy={json.dumps([sort_token])}; "
+                        "the returned post order is not verified."
+                    ),
+                }
 
         result: dict[str, Any] = {"url": url, "sections": sections}
         if references:

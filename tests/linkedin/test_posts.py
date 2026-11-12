@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import ANY, AsyncMock, call, patch
 
 import pytest
@@ -29,7 +30,9 @@ def _search(page) -> PostSearch:
     """Wire the post-search owner the way the facade does."""
     session = PageSession(page)
     navigator = PageNavigator(session)
-    return PostSearch(SectionCapture(session, navigator, PageContentReader(session)))
+    return PostSearch(
+        session, SectionCapture(session, navigator, PageContentReader(session))
+    )
 
 
 def extracted(
@@ -42,6 +45,208 @@ def extracted(
 
 
 class TestSearchPosts:
+    @pytest.mark.parametrize(
+        ("sort_by", "token"),
+        [
+            ("date", "date_posted"),
+            ("date_posted", "date_posted"),
+            ("relevance", "relevance"),
+        ],
+    )
+    async def test_requested_sort_reaches_capture_and_survives_settled_url(
+        self, mock_page, sort_by, token
+    ):
+        search = _search(mock_page)
+        reference: Reference = {
+            "kind": "feed_post",
+            "url": "/feed/update/urn:li:activity:123/",
+        }
+
+        async def capture(url, **kwargs):
+            mock_page.url = url
+            return extracted("Need an SRE", [reference])
+
+        with patch.object(search._capture, "capture", side_effect=capture) as read:
+            result = await search.search_posts("SRE", sort_by=sort_by)
+
+        assert parse_qs(urlparse(read.call_args.args[0]).query)["sortBy"] == [
+            f'["{token}"]'
+        ]
+        assert result["sections"] == {"search_results": "Need an SRE"}
+        assert result["references"] == {"search_results": [reference]}
+        assert "section_errors" not in result
+
+    async def test_semantically_equivalent_settled_sort_is_retained(self, mock_page):
+        search = _search(mock_page)
+
+        async def capture(url, **kwargs):
+            mock_page.url = (
+                "https://www.linkedin.com/search/results/content/"
+                "?origin=FACETED_SEARCH&sortBy=%5B%20%22date_posted%22%20%5D&keywords=SRE"
+            )
+            return extracted("Need an SRE")
+
+        with patch.object(search._capture, "capture", side_effect=capture):
+            result = await search.search_posts("SRE", sort_by=" date ")
+
+        assert result["sections"] == {"search_results": "Need an SRE"}
+        assert "section_errors" not in result
+
+    @pytest.mark.parametrize("retained", [True, False])
+    async def test_an_empty_success_still_reports_whether_requested_sort_was_kept(
+        self, mock_page, retained
+    ):
+        search = _search(mock_page)
+
+        async def capture(url, **kwargs):
+            mock_page.url = (
+                url
+                if retained
+                else "https://www.linkedin.com/search/results/content/?keywords=SRE"
+            )
+            return extracted("")
+
+        with patch.object(search._capture, "capture", side_effect=capture):
+            result = await search.search_posts("SRE", sort_by="date")
+
+        assert result["sections"] == {}
+        assert "references" not in result
+        if retained:
+            assert "section_errors" not in result
+        else:
+            assert (
+                result["section_errors"]["search_results"]["error_type"]
+                == "filters_dropped"
+            )
+
+    @pytest.mark.parametrize(
+        "settled_query",
+        [
+            "keywords=SRE",
+            "sortBy=%5B%22relevance%22%5D",
+            "sortBy=date_posted",
+            "sortBy=%5B%22date_posted%22%2C%22relevance%22%5D",
+            "sortBy=%5B%22date_posted%22%5D&sortBy=%5B%22relevance%22%5D",
+            "sortBy=%5B%22date_posted%22%5D&sortBy=%5B%22date_posted%22%5D",
+            "sortBy=",
+            "sortBy=%5B",
+        ],
+        ids=[
+            "missing",
+            "changed",
+            "not-json",
+            "two-values",
+            "repeated",
+            "repeated-same",
+            "empty",
+            "malformed",
+        ],
+    )
+    async def test_a_dropped_or_invalid_settled_sort_warns_without_losing_results(
+        self, mock_page, settled_query
+    ):
+        search = _search(mock_page)
+        reference: Reference = {"kind": "feed_post", "url": "/posts/sre-mission"}
+
+        async def capture(url, **kwargs):
+            mock_page.url = (
+                f"https://www.linkedin.com/search/results/content/?{settled_query}"
+            )
+            return extracted("Need an SRE", [reference])
+
+        with patch.object(search._capture, "capture", side_effect=capture):
+            result = await search.search_posts("SRE", sort_by="date")
+
+        assert result["sections"] == {"search_results": "Need an SRE"}
+        assert result["references"] == {"search_results": [reference]}
+        warning = result["section_errors"]["search_results"]
+        assert warning["error_type"] == "filters_dropped"
+        assert "sort" in warning["error_message"].lower()
+        assert parse_qs(urlparse(result["url"]).query)["sortBy"] == ['["date_posted"]']
+
+    @pytest.mark.parametrize("sort_by", [None, "", " \t\n"])
+    async def test_an_unrequested_sort_does_not_warn_about_the_current_page(
+        self, mock_page, sort_by
+    ):
+        search = _search(mock_page)
+        with patch.object(
+            search._capture,
+            "capture",
+            new_callable=AsyncMock,
+            return_value=extracted("post"),
+        ):
+            result = await search.search_posts("python", sort_by=sort_by)
+
+        assert "sortBy" not in parse_qs(urlparse(result["url"]).query)
+        assert "section_errors" not in result
+
+    @pytest.mark.parametrize("sort_by", [None, "", " \t\n"])
+    async def test_omitted_sort_keeps_the_legacy_partial_result_contract(
+        self, mock_page, sort_by
+    ):
+        search = _search(mock_page)
+        reference: Reference = {"kind": "person", "url": "/in/someone/"}
+        with patch.object(
+            search._capture,
+            "capture",
+            new_callable=AsyncMock,
+            return_value=extracted(
+                "Partial text",
+                [reference],
+                {"error_type": "navigation_error", "error_message": "Interrupted"},
+            ),
+        ):
+            result = await search.search_posts("SRE", sort_by=sort_by)
+
+        assert result["sections"] == {"search_results": "Partial text"}
+        assert result["references"] == {"search_results": [reference]}
+        assert "section_errors" not in result
+
+    async def test_invalid_sort_is_refused_before_any_browser_read(self, mock_page):
+        search = _search(mock_page)
+        with patch.object(search._capture, "capture", new_callable=AsyncMock) as read:
+            with pytest.raises(ValueError, match="Invalid sort_by"):
+                await search.search_posts("python", sort_by="latest")
+
+        read.assert_not_awaited()
+        mock_page.goto.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("text", "error"),
+        [
+            ("", {"error_type": "authentication_required", "error_message": "Sign in"}),
+            ("", {"error_type": "navigation_error", "error_message": "Timeout"}),
+            ("", {"error_type": "rate_limit", "error_message": "Throttled"}),
+            (
+                "Partial results",
+                {"error_type": "navigation_error", "error_message": "Interrupted"},
+            ),
+            (RATE_LIMITED_SECTION_TEXT, None),
+        ],
+    )
+    async def test_sort_warning_never_masks_an_existing_capture_failure(
+        self, mock_page, text, error
+    ):
+        search = _search(mock_page)
+        with patch.object(
+            search._capture,
+            "capture",
+            new_callable=AsyncMock,
+            return_value=extracted(text, error=error),
+        ):
+            result = await search.search_posts("python", sort_by="date")
+
+        expected_error = error or {
+            "error_type": "rate_limit",
+            "error_message": RATE_LIMITED_SECTION_TEXT,
+        }
+        assert result["section_errors"] == {"search_results": expected_error}
+        assert result["sections"] == (
+            {"search_results": text}
+            if text and text != RATE_LIMITED_SECTION_TEXT
+            else {}
+        )
+
     async def test_the_results_page_is_returned_under_the_content_search_url(
         self, mock_page
     ):

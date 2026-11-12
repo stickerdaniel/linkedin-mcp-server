@@ -65,7 +65,7 @@ class LinkedInExtractor:
         )
         job_pages = JobPageReader(session, navigator, content)
         self._jobs = JobReader(navigator, capture, job_pages)
-        self._posts = PostSearch(capture)
+        self._posts = PostSearch(session, capture)
         self._conversations = ConversationReader(
             session, navigator, content, profile_page
         )
@@ -230,6 +230,7 @@ class LinkedInExtractor:
         date_posted: str | None = None,
         max_pages: int = 3,
         content_type: str | None = None,
+        sort_by: str | None = None,
     ) -> dict[str, Any]:
         """Search LinkedIn posts and extract the results page."""
         return await self._posts.search_posts(
@@ -237,6 +238,7 @@ class LinkedInExtractor:
             date_posted=date_posted,
             max_pages=max_pages,
             content_type=content_type,
+            sort_by=sort_by,
         )
 
     async def get_inbox(self, limit: int = 20) -> dict[str, Any]:

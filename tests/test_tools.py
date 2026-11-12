@@ -173,6 +173,12 @@ def serve_extractor(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], AsyncMoc
             "Invalid content_type",
         ),
         (
+            "post",
+            "search_posts",
+            {"keywords": "python", "sort_by": "latest"},
+            "Invalid sort_by",
+        ),
+        (
             "messaging",
             "reply_to_conversation",
             {"thread_id": "/feed/", "message": "Hello", "confirm_send": False},
@@ -2885,6 +2891,54 @@ class TestFeedTools:
 
 
 class TestPostTools:
+    async def test_search_posts_publishes_optional_nullable_sort(self):
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+        tool = await mcp.get_tool("search_posts")
+
+        assert tool is not None
+        properties = tool.parameters["properties"]
+        assert properties["sort_by"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+        assert properties["sort_by"]["default"] is None
+        assert "sort_by" not in tool.parameters.get("required", [])
+        assert "ctx" not in properties
+        assert "date_posted" in properties["sort_by"]["description"]
+        assert "relevance" in properties["sort_by"]["description"]
+
+    @pytest.mark.parametrize("sort_by", ["date", "date_posted", "relevance", None, ""])
+    async def test_search_posts_mcp_call_forwards_sort_with_other_filters(
+        self, sort_by, serve_extractor
+    ):
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        extractor = _make_mock_extractor(
+            {"url": "https://www.linkedin.com/", "sections": {}}
+        )
+        serve_extractor(extractor)
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        await mcp.call_tool(
+            "search_posts",
+            {
+                "keywords": "SRE & C++",
+                "date_posted": "past-week",
+                "max_pages": 2,
+                "content_type": "documents",
+                "sort_by": sort_by,
+            },
+        )
+
+        extractor.search_posts.assert_awaited_once_with(
+            "SRE & C++",
+            date_posted="past-week",
+            max_pages=2,
+            content_type="documents",
+            sort_by=sort_by,
+        )
+
     async def test_search_posts_success(self, mock_context, serve_extractor):
         expected = {
             "url": (
@@ -2914,6 +2968,7 @@ class TestPostTools:
             date_posted="past-week",
             content_type="documents",
             max_pages=3,
+            sort_by=None,
         )
 
     async def test_search_posts_validation_error_surfaced_as_tool_error(

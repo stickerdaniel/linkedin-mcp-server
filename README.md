@@ -105,7 +105,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `get_job_apply_url` | Check whether a job uses Easy Apply or links to an employer's application. |
 | `get_easy_apply_form` | Read an Easy Apply form's fields, options and prefilled values. Never submits. |
 | `get_feed` | Read recent posts from your home feed, with links to the original posts. |
-| `search_posts` | Search posts by keyword, optionally filtered by recency or content type. |
+| `search_posts` | Search posts by keyword, optionally filtered by recency or content type. Use `sort_by="date"` for Latest or `sort_by="relevance"` for Top match; omit it to keep LinkedIn's default order. |
 | `get_session_status` | Check your saved login and browser state without opening a browser. |
 | `close_session` | Close the shared browser session without deleting your saved login. |
 
