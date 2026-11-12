@@ -97,7 +97,9 @@
       "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5
+      "pause_time": 0.5,
+      "poll_interval": 0.25,
+      "settle_timeout": 2.0
     },
     {
       "arg": {
@@ -234,7 +236,9 @@
       "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5
+      "pause_time": 0.5,
+      "poll_interval": 0.25,
+      "settle_timeout": 2.0
     },
     {
       "arg": {
@@ -357,7 +361,9 @@
       "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5
+      "pause_time": 0.5,
+      "poll_interval": 0.25,
+      "settle_timeout": 2.0
     },
     {
       "arg": {
@@ -480,7 +486,9 @@
       "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5
+      "pause_time": 0.5,
+      "poll_interval": 0.25,
+      "settle_timeout": 2.0
     },
     {
       "arg": {
@@ -603,7 +611,9 @@
       "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5
+      "pause_time": 0.5,
+      "poll_interval": 0.25,
+      "settle_timeout": 2.0
     },
     {
       "arg": {
@@ -726,7 +736,9 @@
       "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5
+      "pause_time": 0.5,
+      "poll_interval": 0.25,
+      "settle_timeout": 2.0
     },
     {
       "arg": {
@@ -849,7 +861,9 @@
       "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5
+      "pause_time": 0.5,
+      "poll_interval": 0.25,
+      "settle_timeout": 2.0
     },
     {
       "arg": {
@@ -972,7 +986,9 @@
       "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5
+      "pause_time": 0.5,
+      "poll_interval": 0.25,
+      "settle_timeout": 2.0
     },
     {
       "arg": {
@@ -1095,7 +1111,9 @@
       "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5
+      "pause_time": 0.5,
+      "poll_interval": 0.25,
+      "settle_timeout": 2.0
     },
     {
       "arg": {
@@ -1218,7 +1236,9 @@
       "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5
+      "pause_time": 0.5,
+      "poll_interval": 0.25,
+      "settle_timeout": 2.0
     },
     {
       "arg": {
@@ -1407,7 +1427,9 @@
       "call": "read_person",
       "kind": "boundary.scroll_body",
       "max_scrolls": 10,
-      "pause_time": 1.0
+      "pause_time": 1.0,
+      "poll_interval": 0.25,
+      "settle_timeout": 2.0
     },
     {
       "arg": {

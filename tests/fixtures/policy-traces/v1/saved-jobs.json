@@ -102,7 +102,9 @@
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
       "pause_time": 0.5,
-      "section": "saved_jobs"
+      "poll_interval": 0.25,
+      "section": "saved_jobs",
+      "settle_timeout": 2.0
     },
     {
       "arg": {
@@ -251,7 +253,9 @@
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
       "pause_time": 0.5,
-      "section": "saved_jobs"
+      "poll_interval": 0.25,
+      "section": "saved_jobs",
+      "settle_timeout": 2.0
     },
     {
       "arg": {
