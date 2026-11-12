@@ -288,7 +288,7 @@
     "annotations": {
       "openWorldHint": true
     },
-    "description": "Read a specific messaging conversation.\n\nProvide either linkedin_username or thread_id to identify the conversation.\n\nWhen looked up by linkedin_username, resolution searches the messaging\ninbox for the participant's display name and click-visits every\nmatching row to capture its thread ID — LinkedIn's sidebar has no\nanchor hrefs or thread-id attributes, so this is the only available\npath. Each visit selects the row in the LinkedIn UI and may mark it\nas read. Pass thread_id directly to skip this enumeration.\n\nUsername resolution scans matching rows from a requested compose page\nfirst. Its indexable sequence ends before the first unresolved click,\nmissing matching click target, or admitted row that fails the existing\nexact display-name check. An index outside that verified prefix is\nrefused with its reason. Search is a fallback only when the inbox scan\nhas no observed matching result and no such barrier; it never\nsubstitutes a result after a stopped or gapped inbox scan. Pass a known\nthread_id to bypass username/index resolution.",
+    "description": "Read a specific messaging conversation.\n\nProvide either linkedin_username or thread_id to identify the conversation.\n\nWhen looked up by linkedin_username, resolution searches the messaging\ninbox for the participant's display name and click-visits every\nmatching row to capture its thread ID \u2014 LinkedIn's sidebar has no\nanchor hrefs or thread-id attributes, so this is the only available\npath. Each visit selects the row in the LinkedIn UI and may mark it\nas read. Pass thread_id directly to skip this enumeration.\n\nUsername resolution scans matching rows from a requested compose page\nfirst. Its indexable sequence ends before the first unresolved click,\nmissing matching click target, or admitted row that fails the existing\nexact display-name check. An index outside that verified prefix is\nrefused with its reason. Search is a fallback only when the inbox scan\nhas no observed matching result and no such barrier; it never\nsubstitutes a result after a stopped or gapped inbox scan. Pass a known\nthread_id to bypass username/index resolution.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -503,6 +503,39 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "person",
+          "post"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read the authenticated user's published posts and visible counters.\n\nReturns {url, sections: {main_profile: raw_text, posts: raw_text}} through\nthe own-profile reader, with optional references and section_errors.\nThe posts section is LinkedIn's rendered activity page. max_scrolls (0\u201350) limits\nloading; the result is a sample rather than the complete post history.\nOpen individual permalinks with get_post for their visible discussion,\nor get_post_analytics for any owner-only metrics LinkedIn makes available.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "max_scrolls": {
+          "default": 5,
+          "maximum": 50,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "name": "get_my_posts",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get My Posts"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "person"
         ]
       }
@@ -614,6 +647,77 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "post"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read one post's text, visible comments and engagement counters.\n\npost_url accepts a LinkedIn /feed/update/ or /posts/ permalink, including\na relative reference returned by this server, or a complete activity,\nshare or ugcPost URN. max_scrolls bounds page scrolling (0\u201350).\n\nReturns {url, sections: {post: raw_text}} with optional references and\nsection_errors. Parse reactions, comments and repost counts only when\nthe page displays them; a missing count is not zero. Collapsed replies,\nreaction lists and truncated text are not expanded. A bounded read is\nnot a complete comment export. No likes, replies or reposts are sent.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "max_scrolls": {
+          "default": 3,
+          "maximum": 50,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "post_url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "post_url"
+      ],
+      "type": "object"
+    },
+    "name": "get_post",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Post"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "analytics",
+          "post"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read the analytics page LinkedIn exposes for a post you own.\n\nAccepts an activity permalink or complete urn:li:activity:<id>. Returns raw\nanalytics text, which may include impressions, reach and engagement.\nAvailability depends on the account, post and current LinkedIn page.\nMissing or restricted metrics are not zero. This tool provides no\nuniversal ranking score and does not compare posts automatically.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "post_url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "post_url"
+      ],
+      "type": "object"
+    },
+    "name": "get_post_analytics",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Post Analytics"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "job"
         ]
       }
@@ -653,6 +757,38 @@
       "type": "object"
     },
     "title": "Get Saved Jobs"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "post"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read the authenticated user's scheduled posts without changing them.\n\nmax_scrolls (0\u201320) bounds loading of the rendered schedule. The response\nretains LinkedIn's displayed post text, dates and times; it does not\nassume a timezone the page does not state. An unavailable schedule is\nreported as an error, not as evidence that no posts are scheduled.\nThe current workflow supports the English composer only.\nThis tool does not edit, delete, reschedule or publish a scheduled post.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "max_scrolls": {
+          "default": 3,
+          "maximum": 20,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "name": "get_scheduled_posts",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Scheduled Posts"
   },
   {
     "_meta": {

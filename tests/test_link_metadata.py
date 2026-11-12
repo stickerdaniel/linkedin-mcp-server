@@ -1071,3 +1071,63 @@ class TestClassifyLink:
         assert len(references) == 1
         assert references[0]["kind"] == "conversation"
         assert references[0]["url"] == "/messaging/thread/2-xyz/"
+
+
+@pytest.mark.parametrize("post_id", ["123456789", "987654321"])
+def test_activity_analytics_anchor_keeps_a_usable_post_permalink(post_id):
+    references = build_references(
+        [
+            {
+                "href": f"https://www.linkedin.com/analytics/post-summary/urn:li:activity:{post_id}/?trk=synthetic",
+                "text": "View analytics",
+            }
+        ],
+        "posts",
+    )
+    assert references == [
+        {
+            "kind": "feed_post",
+            "url": f"/feed/update/urn:li:activity:{post_id}/",
+            "text": "analytics",
+            "context": "company post",
+        }
+    ]
+
+
+def test_analytics_and_permalink_for_the_same_activity_deduplicate():
+    references = build_references(
+        [
+            {
+                "href": "https://www.linkedin.com/analytics/post-summary/urn:li:activity:123456789/",
+                "text": "View analytics",
+            },
+            {
+                "href": "https://www.linkedin.com/feed/update/urn:li:activity:123456789/",
+                "text": "Synthetic post title",
+            },
+        ],
+        "posts",
+    )
+    assert len(references) == 1
+    assert references[0]["url"] == "/feed/update/urn:li:activity:123456789/"
+    assert references[0]["text"] == "Synthetic post title"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/analytics/post-summary/urn:li:activity:123/x/",
+        "/analytics/post-summary/urn:li:activity:123/../urn:li:activity:456/",
+        "/analytics/post-summary/urn:li:activity:１２３/",
+        "/analytics/post-summary/urn:li:share:123/",
+        "/analytics/post-summary/urn:li:activity:123%2Fextra/",
+    ],
+)
+def test_unknown_analytics_routes_are_never_reinterpreted_as_posts(path):
+    assert (
+        build_references(
+            [{"href": f"https://www.linkedin.com{path}", "text": "View analytics"}],
+            "posts",
+        )
+        == []
+    )

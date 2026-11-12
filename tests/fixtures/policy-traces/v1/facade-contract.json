@@ -56,6 +56,10 @@
         "coroutine": true,
         "signature": "(self, job_id: 'str') -> 'dict[str, Any]'"
       },
+      "get_my_posts": {
+        "coroutine": true,
+        "signature": "(self, max_scrolls: 'int' = 5) -> 'dict[str, Any]'"
+      },
       "get_my_profile": {
         "coroutine": true,
         "signature": "(self, sections: 'set[str] | None' = None, callbacks: 'ProgressCallback | None' = None, max_scrolls: 'int | None' = None) -> 'dict[str, Any]'"
@@ -64,9 +68,21 @@
         "coroutine": true,
         "signature": "(self) -> 'str'"
       },
+      "get_post": {
+        "coroutine": true,
+        "signature": "(self, post_url: 'str', max_scrolls: 'int' = 3) -> 'dict[str, Any]'"
+      },
+      "get_post_analytics": {
+        "coroutine": true,
+        "signature": "(self, post_url: 'str') -> 'dict[str, Any]'"
+      },
       "get_saved_jobs": {
         "coroutine": true,
         "signature": "(self, max_pages: 'int' = 3, stage: 'JobsTrackerStage' = 'saved') -> 'dict[str, Any]'"
+      },
+      "get_scheduled_posts": {
+        "coroutine": true,
+        "signature": "(self, max_scrolls: 'int' = 3) -> 'dict[str, Any]'"
       },
       "get_sidebar_profiles": {
         "coroutine": true,
@@ -124,8 +140,12 @@
       "get_easy_apply_form",
       "get_inbox",
       "get_job_apply_url",
+      "get_my_posts",
       "get_my_profile",
+      "get_post",
+      "get_post_analytics",
       "get_saved_jobs",
+      "get_scheduled_posts",
       "get_sidebar_profiles",
       "read_company",
       "read_job",
@@ -451,6 +471,24 @@
           "type": "object"
         }
       },
+      "get_my_posts": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "max_scrolls": {
+              "default": 5,
+              "maximum": 50,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "get_my_profile": {
         "input": {
           "additionalProperties": false,
@@ -534,6 +572,48 @@
           "type": "object"
         }
       },
+      "get_post": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "max_scrolls": {
+              "default": 3,
+              "maximum": 50,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "post_url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "post_url"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_post_analytics": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "post_url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "post_url"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "get_saved_jobs": {
         "input": {
           "additionalProperties": false,
@@ -555,6 +635,24 @@
                 "archived"
               ],
               "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_scheduled_posts": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "max_scrolls": {
+              "default": 3,
+              "maximum": 20,
+              "minimum": 0,
+              "type": "integer"
             }
           },
           "type": "object"

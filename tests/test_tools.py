@@ -49,6 +49,10 @@ def _make_mock_extractor(result: dict) -> MagicMock:
     mock.get_my_profile = AsyncMock(return_value=result)
     mock.search_companies = AsyncMock(return_value=result)
     mock.search_posts = AsyncMock(return_value=result)
+    mock.get_post = AsyncMock(return_value=result)
+    mock.get_my_posts = AsyncMock(return_value=result)
+    mock.get_post_analytics = AsyncMock(return_value=result)
+    mock.get_scheduled_posts = AsyncMock(return_value=result)
     mock.get_company_employees = AsyncMock(return_value=result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
@@ -280,6 +284,10 @@ async def test_invalid_reference_is_rejected_before_extractor(
 #: reaches its readiness call. `test_the_valid_calls_name_every_tool` keeps it
 #: complete, which is what makes the tests below cover a tool added later.
 _A_VALID_CALL = [
+    ("post", "get_post", {"post_url": "urn:li:activity:123456789"}),
+    ("post", "get_my_posts", {}),
+    ("post", "get_post_analytics", {"post_url": "urn:li:activity:123456789"}),
+    ("post", "get_scheduled_posts", {}),
     ("person", "get_person_profile", {"linkedin_username": "alice"}),
     ("person", "search_people", {"keywords": "engineer"}),
     ("person", "connect_with_person", {"linkedin_username": "alice"}),

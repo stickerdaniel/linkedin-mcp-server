@@ -21,6 +21,7 @@ PACKAGE = ROOT / "linkedin_mcp_server"
 LINKEDIN = PACKAGE / "linkedin"
 EXTRACTOR = LINKEDIN / "extractor.py"
 FACADE_PACKAGE_IMPORTERS = {
+    Path("tests/linkedin/test_post_facade.py"),
     Path("linkedin_mcp_server/dependencies.py"),
     Path("tests/linkedin/policy_scenarios.py"),
     Path("tests/linkedin/test_facade_contracts.py"),
@@ -30,6 +31,10 @@ FACADE_PACKAGE_IMPORTERS = {
 }
 
 PUBLIC_SIGNATURES = {
+    "get_post": "(self, post_url: 'str', max_scrolls: 'int' = 3) -> 'dict[str, Any]'",
+    "get_my_posts": "(self, max_scrolls: 'int' = 5) -> 'dict[str, Any]'",
+    "get_post_analytics": "(self, post_url: 'str') -> 'dict[str, Any]'",
+    "get_scheduled_posts": "(self, max_scrolls: 'int' = 3) -> 'dict[str, Any]'",
     "click_button_by_text": "(self, text: 'str', *, scope: 'str' = 'main', timeout: 'int' = 5000) -> 'bool'",
     "connect_with_person": "(self, username: 'str', *, note: 'str | None' = None) -> 'dict[str, Any]'",
     "extract_feed": "(self, num_posts: 'int' = 10) -> 'ExtractedSection'",
@@ -58,6 +63,10 @@ PUBLIC_SIGNATURES = {
 }
 
 DELEGATES = {
+    "get_post": ("_post_reader", "get_post"),
+    "get_my_posts": ("_post_management", "get_my_posts"),
+    "get_post_analytics": ("_post_management", "get_post_analytics"),
+    "get_scheduled_posts": ("_post_management", "get_scheduled_posts"),
     "click_button_by_text": ("_content", "click_button_by_text"),
     "connect_with_person": ("_connection", "connect_with_person"),
     "extract_feed": ("_feed", "extract_feed"),
@@ -86,6 +95,10 @@ DELEGATES = {
 }
 
 DELEGATE_CALLS = {
+    "get_post": "self._post_reader.get_post(post_url, max_scrolls=max_scrolls)",
+    "get_my_posts": "self._post_management.get_my_posts(max_scrolls=max_scrolls)",
+    "get_post_analytics": "self._post_management.get_post_analytics(post_url)",
+    "get_scheduled_posts": "self._post_management.get_scheduled_posts(max_scrolls=max_scrolls)",
     "click_button_by_text": "self._content.click_button_by_text(text, scope=scope, timeout=timeout)",
     "connect_with_person": "self._connection.connect_with_person(username, note=note)",
     "extract_feed": "self._feed.extract_feed(num_posts)",
@@ -114,6 +127,8 @@ DELEGATE_CALLS = {
 }
 
 FACADE_STATE = {
+    "_post_reader",
+    "_post_management",
     "_capture",
     "_company",
     "_connection",
