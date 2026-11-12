@@ -34,11 +34,18 @@ function Server { uvx --isolated --cache-dir $Cache --from $From mcp-server-link
 function Recorder { uvx --isolated --cache-dir $Cache --from $From python "$Dir\daemon_pilot.py" @args }
 ```
 
-Get the recorder from the same commit, then sign in once:
+Get the recorder from the same commit:
 
 ```powershell
 New-Item -ItemType Directory -Force $Dir | Out-Null
 Invoke-WebRequest "https://raw.githubusercontent.com/stickerdaniel/linkedin-mcp-server/$Sha/scripts/daemon_pilot.py" -OutFile "$Dir\daemon_pilot.py"
+```
+
+Then sign in once, to a live account here or to the synthetic origin in the
+next section, never both: the synthetic origin stages only into a profile that
+holds nothing. For a live account:
+
+```powershell
 Server --login
 Server --status
 ```
@@ -53,7 +60,8 @@ long as a hold says, and no request leaves the machine. It changes the trust
 store and the hosts file, so run it only on a disposable machine, such as a VM
 clone deleted afterwards.
 
-In an administrator PowerShell, after the settings above:
+In an administrator PowerShell, after the settings and the recorder above, and
+in place of `Server --login`:
 
 ```powershell
 $Src = "$Dir\tests\differential"
@@ -76,33 +84,43 @@ it holds the session's acceptance in memory:
 uvx --isolated --cache-dir $Cache --from $From python "$Src\manual_origin.py" --certs $Certs
 ```
 
-It refuses while the names resolve anywhere but loopback. Its start ends with
-`ready: proxy http://127.0.0.1:8899` and a `check:` line reading
-`staged li_at, accepted by the origin`. This replaces `Server --login` above;
-`Server --status` must still end with `Session is valid`. Every other window
-sets the proxy, and so does the Desktop config's `env`:
+It refuses while the names resolve anywhere but loopback, and while the
+profile, its cookie file or its source state holds anything. Its start ends
+with `ready: proxy http://127.0.0.1:8899` and a `check:` line reading
+`staged li_at, accepted by the origin`. Every other window sets the proxy, and
+so does the Desktop config's `env`:
 
 ```powershell
 $env:PROXY_SERVER = "http://127.0.0.1:8899"
+Server --status
 ```
 
 ```json
 "env": { "LINKEDIN_TRACE_MODE": "always", "PROXY_SERVER": "http://127.0.0.1:8899" }
 ```
 
+`--status` must end with `Session is valid`.
+
 In the areas below:
 
-- Every read is of `synthetic-person`, with experience and education. The
-  origin serves that profile's three pages and the feed, nothing else.
+- Every page needs a session the origin accepts. A browser that sends none, or
+  another, is sent to the login wall, so a lost session shows as one.
+- Reading your own profile works: the origin redirects `/in/me/` to
+  `synthetic-person`. Every other read is of `synthetic-person`, with
+  experience and education. The origin serves that profile's three pages and
+  the feed, nothing else.
 - For a call in flight, type `hold synthetic-person` in the origin's window
   first. Each of the three pages is then held for up to 20 seconds, and the
   window prints when a page is held and how the hold ended. `peer-gone` is the
   browser dropping the held request.
 - For a sign-in in area 4.3, type `signin` once the login page is open. Every
   login page completes with a fresh session from then on.
-- After each `after`, type `check`. Up to area 4.2 it reads
-  `staged li_at, accepted by the origin` with one generation throughout; after
-  area 4.3 it reads `other li_at, accepted by the origin`.
+- After each `after`, type `check`:
+  - Before area 4.2: `staged li_at, accepted by the origin`, with the
+    generation of the start.
+  - Right after area 4.2: `no li_at; generation none`.
+  - After area 4.3: `other li_at, accepted by the origin`, with a new
+    generation.
 - A `proxy: refused` line names a request the proxy kept from leaving. Record
   each one.
 

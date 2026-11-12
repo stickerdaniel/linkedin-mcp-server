@@ -193,6 +193,17 @@ def person_path(username: str, section: str) -> str:
     return f"/in/{username}{PERSON_PAGES[section]}"
 
 
+#: The alias ``get_my_profile`` opens. LinkedIn redirects it to the signed-in
+#: member's profile, and the origin redirects it to ``SELF_USERNAME``'s.
+SELF_PATH = "/in/me/"
+SELF_USERNAME = "synthetic-person"
+
+
+def _is_page(path: str) -> bool:
+    """Whether *path* is a page the origin serves to a signed-in member."""
+    return path in ("/feed/", SELF_PATH) or _PERSON_PATH.match(path) is not None
+
+
 def _person_page(section: str) -> bytes:
     """The least a person section needs, derived from the product's checks.
 
@@ -743,7 +754,8 @@ class OriginRequest:
     #: session, the staged one or one the origin issued, it carried.
     session_digests: tuple[str, ...] = ()
     #: Answered 302 to the login wall: a ``/feed/`` without an accepted
-    #: session once the harness rejected the sessions it had accepted.
+    #: session once the harness rejected the sessions it had accepted, or any
+    #: page without one once it required sessions (``require_sessions``).
     redirected: bool = False
 
 
@@ -773,6 +785,12 @@ class _OriginHandler(BaseHTTPRequestHandler):
         )
         if walled or origin.serves_login(path):
             self._sign_in(origin, path, header, walled=walled, query="?" in self.path)
+            return
+        if path == SELF_PATH:
+            self.send_response(302)
+            self.send_header("Location", person_path(SELF_USERNAME, "main_profile"))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
             return
         gate = origin.gate_for(path)
         ended: str | None = None
@@ -870,6 +888,8 @@ class SyntheticOrigin(ThreadingHTTPServer):
         #: Sessions this origin issued itself (``complete_login``).
         self._issued: list[bytes] = []
         self._login = LoginFixture()
+        #: Every page needs an accepted session (``require_sessions``).
+        self._strict = False
         self._gates: list[Gate] = []
         context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         context.load_cert_chain(certificates / LEAF_FILE, certificates / LEAF_KEY_FILE)
@@ -948,11 +968,27 @@ class SyntheticOrigin(ThreadingHTTPServer):
             self._login.rejections.append(found)
         return dict(found)
 
+    def require_sessions(self) -> None:
+        """Send every page request without an accepted session to the wall.
+
+        For a run by hand, where nothing else tells a browser that kept its
+        session from one that lost it: without this, a ``/feed/`` that sends
+        no session is served as a signed-in one until the sessions are
+        rejected.
+        """
+        with self._lock:
+            self._strict = True
+
     def walls(self, path: str, valid: bool | None) -> bool:
         """Whether a request for *path* judged *valid* meets the wall."""
         with self._lock:
             rejected = bool(self._rejected)
-        return path == "/feed/" and rejected and valid is not True
+            strict = self._strict
+        if valid is True:
+            return False
+        if strict:
+            return _is_page(path)
+        return path == "/feed/" and rejected
 
     def serves_login(self, path: str) -> bool:
         with self._lock:

@@ -11,15 +11,17 @@ the names to loopback::
 
     python manual_origin.py --certs CERTS [--port 8899]
 
-It refuses while a name resolves anywhere but loopback, and while the
-configured profile already holds a session. Then it starts the origin and a
-proxy on ``127.0.0.1:PORT``, installs the browser, stages a synthetic session
-through the product's own import validation, and reads commands until
-``quit``. Every host and command of the run sets
-``PROXY_SERVER=http://127.0.0.1:PORT``.
+It refuses while a name resolves anywhere but loopback, and unless the
+configured profile is new: no source state, no cookie file, and an empty
+profile directory. Then it starts the origin and a proxy on
+``127.0.0.1:PORT``, installs the browser, stages a synthetic session through
+the product's own import validation, and reads commands until ``quit``. Every
+host and command of the run sets ``PROXY_SERVER=http://127.0.0.1:PORT``.
 
-The origin keeps the sessions it accepts in memory only, so the run lasts as
-long as this process.
+Every page needs a session the origin accepts (``require_sessions``), so a
+browser that lost its session meets the login wall instead of a feed. The
+origin keeps those sessions in memory only, so the run lasts as long as this
+process.
 """
 
 from __future__ import annotations
@@ -128,12 +130,25 @@ def stage(origin: SyntheticOrigin) -> tuple[Path, str]:
     session's digest."""
     from linkedin_mcp_server.bootstrap import ensure_browser_installed
     from linkedin_mcp_server.drivers.browser import get_profile_dir
-    from linkedin_mcp_server.session_state import source_state_path
+    from linkedin_mcp_server.session_state import (
+        portable_cookie_path,
+        source_state_path,
+    )
 
     profile = get_profile_dir()
-    if source_state_path(profile).exists():
+    # Staging overwrites the cookie file and, after a stalled browser, resets
+    # the profile directory, so it starts only where neither holds anything.
+    found = [
+        str(path)
+        for path in (source_state_path(profile), portable_cookie_path(profile))
+        if path.exists()
+    ]
+    if profile.is_dir() and any(profile.iterdir()):
+        found.append(str(profile))
+    if found:
         raise SystemExit(
-            f"{profile} already holds a session. Run --logout, then start again."
+            f"Refused: {', '.join(found)} already exist. Staging needs a new "
+            f"profile; run --logout, then start again."
         )
     ensure_browser_installed()
     staged = asyncio.run(
@@ -218,6 +233,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         # Read by the configuration on its first load, which staging triggers.
         os.environ["PROXY_SERVER"] = proxy.url
+        origin.require_sessions()
         origin.arm_login()
         profile, staged_digest = stage(origin)
         say(f"ready: proxy {proxy.url}, profile {profile}")
