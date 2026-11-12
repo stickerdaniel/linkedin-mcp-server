@@ -34,16 +34,99 @@ function Server { uvx --isolated --cache-dir $Cache --from $From mcp-server-link
 function Recorder { uvx --isolated --cache-dir $Cache --from $From python "$Dir\daemon_pilot.py" @args }
 ```
 
-Get the recorder from the same commit, then sign in once:
+Get the recorder from the same commit:
 
 ```powershell
 New-Item -ItemType Directory -Force $Dir | Out-Null
 Invoke-WebRequest "https://raw.githubusercontent.com/stickerdaniel/linkedin-mcp-server/$Sha/scripts/daemon_pilot.py" -OutFile "$Dir\daemon_pilot.py"
+```
+
+Then sign in once, to a live account here or to the synthetic origin in the
+next section, never both: the synthetic origin stages only into a profile that
+holds nothing. For a live account:
+
+```powershell
 Server --login
 Server --status
 ```
 
 `--status` must end with `Session is valid`.
+
+### Against the synthetic origin
+
+The protocol can also run against the differential harness's synthetic
+www.linkedin.com. Its session is deterministic, a call stays in flight for as
+long as a hold says, and no request leaves the machine. It changes the trust
+store and the hosts file, so run it only on a disposable machine, such as a VM
+clone deleted afterwards.
+
+In an administrator PowerShell, after the settings and the recorder above, and
+in place of `Server --login`:
+
+```powershell
+$Src = "$Dir\tests\differential"
+$Certs = "$Dir\certs"
+New-Item -ItemType Directory -Force $Src | Out-Null
+foreach ($File in "__init__.py", "synthetic_origin.py", "session.py", "manual_origin.py") {
+  Invoke-WebRequest "https://raw.githubusercontent.com/stickerdaniel/linkedin-mcp-server/$Sha/tests/differential/$File" -OutFile "$Src\$File"
+}
+uvx --isolated --cache-dir $Cache --from $From python "$Src\synthetic_origin.py" $Certs
+certutil.exe -addstore -f Root "$Certs\ca.pem"
+Add-Content "$env:SystemRoot\System32\drivers\etc\hosts" "`n127.0.0.1 www.linkedin.com static.licdn.com synthetic-canary.test`n::1 www.linkedin.com static.licdn.com synthetic-canary.test"
+ipconfig /flushdns
+```
+
+The CA is valid for one day, and only for the two LinkedIn names. Start the
+origin in a window of its own and keep it open for the whole protocol, since
+it holds the session's acceptance in memory:
+
+```powershell
+uvx --isolated --cache-dir $Cache --from $From python "$Src\manual_origin.py" --certs $Certs
+```
+
+It refuses while the names resolve anywhere but loopback, and while the
+profile, its cookie file or its source state holds anything. Its start ends
+with `ready: proxy http://127.0.0.1:8899` and a `check:` line reading
+`staged li_at, accepted by the origin`. Every other window sets the proxy, and
+so does the Desktop config's `env`:
+
+```powershell
+$env:PROXY_SERVER = "http://127.0.0.1:8899"
+Server --status
+```
+
+```json
+"env": { "LINKEDIN_TRACE_MODE": "always", "PROXY_SERVER": "http://127.0.0.1:8899" }
+```
+
+`--status` must end with `Session is valid`.
+
+In the areas below:
+
+- Every page needs a session the origin accepts. A browser that sends none, or
+  another, is sent to the login wall, so a lost session shows as one.
+- Reading your own profile works: the origin redirects `/in/me/` to
+  `synthetic-person`. Every other read is of `synthetic-person`, with
+  experience and education. The origin serves that profile's three pages and
+  the feed, nothing else.
+- For a call in flight, type `hold synthetic-person` in the origin's window
+  first. Each of the three pages is then held for up to 20 seconds, and the
+  window prints when a page is held and how the hold ended. `peer-gone` is the
+  browser dropping the held request.
+- For a sign-in in area 4.3, type `signin` once the login page is open. Every
+  login page completes with a fresh session from then on.
+- After each `after`, type `check`:
+  - Before area 4.2: `staged li_at, accepted by the origin`, with the
+    generation of the start.
+  - Right after area 4.2: `no li_at; generation none`.
+  - After area 4.3: `other li_at, accepted by the origin`, with a new
+    generation.
+- A `proxy: refused` line names a request the proxy kept from leaving. Record
+  each one.
+
+On a machine that is kept, remove the CA afterwards with
+`certutil.exe -delstore Root "linkedin-mcp synthetic origin test CA"`, and the
+two lines from the hosts file.
 
 ### Claude Desktop config
 
@@ -205,14 +288,14 @@ $Flags = "--daemon", "--log-level", "INFO"
 Areas 4.2 and 4.3 change the session on purpose, so their `after` records an
 incident by design; note that in the evidence.
 
-### 5. Upgrade (blocked)
+### 5. Upgrade
 
-Blocked until a released predecessor contains the clean-slate namespace and the
-candidate's installed version is strictly newer. v4.27.0 does not qualify, and
-a locally bumped build never counts. Once unblocked:
+The predecessor is v4.28.0, the first release with the clean-slate namespace.
+The candidate's installed version must be strictly newer; a locally bumped
+build never counts.
 
 1. Run Desktop on the predecessor
-   (`--from mcp-server-linkedin==<version>`, its own fresh cache) with the same
+   (`--from mcp-server-linkedin==4.28.0`, its own fresh cache) with the same
    args, read, and quit Desktop while its owner is idle.
 2. Switch the config to the candidate and start Desktop.
 
