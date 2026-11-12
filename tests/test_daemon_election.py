@@ -8209,34 +8209,52 @@ class TestElectionSettlement:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         profile = _profile(tmp_path)
-        release = threading.Event()
+        clock = [0.0]
         reads = 0
 
-        def inspect(*args: object) -> OwnerLookup:
-            nonlocal reads
-            reads += 1
-            if reads == 1:
-                return OwnerLookup(state=OwnerState.ABSENT, reason="observed absent")
-            release.wait()
-            return OwnerLookup(state=OwnerState.UNTRUSTED, reason="late")
+        class Inspector:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                return None
 
-        monkeypatch.setattr(daemon_module, "_inspect", inspect)
-        monkeypatch.setattr(daemon_module, "_DESCRIPTOR_READ_SECONDS", 0.005)
+            def require_fresh_inspection(self) -> None:
+                return None
+
+            def inspect_until(self, *, timeout: float) -> OwnerLookup:
+                nonlocal reads
+                reads += 1
+                if reads == 1:
+                    return OwnerLookup(
+                        state=OwnerState.ABSENT, reason="observed absent"
+                    )
+                clock[0] += timeout
+                raise daemon_module._DescriptorReadTimeout("late")
+
+        def monotonic() -> float:
+            now = clock[0]
+            clock[0] += 0.001
+            return now
+
+        monkeypatch.setattr(election_module, "_DescriptorInspector", Inspector)
+        monkeypatch.setattr(election_module.time, "monotonic", monotonic)
+        monkeypatch.setattr(
+            election_module.time,
+            "sleep",
+            lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+        )
         monkeypatch.setattr(
             spawn_module, "_start_owner", lambda *a, **k: Attempt.CONTENDED
         )
-        try:
-            outcome = obtain_owner(
-                profile.parent,
-                profile,
-                _config(profile),
-                deadline_seconds=0.01,
-                settlement_seconds=0.02,
-                connect=lambda attachment, timeout: Reach.REFUSED,
-            )
-        finally:
-            release.set()
 
+        outcome = obtain_owner(
+            profile.parent,
+            profile,
+            _config(profile),
+            deadline_seconds=1.0,
+            settlement_seconds=1.0,
+            connect=lambda attachment, timeout: Reach.REFUSED,
+        )
+
+        assert reads > 1, "no read timed out after the concrete one"
         assert outcome.attachment_lookup.state is OwnerState.ABSENT
         assert outcome.attachment_lookup.reason == "observed absent"
 
