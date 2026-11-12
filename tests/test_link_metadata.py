@@ -219,6 +219,32 @@ class TestBuildReferences:
 
         assert normalize_url(href) == "https://gatesnot.es/tgn"
 
+    @pytest.mark.parametrize("path", ["/safety/go/", "/safety/go"])
+    def test_normalize_url_unwraps_safety_redirect(self, path):
+        # An external posting's Apply link takes this form (job_policy.py).
+        href = f"https://www.linkedin.com{path}?url=https%3A%2F%2Fgrnh.se%2Fabc"
+
+        assert normalize_url(href) == "https://grnh.se/abc"
+
+    def test_references_keep_link_behind_safety_redirect(self):
+        assert build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/safety/go/"
+                    "?url=https%3A%2F%2Facme.example%2Fcareers",
+                    "text": "Acme careers",
+                }
+            ],
+            "about",
+        ) == [
+            {
+                "kind": "external",
+                "url": "https://acme.example/careers",
+                "text": "Acme careers",
+                "context": "top card",
+            }
+        ]
+
     def test_normalize_url_drops_redirect_chain_beyond_cap(self):
         target = "https://example.com/report"
         href = target

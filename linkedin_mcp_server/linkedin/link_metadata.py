@@ -136,6 +136,9 @@ _LABEL_CONTENT_RE = re.compile("[^\\W_\u115f\u1160\u3164\uffa0]")
 _URL_LIKE_RE = re.compile(r"^(?:https?://|/)\S+$", re.IGNORECASE)
 _DUPLICATE_HALVES_RE = re.compile(r"^(?P<value>.+?)\s+(?P=value)$")
 _WHITESPACE_RE = re.compile(r"\s+")
+# LinkedIn wraps outbound links in either page; /safety/go is the one an
+# external posting's Apply link uses (see job_policy.SAFETY_REDIRECT_PATH).
+_REDIRECT_PATHS = {"/redir/redirect", "/safety/go"}
 _CONNECTIONS_FOLLOW_RE = re.compile(r"\bconnections follow this page\b", re.IGNORECASE)
 _COMPANY_PATH_RE = re.compile(r"^/company/([^/?#]+)")
 _PERSON_PATH_RE = re.compile(r"^/in/([^/?#]+)")
@@ -272,7 +275,7 @@ def normalize_url(href: str, _depth: int = 0) -> str | None:
         return None
 
     host = parsed.netloc.lower()
-    if _is_linkedin_host(host) and parsed.path.rstrip("/") == "/redir/redirect":
+    if _is_linkedin_host(host) and parsed.path.rstrip("/") in _REDIRECT_PATHS:
         # parse_qs already decodes the parameter once, which is all the
         # encoding LinkedIn applies. A second decode would turn an escaped
         # "?", "#" or "/" in the target into a delimiter.
