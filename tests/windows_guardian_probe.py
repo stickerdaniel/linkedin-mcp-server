@@ -4380,6 +4380,8 @@ async def _browser_launch_owner(root: Path, controls: dict[str, str]) -> int:
     import patchright
     from patchright.async_api import async_playwright
 
+    from linkedin_mcp_server import process_tree
+
     ignored_node_override = os.environ.pop("PLAYWRIGHT_NODEJS_PATH", None)
     expected_node = Path(patchright.__file__).parent / "driver" / "node.exe"
     _win32api, _win32con, _win32event, win32job = _windows_modules()
@@ -4393,7 +4395,7 @@ async def _browser_launch_owner(root: Path, controls: dict[str, str]) -> int:
     driver = await asyncio.wait_for(
         async_playwright().start(), _remaining_browser_seconds(deadline)
     )
-    process = driver._impl_obj._connection._transport._proc
+    process = process_tree._patchright_driver_process(driver)
     node_handle = _asyncio_process_handle(process)
     win32job.AssignProcessToJobObject(inner, node_handle)
     node_pid = int(process.pid)
