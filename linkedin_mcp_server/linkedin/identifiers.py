@@ -81,9 +81,10 @@ _IDENTIFIER = re.compile(r"^[\w-]+$")
 
 # A company slug also takes a period, because organizations claim their domain as
 # one (`/company/beamy.io/`, `/company/booking.com/`). A slug that is only `.` or
-# `..` is still refused, by the dot-segment rule. It takes an ampersand too,
-# because LinkedIn writes one into some slugs (`/company/johnson-&-johnson/`).
-_COMPANY_SLUG = re.compile(r"^[\w.&-]+$")
+# `..` is still refused, by the dot-segment rule. It takes an ampersand and an
+# apostrophe too, because LinkedIn writes them into some slugs
+# (`/company/johnson-&-johnson/`, `/company/lowe's-home-improvement/`).
+_COMPANY_SLUG = re.compile(r"^[\w.&'-]+$")
 
 # Characters that have to be judged in the argument itself, before it becomes a
 # URL, because the parse below does not see them the way a browser does.
@@ -464,10 +465,11 @@ def person_profile_url(identifier: str, suffix: str = "") -> str:
 def company_page_url(identifier: str, suffix: str = "") -> str:
     """Company page URL for an already-normalized slug, escaped as one segment.
 
-    An ampersand is left as is. It is no path syntax, and it is how LinkedIn
-    writes the slug in its own links.
+    An ampersand or apostrophe is left as is. Neither is path syntax, and it is
+    how LinkedIn writes the slug in its own links.
     """
-    return f"https://www.linkedin.com/company/{quote(identifier, safe='&')}{suffix}"
+    slug = quote(identifier, safe="&'")
+    return f"https://www.linkedin.com/company/{slug}{suffix}"
 
 
 def job_view_url(job_id: str, suffix: str = "") -> str:

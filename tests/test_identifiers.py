@@ -251,6 +251,20 @@ class TestNormalizeCompanyIdentifier:
     @pytest.mark.parametrize(
         "value",
         [
+            "lowe's-home-improvement",
+            "/company/lowe's-home-improvement/",
+            "https://www.linkedin.com/company/lowe's-home-improvement/",
+            "https://www.linkedin.com/company/lowe%27s-home-improvement/life/",
+        ],
+    )
+    def test_keeps_the_apostrophe_of_a_company_slug(self, value: str):
+        # Lowe's links its page as /company/lowe's-home-improvement/, and
+        # classify_link hands that path back as a company reference.
+        assert normalize_company_identifier(value) == "lowe's-home-improvement"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
             "https://www.linkedin.com/school/rwth-aachen-university/",
             "https://www.linkedin.com/showcase/microsoft",
         ],
@@ -341,6 +355,12 @@ class TestUrlBuilders:
         assert (
             company_page_url("johnson-&-johnson", "/")
             == "https://www.linkedin.com/company/johnson-&-johnson/"
+        )
+
+    def test_writes_an_apostrophe_slug_the_way_linkedin_links_it(self):
+        assert (
+            company_page_url("lowe's-home-improvement", "/")
+            == "https://www.linkedin.com/company/lowe's-home-improvement/"
         )
 
 
