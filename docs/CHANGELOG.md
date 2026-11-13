@@ -5,6 +5,39 @@ described on [GitHub Releases](https://github.com/stickerdaniel/linkedin-mcp-ser
 
 <!-- towncrier release notes start -->
 
+## 4.30.0 (2026-11-13)
+
+### Highlights
+
+- **Mutual connections.** search_people lists a member's connections with `connection_of`. ([#1358](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1358))
+- **Replies by thread id.** reply_to_conversation answers a thread by id, InMail included. ([#1342](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1342))
+- **Copied links work.** Job and company tools take the links LinkedIn shows, with slugs. ([#1437](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1437))
+
+### Features
+
+- reply_to_conversation answers an existing thread by its id, InMail included. ([#1342](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1342))
+- search_people takes connection_of to list a member's connections, e.g. mutual connections. ([#1358](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1358))
+- The server can load optional tools at start. ([#1475](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1475))
+
+### Bug Fixes
+
+- Connection requests now report pending when LinkedIn hides Pending in the More menu. ([#1425](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1425))
+- Job, messaging and post tools refuse invalid input before starting the browser. ([#1429](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1429))
+- --slow-mo 0 now turns off a SLOW_MO set in the environment. ([#1431](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1431))
+- Job tools accept a job search link with currentJobId in place of the job id. ([#1437](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1437))
+- `--port 0` is refused as an invalid port instead of being dropped in favour of 8000. ([#1447](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1447))
+- Invalid LOG_LEVEL now refuses startup instead of silently keeping the default level. ([#1461](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1461))
+- An unreadable HEADLESS, AUTO_IMPORT_FROM_BROWSER or DAEMON_ENABLED now stops startup. ([#1479](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1479))
+- References keep an external link behind /redir/redirect without a trailing slash. ([#1491](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1491))
+- Job tools accept a slugged job link with a period or escaped character in the title. ([#1493](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1493))
+- References keep an escaped ?, # or / in the target of a LinkedIn redirect. ([#1498](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1498))
+- Company tools accept a slug with an ampersand, such as johnson-&-johnson. ([#1500](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1500))
+- An unknown `LINKEDIN_TRACE_MODE` or `LINKEDIN_MCP_CHECK_FOR_UPDATES` value stops startup. ([#1501](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1501))
+- References keep an external link behind /safety/go. ([#1504](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1504))
+- Company tools accept a slug with an apostrophe, such as lowe's-home-improvement. ([#1506](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1506))
+- A job reference is emitted only for a job link that the job tools accept as input. ([#1508](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1508))
+
+
 ## 4.29.0 (2026-10-31)
 
 ### Highlights
