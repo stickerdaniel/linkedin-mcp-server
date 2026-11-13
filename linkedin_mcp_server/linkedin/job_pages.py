@@ -37,7 +37,7 @@ from linkedin_mcp_server.linkedin.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     ExtractedSection,
 )
-from linkedin_mcp_server.linkedin.identifiers import job_view_url
+from linkedin_mcp_server.linkedin.identifiers import job_id_from_path, job_view_url
 from linkedin_mcp_server.linkedin.job_policy import (
     EASY_APPLY_DRAFT_LEFT,
     SAFETY_REDIRECT_PATH,
@@ -48,7 +48,7 @@ from linkedin_mcp_server.linkedin.job_policy import (
     route,
     same_job_search,
 )
-from linkedin_mcp_server.linkedin.link_metadata import JOB_PATH_RE, build_references
+from linkedin_mcp_server.linkedin.link_metadata import build_references
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.session import PageSession
 from linkedin_mcp_server.linkedin.text import (
@@ -1368,8 +1368,7 @@ class JobPageReader:
         await self._navigator._navigate_to_page(url)
         await self._session.check_rate_limit()
         page = self._session.page
-        landed = JOB_PATH_RE.match(route(page.url)[1])
-        if landed is None or landed.group(1) != job_id:
+        if job_id_from_path(route(page.url)[1]) != job_id:
             await self._navigator._raise_if_auth_barrier(page.url)
             raise LinkedInOperationError(
                 f"The navigation to job {job_id}'s posting ended on {page.url}"

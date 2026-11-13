@@ -8,8 +8,8 @@ from typing import Literal
 from urllib.parse import parse_qs, urlparse
 
 
+from linkedin_mcp_server.linkedin.identifiers import job_id_from_path
 from linkedin_mcp_server.linkedin.link_metadata import (
-    JOB_PATH_RE,
     Reference,
     _SEARCH_RESULTS_REFERENCE_CAP,
 )
@@ -34,10 +34,9 @@ def reconcile_search_references(
 
     for ref in references:
         if ref.get("kind") == "job":
-            match = JOB_PATH_RE.match(str(ref.get("url", "")))
-            if match is None:
+            job_id = job_id_from_path(str(ref.get("url", "")))
+            if job_id is None:
                 continue
-            job_id = match.group(1)
             if job_id not in kept_ids or job_id in emitted_ids:
                 continue
             out.append(ref)

@@ -556,21 +556,6 @@ class TestSluggedJobUrls:
         assert normalize_job_id(slugged) == normalize_job_id("/jobs/view/1967281839/")
         assert normalize_job_id(slugged) == "1967281839"
 
-    @pytest.mark.parametrize(
-        "slug",
-        [
-            "senior-.net-developer-at-acme",
-            "node.js-engineer-at-acme",
-            "c%2B%2B-engineer-at-acme",
-        ],
-    )
-    def test_a_slug_with_punctuation_resolves_like_its_reference(self, slug: str):
-        # link_metadata turns the same link into the reference /jobs/view/<id>/,
-        # so refusing it here refused a job this server itself recognizes.
-        url = f"https://www.linkedin.com/jobs/view/{slug}-4252026496/"
-        assert classify_link(url) == ("job", "/jobs/view/4252026496/")
-        assert normalize_job_id(url) == "4252026496"
-
     def test_a_bare_argument_stays_strictly_numeric(self):
         # Outside a URL the words are not a slug LinkedIn wrote, they are a
         # wrong value, and a page load is what it costs to learn that.
@@ -600,7 +585,6 @@ class TestJobOpenInASearch:
         [
             "https://www.linkedin.com/jobs/search/?keywords=python",
             "https://www.linkedin.com/jobs/search/?currentJobId=abc",
-            "https://www.linkedin.com/jobs/search/?currentJobId=1&currentJobId=2",
             "https://www.linkedin.com/feed/?currentJobId=4252026496",
             # The query value must be the digits themselves, not a reference
             # that decodes or trims into some other job.
@@ -612,6 +596,84 @@ class TestJobOpenInASearch:
     def test_a_search_without_one_job_is_still_refused(self, value: str):
         with pytest.raises(InvalidReferenceError):
             normalize_job_id(value)
+
+
+def _job_input(url: str) -> str | None:
+    try:
+        return normalize_job_id(url)
+    except InvalidReferenceError:
+        return None
+
+
+def _job_reference(url: str) -> str | None:
+    match classify_link(url):
+        case ("job", reference):
+            return reference
+        case _:
+            return None
+
+
+class TestOneJobGrammar:
+    """A job link means the same job, or none, whether a caller passes it in or
+    a page shows it. Each side read job routes with its own rules, and every
+    difference was a reference one side printed and the other refused, or a
+    search the input called ambiguous while the page reading picked a job."""
+
+    @pytest.mark.parametrize(
+        ("url", "job_id", "reference"),
+        [
+            ("/jobs/view/4252026496/", "4252026496", "/jobs/view/4252026496/"),
+            # Two values do not say which job was meant, even when they agree,
+            # and an escaped key is still the same parameter.
+            ("/jobs/search/?currentJobId=1&currentJobId=2", None, None),
+            ("/jobs/search/?currentJobId=1&currentJobId=1", None, None),
+            ("/jobs/search/?currentJobId=1&current%4AobId=2", None, None),
+            ("/jobs/search-results/?currentJobId=7&currentJobId=8", None, None),
+            # A blank or valueless occurrence selects nothing.
+            ("/jobs/search/?currentJobId=&currentJobId=1", "1", "/jobs/view/1/"),
+            ("/jobs/search/?currentJobId=1&currentJobId=", "1", "/jobs/view/1/"),
+            ("/jobs/search/?currentJobId&currentJobId=1", "1", "/jobs/view/1/"),
+            ("/jobs/search/?currentJobId=1&currentJobId", "1", "/jobs/view/1/"),
+            ("/jobs/search/?currentJobId=&currentJobId=", None, None),
+            # The escape decodes to a path separator inside the job segment.
+            ("/jobs/view/ui%2Fux-designer-at-acme-4252026496/", None, None),
+            # A title keeps its punctuation in front of the id.
+            (
+                "/jobs/view/senior-.net-developer-at-acme-4252026496/",
+                "4252026496",
+                "/jobs/view/4252026496/",
+            ),
+            (
+                "/jobs/view/node.js-engineer-at-acme-4252026496/",
+                "4252026496",
+                "/jobs/view/4252026496/",
+            ),
+            (
+                "/jobs/view/c%2B%2B-engineer-at-acme-4252026496/",
+                "4252026496",
+                "/jobs/view/4252026496/",
+            ),
+            ("/jobs/view/engineer-(ai)-1234/", "1234", "/jobs/view/1234/"),
+            # Arabic-Indic digits are decimal digits to Python and no job id.
+            ("/jobs/view/engineer-٤٢٥/", None, None),
+            ("/jobs/search/?currentJobId=%D9%A4%D9%A2%D9%A5", None, None),
+        ],
+    )
+    def test_both_boundaries_read_the_same_job(
+        self, url: str, job_id: str | None, reference: str | None
+    ):
+        absolute = f"https://www.linkedin.com{url}"
+        assert (_job_input(absolute), _job_reference(absolute)) == (job_id, reference)
+
+    @pytest.mark.parametrize(
+        "piece",
+        [".", "(", "&", "%2B", "%C3%A9", "%2F", "%20", "%25", "%3F", "%5C", "%FF"],
+    )
+    def test_every_job_reference_is_accepted_as_input(self, piece: str):
+        url = f"https://www.linkedin.com/jobs/view/engineer{piece}at-acme-4252026496/"
+        reference = _job_reference(url)
+        if reference is not None:
+            assert _job_input(reference) == _job_input(url) == "4252026496"
 
 
 class TestNothingTidiesTheReference:
