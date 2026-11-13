@@ -10,8 +10,8 @@ described on [GitHub Releases](https://github.com/stickerdaniel/linkedin-mcp-ser
 ### Highlights
 
 - **Mutual connections.** search_people lists a member's connections with `connection_of`. ([#1358](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1358))
-- **Replies by thread id.** reply_to_conversation answers an existing thread, InMail included. ([#1342](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1342))
-- **Copied links work.** Job and company tools take the links LinkedIn shows, slugs included. ([#1437](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1437))
+- **Replies by thread id.** reply_to_conversation answers a thread by id, InMail included. ([#1342](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1342))
+- **Copied links work.** Job and company tools take the links LinkedIn shows, with slugs. ([#1437](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1437))
 
 ### Features
 
