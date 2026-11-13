@@ -22,6 +22,8 @@ touched for the browser we actually import from:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
+from dataclasses import dataclass
 import functools
 import json
 import logging
@@ -34,6 +36,7 @@ from linkedin_mcp_server.browser_import.discovery import (
 )
 from linkedin_mcp_server.browser_import.extract import (
     LiAtMeta,
+    LinkedInCookie,
     extract_linkedin_cookies,
     read_li_at_meta,
 )
@@ -63,6 +66,34 @@ from linkedin_mcp_server.session_state import (
 logger = logging.getLogger(__name__)
 
 _PRIVATE_FILE_MODE = 0o600
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    """One session source to try: a label for logs and a way to stage it.
+
+    ``stage`` writes the source's cookies to the path it is given and returns
+    ``True`` when an ``li_at`` was written, ``False`` when the source yielded
+    nothing usable. It is blocking and runs in a worker thread.
+    """
+
+    label: str
+    stage: Callable[[Path], bool]
+
+
+def _browser_candidate(profile: BrowserProfile) -> _Candidate:
+    # The module global is looked up at call time so tests can patch it.
+    return _Candidate(
+        label=f"{profile.browser}/{profile.profile_dir_name}",
+        stage=lambda cookie_path: _extract_and_stage(profile, cookie_path),
+    )
+
+
+def _stage_cookies(cookies: list[LinkedInCookie], cookie_path: Path) -> None:
+    """Write *cookies* to *cookie_path* in the on-disk shape a login leaves."""
+    payload = json.dumps([c.to_playwright() for c in cookies], indent=2)
+    secure_write_text(cookie_path, payload, mode=_PRIVATE_FILE_MODE)
+    harden_linkedin_tree(cookie_path.parent)
 
 
 def _is_live(meta: LiAtMeta) -> bool:
@@ -182,9 +213,7 @@ def _extract_and_stage(profile: BrowserProfile, cookie_path: Path) -> bool:
     if not any(c.name == "li_at" for c in cookies):
         return False
 
-    payload = json.dumps([c.to_playwright() for c in cookies], indent=2)
-    secure_write_text(cookie_path, payload, mode=_PRIVATE_FILE_MODE)
-    harden_linkedin_tree(cookie_path.parent)
+    _stage_cookies(cookies, cookie_path)
     logger.info(
         "Validating %d LinkedIn cookies from %s/%s",
         len(cookies),
@@ -230,6 +259,59 @@ async def import_session_from_browser(
         "recently used first",
         len(live),
     )
+    return await _import_candidates(
+        [_browser_candidate(profile) for profile, _meta in live],
+        user_data_dir=user_data_dir,
+        superseded_by=superseded_by,
+        profile_wait_seconds=profile_wait_seconds,
+    )
+
+
+async def import_session_from_cookies(
+    cookies: list[LinkedInCookie],
+    *,
+    user_data_dir: Path,
+    source_label: str = "LINKEDIN_COOKIES",
+    superseded_by: str | None | object = UNGUARDED,
+    profile_wait_seconds: float = 0.0,
+) -> bool:
+    """Validate and persist a session handed over as a list of cookies.
+
+    The cloud counterpart of :func:`import_session_from_browser`: the cookies
+    come from the environment (see ``env_cookies``) instead of a local browser's
+    cookie store, and then go through the very same rotate -> stage -> prove
+    ``/feed/`` -> commit flow, including restoring the previous session when
+    LinkedIn rejects the new one.
+
+    Returns ``True`` on a validated, persisted session and ``False`` when
+    LinkedIn did not accept the cookies.
+    """
+    if not any(c.name == "li_at" for c in cookies):
+        raise ValueError("cookies must contain li_at")
+
+    def stage(cookie_path: Path) -> bool:
+        _stage_cookies(cookies, cookie_path)
+        logger.info(
+            "Validating %d LinkedIn cookies from %s", len(cookies), source_label
+        )
+        return True
+
+    return await _import_candidates(
+        [_Candidate(label=source_label, stage=stage)],
+        user_data_dir=user_data_dir,
+        superseded_by=superseded_by,
+        profile_wait_seconds=profile_wait_seconds,
+    )
+
+
+async def _import_candidates(
+    candidates: list[_Candidate],
+    *,
+    user_data_dir: Path,
+    superseded_by: str | None | object,
+    profile_wait_seconds: float,
+) -> bool:
+    """Own the profile, then rotate, validate and commit the first accepted."""
     cookie_path = portable_cookie_path(user_data_dir)
 
     # An import seeds a session that may belong to a different account than the
@@ -274,7 +356,7 @@ async def import_session_from_browser(
             logger.info("Another client already signed in; keeping its session")
             return True
         return await _import_holding_the_profile(
-            live, cookie_path, user_data_dir, lease
+            candidates, cookie_path, user_data_dir, lease
         )
     except BrowserShutdownUnconfirmedError:
         # A validation browser may still hold the profile, so keep the lease
@@ -288,7 +370,7 @@ async def import_session_from_browser(
 
 
 async def _import_holding_the_profile(
-    live: list[tuple[BrowserProfile, LiAtMeta]],
+    candidates: list[_Candidate],
     cookie_path: Path,
     user_data_dir: Path,
     lease: ProfileLease,
@@ -308,7 +390,7 @@ async def _import_holding_the_profile(
     shutdown_confirmed = True
     lease.mark_browser_open()
     try:
-        imported = await _import_first_accepted(live, cookie_path, user_data_dir)
+        imported = await _import_first_accepted(candidates, cookie_path, user_data_dir)
         return imported
     except BrowserShutdownUnconfirmedError:
         # A validation browser may still be running on this profile. Leave
@@ -351,7 +433,7 @@ async def _import_holding_the_profile(
 
 
 async def _import_first_accepted(
-    live: list[tuple[BrowserProfile, LiAtMeta]],
+    candidates: list[_Candidate],
     cookie_path: Path,
     user_data_dir: Path,
 ) -> bool:
@@ -359,28 +441,23 @@ async def _import_first_accepted(
     from linkedin_mcp_server.drivers.browser import validate_imported_cookies
 
     staged_any = False
-    for profile, _meta in live:
-        if not await asyncio.to_thread(_extract_and_stage, profile, cookie_path):
+    for candidate in candidates:
+        if not await asyncio.to_thread(candidate.stage, cookie_path):
             continue
         staged_any = True
 
         if await validate_imported_cookies(cookie_path, user_data_dir):
             write_source_state(user_data_dir)
-            logger.info(
-                "Imported LinkedIn session from %s/%s",
-                profile.browser,
-                profile.profile_dir_name,
-            )
+            logger.info("Imported LinkedIn session from %s", candidate.label)
             return True
 
         # Cookie was present but LinkedIn rejected it (revoked/remote logout).
         # Drop the partial artifacts and try the next-freshest browser.
         reset_source_profile(user_data_dir)
         logger.info(
-            "%s/%s had an li_at but LinkedIn rejected the session; trying the "
-            "next browser",
-            profile.browser,
-            profile.profile_dir_name,
+            "%s had an li_at but LinkedIn rejected the session; trying the "
+            "next source, if any",
+            candidate.label,
         )
 
     if not staged_any:
