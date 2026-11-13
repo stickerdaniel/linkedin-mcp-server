@@ -1224,6 +1224,32 @@ class TestEndpointSpelling:
         with pytest.raises(DescriptorError):
             descriptor.check_endpoint_is_local()
 
+    @pytest.mark.parametrize("host", ["127.0.0.1.", "127.0.0.1.."])
+    def test_a_numeric_address_with_a_trailing_dot_is_refused_before_resolving(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str
+    ):
+        # A trailing root dot belongs to domain names, not to address
+        # literals, and this daemon never publishes one on a numeric host.
+        # glibc's getaddrinfo strips the dot and answers 127.0.0.1 for
+        # "127.0.0.1.", so the spelling has to be refused before the resolver
+        # is asked. The resolver here is made to answer loopback and must never
+        # be consulted.
+        import socket
+
+        descriptor = _descriptor(tmp_path, new_token(), host=host)
+        consulted = []
+
+        def answering_resolver(hostname, port, *args, **kwargs):
+            consulted.append(hostname)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+
+        monkeypatch.setattr(socket, "getaddrinfo", answering_resolver)
+
+        with pytest.raises(DescriptorError):
+            descriptor.check_endpoint_is_local()
+
+        assert consulted == []
+
     @pytest.mark.parametrize(
         "host",
         [

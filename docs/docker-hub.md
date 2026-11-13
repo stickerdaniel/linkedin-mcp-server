@@ -17,6 +17,7 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 - **Job Details**: Retrieve job posting information
 - **Easy Apply Forms**: Read the questions of a job's Easy Apply form, with each field's type, options and prefilled value, without typing or submitting
 - **Job Search**: Search for jobs with keywords and location filters
+- **Save Job**: Save a LinkedIn job posting to the authenticated user's saved jobs list
 - **Saved Jobs**: List job postings saved by the authenticated user
 - **Dismiss Jobs**: Dismiss a job from job search so later searches no longer show it
 - **People Search**: Search for people by keywords, location, connection degree, current company, and mutual connections

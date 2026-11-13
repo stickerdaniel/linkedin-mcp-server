@@ -54,8 +54,9 @@ instances, clear profiles, or replace the user's browser session.
 - Content: `get_feed` and `search_posts`.
 - Messages: `get_inbox`, `get_conversation`, and `search_conversations`.
 - Writes: `send_message`, `reply_to_conversation` (answer an existing thread,
-  InMail included), `connect_with_person`, `archive_conversation` and
-  `dismiss_job`, subject to the explicit authorization rules above.
+  InMail included), `connect_with_person`, `archive_conversation`,
+  `dismiss_job` and `save_job`, subject to the explicit authorization rules
+  above.
 - Session: `get_session_status` says whether a login is saved without opening
   a browser or a login window; it does not prove LinkedIn still accepts it.
 - Cleanup: use `close_session` only when the user asks to end the managed

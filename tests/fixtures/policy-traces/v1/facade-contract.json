@@ -88,6 +88,10 @@
         "coroutine": true,
         "signature": "(self, thread_id: 'str', message: 'str', *, confirm_send: 'bool') -> 'dict[str, Any]'"
       },
+      "save_job": {
+        "coroutine": true,
+        "signature": "(self, job_id: 'str') -> 'dict[str, Any]'"
+      },
       "search_companies": {
         "coroutine": true,
         "signature": "(self, keywords: 'str') -> 'dict[str, Any]'"
@@ -131,6 +135,7 @@
       "read_job",
       "read_person",
       "reply_to_conversation",
+      "save_job",
       "search_companies",
       "search_conversations",
       "search_jobs",
@@ -615,6 +620,25 @@
             "thread_id",
             "message",
             "confirm_send"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "save_job": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "job_id": {
+              "description": "LinkedIn job ID (e.g., \"4252026496\", \"3856789012\")",
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id"
           ],
           "type": "object"
         },

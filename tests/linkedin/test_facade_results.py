@@ -12,6 +12,7 @@ from linkedin_mcp_server.linkedin.contracts import (
     ExtractedSection,
 )
 from linkedin_mcp_server.linkedin.link_metadata import Reference
+from linkedin_mcp_server.linkedin.jobs import JobReader
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 
 
@@ -44,6 +45,24 @@ class TestSingleSectionRateLimits:
 
         assert result["sections"] == {}
         assert result["section_errors"][section]["error_type"] == "rate_limit"
+
+
+async def test_save_job_facade_preserves_the_job_reader_result(mock_page):
+    extractor = LinkedInExtractor(mock_page)
+    expected = {
+        "url": "https://www.linkedin.com/jobs/view/12345/",
+        "job_id": "12345",
+        "saved": True,
+        "already_saved": True,
+    }
+
+    with patch.object(
+        JobReader, "save_job", new_callable=AsyncMock, return_value=expected
+    ) as save_job:
+        result = await extractor.save_job("12345")
+
+    assert result == expected
+    save_job.assert_awaited_once_with("12345")
 
 
 class TestEveryNormalizedEntryPoint:

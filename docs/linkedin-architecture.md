@@ -90,6 +90,7 @@ a page-owning collaborator.
 - `read_job`
 - `read_person`
 - `reply_to_conversation`
+- `save_job`
 - `search_companies`
 - `search_conversations`
 - `search_jobs`
