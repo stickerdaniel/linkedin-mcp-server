@@ -333,6 +333,52 @@ one marked `160.0.1.0`.
 Not re-measured on 153: fpscanner, rebrowser-bot-detector, the JA4 and HTTP/2
 fingerprints, the startup-flash timing, and the cookie-across-restart check.
 
+### Re-measured on Chrome for Testing 156
+
+Patchright 1.64.4 moves the lock to revision 1248, Chrome for Testing
+156.0.8078.4, and ffmpeg from revision 1011 to 1013. winldd stays at 1007. The
+driver it bundles reports itself as 1.64.3. Its chromium download and
+executable tables are the same as at 1.63.0, so every platform still fetches
+Chrome for Testing, and `--version` on macOS arm64 reads `Google Chrome for
+Testing 156.0.8078.4`. Each row below was measured against the same probe on
+the 153 build, on the same machine, as a control. Measured 2026-11-13 on macOS
+27.2 arm64 with a 1920x1080 60 Hz display.
+
+macOS, through `BrowserManager` against a loopback origin, both launch modes.
+`tests/test_browser_identity.py` passes all 35 cases on 156, and on 153 in the
+same session.
+
+| | Value on 156 |
+|---|---|
+| User agent | `…Chrome/156.0.0.0…`, no `HeadlessChrome` |
+| `sec-ch-ua` brands | `Not:A-Brand/8`, `Chromium/156`, major agreeing with the UA |
+| High-entropy hints | `arm`, `64`, two `fullVersionList` entries |
+| `navigator.webdriver` | `false` |
+| `document.visibilityState` / `hasFocus()` | `visible` / `true` |
+| Outer window vs screen | default 1280x720 on 1280x720; headed 1200x907 on 1920x1080 |
+| `navigator.plugins.length` / `window.chrome` | 5 / `object` |
+| `Notification.permission` | `default` |
+| `requestAnimationFrame` | 60/s in the default mode and 61/s headed |
+| CreepJS headless / like headless / stealth | default 0% / 44% / 0%; headed 0% / 31% / 0% |
+
+Every row matches the 153 control except the version and the GREASE brand,
+which moved from `Not_A Brand` in second place to `Not:A-Brand` in first. The
+153 control read 1200x907 headed as well, so the 926 in the 153 table follows
+the machine, not the build. The control's frame rate was 58/s and 60/s. The
+CreepJS scores, the flagged like-headless keys and the headless hash are
+identical on 153 and 156 in both modes.
+
+The downgrade guard parses the 156 binary as comparable. It opened profiles
+marked `153.0.8010.12` and `156.0.8078.4` and refused one marked `999.0.1.0`.
+A fresh profile opened once by 156 through `BrowserManager` records
+`156.0.8078.4`, and the guard refuses the 153 binary on it, so a return to
+patchright 1.63.0 after a run on 1.64.4 stops at the guard.
+
+Not re-measured on 156: the published images, Windows, fpscanner,
+rebrowser-bot-detector, the JA4 and HTTP/2 fingerprints, the startup-flash
+timing, and the cookie-across-restart check. The image rows in the 153 table
+stay 153 measurements.
+
 ## Things that look like fixes and are not
 
 - **`--user-agent` as a browser switch.** Reaches every target including

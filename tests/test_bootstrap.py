@@ -8472,7 +8472,7 @@ class TestPatchrightCommandTargetContract:
     def test_the_locked_release_is_the_one_this_contract_describes(self):
         import importlib.metadata
 
-        assert importlib.metadata.version("patchright") == "1.63.0"
+        assert importlib.metadata.version("patchright") == "1.64.4"
 
     def _assert_is_an_ffmpeg_directory(self, name: str) -> None:
         """Pin the kind, and the revision to one this browsers.json names.
