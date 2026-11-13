@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
@@ -33,6 +34,28 @@ from .support.policy_trace import (
     ScriptedResponse,
     TraceRecorder,
 )
+
+
+@pytest.fixture
+async def skip_loop_time(monkeypatch) -> Callable[[float], None]:
+    """Move the running loop's clock forward by the seconds given.
+
+    AnyIO deadlines and loop timers read ``loop.time()``, so a skip makes the
+    ones it passes fall due on the loop's next pass, and ``time.monotonic()``
+    keeps real time. A test sizes its deadline for everything before the
+    moment it is about, however slow the host, and crosses it with a skip at
+    that moment.
+    """
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    skipped = 0.0
+
+    def skip(seconds: float) -> None:
+        nonlocal skipped
+        skipped += seconds
+
+    monkeypatch.setattr(loop, "time", lambda: real_time() + skipped)
+    return skip
 
 
 def _reader(page) -> FeedReader:
@@ -783,7 +806,9 @@ class TestDrainListenerTasks:
         assert unwound
         assert task.done()
 
-    async def test_a_deadline_falling_due_inside_the_shield_still_fires(self):
+    async def test_a_deadline_falling_due_inside_the_shield_still_fires(
+        self, skip_loop_time
+    ):
         """The shield can swallow the moment a deadline comes due.
 
         AnyIO skips a shielded scope while delivering, and the restart on
@@ -796,28 +821,37 @@ class TestDrainListenerTasks:
         successful return.
         """
         started = asyncio.Event()
+        # Outlasts the drain's two-second wait on any host. The read's
+        # cleanup crosses it on the loop's clock instead.
+        timeout = 30.0
+        crossed = False
 
         async def read() -> None:
+            nonlocal crossed
             started.set()
             try:
                 await asyncio.Event().wait()
             finally:
-                # Outlives the deadline, so the shield is still open when it
-                # falls due, and closes only afterwards.
-                await asyncio.sleep(0.7)
+                # The drain has cancelled this read and waits for it inside
+                # its shield, so the deadline falls due with the shield open.
+                # The drain resumes on a later pass of the loop than the one
+                # that runs the expired deadline.
+                skip_loop_time(timeout)
+                crossed = True
 
         task = asyncio.create_task(read())
         await started.wait()
 
         reached_the_caller = False
         with pytest.raises(TimeoutError):
-            with anyio.fail_after(2.3):
+            with anyio.fail_after(timeout):
                 await FeedReader._drain_listener_tasks([task])
                 # Nothing between here and the scope's close suspends, which
                 # is exactly get_feed's own report_progress when the client
                 # sent no progress token.
                 reached_the_caller = True
 
+        assert crossed, "the deadline did not fall due inside the cleanup"
         assert not reached_the_caller
         assert task.cancelling() >= 1
 
@@ -930,11 +964,16 @@ class TestFeedToolDeadline:
     delivery for the next turn. ``get_feed`` then calls ``report_progress``,
     which suspends only when the client sent a progress token, so the two
     cases have to be driven separately. Both go over a real client session
-    against a real ``anyio.fail_after``; nothing about the timeout is mocked.
+    against a real ``anyio.fail_after``. The tool deadline outlasts the
+    session start and the drain's two-second wait on any host, and the
+    fake read's cleanup crosses it on the loop's clock, once the drain has
+    cancelled the read and waits for it inside the shield.
     """
 
+    TIMEOUT = 30.0
+
     @staticmethod
-    def _server_and_reads(mcp_timeout: float, cleanup: float):
+    def _server_and_reads(mcp_timeout: float, cross_the_deadline: Callable[[], None]):
         from linkedin_mcp_server.tools.feed import register_feed_tools
 
         reads: list[asyncio.Task[None]] = []
@@ -947,8 +986,10 @@ class TestFeedToolDeadline:
                 try:
                     await asyncio.Event().wait()
                 finally:
-                    # Holds the shield open across the deadline.
-                    await asyncio.sleep(cleanup)
+                    # Runs inside the shield. The drain resumes on a later
+                    # pass of the loop than the one that runs the expired
+                    # deadline.
+                    cross_the_deadline()
 
             task = asyncio.create_task(read())
             reads.append(task)
@@ -960,12 +1001,18 @@ class TestFeedToolDeadline:
         register_feed_tools(mcp, tool_timeout=mcp_timeout)
         return mcp, reads, SimpleNamespace(extract_feed=extract_feed)
 
-    async def _call(self, use_session: bool):
+    async def _call(self, skip_loop_time: Callable[[float], None], use_session: bool):
         from fastmcp import Client
 
         from linkedin_mcp_server.tools import feed as feed_tools
 
-        mcp, reads, extractor = self._server_and_reads(2.5, 0.7)
+        crossed: list[bool] = []
+
+        def cross_the_deadline() -> None:
+            skip_loop_time(self.TIMEOUT)
+            crossed.append(True)
+
+        mcp, reads, extractor = self._server_and_reads(self.TIMEOUT, cross_the_deadline)
         try:
             with patch.object(
                 feed_tools,
@@ -975,12 +1022,15 @@ class TestFeedToolDeadline:
                 async with Client(mcp) as client:
                     if use_session:
                         # No progress token: report_progress never suspends.
-                        return await client.session.call_tool(
+                        result = await client.session.call_tool(
                             "get_feed", {"num_posts": 1}
                         )
-                    # Client.call_tool installs a progress handler, so the
-                    # request carries a token and report_progress awaits.
-                    return await client.call_tool("get_feed", {"num_posts": 1})
+                    else:
+                        # Client.call_tool installs a progress handler, so the
+                        # request carries a token and report_progress awaits.
+                        result = await client.call_tool(
+                            "get_feed", {"num_posts": 1}, raise_on_error=False
+                        )
         finally:
             for task in reads:
                 if not task.done():
@@ -988,14 +1038,17 @@ class TestFeedToolDeadline:
             if reads:
                 await asyncio.wait(reads, timeout=2.0)
 
-    async def test_the_deadline_fires_without_a_progress_token(self):
-        result = await self._call(use_session=True)
+        assert crossed, "the deadline did not fall due inside the cleanup"
+        return result
+
+    async def test_the_deadline_fires_without_a_progress_token(self, skip_loop_time):
+        result = await self._call(skip_loop_time, use_session=True)
 
         assert result.is_error, "expired call returned a feed result"
         assert "timed out" in str(result.content)
 
-    async def test_the_deadline_fires_with_a_progress_token(self):
-        from fastmcp.exceptions import ToolError
+    async def test_the_deadline_fires_with_a_progress_token(self, skip_loop_time):
+        result = await self._call(skip_loop_time, use_session=False)
 
-        with pytest.raises(ToolError, match="timed out"):
-            await self._call(use_session=False)
+        assert result.is_error, "expired call returned a feed result"
+        assert "timed out" in str(result.content)
