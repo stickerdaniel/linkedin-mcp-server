@@ -159,7 +159,12 @@ async def test_tool_schema_trace_keeps_people_boundary_coercion_and_inventory():
         "tool_schemas"
     ]
 
-    assert len(schemas) == 25
+    assert len(schemas) == 27
+    assert {"prepare_post", "publish_post"} <= schemas.keys()
+    assert schemas["prepare_post"]["input"]["required"] == ["text"]
+    publish = schemas["publish_post"]["input"]
+    assert publish["required"] == ["draft_id", "approved_text"]
+    assert publish["properties"]["confirmed"]["default"] is False
     network = schemas["search_people"]["input"]["properties"]["network"]
     assert network["anyOf"] == [
         {"items": {"type": "string"}, "type": "array"},
@@ -171,6 +176,27 @@ async def test_tool_schema_trace_keeps_people_boundary_coercion_and_inventory():
         "message",
         "confirm_send",
     ]
+
+
+async def test_post_preview_and_unconfirmed_publish_never_open_the_composer():
+    traces = await build_policy_traces()
+    preview = traces["post-preview.json"]
+    assert preview["result"]["text"] == "Synthetic post preview.\n\nSecond paragraph."
+    assert (
+        preview["result"]["author_url"] == "https://www.linkedin.com/in/ada-lovelace/"
+    )
+    assert preview["result"]["published"] is False
+    assert preview["result"]["expires_in_seconds"] == 600
+    dry_run = traces["post-publish-unconfirmed.json"]
+    assert dry_run["result"] == {"status": "confirmation_required", "published": False}
+    assert not [
+        event for event in dry_run["events"] if event.get("call") == "publish_post"
+    ]
+    assert all(
+        "shareActive" not in event.get("requested_url", "")
+        for trace in (preview, dry_run)
+        for event in trace["events"]
+    )
 
 
 async def test_facade_results_keep_raw_values_and_optional_key_shape():

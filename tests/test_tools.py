@@ -49,6 +49,8 @@ def _make_mock_extractor(result: dict) -> MagicMock:
     mock.get_my_profile = AsyncMock(return_value=result)
     mock.search_companies = AsyncMock(return_value=result)
     mock.search_posts = AsyncMock(return_value=result)
+    mock.prepare_post = AsyncMock(return_value=result)
+    mock.publish_post = AsyncMock(return_value=result)
     mock.get_company_employees = AsyncMock(return_value=result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
@@ -57,7 +59,15 @@ def _make_mock_extractor(result: dict) -> MagicMock:
     return mock
 
 
-_TOOL_MODULES = ("person", "company", "job", "messaging", "feed", "post")
+_TOOL_MODULES = (
+    "person",
+    "company",
+    "job",
+    "messaging",
+    "feed",
+    "post",
+    "post_publishing",
+)
 
 
 @pytest.fixture
@@ -280,6 +290,16 @@ async def test_invalid_reference_is_rejected_before_extractor(
 #: reaches its readiness call. `test_the_valid_calls_name_every_tool` keeps it
 #: complete, which is what makes the tests below cover a tool added later.
 _A_VALID_CALL = [
+    ("post_publishing", "prepare_post", {"text": "Synthetic preview"}),
+    (
+        "post_publishing",
+        "publish_post",
+        {
+            "draft_id": "synthetic-id",
+            "approved_text": "Synthetic preview",
+            "confirmed": True,
+        },
+    ),
     ("person", "get_person_profile", {"linkedin_username": "alice"}),
     ("person", "search_people", {"keywords": "engineer"}),
     ("person", "connect_with_person", {"linkedin_username": "alice"}),

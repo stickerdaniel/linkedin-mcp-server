@@ -141,6 +141,14 @@
       "description": "Search LinkedIn posts/content globally by keyword (the 'Posts' tab) with an optional recency filter (past-24h/past-week/past-month) and content-type filter (e.g. documents); returns unordered candidate permalinks in references"
     },
     {
+      "name": "prepare_post",
+      "description": "Prepare a ten-minute plain-text personal post preview with its exact text, author and Anyone audience; does not publish"
+    },
+    {
+      "name": "publish_post",
+      "description": "Experimental publishing of an unchanged preview after explicit human approval; English/French composer checks, plain-text personal posts with Anyone audience only; live composer compatibility unverified, never retry an uncertain outcome"
+    },
+    {
       "name": "get_session_status",
       "description": "Diagnose saved-session files and the serving process's browser state without opening a browser or contacting LinkedIn"
     },

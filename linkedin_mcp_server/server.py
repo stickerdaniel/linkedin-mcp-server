@@ -50,6 +50,7 @@ from linkedin_mcp_server.tools.job import register_job_tools
 from linkedin_mcp_server.tools.messaging import register_messaging_tools
 from linkedin_mcp_server.tools.person import register_person_tools
 from linkedin_mcp_server.tools.post import register_post_tools
+from linkedin_mcp_server.tools.post_publishing import register_post_publishing_tools
 
 if TYPE_CHECKING:
     from linkedin_mcp_server.daemon.discovery import Unanswered
@@ -64,7 +65,7 @@ logger = logging.getLogger(__name__)
 # follow unprompted, such as reading only what a request needs, are left out,
 # and a generic "retry once" made Haiku retry while setup was still running.
 _SERVER_INSTRUCTIONS = """\
-send_message and connect_with_person act for the user. Use them only for the
+send_message, connect_with_person and publish_post act for the user. Use them only for the
 exact action, recipient and text the user approved; when the user asks for a
 draft, or for something these tools cannot do, reply with the text instead. If
 a write's outcome is unknown, ask the user to check LinkedIn before acting
@@ -326,6 +327,7 @@ def create_mcp_server(
         register_messaging_tools(mcp, tool_timeout=tool_timeout)
         register_feed_tools(mcp, tool_timeout=tool_timeout)
         register_post_tools(mcp, tool_timeout=tool_timeout)
+        register_post_publishing_tools(mcp, tool_timeout=tool_timeout)
 
         # Inside the gate with the rest, and easy to miss because it is the one
         # tool defined here rather than in a `register_*` call. Left out of the

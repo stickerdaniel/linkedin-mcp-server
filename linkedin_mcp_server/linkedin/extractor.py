@@ -24,6 +24,7 @@ from linkedin_mcp_server.linkedin.jobs import JobReader
 from linkedin_mcp_server.linkedin.message_sender import MessageSender
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 from linkedin_mcp_server.linkedin.person import PersonReader
+from linkedin_mcp_server.linkedin.post_writer import PostWriter
 from linkedin_mcp_server.linkedin.posts import PostSearch
 from linkedin_mcp_server.linkedin.profile_page import ProfilePageReader
 from linkedin_mcp_server.linkedin.session import PageSession
@@ -52,6 +53,10 @@ class LinkedInExtractor:
         )
         person = PersonReader(session, navigator, capture, profile_page)
 
+        async def resolve_post_author() -> str:
+            profile = await person.get_my_profile(max_scrolls=0)
+            return profile["url"]
+
         self._content = content
         self._capture = capture
         self._feed = FeedReader(session, navigator, content)
@@ -66,6 +71,9 @@ class LinkedInExtractor:
         job_pages = JobPageReader(session, navigator, content)
         self._jobs = JobReader(navigator, capture, job_pages)
         self._posts = PostSearch(capture)
+        self._post_writer = PostWriter(
+            session, navigator, resolve_author=resolve_post_author
+        )
         self._conversations = ConversationReader(
             session, navigator, content, profile_page
         )
@@ -237,6 +245,18 @@ class LinkedInExtractor:
             date_posted=date_posted,
             max_pages=max_pages,
             content_type=content_type,
+        )
+
+    async def prepare_post(self, text: str) -> dict[str, Any]:
+        """Resolve the personal author and prepare an exact post preview."""
+        return await self._post_writer.prepare_post(text)
+
+    async def publish_post(
+        self, draft_id: str, approved_text: str, *, confirmed: bool = False
+    ) -> dict[str, Any]:
+        """Attempt one publication after exact preview approval."""
+        return await self._post_writer.publish(
+            draft_id, approved_text, confirmed=confirmed
         )
 
     async def get_inbox(self, limit: int = 20) -> dict[str, Any]:
