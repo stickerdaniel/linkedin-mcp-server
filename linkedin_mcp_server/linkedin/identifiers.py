@@ -160,6 +160,11 @@ _NUMERIC_ID = re.compile(r"[0-9]+")
 # `c%2B%2B-engineer`, `engineer-(ai)`.
 _JOB_SEGMENT = re.compile(r"(?:.*-)?([0-9]+)")
 
+# What a decoded job segment may not hold: the delimiters that would end it or
+# start a query or fragment, the backslash a browser reads as a slash, and
+# control characters.
+_JOB_SEGMENT_REFUSED = re.compile(r"[/?#\\\x00-\x1f\x7f]")
+
 # A raw path on the job route, up to the end of its first segment after it.
 _JOB_VIEW_PATH = re.compile(r"/jobs/view/([^/?#]+)")
 
@@ -486,13 +491,24 @@ def messaging_thread_url(thread_id: str, suffix: str = "") -> str:
 def _job_id_from_segment(segment: str) -> str | None:
     """The job id a raw ``/jobs/view/<segment>/`` segment names, or ``None``.
 
-    The segment is decoded once and judged like any other reference segment
-    first, so an escape that decodes to path syntax names no job: a browser
-    loading ``/jobs/view/ui%2Fux-designer-at-acme-4252026496/`` asks LinkedIn
-    for that literal segment, and nothing proves it serves a posting there.
+    The segment is decoded once. Only the trailing id is kept and every job URL
+    is rebuilt from it, so a title's escaped space or percent sign
+    (``100%25-remote-developer-at-acme-4252026496``) still names its job. An
+    escape that decodes to path, query or fragment syntax, a backslash or a
+    control character names none: a browser loading
+    ``/jobs/view/ui%2Fux-designer-at-acme-4252026496/`` asks LinkedIn for that
+    literal segment, and nothing proves it serves a posting there. A malformed
+    escape or invalid UTF-8 names none either.
     """
-    decoded = _usable(segment)
-    match = _JOB_SEGMENT.fullmatch(decoded) if decoded is not None else None
+    if _STRAY_PERCENT.search(segment):
+        return None
+    try:
+        decoded = unquote(segment, errors="strict")
+    except UnicodeDecodeError:
+        return None
+    if _JOB_SEGMENT_REFUSED.search(decoded):
+        return None
+    match = _JOB_SEGMENT.fullmatch(decoded)
     return match.group(1) if match else None
 
 

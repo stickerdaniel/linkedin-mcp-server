@@ -15,6 +15,7 @@ from linkedin_mcp_server.core.exceptions import (
 )
 from linkedin_mcp_server.linkedin.identifiers import (
     company_page_url,
+    job_id_from_path,
     job_view_url,
     messaging_thread_url,
     normalize_company_identifier,
@@ -654,6 +655,21 @@ class TestOneJobGrammar:
                 "/jobs/view/4252026496/",
             ),
             ("/jobs/view/engineer-(ai)-1234/", "1234", "/jobs/view/1234/"),
+            # An escaped percent sign or space is title text, not syntax.
+            (
+                "/jobs/view/100%25-remote-developer-at-acme-4252026496/",
+                "4252026496",
+                "/jobs/view/4252026496/",
+            ),
+            (
+                "/jobs/view/senior%20developer-at-acme-4252026496/",
+                "4252026496",
+                "/jobs/view/4252026496/",
+            ),
+            # The escape decodes to a query delimiter, a backslash, or no UTF-8.
+            ("/jobs/view/what%3F-at-acme-4252026496/", None, None),
+            ("/jobs/view/a%5Cb-at-acme-4252026496/", None, None),
+            ("/jobs/view/caf%FF-at-acme-4252026496/", None, None),
             # Arabic-Indic digits are decimal digits to Python and no job id.
             ("/jobs/view/engineer-٤٢٥/", None, None),
             ("/jobs/search/?currentJobId=%D9%A4%D9%A2%D9%A5", None, None),
@@ -666,14 +682,32 @@ class TestOneJobGrammar:
         assert (_job_input(absolute), _job_reference(absolute)) == (job_id, reference)
 
     @pytest.mark.parametrize(
-        "piece",
-        [".", "(", "&", "%2B", "%C3%A9", "%2F", "%20", "%25", "%3F", "%5C", "%FF"],
+        "piece", [".", "(", "&", "%2B", "%C3%A9", "%20", "%25", "%2525"]
     )
     def test_every_job_reference_is_accepted_as_input(self, piece: str):
         url = f"https://www.linkedin.com/jobs/view/engineer{piece}at-acme-4252026496/"
         reference = _job_reference(url)
-        if reference is not None:
-            assert _job_input(reference) == _job_input(url) == "4252026496"
+        assert reference == "/jobs/view/4252026496/"
+        assert _job_input(reference) == _job_input(url) == "4252026496"
+
+    @pytest.mark.parametrize("piece", ["%2F", "%3F", "%23", "%5C", "%0A", "%FF", "%ZZ"])
+    def test_a_segment_that_decodes_to_syntax_names_no_job(self, piece: str):
+        url = f"https://www.linkedin.com/jobs/view/engineer{piece}at-acme-4252026496/"
+        assert (_job_input(url), _job_reference(url)) == (None, None)
+
+    @pytest.mark.parametrize(
+        ("landed", "job_id"),
+        [
+            ("/jobs/view/4252026496/", "4252026496"),
+            ("/jobs/view/d%C3%A9veloppeur-at-acme-4252026496/", "4252026496"),
+            ("/jobs/view/100%25-remote-developer-at-acme-4252026496/", "4252026496"),
+            ("/jobs/view/ui%2Fux-designer-at-acme-4252026496/", None),
+            ("/feed/", None),
+        ],
+    )
+    def test_the_landed_posting_names_its_job(self, landed: str, job_id):
+        # read_posting_title compares this with the job it navigated to.
+        assert job_id_from_path(landed) == job_id
 
 
 class TestNothingTidiesTheReference:
