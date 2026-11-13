@@ -48,6 +48,14 @@ RUN patchright install-deps chromium && \
     chmod -R 755 /opt/patchright && \
     rm -rf /var/lib/apt/lists/*
 
+# Chromium's managed policy for the image's browser (Chrome for Testing reads
+# this directory). The login viewer hands that browser to whoever opens its URL,
+# so it must not offer to keep the LinkedIn password in the profile (Patchright
+# launches with --password-store=basic, which stores it under a fixed key), nor
+# fill in addresses or cards. Every launch in the image reads it, the server's
+# own browser too, so it holds nothing that changes what a page can load.
+COPY --chmod=644 scripts/chromium-policy.json /etc/opt/chrome_for_testing/policies/managed/linkedin-mcp.json
+
 # Docker seeds a fresh named volume from this directory. Bind mounts retain the
 # host directory's ownership and are prepared by the documented login command.
 RUN install -d -m 0700 -o pwuser -g pwuser /home/pwuser/.linkedin-mcp
