@@ -72,6 +72,10 @@
         "coroutine": true,
         "signature": "(self, username: 'str') -> 'dict[str, Any]'"
       },
+      "get_unread_conversations": {
+        "coroutine": true,
+        "signature": "(self, limit: 'int' = 200) -> 'dict[str, Any]'"
+      },
       "read_company": {
         "coroutine": true,
         "signature": "(self, company_name: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None) -> 'dict[str, Any]'"
@@ -127,6 +131,7 @@
       "get_my_profile",
       "get_saved_jobs",
       "get_sidebar_profiles",
+      "get_unread_conversations",
       "read_company",
       "read_job",
       "read_person",
@@ -587,6 +592,25 @@
           "required": [
             "linkedin_username"
           ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_unread_conversations": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "default": 200,
+              "description": "Bounds the listing's scroll depth (1-1000, default 200);\neach scroll batch names roughly twenty conversations.",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
           "type": "object"
         },
         "output": {

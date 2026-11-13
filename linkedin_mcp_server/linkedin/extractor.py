@@ -243,6 +243,10 @@ class LinkedInExtractor:
         """List recent conversations from the messaging inbox."""
         return await self._conversations.get_inbox(limit)
 
+    async def get_unread_conversations(self, limit: int = 200) -> dict[str, Any]:
+        """Every unread conversation, from the unread-filtered inbox."""
+        return await self._conversations.get_unread_conversations(limit)
+
     async def get_conversation(
         self,
         linkedin_username: str | None = None,

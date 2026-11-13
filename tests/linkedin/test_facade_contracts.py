@@ -52,6 +52,7 @@ TOOL_DELEGATES = {
     "get_conversation": "get_conversation",
     "get_feed": "extract_feed",
     "get_inbox": "get_inbox",
+    "get_unread_conversations": "get_unread_conversations",
     "get_job_apply_url": "get_job_apply_url",
     "get_easy_apply_form": "get_easy_apply_form",
     "get_job_details": "read_job",

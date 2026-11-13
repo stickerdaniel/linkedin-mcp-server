@@ -1,0 +1,159 @@
+{
+  "call": {
+    "arguments": {
+      "limit": 40
+    },
+    "method": "get_unread_conversations"
+  },
+  "events": [
+    {
+      "call": "get_unread_conversations",
+      "callback_id": "callback-1",
+      "event": "response",
+      "kind": "listener.add",
+      "section": "conversation"
+    },
+    {
+      "call": "get_unread_conversations",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "conversation"
+    },
+    {
+      "call": "get_unread_conversations",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/?filter=unread",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "conversation"
+    },
+    {
+      "call": "get_unread_conversations",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/messaging/?filter=unread",
+      "requested_url": "https://www.linkedin.com/messaging/?filter=unread",
+      "section": "conversation",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_unread_conversations",
+      "description": "goto https://www.linkedin.com/messaging/?filter=unread",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "conversation"
+    },
+    {
+      "call": "get_unread_conversations",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/?filter=unread",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "conversation"
+    },
+    {
+      "call": "get_unread_conversations",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "conversation"
+    },
+    {
+      "call": "get_unread_conversations",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "conversation"
+    },
+    {
+      "call": "get_unread_conversations",
+      "kind": "boundary.rate_limit",
+      "section": "conversation"
+    },
+    {
+      "arg": {
+        "minimumLength": 100
+      },
+      "call": "get_unread_conversations",
+      "kind": "wait_for_function",
+      "operation": "main_text_minimum",
+      "program_digest": "9ab4343bf5cb",
+      "section": "conversation",
+      "timeout_ms": 10000
+    },
+    {
+      "call": "get_unread_conversations",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "conversation"
+    },
+    {
+      "arg": {
+        "position": "bottom"
+      },
+      "call": "get_unread_conversations",
+      "kind": "evaluate",
+      "operation": "scroll_main_region",
+      "program_digest": "4ae107c367fc",
+      "section": "conversation"
+    },
+    {
+      "call": "get_unread_conversations",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.5,
+      "section": "conversation"
+    },
+    {
+      "arg": {
+        "position": "bottom"
+      },
+      "call": "get_unread_conversations",
+      "kind": "evaluate",
+      "operation": "scroll_main_region",
+      "program_digest": "4ae107c367fc",
+      "section": "conversation"
+    },
+    {
+      "call": "get_unread_conversations",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.5,
+      "section": "conversation"
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "get_unread_conversations",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e6b2be4ebddd",
+      "section": "conversation"
+    },
+    {
+      "call": "get_unread_conversations",
+      "callback_id": "callback-3",
+      "event": "response",
+      "kind": "listener.remove",
+      "section": "conversation"
+    }
+  ],
+  "result": {
+    "section_names": [
+      "unread_conversations"
+    ],
+    "sections": {
+      "unread_conversations": "Conversation content"
+    },
+    "url": "https://www.linkedin.com/messaging/?filter=unread"
+  },
+  "scenario": "get_unread_conversations__baseline",
+  "schema_version": 1
+}

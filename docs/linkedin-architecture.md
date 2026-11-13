@@ -22,7 +22,7 @@ a page-owning collaborator.
 | `connection_actions` | `ACTION_SIGNALS_JS`, `CLICK_INCOMING_ACCEPT_JS`, `ConnectionActions`, `INVITATION_PENDING_JS`, `OPEN_MORE_BUTTON_JS`, `ReadMainProfile`, `SENT_INVITATIONS_URL` | `page-owning` |
 | `content` | `PageContentReader` | `page-owning` |
 | `contracts` | `ExtractedSection`, `FilterValidationError`, `RATE_LIMITED_SECTION_TEXT`, `SEND_INTERRUPTED_WARNING`, `before_the_reply_deadline()`, `message_action_result()`, `normalize_message_text()`, `rate_limited_section_error()`, `refuse_an_invalid_message()`, `refuse_an_invalid_reply()`, `reply_action_result()` | `browser-free` |
-| `conversations` | `ConversationReader`, `THREAD_MENU_ITEMS_JS`, `THREAD_MENU_SURVEY_JS`, `THREAD_OPTIONS_JS`, `is_conversations_payload_response()`, `strip_select_conversation_prefix()`, `thread_categories()` | `page-owning` |
+| `conversations` | `ConversationReader`, `THREAD_MENU_ITEMS_JS`, `THREAD_MENU_SURVEY_JS`, `THREAD_OPTIONS_JS`, `conversation_participant_names()`, `conversation_read_status()`, `is_conversations_payload_response()`, `payload_read_status()`, `strip_select_conversation_prefix()`, `thread_categories()` | `page-owning` |
 | `extractor` | `LinkedInExtractor` | `page-owning` |
 | `feed` | `FEED_POST_BOUNDARIES_JS`, `FeedReader` | `page-owning` |
 | `feed_payload` | `POST_SLUG_URL_RE`, `append_permalink_references()`, `build_feed_references()`, `is_feed_payload_response()`, `is_permalink_payload_response()`, `permalink_paths_from_payload()` | `browser-free` |
@@ -86,6 +86,7 @@ a page-owning collaborator.
 - `get_page_text`
 - `get_saved_jobs`
 - `get_sidebar_profiles`
+- `get_unread_conversations`
 - `read_company`
 - `read_job`
 - `read_person`
