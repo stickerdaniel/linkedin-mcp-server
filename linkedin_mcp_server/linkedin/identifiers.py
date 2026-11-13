@@ -49,6 +49,8 @@ from linkedin_mcp_server.core.exceptions import InvalidReferenceError
 
 __all__ = [
     "company_page_url",
+    "job_id_from_path",
+    "job_id_from_search_query",
     "job_view_url",
     "messaging_thread_url",
     "normalize_company_identifier",
@@ -136,17 +138,36 @@ _ORGANIZATION_ROUTES = {"company"}
 # ``/messaging/thread/2-abc/``) and the tool descriptions send callers back
 # through them, so a reference handed straight back is a caller following the
 # instructions. Refusing it would refuse this server's own output.
-_JOB_ROUTE = ("jobs", "view")
+_JOB_ROUTE = ["jobs", "view"]
 # A job clicked in a search opens in the search's detail pane, and the address
 # bar keeps the search with the posting in `currentJobId`. link_metadata reads
 # the same parameter on the same two routes as a job reference.
 _JOB_SEARCH_ROUTES = (["jobs", "search"], ["jobs", "search-results"])
 _THREAD_ROUTE = ("messaging", "thread")
 
-# A LinkedIn job id is the number in /jobs/view/<id>. Everything that produces
-# one here extracts ``\d+``, and anything else navigates to a 404 that costs a
-# page load to discover.
-_NUMERIC_ID = re.compile(r"^[0-9]+$")
+# A LinkedIn job id is the number in /jobs/view/<id>, and anything else
+# navigates to a 404 that costs a page load to discover. `[0-9]` and not `\d`,
+# because Python's `\d` also matches Arabic-Indic and other Unicode decimal
+# digits, which name no job.
+_NUMERIC_ID = re.compile(r"[0-9]+")
+
+# The `/jobs/view/` segment, after `_usable` has decoded it. LinkedIn serves a
+# job under both `/jobs/view/1967281839/` and
+# `/jobs/view/<title>-at-<company>-1967281839/`, and both 301 to the same page,
+# so the id is the run of digits after the last hyphen and the words in front of
+# it are decoration. Anchoring to the start of the segment read
+# `2026-software-engineer-at-acme-4252026496` as job 2026. Any character may sit
+# in front, because a title keeps its punctuation: `senior-.net-developer`,
+# `c%2B%2B-engineer`, `engineer-(ai)`.
+_JOB_SEGMENT = re.compile(r"(?:.*-)?([0-9]+)")
+
+# What a decoded job segment may not hold: the delimiters that would end it or
+# start a query or fragment, the backslash a browser reads as a slash, and
+# control characters.
+_JOB_SEGMENT_REFUSED = re.compile(r"[/?#\\\x00-\x1f\x7f]")
+
+# A raw path on the job route, up to the end of its first segment after it.
+_JOB_VIEW_PATH = re.compile(r"/jobs/view/([^/?#]+)")
 
 _PROFILE_URN_PREFIX = "urn:li:fsd_profile:"
 _PROFILE_URN_ID = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -399,32 +420,11 @@ def normalize_company_identifier(value: str) -> str:
     return reference
 
 
-def _numeric_tail(segment: str) -> str:
-    """The id at the end of a slugged path segment, or the segment unchanged.
-
-    LinkedIn serves a job under both `/jobs/view/1967281839/` and
-    `/jobs/view/<title>-at-<company>-1967281839/`, and the slugged form is the
-    one a browser address bar holds. Measured, both 301 to the same destination,
-    so the trailing run of digits is the id and the words in front of it are
-    decoration.
-
-    Only reached for a segment taken out of a URL under the id's own route. A
-    bare argument stays strictly numeric, because there the words are not a slug
-    LinkedIn wrote, they are a wrong value.
-
-    Any character may sit in front, as in `JOB_PATH_RE` and the browser's job-id
-    extraction: a title such as ".NET Developer" or "Node.js" keeps its period.
-    """
-    match = re.fullmatch(r"[^/?#]*?-(\d+)", segment)
-    return match.group(1) if match else segment
-
-
 def normalize_opaque_id(
     value: str,
     *,
     field: str,
     route: tuple[str, ...] = (),
-    numeric: bool = False,
 ) -> str:
     """An id LinkedIn issued (a job id, a conversation thread id), checked as one.
 
@@ -436,21 +436,21 @@ def normalize_opaque_id(
     Args:
         route: the path this kind of id sits under, so the reference this server
             prints (``/messaging/thread/2-abc/``) can be handed straight back.
-        numeric: reject anything but digits, for the ids LinkedIn issues as a
-            number. A word there is a 404 that costs a page load to learn.
     """
     value = value.strip()
     reference = _id_after_route(value, route, want=field) if route else None
-    if reference is not None and numeric:
-        reference = _numeric_tail(reference)
     if reference is None:
         reference = _usable(value)
-    if reference is None or (numeric and not _NUMERIC_ID.match(reference)):
-        raise InvalidReferenceError(
-            f"{field} is not a LinkedIn id. Pass the id exactly as a previous "
-            "result returned it, with no URL, path or query around it."
-        )
+    if reference is None:
+        raise _not_an_id(field)
     return reference
+
+
+def _not_an_id(field: str) -> InvalidReferenceError:
+    return InvalidReferenceError(
+        f"{field} is not a LinkedIn id. Pass the id exactly as a previous "
+        "result returned it, with no URL, path or query around it."
+    )
 
 
 def person_profile_url(identifier: str, suffix: str = "") -> str:
@@ -484,23 +484,86 @@ def messaging_thread_url(thread_id: str, suffix: str = "") -> str:
     )
 
 
-def _job_open_in_search(value: str) -> str | None:
-    """The ``currentJobId`` of a job search address, or ``None``.
+# The job grammar below is shared by both directions a job reference travels:
+# normalize_job_id reads what a caller passes in, and link_metadata reads the
+# links on a page it turns into references. A rule kept twice drifted twice,
+# each time into a reference one side printed and the other refused.
 
-    Exactly one: a search naming two jobs does not say which one was meant.
+
+def _job_id_from_segment(segment: str) -> str | None:
+    """The job id a raw ``/jobs/view/<segment>/`` segment names, or ``None``.
+
+    The segment is decoded once. Only the trailing id is kept and every job URL
+    is rebuilt from it, so a title's escaped space or percent sign
+    (``100%25-remote-developer-at-acme-4252026496``) still names its job. An
+    escape that decodes to path, query or fragment syntax, a backslash or a
+    control character names none: a browser loading
+    ``/jobs/view/ui%2Fux-designer-at-acme-4252026496/`` asks LinkedIn for that
+    literal segment, and nothing proves it serves a posting there. A malformed
+    escape or invalid UTF-8 names none either.
     """
-    segments = _linkedin_segments(value, want="job_id")
-    if segments is None or [s.lower() for s in segments] not in _JOB_SEARCH_ROUTES:
+    if _STRAY_PERCENT.search(segment):
         return None
-    query = value.split("#", 1)[0].partition("?")[2]
+    try:
+        decoded = unquote(segment, errors="strict")
+    except UnicodeDecodeError:
+        return None
+    if _JOB_SEGMENT_REFUSED.search(decoded):
+        return None
+    match = _JOB_SEGMENT.fullmatch(decoded)
+    return match.group(1) if match else None
+
+
+def job_id_from_path(path: str) -> str | None:
+    """The job id a raw, site-relative ``/jobs/view/...`` path names, or ``None``.
+
+    For a path already known to be LinkedIn's: a link on a page, a reference
+    this server emitted, the address a navigation landed on. Only the segment
+    after the route counts; anything after it is a sub-page of the same job.
+    """
+    match = _JOB_VIEW_PATH.match(path)
+    return _job_id_from_segment(match.group(1)) if match else None
+
+
+def job_id_from_search_query(query: str) -> str | None:
+    """The job a raw job search query selects in ``currentJobId``, or ``None``.
+
+    Exactly one non-blank value, in ASCII digits. ``parse_qs`` drops blank and
+    valueless occurrences, which select nothing, and decodes the key, so
+    ``current%4AobId`` is the same parameter. Two values, equal or not, do not
+    say which job was meant, and taking the first would answer for one of them.
+    """
     ids = parse_qs(query).get("currentJobId", [])
     return ids[0] if len(ids) == 1 and _NUMERIC_ID.fullmatch(ids[0]) else None
 
 
+def _job_id_from_address(value: str) -> str | None:
+    """The job id a LinkedIn address names on either job route, or ``None``."""
+    segments = _linkedin_segments(value, want="job_id")
+    if segments is None:
+        return None
+    route = [segment.lower() for segment in segments]
+    if route[:2] == _JOB_ROUTE and len(segments) > 2:
+        return _job_id_from_segment(segments[2])
+    if route in _JOB_SEARCH_ROUTES:
+        return job_id_from_search_query(value.split("#", 1)[0].partition("?")[2])
+    return None
+
+
 def normalize_job_id(value: str) -> str:
-    """The numeric id for a job posting, from the id or from a reference to it."""
-    value = _job_open_in_search(value.strip()) or value
-    return normalize_opaque_id(value, field="job_id", route=_JOB_ROUTE, numeric=True)
+    """The numeric id for a job posting, from the id or from a reference to it.
+
+    A bare argument stays strictly numeric. Outside a URL the words in front of
+    an id are not a slug LinkedIn wrote, they are a wrong value.
+    """
+    value = value.strip()
+    job_id = _job_id_from_address(value)
+    if job_id is None:
+        bare = _usable(value)
+        job_id = bare if bare is not None and _NUMERIC_ID.fullmatch(bare) else None
+    if job_id is None:
+        raise _not_an_id("job_id")
+    return job_id
 
 
 def normalize_thread_id(value: str) -> str:
