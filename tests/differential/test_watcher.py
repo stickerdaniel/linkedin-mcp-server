@@ -192,18 +192,54 @@ def test_every_owner_observer_recognises_either_builds_owner(owner):
     assert [lifetime[:2] for lifetime in owners] == [[77, 5.0]]
 
 
+#: The deadline of a watcher a test starts, and the bound of every wait on it.
+#: A sample reads the whole process table, which has taken 11s on a loaded Mac
+#: under ``-n 4``, so a wait ends on what the watcher wrote, not on a clock. A
+#: test here needs at most six samples. Seven tests wait on a watcher, so a
+#: record it never writes costs at most 14 minutes when they run serially,
+#: inside the 25 of the macOS CI job.
+WATCHER_DEADLINE = 120.0
+
+
 def _stand_in_browser(profile: Path) -> subprocess.Popen[bytes]:
+    # Lives until the test kills it, however long the watcher takes to see it.
     return subprocess.Popen(
         [
             sys.executable,
             "-c",
-            "import time; time.sleep(30)",
+            f"import time; time.sleep({WATCHER_DEADLINE})",
             f"--user-data-dir={profile}",
         ]
     )
 
 
-def _start_watcher(tmp_path: Path, *, deadline: float = 60) -> subprocess.Popen:
+def _until_written(
+    watcher: subprocess.Popen,
+    out: Path,
+    found: Callable[[list[dict]], bool],
+    what: str,
+) -> list[dict]:
+    """The watcher's records once *found* holds for them.
+
+    Fails once the watcher has ended without writing it, or has outlived its
+    own deadline.
+    """
+    limit = time.monotonic() + WATCHER_DEADLINE
+    while True:
+        # Read after the exit check, so a record written just before the exit
+        # is still found.
+        ended = watcher.poll() is not None
+        records = read_jsonl(out)
+        if found(records):
+            return records
+        assert not ended, f"the watcher ended without writing {what}"
+        assert time.monotonic() < limit, f"the watcher did not write {what}"
+        time.sleep(0.05)
+
+
+def _start_watcher(
+    tmp_path: Path, *, deadline: float = WATCHER_DEADLINE
+) -> subprocess.Popen:
     out, stop = tmp_path / "watcher.jsonl", tmp_path / "watcher.stop"
     watcher = subprocess.Popen(
         [
@@ -231,18 +267,20 @@ def _start_watcher(tmp_path: Path, *, deadline: float = 60) -> subprocess.Popen:
             str(tmp_path / "ms-playwright"),
         ]
     )
-    limit = time.monotonic() + 15
-    while not any(r["kind"] == "watcher.ready" for r in read_jsonl(out)):
-        assert time.monotonic() < limit, "the watcher never took its baseline"
-        time.sleep(0.05)
+    _until_written(
+        watcher,
+        out,
+        lambda records: any(r["kind"] == "watcher.ready" for r in records),
+        "the baseline",
+    )
     return watcher
 
 
 def _stop_watcher(tmp_path: Path, watcher: subprocess.Popen) -> list[dict]:
-    # Long enough for the exits to land in a sample before it stops.
-    time.sleep(0.5)
+    # It takes one more sample after the request, so whatever ended before it
+    # is read as ended.
     (tmp_path / "watcher.stop").touch()
-    watcher.wait(timeout=15)
+    watcher.wait(timeout=WATCHER_DEADLINE)
     return read_jsonl(tmp_path / "watcher.jsonl")
 
 
@@ -252,16 +290,16 @@ def _run_watcher(tmp_path: Path, profile: Path, browsers: int) -> list[dict]:
     try:
         for _ in range(browsers):
             started.append(_stand_in_browser(profile))
-        key = canonical_user_data_dir(str(profile))
-        limit = time.monotonic() + 15
-        while time.monotonic() < limit:
-            if any(
-                r["kind"] == "browser.roots"
-                and len(r["roots"].get(key, [])) == browsers
-                for r in read_jsonl(tmp_path / "watcher.jsonl")
-            ):
-                break
-            time.sleep(0.05)
+        pids = {process.pid for process in started}
+        # The sample that writes the last start sees every stand-in alive.
+        _until_written(
+            watcher,
+            tmp_path / "watcher.jsonl",
+            lambda records: (
+                pids <= {r["pid"] for r in records if r["kind"] == "process.start"}
+            ),
+            "the stand-ins' starts",
+        )
     finally:
         for process in started:
             process.kill()
@@ -344,12 +382,12 @@ os.execv(sys.executable, [sys.executable, sys.argv[1], "--user-data-dir=" + prof
 
 # Browser-shaped until the test has seen the watcher record it, so a slow
 # sample on a loaded machine cannot miss a phase that ended on its own clock.
-_AFTER_EXEC = """
+_AFTER_EXEC = f"""
 import os
 import time
 
 release = os.environ["STAND_IN_RELEASE"]
-deadline = time.monotonic() + 30
+deadline = time.monotonic() + {WATCHER_DEADLINE}
 while not os.path.exists(release) and time.monotonic() < deadline:
     time.sleep(0.05)
 """
@@ -377,18 +415,19 @@ def test_a_process_that_execs_into_a_browser_late_is_still_seen(tmp_path):
         try:
             # Not until the stand-in exits: on Windows the exec is a new
             # process, and the one launched here ends as it starts.
-            deadline = time.monotonic() + 30
-            while time.monotonic() < deadline:
-                if any(
+            _until_written(
+                watcher,
+                tmp_path / "watcher.jsonl",
+                lambda records: any(
                     r.get("actor") == "browser"
                     and (
                         f"--user-data-dir={profile}" in r.get("cmdline", "")
                         or r.get("profile") == key
                     )
-                    for r in read_jsonl(tmp_path / "watcher.jsonl")
-                ):
-                    break
-                time.sleep(0.05)
+                    for r in records
+                ),
+                "the exec'd browser",
+            )
             release.touch()
             stand_in.wait(timeout=30)
         finally:
@@ -414,7 +453,7 @@ def test_a_process_that_execs_into_a_browser_late_is_still_seen(tmp_path):
 
 def test_a_watcher_that_stops_early_cannot_carry_o1(tmp_path):
     watcher = _start_watcher(tmp_path, deadline=1)
-    watcher.wait(timeout=15)
+    watcher.wait(timeout=WATCHER_DEADLINE)
     ended = time.time()
     records = read_jsonl(tmp_path / "watcher.jsonl")
     (summary,) = [r for r in records if r["kind"] == "watcher.summary"]
@@ -1622,7 +1661,7 @@ def test_a_watcher_that_never_takes_its_baseline_is_stopped(tmp_path, monkeypatc
         tmp_path / "w", EventLog(tmp_path / "log", run="r"), experiment="K1", row="R"
     )
     with pytest.raises(RuntimeError, match="baseline"):
-        watcher.start(ready_seconds=0.5)
+        watcher.start(deadline=0.5)
     assert watcher._process is not None
     assert watcher._process.poll() is not None
 
@@ -1637,7 +1676,7 @@ def test_the_harness_watcher_trusts_images_only_where_there_is_no_exec(tmp_path)
         row="R",
         browser_dir=tmp_path / "ms-playwright",
     )
-    watcher.start()
+    watcher.start(deadline=WATCHER_DEADLINE)
     summary = watcher.stop()
     assert summary is not None
     assert summary["no_exec"] is (sys.platform == "win32")
@@ -2394,7 +2433,7 @@ def test_a_stop_request_publishes_the_whole_summary_behind_a_slow_writer(
     arguments = [
         *("--out", str(out), "--stop", str(stop), "--run", "unit"),
         *("--experiment", "K0", "--row", "watcher-unit", "--platform", "test"),
-        *("--root-pid", str(os.getpid()), "--deadline", "60"),
+        *("--root-pid", str(os.getpid()), "--deadline", str(WATCHER_DEADLINE)),
         *("--browser-dir", str(tmp_path / "ms-playwright")),
     ]
     # The real loop on the real process table, in this process.
@@ -2402,7 +2441,7 @@ def test_a_stop_request_publishes_the_whole_summary_behind_a_slow_writer(
     run.start()
     browser: subprocess.Popen[bytes] | None = None
     try:
-        limit = time.monotonic() + 30
+        limit = time.monotonic() + WATCHER_DEADLINE
         while not any(r["kind"] == "watcher.ready" for r in read_jsonl(out)):
             assert run.is_alive() and time.monotonic() < limit
             time.sleep(0.05)
@@ -2411,10 +2450,10 @@ def test_a_stop_request_publishes_the_whole_summary_behind_a_slow_writer(
         time.sleep(0.5)
         requested = time.time()
         stop.touch()
-        run.join(timeout=60)
+        run.join(timeout=WATCHER_DEADLINE)
     finally:
         stop.touch()
-        run.join(timeout=60)
+        run.join(timeout=WATCHER_DEADLINE)
         if browser is not None:
             browser.kill()
             browser.wait(timeout=10)
