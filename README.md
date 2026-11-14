@@ -171,7 +171,7 @@ AI agent? Get a quick confirmation from the user before enabling automatic updat
 
 - `--transport {stdio,streamable-http}` - Force the transport mode (default: stdio)
 - `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
-- `--http-token-file PATH` - Require `Authorization: Bearer <token>` from HTTP clients, with the token read from this file (one trailing newline ignored, at least 32 characters). Keep the file private to you (`chmod 600`); a file other accounts can read is refused. Required for a `--host` other than loopback. Environment: `LINKEDIN_MCP_HTTP_TOKEN`; the file wins when both are set.
+- `--http-token-file PATH` - Require `Authorization: Bearer <token>` from HTTP clients, with the token read from this file (one trailing newline ignored, at least 32 characters). On macOS and Linux a file with group or other access is refused (`chmod 600`). Windows does not check its permissions, so keep it in a folder only your account can read, or use the environment variable. Required for a `--host` other than loopback. Environment: `LINKEDIN_MCP_HTTP_TOKEN`; the file wins when both are set.
 
 **Timeouts:**
 
@@ -235,7 +235,7 @@ uvx mcp-server-linkedin@latest --log-level DEBUG
 uvx mcp-server-linkedin@latest --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
 ```
 
-Any other `--host` needs a token: set `LINKEDIN_MCP_HTTP_TOKEN` or pass `--http-token-file` (a file private to you, `chmod 600`), and send `Authorization: Bearer <token>` from the client. The Docker HTTP example under [Setup with Docker](#setup-with-docker) shows both halves.
+Any other `--host` needs a token: set `LINKEDIN_MCP_HTTP_TOKEN` or pass `--http-token-file` (a file only your account can read), and send `Authorization: Bearer <token>` from the client. The Docker HTTP example under [Setup with Docker](#setup-with-docker) shows both halves.
 
 Runtime server logs are emitted by FastMCP/Uvicorn.
 
@@ -578,7 +578,7 @@ username.
 
 - `--transport {stdio,streamable-http}` - Force the transport mode (default: stdio)
 - `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
-- `--http-token-file PATH` - Require `Authorization: Bearer <token>` from HTTP clients, with the token read from this file (one trailing newline ignored, at least 32 characters). Keep the file private to you (`chmod 600`); a file other accounts can read is refused. Required for a `--host` other than loopback. Environment: `LINKEDIN_MCP_HTTP_TOKEN`; the file wins when both are set.
+- `--http-token-file PATH` - Require `Authorization: Bearer <token>` from HTTP clients, with the token read from this file (one trailing newline ignored, at least 32 characters). On macOS and Linux a file with group or other access is refused (`chmod 600`). Windows does not check its permissions, so keep it in a folder only your account can read, or use the environment variable. Required for a `--host` other than loopback. Environment: `LINKEDIN_MCP_HTTP_TOKEN`; the file wins when both are set.
 
 **Timeouts:**
 
@@ -642,8 +642,10 @@ docker run -it --rm `
 ```
 
 `-e LINKEDIN_MCP_HTTP_TOKEN` without a value copies the variable from your
-shell, so the token stays out of the `docker run` command line. The client
-sends it as a header on every request:
+shell, so the token stays out of the `docker run` command line. Use the
+variable rather than `--http-token-file` in Docker: a read-only secrets mount
+often reports mode `0444`, which the file check refuses. The client sends the
+token as a header on every request:
 
 ```json
 {
@@ -851,7 +853,7 @@ uv run -m linkedin_mcp_server
 
 - `--transport {stdio,streamable-http}` - Force the transport mode (default: stdio)
 - `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
-- `--http-token-file PATH` - Require `Authorization: Bearer <token>` from HTTP clients, with the token read from this file (one trailing newline ignored, at least 32 characters). Keep the file private to you (`chmod 600`); a file other accounts can read is refused. Required for a `--host` other than loopback. Environment: `LINKEDIN_MCP_HTTP_TOKEN`; the file wins when both are set.
+- `--http-token-file PATH` - Require `Authorization: Bearer <token>` from HTTP clients, with the token read from this file (one trailing newline ignored, at least 32 characters). On macOS and Linux a file with group or other access is refused (`chmod 600`). Windows does not check its permissions, so keep it in a folder only your account can read, or use the environment variable. Required for a `--host` other than loopback. Environment: `LINKEDIN_MCP_HTTP_TOKEN`; the file wins when both are set.
 
 **Timeouts:**
 
@@ -893,7 +895,7 @@ uv run -m linkedin_mcp_server
 uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --port 8000 --path /mcp
 ```
 
-Any other `--host` needs a token: set `LINKEDIN_MCP_HTTP_TOKEN` or pass `--http-token-file` (a file private to you, `chmod 600`), and send `Authorization: Bearer <token>` from the client.
+Any other `--host` needs a token: set `LINKEDIN_MCP_HTTP_TOKEN` or pass `--http-token-file` (a file only your account can read), and send `Authorization: Bearer <token>` from the client.
 
 **Claude Desktop:**
 

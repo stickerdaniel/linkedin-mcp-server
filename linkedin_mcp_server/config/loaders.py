@@ -11,6 +11,7 @@ import os
 import stat
 import sys
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Never, NoReturn
@@ -378,7 +379,9 @@ def _http_token_file(raw: str) -> str:
         raise SettingError(f"It cannot be read: {error.strerror or error}.")
     finally:
         if descriptor != -1:
-            os.close(descriptor)
+            # A failed close must not replace the refusal already on its way.
+            with suppress(OSError):
+                os.close(descriptor)
     return content.removesuffix("\n").removesuffix("\r")
 
 
@@ -624,9 +627,11 @@ SETTINGS: tuple[Setting, ...] = (
             metavar="PATH",
             help=(
                 "Require 'Authorization: Bearer <token>' from HTTP clients, with "
-                "the token read from this file (private to you, chmod 600; one "
-                "trailing newline is ignored; at least 32 characters). Overrides "
-                "LINKEDIN_MCP_HTTP_TOKEN. Needed for a --host other than loopback"
+                "the token read from this file (one trailing newline is ignored; "
+                "at least 32 characters). On macOS and Linux a file with group or "
+                "other access is refused (chmod 600); Windows does not check. "
+                "Overrides LINKEDIN_MCP_HTTP_TOKEN. Needed for a --host other "
+                "than loopback"
             ),
         ),
         apply=_server("http_token"),
