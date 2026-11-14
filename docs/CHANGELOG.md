@@ -9,8 +9,8 @@ described on [GitHub Releases](https://github.com/stickerdaniel/linkedin-mcp-ser
 
 ### Highlights
 
-- **FastMCP 4.2.0.** Resource listings through the shared browser server stay on the frontend again. ([#1513](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1513))
-- **Docker security updates.** The image ships dnspython 2.9.2 and opentelemetry-api 1.45.2. ([#1512](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1512), [#1515](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1515))
+- **FastMCP 4.2.0.** Resource listings through the shared browser stay local again. ([#1513](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1513))
+- **Docker security fixes.** The image ships dnspython 2.9.2 and opentelemetry-api 1.45.2. ([#1515](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1515))
 
 ### Bug Fixes
 
