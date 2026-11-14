@@ -1,5 +1,6 @@
 import ast
 import logging
+import os
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -1386,8 +1387,24 @@ class TestProxyEncodedUserinfo:
 
 _UNTOUCHED = "<untouched>"
 
-#: A token file as an editor saves it, with one trailing newline.
-_HTTP_TOKEN_FILE = str(Path(__file__).parent / "fixtures" / "http-token" / "token.txt")
+
+#: Stands for a private token file in the cases below, which are literals and
+#: test ids. ``_real_argv`` writes the file into the test's own directory: the
+#: repository can only record mode 0644, which the loader refuses for a token.
+_HTTP_TOKEN_FILE = "<private token file>"
+
+
+def _real_argv(argv: tuple[str, ...], directory: Path) -> list[str]:
+    """*argv* with ``_HTTP_TOKEN_FILE`` replaced by a real file in *directory*.
+
+    The file holds a token as an editor saves it, with one trailing newline.
+    """
+    if _HTTP_TOKEN_FILE not in argv:
+        return list(argv)
+    path = directory / "token"
+    path.write_text("fixture-http-token-0123456789abcdef0123\n", encoding="utf-8")
+    os.chmod(path, 0o600)
+    return [str(path) if arg == _HTTP_TOKEN_FILE else arg for arg in argv]
 
 
 class _Keep:
@@ -1512,20 +1529,12 @@ _CASES: dict[str, _Cases] = {
         env={None: KEEP, "": KEEP, "/env": "/env"},
         cli={(): KEEP, ("--path", ""): KEEP, ("--path", "/cli"): "/cli"},
     ),
-    # Never quoted in a refusal. The file wins over the variable.
+    # Taken as given and judged by AppConfig.validate() for HTTP only, so a
+    # malformed variable cannot block a file that replaces it. The file wins.
     "LINKEDIN_MCP_HTTP_TOKEN": _Cases(
-        "other",
+        "text",
         ("server.http_token",),
-        env={
-            None: KEEP,
-            "": KEEP,
-            " ": REFUSED,
-            "a" * 31: REFUSED,
-            "a" * 32: "a" * 32,
-            "a" * 32 + "\n": REFUSED,
-            "a" * 16 + " " + "a" * 16: REFUSED,
-            "ä" * 32: REFUSED,
-        },
+        env={None: KEEP, "": KEEP, " ": " ", "short": "short", "a" * 32: "a" * 32},
         cli={
             (): KEEP,
             ("--http-token-file", ""): KEEP,
@@ -2017,10 +2026,12 @@ class TestSettingsTable:
         _channels("cli"),
         ids=_id,
     )
-    def test_command_line(self, name: str, argv: tuple[str, ...], expected: object):
+    def test_command_line(
+        self, tmp_path: Path, name: str, argv: tuple[str, ...], expected: object
+    ):
         cases = _CASES[name]
         _assert_result(
-            lambda: load_from_args(_untouched(cases), list(argv)),
+            lambda: load_from_args(_untouched(cases), _real_argv(argv, tmp_path)),
             cases.fields,
             expected,
             before=(_UNTOUCHED,) * len(cases.fields),
@@ -2040,6 +2051,7 @@ class TestSettingsTable:
     )
     def test_the_command_line_wins_over_the_environment(
         self,
+        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         name: str,
         argv: tuple[str, ...],
@@ -2062,7 +2074,9 @@ class TestSettingsTable:
         )
         _set_env(monkeypatch, {name: raw})
         _assert_result(
-            lambda: load_from_args(load_from_env(_untouched(cases)), list(argv)),
+            lambda: load_from_args(
+                load_from_env(_untouched(cases)), _real_argv(argv, tmp_path)
+            ),
             cases.fields,
             expected,
             before=from_env,
