@@ -302,7 +302,10 @@ def create_mcp_server(
         mcp.add_middleware(UpdateNoticeMiddleware())
 
     if proxy_backend is not None:
-        from linkedin_mcp_server.daemon.forwarder import OwnerForwarder
+        from linkedin_mcp_server.daemon.forwarder import (
+            OwnerForwarder,
+            ResourcesAnsweredHere,
+        )
         from linkedin_mcp_server.daemon.proxy import call_budget
 
         # Each request on the hop gets the call's whole budget, so the owner,
@@ -316,6 +319,7 @@ def create_mcp_server(
         # 3.4.4 — `tools/list` returned `[]` and the call that followed failed as
         # an unknown tool. A transport failure has to look like one.
         mcp.provider_error_strategy = "raise"
+        mcp.add_middleware(ResourcesAnsweredHere())
 
     # Every local registration below drives Chromium, so a proxy takes none of
     # them and serves the owner's through the provider above instead.
