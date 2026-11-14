@@ -173,6 +173,11 @@ CHILD_TYPE_FLAG = "--type="
 #: Target interval between samples.
 SAMPLE_SECONDS = 0.05
 
+#: How long the watcher samples at most, so a harness that dies without
+#: writing the stop file cannot leave it sampling for the rest of the runner's
+#: life. Checked between samples: a sample under way at the deadline finishes.
+DEADLINE_SECONDS = 900.0
+
 #: Whether this platform can replace a process's program in place. Windows
 #: cannot: ``CreateProcess`` fixes a process's image and command line for its
 #: whole lifetime, and becoming another program means a new process, which is a
@@ -2207,9 +2212,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # The process whose descendants are the row's actors. The harness passes
     # its own pid; by default, whoever started this watcher.
     parser.add_argument("--root-pid", type=int, default=os.getppid())
-    # Its own deadline, so a harness that dies without writing the stop file
-    # cannot leave this sampling for the rest of the runner's life.
-    parser.add_argument("--deadline", type=float, default=900.0)
+    parser.add_argument("--deadline", type=float, default=DEADLINE_SECONDS)
     # What the row's browser runs: an unreadable actor running either could be
     # a browser root, and one running neither cannot.
     parser.add_argument("--browser-exe")
