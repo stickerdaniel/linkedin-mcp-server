@@ -171,7 +171,7 @@ AI agent? Get a quick confirmation from the user before enabling automatic updat
 
 - `--transport {stdio,streamable-http}` - Force the transport mode (default: stdio)
 - `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
-- `--http-token-file PATH` - Require `Authorization: Bearer <token>` from HTTP clients, with the token read from this file (one trailing newline ignored, at least 32 characters). On macOS and Linux a file with group or other access is refused (`chmod 600`). Windows does not check its permissions, so keep it in a folder only your account can read, or use the environment variable. Required for a `--host` other than loopback. Environment: `LINKEDIN_MCP_HTTP_TOKEN`; the file wins when both are set.
+- `--http-token-file PATH` - Require `Authorization: Bearer <token>` from HTTP clients, with the token read from this file (one trailing newline ignored, at least 32 characters). A file whose permission bits grant group or other access is refused (`chmod 600`). ACLs are not read, so on macOS also remove ACL entries (`chmod -N <file>`, check with `ls -le`). Windows does not check its permissions, so keep it in a folder only your account can read, or use the environment variable. Required for a `--host` other than loopback. Environment: `LINKEDIN_MCP_HTTP_TOKEN`; the file wins when both are set.
 
 **Timeouts:**
 
@@ -578,7 +578,7 @@ username.
 
 - `--transport {stdio,streamable-http}` - Force the transport mode (default: stdio)
 - `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
-- `--http-token-file PATH` - Require `Authorization: Bearer <token>` from HTTP clients, with the token read from this file (one trailing newline ignored, at least 32 characters). On macOS and Linux a file with group or other access is refused (`chmod 600`). Windows does not check its permissions, so keep it in a folder only your account can read, or use the environment variable. Required for a `--host` other than loopback. Environment: `LINKEDIN_MCP_HTTP_TOKEN`; the file wins when both are set.
+- `--http-token-file PATH` - Require `Authorization: Bearer <token>` from HTTP clients, with the token read from this file (one trailing newline ignored, at least 32 characters). A file whose permission bits grant group or other access is refused (`chmod 600`). ACLs are not read, so on macOS also remove ACL entries (`chmod -N <file>`, check with `ls -le`). Windows does not check its permissions, so keep it in a folder only your account can read, or use the environment variable. Required for a `--host` other than loopback. Environment: `LINKEDIN_MCP_HTTP_TOKEN`; the file wins when both are set.
 
 **Timeouts:**
 
@@ -853,7 +853,7 @@ uv run -m linkedin_mcp_server
 
 - `--transport {stdio,streamable-http}` - Force the transport mode (default: stdio)
 - `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
-- `--http-token-file PATH` - Require `Authorization: Bearer <token>` from HTTP clients, with the token read from this file (one trailing newline ignored, at least 32 characters). On macOS and Linux a file with group or other access is refused (`chmod 600`). Windows does not check its permissions, so keep it in a folder only your account can read, or use the environment variable. Required for a `--host` other than loopback. Environment: `LINKEDIN_MCP_HTTP_TOKEN`; the file wins when both are set.
+- `--http-token-file PATH` - Require `Authorization: Bearer <token>` from HTTP clients, with the token read from this file (one trailing newline ignored, at least 32 characters). A file whose permission bits grant group or other access is refused (`chmod 600`). ACLs are not read, so on macOS also remove ACL entries (`chmod -N <file>`, check with `ls -le`). Windows does not check its permissions, so keep it in a folder only your account can read, or use the environment variable. Required for a `--host` other than loopback. Environment: `LINKEDIN_MCP_HTTP_TOKEN`; the file wins when both are set.
 
 **Timeouts:**
 
