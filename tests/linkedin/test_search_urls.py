@@ -173,6 +173,61 @@ class TestBuildContentSearchUrlContentType:
         assert "documents" in str(error.value)
 
 
+class TestBuildContentSearchUrlSort:
+    @pytest.mark.parametrize(
+        ("sort_by", "token"),
+        [
+            ("date", "date_posted"),
+            ("date_posted", "date_posted"),
+            ("relevance", "relevance"),
+            (" date ", "date_posted"),
+        ],
+    )
+    def test_sort_uses_the_content_json_facet_not_the_jobs_sort_code(
+        self, sort_by, token
+    ):
+        query = parse_qs(
+            urlparse(build_content_search_url("SRE", sort_by=sort_by)).query
+        )
+        assert query == {
+            "keywords": ["SRE"],
+            "origin": ["FACETED_SEARCH"],
+            "sortBy": [f'["{token}"]'],
+        }
+
+    @pytest.mark.parametrize("sort_by", [None, "", " \t\n"])
+    def test_absent_sort_preserves_the_legacy_url_byte_for_byte(self, sort_by):
+        assert build_content_search_url(
+            "C++", "past-week", "documents", sort_by=sort_by
+        ) == (
+            f"{CONTENT}keywords=C%2B%2B&origin=FACETED_SEARCH"
+            "&datePosted=%5B%22past-week%22%5D&contentType=%5B%22documents%22%5D"
+        )
+
+    def test_sort_combines_with_escaped_keywords_and_existing_positional_filters(self):
+        query = parse_qs(
+            urlparse(
+                build_content_search_url(
+                    "C++ & SRE=freelance à Paris", "past_week", "images", "date"
+                )
+            ).query
+        )
+        assert query == {
+            "keywords": ["C++ & SRE=freelance à Paris"],
+            "origin": ["FACETED_SEARCH"],
+            "datePosted": ['["past-week"]'],
+            "contentType": ['["photos"]'],
+            "sortBy": ['["date_posted"]'],
+        }
+
+    @pytest.mark.parametrize(
+        "sort_by", ["latest", "DD", "R", "DATE", " date posted ", '["date_posted"]']
+    )
+    def test_unknown_nonblank_sort_is_refused(self, sort_by):
+        with pytest.raises(FilterValidationError, match="Invalid sort_by"):
+            build_content_search_url("SRE", sort_by=sort_by)
+
+
 class TestBuildJobSearchUrl:
     def test_keywords_only(self):
         assert build_job_search_url("python developer") == (

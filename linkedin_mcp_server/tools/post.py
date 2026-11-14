@@ -41,6 +41,7 @@ def register_post_tools(
         date_posted: str | None = None,
         max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
         content_type: str | None = None,
+        sort_by: str | None = None,
     ) -> dict[str, Any]:
         """
         Search LinkedIn posts/content globally by keyword (the "Posts" tab).
@@ -61,6 +62,9 @@ def register_post_tools(
             content_type: Optional "Content type" filter. One of
                 "documents" (PDFs and slide decks people upload), "images",
                 "videos", "live_videos", "job_posts". Omit for all posts.
+            sort_by: Optional ``date`` (or ``date_posted``) for Latest,
+                ``relevance`` for Top match. Omit or leave blank to keep
+                LinkedIn's default ordering.
             max_pages: Scroll depth as result "pages" of ~5 scrolls each
                 (1-10, default 3). Content search is an infinite scroll, so
                 this caps how far the page is scrolled rather than fetching
@@ -76,22 +80,28 @@ def register_post_tools(
             should parse the raw text to extract each post's author,
             headline/role, company, body, posted date, and reaction/comment
             counts.
+            An explicit sort dropped or changed in the settled URL is reported
+            as a ``filters_dropped`` section error; the results are retained.
         """
         try:
             # Refused before the browser, as in search_people.
             build_content_search_url(
-                keywords, date_posted=date_posted, content_type=content_type
+                keywords,
+                date_posted=date_posted,
+                content_type=content_type,
+                sort_by=sort_by,
             )
         except FilterValidationError as e:
             raise CodedToolError(str(e), ErrorCode.INVALID_ARGUMENT) from e
 
         extractor = await get_ready_extractor(ctx, tool_name="search_posts")
         logger.info(
-            "Searching posts: keywords='%s', date_posted='%s', content_type='%s', "
+            "Searching posts: keywords='%s', date_posted='%s', content_type='%s', sort_by='%s', "
             "max_pages=%d",
             keywords,
             date_posted,
             content_type,
+            sort_by,
             max_pages,
         )
 
@@ -103,6 +113,7 @@ def register_post_tools(
                 date_posted=date_posted,
                 content_type=content_type,
                 max_pages=max_pages,
+                sort_by=sort_by,
             )
         except FilterValidationError as e:
             # Validation messages carry actionable detail; surface them as
