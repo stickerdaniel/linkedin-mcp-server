@@ -2,9 +2,9 @@
 
 Documentation is not usually worth a test. This is, because the command is
 copied verbatim by people setting the server up, and the mistake it prevents is
-silent: an MCP endpoint with no authentication, reachable from the whole
-network, that keeps working perfectly for the person who pasted it. Nothing
-fails, so nothing tells them.
+silent: an MCP endpoint reachable from the whole network over plain HTTP, its
+bearer token readable by anyone on the path, that keeps working perfectly for
+the person who pasted it. Nothing fails, so nothing tells them.
 
 The server cannot catch this itself. `--host 0.0.0.0` is *required* inside a
 container -- a process bound to 127.0.0.1 in there is unreachable through a
@@ -71,8 +71,8 @@ def test_documented_http_command_publishes_to_loopback(block: str):
         host = spec.rsplit(":", 2)[0]
         assert host in {"127.0.0.1", "[::1]"}, (
             f"documented HTTP command publishes on {host!r}. Use a literal "
-            "loopback address: the MCP endpoint has no authentication, so what "
-            "this resolves to is the whole guarantee."
+            "loopback address: the token travels as plain HTTP, so what this "
+            "resolves to decides who can read it."
         )
 
 
@@ -98,4 +98,16 @@ def test_exposure_tradeoff_is_explained_not_just_shown(path: str):
     assert "127.0.0.1:8080:8080" in text, (
         f"{path} should show the loopback publish form so the safe command is "
         "the one people copy"
+    )
+
+
+@pytest.mark.parametrize("block", _docker_http_blocks())
+def test_documented_http_command_passes_the_token_through(block: str):
+    """A wildcard bind without a token refuses to start.
+
+    ``-e NAME`` without a value, so the token stays out of the command line.
+    """
+    assert re.search(r"^\s*-e\s+LINKEDIN_MCP_HTTP_TOKEN\s", block, re.MULTILINE), (
+        "the documented Docker HTTP command must pass LINKEDIN_MCP_HTTP_TOKEN "
+        "into the container, or the server refuses to start on --host 0.0.0.0"
     )

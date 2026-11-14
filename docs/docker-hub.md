@@ -107,13 +107,29 @@ Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSO
 >
 > **Note:** `stdio` is the default transport. Add `--transport streamable-http` only when you specifically want HTTP mode.
 >
-> **Note:** In HTTP mode the endpoint has no authentication, so the address it
-> is published on is the only thing limiting who can use your LinkedIn session.
-> Publish to loopback: `-p 127.0.0.1:8080:8080` together with
-> `--host 0.0.0.0`. The wildcard host is required for the server to be reachable
-> inside the container at all; the `127.0.0.1:` prefix on `-p` is what keeps it
-> off your network. Without that prefix Docker publishes on every interface.
-> Only expose it more widely behind something that authenticates.
+> **Note:** HTTP mode in Docker requires a bearer token, because
+> `--host 0.0.0.0` is beyond loopback inside the container. Generate one, pass
+> it through, and publish to loopback:
+>
+> ```bash
+> export LINKEDIN_MCP_HTTP_TOKEN="$(openssl rand -hex 32)"
+> docker run -it --rm \
+>   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
+>   -e LINKEDIN_MCP_HTTP_TOKEN \
+>   -p 127.0.0.1:8080:8080 \
+>   stickerdaniel/linkedin-mcp-server:latest \
+>   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
+> ```
+>
+> The client sends `Authorization: Bearer <token>` on every request, for
+> example `"headers": { "Authorization": "Bearer <token>" }` next to
+> `"url": "http://127.0.0.1:8080/mcp"`; a request without it gets `401`. The
+> wildcard host is required for the server to be reachable inside the
+> container at all; the `127.0.0.1:` prefix on `-p` keeps it off your network.
+> Plain HTTP sends the token unencrypted, so reach it from another machine
+> through an SSH tunnel or an HTTPS reverse proxy.
+> `LINKEDIN_MCP_ALLOW_UNAUTHENTICATED_HTTP=true` starts without a token, which
+> is unsafe: anyone who can reach the port can use your LinkedIn session.
 >
 > **Note:** Only one process uses the browser at a time; others wait briefly
 > and take over when it finishes a call. That coordination does not reach
@@ -139,6 +155,8 @@ Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSO
 | `HOST` | `127.0.0.1` | HTTP server host (for streamable-http transport) |
 | `PORT` | `8000` | HTTP server port (for streamable-http transport) |
 | `HTTP_PATH` | `/mcp` | HTTP server path (for streamable-http transport) |
+| `LINKEDIN_MCP_HTTP_TOKEN` | - | Bearer token HTTP clients must send as `Authorization: Bearer <token>`, at least 32 characters. Required for HTTP mode in Docker. Use this variable in Docker rather than `--http-token-file`: a read-only secrets mount often reports mode `0444`, which the file check refuses. |
+| `LINKEDIN_MCP_ALLOW_UNAUTHENTICATED_HTTP` | `false` | Unsafe: serve HTTP beyond loopback without a token. Only for a port that something else restricts. |
 | `SLOW_MO` | `0` | Delay between browser actions in ms (debugging) |
 | `HEADLESS` | `false` | Docker runs full headed Chromium on a virtual display. Set `true` only for Chromium's real headless mode, which identifies itself as `HeadlessChrome`. |
 | `DAEMON_ENABLED` | `false` | The experimental shared-browser daemon is ignored in Docker. |

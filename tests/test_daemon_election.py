@@ -6134,6 +6134,7 @@ class TestVersionSkew:
         original = dict(os_module.environ)
         os_module.environ["PROXY_PASSWORD"] = "hunter2"
         os_module.environ["PROXY_USERNAME"] = "someone"
+        os_module.environ["LINKEDIN_MCP_HTTP_TOKEN"] = "t" * 32
         try:
             handed = spawn_module._owner_environment()
         finally:
@@ -6142,6 +6143,7 @@ class TestVersionSkew:
 
         assert "PROXY_PASSWORD" not in handed
         assert "PROXY_USERNAME" not in handed
+        assert "LINKEDIN_MCP_HTTP_TOKEN" not in handed
         # And the rest of the environment still crosses: the owner needs PATH,
         # HOME and the rest to run at all.
         assert "PATH" in handed

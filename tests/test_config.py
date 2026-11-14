@@ -1,5 +1,6 @@
 import ast
 import logging
+import os
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -229,18 +230,20 @@ class TestAppConfig:
 
 
 class TestExposedBindWarning:
-    """The endpoint has no authentication, so the bind address is the guard.
+    """Beyond loopback, HTTP needs a client token or an explicit opt-out.
 
-    The warning used to fire only for a literal 0.0.0.0 or ::, which meant the
-    most likely way to expose a session by accident, naming a LAN address
-    outright, happened in silence.
+    Judged by the bind address, which once warned only for a literal 0.0.0.0 or
+    ::, so naming a LAN address outright, the likeliest accident, passed in
+    silence.
     """
 
     @staticmethod
-    def _validate_with_host(host, caplog):
+    def _validate_with_host(host, caplog, **server):
         config = AppConfig()
         config.server.transport = "streamable-http"
         config.server.host = host
+        for name, value in server.items():
+            setattr(config.server, name, value)
         with caplog.at_level(
             logging.WARNING, logger="linkedin_mcp_server.config.schema"
         ):
@@ -248,7 +251,7 @@ class TestExposedBindWarning:
         return caplog.text
 
     @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
-    def test_loopback_binds_are_silent(self, host, caplog):
+    def test_loopback_binds_need_no_token(self, host, caplog):
         assert self._validate_with_host(host, caplog) == ""
 
     @pytest.mark.parametrize(
@@ -256,17 +259,36 @@ class TestExposedBindWarning:
         [
             "0.0.0.0",
             "::",
-            "192.168.1.5",  # a LAN address warned about nothing before
+            "192.168.1.5",
             "10.0.0.7",
             "example.internal",
         ],
     )
-    def test_reachable_binds_warn(self, host, caplog):
-        text = self._validate_with_host(host, caplog)
-        assert host in text
+    def test_reachable_binds_without_a_token_are_refused(self, host, caplog):
+        with pytest.raises(ConfigurationError) as refused:
+            self._validate_with_host(host, caplog)
+
+        message = str(refused.value)
+        assert host in message
+        assert "LINKEDIN_MCP_HTTP_TOKEN" in message
+        assert "--host 127.0.0.1" in message
+        assert "LINKEDIN_MCP_ALLOW_UNAUTHENTICATED_HTTP=true" in message
+        assert "unsafe" in message
+
+    def test_a_reachable_bind_with_a_token_starts_silently(self, caplog):
+        text = self._validate_with_host("0.0.0.0", caplog, http_token="t" * 32)
+
+        assert text == ""
+
+    def test_the_opt_out_starts_and_warns(self, caplog):
+        text = self._validate_with_host(
+            "0.0.0.0", caplog, allow_unauthenticated_http=True
+        )
+
+        assert "0.0.0.0" in text
         assert "no authentication" in text
 
-    def test_stdio_never_warns_about_the_host(self, caplog):
+    def test_stdio_never_judges_the_host(self, caplog):
         """The host field is meaningless without an HTTP listener."""
         config = AppConfig()
         config.server.transport = "stdio"
@@ -1366,6 +1388,25 @@ class TestProxyEncodedUserinfo:
 _UNTOUCHED = "<untouched>"
 
 
+#: Stands for a private token file in the cases below, which are literals and
+#: test ids. ``_real_argv`` writes the file into the test's own directory: the
+#: repository can only record mode 0644, which the loader refuses for a token.
+_HTTP_TOKEN_FILE = "<private token file>"
+
+
+def _real_argv(argv: tuple[str, ...], directory: Path) -> list[str]:
+    """*argv* with ``_HTTP_TOKEN_FILE`` replaced by a real file in *directory*.
+
+    The file holds a token as an editor saves it, with one trailing newline.
+    """
+    if _HTTP_TOKEN_FILE not in argv:
+        return list(argv)
+    path = directory / "token"
+    path.write_text("fixture-http-token-0123456789abcdef0123\n", encoding="utf-8")
+    os.chmod(path, 0o600)
+    return [str(path) if arg == _HTTP_TOKEN_FILE else arg for arg in argv]
+
+
 class _Keep:
     """Expected: the fields still hold what they held before this source."""
 
@@ -1487,6 +1528,33 @@ _CASES: dict[str, _Cases] = {
         ("server.path",),
         env={None: KEEP, "": KEEP, "/env": "/env"},
         cli={(): KEEP, ("--path", ""): KEEP, ("--path", "/cli"): "/cli"},
+    ),
+    # Taken as given and judged by AppConfig.validate() for HTTP only, so a
+    # malformed variable cannot block a file that replaces it. The file wins.
+    "LINKEDIN_MCP_HTTP_TOKEN": _Cases(
+        "text",
+        ("server.http_token",),
+        env={None: KEEP, "": KEEP, " ": " ", "short": "short", "a" * 32: "a" * 32},
+        cli={
+            (): KEEP,
+            ("--http-token-file", ""): KEEP,
+            ("--http-token-file", _HTTP_TOKEN_FILE): (
+                "fixture-http-token-0123456789abcdef0123"
+            ),
+            ("--http-token-file", "/nonexistent/linkedin-mcp-token"): REFUSED,
+        },
+    ),
+    "LINKEDIN_MCP_ALLOW_UNAUTHENTICATED_HTTP": _Cases(
+        "flag",
+        ("server.allow_unauthenticated_http",),
+        env={
+            None: KEEP,
+            "": KEEP,
+            " ": KEEP,
+            "false": False,
+            "true": True,
+            "ture": REFUSED,
+        },
     ),
     "SLOW_MO": _Cases(
         "number",
@@ -1958,10 +2026,12 @@ class TestSettingsTable:
         _channels("cli"),
         ids=_id,
     )
-    def test_command_line(self, name: str, argv: tuple[str, ...], expected: object):
+    def test_command_line(
+        self, tmp_path: Path, name: str, argv: tuple[str, ...], expected: object
+    ):
         cases = _CASES[name]
         _assert_result(
-            lambda: load_from_args(_untouched(cases), list(argv)),
+            lambda: load_from_args(_untouched(cases), _real_argv(argv, tmp_path)),
             cases.fields,
             expected,
             before=(_UNTOUCHED,) * len(cases.fields),
@@ -1981,6 +2051,7 @@ class TestSettingsTable:
     )
     def test_the_command_line_wins_over_the_environment(
         self,
+        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         name: str,
         argv: tuple[str, ...],
@@ -2003,7 +2074,9 @@ class TestSettingsTable:
         )
         _set_env(monkeypatch, {name: raw})
         _assert_result(
-            lambda: load_from_args(load_from_env(_untouched(cases)), list(argv)),
+            lambda: load_from_args(
+                load_from_env(_untouched(cases)), _real_argv(argv, tmp_path)
+            ),
             cases.fields,
             expected,
             before=from_env,
