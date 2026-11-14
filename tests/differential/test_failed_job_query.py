@@ -677,10 +677,13 @@ def _gone(pid, start, t):
 #: (6076, a child of the harness, which also started the row's canaries) and
 #: the frontend (6928), the owner's release gate (3572), its Python child
 #: (7708) and that child's console host (1276), eight seconds before the
-#: installer's supervisor (880) and a worker below it. Here the harness is
-#: this process.
+#: installer's supervisor (880) and a worker below it. The harness gets a pid
+#: of its own: on Windows this process can hold one of the recorded pids, and
+#: a recorded parent that is also the harness ends its ancestry early.
+_HARNESS = 1000
+_OUTSIDE = (_HARNESS,)
 _K2_ROW = [
-    _seen(6076, os.getpid(), 678.2, "frontend", ("venv\\python.exe", "-m", "x")),
+    _seen(6076, _HARNESS, 678.2, "frontend", ("venv\\python.exe", "-m", "x")),
     _seen(6928, 6076, 678.25, "frontend", ("venv\\python.exe", "-m", "x")),
     _seen(3572, 6928, 678.378, "owner", ("venv\\python.exe", "-I", "-S", "-u")),
     _seen(7708, 3572, 678.383, "owner", ("venv\\python.exe", "-I", "-S", "-u")),
@@ -693,7 +696,7 @@ _K2_ROW = [
 
 
 def _lineage(records, pid, created):
-    lineage = Lineage(records)
+    lineage = Lineage(records, outside=_OUTSIDE)
     life = lineage.lifetime(pid, created)
     return None if life is None else lineage.of(life)
 
@@ -723,7 +726,9 @@ def test_a_parent_nobody_recorded_leaves_the_ancestry_unresolved(missing):
     # sit below an installer, so it has to be seen to end like one.
     records = [r for r in _K2_ROW if r["pid"] != missing]
     assert _lineage(records, 1276, 678.386) == UNRESOLVED
-    problems = installer_inventory(records, _fates(_ended(880, 686.896)))
+    problems = installer_inventory(
+        records, _fates(_ended(880, 686.896)), outside=_OUTSIDE
+    )
     assert any(p.startswith("pid 1276 (unresolved)") for p in problems)
 
 
@@ -733,7 +738,7 @@ def test_a_link_outside_the_row_leaves_the_ancestry_unresolved():
 
 
 def test_only_the_installer_family_is_the_family():
-    member = installer_family(_K2_ROW, _fates(_ended(5000, 688.0)))
+    member = installer_family(_K2_ROW, _fates(_ended(5000, 688.0)), outside=_OUTSIDE)
     assert member(880, 686.896) and member(4040, 687.182) and member(4100, 687.3)
     # Watched as an installer, though the watcher never recorded it.
     assert member(5000, 688.0)
@@ -754,12 +759,17 @@ def test_every_lifetime_the_drain_asked_about_must_be_accounted_for():
             (4040, 687.182),
         ]
     ]
-    assert unaccounted_members(asked, _K2_ROW, _fates()) == []
+    assert unaccounted_members(asked, _K2_ROW, _fates(), outside=_OUTSIDE) == []
     stranger = [*asked, {"member": 4200, "created": 687.9}]
-    (problem,) = unaccounted_members(stranger, _K2_ROW, _fates())
+    (problem,) = unaccounted_members(stranger, _K2_ROW, _fates(), outside=_OUTSIDE)
     assert "pid 4200" in problem
     # Watched by the row, though never recorded, it is accounted for.
-    assert unaccounted_members(stranger, _K2_ROW, _fates(_ended(4200, 687.9))) == []
+    assert (
+        unaccounted_members(
+            stranger, _K2_ROW, _fates(_ended(4200, 687.9)), outside=_OUTSIDE
+        )
+        == []
+    )
 
 
 # --- Which records witness the intended entry ------------------------------------
@@ -804,7 +814,7 @@ def _record(**fields: Any) -> dict[str, Any]:
 def test_a_witness_is_the_owner_that_closed_asking_about_the_family_then(
     changes, witness
 ):
-    family = installer_family(_K2_ROW, _fates())
+    family = installer_family(_K2_ROW, _fates(), outside=_OUTSIDE)
     found = fault_witnesses(
         [_record(**changes)], owner=_OWNER, family=family, interval_ns=_CLOSE_NS
     )
@@ -834,7 +844,7 @@ def test_fault_order_does_not_follow_an_accepted_wall_clock_shift(
     found = fault_witnesses(
         [_record(t=wall, monotonic_ns=mono)],
         owner=_OWNER,
-        family=installer_family(_K2_ROW, _fates()),
+        family=installer_family(_K2_ROW, _fates(), outside=_OUTSIDE),
         interval_ns=(10_200_000_000, 10_500_000_000),
     )
     assert bool(found) is expected
@@ -869,7 +879,7 @@ except RuntimeError:
 
 
 def test_no_owner_or_no_close_leaves_no_witness():
-    family = installer_family(_K2_ROW, _fates())
+    family = installer_family(_K2_ROW, _fates(), outside=_OUTSIDE)
     assert (
         fault_witnesses([_record()], owner=None, family=family, interval_ns=_CLOSE_NS)
         == []
@@ -899,7 +909,7 @@ def test_every_installer_lifetime_must_be_shown_ended():
         # Earlier observation without ancestry still cannot prove non-setup.
         _seen(5200, 5199, 600.0, "other"),
     ]
-    problems = installer_inventory(records, fates)
+    problems = installer_inventory(records, fates, outside=_OUTSIDE)
     # 880 settled through its handle. 4040's handle failed; 4100 is a console
     # host below the installer, 5000 an installer nobody watched, and 5100
     # and 5200 have unresolved lineage: none was seen to leave. The owner's
@@ -916,7 +926,7 @@ def test_every_installer_lifetime_must_be_shown_ended():
         _gone(5100, 689.0, 690.97),
         _gone(5200, 600.0, 690.97),
     ]
-    assert installer_inventory(gone, fates) == []
+    assert installer_inventory(gone, fates, outside=_OUTSIDE) == []
 
 
 def test_a_late_installer_whose_handle_failed_blocks_the_session(tmp_path):
@@ -963,19 +973,19 @@ def test_a_positively_queried_lifetime_is_part_of_the_family_until_accounted():
     # The rest of the measured family, seen to leave.
     row = [*_K2_ROW, _gone(4040, 687.182, 690.95), _gone(4100, 687.3, 690.95)]
     asked = [{"member": 799, "created": 690.5}]
-    assert family_problems(row, fates, []) == []
-    (problem,) = family_problems(row, fates, asked)
+    assert family_problems(row, fates, [], outside=_OUTSIDE) == []
+    (problem,) = family_problems(row, fates, asked, outside=_OUTSIDE)
     assert "pid 799" in problem
     # Recorded below the installer and then seen to leave: accounted and ended.
     below = _seen(799, 880, 690.5, "other")
     seen = [*row, below, _gone(799, 690.5, 691.0)]
-    assert family_problems(seen, fates, asked) == []
+    assert family_problems(seen, fates, asked, outside=_OUTSIDE) == []
     # Recorded, but not seen to end: an installer's descendant is still running.
-    running = family_problems([*row, below], fates, asked)
+    running = family_problems([*row, below], fates, asked, outside=_OUTSIDE)
     assert any("799 (below an installer)" in p for p in running)
     # A process whose recorded ancestry reaches the harness is no installer's.
     grounded = [*row, _seen(799, 6928, 690.5, "other")]
-    assert family_problems(grounded, fates, asked) == []
+    assert family_problems(grounded, fates, asked, outside=_OUTSIDE) == []
 
 
 def test_a_family_never_shown_ended_before_the_teardown_is_a_failure(tmp_path):

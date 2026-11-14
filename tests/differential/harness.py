@@ -4450,6 +4450,8 @@ def family_problems(
     observed: Iterable[Mapping[str, Any]],
     fates: Fates,
     records: Iterable[Mapping[str, Any]],
+    *,
+    outside: Iterable[int] = (),
 ) -> list[str]:
     """Why the installer family is not shown ended, from everything known now.
 
@@ -4462,8 +4464,8 @@ def family_problems(
     """
     observed = list(observed)
     return [
-        *installer_inventory(observed, fates),
-        *unaccounted_members(records, observed, fates),
+        *installer_inventory(observed, fates, outside=outside),
+        *unaccounted_members(records, observed, fates, outside=outside),
     ]
 
 
