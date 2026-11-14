@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Annotated, Any, NoReturn, TypeVar, cast
 import httpx2
 import mcp.types as mt
 from fastmcp.server.dependencies import get_context
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.providers import Provider
 from fastmcp.tools import Tool, ToolResult
 from fastmcp.utilities.components import get_fastmcp_metadata
@@ -52,6 +53,7 @@ from linkedin_mcp_server.daemon.liveness import CALL_HEADER
 if TYPE_CHECKING:
     from types import TracebackType
 
+    from fastmcp.resources import Resource, ResourceResult
     from fastmcp.server.context import Context
     from fastmcp.utilities.components import FastMCPComponent
     from mcp.client.session import LoggingFnT
@@ -263,6 +265,49 @@ def bound_to(binding: CallBinding) -> Generator[None]:
         yield
     finally:
         _call_being_made.reset(token)
+
+
+#: Whether the current task answers a resource request. FastMCP 4.2 lists every
+#: provider's tools inside ``resources/list`` and a ``ui://prefab/renderer/``
+#: read, looking for tools that need a Prefab renderer (fastmcp#6077). None of
+#: the owner's tools does, so the forwarder lists none there.
+_answering_resources: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "linkedin_mcp_answering_resources", default=False
+)
+
+
+@contextmanager
+def _resources_answered_here() -> Generator[None]:
+    token = _answering_resources.set(True)
+    try:
+        yield
+    finally:
+        _answering_resources.reset(token)
+
+
+class ResourcesAnsweredHere(Middleware):
+    """Keep resource requests on this frontend, so none of them reaches the owner.
+
+    Added beside :class:`OwnerForwarder`: a departed owner then fails no resource
+    listing or read, and a client's opening listings cost no hop beyond
+    ``tools/list``.
+    """
+
+    async def on_list_resources(
+        self,
+        context: MiddlewareContext[mt.ListResourcesRequest],
+        call_next: CallNext[mt.ListResourcesRequest, Sequence[Resource]],
+    ) -> Sequence[Resource]:
+        with _resources_answered_here():
+            return await call_next(context)
+
+    async def on_read_resource(
+        self,
+        context: MiddlewareContext[mt.ReadResourceRequestParams],
+        call_next: CallNext[mt.ReadResourceRequestParams, ResourceResult],
+    ) -> ResourceResult:
+        with _resources_answered_here():
+            return await super().on_read_resource(context, call_next)
 
 
 def owner_transport() -> httpx2.AsyncBaseTransport:
@@ -620,7 +665,9 @@ class OwnerForwarder(Provider):
     that times out is reported by the owner rather than cut off here.
 
     Resources and prompts keep the provider's empty defaults: the owner
-    registers none, so no listing or lookup of either reaches it.
+    registers none, so no listing or lookup of either reaches it. A server
+    with this provider also adds :class:`ResourcesAnsweredHere`, which keeps
+    FastMCP's tool listing inside a resource request from reaching it either.
     """
 
     def __init__(self, backend: DaemonProxyBackend, *, timeout: float) -> None:
@@ -629,6 +676,9 @@ class OwnerForwarder(Provider):
         self.timeout = timeout
 
     async def _list_tools(self) -> Sequence[Tool]:
+        if _answering_resources.get():
+            return []
+
         async def every_page(session: ClientSession) -> list[mt.Tool]:
             tools: list[mt.Tool] = []
             cursor: str | None = None
