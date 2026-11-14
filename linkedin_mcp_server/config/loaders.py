@@ -221,17 +221,6 @@ class SettingError(ValueError):
         return f"Invalid {name}: '{raw}'. {self}"
 
 
-class SecretSettingError(SettingError):
-    """A value refused for a setting that holds a secret.
-
-    Reported as ``Invalid <name>. <reason>``, without the value: configuration
-    errors are printed to the console and pasted into issue reports.
-    """
-
-    def describe(self, name: str, raw: str) -> str:
-        return f"Invalid {name}. {self}"
-
-
 class SettingRemoved(SettingError):
     """A setting refused whatever its value, with an explanation of its own.
 
@@ -351,49 +340,44 @@ def _browser_to_import(raw: str) -> str:
     return _normalize_env(raw) or "auto"
 
 
-#: Shortest HTTP client token accepted: what ``openssl rand -hex 16`` prints.
-#: A token a person can type from memory is shorter.
-MIN_HTTP_TOKEN_LENGTH = 32
-
-
-def _http_token(raw: str) -> str:
-    """The bearer token HTTP clients must present.
-
-    Printable ASCII without spaces, because an ``Authorization`` header carries
-    it and a client trims or cannot send anything else, so such a token could
-    never match. Every refusal is a SecretSettingError and names no part of it.
-    """
-    if not raw.strip():
-        raise SecretSettingError("It is empty or only whitespace.")
-    if not all("!" <= character <= "~" for character in raw):
-        raise SecretSettingError(
-            "It may hold only printable ASCII without spaces or line breaks, "
-            "because an Authorization header carries it."
-        )
-    if len(raw) < MIN_HTTP_TOKEN_LENGTH:
-        raise SecretSettingError(
-            f"It is shorter than {MIN_HTTP_TOKEN_LENGTH} characters. Generate "
-            "one with: openssl rand -hex 32"
-        )
-    return raw
-
-
 def _http_token_file(raw: str) -> str:
     """The HTTP client token, read from the file the path *raw* names.
 
     A file rather than a value, so the token stays out of the process list. One
     trailing line break, as ``echo`` or an editor leaves it, is not part of the
-    token; anything else is judged by ``_http_token``. Only a regular file is
-    read, or a link to one: a FIFO or a device would block startup or never end.
+    token. The token itself is judged in ``AppConfig.validate()``, once the
+    variable and this file have settled which one applies.
+
+    Opened first and judged on the open descriptor, so the file checked is the
+    file read. Non-blocking, so a FIFO is refused rather than waited on. Only a
+    regular file is read, or a link to one. On POSIX it has to be private to its
+    owner, as an SSH key does: anyone else who can read it can use the session.
+    Windows has no mode bits to judge, so the check is skipped there and the
+    file's ACL is the operator's to set.
     """
     path = Path(raw).expanduser()
     try:
-        if not stat.S_ISREG(path.stat().st_mode):
-            raise SettingError("It is not a regular file.")
-        content = path.read_bytes().decode("utf-8", errors="replace")
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
     except OSError as error:
         raise SettingError(f"It cannot be read: {error.strerror or error}.")
-    return _http_token(content.removesuffix("\n").removesuffix("\r"))
+    try:
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode):
+            raise SettingError("It is not a regular file.")
+        if os.name == "posix" and stat.S_IMODE(status.st_mode) & 0o077:
+            raise SettingError(
+                "Other accounts on this machine may access it. Make it private "
+                "to you: chmod 600"
+            )
+        # Wrapped only once judged: fdopen itself refuses a directory, with an
+        # error that would not say what is wrong.
+        with os.fdopen(descriptor, "rb") as file:
+            descriptor = -1
+            content = file.read().decode("utf-8", errors="replace")
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+    return content.removesuffix("\n").removesuffix("\r")
 
 
 def _user_agent(raw: str) -> NoReturn:
@@ -624,11 +608,12 @@ SETTINGS: tuple[Setting, ...] = (
         apply=_server("path"),
     ),
     Setting(
-        # Never quoted in an error (SecretSettingError) and kept out of the
-        # config's repr. Only the file is an option, so the token stays out of
-        # the process list. The file wins over the variable, as every option
-        # does.
-        env=Env(EnvironmentKeys.LINKEDIN_MCP_HTTP_TOKEN, _http_token),
+        # Judged in AppConfig.validate(), after the file has had its chance
+        # to replace the variable, and only for HTTP, which is what uses it.
+        # Kept out of the config's repr. Only the file is an option, so the
+        # token stays out of the process list. The file wins over the
+        # variable, as every option does.
+        env=Env(EnvironmentKeys.LINKEDIN_MCP_HTTP_TOKEN, _text),
         cli=Option(
             flag="--http-token-file",
             parse=_http_token_file,
@@ -637,9 +622,9 @@ SETTINGS: tuple[Setting, ...] = (
             metavar="PATH",
             help=(
                 "Require 'Authorization: Bearer <token>' from HTTP clients, with "
-                "the token read from this file (one trailing newline is ignored; "
-                "at least 32 characters). Overrides LINKEDIN_MCP_HTTP_TOKEN. "
-                "Needed for a --host other than loopback"
+                "the token read from this file (private to you, chmod 600; one "
+                "trailing newline is ignored; at least 32 characters). Overrides "
+                "LINKEDIN_MCP_HTTP_TOKEN. Needed for a --host other than loopback"
             ),
         ),
         apply=_server("http_token"),

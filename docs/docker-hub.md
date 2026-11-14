@@ -155,7 +155,7 @@ Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSO
 | `HOST` | `127.0.0.1` | HTTP server host (for streamable-http transport) |
 | `PORT` | `8000` | HTTP server port (for streamable-http transport) |
 | `HTTP_PATH` | `/mcp` | HTTP server path (for streamable-http transport) |
-| `LINKEDIN_MCP_HTTP_TOKEN` | - | Bearer token HTTP clients must send as `Authorization: Bearer <token>`, at least 32 characters. Required for HTTP mode in Docker. `--http-token-file PATH` reads it from a mounted file instead and wins when both are set. |
+| `LINKEDIN_MCP_HTTP_TOKEN` | - | Bearer token HTTP clients must send as `Authorization: Bearer <token>`, at least 32 characters. Required for HTTP mode in Docker. `--http-token-file PATH` reads it from a mounted file instead and wins when both are set; the file has to be private to its owner (`chmod 600`). |
 | `LINKEDIN_MCP_ALLOW_UNAUTHENTICATED_HTTP` | `false` | Unsafe: serve HTTP beyond loopback without a token. Only for a port that something else restricts. |
 | `SLOW_MO` | `0` | Delay between browser actions in ms (debugging) |
 | `HEADLESS` | `false` | Docker runs full headed Chromium on a virtual display. Set `true` only for Chromium's real headless mode, which identifies itself as `HeadlessChrome`. |

@@ -130,6 +130,42 @@ class ConfigurationError(Exception):
     """Raised when configuration validation fails."""
 
 
+#: Shortest HTTP client token accepted: what ``openssl rand -hex 16`` prints.
+#: A token a person can type from memory is shorter.
+MIN_HTTP_TOKEN_LENGTH = 32
+
+# Both places a token can come from, because a refusal cannot say which one
+# applied without carrying the source along with the secret.
+_HTTP_TOKEN_SOURCES = "LINKEDIN_MCP_HTTP_TOKEN or --http-token-file"
+
+
+def _check_http_token(token: str) -> None:
+    """Refuse an HTTP client token that cannot work or can be guessed.
+
+    Printable ASCII without spaces, because an ``Authorization`` header carries
+    it and a client trims or cannot send anything else, so such a token could
+    never match. No message names any part of it: configuration errors are
+    printed to the console and pasted into issue reports.
+    """
+    if not token.strip():
+        problem = "is empty or only whitespace"
+    elif not all("!" <= character <= "~" for character in token):
+        problem = (
+            "may hold only printable ASCII without spaces or line breaks, "
+            "because an Authorization header carries it"
+        )
+    elif len(token) < MIN_HTTP_TOKEN_LENGTH:
+        problem = (
+            f"is shorter than {MIN_HTTP_TOKEN_LENGTH} characters. Generate one "
+            "with: openssl rand -hex 32"
+        )
+    else:
+        return
+    raise ConfigurationError(
+        f"The HTTP client token from {_HTTP_TOKEN_SOURCES} {problem}."
+    )
+
+
 @dataclass
 class BrowserConfig:
     """Configuration for browser settings."""
@@ -492,6 +528,8 @@ class AppConfig:
             raise ConfigurationError("HTTP transport requires a valid host")
         if not self.server.port:
             raise ConfigurationError("HTTP transport requires a valid port")
+        if self.server.http_token is not None:
+            _check_http_token(self.server.http_token)
         if is_loopback_host(self.server.host) or self.server.http_token is not None:
             return
         # Refused without a token rather than warned about. A container has to
