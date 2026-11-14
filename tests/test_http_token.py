@@ -357,6 +357,23 @@ class TestTheTokenFile:
             self._load(path)
         assert "Input/output error" in str(refused.value)
 
+    def test_a_failed_close_keeps_the_refusal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Closing a refused directory can fail too; the refusal still wins."""
+        from linkedin_mcp_server.config.schema import ConfigurationError
+
+        closing = os.close
+
+        def failing_close(descriptor: int) -> None:
+            closing(descriptor)
+            raise OSError(5, "Input/output error")
+
+        monkeypatch.setattr(os, "close", failing_close)
+
+        with pytest.raises(ConfigurationError, match="--http-token-file"):
+            self._load(tmp_path)
+
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX FIFOs only")
     def test_a_fifo_is_refused_without_waiting(self, tmp_path: Path) -> None:
         from linkedin_mcp_server.config.schema import ConfigurationError
