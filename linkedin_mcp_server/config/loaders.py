@@ -351,10 +351,11 @@ def _http_token_file(raw: str) -> str:
 
     Opened first and judged on the open descriptor, so the file checked is the
     file read. Non-blocking, so a FIFO is refused rather than waited on. Only a
-    regular file is read, or a link to one. On POSIX it has to be private to its
-    owner, as an SSH key does: anyone else who can read it can use the session.
-    Windows has no mode bits to judge, so the check is skipped there and the
-    file's ACL is the operator's to set.
+    regular file is read, or a link to one. On POSIX its mode bits must grant no
+    group or other access, as an SSH key's do: anyone else who can read it can
+    use the session. Only the mode bits are judged. ACLs are not read, so an ACL
+    entry on macOS can still grant access, and removing it is the operator's
+    job. Windows has no mode bits to judge, so the check is skipped there.
     """
     path = Path(raw).expanduser()
     descriptor = -1
@@ -363,10 +364,11 @@ def _http_token_file(raw: str) -> str:
         status = os.fstat(descriptor)
         if not stat.S_ISREG(status.st_mode):
             raise SettingError("It is not a regular file.")
+        # Mode bits only; an ACL entry is not seen (docstring).
         if os.name == "posix" and stat.S_IMODE(status.st_mode) & 0o077:
             raise SettingError(
-                "Other accounts on this machine may access it. Make it private "
-                "to you: chmod 600"
+                "Its permission bits let other accounts on this machine access "
+                "it. Make it private to you: chmod 600"
             )
         # Wrapped only once judged: fdopen itself refuses a directory, with an
         # error that would not say what is wrong.
@@ -628,8 +630,9 @@ SETTINGS: tuple[Setting, ...] = (
             help=(
                 "Require 'Authorization: Bearer <token>' from HTTP clients, with "
                 "the token read from this file (one trailing newline is ignored; "
-                "at least 32 characters). On macOS and Linux a file with group or "
-                "other access is refused (chmod 600); Windows does not check. "
+                "at least 32 characters). A file whose permission bits grant group "
+                "or other access is refused (chmod 600). ACLs are not read, so on "
+                "macOS also run chmod -N on it; Windows does not check. "
                 "Overrides LINKEDIN_MCP_HTTP_TOKEN. Needed for a --host other "
                 "than loopback"
             ),
