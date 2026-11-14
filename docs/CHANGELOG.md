@@ -5,6 +5,18 @@ described on [GitHub Releases](https://github.com/stickerdaniel/linkedin-mcp-ser
 
 <!-- towncrier release notes start -->
 
+## 4.30.1 (2026-11-14)
+
+### Highlights
+
+- **FastMCP 4.2.0.** Resource listings through the shared browser stay local again. ([#1513](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1513))
+- **Docker security fixes.** The image ships dnspython 2.9.2 and opentelemetry-api 1.45.2. ([#1515](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1515))
+
+### Bug Fixes
+
+- The shared browser server answers resource listings again when its owner has stopped. ([#1513](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1513))
+
+
 ## 4.30.0 (2026-11-13)
 
 ### Highlights
