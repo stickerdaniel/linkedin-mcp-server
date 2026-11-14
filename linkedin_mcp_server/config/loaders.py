@@ -8,9 +8,11 @@ import argparse
 import logging
 import math
 import os
+import stat
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Never, NoReturn
 from urllib.parse import unquote, urlsplit
 
@@ -148,6 +150,8 @@ class EnvironmentKeys:
     INSTALLER_TEMP_DIR = "INSTALLER_TEMP_DIR"
     LINKEDIN_TRACE_MODE = "LINKEDIN_TRACE_MODE"
     LINKEDIN_MCP_CHECK_FOR_UPDATES = "LINKEDIN_MCP_CHECK_FOR_UPDATES"
+    LINKEDIN_MCP_HTTP_TOKEN = "LINKEDIN_MCP_HTTP_TOKEN"
+    LINKEDIN_MCP_ALLOW_UNAUTHENTICATED_HTTP = "LINKEDIN_MCP_ALLOW_UNAUTHENTICATED_HTTP"
 
 
 # What ``manifest.json`` fills from ``user_config``, and the exact string each
@@ -215,6 +219,17 @@ class SettingError(ValueError):
 
     def describe(self, name: str, raw: str) -> str:
         return f"Invalid {name}: '{raw}'. {self}"
+
+
+class SecretSettingError(SettingError):
+    """A value refused for a setting that holds a secret.
+
+    Reported as ``Invalid <name>. <reason>``, without the value: configuration
+    errors are printed to the console and pasted into issue reports.
+    """
+
+    def describe(self, name: str, raw: str) -> str:
+        return f"Invalid {name}. {self}"
 
 
 class SettingRemoved(SettingError):
@@ -334,6 +349,51 @@ def _viewport(raw: str) -> tuple[int, int]:
 def _browser_to_import(raw: str) -> str:
     """A browser key, where a blank value means "auto"."""
     return _normalize_env(raw) or "auto"
+
+
+#: Shortest HTTP client token accepted: what ``openssl rand -hex 16`` prints.
+#: A token a person can type from memory is shorter.
+MIN_HTTP_TOKEN_LENGTH = 32
+
+
+def _http_token(raw: str) -> str:
+    """The bearer token HTTP clients must present.
+
+    Printable ASCII without spaces, because an ``Authorization`` header carries
+    it and a client trims or cannot send anything else, so such a token could
+    never match. Every refusal is a SecretSettingError and names no part of it.
+    """
+    if not raw.strip():
+        raise SecretSettingError("It is empty or only whitespace.")
+    if not all("!" <= character <= "~" for character in raw):
+        raise SecretSettingError(
+            "It may hold only printable ASCII without spaces or line breaks, "
+            "because an Authorization header carries it."
+        )
+    if len(raw) < MIN_HTTP_TOKEN_LENGTH:
+        raise SecretSettingError(
+            f"It is shorter than {MIN_HTTP_TOKEN_LENGTH} characters. Generate "
+            "one with: openssl rand -hex 32"
+        )
+    return raw
+
+
+def _http_token_file(raw: str) -> str:
+    """The HTTP client token, read from the file the path *raw* names.
+
+    A file rather than a value, so the token stays out of the process list. One
+    trailing line break, as ``echo`` or an editor leaves it, is not part of the
+    token; anything else is judged by ``_http_token``. Only a regular file is
+    read, or a link to one: a FIFO or a device would block startup or never end.
+    """
+    path = Path(raw).expanduser()
+    try:
+        if not stat.S_ISREG(path.stat().st_mode):
+            raise SettingError("It is not a regular file.")
+        content = path.read_bytes().decode("utf-8", errors="replace")
+    except OSError as error:
+        raise SettingError(f"It cannot be read: {error.strerror or error}.")
+    return _http_token(content.removesuffix("\n").removesuffix("\r"))
 
 
 def _user_agent(raw: str) -> NoReturn:
@@ -562,6 +622,37 @@ SETTINGS: tuple[Setting, ...] = (
             help="HTTP server path (default: /mcp)",
         ),
         apply=_server("path"),
+    ),
+    Setting(
+        # Never quoted in an error (SecretSettingError) and kept out of the
+        # config's repr. Only the file is an option, so the token stays out of
+        # the process list. The file wins over the variable, as every option
+        # does.
+        env=Env(EnvironmentKeys.LINKEDIN_MCP_HTTP_TOKEN, _http_token),
+        cli=Option(
+            flag="--http-token-file",
+            parse=_http_token_file,
+            phase="load",
+            cli_empty="ignore",
+            metavar="PATH",
+            help=(
+                "Require 'Authorization: Bearer <token>' from HTTP clients, with "
+                "the token read from this file (one trailing newline is ignored; "
+                "at least 32 characters). Overrides LINKEDIN_MCP_HTTP_TOKEN. "
+                "Needed for a --host other than loopback"
+            ),
+        ),
+        apply=_server("http_token"),
+    ),
+    Setting(
+        # Environment only: serving beyond loopback without a token is a
+        # deliberate, unsafe choice, checked in AppConfig.validate().
+        env=Env(
+            EnvironmentKeys.LINKEDIN_MCP_ALLOW_UNAUTHENTICATED_HTTP,
+            _flag,
+            blank="unset",
+        ),
+        apply=_server("allow_unauthenticated_http"),
     ),
     Setting(
         env=Env(EnvironmentKeys.SLOW_MO, _integer),

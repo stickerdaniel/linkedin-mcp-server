@@ -107,6 +107,7 @@ LONG_OPTIONS = (
     "--host",
     "--port",
     "--path",
+    "--http-token-file",
     "--slow-mo",
     "--user-agent",
     "--viewport",

@@ -171,6 +171,7 @@ AI agent? Get a quick confirmation from the user before enabling automatic updat
 
 - `--transport {stdio,streamable-http}` - Force the transport mode (default: stdio)
 - `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
+- `--http-token-file PATH` - Require `Authorization: Bearer <token>` from HTTP clients, with the token read from this file (one trailing newline ignored, at least 32 characters). Required for a `--host` other than loopback. Environment: `LINKEDIN_MCP_HTTP_TOKEN`; the file wins when both are set.
 
 **Timeouts:**
 
@@ -233,6 +234,8 @@ uvx mcp-server-linkedin@latest --log-level DEBUG
 ```bash
 uvx mcp-server-linkedin@latest --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
 ```
+
+Any other `--host` needs a token: set `LINKEDIN_MCP_HTTP_TOKEN` or pass `--http-token-file`, and send `Authorization: Bearer <token>` from the client. The Docker HTTP example under [Setup with Docker](#setup-with-docker) shows both halves.
 
 Runtime server logs are emitted by FastMCP/Uvicorn.
 
@@ -575,6 +578,7 @@ username.
 
 - `--transport {stdio,streamable-http}` - Force the transport mode (default: stdio)
 - `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
+- `--http-token-file PATH` - Require `Authorization: Bearer <token>` from HTTP clients, with the token read from this file (one trailing newline ignored, at least 32 characters). Required for a `--host` other than loopback. Environment: `LINKEDIN_MCP_HTTP_TOKEN`; the file wins when both are set.
 
 **Timeouts:**
 
@@ -608,11 +612,17 @@ username.
 
 **HTTP Mode Example (for web-based MCP clients):**
 
+A server bound beyond loopback requires a bearer token, and `--host 0.0.0.0`
+inside the container is beyond loopback. Generate a token, hand it to the
+container, and send it from the client.
+
 Bash / macOS / Linux:
 
 ```bash
+export LINKEDIN_MCP_HTTP_TOKEN="$(openssl rand -hex 32)"
 docker run -it --rm \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
+  -e LINKEDIN_MCP_HTTP_TOKEN \
   -p 127.0.0.1:8080:8080 \
   stickerdaniel/linkedin-mcp-server:latest \
   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
@@ -621,21 +631,47 @@ docker run -it --rm \
 PowerShell (Windows):
 
 ```powershell
+$env:LINKEDIN_MCP_HTTP_TOKEN = [guid]::NewGuid().ToString("N") + [guid]::NewGuid().ToString("N")
 $sessionDir = Join-Path $env:USERPROFILE ".linkedin-mcp"
 docker run -it --rm `
   -v "${sessionDir}:/home/pwuser/.linkedin-mcp" `
+  -e LINKEDIN_MCP_HTTP_TOKEN `
   -p 127.0.0.1:8080:8080 `
   stickerdaniel/linkedin-mcp-server:latest `
   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
 ```
 
-Both halves of that are needed, and they do different jobs. `--host 0.0.0.0`
-makes the server reachable *inside* the container: a process bound to
-`127.0.0.1` in there cannot be reached through a published port at all. The
-`127.0.0.1:` in front of `-p` is what limits it *outside*, to this machine.
-Drop that prefix and Docker publishes on every interface, which puts an
-endpoint with no authentication on your network. The server cannot tell the two
-apart, so it warns either way.
+`-e LINKEDIN_MCP_HTTP_TOKEN` without a value copies the variable from your
+shell, so the token stays out of the `docker run` command line. The client
+sends it as a header on every request:
+
+```json
+{
+  "mcpServers": {
+    "mcp-server-linkedin": {
+      "url": "http://127.0.0.1:8080/mcp",
+      "headers": { "Authorization": "Bearer <your token>" }
+    }
+  }
+}
+```
+
+The token is a static header, not an OAuth login, so a client has to support
+custom headers. A request without it, or with a different one, gets `401`. The
+token needs at least 32 characters.
+
+`--host 0.0.0.0` and the `127.0.0.1:` prefix on `-p` do different jobs, and
+both are needed. `--host 0.0.0.0` makes the server reachable *inside* the
+container: a process bound to `127.0.0.1` in there cannot be reached through a
+published port at all. The `127.0.0.1:` in front of `-p` limits it *outside*,
+to this machine. Plain HTTP sends the token unencrypted, so reach the server
+from another machine through an SSH tunnel or an HTTPS reverse proxy, never by
+publishing the port on your network.
+
+Without a token, a bind beyond loopback refuses to start.
+`LINKEDIN_MCP_ALLOW_UNAUTHENTICATED_HTTP=true` starts it anyway, with a
+warning. That is unsafe: anyone who can reach the port can use your LinkedIn
+session. Use it only when something else restricts the port.
 
 Loopback publishing limits this to the machine, not to the container. Other
 containers on the same host can still reach it through `host.docker.internal`
@@ -658,9 +694,9 @@ serve it under:
 FASTMCP_HTTP_ALLOWED_HOSTS='["mcp.example"]'
 ```
 
-That permits exactly that name and keeps refusing everything else. The endpoint
-still has no authentication, so anything reachable beyond your own machine
-belongs behind something that provides it.
+That permits exactly that name and keeps refusing everything else. Requests
+under that name still need the bearer token, and the proxy in front should
+terminate HTTPS so the token never crosses the network in plain text.
 
 **Test with mcp inspector:**
 
@@ -815,6 +851,7 @@ uv run -m linkedin_mcp_server
 
 - `--transport {stdio,streamable-http}` - Force the transport mode (default: stdio)
 - `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
+- `--http-token-file PATH` - Require `Authorization: Bearer <token>` from HTTP clients, with the token read from this file (one trailing newline ignored, at least 32 characters). Required for a `--host` other than loopback. Environment: `LINKEDIN_MCP_HTTP_TOKEN`; the file wins when both are set.
 
 **Timeouts:**
 
@@ -855,6 +892,8 @@ uv run -m linkedin_mcp_server
 ```bash
 uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --port 8000 --path /mcp
 ```
+
+Any other `--host` needs a token: set `LINKEDIN_MCP_HTTP_TOKEN` or pass `--http-token-file`, and send `Authorization: Bearer <token>` from the client.
 
 **Claude Desktop:**
 
