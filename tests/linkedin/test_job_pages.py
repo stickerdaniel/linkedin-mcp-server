@@ -1776,7 +1776,9 @@ class TestAnswerEasyApplyStep:
         done = self._dialog(mock_page)
 
         with pytest.raises(InvalidAnswerError, match="both labelled 'First name'"):
-            await _reader(mock_page)._answer_easy_apply_step(twice, {"First name": "S"})
+            await _reader(mock_page)._answer_easy_apply_step(
+                twice, {"First name": "Noor"}
+            )
         assert done == []
 
     async def test_an_empty_typeahead_no_answer_names_still_refuses(self, mock_page):

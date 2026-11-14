@@ -109,8 +109,8 @@ WITH_COUNTRY: dict[str, Any] = dict(
 # What the typeahead is offering to look up, and the entity behind each label.
 # Two of them share a prefix, so an answer that stops at the prefix names none.
 CITIES: dict[str, str] = {
-    "Paris, \u00cele-de-France, France": "urn:li:geo:104994268",
-    "Paris, Texas, United States": "urn:li:geo:101857102",
+    "Paris, \u00cele-de-France, France": "urn:li:geo:100000001",
+    "Paris, Texas, United States": "urn:li:geo:100000002",
 }
 
 

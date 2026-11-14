@@ -373,10 +373,10 @@ class TestSubmitEasyApply:
         "heading": "Contact info",
         "progress": 0,
         "fields": [
-            {"label": "First name", "type": "text", "required": True, "value": "S"}
+            {"label": "First name", "type": "text", "required": True, "value": "Noor"}
         ],
     }
-    ANSWERS = {"First name": "S"}
+    ANSWERS = {"First name": "Noor"}
 
     @staticmethod
     def _walking(reader, **kwargs):
