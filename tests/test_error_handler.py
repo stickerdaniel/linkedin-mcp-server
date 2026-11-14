@@ -6,6 +6,7 @@ from fastmcp.exceptions import ToolError
 from linkedin_mcp_server.core.exceptions import (
     NetworkError,
     ProfileNotFoundError,
+    InvalidAnswerError,
     InvalidReferenceError,
     ProxyConnectionError,
     RateLimitError,
@@ -286,6 +287,27 @@ def test_invalid_reference_skips_issue_diagnostics(monkeypatch):
         raise_tool_error(InvalidReferenceError("Pass the /company/ slug."))
     assert marker not in str(raised.value)
     assert "Pass the /company/ slug." in str(raised.value)
+
+
+def test_a_refused_answer_reaches_the_caller_without_diagnostics(monkeypatch):
+    # The same reasoning as the reference above: an answer that does not fit
+    # the field it names is corrected in the caller's answers, not in the
+    # server, and the refusal already says which field refused it.
+    marker = "ISSUE-TEMPLATE-MARKER"
+    monkeypatch.setattr(
+        "linkedin_mcp_server.error_handler.build_issue_diagnostics",
+        lambda *args, **kwargs: marker,
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.error_handler.format_tool_error_with_diagnostics",
+        lambda message, diagnostics: f"{message}\n{diagnostics}",
+    )
+    refusal = "No option is labelled 'Maybe'. Field: Authorized? (radio)."
+
+    with pytest.raises(ToolError) as raised:
+        raise_tool_error(InvalidAnswerError(refusal))
+    assert str(raised.value) == refusal
+    assert marker not in str(raised.value)
 
 
 def test_unknown_exception_log_is_redacted(monkeypatch, caplog):

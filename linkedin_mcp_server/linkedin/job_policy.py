@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from ipaddress import IPv6Address, ip_address
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import parse_qs, urlparse
 
 
@@ -402,6 +402,165 @@ def apply_link_missing_section_error() -> dict[str, str]:
             "this host's own network, so none is returned."
         ),
     }
+
+
+# Answers arrive keyed by the label the read returned, and each one is a
+# value the caller chose: text for a typed or picked control, a list for a
+# checkbox group answered with several options, a bool for a lone checkbox,
+# and a path for a file input.
+EasyApplyAnswer = str | bool | list[str]
+
+EASY_APPLY_TYPEAHEAD_REFUSED = (
+    "A typeahead is answered by picking one of the suggestions LinkedIn offers "
+    "while the value is typed, so it needs an answer naming it. Name this "
+    "field in the answers with the value to look up."
+)
+
+EASY_APPLY_NO_CONTROL = (
+    "LinkedIn gave this control no id, so there is no way to address it."
+)
+
+
+def easy_apply_answer_refused(field: dict[str, Any], reason: str) -> str:
+    """The message for an answer that cannot be placed in ``field``.
+
+    The label, the type and the options travel with the reason because the fix
+    is in the caller's answers rather than in the dialog: they name the field
+    by the same label the read returned, and they need to see what it accepts.
+    """
+    described = f"{field.get('label') or '(unlabelled)'} ({field.get('type')})"
+    options = field.get("options")
+    if options:
+        described += ", options: " + ", ".join(repr(option) for option in options)
+    return f"{reason} Field: {described}."
+
+
+# How many of LinkedIn's suggestions a refusal quotes. Enough to recognise the
+# spelling that was meant; a city query that comes back with more than this was
+# too vague to be the answer anyway.
+_EASY_APPLY_QUOTED_SUGGESTIONS = 20
+
+
+def easy_apply_no_suggestion_error(
+    field: dict[str, Any], answer: str, offered: list[str]
+) -> str:
+    """The message for a typeahead whose suggestions never held ``answer``.
+
+    What LinkedIn offered travels with it, because the vocabulary is LinkedIn's
+    and the caller has no other way to learn it: the read cannot publish a list
+    that only exists as a response to a query. One refusal is meant to be
+    enough to write the retry.
+    """
+    if not offered:
+        listed = "LinkedIn offered no suggestions for it."
+    else:
+        quoted = ", ".join(
+            repr(option) for option in offered[:_EASY_APPLY_QUOTED_SUGGESTIONS]
+        )
+        rest = len(offered) - _EASY_APPLY_QUOTED_SUGGESTIONS
+        listed = f"LinkedIn offered {quoted}" + (
+            f" and {rest} more." if rest > 0 else "."
+        )
+    return easy_apply_answer_refused(
+        field, f"No suggestion is labelled {answer!r}. {listed}"
+    )
+
+
+def easy_apply_pick_unconfirmed_error(
+    field: dict[str, Any], answer: str, held: str
+) -> str:
+    """The message for a suggestion that was clicked and did not take.
+
+    The click landed on a suggestion LinkedIn was offering, so what follows is
+    LinkedIn's side of it: the field is left holding something other than the
+    answer, or the list never closed on the pick. Either way nothing was
+    chosen, and saying so beats sending an application whose answer is a string
+    that was typed rather than an entity that was picked.
+    """
+    return easy_apply_answer_refused(
+        field,
+        f"Its suggestion {answer!r} was clicked and LinkedIn did not take it; "
+        f"the field was left holding {held!r}.",
+    )
+
+
+def easy_apply_duplicate_label_error(label: str) -> str:
+    """The message for two fields on one step sharing a label.
+
+    Never resolved by picking one. The answer was written against a label, and
+    two fields wearing it means the answer names a question the form asks
+    twice, which only whoever wrote the answers can settle.
+    """
+    return (
+        f"Two fields on this step are both labelled {label!r}, so an answer "
+        "naming it could go to either one."
+    )
+
+
+def easy_apply_unknown_answers_error(labels: list[str]) -> str:
+    """The message for answers no field on the form wears.
+
+    A stale answers file is the likely cause, and the risk it carries is the
+    one thing worth stopping for: an answer that silently goes nowhere leaves a
+    question filled with whatever LinkedIn prefilled, on an application that is
+    then submitted as though it had been answered.
+    """
+    named = ", ".join(repr(label) for label in sorted(labels))
+    return (
+        f"The form asks nothing labelled {named}, so those answers would go "
+        "nowhere. The labels have to match what the form read returned."
+    )
+
+
+def easy_apply_required_unanswered_error(fields: list[dict[str, Any]]) -> str:
+    """The message for required fields left empty on a step about to be sent.
+
+    LinkedIn would refuse the step anyway, and the run would end on its error
+    rather than on the caller's answers. Stopping first names every one of them
+    at once, which is what a second run needs.
+    """
+    named = "; ".join(
+        f"{field.get('label') or '(unlabelled)'} ({field.get('type')})"
+        for field in fields
+    )
+    return (
+        f"This step requires an answer for: {named}. None of them holds one, "
+        "prefilled or supplied, so nothing further was sent."
+    )
+
+
+def easy_apply_upload_unconfirmed_error(names: list[str]) -> str:
+    """The message for a file LinkedIn never showed back.
+
+    Raised rather than reported, because the shape it guards against is an
+    application sent with the resume it was meant to replace. The upload is the
+    one answer whose result cannot be read off the control that took it, so the
+    form showing the file back is the only evidence there is.
+    """
+    named = ", ".join(repr(name) for name in sorted(names))
+    return (
+        f"LinkedIn did not show {named} back on the form after it was "
+        "uploaded, so there is no evidence it was attached and nothing was "
+        "sent. The form may still have been rebuilding; try again."
+    )
+
+
+EASY_APPLY_SUBMIT_UNCONFIRMED = (
+    "Submit was clicked and the Easy Apply dialog stayed open, so the "
+    "application was probably not sent. Read the form again to see what "
+    "LinkedIn is asking for."
+)
+
+
+# The button-shaped Easy Apply (measured on 2026-09-25) opens a redesigned
+# dialog: a native `<dialog>` in the document rather than one inside a shadow
+# root, with no data attributes on its Next, Submit or Discard buttons. The form
+# programs read only the dialog the `/apply/` anchor opens, so they refuse
+# before opening this one rather than leave a draft they cannot find to discard.
+EASY_APPLY_BUTTON_UNREAD = (
+    "This posting's Easy Apply opens LinkedIn's redesigned dialog, which the "
+    "form tools cannot read yet. Nothing was opened."
+)
 
 
 EASY_APPLY_DRAFT_LEFT = (
