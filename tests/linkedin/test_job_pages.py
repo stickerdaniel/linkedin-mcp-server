@@ -2836,3 +2836,40 @@ class TestSubmitEasyApply:
         assert result.submitted is False
         assert len(result.steps) == 2
         assert "submit" not in dialog.log
+
+
+def test_a_required_select_on_its_placeholder_is_unanswered():
+    email = {
+        "label": "Email address",
+        "type": "select",
+        "required": True,
+        "options": ["Select an option", "me@example.com"],
+        "value": "Select an option",
+        "placeholder": True,
+        "ids": ["email"],
+    }
+    picked = dict(email, value="me@example.com")
+    del picked["placeholder"]
+
+    step = {"heading": "Contact info", "progress": 0, "fields": [email]}
+    assert job_pages_module._unanswered_required(step, set()) == [email]
+    step["fields"] = [picked]
+    assert job_pages_module._unanswered_required(step, set()) == []
+
+
+def test_the_placeholder_flag_is_not_shown_to_the_caller():
+    step = {
+        "heading": "Contact info",
+        "progress": 0,
+        "fields": [
+            {
+                "label": "Email address",
+                "type": "select",
+                "required": True,
+                "value": "Select an option",
+                "placeholder": True,
+                "ids": ["email"],
+            }
+        ],
+    }
+    assert "placeholder" not in job_pages_module._public_step(step)["fields"][0]

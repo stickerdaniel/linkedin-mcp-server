@@ -422,6 +422,12 @@ EASY_APPLY_STEP_JS = (
             }
             const picked = first.options[first.selectedIndex];
             if (picked) field.value = picked.text.trim();
+            // A placeholder shows as selected and answers nothing. It is told
+            // apart by its markup, never by its words, which are translated.
+            // Dropped from what the caller sees (`_public_step`).
+            if (picked && (picked.value === '' || picked.disabled || picked.hidden)) {
+                field.placeholder = true;
+            }
         } else if (isChoice(first)) {
             const options = group.map(labelOf);
             field.options = options.slice(0, maxOptions);
@@ -828,7 +834,8 @@ def _unanswered_required(
 ) -> list[dict[str, Any]]:
     """The required fields of ``step`` holding nothing.
 
-    Judged on the step as read back, so an answer that cleared a field, an
+    A select still on its placeholder holds nothing, though the read gives the
+    placeholder's text as its value. Judged on the step as read back, so an answer that cleared a field, an
     empty text or a lone checkbox answered no, leaves it as missing as one
     nothing answered. The exception is a file answered on this step: a file
     input never reports the file it was given, and the upload is waited for
@@ -845,14 +852,15 @@ def _unanswered_required(
             if field["type"] in ("radio", "checkbox")
             else field.get("value")
         )
-        if not held:
+        if not held or field.get("placeholder"):
             missing.append(field)
     return missing
 
 
 # What the step read carries for the walk alone: the controls behind a field,
-# and the whole of a select list the read cut.
-_PRIVATE_KEYS = frozenset({"ids", "all_options"})
+# the whole of a select list the read cut, and whether a select still shows
+# its placeholder.
+_PRIVATE_KEYS = frozenset({"ids", "all_options", "placeholder"})
 
 
 def _public_step(step: dict[str, Any]) -> dict[str, Any]:

@@ -54,7 +54,7 @@ CONTACT: dict[str, Any] = {
         '<input id="first" type="text" required value="Ada"></div>'
         '<div data-test-form-element><label for="email">Email address</label>'
         '<select id="email" required aria-required="true">'
-        "<option>Select an option</option><option>me@example.com</option>"
+        '<option value="">Select an option</option><option>me@example.com</option>'
         "</select></div>"
         '<div data-test-form-element><label for="phone">Mobile phone number</label>'
         '<input id="phone" type="text" required></div>'
@@ -619,6 +619,26 @@ async def test_a_required_field_nothing_answers_refuses_before_any_click(dom_pag
     assert "discard" in events
 
 
+@pytest.mark.parametrize("confirm_submit", [False, True])
+async def test_a_select_left_on_its_placeholder_refuses_before_any_click(
+    dom_page, confirm_submit
+):
+    # The read gives the placeholder's text as the select's value, so only its
+    # markup says the question is unanswered. A rehearsal must not call the
+    # form complete, and a run with the flag must not click on.
+    with pytest.raises(InvalidAnswerError, match="Email address"):
+        await answer(
+            dom_page,
+            [CONTACT, QUESTIONS],
+            {"First name": "Noor", "Mobile phone number": "+33600000000"},
+            confirm_submit=confirm_submit,
+        )
+
+    events = await log(dom_page)
+    assert "next" not in events and "submit" not in events
+    assert "discard" in events
+
+
 async def test_with_every_answer_the_flag_clicks_submit_once(dom_page, resume):
     result = await answer(
         dom_page,
@@ -916,6 +936,7 @@ async def test_a_country_past_the_reads_cut_is_selected(dom_page):
         [WITH_COUNTRY],
         {
             "First name": "Noor",
+            "Email address": "me@example.com",
             "Mobile phone number": "600000000",
             "Phone country code": COUNTRIES[55],
         },
