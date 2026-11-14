@@ -356,11 +356,9 @@ def _http_token_file(raw: str) -> str:
     file's ACL is the operator's to set.
     """
     path = Path(raw).expanduser()
+    descriptor = -1
     try:
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
-    except OSError as error:
-        raise SettingError(f"It cannot be read: {error.strerror or error}.")
-    try:
         status = os.fstat(descriptor)
         if not stat.S_ISREG(status.st_mode):
             raise SettingError("It is not a regular file.")
@@ -374,6 +372,10 @@ def _http_token_file(raw: str) -> str:
         with os.fdopen(descriptor, "rb") as file:
             descriptor = -1
             content = file.read().decode("utf-8", errors="replace")
+    # Every step, not only the open: Option.given() turns a SettingError into
+    # a refusal that names the option, and anything else into a traceback.
+    except OSError as error:
+        raise SettingError(f"It cannot be read: {error.strerror or error}.")
     finally:
         if descriptor != -1:
             os.close(descriptor)

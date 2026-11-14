@@ -329,6 +329,34 @@ class TestTheTokenFile:
         with pytest.raises(ConfigurationError, match="--http-token-file"):
             self._load(tmp_path)
 
+    @pytest.mark.parametrize("step", ["fstat", "read"])
+    def test_a_failed_read_is_a_refusal_naming_the_option(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str
+    ) -> None:
+        """An I/O error after the open still says which setting failed."""
+        from linkedin_mcp_server.config.schema import ConfigurationError
+
+        path = _private(tmp_path / "token", _SENTINEL)
+
+        def failing(*_args: Any, **_kwargs: Any) -> Any:
+            raise OSError(5, "Input/output error")
+
+        if step == "fstat":
+            monkeypatch.setattr(os, "fstat", failing)
+        else:
+            opened = os.fdopen
+
+            def fdopen(*args: Any, **kwargs: Any) -> Any:
+                file = opened(*args, **kwargs)
+                monkeypatch.setattr(file, "read", failing)
+                return file
+
+            monkeypatch.setattr(os, "fdopen", fdopen)
+
+        with pytest.raises(ConfigurationError, match="--http-token-file") as refused:
+            self._load(path)
+        assert "Input/output error" in str(refused.value)
+
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX FIFOs only")
     def test_a_fifo_is_refused_without_waiting(self, tmp_path: Path) -> None:
         from linkedin_mcp_server.config.schema import ConfigurationError
