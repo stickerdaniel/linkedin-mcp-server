@@ -88,7 +88,7 @@ def secure_write_text(path: Path, content: str, mode: int = 0o600) -> None:
     secure_mkdir(path.parent)
     fd_int, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
-        with os.fdopen(fd_int, "w") as f:
+        with os.fdopen(fd_int, "w", encoding="utf-8") as f:
             f.write(content)
         os.chmod(tmp, mode)
         os.replace(tmp, path)
