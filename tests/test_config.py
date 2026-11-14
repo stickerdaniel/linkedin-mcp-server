@@ -229,18 +229,20 @@ class TestAppConfig:
 
 
 class TestExposedBindWarning:
-    """The endpoint has no authentication, so the bind address is the guard.
+    """Beyond loopback, HTTP needs a client token or an explicit opt-out.
 
-    The warning used to fire only for a literal 0.0.0.0 or ::, which meant the
-    most likely way to expose a session by accident, naming a LAN address
-    outright, happened in silence.
+    Judged by the bind address, which once warned only for a literal 0.0.0.0 or
+    ::, so naming a LAN address outright, the likeliest accident, passed in
+    silence.
     """
 
     @staticmethod
-    def _validate_with_host(host, caplog):
+    def _validate_with_host(host, caplog, **server):
         config = AppConfig()
         config.server.transport = "streamable-http"
         config.server.host = host
+        for name, value in server.items():
+            setattr(config.server, name, value)
         with caplog.at_level(
             logging.WARNING, logger="linkedin_mcp_server.config.schema"
         ):
@@ -248,7 +250,7 @@ class TestExposedBindWarning:
         return caplog.text
 
     @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
-    def test_loopback_binds_are_silent(self, host, caplog):
+    def test_loopback_binds_need_no_token(self, host, caplog):
         assert self._validate_with_host(host, caplog) == ""
 
     @pytest.mark.parametrize(
@@ -256,17 +258,36 @@ class TestExposedBindWarning:
         [
             "0.0.0.0",
             "::",
-            "192.168.1.5",  # a LAN address warned about nothing before
+            "192.168.1.5",
             "10.0.0.7",
             "example.internal",
         ],
     )
-    def test_reachable_binds_warn(self, host, caplog):
-        text = self._validate_with_host(host, caplog)
-        assert host in text
+    def test_reachable_binds_without_a_token_are_refused(self, host, caplog):
+        with pytest.raises(ConfigurationError) as refused:
+            self._validate_with_host(host, caplog)
+
+        message = str(refused.value)
+        assert host in message
+        assert "LINKEDIN_MCP_HTTP_TOKEN" in message
+        assert "--host 127.0.0.1" in message
+        assert "LINKEDIN_MCP_ALLOW_UNAUTHENTICATED_HTTP=true" in message
+        assert "unsafe" in message
+
+    def test_a_reachable_bind_with_a_token_starts_silently(self, caplog):
+        text = self._validate_with_host("0.0.0.0", caplog, http_token="t" * 32)
+
+        assert text == ""
+
+    def test_the_opt_out_starts_and_warns(self, caplog):
+        text = self._validate_with_host(
+            "0.0.0.0", caplog, allow_unauthenticated_http=True
+        )
+
+        assert "0.0.0.0" in text
         assert "no authentication" in text
 
-    def test_stdio_never_warns_about_the_host(self, caplog):
+    def test_stdio_never_judges_the_host(self, caplog):
         """The host field is meaningless without an HTTP listener."""
         config = AppConfig()
         config.server.transport = "stdio"
@@ -1365,6 +1386,9 @@ class TestProxyEncodedUserinfo:
 
 _UNTOUCHED = "<untouched>"
 
+#: A token file as an editor saves it, with one trailing newline.
+_HTTP_TOKEN_FILE = str(Path(__file__).parent / "fixtures" / "http-token" / "token.txt")
+
 
 class _Keep:
     """Expected: the fields still hold what they held before this source."""
@@ -1487,6 +1511,41 @@ _CASES: dict[str, _Cases] = {
         ("server.path",),
         env={None: KEEP, "": KEEP, "/env": "/env"},
         cli={(): KEEP, ("--path", ""): KEEP, ("--path", "/cli"): "/cli"},
+    ),
+    # Never quoted in a refusal. The file wins over the variable.
+    "LINKEDIN_MCP_HTTP_TOKEN": _Cases(
+        "other",
+        ("server.http_token",),
+        env={
+            None: KEEP,
+            "": KEEP,
+            " ": REFUSED,
+            "a" * 31: REFUSED,
+            "a" * 32: "a" * 32,
+            "a" * 32 + "\n": REFUSED,
+            "a" * 16 + " " + "a" * 16: REFUSED,
+            "ä" * 32: REFUSED,
+        },
+        cli={
+            (): KEEP,
+            ("--http-token-file", ""): KEEP,
+            ("--http-token-file", _HTTP_TOKEN_FILE): (
+                "fixture-http-token-0123456789abcdef0123"
+            ),
+            ("--http-token-file", "/nonexistent/linkedin-mcp-token"): REFUSED,
+        },
+    ),
+    "LINKEDIN_MCP_ALLOW_UNAUTHENTICATED_HTTP": _Cases(
+        "flag",
+        ("server.allow_unauthenticated_http",),
+        env={
+            None: KEEP,
+            "": KEEP,
+            " ": KEEP,
+            "false": False,
+            "true": True,
+            "ture": REFUSED,
+        },
     ),
     "SLOW_MO": _Cases(
         "number",

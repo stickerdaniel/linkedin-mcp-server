@@ -78,17 +78,22 @@ complete it in the browser, then continue when they say so.
 
 
 class _StaticTokenAuth(TokenVerifier):
-    """Accepts exactly the one token the owner published, and nothing else.
+    """Accepts exactly one token, and nothing else.
 
-    A whole OAuth flow would be ceremony here: both ends are this installation,
-    the token is minted at startup, never reused, and written to a file only
-    this account can read. What it has to be is unguessable and compared without
-    leaking where two tokens diverge, which is what the digest comparison below
-    is for.
+    Two credentials use it and stay apart: the token a daemon owner published
+    for its frontends, and the one an operator configured for HTTP clients.
+    *client_id* names which of the two a request presented.
+
+    A whole OAuth flow would be ceremony here. The owner's token is minted at
+    startup, never reused, and written to a file only this account can read;
+    the operator's is handed to the client by hand. What each has to be is
+    unguessable and compared without leaking where two tokens diverge, which is
+    what the digest comparison below is for.
     """
 
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, *, client_id: str = "linkedin-mcp-frontend") -> None:
         super().__init__()
+        self._client_id = client_id
         # A digest rather than the token, so the verifier's own repr does not
         # carry the credential — the surrounding code logs whole objects at
         # DEBUG and users paste those logs into issue reports.
@@ -105,7 +110,7 @@ class _StaticTokenAuth(TokenVerifier):
             self._expected, hashlib.sha256(token.encode()).digest()
         ):
             return None
-        return AccessToken(token=token, client_id="linkedin-mcp-frontend", scopes=[])
+        return AccessToken(token=token, client_id=self._client_id, scopes=[])
 
 
 @lifespan
@@ -173,6 +178,7 @@ def create_mcp_server(
     tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
     role: ServerRole = ServerRole.DIRECT,
     auth_token: str | None = None,
+    http_token: str | None = None,
     proxy_backend: "DaemonProxyBackend | None" = None,
     silent_owner: "Unanswered | None" = None,
 ) -> FastMCP:
@@ -185,6 +191,11 @@ def create_mcp_server(
     *auth_token* is the bearer token a daemon owner requires. Only an owner has
     one: it listens on a loopback port that every process on the machine can
     reach, and a browser the user merely points at a page can reach it too.
+
+    *http_token* is the bearer token a Direct server's HTTP clients present,
+    configured by the operator. It is a separate credential from *auth_token*,
+    and only a Direct server takes it: that is the only role with an HTTP
+    listener a user's client connects to.
 
     *proxy_backend* is the owner a proxy forwards to, held as an object rather
     than as a bare attachment because which owner that is can change: an upgrade
@@ -202,7 +213,14 @@ def create_mcp_server(
         # owner. Refused rather than ignored, because the mistake it describes
         # is an endpoint that was meant to be authenticated.
         raise ValueError(
-            f"Only a daemon owner authenticates requests, not {role.value}"
+            f"Only a daemon owner requires the frontend token, not {role.value}"
+        )
+    if http_token is not None and role is not ServerRole.DIRECT:
+        # The owner's port is guarded by its own minted token, and a proxy
+        # serves stdio. Accepting the operator's token on either would let it
+        # stand in for the owner's credential or protect nothing.
+        raise ValueError(
+            f"Only a Direct server authenticates HTTP clients, not {role.value}"
         )
     if role is ServerRole.PROXY and proxy_backend is None:
         # A proxy registers no tools of its own, so without an owner it would
@@ -233,6 +251,13 @@ def create_mcp_server(
     # rule, including the owner's, which claims OWNER before it ever gets here.
     set_process_role(role)
 
+    # At most one of the two, by the role checks above.
+    auth: _StaticTokenAuth | None = None
+    if auth_token is not None:
+        auth = _StaticTokenAuth(auth_token)
+    elif http_token is not None:
+        auth = _StaticTokenAuth(http_token, client_id="linkedin-mcp-http-client")
+
     mcp = FastMCP(
         "mcp-server-linkedin",
         version=__version__,
@@ -245,7 +270,7 @@ def create_mcp_server(
         # and then claim to be closing a browser it never had.
         lifespan=browser_lifespan if role.drives_browser else None,
         mask_error_details=True,
-        auth=_StaticTokenAuth(auth_token) if auth_token is not None else None,
+        auth=auth,
     )
     # First, so it is the outermost layer on every role: everything inside it
     # still sees a failure as the exception it raised.
