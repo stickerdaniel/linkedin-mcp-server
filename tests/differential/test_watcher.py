@@ -195,8 +195,10 @@ def test_every_owner_observer_recognises_either_builds_owner(owner):
 #: The deadline of a watcher a test starts, and the bound of every wait on it.
 #: A sample reads the whole process table, which has taken 11s on a loaded Mac
 #: under ``-n 4``, so a wait ends on what the watcher wrote, not on a clock. A
-#: test here needs at most six samples; this bound only ends a hung watcher.
-WATCHER_DEADLINE = 300.0
+#: test here needs at most six samples. Seven tests wait on a watcher, so a
+#: record it never writes costs at most 14 minutes when they run serially,
+#: inside the 25 of the macOS CI job.
+WATCHER_DEADLINE = 120.0
 
 
 def _stand_in_browser(profile: Path) -> subprocess.Popen[bytes]:
@@ -1674,7 +1676,7 @@ def test_the_harness_watcher_trusts_images_only_where_there_is_no_exec(tmp_path)
         row="R",
         browser_dir=tmp_path / "ms-playwright",
     )
-    watcher.start()
+    watcher.start(deadline=WATCHER_DEADLINE)
     summary = watcher.stop()
     assert summary is not None
     assert summary["no_exec"] is (sys.platform == "win32")
