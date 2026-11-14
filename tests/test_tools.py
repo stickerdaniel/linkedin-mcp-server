@@ -162,6 +162,12 @@ def serve_extractor(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], AsyncMoc
             "job_id is not a LinkedIn id",
         ),
         (
+            "job",
+            "submit_easy_apply",
+            {"job_id": "/feed/", "confirm_submit": True},
+            "job_id is not a LinkedIn id",
+        ),
+        (
             "post",
             "search_posts",
             {"keywords": "python", "date_posted": "last-year"},

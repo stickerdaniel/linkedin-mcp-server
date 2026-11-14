@@ -221,6 +221,7 @@ def register_job_tools(
             section_errors reports a form that could not be answered or a draft
             that could not be discarded.
         """
+        job_id = normalize_job_id(job_id)
         extractor = await get_ready_extractor(ctx, tool_name="submit_easy_apply")
         logger.info("Answering Easy Apply form: %s (submit=%s)", job_id, confirm_submit)
 
