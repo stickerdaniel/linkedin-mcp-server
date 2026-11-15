@@ -42,6 +42,14 @@ WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
 
 SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 
+# Easy Apply is ``f_AL=true``. ``f_EA=true`` is a different filter, "Under 10
+# applicants", and the redesigned search applies it without complaint, so a
+# search sent with it returns early-applicant postings that read as Easy Apply
+# ones. Measured on the redesigned search's own filter bar (#1459): the Easy
+# Apply toggle writes ``f_AL=true``, the route keeps it through the
+# ``/jobs/search/`` redirect, and ``f_EA=true`` checks "Under 10 applicants".
+_EASY_APPLY_PARAM = "f_AL=true"
+
 # Content (post) search uses literal ``datePosted`` tokens inside a JSON-list
 # facet, e.g. ``datePosted=["past-week"]`` — unlike job search, which uses
 # ``f_TPR=r<seconds>`` codes. The three hyphenated values are LinkedIn's
@@ -131,7 +139,7 @@ def build_job_search_url(
     if work_type:
         params += f"&f_WT={_normalize_csv(work_type, WORK_TYPE_MAP)}"
     if easy_apply:
-        params += "&f_EA=true"
+        params += f"&{_EASY_APPLY_PARAM}"
     if sort_by:
         mapped = SORT_BY_MAP.get(sort_by.strip(), sort_by)
         params += f"&sortBy={quote_plus(mapped)}"
