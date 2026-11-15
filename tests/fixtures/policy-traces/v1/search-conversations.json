@@ -105,6 +105,13 @@
       "operation": "root_content",
       "program_digest": "e6b2be4ebddd",
       "section": "conversation"
+    },
+    {
+      "call": "search_conversations",
+      "kind": "evaluate",
+      "operation": "page_time_zone",
+      "program_digest": "5d4ce137d9de",
+      "section": "conversation"
     }
   ],
   "result": {
@@ -113,6 +120,10 @@
     ],
     "sections": {
       "search_results": "Conversation content"
+    },
+    "time_zone": {
+      "id": "Europe/Berlin",
+      "utc_offset": "+01:00"
     },
     "url": "https://www.linkedin.com/messaging/?searchTerm=engine"
   },

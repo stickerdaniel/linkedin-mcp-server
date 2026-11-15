@@ -68,7 +68,9 @@ def register_messaging_tools(
         Returns:
             Dict with url, sections (inbox -> raw text), optional references, and
             optional section_errors (inbox -> why click-derived references are
-            incomplete).
+            incomplete). Times in the text are LinkedIn's clock and day
+            strings without a zone; time_zone ({id?, utc_offset}) names the
+            zone they are in, with utc_offset taken at the time of the read.
         """
         extractor = await get_ready_extractor(ctx, tool_name="get_inbox")
         logger.info("Fetching inbox (limit=%d)", limit)
@@ -132,6 +134,9 @@ def register_messaging_tools(
 
         Returns:
             Dict with url, sections (conversation -> raw text), and optional references.
+            Times in the text are LinkedIn's clock and day strings without a
+            zone; time_zone ({id?, utc_offset}) names the zone they are in,
+            with utc_offset taken at the time of the read.
         """
         if not linkedin_username and not thread_id:
             raise InvalidReferenceError(
@@ -197,7 +202,10 @@ def register_messaging_tools(
         Returns:
             Dict with url, sections (search_results -> raw text), optional
             references, and optional section_errors (search_results -> where
-            click-derived references stopped).
+            click-derived references stopped). Times in the text are
+            LinkedIn's clock and day strings without a zone; time_zone
+            ({id?, utc_offset}) names the zone they are in, with utc_offset
+            taken at the time of the read.
         """
         extractor = await get_ready_extractor(ctx, tool_name="search_conversations")
         logger.info("Searching conversations: keywords='%s', limit=%d", keywords, limit)

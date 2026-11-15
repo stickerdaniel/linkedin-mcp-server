@@ -216,6 +216,13 @@
       "operation": "conversation_thread_refs",
       "program_digest": "9ed788195c04",
       "section": "conversation"
+    },
+    {
+      "call": "get_inbox",
+      "kind": "evaluate",
+      "operation": "page_time_zone",
+      "program_digest": "5d4ce137d9de",
+      "section": "conversation"
     }
   ],
   "result": {
@@ -240,6 +247,10 @@
     ],
     "sections": {
       "inbox": "Conversation content"
+    },
+    "time_zone": {
+      "id": "Europe/Berlin",
+      "utc_offset": "+01:00"
     },
     "url": "https://www.linkedin.com/messaging/"
   },

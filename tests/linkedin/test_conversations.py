@@ -28,6 +28,7 @@ from linkedin_mcp_server.linkedin.conversations import (
     _StoppedRow,
     _ThreadRefScan,
     _ThreadResolution,
+    _time_zone_from_page,
     is_conversations_payload_response,
     strip_select_conversation_prefix,
     thread_categories,
@@ -1318,6 +1319,103 @@ class TestGetInbox:
 
         assert [call.args[0] for call in nav.await_args_list] == [MESSAGING, COMPOSE]
         scan.assert_not_awaited()
+
+
+class TestPageTimeZone:
+    """Message times are bare clock strings; the zone is what makes them times."""
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            (
+                {"id": "Asia/Kolkata", "offsetMinutes": 330},
+                {"id": "Asia/Kolkata", "utc_offset": "+05:30"},
+            ),
+            (
+                {"id": "America/St_Johns", "offsetMinutes": -150},
+                {"id": "America/St_Johns", "utc_offset": "-02:30"},
+            ),
+            ({"id": "UTC", "offsetMinutes": 0}, {"id": "UTC", "utc_offset": "+00:00"}),
+            # What a page in a zero-offset zone actually answers.
+            (
+                {"id": "Etc/UTC", "offsetMinutes": -0.0},
+                {"id": "Etc/UTC", "utc_offset": "+00:00"},
+            ),
+            (
+                {"id": "Asia/Kolkata", "offsetMinutes": 330.0},
+                {"id": "Asia/Kolkata", "utc_offset": "+05:30"},
+            ),
+            ({"id": None, "offsetMinutes": 60}, {"utc_offset": "+01:00"}),
+            ({"id": "", "offsetMinutes": -600}, {"utc_offset": "-10:00"}),
+        ],
+    )
+    def test_the_page_answer_becomes_a_name_and_an_offset(
+        self, raw: dict[str, Any], expected: dict[str, str]
+    ):
+        assert _time_zone_from_page(raw) == expected
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            None,
+            "Europe/Berlin",
+            {"id": "Europe/Berlin"},
+            {"id": "Europe/Berlin", "offsetMinutes": True},
+            {"id": "Europe/Berlin", "offsetMinutes": "60"},
+            {"id": "Europe/Berlin", "offsetMinutes": 1.5},
+            {"id": "Europe/Berlin", "offsetMinutes": 1440},
+            {"id": "Europe/Berlin", "offsetMinutes": -1440},
+        ],
+    )
+    def test_an_answer_without_a_real_offset_names_no_zone(self, raw: Any):
+        assert _time_zone_from_page(raw) is None
+
+    async def test_a_read_conversation_names_the_zone_of_its_times(self, mock_page):
+        reader = _reader(mock_page)
+        mock_page.evaluate = AsyncMock(
+            return_value={"id": "Europe/Kyiv", "offsetMinutes": 120}
+        )
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                reader, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                PageContentReader,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=_root("Ada Lovelace 8:20 PM\nSee you on Tuesday"),
+            ),
+        ):
+            result = await reader.get_conversation(thread_id="2-abc")
+
+        assert result["time_zone"] == {"id": "Europe/Kyiv", "utc_offset": "+02:00"}
+        assert result["sections"] == {
+            "conversation": "Ada Lovelace 8:20 PM\nSee you on Tuesday"
+        }
+
+    async def test_a_result_without_text_is_not_asked_about_its_zone(self, mock_page):
+        reader = _reader(mock_page)
+        mock_page.evaluate = AsyncMock(
+            return_value={"id": "Europe/Kyiv", "offsetMinutes": 120}
+        )
+
+        result = await reader._add_time_zone({"url": mock_page.url, "sections": {}})
+
+        assert result == {"url": mock_page.url, "sections": {}}
+        mock_page.evaluate.assert_not_awaited()
+
+    async def test_a_page_that_cannot_answer_keeps_the_read(self, mock_page):
+        from patchright.async_api import Error as PlaywrightError
+
+        reader = _reader(mock_page)
+        mock_page.evaluate = AsyncMock(side_effect=PlaywrightError("page closed"))
+        read = {"url": mock_page.url, "sections": {"inbox": "Ada Lovelace 8:20 PM"}}
+
+        result = await reader._add_time_zone(dict(read))
+
+        assert result == read
 
 
 class TestGetConversation:

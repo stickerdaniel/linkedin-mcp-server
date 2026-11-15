@@ -146,6 +146,13 @@
       "operation": "root_content",
       "program_digest": "e6b2be4ebddd",
       "section": "conversation"
+    },
+    {
+      "call": "get_conversation",
+      "kind": "evaluate",
+      "operation": "page_time_zone",
+      "program_digest": "5d4ce137d9de",
+      "section": "conversation"
     }
   ],
   "result": {
@@ -154,6 +161,10 @@
     ],
     "sections": {
       "conversation": "Conversation content"
+    },
+    "time_zone": {
+      "id": "Europe/Berlin",
+      "utc_offset": "+01:00"
     },
     "url": "https://www.linkedin.com/messaging/thread/2-abc/"
   },
