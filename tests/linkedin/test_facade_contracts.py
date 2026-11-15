@@ -441,7 +441,7 @@ async def test_facade_search_conversations_forwards_its_row_cap(mock_page):
     ):
         await extractor.search_conversations("engine", limit=7)
 
-    refs.assert_awaited_once_with(limit=7, context="search_results")
+    refs.assert_awaited_once_with(limit=7, context="search_results", rows_attached=True)
 
 
 async def test_facade_read_person_keeps_refusing_the_self_alias_by_default(mock_page):

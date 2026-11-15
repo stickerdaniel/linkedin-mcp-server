@@ -705,6 +705,40 @@ class ConversationReader:
             )
             await self._session.delay(pause_time)
 
+    async def _wait_for_conversation_rows(self, context: str) -> bool:
+        """Wait for the first conversation row to attach; False on timeout.
+
+        The conversation list mounts after main text settles, so wait
+        explicitly for at least one label rather than relying on
+        _wait_for_main_text alone (which only checks chrome text). LinkedIn
+        routinely takes several seconds to hydrate the messaging sidebar
+        after a navigation; an empty sidebar (zero matches) returns on
+        timeout.
+
+        Selector is structural (`main li label[aria-label]`) rather than
+        text-prefix-based (`aria-label^="Select conversation"`) so it
+        survives any LinkedIn locale — the verb in the aria-label is
+        locale-dependent, the attribute's presence inside a list-item label
+        is not.
+
+        Wait on `state="attached"` instead of the default `visible`:
+        Ember-managed labels are reliably attached but Playwright's
+        visibility heuristic doesn't always consider them visible.
+        """
+        try:
+            await self._session.page.wait_for_selector(
+                "main li label[aria-label]",
+                state="attached",
+                timeout=10000,
+            )
+        except PlaywrightTimeoutError:
+            logger.debug(
+                "conversation labels did not appear within 10s (context=%s)",
+                context,
+            )
+            return False
+        return True
+
     async def _extract_conversation_thread_refs(
         self,
         limit: int | None,
@@ -712,6 +746,7 @@ class ConversationReader:
         *,
         name_filter: str | None = None,
         scroll_attempts: int = 0,
+        rows_attached: bool | None = None,
     ) -> _ThreadRefScan:
         """Click each visible conversation item and capture the thread URL.
 
@@ -740,34 +775,14 @@ class ConversationReader:
 
         ``scroll_attempts`` bottom scrolls run after the rows attach and before
         they are read, with the same heuristic as the inbox text page.
+
+        ``rows_attached`` is the outcome of a :meth:`_wait_for_conversation_rows`
+        the caller already ran on this page, so a page without rows is not
+        waited on twice. ``None`` waits here.
         """
-        # The conversation list mounts after main text settles, so wait
-        # explicitly for at least one label rather than relying on
-        # _wait_for_main_text alone (which only checks chrome text). LinkedIn
-        # routinely takes several seconds to hydrate the messaging sidebar
-        # after a navigation; an empty sidebar (zero matches) returns on
-        # timeout.
-        #
-        # Selector is structural (`main li label[aria-label]`) rather than
-        # text-prefix-based (`aria-label^="Select conversation"`) so it
-        # survives any LinkedIn locale — the verb in the aria-label is
-        # locale-dependent, the attribute's presence inside a list-item label
-        # is not.
-        #
-        # Wait on `state="attached"` instead of the default `visible`:
-        # Ember-managed labels are reliably attached but Playwright's
-        # visibility heuristic doesn't always consider them visible.
-        try:
-            await self._session.page.wait_for_selector(
-                "main li label[aria-label]",
-                state="attached",
-                timeout=10000,
-            )
-        except PlaywrightTimeoutError:
-            logger.debug(
-                "conversation labels did not appear within 10s (context=%s)",
-                context,
-            )
+        if rows_attached is None:
+            rows_attached = await self._wait_for_conversation_rows(context)
+        if not rows_attached:
             return _ThreadRefScan(refs=[], rows_available=False)
 
         if scroll_attempts > 0:
@@ -1156,6 +1171,13 @@ class ConversationReader:
         await self._session.check_rate_limit()
         await self._session.dismiss_modal()
         await self._wait_for_main_text(log_context="Messaging search")
+        # The text waits for the result rows too. The empty-state message
+        # alone fills main past the text threshold, so a page read before the
+        # rows attach says "no messages" for a search that has matches, and
+        # then the scan clicks those very rows (#703). A search without rows
+        # still reads its text after the wait, and the scan reuses the
+        # outcome instead of waiting a second time.
+        rows_attached = await self._wait_for_conversation_rows("search_results")
 
         raw_result = await self._content._extract_root_content(["main"])
         raw = raw_result["text"]
@@ -1171,7 +1193,7 @@ class ConversationReader:
         # surface per-result thread IDs is to click each row and read the SPA
         # URL. URL-driven search keeps the filter active across clicks.
         scan = await self._extract_conversation_thread_refs(
-            limit=limit, context="search_results"
+            limit=limit, context="search_results", rows_attached=rows_attached
         )
         if scan.refs:
             references = dedupe_references(scan.refs + references)
