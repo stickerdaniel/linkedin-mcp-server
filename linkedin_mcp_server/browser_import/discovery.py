@@ -43,9 +43,9 @@ class BrowserProfile:
     # account-first lookup is the primary key; mac_keychain_service is the
     # fallback.
     mac_keychain_account: str = ""
-    # On-disk profile layout. "profiles" = standard Default/Profile N subdirs;
-    # "flat" = cookies at the user-data root with no Default/ subdir (Opera and
-    # Opera GX, see docs/browser-import-support.md).
+    # On-disk layout of THIS profile. "profiles" = a standard Default/Profile N
+    # subdir; "flat" = the user-data root itself, as Opera and Opera GX kept it
+    # before Opera One (see docs/browser-import-support.md).
     layout: str = "profiles"
 
 
@@ -149,12 +149,15 @@ SUPPORTED_BROWSERS: dict[str, dict[str, object]] = {
         "linux_app_token": "",  # unused (no Linux build)
         "win_subpath": "CocCoc/Browser/User Data",
     },
-    # Opera / Opera GX: flat layout (cookies at the user-data ROOT, no Default/
-    # subdir). Local State still sits at the root, so the install gate is
-    # unchanged. macOS keychain account "Opera" for BOTH (cross-checked:
-    # HackBrowserData browser_darwin.go KeychainLabel "Opera", yt-dlp
-    # cookies.py keyring_name "Opera"). Windows path is under %APPDATA%
-    # (Roaming), which _os_base_dirs already searches. No Opera GX Linux build.
+    # Opera / Opera GX: "flat" means the root MAY hold the profile. Before
+    # Opera One the cookies sat at the user-data ROOT with no Default/ subdir;
+    # Opera One keeps them in the standard Default/ subdir (#555), so discovery
+    # offers the root and then the standard profiles. Local State sits at the
+    # root either way, so the install gate is unchanged. macOS keychain account
+    # "Opera" for BOTH (cross-checked: HackBrowserData browser_darwin.go
+    # KeychainLabel "Opera", yt-dlp cookies.py keyring_name "Opera"). Windows
+    # path is under %APPDATA% (Roaming), which _os_base_dirs already searches.
+    # No Opera GX Linux build.
     "opera": {
         "label": "Opera",
         "safe_storage": "Opera",
@@ -277,7 +280,7 @@ def _glob_profile_dirs(user_data_root: Path) -> list[str]:
 
 
 def _flat_display_name(user_data_root: Path) -> str:
-    """TTY label for a flat-layout (Opera) root that holds a single profile."""
+    """TTY label for the root of a flat-layout (Opera) browser as a profile."""
     info_cache = _read_info_cache(user_data_root / "Local State")
     # Flat browsers still write a Default entry in info_cache when present.
     default = info_cache.get("Default") if info_cache else None
@@ -295,13 +298,22 @@ def enumerate_profiles(
     ``Default`` + ``Profile *`` dirs that contain a ``Preferences`` file when
     ``Local State`` is missing or corrupt.
 
-    With ``layout="flat"`` (Opera) the user-data root itself is the single
-    profile: cookies live at the root with no ``Default/`` subdir, represented
-    by the ``"."`` profile_dir_name so ``root / "." == root`` resolves them.
+    With ``layout="flat"`` (Opera) the user-data root itself comes first, as
+    the ``"."`` profile_dir_name so ``root / "." == root`` resolves its cookies,
+    followed by the standard profiles. Opera kept its profile at the root
+    until Opera One moved it to ``Default/`` (#555), and an install upgraded
+    across that change can hold both. Each candidate is offered and
+    ``discover_profiles`` keeps those with a cookies database; which one holds
+    the live session is decided later, by ``li_at`` recency.
     """
+    profiles = _standard_profiles(user_data_root)
     if layout == "flat":
-        return [(".", _flat_display_name(user_data_root))]
+        return [(".", _flat_display_name(user_data_root)), *profiles]
+    return profiles
 
+
+def _standard_profiles(user_data_root: Path) -> list[tuple[str, str]]:
+    """The ``Default`` / ``Profile N`` profiles under ``user_data_root``."""
     skip = {"Guest Profile", "System Profile"}
     info_cache = _read_info_cache(user_data_root / "Local State")
     profiles: list[tuple[str, str]] = []
@@ -367,7 +379,7 @@ def discover_profiles(browser: str | None = None) -> list[BrowserProfile]:
                     local_state_path=root / "Local State",
                     mac_keychain_service=str(spec.get("mac_keychain_service", "")),
                     mac_keychain_account=str(spec.get("mac_keychain_account", "")),
-                    layout=layout,
+                    layout="flat" if dir_name == "." else "profiles",
                 )
             )
     logger.debug(
