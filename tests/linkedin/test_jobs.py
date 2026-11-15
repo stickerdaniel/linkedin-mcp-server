@@ -963,7 +963,7 @@ class TestSearchJobs:
         [
             (None, False),
             (
-                "https://www.linkedin.com/jobs/search/?keywords=python&f_EA=true",
+                "https://www.linkedin.com/jobs/search/?keywords=python&f_AL=true",
                 True,
             ),
         ],
@@ -1002,21 +1002,21 @@ class TestSearchJobs:
         ):
             result = await reader.search_jobs(
                 "python",
-                job_type="x&f_EA=true",
+                job_type="x&f_AL=true",
                 easy_apply=True,
                 max_pages=1,
             )
 
         assert result["url"] == (
             "https://www.linkedin.com/jobs/search/"
-            "?keywords=python&f_JT=x%26f_EA%3Dtrue&f_EA=true"
+            "?keywords=python&f_JT=x%26f_AL%3Dtrue&f_AL=true"
         )
         assert result["job_ids"] == ["901"]
         if expected_dropped:
             error = result["section_errors"]["search_results"]
             assert error["error_type"] == "filters_dropped"
             assert "f_JT" in error["error_message"]
-            assert "did not keep f_EA" not in error["error_message"]
+            assert "did not keep f_AL" not in error["error_message"]
         else:
             assert "section_errors" not in result
 
@@ -1834,7 +1834,8 @@ class TestSearchJobs:
         assert "location=Remote" in result["url"]
         assert "f_TPR=r604800" in result["url"]
         assert "f_WT=2" in result["url"]
-        assert "f_EA=true" in result["url"]
+        assert "f_AL=true" in result["url"]
+        assert "f_EA" not in result["url"]
         assert mock_extract.await_count == 1
 
     async def test_page_texts_joined_with_separator(self, mock_page):
