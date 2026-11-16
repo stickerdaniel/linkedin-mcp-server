@@ -386,7 +386,7 @@
         "max_scrolls": {
           "anyOf": [
             {
-              "maximum": 20,
+              "maximum": 12,
               "minimum": 1,
               "type": "integer"
             },
@@ -395,7 +395,7 @@
             }
           ],
           "default": null,
-          "description": "Maximum feed scrolls before returning what has loaded\n(1-20). Default (None) uses 12. Each scroll waits up to ~6 s\nfor a new batch, so a lower value returns sooner with fewer\nposts."
+          "description": "Maximum feed scrolls before returning what has loaded\n(1-12). Default (None) uses 12. Each scroll can wait up to\n~12 s for a new batch, so a lower value returns sooner with\nfewer posts."
         },
         "num_posts": {
           "default": 10,
