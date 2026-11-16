@@ -109,6 +109,7 @@ class TestFeedListenerLifecycle:
             num_posts: int,
             captured_urls: list[str],
             pending_reads: list[asyncio.Task[None]],
+            max_scrolls: int | None = None,
         ) -> ExtractedSection:
             assert url == "https://www.linkedin.com/feed/"
             assert num_posts == 3
@@ -141,6 +142,7 @@ class TestFeedListenerLifecycle:
             num_posts: int,
             captured_urls: list[str],
             pending_reads: list[asyncio.Task[None]],
+            max_scrolls: int | None = None,
         ) -> ExtractedSection:
             task = asyncio.create_task(failing_read())
             await asyncio.wait({task})
@@ -186,7 +188,9 @@ class TestExtractFeedFailures:
 
     @staticmethod
     def _once_raising(error: Exception):
-        async def _extract_feed_once(num_posts: int) -> ExtractedSection:
+        async def _extract_feed_once(
+            num_posts: int, max_scrolls: int | None = None
+        ) -> ExtractedSection:
             raise error
 
         return _extract_feed_once
@@ -276,6 +280,32 @@ class TestFeedScrollCeiling:
         # requested count is still nowhere near when the loop gives up.
         assert len(result.references) == self._CEILING
         assert len(result.references) < self._NUM_POSTS
+        page.assert_clean()
+
+    async def test_max_scrolls_lowers_the_ceiling(self):
+        max_scrolls = 3
+        recorder = TraceRecorder(
+            "feed-scroll-max-scrolls",
+            _COMMON_ALLOWED | {"response.body.start", "response.body.finish"},
+        )
+        clock = FakeClock(recorder)
+        page = _page(recorder).script("evaluate:root_content", _root("Feed content"))
+        page.script("evaluate:feed_post_boundaries", {"posts": []})
+        page.script(
+            "mouse.wheel",
+            *[self._one_batch_per_wheel(page, index) for index in range(max_scrolls)],
+        )
+        reader = _reader(page)
+
+        async with boundaries(recorder, clock):
+            with recorder.context("extract_feed", "feed"):
+                result = await reader.extract_feed(
+                    num_posts=self._NUM_POSTS, max_scrolls=max_scrolls
+                )
+
+        wheels = [event for event in recorder.events if event["kind"] == "mouse.wheel"]
+        assert len(wheels) == max_scrolls
+        assert len(result.references) == max_scrolls
         page.assert_clean()
 
 
@@ -978,7 +1008,9 @@ class TestFeedToolDeadline:
 
         reads: list[asyncio.Task[None]] = []
 
-        async def extract_feed(num_posts: int = 1) -> ExtractedSection:
+        async def extract_feed(
+            num_posts: int = 1, max_scrolls: int | None = None
+        ) -> ExtractedSection:
             started = asyncio.Event()
 
             async def read() -> None:

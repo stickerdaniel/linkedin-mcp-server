@@ -11,6 +11,7 @@ from linkedin_mcp_server.linkedin.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     ExtractedSection,
 )
+from linkedin_mcp_server.linkedin.feed import FeedReader
 from linkedin_mcp_server.linkedin.link_metadata import Reference
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
 
@@ -75,3 +76,17 @@ class TestEveryNormalizedEntryPoint:
 
         capture.assert_not_called()
         navigate.assert_not_called()
+
+
+class TestFeedArguments:
+    async def test_max_scrolls_reaches_the_feed_reader(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            FeedReader,
+            "extract_feed",
+            new_callable=AsyncMock,
+            return_value=extracted("Feed content"),
+        ) as extract_feed:
+            await extractor.extract_feed(num_posts=5, max_scrolls=3)
+
+        extract_feed.assert_awaited_once_with(5, 3)
