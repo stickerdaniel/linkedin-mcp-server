@@ -2940,11 +2940,11 @@ class TestFeedTools:
             num_posts=10, max_scrolls=None
         )
 
-    @pytest.mark.parametrize("max_scrolls", [0, 21])
+    @pytest.mark.parametrize("max_scrolls", [0, 13])
     async def test_get_feed_rejects_out_of_range_max_scrolls(
         self, mock_context, max_scrolls
     ):
-        """max_scrolls stays within 1-20, below the tool timeout."""
+        """max_scrolls stays within 1-12: it can only shorten the default read."""
         from fastmcp.exceptions import ValidationError
 
         from linkedin_mcp_server.tools.feed import register_feed_tools

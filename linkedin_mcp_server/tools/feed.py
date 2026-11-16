@@ -38,7 +38,7 @@ def register_feed_tools(
     async def get_feed(
         ctx: Context,
         num_posts: Annotated[int, Field(ge=1, le=50)] = 10,
-        max_scrolls: Annotated[int, Field(ge=1, le=20)] | None = None,
+        max_scrolls: Annotated[int, Field(ge=1, le=12)] | None = None,
     ) -> dict[str, Any]:
         """
         Get posts from the authenticated user's LinkedIn feed.
@@ -49,9 +49,9 @@ def register_feed_tools(
                        Posts are loaded in batches of ~5 as the page scrolls,
                        so the actual count may slightly exceed the target.
             max_scrolls: Maximum feed scrolls before returning what has loaded
-                (1-20). Default (None) uses 12. Each scroll waits up to ~6 s
-                for a new batch, so a lower value returns sooner with fewer
-                posts.
+                (1-12). Default (None) uses 12. Each scroll can wait up to
+                ~12 s for a new batch, so a lower value returns sooner with
+                fewer posts.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional keys:
