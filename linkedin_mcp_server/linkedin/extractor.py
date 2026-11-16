@@ -82,9 +82,11 @@ class LinkedInExtractor:
             text, scope=scope, timeout=timeout
         )
 
-    async def extract_feed(self, num_posts: int = 10) -> ExtractedSection:
+    async def extract_feed(
+        self, num_posts: int = 10, max_scrolls: int | None = None
+    ) -> ExtractedSection:
         """Read the LinkedIn home feed, scrolling until enough posts load."""
-        return await self._feed.extract_feed(num_posts)
+        return await self._feed.extract_feed(num_posts, max_scrolls)
 
     async def extract_page(
         self,

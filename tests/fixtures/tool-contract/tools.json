@@ -383,6 +383,20 @@
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
+        "max_scrolls": {
+          "anyOf": [
+            {
+              "maximum": 20,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum feed scrolls before returning what has loaded\n(1-20). Default (None) uses 12. Each scroll waits up to ~6 s\nfor a new batch, so a lower value returns sooner with fewer\nposts."
+        },
         "num_posts": {
           "default": 10,
           "description": "Number of posts to fetch (1-50, default 10).\n       Posts are loaded in batches of ~5 as the page scrolls,\n       so the actual count may slightly exceed the target.",
