@@ -1,15 +1,23 @@
 # .github/workflows/forwarder-compat.yml
 #
-# The frontend's forwarder against the newest FastMCP and MCP SDK the declared
-# ranges allow, rather than the locked ones.
+# The frontend's forwarder against the newest FastMCP, MCP SDK and httpx2
+# releases, rather than the locked ones.
 #
-# `uvx` resolves both fresh on every install, so a user can run a release the
-# lock never saw. The forwarder reaches both through public names only
-# (tests/test_daemon_forwarder.py holds that line), and this job is what shows
-# that the public names still behave: the hop's pinned protocol version, the
-# dispatch record read off the wire, progress, and the fidelity of what a
-# client reads. A failure here means a release inside the declared range breaks
-# forwarding, before a user meets it.
+# `uvx` resolves all three fresh on every install, inside the ranges
+# `pyproject.toml` declares. Those ranges stop at the next minor, so a new
+# minor reaches users only through the Renovate pull request that raises the
+# cap, and this workflow runs on that pull request. The forwarder reaches the
+# libraries through public names only (tests/test_daemon_forwarder.py holds
+# that line), and this job is what shows that the public names still behave:
+# the hop's pinned protocol version, the dispatch record read off the wire,
+# progress, and the fidelity of what a client reads.
+#
+# Two ranges run:
+# - `declared`: the newest releases the declared ranges allow, what a user
+#   installs today. A failure here reaches users.
+# - `major`: the newest releases below the next major, on the schedule and on
+#   dispatch only. A failure here reaches nobody yet. It names the minor that
+#   will fail its Renovate pull request, days before that pull request opens.
 name: Forwarder compatibility
 
 on:
@@ -36,8 +44,16 @@ concurrency:
 
 jobs:
   newest:
-    name: Forwarding on the newest allowed FastMCP and MCP
+    name: Forwarding on the newest FastMCP and MCP
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        range: [declared, major]
+        # A pull request tests what its own ranges allow; a release beyond
+        # them is not that pull request's failure.
+        exclude:
+          - range: ${{ github.event_name == 'pull_request' && 'major' || 'none' }}
     # The selection below runs in well under a minute locally; the bound is for
     # a wedged hop, which would otherwise hold the runner for six hours.
     timeout-minutes: 15
@@ -53,12 +69,21 @@ jobs:
         with:
           enable-cache: true
 
-      # Re-resolved inside the ranges `pyproject.toml` declares, so a major
-      # release outside them is not tested here: that is a deliberate bump.
-      # Their own dependencies move with them as the resolver needs. The lock
-      # this writes stays on the runner.
-      - name: Resolve the newest allowed FastMCP and MCP
-        run: uv sync --group dev --upgrade-package fastmcp --upgrade-package mcp
+      # Re-resolved inside the ranges `pyproject.toml` declares. Their own
+      # dependencies move with them as the resolver needs. The lock this
+      # writes stays on the runner.
+      - name: Resolve the newest declared FastMCP, MCP and httpx2
+        run: >-
+          uv sync --group dev
+          --upgrade-package fastmcp --upgrade-package mcp --upgrade-package httpx2
+
+      # Past the minor caps, up to the next major, which is a deliberate bump
+      # and not tested here.
+      - name: Install the newest FastMCP, MCP and httpx2 below the next major
+        if: matrix.range == 'major'
+        run: >-
+          uv pip install "fastmcp<5" "mcp<3" "httpx2<3"
+          --upgrade-package fastmcp --upgrade-package mcp --upgrade-package httpx2
 
       - name: Report the versions under test
         run: >-
