@@ -39,13 +39,17 @@ classifiers = [
     "Environment :: Console",
     "Operating System :: OS Independent",
 ]
+# fastmcp, httpx2 and mcp stop at the next minor. `uvx` resolves these ranges,
+# not uv.lock, so a wider cap ships every new minor to users untested. Renovate
+# raises a cap in a pull request that forwarder-compat.yml tests; see
+# docs/decisions/2026-11-17-cap-the-mcp-ecosystem-at-the-next-minor.md.
 dependencies = [
     "anyio>=4.13.0",
     "cryptography>=50.0.1",
-    "fastmcp>=4.1.7,<5",
-    "httpx2>=2.13.1,<3",
+    "fastmcp>=4.2.0,<4.3.0",
+    "httpx2>=2.16.2,<2.17.0",
     "inquirer>=3.4.0",
-    "mcp>=2.2.0,<3",
+    "mcp>=2.3.0,<2.4.0",
     "opentelemetry-api>=1.45.1",
     "packaging>=26.2",
     "patchright>=1.55.0",
