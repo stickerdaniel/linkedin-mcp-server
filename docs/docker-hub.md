@@ -29,13 +29,15 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 
 ## Quick Start
 
-The image ships full Chromium. Log in once through a browser the container shows you in your own browser tab.
+The image ships full Chromium. Create the session directory first, so the container can save your session into it: `mkdir -p ~/.linkedin-mcp` (on Windows, `%USERPROFILE%\.linkedin-mcp`).
+
+**Sign in from the chat.** In Claude Desktop, and any other client that shows MCP Apps, a tool without a session asks the assistant to call `open_login`, which opens the LinkedIn sign-in inside the chat. Click and type in the page; Ctrl+V (Cmd+V on a Mac) pastes any text. No port is published for this.
+
+**Or sign in with the login viewer**, from any client: the container shows its login browser in your own browser tab.
 
 macOS / Linux:
 
 ```bash
-# Create the directory first so the container can save your session into it
-mkdir -p ~/.linkedin-mcp
 docker run -it --rm \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
   -p 127.0.0.1:6080:6080 \
@@ -130,7 +132,7 @@ Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSO
 | `TIMEOUT` | `5000` | Browser timeout in milliseconds |
 | `TOOL_TIMEOUT` | `180` | Timeout for a whole tool call, in seconds. Raise it for calls that read many pages, slow networks, or a cold-start browser. |
 | `LOGIN_TIMEOUT` | `1800` | How long the login browser waits for you to finish signing in, in seconds (`0` = no limit). The Docker viewer ends the login after 30 minutes either way. |
-| `LOGIN_INLINE_WAIT` | `25` | How long a tool call waits for a login to finish, in seconds (max 45). Not used in Docker, where `--login --login-viewer` is the login path. |
+| `LOGIN_INLINE_WAIT` | `25` | How long a tool call waits for a login to finish, in seconds (max 45). Not used in Docker, where `open_login` or `--login --login-viewer` signs in. |
 | `BROWSER_WAIT` | `25` | How long to wait for another server process to hand over the shared browser, in seconds (max 45; `0` = report busy at once). |
 | `BROWSER_MIN_HOLD` | `20` | Shortest time a process keeps the shared browser before handing it over, in seconds. Clamped to 3 seconds below `BROWSER_WAIT`, so raise that one along with it. Higher means fewer browser restarts but longer waits for other clients. |
 | `BROWSER_IDLE_TIMEOUT` | `600` | Close an idle browser and release the profile after this many seconds without a tool call (`0` = keep it open). |
