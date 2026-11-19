@@ -9,8 +9,9 @@ lose the signal or act on it wrongly.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Generator
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -25,6 +26,7 @@ from fastmcp.tools import ToolResult
 from owner_hop import Forward, Interceptor, method_of
 
 from linkedin_mcp_server.daemon import auth_repair as daemon_auth
+from linkedin_mcp_server.daemon import proxy as daemon_proxy
 from linkedin_mcp_server.daemon.auth_repair import (
     MARKER_KEY,
     MARKER_VERSION,
@@ -562,6 +564,40 @@ class TestTheRepairRunsForReal:
             _auth_ready=lambda *a, **k: bool(done),
         )
 
+    @contextlib.contextmanager
+    def _the_deadline_passes_once(
+        self, passed: asyncio.Event
+    ) -> Generator[list[float]]:
+        """Pass the call's deadline when *passed* is set, and not before.
+
+        Every wait a call makes goes through ``proxy._by`` with the call's one
+        deadline. Here each wait also ends the way that deadline ends it once
+        *passed* is set, so a test chooses the step the deadline lands in. A
+        budget raced against the wall clock instead lands wherever the runner
+        stalls: a pause before the repair's answer spent a one second budget
+        before the replay ever started. Yields every deadline a wait was given.
+        """
+        real_by = daemon_proxy._by
+        deadlines: list[float] = []
+
+        async def by[T](deadline: float, awaitable: Awaitable[T]) -> T:
+            deadlines.append(deadline)
+            work = asyncio.ensure_future(real_by(deadline, awaitable))
+            passing = asyncio.ensure_future(passed.wait())
+            try:
+                await asyncio.wait({work, passing}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                passing.cancel()
+            if not work.done():
+                work.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await work
+                raise daemon_proxy._OutOfTime
+            return work.result()
+
+        with patch.object(daemon_proxy, "_by", by):
+            yield deadlines
+
     @pytest.fixture(autouse=True)
     def _short_budget(self, monkeypatch):
         """Scale the inline wait down, keeping the shape of the real timings.
@@ -663,23 +699,31 @@ class TestTheRepairRunsForReal:
         timeout" left the subtraction untested: dropping ``- already_spent``
         yields five sixths of the budget, which is still under it, and the test
         stayed green while the overrun it exists for came back.
+
+        The deadline passes once the wait has begun, never on the wall clock: a
+        one second budget raced against the runner was spent by a pause before
+        the wait was reached, and the test then saw no wait at all.
         """
-        budget = 1.2
+        # The TOOL_TIMEOUT above, which no step of this call comes near.
+        budget = 60.0
         owner, calls = _owner_that_fails_with(
             AuthMissingOnOwnerError("no session", nothing_ran_yet=True)
         )
         asked_for: list[float] = []
+        waiting = asyncio.Event()
 
         real_wait = daemon_auth._wait_for_the_sign_in
 
         async def record(timeout: float) -> bool:
             asked_for.append(timeout)
+            waiting.set()
             return await real_wait(timeout)
 
         with (
             self._profile_is_free(),
             self._a_login_that(takes=30.0),
             patch.object(daemon_auth, "_wait_for_the_sign_in", record),
+            self._the_deadline_passes_once(waiting),
         ):
             async with Client(_proxy_to(owner, budget=budget)) as client:
                 result = await client.call_tool("read_page", raise_on_error=False)
@@ -714,9 +758,13 @@ class TestTheRepairRunsForReal:
 
         Read-only, which is what makes giving up safe here: an abandoned read
         costs a wasted page load. The mutating case below must not do this.
+
+        The deadline passes once the replay has started, never on the wall
+        clock, and every wait of the call must have been given that deadline.
         """
         owner = FastMCP("owner", mask_error_details=True)
         calls: list[int] = []
+        replaying = asyncio.Event()
 
         @owner.tool(annotations={"readOnlyHint": True})
         async def read_page() -> str:
@@ -726,15 +774,23 @@ class TestTheRepairRunsForReal:
                     AuthMissingOnOwnerError("no session", nothing_ran_yet=True),
                     "read_page",
                 )
+            replaying.set()
             await asyncio.sleep(30)  # a replay that outlives the call
             return "read ok"
 
         owner.add_middleware(OwnerAuthSignalMiddleware())
-        with self._profile_is_free(), self._a_login_that(takes=0.05):
-            async with Client(_proxy_to(owner, budget=1.0)) as client:
+        with (
+            self._profile_is_free(),
+            self._a_login_that(takes=0.05),
+            self._the_deadline_passes_once(replaying) as deadlines,
+        ):
+            async with Client(_proxy_to(owner, budget=20.0)) as client:
                 result = await client.call_tool("read_page", raise_on_error=False)
 
         assert len(calls) == 2, "the replay never ran"
+        # Every wait of the call, the replay's included, ended at one deadline,
+        # so the replay got no budget of its own.
+        assert len(set(deadlines)) == 1, deadlines
         # The owner's own words, not a timeout: the client is told what happened
         # and that retrying now works.
         assert result.is_error is True
