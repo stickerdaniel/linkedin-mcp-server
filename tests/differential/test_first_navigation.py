@@ -429,6 +429,17 @@ async def test_a_parser_blocking_script_leaves_domcontentloaded_missing(tmp_path
                             lambda request: request.url.endswith("/stalled.js"),
                         ),
                     )
+                    # The cut-off navigation is quick, so the browser could close
+                    # before the sampler ever saw it; the lifetimes asserted below
+                    # need both processes identified while they still run.
+                    await _sampled(
+                        lifetimes,
+                        lambda document: (
+                            {p["role"] for p in document.get("processes", [])}
+                            >= {"browser-root", "driver"}
+                        ),
+                        "the browser root and driver were not identified",
+                    )
     finally:
         lifetimes.stop(exc=None, requested=requested_ends(path))
     record = _record(path)
