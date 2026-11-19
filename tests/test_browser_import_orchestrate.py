@@ -567,3 +567,67 @@ class TestWaitingForARetiringOwner:
             release()
 
         assert time.monotonic() - started < 0.5
+
+
+@pytest.mark.asyncio
+async def test_cookie_import_stages_validates_and_persists(monkeypatch, tmp_path):
+    """Cookies handed over from the environment take the same path a browser's do:
+    retire the old profile, stage the full set, prove /feed/, then commit."""
+    from linkedin_mcp_server.browser_import.orchestrate import (
+        import_session_from_cookies,
+    )
+
+    user_data_dir = tmp_path / "profile"
+    order: list[str] = []
+    monkeypatch.setattr(
+        orchestrate,
+        "rotate_shielded",
+        AsyncMock(side_effect=lambda *a: order.append("rotate")),
+    )
+
+    async def validate(cookie_path, profile_dir):
+        order.append("validate")
+        names = {c["name"] for c in json.loads(Path(cookie_path).read_text())}
+        assert names == {"li_at", "JSESSIONID"}
+        return True
+
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.validate_imported_cookies", validate
+    )
+
+    assert await import_session_from_cookies(
+        [_cookie("li_at", "secret"), _cookie("JSESSIONID", '"ajax:1"')],
+        user_data_dir=user_data_dir,
+    )
+    assert order == ["rotate", "validate"]
+    assert source_state_path(user_data_dir).exists()
+    mode = stat.S_IMODE(os.stat(portable_cookie_path(user_data_dir)).st_mode)
+    assert mode == 0o600
+
+
+@pytest.mark.asyncio
+async def test_rejected_cookie_import_restores_the_previous_session(
+    monkeypatch, tmp_path
+):
+    from linkedin_mcp_server.browser_import.orchestrate import (
+        import_session_from_cookies,
+    )
+
+    user_data_dir = tmp_path / "profile"
+    retired = tmp_path / "invalid-state-x"
+    restore = MagicMock(return_value=True)
+    monkeypatch.setattr(orchestrate, "rotate_shielded", AsyncMock(return_value=retired))
+    monkeypatch.setattr(orchestrate, "restore_source_profile", restore)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.validate_imported_cookies",
+        AsyncMock(return_value=False),
+    )
+
+    assert (
+        await import_session_from_cookies(
+            [_cookie("li_at")], user_data_dir=user_data_dir
+        )
+        is False
+    )
+    restore.assert_called_once_with(retired, user_data_dir)
+    assert not portable_cookie_path(user_data_dir).exists()

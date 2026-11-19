@@ -23,6 +23,7 @@ __all__ = [
     "discover_profiles",
     "extract_linkedin_cookies",
     "import_session_from_browser",
+    "import_session_from_cookies",
 ]
 
 
@@ -35,3 +36,14 @@ def import_session_from_browser(
     from .orchestrate import import_session_from_browser as _impl
 
     return _impl(browser, user_data_dir=user_data_dir)
+
+
+def import_session_from_cookies(
+    cookies: list[LinkedInCookie],
+    *,
+    user_data_dir: Path,
+) -> Coroutine[Any, Any, bool]:
+    """Lazy entry point for a session handed over as cookies (see env_cookies)."""
+    from .orchestrate import import_session_from_cookies as _impl
+
+    return _impl(cookies, user_data_dir=user_data_dir)
