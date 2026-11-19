@@ -108,6 +108,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `search_posts` | Search posts by keyword, optionally filtered by recency or content type. |
 | `get_session_status` | Check your saved login and browser state without opening a browser. |
 | `close_session` | Close the shared browser session without deleting your saved login. |
+| `open_login` | Show the LinkedIn sign-in inside the chat, in clients that display MCP Apps. |
 
 <br/>
 <br/>
@@ -466,13 +467,21 @@ Both run the latest server release. On the first tool call that needs authentica
 
 ### Authentication
 
-Log in once. The container opens a LinkedIn login browser that you drive from your own browser tab.
+Create the session directory first, so the container can save your session into it:
+
+```bash
+mkdir -p ~/.linkedin-mcp
+```
+
+On Windows, create `%USERPROFILE%\.linkedin-mcp`.
+
+**Sign in from the chat.** Add the server to your MCP client as shown below and ask for something on LinkedIn. Without a session, the tool asks the assistant to call `open_login`. Claude Desktop, and any other client that shows MCP Apps, then opens the LinkedIn sign-in inside the chat. Click and type in the page; Ctrl+V (Cmd+V on a Mac) pastes any text, such as a password from your password manager. When the view says Signed in, the assistant retries the tool. No port is published for this. The sign-in stops with the server, also with `--login-timeout 0`.
+
+**Or sign in with the login viewer**, from any client or when the page in the chat does not work for your sign-in. The container opens a LinkedIn login browser that you drive from your own browser tab.
 
 macOS / Linux:
 
 ```bash
-# Create the directory first so the container can save your session into it
-mkdir -p ~/.linkedin-mcp
 docker run -it --rm \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
   -p 127.0.0.1:6080:6080 \
@@ -543,7 +552,7 @@ username.
 > `$env:USERPROFILE\.linkedin-mcp` before passing it to Docker.
 
 > [!NOTE]
-> Sessions expire over time. When tool calls start asking for authentication, repeat the login command above, or run `uvx mcp-server-linkedin@latest --login` on the host.
+> Sessions expire over time. When tool calls start asking for authentication, sign in from the chat again, repeat the login viewer command above, or run `uvx mcp-server-linkedin@latest --login` on the host.
 
 ### Setup Help
 

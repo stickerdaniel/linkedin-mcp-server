@@ -1,0 +1,304 @@
+"""Browser-DOM tests for the sign-in view's page, ``login_app/viewer.html``.
+
+The page runs in headless Chromium. All but the last case replace the MCP
+Apps SDK with a stand-in ``App`` that records every ``callServerTool`` call and
+lets the test answer it, so each case is a claim about the page and never
+about a host. The last case loads the page exactly as the server serves it and
+checks that the inlined SDK hands the page its ``App``. Skipped automatically
+when Chromium is not installed.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from importlib import resources
+from typing import Any
+
+import pytest
+from patchright.async_api import async_playwright
+
+from linkedin_mcp_server.login_app import viewer_html
+
+pytestmark = [
+    pytest.mark.browser_dom,
+    pytest.mark.xdist_group("browser_runtime"),
+]
+
+ORIGIN = "https://view.invalid"
+#: The modifier that makes the browser paste on this platform.
+PASTE = "Meta" if sys.platform == "darwin" else "Control"
+#: A valid 1x1 PNG, so the image has a size to click on.
+PIXEL = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+
+SDK_STAND_IN = """
+class App {
+  constructor() { window.bridge = this; this.calls = []; }
+  connect() { return new Promise((resolve) => { this.resolveConnect = resolve; }); }
+  getHostContext() { return { theme: 'light' }; }
+  callServerTool(params) {
+    return new Promise((resolve, reject) => this.calls.push({ params, resolve, reject }));
+  }
+}
+globalThis.linkedinLoginSdk = { App };
+"""
+
+VIEW = {"_meta": {"linkedin.dev/login-view": {"grant": "G1", "attempt_id": "A1"}}}
+
+
+def _template() -> str:
+    return (
+        resources.files("linkedin_mcp_server") / "login_app" / "viewer.html"
+    ).read_text(encoding="utf-8")
+
+
+@pytest.fixture
+async def browser_page():
+    async with async_playwright() as p:
+        try:
+            browser = await p.chromium.launch(channel="chromium", headless=True)
+            page = await browser.new_page()
+        except Exception as exc:  # browser binary missing
+            pytest.skip(f"chromium unavailable: {exc}")
+        page.set_default_timeout(3000)
+        try:
+            yield page
+        finally:
+            await browser.close()
+
+
+async def _serve(page: Any, html: str, *, host: str | None = None) -> None:
+    """Serve *html* as the view, optionally inside a *host* page that frames it."""
+
+    async def serve(route: Any) -> None:
+        url = route.request.url
+        if url.startswith(f"{ORIGIN}/view.html"):
+            await route.fulfill(content_type="text/html", body=html)
+        elif host is not None and url.startswith(f"{ORIGIN}/host.html"):
+            await route.fulfill(content_type="text/html", body=host)
+        else:
+            await route.abort()
+
+    await page.route("**/*", serve)
+    await page.goto(f"{ORIGIN}/{'view' if host is None else 'host'}.html")
+
+
+@pytest.fixture
+async def viewer(browser_page: Any) -> Any:
+    """The page with the SDK stand-in, loaded and not yet connected."""
+    html = _template().replace(
+        "<!--EXT_APPS_SDK-->", f'<script type="module">{SDK_STAND_IN}</script>', 1
+    )
+    await _serve(browser_page, html)
+    await browser_page.wait_for_function("window.bridge !== undefined")
+    return browser_page
+
+
+async def calls(page: Any, name: str) -> list[dict[str, Any]]:
+    return await page.evaluate(
+        "name => bridge.calls.filter(c => c.params.name === name).map(c => c.params.arguments)",
+        name,
+        isolated_context=False,
+    )
+
+
+async def answer(page: Any, name: str, index: int, result: dict[str, Any]) -> None:
+    await page.evaluate(
+        """([name, index, result]) =>
+            bridge.calls.filter(c => c.params.name === name)[index].resolve(result)""",
+        [name, index, result],
+        isolated_context=False,
+    )
+
+
+async def wait_for_calls(page: Any, name: str, count: int) -> None:
+    await page.wait_for_function(
+        "([name, count]) => bridge.calls.filter(c => c.params.name === name).length >= count",
+        arg=[name, count],
+    )
+
+
+def frame(**reply: Any) -> dict[str, Any]:
+    content: list[dict[str, Any]] = [{"type": "text", "text": json.dumps(reply)}]
+    if reply.get("frame") == "image":
+        content.append({"type": "image", "data": PIXEL, "mimeType": "image/png"})
+    return {"content": content}
+
+
+LIVE = frame(
+    access="full",
+    state="signing_in",
+    frame="image",
+    hash="h1",
+    page_id="p1",
+    geometry="800x600",
+)
+
+
+async def connect(page: Any) -> None:
+    await page.evaluate("bridge.resolveConnect()", isolated_context=False)
+
+
+async def give_grant(page: Any) -> None:
+    await page.evaluate(
+        "view => bridge.ontoolresult(view)", VIEW, isolated_context=False
+    )
+
+
+async def live(page: Any) -> None:
+    """Connected, granted, and showing the first frame."""
+    await connect(page)
+    await give_grant(page)
+    await wait_for_calls(page, "login_view_frame", 1)
+    await answer(page, "login_view_frame", 0, LIVE)
+    await page.wait_for_function(
+        "document.getElementById('text').textContent.startsWith('Live.')"
+    )
+
+
+@pytest.mark.parametrize(
+    "grant_first", [True, False], ids=["grant first", "connection first"]
+)
+async def test_polling_starts_once_both_the_connection_and_a_grant_exist(
+    viewer: Any, grant_first: bool
+):
+    first, second = (give_grant, connect) if grant_first else (connect, give_grant)
+
+    await first(viewer)
+    await viewer.wait_for_timeout(150)
+    assert await calls(viewer, "login_view_frame") == []
+
+    await second(viewer)
+    await wait_for_calls(viewer, "login_view_frame", 1)
+    await viewer.wait_for_timeout(150)
+
+    assert await calls(viewer, "login_view_frame") == [
+        {"grant": "G1", "attempt_id": "A1", "after": "", "budget_s": 1.5}
+    ]
+
+
+async def test_a_paste_is_sent_once_and_its_shortcut_is_not(viewer: Any):
+    await live(viewer)
+    await viewer.evaluate(
+        """text => {
+            const field = document.createElement('textarea');
+            field.id = 'source';
+            field.value = text;
+            document.body.append(field);
+            field.select();
+        }""",
+        "pässwörd ✓ 🔑",
+    )
+    await viewer.keyboard.press(f"{PASTE}+KeyC")
+    await viewer.evaluate("document.getElementById('source').remove()")
+
+    await viewer.click("#screen")
+    await wait_for_calls(viewer, "login_view_input", 1)
+    await answer(
+        viewer, "login_view_input", 0, frame(access="full", input="applied", applied=1)
+    )
+    await viewer.keyboard.press(f"{PASTE}+KeyV")
+    await wait_for_calls(viewer, "login_view_input", 2)
+    await viewer.wait_for_timeout(150)
+
+    sent = await calls(viewer, "login_view_input")
+    assert [call["events"] for call in sent[1:]] == [
+        [{"type": "paste", "text": "pässwörd ✓ 🔑"}]
+    ]
+
+
+async def test_input_waits_for_the_batch_in_flight_and_keeps_its_order(viewer: Any):
+    await live(viewer)
+
+    await viewer.click("#screen")
+    await wait_for_calls(viewer, "login_view_input", 1)
+    await viewer.keyboard.type("ab")
+    await viewer.keyboard.press("Enter")
+    await viewer.wait_for_timeout(150)
+    assert len(await calls(viewer, "login_view_input")) == 1
+
+    await answer(
+        viewer, "login_view_input", 0, frame(access="full", input="applied", applied=1)
+    )
+    await wait_for_calls(viewer, "login_view_input", 2)
+
+    first, second = await calls(viewer, "login_view_input")
+    assert [event["type"] for event in first["events"]] == ["click"]
+    assert first["page_id"] == "p1" and first["geometry"] == "800x600"
+    assert second["events"] == [
+        {"type": "type", "text": "ab"},
+        {"type": "key", "key": "Enter", "modifiers": []},
+    ]
+
+
+async def test_teardown_stops_polling_and_drops_queued_input(viewer: Any):
+    await live(viewer)
+    await wait_for_calls(viewer, "login_view_frame", 2)
+
+    await viewer.evaluate("bridge.onteardown({}, {})", isolated_context=False)
+    await answer(
+        viewer,
+        "login_view_frame",
+        1,
+        frame(access="full", state="signing_in", frame="unchanged"),
+    )
+    await viewer.click("#screen")
+    await viewer.wait_for_timeout(300)
+
+    assert len(await calls(viewer, "login_view_frame")) == 2
+    assert await calls(viewer, "login_view_input") == []
+
+
+async def test_a_signed_in_login_leaves_one_line_and_no_image(viewer: Any):
+    await live(viewer)
+    await wait_for_calls(viewer, "login_view_frame", 2)
+
+    await answer(
+        viewer,
+        "login_view_frame",
+        1,
+        frame(access="status", state="signed_in", frame="none"),
+    )
+    await viewer.wait_for_function(
+        "document.getElementById('text').textContent === 'Signed in to LinkedIn. You can close this.'"
+    )
+    await viewer.wait_for_timeout(150)
+
+    assert await viewer.locator("#screen").is_hidden()
+    assert await viewer.locator("#fallback").is_hidden()
+    assert len(await calls(viewer, "login_view_frame")) == 2
+
+
+async def test_an_error_result_shows_its_text_and_the_way_out(viewer: Any):
+    await connect(viewer)
+    await viewer.evaluate(
+        """() => bridge.ontoolresult({ isError: true,
+            content: [{ type: 'text', text: 'Mount a host directory and try again.' }] })""",
+        isolated_context=False,
+    )
+
+    await viewer.wait_for_function(
+        "document.getElementById('text').textContent === 'Mount a host directory and try again.'"
+    )
+    assert await viewer.locator("#fallback").is_visible()
+    assert "--login --login-viewer" in await viewer.locator("#fallback").inner_text()
+    assert await calls(viewer, "login_view_frame") == []
+
+
+async def test_the_inlined_sdk_hands_the_page_its_app(browser_page: Any):
+    # Framed, as a host frames it, so the SDK's handshake goes to a parent
+    # that never answers and the page waits for its host.
+    errors: list[str] = []
+    browser_page.on("pageerror", lambda error: errors.append(str(error)))
+
+    await _serve(browser_page, viewer_html(), host='<iframe src="/view.html"></iframe>')
+    view = browser_page.frames[1]
+    await view.wait_for_function(
+        "typeof globalThis.linkedinLoginSdk?.App === 'function'"
+    )
+    await browser_page.wait_for_timeout(200)
+
+    assert errors == []
+    assert (
+        await view.locator("#text").inner_text() == "Connecting to the sign-in browser."
+    )

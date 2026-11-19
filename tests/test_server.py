@@ -168,6 +168,15 @@ def _server_for(role: ServerRole) -> FastMCP:
 #: Every local tool as ``tools/list`` puts it on the wire. A difference is a
 #: change every client sees, so update the file only for an intended one.
 _TOOL_CONTRACT = Path(__file__).parent / "fixtures" / "tool-contract" / "tools.json"
+#: The tools only a Direct server adds: the sign-in view's, in the same form.
+_LOGIN_APP_CONTRACT = _TOOL_CONTRACT.with_name("login-app-tools.json")
+
+
+def _direct_tool_contract() -> list[dict[str, Any]]:
+    """What a Direct server lists: every shared tool plus the sign-in view's."""
+    shared = json.loads(_TOOL_CONTRACT.read_text(encoding="utf-8"))
+    login_app = json.loads(_LOGIN_APP_CONTRACT.read_text(encoding="utf-8"))
+    return sorted([*shared, *login_app], key=lambda tool: tool["name"])
 
 
 #: Each client mode with the era it must actually negotiate. Written out rather
@@ -223,6 +232,7 @@ def _stand_in_the_lifespan(monkeypatch: pytest.MonkeyPatch) -> None:
         "start_background_browser_setup_if_needed",
         "watch_for_handoff_requests",
         "stop_background_browser_setup",
+        "stop_login",
         "close_browser",
     ):
         monkeypatch.setattr(server_module, name, AsyncMock())
@@ -246,12 +256,46 @@ class TestToolContract:
         # argument that leaks into `inputSchema`, a lost `outputSchema` or a
         # changed safety annotation is a change every client sees. Both eras a
         # client may speak, because the fixture was recorded on the handshake
-        # era and a current client negotiates the other one.
-        recorded = json.loads(_TOOL_CONTRACT.read_text(encoding="utf-8"))
+        # era and a current client negotiates the other one. Only a Direct
+        # server adds the sign-in view's tools; an owner lists exactly the
+        # shared ones.
+        if role is ServerRole.DIRECT:
+            recorded = _direct_tool_contract()
+        else:
+            recorded = json.loads(_TOOL_CONTRACT.read_text(encoding="utf-8"))
 
         assert (
             await _served_tool_contract(monkeypatch, role, mode, protocol) == recorded
         )
+
+    @_BOTH_ERAS
+    async def test_only_a_direct_server_offers_the_sign_in_page(
+        self, monkeypatch: pytest.MonkeyPatch, mode: str, protocol: str
+    ):
+        # The page `open_login` names in its `_meta.ui.resourceUri`. An owner
+        # has no client to show it to, and resources are not forwarded.
+        _stand_in_the_lifespan(monkeypatch)
+
+        async def resources(role: ServerRole) -> list[dict[str, Any]]:
+            async with Client(_server_for(role), mode=mode) as client:
+                assert client.protocol_version == protocol
+                listed = await client.list_resources()
+            return [
+                resource.model_dump(mode="json", by_alias=True, exclude_none=True)
+                for resource in listed
+            ]
+
+        assert await resources(ServerRole.OWNER) == []
+        assert await resources(ServerRole.DIRECT) == [
+            {
+                "name": "login_view",
+                "title": "LinkedIn sign-in",
+                "uri": "ui://linkedin-mcp/login.html",
+                "description": "The page open_login shows to sign in to LinkedIn.",
+                "mimeType": "text/html;profile=mcp-app",
+                "_meta": {"ui": {"prefersBorder": True}, "fastmcp": {"tags": []}},
+            }
+        ]
 
     @_BOTH_ERAS
     async def test_a_proxy_serves_the_owners_tools_unchanged(
@@ -359,6 +403,8 @@ class TestServerRoles:
     def test_every_role_that_drives_a_browser_serves_the_same_tools(self):
         # A tool present in one role and missing from another would disappear
         # from a client's list depending on how its server happened to start.
+        # The one exception is the sign-in view, which only a Direct server
+        # can show, and it adds exactly its three tools.
         #
         # A proxy is deliberately not in here: it registers none of these and
         # serves the owner's instead, which is a different claim and has its own
@@ -367,15 +413,12 @@ class TestServerRoles:
             tools = await _server_for(role).list_tools()
             return {tool.name for tool in tools}
 
-        served = {
-            role: asyncio.run(tool_names(role))
-            for role in ServerRole
-            if role.drives_browser
-        }
+        direct = asyncio.run(tool_names(ServerRole.DIRECT))
+        owner = asyncio.run(tool_names(ServerRole.OWNER))
 
-        assert len(served) > 1
-        assert len(set(map(frozenset, served.values()))) == 1
-        assert "get_person_profile" in served[ServerRole.DIRECT]
+        assert direct - owner == {"open_login", "login_view_frame", "login_view_input"}
+        assert owner <= direct
+        assert "get_person_profile" in owner
 
     def test_the_role_is_readable_without_importing_the_server(self):
         # The reason the enum lives in its own module. Behaviour has to differ

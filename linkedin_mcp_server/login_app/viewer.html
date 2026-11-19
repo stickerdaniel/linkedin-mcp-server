@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in to LinkedIn</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: transparent;
+    color: var(--color-text-secondary, #6b6a66);
+    font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+    font-size: var(--font-text-sm-size, 13px);
+    line-height: var(--font-text-sm-line-height, 1.45);
+  }
+  #screen { display: block; width: 100%; height: auto; background: #fff; outline: none; cursor: default; }
+  #screen[hidden] { display: none; }
+  #screen:focus-visible { box-shadow: inset 0 0 0 2px var(--color-ring-primary, #0a66c2); }
+  #status { display: flex; gap: 8px; align-items: center; padding: 8px 12px; }
+  body.live #status { border-top: 1px solid var(--color-border-secondary, rgba(127, 127, 127, 0.3)); }
+  body.ended #status { padding: 14px 12px; color: var(--color-text-primary, inherit); }
+  #dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--color-text-tertiary, #9a978f); }
+  body.live #dot, body.success #dot { background: var(--color-text-success, #2f9e5c); }
+  body.problem #dot { background: var(--color-text-danger, #c9483b); }
+  #fallback { margin: 0; padding: 0 12px 12px 28px; }
+  #fallback[hidden] { display: none; }
+  code { font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 0.95em; word-break: break-all; }
+</style>
+<!--EXT_APPS_SDK-->
+</head>
+<body>
+<img id="screen" tabindex="0" alt="The LinkedIn sign-in page" draggable="false" hidden>
+<div id="status" role="status"><span id="dot"></span><span id="text">Connecting to the sign-in browser.</span></div>
+<p id="fallback" hidden>To sign in outside the chat, run the Docker login viewer:
+<code>docker run -it --rm -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp -p 127.0.0.1:6080:6080 stickerdaniel/linkedin-mcp-server:latest --login --login-viewer</code>,
+or on the host: <code>uvx mcp-server-linkedin@latest --login</code></p>
+<script type="module">
+// The sign-in view. The server keeps the login; this page only shows the
+// login browser's page and sends the user's input back. The grant arrives in
+// the result of open_login (_meta), so ontoolresult is registered before
+// connect(), and polling starts once both the connection and a grant exist.
+const { App } = globalThis.linkedinLoginSdk;
+
+const META_KEY = 'linkedin.dev/login-view';
+const BUDGET_S = 1.5;
+const MAX_EVENTS = 64;
+const MAX_TEXT = 4096;
+const RETRY_MS = 1000;
+const MAC = /Mac|iPhone|iPad/.test(navigator.platform);
+const NAMED_KEYS = new Set(['Enter', 'Tab', 'Backspace', 'Delete', 'Escape', 'ArrowUp',
+  'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']);
+const LIVE = `Live. Click and type in the page, ${MAC ? 'Cmd' : 'Ctrl'}+V pastes.`;
+const SIGNED_IN = 'Signed in to LinkedIn. You can close this.';
+const ENDINGS = {
+  signed_in: [SIGNED_IN, 'success', false],
+  repaired_by_peer: [SIGNED_IN, 'success', false],
+  restricted: ['LinkedIn restricted this account. Open linkedin.com in your browser to see why.', 'problem', false],
+  cancelled: ['The sign-in was stopped.', 'problem', true],
+  failed: ['The sign-in did not finish.', 'problem', true],
+};
+const REFUSALS = {
+  replaced: 'A newer sign-in view replaced this one.',
+  expired: 'This sign-in view expired. Ask for the LinkedIn sign-in again.',
+  denied: 'This view has no access to the sign-in.',
+};
+
+const screen = document.getElementById('screen');
+const text = document.getElementById('text');
+const fallback = document.getElementById('fallback');
+
+const app = new App({ name: 'linkedin-login-view', version: '1.0.0' }, {}, { autoResize: true });
+
+let connected = false;
+let grant = null;
+let attemptId = null;
+let polling = false;
+let ended = false;
+let after = '';
+let pageId = null;
+let geometry = null;
+const queue = [];
+let sending = false;
+
+function show(tone, message, { help = false } = {}) {
+  document.body.className = tone;
+  text.textContent = message;
+  fallback.hidden = !help;
+}
+
+function end(tone, message, help) {
+  ended = true;
+  grant = null;
+  queue.length = 0;
+  screen.hidden = true;
+  screen.removeAttribute('src');
+  show(`ended ${tone}`, message, { help });
+}
+
+function textOf(result) {
+  const parts = (result?.content ?? []).filter((c) => c.type === 'text').map((c) => c.text);
+  return parts.join(' ').trim();
+}
+
+function applyHostStyles(context) {
+  const variables = context?.styles?.variables;
+  if (variables) {
+    for (const [name, value] of Object.entries(variables)) {
+      if (name.startsWith('--') && typeof value === 'string') {
+        document.documentElement.style.setProperty(name, value);
+      }
+    }
+  }
+  if (context?.theme === 'light' || context?.theme === 'dark') {
+    document.documentElement.style.colorScheme = context.theme;
+  }
+}
+
+app.ontoolresult = (params) => {
+  const view = params?._meta?.[META_KEY];
+  if (params?.isError || typeof view?.grant !== 'string') {
+    // open_login answered in words instead of a view: a session is already in
+    // place, or the client or container cannot show the sign-in.
+    end(params?.isError ? 'problem' : 'info', textOf(params) || 'There is nothing to sign in to.', Boolean(params?.isError));
+    return;
+  }
+  grant = view.grant;
+  attemptId = view.attempt_id;
+  ended = false;
+  after = '';
+  start();
+};
+
+app.onteardown = async () => {
+  // The login keeps running until its own deadline; a new open_login rejoins it.
+  grant = null;
+  queue.length = 0;
+  ended = true;
+  return {};
+};
+
+app.onhostcontextchanged = applyHostStyles;
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) start();
+});
+
+function start() {
+  if (connected && grant && !ended && !polling && !document.hidden) poll();
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function poll() {
+  polling = true;
+  try {
+    while (connected && grant && !ended && !document.hidden) {
+      const asked = grant;
+      let result;
+      try {
+        result = await app.callServerTool({
+          name: 'login_view_frame',
+          arguments: { grant, attempt_id: attemptId, after, budget_s: BUDGET_S },
+        });
+      } catch {
+        if (grant === asked && !ended) show('problem', 'The chat lost the sign-in view. Retrying.');
+        await sleep(RETRY_MS);
+        continue;
+      }
+      if (grant !== asked || ended) continue;
+      if (result.isError) {
+        end('problem', textOf(result) || 'The sign-in view failed.', true);
+        break;
+      }
+      onFrame(result);
+    }
+  } finally {
+    polling = false;
+  }
+}
+
+function onFrame(result) {
+  let reply;
+  try {
+    reply = JSON.parse(textOf(result));
+  } catch {
+    return;
+  }
+  if (reply.access in REFUSALS) {
+    end('problem', REFUSALS[reply.access], false);
+    return;
+  }
+  const ending = ENDINGS[reply.state];
+  if (ending) {
+    const [message, tone, help] = ending;
+    end(tone, reply.state === 'failed' && reply.reason ? `${message} ${reply.reason}` : message, help);
+    return;
+  }
+  const image = (result.content ?? []).find((c) => c.type === 'image');
+  if (reply.frame === 'image' && image) {
+    screen.src = `data:${image.mimeType};base64,${image.data}`;
+    screen.hidden = false;
+    after = reply.hash;
+    pageId = reply.page_id;
+    geometry = reply.geometry;
+  }
+  if (screen.hidden) show('waiting', 'Opening the LinkedIn sign-in.');
+  else show('live', LIVE);
+}
+
+// ---- input: one queue, one batch in flight, never replayed ----
+
+function send(event) {
+  if (!grant || ended || !pageId) return;
+  const last = queue[queue.length - 1];
+  if (event.type === 'type' && last?.type === 'type' && last.text.length + event.text.length <= MAX_TEXT) {
+    last.text += event.text;
+  } else if (event.type === 'wheel' && last?.type === 'wheel') {
+    last.dy += event.dy;
+    last.x = event.x;
+    last.y = event.y;
+  } else {
+    queue.push(event);
+  }
+  pump();
+}
+
+function takeBatch() {
+  const batch = [];
+  let chars = 0;
+  while (queue.length && batch.length < MAX_EVENTS) {
+    const size = queue[0].text?.length ?? 0;
+    if (batch.length && chars + size > MAX_TEXT) break;
+    chars += size;
+    batch.push(queue.shift());
+  }
+  return batch;
+}
+
+async function pump() {
+  if (sending) return;
+  sending = true;
+  try {
+    while (queue.length && grant && !ended) {
+      const events = takeBatch();
+      let result;
+      try {
+        result = await app.callServerTool({
+          name: 'login_view_input',
+          arguments: { grant, attempt_id: attemptId, page_id: pageId, geometry, events },
+        });
+      } catch {
+        if (!ended) show('problem', 'That input did not reach the page. Try it again.');
+        continue;
+      }
+      let reply = {};
+      try {
+        reply = JSON.parse(textOf(result));
+      } catch {
+        // An error result in words; the next frame says what happened.
+      }
+      if (!ended && reply.input === 'stale') show('problem', 'The page changed before that input arrived. Try it again.');
+    }
+  } finally {
+    sending = false;
+  }
+}
+
+function pointAt(event) {
+  const box = screen.getBoundingClientRect();
+  return { x: (event.clientX - box.left) / box.width, y: (event.clientY - box.top) / box.height };
+}
+
+screen.addEventListener('mousedown', (event) => event.preventDefault());
+screen.addEventListener('click', (event) => {
+  screen.focus();
+  send({ type: 'click', ...pointAt(event), button: 'left' });
+});
+screen.addEventListener('contextmenu', (event) => {
+  event.preventDefault();
+  screen.focus();
+  send({ type: 'click', ...pointAt(event), button: 'right' });
+});
+screen.addEventListener('wheel', (event) => {
+  event.preventDefault();
+  const lines = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? screen.clientHeight : 1;
+  send({ type: 'wheel', ...pointAt(event), dy: event.deltaY * lines });
+}, { passive: false });
+
+screen.addEventListener('keydown', (event) => {
+  if (event.isComposing) return;
+  const shortcut = MAC ? event.metaKey : event.ctrlKey;
+  if (shortcut && !event.altKey && event.key.toLowerCase() === 'v') {
+    // Left to the browser, which fires the paste event below with the text.
+    return;
+  }
+  const modifiers = [];
+  if (event.altKey) modifiers.push('Alt');
+  if (event.ctrlKey) modifiers.push('Control');
+  if (event.metaKey) modifiers.push('Meta');
+  if (event.shiftKey) modifiers.push('Shift');
+  if (NAMED_KEYS.has(event.key)) {
+    event.preventDefault();
+    send({ type: 'key', key: event.key, modifiers });
+  } else if (event.key.length === 1 && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    send({ type: 'key', key: event.key.toLowerCase(), modifiers });
+  } else if ([...event.key].length === 1) {
+    event.preventDefault();
+    send({ type: 'type', text: event.key });
+  }
+});
+
+document.addEventListener('paste', (event) => {
+  event.preventDefault();
+  // Split by code point, the unit the server counts, so no chunk ends inside
+  // a surrogate pair.
+  const pasted = Array.from(event.clipboardData?.getData('text/plain') ?? '');
+  for (let i = 0; i < pasted.length; i += MAX_TEXT) {
+    send({ type: 'paste', text: pasted.slice(i, i + MAX_TEXT).join('') });
+  }
+});
+
+app.connect().then(() => {
+  connected = true;
+  applyHostStyles(app.getHostContext());
+  if (!grant && !ended) show('waiting', 'Waiting for the sign-in to start.');
+  start();
+}).catch(() => {
+  end('problem', 'The chat could not open the sign-in view.', true);
+});
+</script>
+</body>
+</html>

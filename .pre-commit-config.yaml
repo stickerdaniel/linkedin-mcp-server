@@ -1,4 +1,7 @@
 # .pre-commit-config.yaml
+# The vendored MCP Apps SDK ships byte for byte; tests/test_login_app_package.py
+# pins its sha256, so no hook may rewrite it; it is also over the size limit.
+exclude: ^linkedin_mcp_server/login_app/(ext-apps-app-with-deps-[0-9.]+\.js|EXT_APPS_LICENSE)$
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

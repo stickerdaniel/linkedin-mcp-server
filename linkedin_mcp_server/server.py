@@ -26,6 +26,7 @@ from linkedin_mcp_server.bootstrap import (
     report_retained_browser_revisions_if_ready,
     start_background_browser_setup_if_needed,
     stop_background_browser_setup,
+    stop_login,
 )
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.drivers.browser import (
@@ -34,6 +35,7 @@ from linkedin_mcp_server.drivers.browser import (
 )
 from linkedin_mcp_server.daemon.auth_repair import OwnerAuthSignalMiddleware
 from linkedin_mcp_server.error_handler import ErrorCodeMiddleware, raise_tool_error
+from linkedin_mcp_server.login_app import register_login_app
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
@@ -158,14 +160,22 @@ async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
                     # prevent, and it matters more than the reason the poll failed.
                     logger.warning("Profile handoff watcher failed", exc_info=True)
         finally:
-            # Setup is owned by this lifespan. This also covers cancellation while
-            # direct-server startup is still waiting on its shared readiness task.
+            # The login ends with the server and finishes its own cleanup first:
+            # it may have retired the previous session and has to restore it
+            # while it still holds the profile. Before setup, which it may be
+            # waiting on.
             try:
-                await stop_background_browser_setup()
+                await stop_login()
             finally:
-                # A BaseException from either background task still closes the
-                # browser; it is no reason to abandon the shared profile.
-                await close_browser()
+                # Setup is owned by this lifespan. This also covers cancellation
+                # while direct-server startup is still waiting on its shared
+                # readiness task.
+                try:
+                    await stop_background_browser_setup()
+                finally:
+                    # A BaseException from either background task still closes
+                    # the browser; it is no reason to abandon the shared profile.
+                    await close_browser()
 
 
 def create_mcp_server(
@@ -372,5 +382,11 @@ def create_mcp_server(
                 return session_status()
             except Exception as e:
                 raise_tool_error(e, "get_session_status")  # NoReturn
+
+    # Direct only. An owner has no client of its own to show a view to, and
+    # resources are not forwarded, so a proxy could offer the tools but never
+    # the page they belong to. Docker always runs Direct.
+    if role is ServerRole.DIRECT:
+        register_login_app(mcp, tool_timeout=tool_timeout)
 
     return mcp

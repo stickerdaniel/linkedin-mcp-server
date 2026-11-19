@@ -2,3 +2,11 @@ mcp-server-linkedin
 Copyright 2025-2026 Daniel Sticker
 
 Licensed under the Apache License, Version 2.0.
+
+This product includes @modelcontextprotocol/ext-apps 2.0.4
+(https://github.com/modelcontextprotocol/ext-apps), the MCP Apps SDK, as
+linkedin_mcp_server/login_app/ext-apps-app-with-deps-2.0.4.js, unmodified.
+Its license, which covers parts under the MIT License and parts under the
+Apache License, Version 2.0, is in linkedin_mcp_server/login_app/EXT_APPS_LICENSE.
+That file bundles the SDK's dependencies, among them zod
+(https://github.com/colinhacks/zod), which is licensed under the MIT License.

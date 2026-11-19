@@ -43,6 +43,7 @@ def quiet_lifespan(monkeypatch):
         "start_background_browser_setup_if_needed",
         "watch_for_handoff_requests",
         "stop_background_browser_setup",
+        "stop_login",
         "close_browser",
     ):
         monkeypatch.setattr(server_module, name, AsyncMock())

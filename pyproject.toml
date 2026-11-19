@@ -79,7 +79,14 @@ include = ["linkedin_mcp_server*"]
 exclude = ["assets*", "docs*", "tests*"]
 
 [tool.setuptools.package-data]
-linkedin_mcp_server = ["py.typed"]
+# login_app/ holds the sign-in view's page, the vendored MCP Apps SDK it inlines
+# and that SDK's license, all read at runtime through importlib.resources.
+linkedin_mcp_server = [
+    "py.typed",
+    "login_app/viewer.html",
+    "login_app/ext-apps-app-with-deps-2.0.4.js",
+    "login_app/EXT_APPS_LICENSE",
+]
 
 [tool.ruff.lint]
 # Preserve Ruff's pre-0.16 default rule set instead of adopting new rules implicitly.
