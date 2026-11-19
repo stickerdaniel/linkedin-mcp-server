@@ -332,12 +332,29 @@ async def test_escape_twice_leaves_the_page_for_the_help(viewer: Any):
 
     await viewer.keyboard.press("Escape")
     await viewer.keyboard.press("Escape")
-    await viewer.wait_for_timeout(150)
+    await wait_for_calls(viewer, "login_view_input", 1)
     assert await focused(viewer) == "help"
-    assert await sent_keys(viewer) == ["Escape"]  # the first one reached the page
 
     await viewer.keyboard.press("Enter")
     assert await viewer.locator("#fallback").is_visible()
+
+    # Let the first batch finish, then send a sentinel: whatever the queue held
+    # behind the first Escape goes out before it.
+    await answer(
+        viewer, "login_view_input", 0, frame(access="full", input="applied", applied=1)
+    )
+    await viewer.focus("#screen")
+    await viewer.keyboard.type("z")
+    await wait_for_calls(viewer, "login_view_input", 2)
+    sent = [
+        event
+        for call in await calls(viewer, "login_view_input")
+        for event in call["events"]
+    ]
+    assert sent == [
+        {"type": "key", "key": "Escape", "modifiers": []},
+        {"type": "type", "text": "z"},
+    ]
 
 
 async def test_one_escape_and_tab_still_reach_the_page(viewer: Any):
