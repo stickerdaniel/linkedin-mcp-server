@@ -168,6 +168,12 @@ def serve_extractor(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], AsyncMoc
         ),
         (
             "job",
+            "save_job",
+            {"job_id": "/feed/"},
+            "job_id is not a LinkedIn id",
+        ),
+        (
+            "job",
             "dismiss_job",
             {"job_id": "/feed/"},
             "job_id is not a LinkedIn id",
@@ -1749,14 +1755,19 @@ class TestJobTools:
         assert tool.annotations.read_only_hint is False
         assert tool.annotations.destructive_hint is True
 
-    async def test_save_job(self, mock_context, serve_extractor):
+    @pytest.mark.parametrize(
+        "already_saved", [False, True], ids=["newly-saved", "already-saved"]
+    )
+    async def test_save_job(self, mock_context, serve_extractor, already_saved):
         expected = {
             "url": "https://www.linkedin.com/jobs/view/12345/",
             "job_id": "12345",
             "saved": True,
-            "already_saved": False,
+            "already_saved": already_saved,
         }
-        mock_extractor = _make_mock_extractor(expected)
+        # Keep the assertion independent of the mock's object, so a tool that
+        # drops a key in place cannot hide by editing both sides at once.
+        mock_extractor = _make_mock_extractor(dict(expected))
 
         from linkedin_mcp_server.tools.job import register_job_tools
 
