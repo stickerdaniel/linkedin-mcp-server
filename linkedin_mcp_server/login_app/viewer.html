@@ -35,7 +35,7 @@
 <body>
 <img id="screen" tabindex="0" alt="The LinkedIn sign-in page" draggable="false" hidden>
 <div id="status"><span id="dot"></span><span id="text" role="status">Connecting to the sign-in browser.</span><button id="help" type="button" aria-controls="fallback" aria-expanded="false">Trouble signing in?</button></div>
-<p id="fallback" hidden>To sign in outside the chat, run the Docker login viewer:
+<p id="fallback" hidden>To sign in outside the chat, first quit your MCP client, such as Claude Desktop: the sign-in shown here holds the saved session until the server stops. Then run the Docker login viewer:
 <code>docker run -it --rm -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp -p 127.0.0.1:6080:6080 stickerdaniel/linkedin-mcp-server:latest --login --login-viewer</code>,
 or on the host: <code>uvx mcp-server-linkedin@latest --login</code></p>
 <script type="module">
