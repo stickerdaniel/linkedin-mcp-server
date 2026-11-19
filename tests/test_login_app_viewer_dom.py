@@ -294,6 +294,70 @@ async def test_teardown_stops_polling_and_drops_queued_input(viewer: Any):
     assert [[e["type"] for e in call["events"]] for call in sent] == [["click"]]
 
 
+async def focused(page: Any) -> str:
+    return await page.evaluate("document.activeElement?.id ?? ''")
+
+
+async def sent_keys(page: Any) -> list[str]:
+    return [
+        event["key"]
+        for call in await calls(page, "login_view_input")
+        for event in call["events"]
+        if event["type"] == "key"
+    ]
+
+
+async def test_tab_reaches_the_help_before_the_page_image(viewer: Any):
+    await live(viewer)
+    # The help sits below the image on screen, so it must lead in the DOM.
+    help_box = await viewer.locator("#help").bounding_box()
+    screen_box = await viewer.locator("#screen").bounding_box()
+    assert help_box is not None and screen_box is not None
+    assert help_box["y"] >= screen_box["y"] + screen_box["height"]
+
+    await viewer.keyboard.press("Tab")
+
+    assert await focused(viewer) == "help"
+
+
+async def test_escape_twice_leaves_the_page_for_the_help(viewer: Any):
+    await live(viewer)
+    await viewer.focus("#screen")
+    assert await focused(viewer) == "screen"
+    assert (
+        await viewer.locator("#screen").get_attribute("aria-describedby")
+        == "screen-keys"
+    )
+    assert "Escape twice" in await viewer.locator("#screen-keys").text_content()
+
+    await viewer.keyboard.press("Escape")
+    await viewer.keyboard.press("Escape")
+    await viewer.wait_for_timeout(150)
+    assert await focused(viewer) == "help"
+    assert await sent_keys(viewer) == ["Escape"]  # the first one reached the page
+
+    await viewer.keyboard.press("Enter")
+    assert await viewer.locator("#fallback").is_visible()
+
+
+async def test_one_escape_and_tab_still_reach_the_page(viewer: Any):
+    await live(viewer)
+    await viewer.focus("#screen")
+
+    await viewer.keyboard.press("Escape")
+    await wait_for_calls(viewer, "login_view_input", 1)
+    assert await focused(viewer) == "screen"
+    await answer(
+        viewer, "login_view_input", 0, frame(access="full", input="applied", applied=1)
+    )
+    await viewer.wait_for_timeout(1100)
+    await viewer.keyboard.press("Tab")
+    await wait_for_calls(viewer, "login_view_input", 2)
+
+    assert await focused(viewer) == "screen"
+    assert await sent_keys(viewer) == ["Escape", "Tab"]
+
+
 async def test_the_way_out_of_the_chat_is_reachable_while_live_and_after_expiry(
     viewer: Any,
 ):
