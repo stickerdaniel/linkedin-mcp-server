@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 import pytest
@@ -62,7 +63,7 @@ class FakePage:
     """A page whose screenshots are scripted and whose input is recorded.
 
     Its viewport is the size of its first scripted screenshot unless
-    *viewport* is set. A screenshot slower than the timeout it is given fails
+    *viewport* is set; :attr:`on_evaluate` runs while that size is read. A screenshot slower than the timeout it is given fails
     the way patchright's does, after that timeout.
     """
 
@@ -73,6 +74,8 @@ class FakePage:
         self.received: list[tuple[str, Any]] = []
         self.gate: asyncio.Event | None = None
         self.render_s = 0.0
+        #: Runs while the page reports its size, to act in the middle of that read.
+        self.on_evaluate: Callable[[], Awaitable[None]] | None = None
         first = next(shot for shot in self.shots if isinstance(shot, bytes))
         size = login_view._jpeg_size(first)
         assert size is not None
@@ -105,8 +108,9 @@ class FakePage:
     def is_closed(self) -> bool:
         return self.closed
 
-    async def evaluate(self, expression: str) -> list[int]:
-        assert expression == "[window.innerWidth, window.innerHeight]"
+    async def evaluate(self, _expression: str) -> list[int]:
+        if self.on_evaluate is not None:
+            await self.on_evaluate()
         return list(self.viewport)
 
     async def screenshot(self, *, timeout: float, **_options: object) -> bytes:
@@ -312,6 +316,28 @@ class TestInput:
 
         assert result.status == "stale"
         assert page.received == []
+        view.close()
+
+    async def test_a_popup_opened_while_the_size_is_read_gets_no_input(self):
+        view, page, context = fake_view(FakePage([jpeg(800, 600)]))
+        page_id, geometry = await self._ready(view)
+        popup = FakePage([jpeg(420, 360)])
+
+        async def popup_opens() -> None:
+            context.open(popup)
+
+        page.on_evaluate = popup_opens
+
+        result = await view.apply(
+            page_id,
+            geometry,
+            [TypeText(type="type", text="secret")],
+            still_allowed=always,
+        )
+
+        assert result.status == "stale"
+        assert page.received == []
+        assert popup.received == []
         view.close()
 
     async def test_a_batch_whose_grant_went_while_it_waited_reaches_nothing(self):

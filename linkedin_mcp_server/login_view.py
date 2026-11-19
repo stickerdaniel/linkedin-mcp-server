@@ -317,6 +317,13 @@ class LoginView:
             page = viewed[1]
             if await _live_geometry(page) != geometry:
                 return InputResult("stale")
+            # Asked again after that read: a popup that opened during it is
+            # what the user now sees, and the batch was meant for this page.
+            if self._closed:
+                return InputResult("closed")
+            viewed = self._viewed()
+            if viewed is None or viewed[0] != page_id:
+                return InputResult("stale")
             width, height = _dimensions(geometry)
             applied = 0
             try:
