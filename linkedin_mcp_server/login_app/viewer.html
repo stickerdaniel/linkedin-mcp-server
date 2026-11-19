@@ -24,6 +24,8 @@
   #dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--color-text-tertiary, #9a978f); }
   body.live #dot, body.success #dot { background: var(--color-text-success, #2f9e5c); }
   body.problem #dot { background: var(--color-text-danger, #c9483b); }
+  #help { margin-left: auto; flex: none; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
+  #help[hidden] { display: none; }
   #fallback { margin: 0; padding: 0 12px 12px 28px; }
   #fallback[hidden] { display: none; }
   code { font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 0.95em; word-break: break-all; }
@@ -32,7 +34,7 @@
 </head>
 <body>
 <img id="screen" tabindex="0" alt="The LinkedIn sign-in page" draggable="false" hidden>
-<div id="status" role="status"><span id="dot"></span><span id="text">Connecting to the sign-in browser.</span></div>
+<div id="status"><span id="dot"></span><span id="text" role="status">Connecting to the sign-in browser.</span><button id="help" type="button" aria-controls="fallback" aria-expanded="false">Trouble signing in?</button></div>
 <p id="fallback" hidden>To sign in outside the chat, run the Docker login viewer:
 <code>docker run -it --rm -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp -p 127.0.0.1:6080:6080 stickerdaniel/linkedin-mcp-server:latest --login --login-viewer</code>,
 or on the host: <code>uvx mcp-server-linkedin@latest --login</code></p>
@@ -61,14 +63,15 @@ const ENDINGS = {
   failed: ['The sign-in did not finish.', 'problem', true],
 };
 const REFUSALS = {
-  replaced: 'A newer sign-in view replaced this one.',
-  expired: 'This sign-in view expired. Ask for the LinkedIn sign-in again.',
-  denied: 'This view has no access to the sign-in.',
+  replaced: ['A newer sign-in view replaced this one.', false],
+  expired: ['This sign-in view expired. Ask for the LinkedIn sign-in again.', true],
+  denied: ['This view has no access to the sign-in.', false],
 };
 
 const screen = document.getElementById('screen');
 const text = document.getElementById('text');
 const fallback = document.getElementById('fallback');
+const help = document.getElementById('help');
 
 const app = new App({ name: 'linkedin-login-view', version: '1.0.0' }, {}, { autoResize: true });
 
@@ -82,20 +85,36 @@ let pageId = null;
 let geometry = null;
 const queue = [];
 let sending = false;
+// The way out of the chat (the CLI viewer, host --login) stays one click away
+// in every state but a finished sign-in, because the page view cannot show
+// everything a sign-in may need, such as a native browser dialog.
+let helpOpen = false;
 
-function show(tone, message, { help = false } = {}) {
-  document.body.className = tone;
-  text.textContent = message;
-  fallback.hidden = !help;
+function renderHelp() {
+  fallback.hidden = !helpOpen;
+  help.setAttribute('aria-expanded', String(helpOpen));
 }
 
-function end(tone, message, help) {
+help.addEventListener('click', () => {
+  helpOpen = !helpOpen;
+  renderHelp();
+});
+
+function show(tone, message) {
+  document.body.className = tone;
+  text.textContent = message;
+  help.hidden = tone.includes('success');
+}
+
+function end(tone, message, openHelp) {
   ended = true;
   grant = null;
   queue.length = 0;
   screen.hidden = true;
   screen.removeAttribute('src');
-  show(`ended ${tone}`, message, { help });
+  show(`ended ${tone}`, message);
+  helpOpen = openHelp;
+  renderHelp();
 }
 
 function textOf(result) {
@@ -190,7 +209,8 @@ function onFrame(result) {
     return;
   }
   if (reply.access in REFUSALS) {
-    end('problem', REFUSALS[reply.access], false);
+    const [message, openHelp] = REFUSALS[reply.access];
+    end('problem', message, openHelp);
     return;
   }
   const ending = ENDINGS[reply.state];

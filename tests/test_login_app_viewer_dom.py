@@ -272,19 +272,61 @@ async def test_input_queued_for_a_page_is_never_sent_to_the_page_that_replaced_i
 async def test_teardown_stops_polling_and_drops_queued_input(viewer: Any):
     await live(viewer)
     await wait_for_calls(viewer, "login_view_frame", 2)
+    # A click is in flight and text waits behind it when the host tears down.
+    await viewer.click("#screen")
+    await wait_for_calls(viewer, "login_view_input", 1)
+    await viewer.keyboard.type("hunter2")
 
     await viewer.evaluate("bridge.onteardown({}, {})", isolated_context=False)
+    await answer(
+        viewer, "login_view_input", 0, frame(access="full", input="applied", applied=1)
+    )
     await answer(
         viewer,
         "login_view_frame",
         1,
         frame(access="full", state="signing_in", frame="unchanged"),
     )
-    await viewer.click("#screen")
     await viewer.wait_for_timeout(300)
 
     assert len(await calls(viewer, "login_view_frame")) == 2
-    assert await calls(viewer, "login_view_input") == []
+    sent = await calls(viewer, "login_view_input")
+    assert [[e["type"] for e in call["events"]] for call in sent] == [["click"]]
+
+
+async def test_the_way_out_of_the_chat_is_reachable_while_live_and_after_expiry(
+    viewer: Any,
+):
+    await live(viewer)
+    fallback = viewer.locator("#fallback")
+    assert await fallback.is_hidden()
+
+    await viewer.click("#help")
+    assert await fallback.is_visible()
+    assert "--login --login-viewer" in await fallback.inner_text()
+    # The next live frame keeps it open.
+    await wait_for_calls(viewer, "login_view_frame", 2)
+    await answer(
+        viewer,
+        "login_view_frame",
+        1,
+        frame(access="full", state="signing_in", frame="unchanged"),
+    )
+    await wait_for_calls(viewer, "login_view_frame", 3)
+    assert await fallback.is_visible()
+    await viewer.click("#help")
+    assert await fallback.is_hidden()
+
+    await answer(viewer, "login_view_frame", 2, frame(access="expired"))
+    await viewer.wait_for_function(
+        "document.getElementById('text').textContent.includes('expired')"
+    )
+    assert await viewer.locator("#help").is_visible()
+    assert await fallback.is_visible()
+    await viewer.click("#help")
+    assert await fallback.is_hidden()
+    await viewer.click("#help")
+    assert await fallback.is_visible()
 
 
 async def test_a_signed_in_login_leaves_one_line_and_no_image(viewer: Any):

@@ -296,10 +296,13 @@ class LoginView:
 
         *page_id* and *geometry* name the frame the user acted on. Input for a
         page that is no longer viewed, or one whose size changed, is refused as
-        ``stale`` and nothing reaches the page. *still_allowed* is asked again
-        once the batch holds the input lock, because a grant can be replaced
-        while a batch waits behind another. A batch cut short by navigation or
-        teardown reports how many events landed and is never replayed.
+        ``stale`` and nothing reaches the page. *still_allowed* is asked once
+        the batch holds the input lock and again before every event, because a
+        grant can be replaced while a batch waits, while the page's size is
+        read, or between two events. A batch stops at the first event whose
+        grant or page is gone (``refused`` or ``stale``), or that navigation or
+        teardown cut short, reports how many events landed, and is never
+        replayed.
 
         The size is read from the page itself, not from the last screenshot,
         because a page can resize between the frame the user saw and the batch.
@@ -317,19 +320,21 @@ class LoginView:
             page = viewed[1]
             if await _live_geometry(page) != geometry:
                 return InputResult("stale")
-            # Asked again after that read: a popup that opened during it is
-            # what the user now sees, and the batch was meant for this page.
-            if self._closed:
-                return InputResult("closed")
-            viewed = self._viewed()
-            if viewed is None or viewed[0] != page_id:
-                return InputResult("stale")
             width, height = _dimensions(geometry)
             applied = 0
             try:
                 for event in events:
+                    # Every check again before each event, the first one
+                    # included: the size read and each dispatch await the
+                    # browser, and in that time the grant can be replaced or
+                    # an event can open a popup the user now sees instead.
+                    if not still_allowed():
+                        return InputResult("refused", applied)
                     if self._closed:
                         return InputResult("closed", applied)
+                    viewed = self._viewed()
+                    if viewed is None or viewed[0] != page_id:
+                        return InputResult("stale", applied)
                     await _dispatch(page, event, width, height)
                     applied += 1
             except Exception:
@@ -393,7 +398,9 @@ class LoginView:
         if size is None:
             return _Capture(None, "transient")
         geometry = f"{size[0]}x{size[1]}"
-        digest = hashlib.sha256(jpeg).hexdigest()[:32]
+        # The page id is part of the digest: a switch to another page that
+        # looks the same is still a new frame, and the viewer needs its id.
+        digest = hashlib.sha256(page_id.encode() + b"\0" + jpeg).hexdigest()[:32]
         return _Capture(Frame(digest, page_id, geometry, jpeg))
 
 

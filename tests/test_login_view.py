@@ -76,6 +76,8 @@ class FakePage:
         self.render_s = 0.0
         #: Runs while the page reports its size, to act in the middle of that read.
         self.on_evaluate: Callable[[], Awaitable[None]] | None = None
+        #: Runs after a click lands, as a page reacting to it would.
+        self.on_click: Callable[[], None] | None = None
         first = next(shot for shot in self.shots if isinstance(shot, bytes))
         size = login_view._jpeg_size(first)
         assert size is not None
@@ -85,6 +87,8 @@ class FakePage:
         class Mouse:
             async def click(self, x: float, y: float, *, button: str) -> None:
                 page.received.append(("click", (x, y, button)))
+                if page.on_click is not None:
+                    page.on_click()
 
             async def move(self, x: float, y: float) -> None:
                 page.received.append(("move", (x, y)))
@@ -250,6 +254,24 @@ class TestFrames:
         assert page.taken == taken
         view.close()
 
+    async def test_switching_to_a_page_that_looks_the_same_is_a_new_frame(self):
+        same = jpeg(800, 600, b"same")
+        view, _, context = fake_view(FakePage([same]))
+        opener = await view.frame(None, 1)
+        assert opener.frame is not None and opener.frame.page_id == "p1"
+        popup = FakePage([same])
+
+        context.open(popup)
+        switched = await view.frame(opener.frame.digest, 2)
+        assert switched.status == "image"
+        assert switched.frame is not None and switched.frame.page_id == "p2"
+
+        popup.closed = True
+        back = await view.frame(switched.frame.digest, 2)
+        assert back.status == "image"
+        assert back.frame is not None and back.frame.page_id == "p1"
+        view.close()
+
     async def test_closing_the_view_ends_a_waiting_frame_request(self):
         page = FakePage()
         page.gate = asyncio.Event()
@@ -340,19 +362,65 @@ class TestInput:
         assert popup.received == []
         view.close()
 
-    async def test_a_batch_whose_grant_went_while_it_waited_reaches_nothing(self):
+    async def test_a_grant_replaced_while_the_size_is_read_sends_nothing(self):
+        view, page, _ = fake_view()
+        page_id, geometry = await self._ready(view)
+        grant = {"live": True}
+
+        async def replaced_meanwhile() -> None:
+            grant["live"] = False
+
+        page.on_evaluate = replaced_meanwhile
+
+        result = await view.apply(
+            page_id,
+            geometry,
+            [TypeText(type="type", text="secret")],
+            still_allowed=lambda: grant["live"],
+        )
+
+        assert (result.status, result.applied) == ("refused", 0)
+        assert page.received == []
+        view.close()
+
+    async def test_a_grant_replaced_mid_batch_stops_the_rest(self):
         view, page, _ = fake_view()
         page_id, geometry = await self._ready(view)
 
         result = await view.apply(
             page_id,
             geometry,
-            [TypeText(type="type", text="secret")],
-            still_allowed=lambda: False,
+            [
+                Click(type="click", x=0.5, y=0.5),
+                Paste(type="paste", text="secret"),
+            ],
+            # Replaced while the click was dispatched.
+            still_allowed=lambda: page.received == [],
         )
 
-        assert result.status == "refused"
-        assert page.received == []
+        assert (result.status, result.applied) == ("refused", 1)
+        assert [kind for kind, _ in page.received] == ["click"]
+        view.close()
+
+    async def test_a_popup_the_first_event_opens_gets_none_of_the_rest(self):
+        view, page, context = fake_view(FakePage([jpeg(800, 600)]))
+        page_id, geometry = await self._ready(view)
+        popup = FakePage([jpeg(420, 360)])
+        page.on_click = lambda: context.open(popup)
+
+        result = await view.apply(
+            page_id,
+            geometry,
+            [
+                Click(type="click", x=0.5, y=0.5),
+                Paste(type="paste", text="secret"),
+            ],
+            still_allowed=always,
+        )
+
+        assert (result.status, result.applied) == ("stale", 1)
+        assert [kind for kind, _ in page.received] == ["click"]
+        assert popup.received == []
         view.close()
 
     async def test_more_text_than_one_batch_carries_is_refused_whole(self):

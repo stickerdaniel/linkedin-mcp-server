@@ -79,13 +79,15 @@ include = ["linkedin_mcp_server*"]
 exclude = ["assets*", "docs*", "tests*"]
 
 [tool.setuptools.package-data]
-# login_app/ holds the sign-in view's page, the vendored MCP Apps SDK it inlines
-# and that SDK's license, all read at runtime through importlib.resources.
+# login_app/ holds the sign-in view's page, the vendored MCP Apps SDK it inlines,
+# and the licenses of that SDK and of zod, which the SDK bundle contains. The
+# page and the SDK are read at runtime through importlib.resources.
 linkedin_mcp_server = [
     "py.typed",
     "login_app/viewer.html",
     "login_app/ext-apps-app-with-deps-2.0.4.js",
     "login_app/EXT_APPS_LICENSE",
+    "login_app/ZOD_LICENSE",
 ]
 
 [tool.ruff.lint]

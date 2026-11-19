@@ -81,7 +81,8 @@ STATUS_TAIL_S = 120.0
 
 #: The vendored ``@modelcontextprotocol/ext-apps`` browser bundle, kept byte for
 #: byte as published in 2.0.4 (``dist/src/app-with-deps.js``). Its license is
-#: ``login_app/EXT_APPS_LICENSE``; ``tests/test_login_app_package.py`` pins
+#: ``login_app/EXT_APPS_LICENSE``, and the zod 4.6.6 it bundles is under
+#: ``login_app/ZOD_LICENSE``; ``tests/test_login_app_package.py`` pins
 #: the digest.
 SDK_FILE = "ext-apps-app-with-deps-2.0.4.js"
 SDK_SHA256 = "d24b6ae50dbc989539db8287e217f41f0833f2b0a81ac4c6dbde444715ef5cd0"
