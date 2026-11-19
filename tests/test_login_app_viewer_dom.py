@@ -231,6 +231,44 @@ async def test_input_waits_for_the_batch_in_flight_and_keeps_its_order(viewer: A
     ]
 
 
+async def test_input_queued_for_a_page_is_never_sent_to_the_page_that_replaced_it(
+    viewer: Any,
+):
+    await live(viewer)
+    await wait_for_calls(viewer, "login_view_frame", 2)
+
+    # A click goes out on p1; text typed meanwhile, while p1 is still shown,
+    # waits behind it. Then a popup p2 replaces p1 before the click returns.
+    await viewer.click("#screen")
+    await wait_for_calls(viewer, "login_view_input", 1)
+    await viewer.keyboard.type("hunter2")
+    popup = frame(
+        access="full",
+        state="signing_in",
+        frame="image",
+        hash="h2",
+        page_id="p2",
+        geometry="420x360",
+    )
+    await answer(viewer, "login_view_frame", 1, popup)
+    await wait_for_calls(viewer, "login_view_frame", 3)
+    await answer(
+        viewer, "login_view_input", 0, frame(access="full", input="applied", applied=1)
+    )
+    await viewer.wait_for_function(
+        "document.getElementById('text').textContent.startsWith('The page changed')"
+    )
+
+    # Input typed on p2 goes to p2.
+    await viewer.keyboard.type("x")
+    await wait_for_calls(viewer, "login_view_input", 2)
+
+    first, second = await calls(viewer, "login_view_input")
+    assert (first["page_id"], first["geometry"]) == ("p1", "800x600")
+    assert (second["page_id"], second["geometry"]) == ("p2", "420x360")
+    assert second["events"] == [{"type": "type", "text": "x"}]
+
+
 async def test_teardown_stops_polling_and_drops_queued_input(viewer: Any):
     await live(viewer)
     await wait_for_calls(viewer, "login_view_frame", 2)

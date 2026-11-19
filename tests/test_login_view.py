@@ -59,7 +59,12 @@ def jpeg(width: int, height: int, tag: bytes = b"") -> bytes:
 
 
 class FakePage:
-    """A page whose screenshots are scripted and whose input is recorded."""
+    """A page whose screenshots are scripted and whose input is recorded.
+
+    Its viewport is the size of its first scripted screenshot unless
+    *viewport* is set. A screenshot slower than the timeout it is given fails
+    the way patchright's does, after that timeout.
+    """
 
     def __init__(self, shots: list[bytes | Exception] | None = None) -> None:
         self.shots = shots or [jpeg(800, 600)]
@@ -67,6 +72,11 @@ class FakePage:
         self.closed = False
         self.received: list[tuple[str, Any]] = []
         self.gate: asyncio.Event | None = None
+        self.render_s = 0.0
+        first = next(shot for shot in self.shots if isinstance(shot, bytes))
+        size = login_view._jpeg_size(first)
+        assert size is not None
+        self.viewport = size
         page = self
 
         class Mouse:
@@ -95,9 +105,17 @@ class FakePage:
     def is_closed(self) -> bool:
         return self.closed
 
-    async def screenshot(self, **_options: object) -> bytes:
+    async def evaluate(self, expression: str) -> list[int]:
+        assert expression == "[window.innerWidth, window.innerHeight]"
+        return list(self.viewport)
+
+    async def screenshot(self, *, timeout: float, **_options: object) -> bytes:
         if self.gate is not None:
             await self.gate.wait()
+        if self.render_s > timeout / 1000:
+            await asyncio.sleep(timeout / 1000)
+            raise PlaywrightError(f"Timeout {timeout}ms exceeded.")
+        await asyncio.sleep(self.render_s)
         shot = self.shots[min(self.taken, len(self.shots) - 1)]
         self.taken += 1
         if isinstance(shot, Exception):
@@ -194,6 +212,40 @@ class TestFrames:
         assert page.taken == 2  # re-taken once at the lower quality
         view.close()
 
+    async def test_a_capture_slower_than_a_poll_reaches_the_next_poll(self):
+        # A page that has just navigated on a loaded host renders for longer
+        # than one poll waits. The capture keeps going, and a later poll for
+        # the current image gets it.
+        page = FakePage()
+        page.render_s = 1.2
+        view, _, _ = fake_view(page)
+
+        first = await view.frame(None, 0.5)
+        polls = 1
+        result = first
+        while result.status != "image" and polls < 8:
+            result = await view.frame(None, 0.5)
+            polls += 1
+
+        assert first.status == "unchanged"
+        assert result.status == "image"
+        assert result.frame is not None and result.frame.geometry == "800x600"
+        view.close()
+
+    async def test_nobody_polling_stops_the_captures(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(login_view, "_IDLE_S", 0.3)
+        view, page, _ = fake_view()
+        assert (await view.frame(None, 1)).status == "image"
+
+        await asyncio.sleep(0.8)
+        taken = page.taken
+        await asyncio.sleep(0.5)
+
+        assert page.taken == taken
+        view.close()
+
     async def test_closing_the_view_ends_a_waiting_frame_request(self):
         page = FakePage()
         page.gate = asyncio.Event()
@@ -243,6 +295,19 @@ class TestInput:
 
         result = await view.apply(
             page_id, "1024x768", [TypeText(type="type", text="x")], still_allowed=always
+        )
+
+        assert result.status == "stale"
+        assert page.received == []
+        view.close()
+
+    async def test_input_for_a_page_resized_since_its_frame_reaches_nothing(self):
+        view, page, _ = fake_view(FakePage([jpeg(800, 600)]))
+        page_id, geometry = await self._ready(view)
+        page.viewport = (400, 300)
+
+        result = await view.apply(
+            page_id, geometry, [Click(type="click", x=0.5, y=0.5)], still_allowed=always
         )
 
         assert result.status == "stale"
@@ -481,6 +546,24 @@ class TestInChromium:
             "aaaaaaaabbbbbbbb",
             "bbbbbbbbaaaaaaaa",
         }
+        view.close()
+
+    async def test_a_resize_after_the_frame_refuses_the_input(self, chromium):
+        context, page = chromium
+        view = LoginView(context, page)
+        page_id, geometry = await _frame_of(view, "p1")
+        assert geometry == "800x600"
+        await page.evaluate(
+            "window.clicks = []; addEventListener('click', e => clicks.push([e.clientX, e.clientY]))"
+        )
+
+        await page.set_viewport_size({"width": 400, "height": 300})
+        result = await view.apply(
+            page_id, geometry, [Click(type="click", x=0.5, y=0.5)], still_allowed=always
+        )
+
+        assert result.status == "stale"
+        assert await page.evaluate("window.clicks") == []
         view.close()
 
     async def test_a_popup_is_viewed_while_open_and_stale_input_reaches_nothing(

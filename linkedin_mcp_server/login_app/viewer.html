@@ -212,32 +212,57 @@ function onFrame(result) {
 }
 
 // ---- input: one queue, one batch in flight, never replayed ----
+//
+// Every queued event keeps the target the user acted on: the attempt, page
+// and geometry shown when the event happened. A batch carries events of one
+// target only, and events whose page is no longer shown are dropped, never
+// sent to whichever page replaced it.
+
+const STALE = 'The page changed before that input arrived. Try it again.';
+
+function sameTarget(a, b) {
+  return a.attemptId === b.attemptId && a.pageId === b.pageId && a.geometry === b.geometry;
+}
+
+function shownTarget() {
+  return { attemptId, pageId, geometry };
+}
 
 function send(event) {
   if (!grant || ended || !pageId) return;
+  const target = shownTarget();
   const last = queue[queue.length - 1];
-  if (event.type === 'type' && last?.type === 'type' && last.text.length + event.text.length <= MAX_TEXT) {
-    last.text += event.text;
-  } else if (event.type === 'wheel' && last?.type === 'wheel') {
-    last.dy += event.dy;
-    last.x = event.x;
-    last.y = event.y;
+  const joins = last && sameTarget(last.target, target);
+  if (joins && event.type === 'type' && last.event.type === 'type'
+      && last.event.text.length + event.text.length <= MAX_TEXT) {
+    last.event.text += event.text;
+  } else if (joins && event.type === 'wheel' && last.event.type === 'wheel') {
+    last.event.dy += event.dy;
+    last.event.x = event.x;
+    last.event.y = event.y;
   } else {
-    queue.push(event);
+    queue.push({ target, event });
   }
   pump();
 }
 
-function takeBatch() {
-  const batch = [];
-  let chars = 0;
-  while (queue.length && batch.length < MAX_EVENTS) {
-    const size = queue[0].text?.length ?? 0;
-    if (batch.length && chars + size > MAX_TEXT) break;
-    chars += size;
-    batch.push(queue.shift());
+function dropTarget(target) {
+  for (let i = queue.length - 1; i >= 0; i -= 1) {
+    if (sameTarget(queue[i].target, target)) queue.splice(i, 1);
   }
-  return batch;
+}
+
+function takeBatch() {
+  const target = queue[0].target;
+  const events = [];
+  let chars = 0;
+  while (queue.length && events.length < MAX_EVENTS && sameTarget(queue[0].target, target)) {
+    const size = queue[0].event.text?.length ?? 0;
+    if (events.length && chars + size > MAX_TEXT) break;
+    chars += size;
+    events.push(queue.shift().event);
+  }
+  return { target, events };
 }
 
 async function pump() {
@@ -245,12 +270,23 @@ async function pump() {
   sending = true;
   try {
     while (queue.length && grant && !ended) {
-      const events = takeBatch();
+      if (!sameTarget(queue[0].target, shownTarget())) {
+        dropTarget(queue[0].target);
+        show('problem', STALE);
+        continue;
+      }
+      const { target, events } = takeBatch();
       let result;
       try {
         result = await app.callServerTool({
           name: 'login_view_input',
-          arguments: { grant, attempt_id: attemptId, page_id: pageId, geometry, events },
+          arguments: {
+            grant,
+            attempt_id: target.attemptId,
+            page_id: target.pageId,
+            geometry: target.geometry,
+            events,
+          },
         });
       } catch {
         if (!ended) show('problem', 'That input did not reach the page. Try it again.');
@@ -262,7 +298,10 @@ async function pump() {
       } catch {
         // An error result in words; the next frame says what happened.
       }
-      if (!ended && reply.input === 'stale') show('problem', 'The page changed before that input arrived. Try it again.');
+      if (!ended && reply.input === 'stale') {
+        dropTarget(target);
+        show('problem', STALE);
+      }
     }
   } finally {
     sending = false;

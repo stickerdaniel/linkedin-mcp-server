@@ -54,7 +54,12 @@ MAX_IMAGE_BASE64 = 768 * 1024
 _QUALITY = 60
 _FALLBACK_QUALITY = 40
 _CAPTURE_SPACING_S = 0.1
-_MIN_CAPTURE_TIMEOUT_S = 0.5
+#: How long one screenshot may take. Fixed rather than tied to a poll's budget:
+#: a page that has just navigated on a loaded machine can take seconds to
+#: render, and a capture cut off at every poll's deadline never finishes.
+_CAPTURE_TIMEOUT_S = 10.0
+#: The capture worker stops once no poll has waited for this long.
+_IDLE_S = 3.0
 _MAX_WHEEL = 5000.0
 _MAX_REASON = 300
 
@@ -200,20 +205,22 @@ class LoginView:
     viewed page is the newest one still open, so a sign-in popup shows while it
     is open and the opener returns when it closes.
 
-    One capture worker runs while anybody waits for a frame and shares each
+    One capture worker runs while anybody polls for a frame and shares each
     screenshot with every waiter; each caller compares it against its own
-    previous frame. Input batches run one at a time, in arrival order.
+    previous frame. A capture may outlast the poll that started it, and the
+    next poll gets its result. The worker stops once no poll has waited for
+    :data:`_IDLE_S`. Input batches run one at a time, in arrival order.
     """
 
     def __init__(self, context: BrowserContext, opener: Page) -> None:
         self._context = context
         self._pages: list[tuple[str, Page]] = [("p1", opener)]
         self._opened = 1
-        self._geometry: dict[str, str] = {}
         self._latest: _Capture | None = None
         self._captures = 0
         self._pulse = asyncio.Event()
-        self._deadlines: list[float] = []
+        self._waiting = 0
+        self._last_watched = 0.0
         self._worker: asyncio.Task[None] | None = None
         self._input = asyncio.Lock()
         self._closed = False
@@ -252,7 +259,8 @@ class LoginView:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + min(max(budget_s, 0.0), MAX_BUDGET_S)
         seen = self._captures
-        self._deadlines.append(deadline)
+        self._waiting += 1
+        self._last_watched = loop.time()
         try:
             while True:
                 if self._closed:
@@ -273,7 +281,8 @@ class LoginView:
                 except TimeoutError:
                     return FrameResult("unchanged")
         finally:
-            self._deadlines.remove(deadline)
+            self._waiting -= 1
+            self._last_watched = loop.time()
 
     async def apply(
         self,
@@ -291,6 +300,9 @@ class LoginView:
         once the batch holds the input lock, because a grant can be replaced
         while a batch waits behind another. A batch cut short by navigation or
         teardown reports how many events landed and is never replayed.
+
+        The size is read from the page itself, not from the last screenshot,
+        because a page can resize between the frame the user saw and the batch.
         """
         if len(events) > MAX_EVENTS or _text_length(events) > MAX_TEXT:
             return InputResult("too_long")
@@ -300,13 +312,11 @@ class LoginView:
             if self._closed:
                 return InputResult("closed")
             viewed = self._viewed()
-            if (
-                viewed is None
-                or viewed[0] != page_id
-                or self._geometry.get(page_id) != geometry
-            ):
+            if viewed is None or viewed[0] != page_id:
                 return InputResult("stale")
             page = viewed[1]
+            if await _live_geometry(page) != geometry:
+                return InputResult("stale")
             width, height = _dimensions(geometry)
             applied = 0
             try:
@@ -341,14 +351,14 @@ class LoginView:
                 self._capture_while_watched(), name="linkedin-login-view-capture"
             )
 
+    def _watched(self, now: float) -> bool:
+        return self._waiting > 0 or now - self._last_watched < _IDLE_S
+
     async def _capture_while_watched(self) -> None:
         loop = asyncio.get_running_loop()
         try:
-            while self._deadlines and not self._closed:
-                timeout = max(
-                    max(self._deadlines) - loop.time(), _MIN_CAPTURE_TIMEOUT_S
-                )
-                self._latest = await self._capture(timeout)
+            while self._watched(loop.time()) and not self._closed:
+                self._latest = await self._capture(_CAPTURE_TIMEOUT_S)
                 self._captures += 1
                 self._wake()
                 await asyncio.sleep(_CAPTURE_SPACING_S)
@@ -376,7 +386,6 @@ class LoginView:
         if size is None:
             return _Capture(None, "transient")
         geometry = f"{size[0]}x{size[1]}"
-        self._geometry[page_id] = geometry
         digest = hashlib.sha256(jpeg).hexdigest()[:32]
         return _Capture(Frame(digest, page_id, geometry, jpeg))
 
@@ -505,6 +514,19 @@ async def _screenshot(page: Page, quality: int, timeout_s: float) -> bytes:
         caret="initial",
         timeout=timeout_s * 1000,
     )
+
+
+async def _live_geometry(page: Page) -> str | None:
+    """The page's CSS viewport now, as ``WIDTHxHEIGHT``, or ``None`` mid-navigation.
+
+    Read in patchright's isolated world, which the page's own scripts never see.
+    """
+    try:
+        width, height = await page.evaluate("[window.innerWidth, window.innerHeight]")
+    except Exception:
+        logger.debug("Could not read the login page's viewport", exc_info=True)
+        return None
+    return f"{width}x{height}"
 
 
 async def _dispatch(page: Page, event: InputEvent, width: int, height: int) -> None:
