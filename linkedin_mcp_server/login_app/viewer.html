@@ -75,14 +75,20 @@ const ENDINGS = {
   cancelled: ['The sign-in was stopped.', 'problem', true],
   failed: ['The sign-in did not finish.', 'problem', true],
 };
+// The server process that runs this sign-in no longer answers: it stopped, or
+// the sign-in's status ran out. Terminal, like a refusal.
+const UNAVAILABLE = 'The sign-in this view showed is no longer reachable. Ask for the LinkedIn sign-in again.';
+const MAYBE_SENT = 'That input may not have reached the page; check it before typing again.';
 const REFUSALS = {
   replaced: ['A newer sign-in view replaced this one.', false],
   expired: ['This sign-in view expired. Ask for the LinkedIn sign-in again.', true],
   denied: ['This view has no access to the sign-in.', false],
+  unavailable: [UNAVAILABLE, true],
 };
 const ATTACH_ENDINGS = {
   replaced: 'A newer sign-in view replaced this one.',
   none: 'This sign-in is no longer available. Ask for the LinkedIn sign-in again.',
+  unavailable: UNAVAILABLE,
 };
 const UNDELIVERED = 'The chat did not hand this view its access to the sign-in.';
 const UNREACHABLE = 'The chat could not reach the sign-in.';
@@ -413,14 +419,26 @@ async function pump() {
           },
         });
       } catch {
-        if (!ended) show('problem', 'That input did not reach the page. Try it again.');
+        // Whether the call failed before or after the server sent the batch
+        // on is unknown here, so nothing claims it did not arrive.
+        if (!ended) show('problem', MAYBE_SENT);
+        continue;
+      }
+      if (result.isError) {
+        // Such as a batch whose answer never came back from the process that
+        // runs the sign-in: the server's text says what is known.
+        if (!ended) show('problem', textOf(result) || MAYBE_SENT);
         continue;
       }
       let reply = {};
       try {
         reply = JSON.parse(textOf(result));
       } catch {
-        // An error result in words; the next frame says what happened.
+        // Not an answer of this view's tool; the next frame says what happened.
+      }
+      if (!ended && reply.access === 'unavailable') {
+        end('problem', UNAVAILABLE, true);
+        break;
       }
       if (!ended && reply.input === 'stale') {
         dropTarget(target);

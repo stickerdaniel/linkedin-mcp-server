@@ -20,10 +20,19 @@ that declared the MCP Apps extension. That client, Claude Desktop for one, is
 trusted to keep app-only tools out of the model's tool list and ``_meta`` and
 the app's traffic out of the model's context. An HTTP transport is never
 eligible, since any local process could connect and ask for a grant.
+
+Relay. Claude Desktop runs one stdio entry as two server processes, so the
+app's view calls can land in a process that does not hold the attempt. Each
+view tool is a routing wrapper: an attempt this process knows is handled here,
+any other one is forwarded through ``login_relay`` to the process that owns it,
+which validates the arguments and runs the same local operation once. The
+relay socket lives in the auth root, next to the session cookies, and accepts
+only the three view operations.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import functools
 import json
@@ -31,6 +40,7 @@ import logging
 import re
 import secrets
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -40,7 +50,8 @@ import mcp.types as mt
 from fastmcp import Context, FastMCP
 from fastmcp.apps.config import UI_EXTENSION_ID, AppConfig
 from fastmcp.tools import ToolResult
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ValidationError as PydanticValidationError
 
 from linkedin_mcp_server.bootstrap import (
     NOT_OBSERVED,
@@ -55,7 +66,13 @@ from linkedin_mcp_server.bootstrap import (
     start_login_if_needed,
 )
 from linkedin_mcp_server.config import get_config
-from linkedin_mcp_server.error_handler import ErrorCode, error_result, raise_tool_error
+from linkedin_mcp_server import login_relay
+from linkedin_mcp_server.error_handler import (
+    ErrorCode,
+    error_result,
+    raise_tool_error,
+    value_free_summary,
+)
 from linkedin_mcp_server.exceptions import (
     AuthenticationInProgressError,
     AuthenticationStartedError,
@@ -110,6 +127,56 @@ _NOT_HERE = (
 )
 
 Access = Literal["full", "status", "replaced", "expired", "denied"]
+
+#: The page may have received some of a batch whose answer never came back.
+INPUT_OUTCOME_UNKNOWN = (
+    "The page may have received part of that input; check it before typing again."
+)
+
+#: Per operation, the owner's own deadline fits inside the forwarding call's,
+#: which fits inside the tool's timeout, so the owner always answers first.
+_OWNER_DEADLINE_S: dict[login_relay.Operation, float] = {
+    "login_view_attach": 5.0,
+    "login_view_frame": MAX_BUDGET_S + 5,
+    "login_view_input": 25.0,
+}
+_FORWARD_DEADLINE_S: dict[login_relay.Operation, float] = {
+    "login_view_attach": 7.0,
+    "login_view_frame": MAX_BUDGET_S + 7,
+    "login_view_input": 28.0,
+}
+
+_AttemptId = Annotated[str, Field(max_length=64)]
+_OpenId = Annotated[str, Field(max_length=64)]
+_GrantText = Annotated[str, Field(max_length=128)]
+_After = Annotated[str, Field(max_length=64)]
+_Budget = Annotated[float, Field(ge=0, le=MAX_BUDGET_S)]
+_PageId = Annotated[str, Field(max_length=16)]
+_Geometry = Annotated[str, Field(pattern=r"^[0-9]{1,5}x[0-9]{1,5}$")]
+_Events = Annotated[list[InputEvent], Field(min_length=1, max_length=MAX_EVENTS)]
+
+
+class _AttachArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attempt_id: _AttemptId
+    open_id: _OpenId
+
+
+class _FrameArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    grant: _GrantText
+    attempt_id: _AttemptId
+    after: _After = ""
+    budget_s: _Budget = DEFAULT_BUDGET_S
+
+
+class _InputArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    grant: _GrantText
+    attempt_id: _AttemptId
+    page_id: _PageId
+    geometry: _Geometry
+    events: _Events
 
 
 def _transport_allows_view() -> bool:
@@ -182,6 +249,10 @@ class _Opens:
         opened = _Open(secrets.token_urlsafe(12), attempt, now)
         self._current[attempt.id] = opened
         return opened
+
+    def knows(self, attempt_id: str) -> bool:
+        """Whether an open of *attempt_id* was made in this process."""
+        return attempt_id in self._current or attempt_id in self._superseded
 
     def attach(self, attempt_id: str, open_id: str) -> tuple[Attach, _Open | None]:
         """The grant of open *open_id* of attempt *attempt_id*, minted once.
@@ -310,6 +381,48 @@ def _reply(payload: dict[str, object], image: bytes | None = None) -> ToolResult
     return ToolResult(content=content)
 
 
+def _envelope(result: ToolResult) -> login_relay.Envelope:
+    text = " ".join(c.text for c in result.content if isinstance(c, mt.TextContent))
+    image = next(
+        (c.data for c in result.content if isinstance(c, mt.ImageContent)), None
+    )
+    return login_relay.Envelope(result.is_error, text, image, result.meta)
+
+
+def _tool_result(envelope: login_relay.Envelope) -> ToolResult:
+    content: list[mt.TextContent | mt.ImageContent] = [
+        mt.TextContent(type="text", text=envelope.text)
+    ]
+    if envelope.image is not None:
+        content.append(
+            mt.ImageContent(type="image", data=envelope.image, mime_type="image/jpeg")
+        )
+    return ToolResult(content=content, meta=envelope.meta, is_error=envelope.is_error)
+
+
+async def _forwarded(
+    operation: login_relay.Operation,
+    arguments: dict[str, object],
+    attempt_id: str,
+) -> ToolResult:
+    """The owner's answer to a view call for an attempt this process lacks."""
+    sent = await login_relay.forward(
+        operation,
+        arguments,
+        attempt_id,
+        deadline_s=_FORWARD_DEADLINE_S[operation],
+    )
+    if sent.envelope is not None:
+        return _tool_result(sent.envelope)
+    if operation == "login_view_input":
+        if sent.delivery == "lost":
+            # The batch went out: some of it may have landed. Never claim it
+            # did not, and never send it again.
+            return error_result(INPUT_OUTCOME_UNKNOWN, ErrorCode.OUTCOME_UNKNOWN)
+        return _reply({"access": "unavailable", "input": "refused"})
+    return _reply({"access": "unavailable"})
+
+
 def _status(access: Access, attempt: LoginAttempt, frame: str) -> dict[str, object]:
     payload: dict[str, object] = {
         "access": access,
@@ -430,24 +543,19 @@ def register_login_app(mcp: FastMCP, *, tool_timeout: float) -> None:
             },
         )
 
-    @mcp.tool(
-        name="login_view_attach",
-        timeout=10,
-        annotations={"readOnlyHint": True, "openWorldHint": False},
-        app=AppConfig(visibility=["app"]),
-    )
-    async def login_view_attach(
-        ctx: Context,
-        attempt_id: Annotated[str, Field(max_length=64)],
-        open_id: Annotated[str, Field(max_length=64)],
-    ) -> ToolResult:
-        """Called by the sign-in view: the grant for the open its result named."""
+    def runs_here(attempt_id: str) -> bool:
+        # Only an open made here makes the attempt local. Any other attempt,
+        # even one running in this process, goes through its endpoint, whose
+        # handler answers it locally and never forwards again.
+        return grants.knows(attempt_id)
+
+    async def attach_here(args: _AttachArgs) -> ToolResult:
         # The open already proves the client could show the view: only a shown
         # open_login creates one. The extension is not checked again here,
         # because Claude Desktop does not repeat it on calls its app makes.
         if not _transport_allows_view():
             return _reply({"access": "none"})
-        outcome, opened = grants.attach(attempt_id, open_id)
+        outcome, opened = grants.attach(args.attempt_id, args.open_id)
         if opened is None or opened.secret is None:
             return _reply({"access": outcome})
         return ToolResult(
@@ -461,19 +569,8 @@ def register_login_app(mcp: FastMCP, *, tool_timeout: float) -> None:
             },
         )
 
-    @mcp.tool(
-        name="login_view_frame",
-        timeout=MAX_BUDGET_S + 10,
-        annotations={"readOnlyHint": True, "openWorldHint": False},
-        app=AppConfig(visibility=["app"]),
-    )
-    async def login_view_frame(
-        grant: Annotated[str, Field(max_length=128)],
-        attempt_id: Annotated[str, Field(max_length=64)],
-        after: Annotated[str, Field(max_length=64)] = "",
-        budget_s: Annotated[float, Field(ge=0, le=MAX_BUDGET_S)] = DEFAULT_BUDGET_S,
-    ) -> ToolResult:
-        """Called by the sign-in view: the page once it differs from frame *after*."""
+    async def frame_here(args: _FrameArgs) -> ToolResult:
+        grant, attempt_id, budget_s = args.grant, args.attempt_id, args.budget_s
         access, attempt = grants.check(grant, attempt_id)
         if attempt is None:
             return _reply({"access": access})
@@ -485,7 +582,7 @@ def register_login_app(mcp: FastMCP, *, tool_timeout: float) -> None:
             return _reply(_status(access, attempt, "none"))
         if view is None:
             return _reply(_status(access, attempt, "none"))
-        result = await view.frame(after or None, budget_s)
+        result = await view.frame(args.after or None, budget_s)
         # Again, right before an image leaves: the grant may have been replaced
         # or the login may have ended while the capture ran.
         access, attempt = grants.check(grant, attempt_id)
@@ -502,6 +599,100 @@ def register_login_app(mcp: FastMCP, *, tool_timeout: float) -> None:
         )
         return _reply(payload, result.frame.jpeg)
 
+    async def input_here(args: _InputArgs) -> ToolResult:
+        grant, attempt_id = args.grant, args.attempt_id
+        access, attempt = grants.check(grant, attempt_id)
+        view = attempt.view if attempt is not None and access == "full" else None
+        if view is None:
+            return _reply({"access": access, "input": "refused"})
+        result = await view.apply(
+            args.page_id,
+            args.geometry,
+            args.events,
+            still_allowed=lambda: grants.check(grant, attempt_id)[0] == "full",
+        )
+        access, _ = grants.check(grant, attempt_id)
+        return _reply(
+            {"access": access, "input": result.status, "applied": result.applied}
+        )
+
+    async def relayed(
+        operation: login_relay.Operation, arguments: Mapping[str, object]
+    ) -> ToolResult:
+        # Validated with the tools' own types, so a JSON event becomes the
+        # event model the page dispatches, then run here and never forwarded.
+        if operation == "login_view_attach":
+            return await attach_here(_AttachArgs.model_validate(arguments))
+        if operation == "login_view_frame":
+            return await frame_here(_FrameArgs.model_validate(arguments))
+        return await input_here(_InputArgs.model_validate(arguments))
+
+    async def answer_relayed(
+        operation: login_relay.Operation, arguments: Mapping[str, object]
+    ) -> login_relay.Envelope:
+        try:
+            result = await asyncio.wait_for(
+                relayed(operation, arguments), _OWNER_DEADLINE_S[operation]
+            )
+        except PydanticValidationError as exc:
+            result = error_result(value_free_summary(exc), ErrorCode.INVALID_ARGUMENT)
+        except TimeoutError:
+            if operation == "login_view_input":
+                result = error_result(INPUT_OUTCOME_UNKNOWN, ErrorCode.OUTCOME_UNKNOWN)
+            else:
+                result = error_result(
+                    "The sign-in view did not answer in time.", ErrorCode.INTERNAL
+                )
+        return _envelope(result)
+
+    login_relay.install(answer_relayed, status_tail_s=lambda: STATUS_TAIL_S)
+
+    @mcp.tool(
+        name="login_view_attach",
+        timeout=10,
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+        app=AppConfig(visibility=["app"]),
+    )
+    async def login_view_attach(
+        ctx: Context,
+        attempt_id: _AttemptId,
+        open_id: _OpenId,
+    ) -> ToolResult:
+        """Called by the sign-in view: the grant for the open its result named."""
+        if not _transport_allows_view():
+            return _reply({"access": "none"})
+        if runs_here(attempt_id):
+            return await attach_here(
+                _AttachArgs(attempt_id=attempt_id, open_id=open_id)
+            )
+        return await _forwarded(
+            "login_view_attach",
+            {"attempt_id": attempt_id, "open_id": open_id},
+            attempt_id,
+        )
+
+    @mcp.tool(
+        name="login_view_frame",
+        timeout=MAX_BUDGET_S + 10,
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+        app=AppConfig(visibility=["app"]),
+    )
+    async def login_view_frame(
+        grant: _GrantText,
+        attempt_id: _AttemptId,
+        after: _After = "",
+        budget_s: _Budget = DEFAULT_BUDGET_S,
+    ) -> ToolResult:
+        """Called by the sign-in view: the page once it differs from frame *after*."""
+        args = _FrameArgs(
+            grant=grant, attempt_id=attempt_id, after=after, budget_s=budget_s
+        )
+        if runs_here(attempt_id):
+            return await frame_here(args)
+        return await _forwarded(
+            "login_view_frame", args.model_dump(mode="json"), attempt_id
+        )
+
     @mcp.tool(
         name="login_view_input",
         timeout=30,
@@ -509,24 +700,22 @@ def register_login_app(mcp: FastMCP, *, tool_timeout: float) -> None:
         app=AppConfig(visibility=["app"]),
     )
     async def login_view_input(
-        grant: Annotated[str, Field(max_length=128)],
-        attempt_id: Annotated[str, Field(max_length=64)],
-        page_id: Annotated[str, Field(max_length=16)],
-        geometry: Annotated[str, Field(pattern=r"^[0-9]{1,5}x[0-9]{1,5}$")],
-        events: Annotated[list[InputEvent], Field(min_length=1, max_length=MAX_EVENTS)],
+        grant: _GrantText,
+        attempt_id: _AttemptId,
+        page_id: _PageId,
+        geometry: _Geometry,
+        events: _Events,
     ) -> ToolResult:
         """Called by the sign-in view: replay the user's input into the page."""
-        access, attempt = grants.check(grant, attempt_id)
-        view = attempt.view if attempt is not None and access == "full" else None
-        if view is None:
-            return _reply({"access": access, "input": "refused"})
-        result = await view.apply(
-            page_id,
-            geometry,
-            events,
-            still_allowed=lambda: grants.check(grant, attempt_id)[0] == "full",
+        args = _InputArgs(
+            grant=grant,
+            attempt_id=attempt_id,
+            page_id=page_id,
+            geometry=geometry,
+            events=events,
         )
-        access, _ = grants.check(grant, attempt_id)
-        return _reply(
-            {"access": access, "input": result.status, "applied": result.applied}
+        if runs_here(attempt_id):
+            return await input_here(args)
+        return await _forwarded(
+            "login_view_input", args.model_dump(mode="json"), attempt_id
         )

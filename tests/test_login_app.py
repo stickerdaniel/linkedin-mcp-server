@@ -444,16 +444,27 @@ class TestAttach:
         assert _reply(await _frame(client, view)) == {"access": "expired"}
         assert late_view is None and _reply(late) == {"access": "none"}
 
-    async def test_an_unknown_open_gets_no_grant_and_starts_nothing(
+    async def test_an_unknown_attempt_gets_no_grant_and_starts_nothing(
         self, client: Client, login: StandInLogin
     ):
+        # No process here owns it, and no relay endpoint answers for it.
         result, view = await _attach(
             client, {"attempt_id": "not-an-attempt", "open_id": "not-an-open"}
         )
 
-        assert view is None and _reply(result) == {"access": "none"}
+        assert view is None and _reply(result) == {"access": "unavailable"}
         assert login.calls == []
         assert bootstrap.current_login_attempt() is None
+
+    async def test_an_unknown_open_of_a_known_attempt_gets_none(
+        self, client: Client, login: StandInLogin
+    ):
+        shown = await _open_shown(client)
+
+        result, view = await _attach(client, {**shown, "open_id": "not-an-open"})
+
+        assert view is None and _reply(result) == {"access": "none"}
+        assert len(login.calls) == 1
 
     async def test_a_login_still_starting_attaches_and_its_frames_wait(
         self, client: Client, login: StandInLogin

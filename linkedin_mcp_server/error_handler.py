@@ -173,6 +173,11 @@ def _value_free(exc: ValidationError) -> str:
     cause = exc.__cause__
     if not isinstance(cause, PydanticValidationError):
         return "Invalid arguments."
+    return value_free_summary(cause)
+
+
+def value_free_summary(cause: PydanticValidationError) -> str:
+    """A Pydantic failure as field names and error kinds, never the values."""
     problems = [
         f"{'.'.join(str(part) for part in error['loc']) or 'arguments'}: {error['type']}"
         for error in cause.errors(

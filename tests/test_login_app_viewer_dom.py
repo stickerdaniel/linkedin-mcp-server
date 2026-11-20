@@ -288,7 +288,7 @@ async def test_an_attach_for_a_superseded_result_is_never_used(viewer: Any):
     assert (await calls(viewer, "login_view_attach"))[1]["open_id"] == "O2"
 
 
-@pytest.mark.parametrize("access", ["replaced", "none"])
+@pytest.mark.parametrize("access", ["replaced", "none", "unavailable"])
 async def test_a_refused_attach_ends_with_the_way_out_and_no_retry(
     viewer: Any, access: str
 ):
@@ -361,6 +361,46 @@ async def test_teardown_during_an_attach_retry_wait_attaches_no_more(viewer: Any
 
     assert len(await calls(viewer, "login_view_attach")) == 1
     assert await calls(viewer, "login_view_frame") == []
+
+
+async def test_an_unreachable_sign_in_ends_the_view_and_polls_no_more(viewer: Any):
+    await live(viewer)
+    await wait_for_calls(viewer, "login_view_frame", 2)
+
+    await answer(viewer, "login_view_frame", 1, frame(access="unavailable"))
+    await viewer.wait_for_function("document.body.className.includes('ended')")
+    await viewer.click("#help")
+    await viewer.click("#help")
+    await viewer.wait_for_timeout(600)
+
+    assert "no longer reachable" in await viewer.locator("#text").inner_text()
+    assert await viewer.locator("#screen").is_hidden()
+    assert await viewer.locator("#fallback").is_visible()
+    assert len(await calls(viewer, "login_view_frame")) == 2
+    assert await calls(viewer, "login_view_input") == []
+
+
+async def test_an_input_of_unknown_outcome_never_claims_it_was_lost(viewer: Any):
+    await live(viewer)
+
+    await viewer.click("#screen")
+    await wait_for_calls(viewer, "login_view_input", 1)
+    unknown = (
+        "The page may have received part of that input; check it before typing again."
+    )
+    await answer(
+        viewer,
+        "login_view_input",
+        0,
+        {"isError": True, "content": [{"type": "text", "text": unknown}]},
+    )
+    await viewer.wait_for_function(
+        "document.getElementById('text').textContent.startsWith('The page may')"
+    )
+    await viewer.wait_for_timeout(300)
+
+    assert await viewer.locator("#text").inner_text() == unknown
+    assert len(await calls(viewer, "login_view_input")) == 1
 
 
 async def test_a_paste_is_sent_once_and_its_shortcut_is_not(viewer: Any):

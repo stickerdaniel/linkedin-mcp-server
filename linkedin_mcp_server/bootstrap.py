@@ -54,6 +54,7 @@ from linkedin_mcp_server.drivers.browser import (
     get_profile_dir,
     set_headless,
 )
+from linkedin_mcp_server import login_relay
 from linkedin_mcp_server.login_view import LoginAttempt
 from linkedin_mcp_server.exceptions import (
     AuthenticationBootstrapFailedError,
@@ -4500,7 +4501,11 @@ def _start_login_attempt() -> asyncio.Task[None]:
     """
     attempt = LoginAttempt()
     _state.login_attempt = attempt
-    return attempt.start(_run_login_flow(), name="linkedin-login")
+    task = attempt.start(_run_login_flow(), name="linkedin-login")
+    # Listening before any open_login returns this attempt's id, so a view in
+    # another server process can reach it at once. Never raises.
+    login_relay.serve(attempt, task)
+    return task
 
 
 def running_login_attempt() -> LoginAttempt | None:
@@ -4529,6 +4534,19 @@ async def stop_login() -> None:
     attempt = _state.login_attempt
     if attempt is not None:
         attempt.close_view()
+    try:
+        await _stop_login_tasks()
+    finally:
+        # Last, and also when no login runs: an ended attempt's relay still
+        # serves its status tail. A relay that fails to close never replaces
+        # the login's own result.
+        try:
+            await login_relay.close_all()
+        except Exception:
+            logger.warning("The sign-in view relay did not close", exc_info=True)
+
+
+async def _stop_login_tasks() -> None:
     tasks = [
         task
         for task in (_state.login_task, _state.import_task)
