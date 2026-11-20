@@ -75,7 +75,9 @@ def _login(profile: Path, guard: str, hold: str) -> int:
         login_viewer: bool = False,
     ) -> bool:
         (pending.profile_dir / "Default").mkdir(parents=True)
-        (pending.profile_dir / "Default" / "Cookies").write_text(f"pid {os.getpid()}")
+        (pending.profile_dir / "Default" / "Cookies").write_text(
+            f"login {os.environ.get('LOGIN_WORKER_TAG', '')}"
+        )
         pending.cookie_path.write_text("[]")
         if hold == "close":
             await asyncio.to_thread(_held_here)

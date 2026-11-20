@@ -1760,13 +1760,14 @@ _LOGIN_WORKER = Path(__file__).parent / "helpers" / "login_attempt_worker.py"
 _POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="POSIX guardians")
 
 
-def _login_worker(*args: str) -> subprocess.Popen[str]:
+def _login_worker(*args: str, tag: str = "") -> subprocess.Popen[str]:
     return subprocess.Popen(
         [sys.executable, str(_LOGIN_WORKER), *args],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env={**os.environ, "LOGIN_WORKER_TAG": tag},
     )
 
 
@@ -1807,11 +1808,11 @@ class TestTheFirstCommittedLoginWins:
         from linkedin_mcp_server.session_state import load_source_state
 
         profile = str(isolate_profile_dir)
-        early = _login_worker("login", profile, "none", held_at)
+        early = _login_worker("login", profile, "none", held_at, tag="early")
         late = None
         try:
             _await_line(early, "HELD")
-            late = _login_worker("login", profile, "none", "none")
+            late = _login_worker("login", profile, "none", "none", tag="late")
             assert _result(late) == "True"
             winner = load_source_state(isolate_profile_dir)
             assert winner is not None
@@ -1829,7 +1830,7 @@ class TestTheFirstCommittedLoginWins:
         assert surviving is not None
         assert surviving.login_generation == winner.login_generation
         cookies = (isolate_profile_dir / "Default" / "Cookies").read_text()
-        assert cookies == f"pid {late.pid}"
+        assert cookies == "login late"
 
 
 class TestAnAttemptOutlivesItsOwnersDoubt:
@@ -2003,7 +2004,11 @@ class TestALogoutFencesAnOpenLogin:
                     capture_output=True,
                     text=True,
                     timeout=120,
-                    env={**os.environ, "USER_DATA_DIR": str(isolate_profile_dir)},
+                    env={
+                        **os.environ,
+                        "USER_DATA_DIR": str(isolate_profile_dir),
+                        "PYTHONIOENCODING": "utf-8",
+                    },
                 )
             )
 
