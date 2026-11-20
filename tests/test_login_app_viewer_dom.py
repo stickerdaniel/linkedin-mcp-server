@@ -772,26 +772,40 @@ async def test_a_view_without_its_grant_only_opens_the_guide(viewer: Any):
     assert await calls(viewer, "login_view_release") == []
 
 
-@pytest.mark.parametrize("failure", ["rejected", "no capability", "error result"])
-async def test_a_link_the_host_cannot_open_is_shown_to_copy(viewer: Any, failure: str):
+@pytest.mark.parametrize("failure", ["rejected", "error result"])
+async def test_a_link_the_user_declines_keeps_the_status_short(
+    viewer: Any, failure: str
+):
     await live(viewer)
-    if failure == "no capability":
-        await viewer.evaluate("bridge.capabilities = {}", isolated_context=False)
 
     await viewer.click("#outside")
     await wait_for_calls(viewer, "login_view_release", 1)
     await answer(
         viewer, "login_view_release", 0, frame(access="full", release="released")
     )
-    if failure != "no capability":
-        await viewer.wait_for_function("bridge.links.length === 1")
-        if failure == "rejected":
-            await viewer.evaluate(
-                "bridge.links[0].reject(new Error('blocked'))", isolated_context=False
-            )
-        else:
-            await answer_link(viewer, 0, {"isError": True})
-    await wait_for_text(viewer, f"Open {GUIDE} in your browser.")
+    await viewer.wait_for_function("bridge.links.length === 1")
+    if failure == "rejected":
+        await viewer.evaluate(
+            "bridge.links[0].reject(new Error('blocked'))", isolated_context=False
+        )
+    else:
+        await answer_link(viewer, 0, {"isError": True})
+    await wait_for_text(viewer, RELEASED)
+
+    assert GUIDE not in await viewer.locator("#text").inner_text()
+    assert await viewer.locator("#outside").is_visible()
+
+
+async def test_a_host_that_cannot_open_links_shows_the_guide_to_copy(viewer: Any):
+    await live(viewer)
+    await viewer.evaluate("bridge.capabilities = {}", isolated_context=False)
+
+    await viewer.click("#outside")
+    await wait_for_calls(viewer, "login_view_release", 1)
+    await answer(
+        viewer, "login_view_release", 0, frame(access="full", release="released")
+    )
+    await wait_for_text(viewer, f"{RELEASED} Guide: {GUIDE}")
 
     selected = await viewer.evaluate(
         """() => {

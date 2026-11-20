@@ -22,7 +22,7 @@
   #screen { order: 0; flex: none; display: block; width: 100%; height: auto; background: #fff; outline: none; cursor: default; }
   #screen[hidden] { display: none; }
   #screen:focus-visible { box-shadow: inset 0 0 0 2px var(--color-ring-primary, #0a66c2); }
-  #status { order: 1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; }
+  #status { order: 1; display: flex; gap: 8px; align-items: center; padding: 8px 12px; }
   body.live #status { border-top: 1px solid var(--color-border-secondary, rgba(127, 127, 127, 0.3)); }
   body.ended #status { padding: 14px 12px; color: var(--color-text-primary, inherit); }
   body.live #text { color: var(--color-text-primary, inherit); }
@@ -174,16 +174,17 @@ async function signInOutside() {
       release = null;
     }
   }
-  let opened = false;
+  const message = release === 'released' ? RELEASED : MAYBE_HELD;
   if (app.getHostCapabilities()?.openLinks) {
+    // The host shows its own dialog with the address; a cancel there is the
+    // user's answer, and the button stays for another try.
     try {
-      opened = !(await app.openLink({ url: GUIDE }))?.isError;
-    } catch {
-      opened = false;
-    }
+      await app.openLink({ url: GUIDE });
+    } catch {}
+    end('info', message);
+  } else {
+    end('info', `${message} Guide: ${GUIDE}`);
   }
-  if (!opened) end('info', `Open ${GUIDE} in your browser.`);
-  else end('info', release === 'released' ? RELEASED : MAYBE_HELD);
   leaving = false;
 }
 
