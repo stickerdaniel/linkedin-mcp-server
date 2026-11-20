@@ -594,6 +594,27 @@
           "type": "object"
         }
       },
+      "login_view_attach": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "attempt_id": {
+              "maxLength": 64,
+              "type": "string"
+            },
+            "open_id": {
+              "maxLength": 64,
+              "type": "string"
+            }
+          },
+          "required": [
+            "attempt_id",
+            "open_id"
+          ],
+          "type": "object"
+        },
+        "output": null
+      },
       "login_view_frame": {
         "input": {
           "additionalProperties": false,

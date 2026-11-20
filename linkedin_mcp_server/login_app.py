@@ -1,20 +1,25 @@
 """Sign in to LinkedIn inside the chat, as an MCP App.
 
 ``open_login`` starts or joins the shared login and returns a view of it: the
-host renders ``ui://linkedin-mcp/login.html`` (``login_app/viewer.html``), and
-that page polls ``login_view_frame`` for images of the login browser's page and
-sends the user's clicks, keys and pastes through ``login_view_input``. The
-login itself is the ordinary one from ``bootstrap``; see ``login_view`` for how
-the page borrows its browser.
+host renders ``ui://linkedin-mcp/login.html`` (``login_app/viewer.html``). That
+page calls ``login_view_attach`` for its grant, then polls ``login_view_frame``
+for images of the login browser's page and sends the user's clicks, keys and
+pastes through ``login_view_input``. The login itself is the ordinary one from
+``bootstrap``; see ``login_view`` for how the page borrows its browser.
 
-Trust model. ``open_login`` hands the page a grant in its result's ``_meta``,
-and both app-only tools refuse a call without it. MCP App visibility is not
-access control: any client on the connection can list and call app-only tools.
-So the view is offered only where one trusted peer holds the connection: the
-Direct role over stdio, to a client that declared the MCP Apps extension. That
-client, Claude Desktop for one, is trusted to keep ``_meta`` and the app's
-traffic out of the model's context. An HTTP transport is never eligible, since
-any local process could connect and ask for a grant.
+Trust model. ``open_login`` returns no grant. Its ``structuredContent`` names
+the attempt and a non-secret ``open_id``; the page hands both to the app-only
+``login_view_attach``, which returns the grant in its own result's ``_meta``.
+The grant travels that way because Claude Desktop drops ``_meta`` from the
+model-called result it hands to the app, while results of calls the app makes
+keep it, and the model sees neither. The frame and input tools refuse a call
+without the grant. MCP App visibility is not access control: any client on the
+connection can list and call app-only tools. So the view is offered only where
+one trusted peer holds the connection: the Direct role over stdio, to a client
+that declared the MCP Apps extension. That client, Claude Desktop for one, is
+trusted to keep app-only tools out of the model's tool list and ``_meta`` and
+the app's traffic out of the model's context. An HTTP transport is never
+eligible, since any local process could connect and ask for a grant.
 """
 
 from __future__ import annotations
@@ -73,7 +78,7 @@ from linkedin_mcp_server.session_state import PeerSessionInPlaceError
 logger = logging.getLogger(__name__)
 
 LOGIN_VIEW_URI = "ui://linkedin-mcp/login.html"
-#: Where ``open_login`` puts the grant: result ``_meta``, never content.
+#: Where ``login_view_attach`` puts the grant: result ``_meta``, never content.
 VIEW_META_KEY = "linkedin.dev/login-view"
 GRANT_LIFETIME_S = 30 * 60.0
 #: How long a grant still reads the outcome after its attempt ended.
@@ -117,60 +122,102 @@ def view_available(ctx: Context | None) -> bool:
     )
 
 
-@dataclass(frozen=True, slots=True)
-class _Grant:
-    secret: str
+Attach = Literal["granted", "replaced", "none"]
+
+
+@dataclass(slots=True)
+class _Open:
+    """One shown sign-in: what one ``open_login`` result hands to its page.
+
+    *open_id* is not a secret; it names this open so that sibling views of
+    one result share it and a newer ``open_login`` can supersede it. The grant
+    is minted on the first attach, but its lifetime runs from the open.
+    """
+
+    open_id: str
     attempt: LoginAttempt
     issued_at: float
+    secret: str | None = None
 
 
-class _Grants:
-    """One live grant per attempt, and the ones it replaced.
+def _same(offered: str, expected: str | None) -> bool:
+    return expected is not None and secrets.compare_digest(
+        offered.encode(), expected.encode()
+    )
 
-    A grant is 32 random bytes bound to one attempt. It reads and drives the
-    login browser for :data:`GRANT_LIFETIME_S` after it was issued, while the
-    attempt runs, and reads only the outcome for :data:`STATUS_TAIL_S` after
-    the attempt ended. A new grant for the same attempt replaces the old one,
-    whose holder then reads ``replaced``; it does not extend the login.
+
+class _Opens:
+    """The current open of each attempt, and the opens a newer one superseded.
+
+    A grant is 32 random bytes bound to one open of one attempt. It reads and
+    drives the login browser for :data:`GRANT_LIFETIME_S` after the open, while
+    the attempt runs, and reads only the outcome for :data:`STATUS_TAIL_S`
+    after the attempt ended. Every attach of the current open returns the same
+    grant and renews nothing, so a second view of the same result, or a retry,
+    never takes access from the first. A newer open of the same attempt
+    supersedes the old one: its grant and its ``open_id`` then read
+    ``replaced``. Neither extends the login.
     """
 
     def __init__(self) -> None:
-        self._live: dict[str, _Grant] = {}
-        self._replaced: dict[str, list[str]] = {}
+        self._current: dict[str, _Open] = {}
+        self._superseded: dict[str, list[_Open]] = {}
 
-    def issue(self, attempt: LoginAttempt) -> str:
+    def open(self, attempt: LoginAttempt) -> _Open:
         now = time.monotonic()
-        for attempt_id, grant in list(self._live.items()):
-            ended = grant.attempt.ended_at
+        for attempt_id, current in list(self._current.items()):
+            ended = current.attempt.ended_at
             if ended is not None and now - ended > STATUS_TAIL_S:
-                del self._live[attempt_id]
-                self._replaced.pop(attempt_id, None)
-        previous = self._live.get(attempt.id)
+                del self._current[attempt_id]
+                self._superseded.pop(attempt_id, None)
+        previous = self._current.get(attempt.id)
         if previous is not None:
-            self._replaced.setdefault(attempt.id, []).append(previous.secret)
-        secret = secrets.token_urlsafe(32)
-        self._live[attempt.id] = _Grant(secret, attempt, now)
-        return secret
+            self._superseded.setdefault(attempt.id, []).append(previous)
+        opened = _Open(secrets.token_urlsafe(12), attempt, now)
+        self._current[attempt.id] = opened
+        return opened
+
+    def attach(self, attempt_id: str, open_id: str) -> tuple[Attach, _Open | None]:
+        """The grant of open *open_id* of attempt *attempt_id*, minted once.
+
+        Answers only for that exact attempt and open; another attempt is never
+        substituted. ``none`` for an unknown open, one whose grant expired, or
+        an attempt that ended longer than :data:`STATUS_TAIL_S` ago.
+        """
+        current = self._current.get(attempt_id)
+        if current is not None and _same(open_id, current.open_id):
+            now = time.monotonic()
+            ended = current.attempt.ended_at
+            if now - current.issued_at > GRANT_LIFETIME_S or (
+                ended is not None and now - ended > STATUS_TAIL_S
+            ):
+                return "none", None
+            if current.secret is None:
+                current.secret = secrets.token_urlsafe(32)
+            return "granted", current
+        for old in self._superseded.get(attempt_id, ()):
+            if _same(open_id, old.open_id):
+                return "replaced", None
+        return "none", None
 
     def check(self, secret: str, attempt_id: str) -> tuple[Access, LoginAttempt | None]:
         """What *secret* may do with *attempt_id*, and that attempt if anything."""
-        grant = self._live.get(attempt_id)
-        if grant is None:
+        current = self._current.get(attempt_id)
+        if current is None:
             return "denied", None
-        offered = secret.encode()
-        if not secrets.compare_digest(offered, grant.secret.encode()):
-            for old in self._replaced.get(attempt_id, ()):
-                if secrets.compare_digest(offered, old.encode()):
+        if not _same(secret, current.secret):
+            for old in self._superseded.get(attempt_id, ()):
+                if _same(secret, old.secret):
                     return "replaced", None
             return "denied", None
         now = time.monotonic()
-        if now - grant.issued_at > GRANT_LIFETIME_S:
+        if now - current.issued_at > GRANT_LIFETIME_S:
             return "expired", None
-        ended = grant.attempt.ended_at
+        ended = current.attempt.ended_at
         if ended is None:
-            return "full", grant.attempt
+            return "full", current.attempt
         if now - ended <= STATUS_TAIL_S:
-            return "status", grant.attempt
+            return "status", current.attempt
         return "expired", None
 
 
@@ -313,13 +360,13 @@ def _generation(observed: str | None | object) -> str | None:
 
 
 def register_login_app(mcp: FastMCP, *, tool_timeout: float) -> None:
-    """Register ``open_login``, the two view tools and the view's page on *mcp*.
+    """Register ``open_login``, the three view tools and the view's page on *mcp*.
 
     Only for the Direct role: an owner has no client to show a view to, and a
     proxy forwards tools without the page they need.
     """
     _withhold_view_arguments()
-    grants = _Grants()
+    grants = _Opens()
 
     @mcp.resource(
         LOGIN_VIEW_URI,
@@ -365,10 +412,43 @@ def register_login_app(mcp: FastMCP, *, tool_timeout: float) -> None:
             raise_tool_error(exc, "open_login")
         if isinstance(shown, str):
             return ToolResult(content=[mt.TextContent(type="text", text=shown)])
+        opened = grants.open(shown)
+        # No grant here: the page asks login_view_attach for it with these
+        # two non-secret names.
         return ToolResult(
             content=[mt.TextContent(type="text", text=_SHOWN)],
+            structured_content={
+                "view": "shown",
+                "attempt_id": shown.id,
+                "open_id": opened.open_id,
+            },
+        )
+
+    @mcp.tool(
+        name="login_view_attach",
+        timeout=10,
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+        app=AppConfig(visibility=["app"]),
+    )
+    async def login_view_attach(
+        ctx: Context,
+        attempt_id: Annotated[str, Field(max_length=64)],
+        open_id: Annotated[str, Field(max_length=64)],
+    ) -> ToolResult:
+        """Called by the sign-in view: the grant for the open its result named."""
+        if not view_available(ctx):
+            return _reply({"access": "none"})
+        outcome, opened = grants.attach(attempt_id, open_id)
+        if opened is None or opened.secret is None:
+            return _reply({"access": outcome})
+        return ToolResult(
+            content=[mt.TextContent(type="text", text=json.dumps({"access": outcome}))],
             meta={
-                VIEW_META_KEY: {"grant": grants.issue(shown), "attempt_id": shown.id}
+                VIEW_META_KEY: {
+                    "grant": opened.secret,
+                    "attempt_id": opened.attempt.id,
+                    "open_id": opened.open_id,
+                }
             },
         )
 

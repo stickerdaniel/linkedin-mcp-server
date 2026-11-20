@@ -55,6 +55,9 @@ class StandInLogin:
         self.cancelled = False
         self.publish = True
         self.failure: BaseException | None = None
+        #: Set to hold the login before it publishes its browser, as an
+        #: install or a busy profile would.
+        self.before_publish: asyncio.Event | None = None
 
     async def __call__(self, _profile: Path, *, superseded_by: object) -> bool:
         self.calls.append(superseded_by)
@@ -65,6 +68,8 @@ class StandInLogin:
             return True
         browser = SimpleNamespace(page=self.page, context=FakeContext())
         try:
+            if self.before_publish is not None:
+                await self.before_publish.wait()
             async with login_view.published(cast(Any, browser)):
                 await self.finish.wait()
         except asyncio.CancelledError:
@@ -137,10 +142,40 @@ async def _until(
     raise AssertionError(f"the view never said {wanted}: {reply}")
 
 
-async def _open(client: Client) -> tuple[mt.CallToolResult, dict[str, str] | None]:
+def _shown(result: mt.CallToolResult) -> dict[str, str] | None:
+    """The attempt and open a shown open_login result names, as the page reads them."""
+    shown = result.structured_content
+    if not isinstance(shown, dict) or shown.get("view") != "shown":
+        return None
+    return {"attempt_id": shown["attempt_id"], "open_id": shown["open_id"]}
+
+
+async def _attach(
+    client: Client, shown: dict[str, str]
+) -> tuple[mt.CallToolResult, dict[str, str] | None]:
+    """Attach as the page does; the grant and its attempt, if the result has one."""
+    result = await client.call_tool_mcp("login_view_attach", shown)
+    meta = (result.meta or {}).get(_VIEW)
+    if meta is None:
+        return result, None
+    return result, {"grant": meta["grant"], "attempt_id": meta["attempt_id"]}
+
+
+async def _open_shown(client: Client) -> dict[str, str]:
     result = await client.call_tool_mcp("open_login", {})
-    meta = result.meta or {}
-    return result, meta.get(_VIEW)
+    shown = _shown(result)
+    assert shown is not None, _text(result)
+    return shown
+
+
+async def _open(client: Client) -> tuple[mt.CallToolResult, dict[str, str] | None]:
+    """Open the sign-in and attach to it, as the host and its page do."""
+    result = await client.call_tool_mcp("open_login", {})
+    shown = _shown(result)
+    if shown is None:
+        return result, None
+    _, view = await _attach(client, shown)
+    return result, view
 
 
 @pytest.fixture
@@ -159,6 +194,8 @@ class TestWhoIsOfferedTheView:
 
         assert result.is_error and view is None
         assert _DOCKER_TEXT in _text(result)
+        # An error result keeps its error marker; only the grant left _meta.
+        assert (result.meta or {})["linkedin.dev/error"]["code"] == "auth_required"
         assert login.calls == []
         assert bootstrap.current_login_attempt() is None
 
@@ -190,26 +227,32 @@ class TestWhoIsOfferedTheView:
 
 
 class TestWhatOpenLoginStarts:
-    async def test_the_grant_travels_only_in_meta(
+    async def test_open_login_carries_no_grant_and_attach_carries_it_in_meta(
         self, client: Client, login: StandInLogin
     ):
-        result, view = await _open(client)
+        opened = await client.call_tool_mcp("open_login", {})
+        shown = _shown(opened)
+        assert shown is not None
+        attached, view = await _attach(client, shown)
 
         assert view is not None and view["grant"]
-        assert not result.is_error
-        assert view["grant"] not in _text(result)
-        assert result.structured_content is None
-        assert "Call the original tool again" in _text(result)
+        assert not opened.is_error and "Call the original tool again" in _text(opened)
+        assert opened.structured_content == {"view": "shown", **shown}
+        assert _VIEW not in (opened.meta or {})
+        assert view["grant"] not in opened.model_dump_json()
+        assert view["grant"] not in _text(attached)
+        assert attached.structured_content is None
+        assert (attached.meta or {})[_VIEW] == {**view, "open_id": shown["open_id"]}
 
     async def test_two_callers_start_one_login_and_a_later_one_joins_it(
         self, client: Client, login: StandInLogin
     ):
-        (_, first), (_, second) = await asyncio.gather(_open(client), _open(client))
+        first, second = await asyncio.gather(_open_shown(client), _open_shown(client))
         await asyncio.sleep(0.05)
-        _, third = await _open(client)
+        third = await _open_shown(client)
 
-        assert first and second and third
         assert first["attempt_id"] == second["attempt_id"] == third["attempt_id"]
+        assert len({first["open_id"], second["open_id"], third["open_id"]}) == 3
         assert len(login.calls) == 1
 
     async def test_session_files_nobody_found_dead_are_left_alone(
@@ -364,11 +407,151 @@ class TestHowTheAttemptEnds:
         assert ("type", "x") not in login.page.received
 
 
+class TestAttach:
+    async def test_every_attach_of_one_open_shares_one_grant(
+        self, client: Client, login: StandInLogin
+    ):
+        # Sibling views of one result (inline and expanded), and retries.
+        shown = await _open_shown(client)
+        (_, first), (_, second) = await asyncio.gather(
+            _attach(client, shown), _attach(client, shown)
+        )
+        assert first is not None and second is not None
+        await _until(client, first, "image")
+        _, third = await _attach(client, shown)
+
+        assert first == second == third
+        for view in (first, second, third):
+            assert len(_images(await _frame(client, view))) == 1
+
+    async def test_attaching_again_does_not_extend_the_grant(
+        self,
+        client: Client,
+        login: StandInLogin,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setattr(login_app, "GRANT_LIFETIME_S", 1.0)
+        shown = await _open_shown(client)
+        _, view = await _attach(client, shown)
+        assert view is not None
+        await asyncio.sleep(0.6)
+        _, again = await _attach(client, shown)
+        assert again == view
+
+        await asyncio.sleep(0.6)
+        late, late_view = await _attach(client, shown)
+
+        assert _reply(await _frame(client, view)) == {"access": "expired"}
+        assert late_view is None and _reply(late) == {"access": "none"}
+
+    async def test_an_unknown_open_gets_no_grant_and_starts_nothing(
+        self, client: Client, login: StandInLogin
+    ):
+        result, view = await _attach(
+            client, {"attempt_id": "not-an-attempt", "open_id": "not-an-open"}
+        )
+
+        assert view is None and _reply(result) == {"access": "none"}
+        assert login.calls == []
+        assert bootstrap.current_login_attempt() is None
+
+    async def test_a_login_still_starting_attaches_and_its_frames_wait(
+        self, client: Client, login: StandInLogin
+    ):
+        login.before_publish = asyncio.Event()
+        shown = await _open_shown(client)
+        _, view = await _attach(client, shown)
+        assert view is not None
+
+        waiting = _reply(await _frame(client, view, budget=0.2))
+        login.before_publish.set()
+        ready = await _until(client, view, "image")
+
+        assert waiting == {"access": "full", "state": "signing_in", "frame": "none"}
+        assert len(_images(ready)) == 1
+
+    async def test_an_old_result_never_reaches_a_later_attempt(
+        self, client: Client, login: StandInLogin
+    ):
+        first = await _open_shown(client)
+        login.finish.set()
+        _, early = await _attach(client, first)
+        assert early is not None
+        await _until(client, early, "signed_in")
+        # The session attempt A wrote is found dead, and attempt B starts.
+        login.finish = asyncio.Event()
+        await _a_tool_finds_the_session_dead()
+        second = await _open_shown(client)
+        assert second["attempt_id"] != first["attempt_id"]
+        _, current = await _attach(client, second)
+        assert current is not None
+        await _until(client, current, "image")
+
+        _, late = await _attach(client, first)
+        assert late is not None and late["attempt_id"] == first["attempt_id"]
+        read = await _frame(client, late)
+        into_b = await _frame(client, {**late, "attempt_id": second["attempt_id"]})
+        typed = await client.call_tool_mcp(
+            "login_view_input",
+            {
+                "grant": late["grant"],
+                "attempt_id": second["attempt_id"],
+                "page_id": "p1",
+                "geometry": "800x600",
+                "events": [{"type": "paste", "text": "hunter2"}],
+            },
+        )
+
+        assert _reply(read)["state"] == "signed_in" and _images(read) == []
+        assert _reply(into_b) == {"access": "denied"}
+        assert _reply(typed)["input"] == "refused"
+        assert ("insert_text", "hunter2") not in login.page.received
+
+    async def test_the_outcome_stays_readable_only_for_the_status_tail(
+        self,
+        client: Client,
+        login: StandInLogin,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setattr(login_app, "STATUS_TAIL_S", 2.0)
+        shown = await _open_shown(client)
+        _, view = await _attach(client, shown)
+        assert view is not None
+        login.finish.set()
+        ended = _reply(await _until(client, view, "signed_in"))
+        _, within = await _attach(client, shown)
+
+        await asyncio.sleep(2.1)
+        after, after_view = await _attach(client, shown)
+
+        assert ended["access"] == "status" and within == view
+        assert after_view is None and _reply(after) == {"access": "none"}
+        assert _reply(await _frame(client, view)) == {"access": "expired"}
+
+    async def test_attach_checks_the_client_too(
+        self, login: StandInLogin, monkeypatch: pytest.MonkeyPatch
+    ):
+        server = create_mcp_server()
+        async with _ui_client(server) as ui:
+            shown = await _open_shown(ui)
+            async with Client(server) as plain:
+                plain_result, plain_view = await _attach(plain, shown)
+            monkeypatch.setattr(get_config().server, "transport", "streamable-http")
+            http_result, http_view = await _attach(ui, shown)
+            monkeypatch.setattr(get_config().server, "transport", "stdio")
+            _, ui_view = await _attach(ui, shown)
+
+        assert plain_view is None and _reply(plain_result) == {"access": "none"}
+        assert http_view is None and _reply(http_result) == {"access": "none"}
+        assert ui_view is not None
+
+
 class TestTheGrant:
     async def test_a_replaced_grant_gets_no_image_and_no_input_through(
         self, client: Client, login: StandInLogin
     ):
-        _, old = await _open(client)
+        old_shown = await _open_shown(client)
+        _, old = await _attach(client, old_shown)
         assert old is not None
         reply = _reply(await _until(client, old, "image"))
 
@@ -394,8 +577,11 @@ class TestTheGrant:
         )
         fresh = await _frame(client, new)
 
+        reattached, reattached_view = await _attach(client, old_shown)
+
         assert _reply(stalled) == {"access": "replaced"} and _images(stalled) == []
         assert _reply(typed)["access"] == "replaced" and login.page.received == []
+        assert reattached_view is None and _reply(reattached) == {"access": "replaced"}
         # The page did not change, and the new view still gets it.
         assert (
             _reply(fresh)["frame"] == "image" and _reply(fresh)["hash"] == reply["hash"]

@@ -14,6 +14,43 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
+    "description": "Called by the sign-in view: the grant for the open its result named.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "maxLength": 64,
+          "type": "string"
+        },
+        "open_id": {
+          "maxLength": 64,
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt_id",
+        "open_id"
+      ],
+      "type": "object"
+    },
+    "name": "login_view_attach",
+    "title": "Login View Attach"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": []
+      },
+      "ui": {
+        "visibility": [
+          "app"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
     "description": "Called by the sign-in view: the page once it differs from frame *after*.",
     "inputSchema": {
       "additionalProperties": false,

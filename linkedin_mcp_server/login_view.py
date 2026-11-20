@@ -37,7 +37,9 @@ logger = logging.getLogger(__name__)
 #: The app-only tools that read and drive a published login browser. They reach
 #: nothing else, so the browser serialization and the update notice leave them
 #: out; one spelling here keeps those exemptions and the registration in step.
-LOGIN_VIEW_TOOLS = frozenset({"login_view_frame", "login_view_input"})
+LOGIN_VIEW_TOOLS = frozenset(
+    {"login_view_attach", "login_view_frame", "login_view_input"}
+)
 
 Outcome = Literal["signed_in", "restricted", "failed", "cancelled", "repaired_by_peer"]
 State = Literal[

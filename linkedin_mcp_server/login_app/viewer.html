@@ -47,9 +47,12 @@
 or on the host: <code>uvx mcp-server-linkedin@latest --login</code></p>
 <script type="module">
 // The sign-in view. The server keeps the login; this page only shows the
-// login browser's page and sends the user's input back. The grant arrives in
-// the result of open_login (_meta), so ontoolresult is registered before
-// connect(), and polling starts once both the connection and a grant exist.
+// login browser's page and sends the user's input back. The result of
+// open_login names the attempt and the open (structuredContent, no secret),
+// so ontoolresult is registered before connect(). Once both the connection and
+// that binding exist, the page calls login_view_attach, whose result carries
+// the grant in _meta, and polling starts with that grant. Hosts may drop _meta
+// from the model-called result, never from a result of the app's own call.
 const { App } = globalThis.linkedinLoginSdk;
 
 const META_KEY = 'linkedin.dev/login-view';
@@ -57,6 +60,9 @@ const BUDGET_S = 1.5;
 const MAX_EVENTS = 64;
 const MAX_TEXT = 4096;
 const RETRY_MS = 1000;
+// Transport failures of an attach are retried this often, with growing waits.
+const ATTACH_RETRIES = 3;
+const ATTACH_BACKOFF_MS = 500;
 const MAC = /Mac|iPhone|iPad/.test(navigator.platform);
 const NAMED_KEYS = new Set(['Enter', 'Tab', 'Backspace', 'Delete', 'Escape', 'ArrowUp',
   'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']);
@@ -74,6 +80,12 @@ const REFUSALS = {
   expired: ['This sign-in view expired. Ask for the LinkedIn sign-in again.', true],
   denied: ['This view has no access to the sign-in.', false],
 };
+const ATTACH_ENDINGS = {
+  replaced: 'A newer sign-in view replaced this one.',
+  none: 'This sign-in is no longer available. Ask for the LinkedIn sign-in again.',
+};
+const UNDELIVERED = 'The chat did not hand this view its access to the sign-in.';
+const UNREACHABLE = 'The chat could not reach the sign-in.';
 
 const screen = document.getElementById('screen');
 const text = document.getElementById('text');
@@ -83,6 +95,13 @@ const help = document.getElementById('help');
 const app = new App({ name: 'linkedin-login-view', version: '1.0.0' }, {}, { autoResize: true });
 
 let connected = false;
+let tornDown = false;
+// The attempt and open the latest shown result named. An attach answer or a
+// retry timer for any other binding is discarded.
+let binding = null;
+let attaching = null;
+let attachTries = 0;
+let attachTimer = null;
 let grant = null;
 let attemptId = null;
 let polling = false;
@@ -113,9 +132,17 @@ function show(tone, message) {
   help.hidden = tone.includes('success');
 }
 
+function forgetBinding() {
+  binding = null;
+  attaching = null;
+  clearTimeout(attachTimer);
+  attachTimer = null;
+}
+
 function end(tone, message, openHelp) {
   ended = true;
   grant = null;
+  forgetBinding();
   queue.length = 0;
   screen.hidden = true;
   screen.removeAttribute('src');
@@ -144,27 +171,97 @@ function applyHostStyles(context) {
 }
 
 app.ontoolresult = (params) => {
-  const view = params?._meta?.[META_KEY];
-  if (params?.isError || typeof view?.grant !== 'string') {
+  if (tornDown) return;
+  const shown = params?.structuredContent;
+  if (params?.isError || shown?.view !== 'shown'
+      || typeof shown.attempt_id !== 'string' || typeof shown.open_id !== 'string') {
     // open_login answered in words instead of a view: a session is already in
     // place, or the client or container cannot show the sign-in.
     end(params?.isError ? 'problem' : 'info', textOf(params) || 'There is nothing to sign in to.', Boolean(params?.isError));
     return;
   }
-  grant = view.grant;
-  attemptId = view.attempt_id;
+  if (binding && binding.attemptId === shown.attempt_id && binding.openId === shown.open_id) {
+    return; // the same result again; its attach is pending or done
+  }
+  forgetBinding();
+  binding = { attemptId: shown.attempt_id, openId: shown.open_id };
+  attachTries = 0;
+  grant = null;
   ended = false;
   after = '';
-  start();
+  pageId = null;
+  geometry = null;
+  queue.length = 0;
+  screen.hidden = true;
+  screen.removeAttribute('src');
+  show('waiting', 'Opening the LinkedIn sign-in.');
+  attach();
 };
 
 app.onteardown = async () => {
   // The login keeps running until its own deadline; a new open_login rejoins it.
+  tornDown = true;
+  forgetBinding();
   grant = null;
   queue.length = 0;
   ended = true;
   return {};
 };
+
+// One attach in flight per binding. Its answer counts only while that binding
+// is still the current one and the view has not ended.
+async function attach() {
+  const asked = binding;
+  if (!connected || !asked || ended || grant || attaching === asked || attachTimer) return;
+  attaching = asked;
+  let result = null;
+  try {
+    result = await app.callServerTool({
+      name: 'login_view_attach',
+      arguments: { attempt_id: asked.attemptId, open_id: asked.openId },
+    });
+  } catch {
+    result = null;
+  }
+  if (binding !== asked || ended) return;
+  attaching = null;
+  if (result === null) {
+    attachTries += 1;
+    if (attachTries > ATTACH_RETRIES) {
+      end('problem', UNREACHABLE, true);
+      return;
+    }
+    show('problem', `${UNREACHABLE} Retrying.`);
+    attachTimer = setTimeout(() => {
+      attachTimer = null;
+      if (binding === asked) attach();
+    }, ATTACH_BACKOFF_MS * attachTries);
+    return;
+  }
+  if (result.isError) {
+    end('problem', textOf(result) || UNDELIVERED, true);
+    return;
+  }
+  let reply = {};
+  try {
+    reply = JSON.parse(textOf(result));
+  } catch {
+    // Read as a missing grant below.
+  }
+  if (reply.access in ATTACH_ENDINGS) {
+    end('problem', ATTACH_ENDINGS[reply.access], true);
+    return;
+  }
+  const view = result._meta?.[META_KEY];
+  if (typeof view?.grant !== 'string' || view.attempt_id !== asked.attemptId
+      || view.open_id !== asked.openId) {
+    end('problem', UNDELIVERED, true);
+    return;
+  }
+  grant = view.grant;
+  attemptId = asked.attemptId;
+  start();
+}
 
 app.onhostcontextchanged = applyHostStyles;
 
@@ -410,7 +507,8 @@ document.addEventListener('paste', (event) => {
 app.connect().then(() => {
   connected = true;
   applyHostStyles(app.getHostContext());
-  if (!grant && !ended) show('waiting', 'Waiting for the sign-in to start.');
+  if (!binding && !ended) show('waiting', 'Waiting for the sign-in to start.');
+  attach();
   start();
 }).catch(() => {
   end('problem', 'The chat could not open the sign-in view.', true);

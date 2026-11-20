@@ -134,6 +134,7 @@ async def test_registered_tools_match_extractor_delegates():
         "close_session",
         "get_session_status",
         "open_login",
+        "login_view_attach",
         "login_view_frame",
         "login_view_input",
     }

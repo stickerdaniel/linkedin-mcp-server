@@ -404,7 +404,7 @@ class TestServerRoles:
         # A tool present in one role and missing from another would disappear
         # from a client's list depending on how its server happened to start.
         # The one exception is the sign-in view, which only a Direct server
-        # can show, and it adds exactly its three tools.
+        # can show, and it adds exactly its four tools.
         #
         # A proxy is deliberately not in here: it registers none of these and
         # serves the owner's instead, which is a different claim and has its own
@@ -416,7 +416,12 @@ class TestServerRoles:
         direct = asyncio.run(tool_names(ServerRole.DIRECT))
         owner = asyncio.run(tool_names(ServerRole.OWNER))
 
-        assert direct - owner == {"open_login", "login_view_frame", "login_view_input"}
+        assert direct - owner == {
+            "open_login",
+            "login_view_attach",
+            "login_view_frame",
+            "login_view_input",
+        }
         assert owner <= direct
         assert "get_person_profile" in owner
 

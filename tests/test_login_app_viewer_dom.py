@@ -43,7 +43,33 @@ class App {
 globalThis.linkedinLoginSdk = { App };
 """
 
-VIEW = {"_meta": {"linkedin.dev/login-view": {"grant": "G1", "attempt_id": "A1"}}}
+
+def shown(open_id: str = "O1", attempt_id: str = "A1") -> dict[str, Any]:
+    """An open_login result that shows the sign-in, as the host hands it over."""
+    return {
+        "content": [{"type": "text", "text": "The LinkedIn sign-in is shown."}],
+        "structuredContent": {
+            "view": "shown",
+            "attempt_id": attempt_id,
+            "open_id": open_id,
+        },
+    }
+
+
+def attached(
+    grant: str = "G1", open_id: str = "O1", attempt_id: str = "A1"
+) -> dict[str, Any]:
+    """A login_view_attach result carrying *grant* in its _meta."""
+    return {
+        "content": [{"type": "text", "text": json.dumps({"access": "granted"})}],
+        "_meta": {
+            "linkedin.dev/login-view": {
+                "grant": grant,
+                "attempt_id": attempt_id,
+                "open_id": open_id,
+            }
+        },
+    }
 
 
 def _template() -> str:
@@ -139,16 +165,33 @@ async def connect(page: Any) -> None:
     await page.evaluate("bridge.resolveConnect()", isolated_context=False)
 
 
-async def give_grant(page: Any) -> None:
+async def deliver(page: Any, result: dict[str, Any]) -> None:
+    """Hand *result* to the page as the result of the model's open_login call."""
     await page.evaluate(
-        "view => bridge.ontoolresult(view)", VIEW, isolated_context=False
+        "result => bridge.ontoolresult(result)", result, isolated_context=False
+    )
+
+
+async def show_the_sign_in(page: Any) -> None:
+    await deliver(page, shown())
+
+
+async def fail(page: Any, name: str, index: int) -> None:
+    """Fail call *index* of tool *name* the way a lost transport does."""
+    await page.evaluate(
+        """([name, index]) => bridge.calls.filter(c => c.params.name === name)[index]
+            .reject(new Error('transport closed'))""",
+        [name, index],
+        isolated_context=False,
     )
 
 
 async def live(page: Any) -> None:
-    """Connected, granted, and showing the first frame."""
+    """Connected, attached with grant G1, and showing the first frame."""
     await connect(page)
-    await give_grant(page)
+    await show_the_sign_in(page)
+    await wait_for_calls(page, "login_view_attach", 1)
+    await answer(page, "login_view_attach", 0, attached())
     await wait_for_calls(page, "login_view_frame", 1)
     await answer(page, "login_view_frame", 0, LIVE)
     await page.wait_for_function(
@@ -157,24 +200,167 @@ async def live(page: Any) -> None:
 
 
 @pytest.mark.parametrize(
-    "grant_first", [True, False], ids=["grant first", "connection first"]
+    "shown_first", [True, False], ids=["result first", "connection first"]
 )
-async def test_polling_starts_once_both_the_connection_and_a_grant_exist(
-    viewer: Any, grant_first: bool
+async def test_the_grant_comes_from_attach_once_both_exist(
+    viewer: Any, shown_first: bool
 ):
-    first, second = (give_grant, connect) if grant_first else (connect, give_grant)
+    first, second = (
+        (show_the_sign_in, connect) if shown_first else (connect, show_the_sign_in)
+    )
 
     await first(viewer)
     await viewer.wait_for_timeout(150)
-    assert await calls(viewer, "login_view_frame") == []
+    assert await calls(viewer, "login_view_attach") == []
 
     await second(viewer)
+    await wait_for_calls(viewer, "login_view_attach", 1)
+    assert await calls(viewer, "login_view_frame") == []
+    await answer(viewer, "login_view_attach", 0, attached())
     await wait_for_calls(viewer, "login_view_frame", 1)
     await viewer.wait_for_timeout(150)
 
+    assert await calls(viewer, "login_view_attach") == [
+        {"attempt_id": "A1", "open_id": "O1"}
+    ]
     assert await calls(viewer, "login_view_frame") == [
         {"grant": "G1", "attempt_id": "A1", "after": "", "budget_s": 1.5}
     ]
+
+
+async def test_a_word_only_result_ends_without_attaching(viewer: Any):
+    await connect(viewer)
+    await deliver(
+        viewer,
+        {"content": [{"type": "text", "text": "A LinkedIn session is in place now."}]},
+    )
+
+    await viewer.wait_for_function(
+        "document.getElementById('text').textContent.startsWith('A LinkedIn session')"
+    )
+    await viewer.wait_for_timeout(150)
+    assert await calls(viewer, "login_view_attach") == []
+    assert await calls(viewer, "login_view_frame") == []
+
+
+async def test_a_duplicate_result_while_attaching_attaches_once(viewer: Any):
+    await connect(viewer)
+    await show_the_sign_in(viewer)
+    await wait_for_calls(viewer, "login_view_attach", 1)
+
+    await show_the_sign_in(viewer)
+    await viewer.wait_for_timeout(200)
+    assert len(await calls(viewer, "login_view_attach")) == 1
+
+    await answer(viewer, "login_view_attach", 0, attached())
+    await wait_for_calls(viewer, "login_view_frame", 1)
+    assert len(await calls(viewer, "login_view_attach")) == 1
+
+
+async def test_an_attach_answered_after_teardown_starts_nothing(viewer: Any):
+    await connect(viewer)
+    await show_the_sign_in(viewer)
+    await wait_for_calls(viewer, "login_view_attach", 1)
+
+    await viewer.evaluate("bridge.onteardown({}, {})", isolated_context=False)
+    await answer(viewer, "login_view_attach", 0, attached())
+    await viewer.wait_for_timeout(300)
+
+    assert await calls(viewer, "login_view_frame") == []
+
+
+async def test_an_attach_for_a_superseded_result_is_never_used(viewer: Any):
+    await connect(viewer)
+    await show_the_sign_in(viewer)
+    await wait_for_calls(viewer, "login_view_attach", 1)
+
+    # A newer open_login result arrives while the first attach is pending.
+    await deliver(viewer, shown(open_id="O2"))
+    await wait_for_calls(viewer, "login_view_attach", 2)
+    await answer(viewer, "login_view_attach", 0, attached(grant="G-old"))
+    await viewer.wait_for_timeout(200)
+    assert await calls(viewer, "login_view_frame") == []
+
+    await answer(viewer, "login_view_attach", 1, attached(grant="G2", open_id="O2"))
+    await wait_for_calls(viewer, "login_view_frame", 1)
+    grants = {call["grant"] for call in await calls(viewer, "login_view_frame")}
+    assert grants == {"G2"}
+    assert (await calls(viewer, "login_view_attach"))[1]["open_id"] == "O2"
+
+
+@pytest.mark.parametrize("access", ["replaced", "none"])
+async def test_a_refused_attach_ends_with_the_way_out_and_no_retry(
+    viewer: Any, access: str
+):
+    await connect(viewer)
+    await show_the_sign_in(viewer)
+    await wait_for_calls(viewer, "login_view_attach", 1)
+
+    await answer(
+        viewer,
+        "login_view_attach",
+        0,
+        {"content": [{"type": "text", "text": json.dumps({"access": access})}]},
+    )
+    await viewer.wait_for_function("document.body.className.includes('ended')")
+    await viewer.wait_for_timeout(1200)
+
+    assert len(await calls(viewer, "login_view_attach")) == 1
+    assert await calls(viewer, "login_view_frame") == []
+    assert await viewer.locator("#fallback").is_visible()
+
+
+async def test_an_attach_without_its_grant_ends_as_a_delivery_problem(viewer: Any):
+    await connect(viewer)
+    await show_the_sign_in(viewer)
+    await wait_for_calls(viewer, "login_view_attach", 1)
+
+    await answer(
+        viewer,
+        "login_view_attach",
+        0,
+        {"content": [{"type": "text", "text": json.dumps({"access": "granted"})}]},
+    )
+    await viewer.wait_for_function(
+        "document.getElementById('text').textContent.startsWith('The chat did not hand')"
+    )
+    await viewer.wait_for_timeout(1200)
+
+    assert len(await calls(viewer, "login_view_attach")) == 1
+    assert await calls(viewer, "login_view_frame") == []
+    assert await viewer.locator("#fallback").is_visible()
+
+
+async def test_a_lost_attach_is_retried_three_times_then_ends(viewer: Any):
+    await connect(viewer)
+    await show_the_sign_in(viewer)
+    for index in range(4):
+        await wait_for_calls(viewer, "login_view_attach", index + 1)
+        await fail(viewer, "login_view_attach", index)
+
+    await viewer.wait_for_function(
+        "document.getElementById('text').textContent.startsWith('The chat could not reach')"
+    )
+    await viewer.wait_for_timeout(2000)
+    assert len(await calls(viewer, "login_view_attach")) == 4
+    assert await calls(viewer, "login_view_frame") == []
+    assert await viewer.locator("#fallback").is_visible()
+
+
+async def test_teardown_during_an_attach_retry_wait_attaches_no_more(viewer: Any):
+    await connect(viewer)
+    await show_the_sign_in(viewer)
+    await wait_for_calls(viewer, "login_view_attach", 1)
+    await fail(viewer, "login_view_attach", 0)
+    await viewer.wait_for_function(
+        "document.getElementById('text').textContent.includes('Retrying')"
+    )
+
+    await viewer.evaluate("bridge.onteardown({}, {})", isolated_context=False)
+    await viewer.wait_for_timeout(1200)
+
+    assert len(await calls(viewer, "login_view_attach")) == 1
+    assert await calls(viewer, "login_view_frame") == []
 
 
 async def test_a_paste_is_sent_once_and_its_shortcut_is_not(viewer: Any):
