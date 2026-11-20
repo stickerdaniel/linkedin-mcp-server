@@ -247,6 +247,11 @@ finishes a call. A client that waits too long gets a "browser is busy" message
 and can simply retry. Use `--log-level DEBUG` to see the wait/acquire/release
 logs.
 
+Signing in does not block the other clients. Each login opens its own browser
+window, and the first sign-in that completes is saved for all of them. A login
+window that a tool call opened closes on its own once another client has signed
+in; `--login` keeps its window and replaces the session when you finish.
+
 This covers processes on the same machine and in the same runtime. It does not
 extend between the host and a Docker container sharing the same
 `~/.linkedin-mcp` directory, so do not run `--login` or `--logout` on the host
