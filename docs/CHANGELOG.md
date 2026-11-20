@@ -9,7 +9,7 @@ described on [GitHub Releases](https://github.com/stickerdaniel/linkedin-mcp-ser
 
 ### Highlights
 
-- **HTTP needs a token.** Beyond loopback, as in Docker, HTTP starts only with a token from `LINKEDIN_MCP_HTTP_TOKEN` or `--http-token-file`. ([#1518](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1518))
+- **HTTP token.** Beyond loopback, as in Docker, HTTP needs `LINKEDIN_MCP_HTTP_TOKEN`. ([#1518](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1518))
 - **FastMCP 4.2.0.** Resource listings through the shared browser stay local again. ([#1513](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1513))
 - **Docker security fixes.** The image ships dnspython 2.9.2 and opentelemetry-api 1.45.2. ([#1515](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1515))
 
